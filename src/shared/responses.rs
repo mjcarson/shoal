@@ -7,7 +7,7 @@ use crate::shared::traits::ShoalTable;
 /// The different response kinds from a query
 #[derive(Debug, Archive, Serialize, Deserialize)]
 #[archive(check_bytes)]
-pub enum ResponseKinds<D: ShoalTable> {
+pub enum ResponseAction<D: ShoalTable> {
     /// Whether an insert was successful or not
     Insert(bool),
     /// The response from a get query
@@ -23,7 +23,7 @@ pub struct Response<T: ShoalTable> {
     /// This response index in the queries vec
     pub index: usize,
     /// The response data
-    pub data: ResponseKinds<T>,
+    pub data: ResponseAction<T>,
     /// Whether this is the last response for a query or not
     pub end: bool,
 }

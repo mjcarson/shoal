@@ -7,7 +7,7 @@ pub mod partition;
 
 use self::partition::Partition;
 use crate::shared::queries::{Get, Query};
-use crate::shared::responses::{Response, ResponseKinds};
+use crate::shared::responses::{Response, ResponseAction};
 use crate::shared::traits::ShoalTable;
 
 /// A Table containing some data for Shoal
@@ -54,7 +54,7 @@ impl<D: ShoalTable> Table<D> {
     /// # Arguments
     ///
     /// * `row` - The row to insert
-    fn insert(&mut self, row: D) -> ResponseKinds<D> {
+    fn insert(&mut self, row: D) -> ResponseAction<D> {
         // get our partition key
         let key = row.get_sort().clone();
         // get our partition
@@ -69,7 +69,7 @@ impl<D: ShoalTable> Table<D> {
     ///
     /// * `get` - The get parameters to use
     /// * `responses` - The response object to use
-    fn get(&mut self, get: &Get<D>) -> ResponseKinds<D> {
+    fn get(&mut self, get: &Get<D>) -> ResponseAction<D> {
         // build a vec for the data we found
         let mut data = Vec::new();
         // build the sort key
@@ -83,10 +83,10 @@ impl<D: ShoalTable> Table<D> {
         // add this data to our response
         if data.is_empty() {
             // this query did not find data
-            ResponseKinds::Get(None)
+            ResponseAction::Get(None)
         } else {
             // this query found data
-            ResponseKinds::Get(Some(data))
+            ResponseAction::Get(Some(data))
         }
     }
 }

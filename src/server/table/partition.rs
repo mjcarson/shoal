@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use crate::shared::queries::Get;
-use crate::shared::responses::ResponseKinds;
+use crate::shared::responses::ResponseAction;
 use crate::shared::traits::ShoalTable;
 
 #[derive(Debug)]
@@ -27,13 +27,13 @@ impl<D: ShoalTable> Partition<D> {
     /// # Arguments
     ///
     /// * `row` - The row to insert
-    pub fn insert(&mut self, row: D) -> ResponseKinds<D> {
+    pub fn insert(&mut self, row: D) -> ResponseAction<D> {
         // get this rows sort key
         let sort_key = row.get_sort().clone();
         // add this row
         self.rows.insert(sort_key, row);
         // respond that we inserted a row
-        ResponseKinds::Insert(true)
+        ResponseAction::Insert(true)
     }
 
     /// Get some rows from this partition
