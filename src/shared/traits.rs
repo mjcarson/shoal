@@ -4,6 +4,7 @@ use std::net::SocketAddr;
 use uuid::Uuid;
 
 use super::queries::Queries;
+use crate::client::{self, FromShoal};
 
 /// The core trait that all databases in shoal must support
 pub trait ShoalDatabase: Default + 'static + std::fmt::Debug + Sized {

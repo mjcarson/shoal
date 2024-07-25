@@ -11,14 +11,14 @@ mod client;
 mod server;
 pub mod shared;
 
+use client::FromShoal;
 use server::messages::MeshMsg;
 use server::ring::Ring;
 use server::shard::ShardContact;
-use shared::queries::{Get, Queries, Query, TaggedQuery};
-use shared::responses::Response;
-use shared::traits::{ShoalDatabase, ShoalTable};
-
 use server::{Conf, ServerError, Table};
+use shared::queries::{Get, Queries, Query, TaggedQuery};
+use shared::responses::{Response, ResponseAction};
+use shared::traits::{ShoalDatabase, ShoalTable};
 
 // A dummy row
 #[derive(Debug, Archive, Serialize, Deserialize, Clone)]
@@ -47,6 +47,21 @@ impl From<DummyRow> for QueryKinds {
         let key = DummyRow::partition_key(&row.key);
         // build our query kind
         QueryKinds::DummyQuery(Query::Insert { key, row })
+    }
+}
+
+impl FromShoal<Tables> for DummyRow {
+    type ResponseKinds = ResponseKinds;
+
+    fn retrieve(kind: ResponseKinds) -> Result<Option<Vec<Self>>, client::Errors> {
+        // make sure its the right data kind
+        if let ResponseKinds::Dummy(action) = kind {
+            // make sure its a get action
+            if let ResponseAction::Get(rows) = action.data {
+                return Ok(rows);
+            }
+        }
+        Err(client::Errors::WrongType("Wrong Type!".to_owned()))
     }
 }
 
@@ -342,12 +357,18 @@ async fn test_queries() {
         .add(DummyGet::new("missing?"));
     // send our query
     let mut stream = shoal.send(query).await;
-    // read our responses
-    while let Some(msg) = stream.next().await {
-        match msg {
-            ResponseKinds::Dummy(resp) => println!("main - {resp:?}"),
-        }
+    // skip the first 3 responses
+    stream.skip(3).await;
+    // try to cast the next response
+    while let Some(dummy) = stream.next_typed_first::<DummyRow>().await.unwrap() {
+        println!("{:?}", dummy);
     }
+    //// read our responses
+    //while let Some(msg) = stream.next().await {
+    //    match msg {
+    //        ResponseKinds::Dummy(resp) => println!("main - {resp:?}"),
+    //    }
+    //}
 }
 
 fn main() {

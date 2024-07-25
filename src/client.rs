@@ -3,6 +3,7 @@
 use bytes::BytesMut;
 use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
+use futures::task::LocalSpawnExt;
 use kanal::{AsyncReceiver, AsyncSender};
 use rkyv::validation::validators::DefaultValidator;
 use rkyv::{
@@ -24,6 +25,7 @@ pub mod errors;
 
 use super::shared::queries::Queries;
 use crate::shared::{responses::Responses, traits::ShoalDatabase};
+pub use errors::Errors;
 
 pub struct Shoal<S: ShoalDatabase> {
     /// The udp socket to send and receive messages on
@@ -117,7 +119,6 @@ impl<S: ShoalDatabase + Send> Shoal<S> {
         let archived = rkyv::to_bytes::<_, 256>(&queries).unwrap();
         // start tracking this response
         let (response_tx, response_rx) = self.track_response(&mut queries);
-        //println!("chan map -> {:#?}", self.channel_map);
         // send our query
         self.socket
             .send_to(archived.as_slice(), "127.0.0.1:12000")
@@ -134,24 +135,13 @@ impl<S: ShoalDatabase + Send> Shoal<S> {
             pending: BTreeMap::default(),
             phantom: PhantomData,
         }
-        //// wait for responses and print them all out
-        //loop {
-        //    // TODO reuse buffers instead of making new ones
-        //    let mut data = BytesMut::zeroed(8192);
-        //    // try to read a single datagram from our udp socket
-        //    let (read, addr) = self.socket.recv_from(&mut data).await.unwrap();
-        //    println!("Read {} bytes from {}", read, addr);
-        //    // get a ref to the data we read
-        //    let readable = &data[..read];
-        //    // unarchive our response
-        //    let unarchived = S::unarchive_response(readable);
-        //    println!("resp -> {:#?}", unarchived);
-        //    //unarchive::<S>(readable);
-        //    //// build a new shoal stream object
-        //    //let stream = ShoalStream::<S>::new(data);
-        //    //// read from our stream
-        //    //stream.read();
-        //}
+    }
+}
+
+impl<S: ShoalDatabase> Drop for Shoal<S> {
+    fn drop(&mut self) {
+        // stop our proxy
+        self.proxy_handle.abort();
     }
 }
 
@@ -168,6 +158,12 @@ struct ShoalUdpProxy<S: ShoalDatabase> {
 
 impl<S: ShoalDatabase> ShoalUdpProxy<S> {
     /// Create a new udp proxy
+    ///
+    /// # Arguments
+    ///
+    /// * `socket` - The socket to listen on
+    /// * `channel_map` - A distributed map of channels to relay messages with
+    /// * `shutdown` - A flag used to tell the proxy to shutdown
     pub fn new(
         socket: Arc<UdpSocket>,
         channel_map: Arc<DashMap<Uuid, AsyncSender<BytesMut>>>,
@@ -193,17 +189,10 @@ impl<S: ShoalDatabase> ShoalUdpProxy<S> {
                 // zero out our pool
                 self.pool.extend((0..4192).map(|_| 0));
             }
-            //println!(
-            //    "remaining -> {:#?}/{:#?}",
-            //    self.pool.len(),
-            //    self.pool.capacity()
-            //);
             // try to read a single datagram from our udp socket
-            let (read, addr) = self.socket.recv_from(&mut self.pool).await.unwrap();
+            let (read, _) = self.socket.recv_from(&mut self.pool).await.unwrap();
             // split the bytes we read into from our bytes pool
             let data = self.pool.split_to(read);
-            // log the data that we read
-            //println!("proxy - got {} bytes from {}", read, addr);
             // try to deserialize our responses query id
             let id = S::response_query_id(&data[..]);
             // get the channel for this query
@@ -214,6 +203,19 @@ impl<S: ShoalDatabase> ShoalUdpProxy<S> {
             }
         }
     }
+}
+
+/// Allow types to be retrieved from a [`ShoalStream`]
+pub trait FromShoal<S: ShoalDatabase>: Sized {
+    /// The response kinds to deserialize from
+    type ResponseKinds: std::fmt::Debug;
+
+    /// Retrieve a type from a [`ShoalStream`]
+    ///
+    /// # Arguments
+    ///
+    /// * `kind` - The response kind to try to cast
+    fn retrieve(kind: S::ResponseKinds) -> Result<Option<Vec<Self>>, Errors>;
 }
 
 /// The reponses from our queries in a stream
@@ -274,13 +276,34 @@ impl<S: ShoalDatabase> ShoalStream<S> {
             self.pending.insert(index, resp);
         }
     }
+
+    /// Skip some number of responses
+    ///
+    /// If there are less responses then the requested number of skips this will
+    /// skip up to that.
+    ///
+    /// # Arguments
+    ///
+    /// * `skip` - The number of responses to skip
+    pub async fn skip(&mut self, mut skip: usize) {
+        // get the next message and throw it away
+        while let Some(_) = self.next().await {
+            // decrement our skip
+            skip -= 1;
+            // if skip is 0 then we can return
+            if skip == 0 {
+                break;
+            }
+        }
+    }
+
     /// Get the next response to our query
     pub async fn next(&mut self) -> Option<S::ResponseKinds> {
         // try to get our receive channels
         if self.response_rx.is_some() {
             // wait for the next response
             let (end, resp) = self.wait_for_next_response().await;
-            // if this is the final response then take return our channels
+            // if this is the final response then return our channels
             if end {
                 // remove this stream id from our channel map
                 self.channel_map.remove(&self.id);
@@ -295,6 +318,51 @@ impl<S: ShoalDatabase> ShoalStream<S> {
         } else {
             // this stream has already ended
             None
+        }
+    }
+
+    /// Get the next response to our query and cast it to a specific type
+    pub async fn next_typed<T: FromShoal<S>>(&mut self) -> Result<Option<Option<Vec<T>>>, Errors> {
+        // try to get our receive channels
+        if self.response_rx.is_some() {
+            // wait for the next response
+            let (end, resp) = self.wait_for_next_response().await;
+            // if this is the final response then take return our channels
+            if end {
+                // remove this stream id from our channel map
+                self.channel_map.remove(&self.id);
+                // take the ends of our channel
+                match (self.response_tx.take(), self.response_rx.take()) {
+                    (Some(tx), Some(rx)) => self.channel_queue_tx.send((tx, rx)).await.unwrap(),
+                    _ => (),
+                }
+            }
+            // try to cast to the correct type
+            T::retrieve(resp).map(|cast| Some(cast))
+        } else {
+            // this stream has already ended
+            Ok(None)
+        }
+    }
+
+    /// Get the next response to our query and get the first row returned and cast it to our specific type
+    ///
+    /// This will ignore any remaining rows in the next response.
+    pub async fn next_typed_first<T: FromShoal<S>>(&mut self) -> Result<Option<Option<T>>, Errors> {
+        // try to get the next response
+        match self.next_typed().await? {
+            Some(Some(mut rows)) => {
+                // check how may rows we found
+                if rows.len() == 1 {
+                    // if we only have a single row then just remove it
+                    Ok(Some(Some(rows.remove(0))))
+                } else {
+                    // we have more then 1 row so do a swap remove to avoid moving the items in the vec forward
+                    Ok(Some(Some(rows.swap_remove(1))))
+                }
+            }
+            Some(None) => Ok(Some(None)),
+            None => Ok(None),
         }
     }
 }
