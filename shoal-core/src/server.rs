@@ -3,7 +3,6 @@ mod conf;
 mod coordinator;
 pub mod errors;
 pub mod messages;
-//pub mod query;
 pub mod ring;
 pub mod shard;
 pub mod table;
@@ -13,7 +12,6 @@ use glommio::{
     channels::channel_mesh::{Full, MeshBuilder},
     ExecutorJoinHandle, LocalExecutorBuilder,
 };
-use rkyv::ser::serializers::AllocSerializer;
 use rkyv::{
     ser::serializers::{
         AlignedSerializer, AllocScratch, CompositeSerializer, FallbackScratch, HeapScratch,
@@ -21,7 +19,6 @@ use rkyv::{
     },
     AlignedVec,
 };
-use rkyv::{Archive, Serialize};
 
 use args::Args;
 pub use conf::Conf;

@@ -1,27 +1,58 @@
 //! The root traits that shoal is built upon that are shared between the client and server
 
-use std::net::SocketAddr;
 use uuid::Uuid;
 
+use crate::server::{ring::Ring, shard::ShardInfo};
+
 use super::queries::Queries;
-use crate::client::{self, FromShoal};
+
+/// The traits for queries in shoal
+pub trait ShoalQuery:
+    std::fmt::Debug
+    + rkyv::Archive
+    + rkyv::Serialize<rkyv::ser::serializers::AllocSerializer<1024>>
+    + Sized
+    + Send
+    + Clone
+{
+    /// Deserialize our response types
+    ///
+    /// # Arguments
+    ///
+    /// * `buff` - The buffer to deserialize into a response
+    fn response_query_id(buff: &[u8]) -> &Uuid;
+
+    /// Find the right shards for this query
+    ///
+    /// # Arguments
+    ///
+    /// * `ring` - The shard ring to check against
+    /// * `found` - The shards we found for this query
+    fn find_shard<'a>(&self, ring: &'a Ring, found: &mut Vec<&'a ShardInfo>);
+}
+
+/// The traits ror responses from shoal
+pub trait ShoalResponse:
+    std::fmt::Debug
+    + rkyv::Archive
+    + rkyv::Serialize<rkyv::ser::serializers::AllocSerializer<1024>>
+    + Sized
+    + Send
+{
+    /// Get the index of a single [`Self::ResponseKinds`]
+    fn get_index(&self) -> usize;
+
+    /// Get whether this is the last response in a response stream
+    fn is_end_of_stream(&self) -> bool;
+}
 
 /// The core trait that all databases in shoal must support
 pub trait ShoalDatabase: Default + 'static + std::fmt::Debug + Sized {
     /// The different tables or types of queries we will handle
-    type QueryKinds: std::fmt::Debug
-        + rkyv::Archive
-        + rkyv::Serialize<rkyv::ser::serializers::AllocSerializer<1024>>
-        + Sized
-        + Send
-        + Clone;
+    type QueryKinds: ShoalQuery;
 
     /// The different tables we can get responses from
-    type ResponseKinds: std::fmt::Debug
-        + rkyv::Archive
-        + rkyv::Serialize<rkyv::ser::serializers::AllocSerializer<1024>>
-        + Sized
-        + Send;
+    type ResponseKinds: ShoalResponse;
 
     /// Build a default queries bundle
     #[must_use]
@@ -35,35 +66,6 @@ pub trait ShoalDatabase: Default + 'static + std::fmt::Debug + Sized {
 
     // Deserialize our response types
     fn unarchive_response(buff: &[u8]) -> Self::ResponseKinds;
-
-    // Deserialize our response types
-    fn response_query_id(buff: &[u8]) -> &Uuid;
-
-    /// Get the index of a single [`Self::ResponseKinds`]
-    ///
-    /// # Arguments
-    ///
-    /// * `resp` - The response to get the order index for
-    fn response_index(resp: &Self::ResponseKinds) -> usize;
-
-    /// Get whether this is the last response in a response stream
-    ///
-    /// # Arguments
-    ///
-    /// * `resp` - The response to check
-    fn is_end_of_stream(resp: &Self::ResponseKinds) -> bool;
-
-    /// Forward our queries to the correct shards
-    #[allow(async_fn_in_trait)]
-    #[cfg(feature = "server")]
-    async fn send_to_shard(
-        ring: &crate::server::ring::Ring,
-        mesh_tx: &mut glommio::channels::channel_mesh::Senders<
-            crate::server::messages::MeshMsg<Self>,
-        >,
-        addr: SocketAddr,
-        queries: Queries<Self>,
-    ) -> Result<(), crate::server::ServerError>;
 
     /// Handle messages for different table types
     #[allow(async_fn_in_trait)]

@@ -3,9 +3,7 @@
 use bytes::BytesMut;
 use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
-use futures::task::LocalSpawnExt;
 use kanal::{AsyncReceiver, AsyncSender};
-use rkyv::validation::validators::DefaultValidator;
 use rkyv::{
     ser::serializers::{
         AlignedSerializer, AllocScratch, CompositeSerializer, FallbackScratch, HeapScratch,
@@ -13,7 +11,6 @@ use rkyv::{
     },
     AlignedVec,
 };
-use rkyv::{Archive, Deserialize};
 use std::collections::BTreeMap;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -24,7 +21,7 @@ use uuid::Uuid;
 pub mod errors;
 
 use super::shared::queries::Queries;
-use crate::shared::{responses::Responses, traits::ShoalDatabase};
+use crate::shared::traits::{ShoalDatabase, ShoalQuery, ShoalResponse};
 pub use errors::Errors;
 
 pub struct Shoal<S: ShoalDatabase> {
@@ -60,15 +57,14 @@ impl<S: ShoalDatabase + Send> Shoal<S> {
         // start our proxy
         let proxy_handle = tokio::spawn(async move { proxy.start().await });
         // build our client
-        let client = Shoal {
+        Shoal {
             socket,
             channel_map,
             channel_queue_tx,
             channel_queue_rx,
             proxy_handle,
             phantom: PhantomData,
-        };
-        client
+        }
     }
 
     /// Build a new query object
@@ -194,7 +190,8 @@ impl<S: ShoalDatabase> ShoalUdpProxy<S> {
             // split the bytes we read into from our bytes pool
             let data = self.pool.split_to(read);
             // try to deserialize our responses query id
-            let id = S::response_query_id(&data[..]);
+            let id = S::QueryKinds::response_query_id(&data[..]);
+            //let id = S::response_query_id(&data[..]);
             // get the channel for this query
             match self.channel_map.get(id) {
                 // send our response to the right shoal stream
@@ -255,7 +252,9 @@ impl<S: ShoalDatabase> ShoalStream<S> {
                     if let Some((_, resp)) = self.pending.pop_first() {
                         // increment our index
                         self.next_index += 1;
-                        return (S::is_end_of_stream(&resp), resp);
+                        // check if this response is the last one in this stream
+                        let end = resp.is_end_of_stream();
+                        return (end, resp);
                     }
                 }
             }
@@ -264,13 +263,15 @@ impl<S: ShoalDatabase> ShoalStream<S> {
             // unarchive our response
             let resp = S::unarchive_response(&buff);
             // get this responses order index
-            let index = S::response_index(&resp);
+            let index = resp.get_index();
             // if this is the next row then return it
             if self.next_index == index {
                 // increment the index of our next response
                 self.next_index += 1;
+                // check if this response is the last one in this stream
+                let end = resp.is_end_of_stream();
                 // this is the next response so just return it
-                return (S::is_end_of_stream(&resp), resp);
+                return (end, resp);
             }
             // push this into our pending responses and wait for the next response
             self.pending.insert(index, resp);
@@ -287,7 +288,7 @@ impl<S: ShoalDatabase> ShoalStream<S> {
     /// * `skip` - The number of responses to skip
     pub async fn skip(&mut self, mut skip: usize) {
         // get the next message and throw it away
-        while let Some(_) = self.next().await {
+        while self.next().await.is_some() {
             // decrement our skip
             skip -= 1;
             // if skip is 0 then we can return
@@ -308,9 +309,8 @@ impl<S: ShoalDatabase> ShoalStream<S> {
                 // remove this stream id from our channel map
                 self.channel_map.remove(&self.id);
                 // take the ends of our channel
-                match (self.response_tx.take(), self.response_rx.take()) {
-                    (Some(tx), Some(rx)) => self.channel_queue_tx.send((tx, rx)).await.unwrap(),
-                    _ => (),
+                if let (Some(tx), Some(rx)) = (self.response_tx.take(), self.response_rx.take()) {
+                    self.channel_queue_tx.send((tx, rx)).await.unwrap();
                 }
             }
             // return our response
@@ -332,13 +332,12 @@ impl<S: ShoalDatabase> ShoalStream<S> {
                 // remove this stream id from our channel map
                 self.channel_map.remove(&self.id);
                 // take the ends of our channel
-                match (self.response_tx.take(), self.response_rx.take()) {
-                    (Some(tx), Some(rx)) => self.channel_queue_tx.send((tx, rx)).await.unwrap(),
-                    _ => (),
+                if let (Some(tx), Some(rx)) = (self.response_tx.take(), self.response_rx.take()) {
+                    self.channel_queue_tx.send((tx, rx)).await.unwrap();
                 }
             }
             // try to cast to the correct type
-            T::retrieve(resp).map(|cast| Some(cast))
+            T::retrieve(resp).map(Some)
         } else {
             // this stream has already ended
             Ok(None)
