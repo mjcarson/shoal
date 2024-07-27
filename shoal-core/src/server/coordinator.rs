@@ -13,10 +13,14 @@ use glommio::{
 };
 use kanal::{AsyncReceiver, AsyncSender};
 
-use super::messages::{MeshMsg, Msg};
 use super::ring::Ring;
+use super::{
+    messages::{MeshMsg, Msg},
+    shard::ShardContact,
+};
 use super::{Conf, ServerError};
-use crate::shared::traits::ShoalDatabase;
+use crate::shared::queries::Queries;
+use crate::shared::traits::{ShoalDatabase, ShoalQuery};
 
 /// Coordinates traffic between this node and others
 pub struct Coordinator<S: ShoalDatabase> {
@@ -102,6 +106,45 @@ impl<S: ShoalDatabase> Coordinator<S> {
         }
     }
 
+    /// Forward our queries to the correct shards
+    async fn send_to_shard(
+        &mut self,
+        addr: SocketAddr,
+        queries: Queries<S>,
+    ) -> Result<(), ServerError> {
+        // initialize a vec to store the shards we find
+        let mut found = Vec::with_capacity(3);
+        // get the index for the last query in this bundle
+        let end_index = queries.queries.len() - 1;
+        // crawl over our queries
+        for (index, kind) in queries.queries.into_iter().enumerate() {
+            // get our target shards info
+            kind.find_shard(&self.ring, &mut found);
+            // send this query to the right shards
+            for shard_info in found.drain(..) {
+                match &shard_info.contact {
+                    ShardContact::Local(id) => {
+                        //println!("coord - sending query to shard: {id}");
+                        self.mesh_tx
+                            .send_to(
+                                *id,
+                                MeshMsg::Query {
+                                    addr,
+                                    id: queries.id,
+                                    index,
+                                    query: kind.clone(),
+                                    end: index == end_index,
+                                },
+                            )
+                            .await
+                            .unwrap();
+                    }
+                };
+            }
+        }
+        Ok(())
+    }
+
     /// Handle a client messages
     ///
     /// # Arguments
@@ -112,11 +155,9 @@ impl<S: ShoalDatabase> Coordinator<S> {
         // get the slice to deserialize
         let readable = &data[..read];
         // deserialize our queries
-        let queries = S::unarchive(&readable);
-        // send our query to correct shard
-        S::send_to_shard(&self.ring, &mut self.mesh_tx, addr, queries)
-            .await
-            .unwrap();
+        let queries = S::unarchive(readable);
+        // send each query to the correct shard
+        self.send_to_shard(addr, queries).await.unwrap();
     }
 
     /// Start handling messages

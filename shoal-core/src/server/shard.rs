@@ -6,7 +6,6 @@ use glommio::{
     net::UdpSocket,
     CpuSet, LocalExecutorPoolBuilder, PoolPlacement, PoolThreadHandles,
 };
-use rkyv::ser::serializers::AllocSerializer;
 use rkyv::{
     ser::serializers::{
         AlignedSerializer, AllocScratch, CompositeSerializer, FallbackScratch, HeapScratch,
@@ -14,15 +13,12 @@ use rkyv::{
     },
     AlignedVec,
 };
-use rkyv::{Archive, Serialize};
 use std::net::SocketAddr;
 use uuid::Uuid;
 
-use super::ring::Ring;
 use super::ServerError;
 use super::{messages::MeshMsg, Conf};
 use crate::shared::traits::ShoalDatabase;
-use crate::shared::{queries::Queries, responses::Responses};
 
 /// How to message a specific shard
 #[derive(Clone, Debug)]
@@ -75,7 +71,6 @@ impl<S: ShoalDatabase> Shard<S> {
     /// # Arguments
     ///
     /// * `addr` - The address to bind our udp socket too
-    #[must_use]
     pub fn new(
         conf: &Conf,
         local_tx: Senders<MeshMsg<S>>,
@@ -198,7 +193,7 @@ impl<S: ShoalDatabase> Shard<S> {
     }
 }
 
-pub fn start<'a, S: ShoalDatabase>(
+pub fn start<S: ShoalDatabase>(
     conf: Conf,
     cpus: CpuSet,
     mesh: MeshBuilder<MeshMsg<S>, Full>,

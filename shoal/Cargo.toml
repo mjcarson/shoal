@@ -1,0 +1,18 @@
+[package]
+name = "shoal"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "shoal"
+path = "src/lib.rs"
+
+
+[dependencies]
+shoal-core = { version = "*", path = "../shoal-core" }
+shoal-derive = { version = "*", path = "../shoal-derive" }
+rkyv = { version = "0.7", features = ["arbitrary_enum_discriminant", "uuid", "validation"] }
+gxhash = "2.2"
+uuid = { version = "1", features = ["v4"] }
+glommio = { version = "0.8" }
+tokio = { version = "1", features = ["full"] }
