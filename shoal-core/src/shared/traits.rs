@@ -1,10 +1,41 @@
 //! The root traits that shoal is built upon that are shared between the client and server
 
+use rkyv::{
+    ser::serializers::{
+        AlignedSerializer, AllocScratch, CompositeSerializer, FallbackScratch, HeapScratch,
+        SharedSerializeMap,
+    },
+    AlignedVec, Archive, Deserialize, Serialize,
+};
+use std::path::PathBuf;
+
 use uuid::Uuid;
 
-use crate::server::{ring::Ring, shard::ShardInfo};
+use crate::server::{ring::Ring, shard::ShardInfo, Conf};
 
 use super::queries::Queries;
+
+/// The trait required for a type to be archivable
+pub trait Archivable:
+    std::fmt::Debug
+    + Sized
+    + rkyv::Archive
+    + rkyv::Serialize<
+        CompositeSerializer<
+            AlignedSerializer<AlignedVec>,
+            FallbackScratch<HeapScratch<1024>, AllocScratch>,
+            SharedSerializeMap,
+        >,
+    >
+{
+    fn deserialize(archived: &<Self as Archive>::Archived) -> Self;
+    //    archived.deserialize(&mut rkyv::Infallible).unwrap()
+    //}
+    //fn archive(&self) -> AlignedVec {
+    //    // archive this row
+    //    rkyv::to_bytes::<_, 1024>(&self).unwrap()
+    //}
+}
 
 /// The traits for queries in shoal
 pub trait ShoalQuery:
@@ -47,12 +78,20 @@ pub trait ShoalResponse:
 }
 
 /// The core trait that all databases in shoal must support
-pub trait ShoalDatabase: Default + 'static + std::fmt::Debug + Sized {
+pub trait ShoalDatabase: 'static + Sized {
     /// The different tables or types of queries we will handle
     type QueryKinds: ShoalQuery;
 
     /// The different tables we can get responses from
     type ResponseKinds: ShoalResponse;
+
+    /// Create a new shoal db instance
+    ///
+    /// # Arguments
+    ///
+    /// * `shard_name` - The name of the shard that owns this table
+    /// * `conf` - A shoal config
+    async fn new(shard_name: &str, conf: &Conf) -> Self;
 
     /// Build a default queries bundle
     #[must_use]
@@ -110,3 +149,41 @@ pub trait ShoalTable:
     /// * `row` - The row to filter
     fn is_filtered(filter: &Self::Filters, row: &Self) -> bool;
 }
+
+///// The methods required to read/write data from shoal storage
+//pub trait ShoalStorable {
+//    /// Serialize a new row of data into an insert entry
+//    async fn insert(&self) ->
+//}
+//
+//pub trait ShoalStorage {
+//    /// The type we are storing
+//    type Data: ShoalStorable;
+//    /// Create a new instance of this storage engine
+//    ///
+//    /// # Arguments
+//    ///
+//    /// * `shard_name` - The id of the shard that owns this table
+//    /// * `conf` - The Shoal config
+//    async fn new(shard_name: &str, conf: &Conf) -> Self;
+//
+//    /// Write this row to our storage
+//    ///
+//    /// # Arguments
+//    ///
+//    /// * `data` - The data to write
+//    async fn write(&mut self, data: &[u8]);
+//
+//    /// Add a new row to storage
+//    async fn add(&mut self, )
+//
+//    /// Flush all currently pending writes to storage
+//    async fn flush(&mut self);
+//
+//    /// Read an intent log from storage
+//    ///
+//    /// # Arguments
+//    ///
+//    /// * `path` - The path to the intent log to read in
+//    async fn read_intents(path: &PathBuf);
+//}

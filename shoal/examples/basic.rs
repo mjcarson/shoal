@@ -1,12 +1,16 @@
 //! A basic key/value database example
 
-use shoal_core::server::Table;
+use shoal_core::server::Conf;
+use shoal_core::storage::FileSystem;
+use shoal_core::tables::{EphemeralTable, PersistentTable};
 use shoal_core::{rkyv, FromShoal};
 
 use shoal_core::server::ring::Ring;
 use shoal_core::shared::queries::{Get, Queries, Query};
 use shoal_core::shared::responses::Response;
-use shoal_core::shared::traits::{ShoalDatabase, ShoalQuery, ShoalResponse, ShoalTable};
+use shoal_core::shared::traits::{
+    Archivable, ShoalDatabase, ShoalQuery, ShoalResponse, ShoalTable,
+};
 
 use glommio::LocalExecutorBuilder;
 use gxhash::GxHasher;
@@ -76,6 +80,13 @@ impl ShoalTable for KeyValueRow {
     /// * `row` - The row to filter
     fn is_filtered(filter: &Self::Filters, row: &Self) -> bool {
         &row.value == filter
+    }
+}
+
+impl Archivable for KeyValueRow {
+    fn deserialize(archived: &<Self as Archive>::Archived) -> Self {
+        // deserialize it
+        archived.deserialize(&mut rkyv::Infallible).unwrap()
     }
 }
 
@@ -205,11 +216,10 @@ impl ShoalResponse for BasicResponseKinds {
 }
 
 /// The tables we are adding to to shoal
-#[derive(Default, Debug)]
 //#[shoal_db(name = "Basic")]
 pub struct Basic {
     /// A basic key value table
-    pub key_value: Table<KeyValueRow>,
+    pub key_value: PersistentTable<KeyValueRow, FileSystem<KeyValueRow>>,
 }
 
 impl ShoalDatabase for Basic {
@@ -218,6 +228,18 @@ impl ShoalDatabase for Basic {
 
     /// The different tables we can get responses from
     type ResponseKinds = BasicResponseKinds;
+
+    /// Create a new shoal db instance
+    ///
+    /// # Arguments
+    ///
+    /// * `shard_name` - The id of the shard that owns this table
+    /// * `conf` - A shoal config
+    async fn new(shard_name: &str, conf: &Conf) -> Self {
+        Basic {
+            key_value: PersistentTable::new(shard_name, conf).await,
+        }
+    }
 
     /// Deserialize our query types
     fn unarchive(buff: &[u8]) -> Queries<Self> {
@@ -247,7 +269,7 @@ impl ShoalDatabase for Basic {
         match typed_query {
             BasicQueryKinds::KeyValueQuery(query) => {
                 // handle these queries
-                BasicResponseKinds::KeyValueRow(self.key_value.handle(id, index, query, end))
+                BasicResponseKinds::KeyValueRow(self.key_value.handle(id, index, query, end).await)
             }
         }
     }
@@ -267,9 +289,10 @@ async fn test_queries() {
         .add(KeyValueGet::new("hello2"))
         .add(KeyValueGet::new("hello3").filter("nope"))
         .add(KeyValueGet::new("missing?"));
+
     // send our query
     let mut stream = shoal.send(query).await;
-    // skip the first 3 responses since they are just inserts
+    // skip the next 3 responses since they are just inserts
     stream.skip(3).await;
     // try to cast the next response
     while let Some(key_value) = stream.next_typed_first::<KeyValueRow>().await.unwrap() {

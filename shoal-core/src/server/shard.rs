@@ -71,7 +71,7 @@ impl<S: ShoalDatabase> Shard<S> {
     /// # Arguments
     ///
     /// * `addr` - The address to bind our udp socket too
-    pub fn new(
+    pub async fn new(
         conf: &Conf,
         local_tx: Senders<MeshMsg<S>>,
         local_rx: Receivers<MeshMsg<S>>,
@@ -83,10 +83,12 @@ impl<S: ShoalDatabase> Shard<S> {
         let addr = format!("{}:0", conf.networking.interface);
         // bind a udp socket to send responses out on
         let socket = UdpSocket::bind(addr)?;
+        // build our shards tables
+        let tables = S::new(&info.name, conf).await;
         // build our shard
         let shard = Shard {
             info,
-            tables: S::default(),
+            tables,
             local_tx,
             local_rx,
             socket,
@@ -215,7 +217,7 @@ where
             // join this nodes mesh
             let (sender, receiver) = mesh.join().await?;
             // build an empty shard
-            let shard: Shard<S> = Shard::new(&conf, sender, receiver)?;
+            let shard: Shard<S> = Shard::new(&conf, sender, receiver).await?;
             // start this shard
             shard.start().await
         }

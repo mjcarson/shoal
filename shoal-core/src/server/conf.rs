@@ -1,5 +1,7 @@
 //! The config for a Shoal database
 
+use std::{path::PathBuf, str::FromStr};
+
 use config::{Config, ConfigError};
 use glommio::CpuSet;
 use serde::{Deserialize, Serialize};
@@ -68,15 +70,47 @@ impl Networking {
     }
 }
 
+/// Help serde set a default file system storage path
+fn default_fs_path() -> PathBuf {
+    PathBuf::from_str("/opt/shoal").expect("Failed to build default filesystem storage path")
+}
+
+/// The settings for file system based storage
+#[derive(Serialize, Deserialize, Clone)]
+pub struct FileSystemStorage {
+    /// Where to store our data on disk by default
+    #[serde(default = "default_fs_path")]
+    pub path: PathBuf,
+}
+
+impl Default for FileSystemStorage {
+    fn default() -> Self {
+        FileSystemStorage {
+            path: default_fs_path(),
+        }
+    }
+}
+
+/// The storage settings for Shoal
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub struct Storage {
+    /// The settings for file system based storage
+    #[serde(default)]
+    pub fs: FileSystemStorage,
+}
+
 /// The config for running Shoal
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Conf {
     /// The compute settings to use
     #[serde(default)]
     pub compute: Compute,
-    /// The networking settings for shoal
+    /// The networking settings to use
     #[serde(default)]
     pub networking: Networking,
+    /// The storage settings to use
+    #[serde(default)]
+    pub storage: Storage,
 }
 
 impl Conf {

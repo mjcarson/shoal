@@ -5,7 +5,7 @@ pub mod errors;
 pub mod messages;
 pub mod ring;
 pub mod shard;
-pub mod table;
+pub mod tables;
 
 use clap::Parser;
 use glommio::{
@@ -25,7 +25,7 @@ pub use conf::Conf;
 use coordinator::Coordinator;
 pub use errors::ServerError;
 use messages::MeshMsg;
-pub use table::Table;
+//pub use table::Table;
 
 use crate::shared::traits::ShoalDatabase;
 
