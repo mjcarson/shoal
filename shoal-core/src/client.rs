@@ -39,7 +39,7 @@ pub struct Shoal<S: ShoalDatabase> {
     phantom: PhantomData<S>,
 }
 
-impl<S: ShoalDatabase + Send> Shoal<S> {
+impl<S: ShoalDatabase> Shoal<S> {
     /// Create a new shoal client
     ///
     /// # Arguments
@@ -53,7 +53,7 @@ impl<S: ShoalDatabase + Send> Shoal<S> {
         // create a map for storing what channels to send response streams on
         let channel_map = Arc::new(DashMap::with_capacity(100));
         // create the response proxy for this client
-        let proxy = ShoalUdpProxy::<S>::new(socket.clone(), channel_map.clone());
+        let proxy = ShoalUdpProxy::<S::QueryKinds>::new(socket.clone(), channel_map.clone());
         // start our proxy
         let proxy_handle = tokio::spawn(async move { proxy.start().await });
         // build our client
@@ -141,7 +141,7 @@ impl<S: ShoalDatabase> Drop for Shoal<S> {
     }
 }
 
-struct ShoalUdpProxy<S: ShoalDatabase> {
+struct ShoalUdpProxy<S: ShoalQuery> {
     /// A pool of memory to use
     pool: BytesMut,
     /// The udp socket to listen on
@@ -152,7 +152,7 @@ struct ShoalUdpProxy<S: ShoalDatabase> {
     phantom: PhantomData<S>,
 }
 
-impl<S: ShoalDatabase> ShoalUdpProxy<S> {
+impl<S: ShoalQuery> ShoalUdpProxy<S> {
     /// Create a new udp proxy
     ///
     /// # Arguments
@@ -190,7 +190,7 @@ impl<S: ShoalDatabase> ShoalUdpProxy<S> {
             // split the bytes we read into from our bytes pool
             let data = self.pool.split_to(read);
             // try to deserialize our responses query id
-            let id = S::QueryKinds::response_query_id(&data[..]);
+            let id = S::response_query_id(&data[..]);
             //let id = S::response_query_id(&data[..]);
             // get the channel for this query
             match self.channel_map.get(id) {

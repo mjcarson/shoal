@@ -1,0 +1,124 @@
+//! Persistent tables cache hot data in memory while also storing data on disk.
+//!
+//! This means that data is retained through restarts at the cost of speed.
+
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::str::FromStr;
+use uuid::Uuid;
+
+use super::partitions::Partition;
+use super::storage::Intents;
+use super::storage::ShoalStorage;
+use crate::server::Conf;
+use crate::shared::queries::{Get, Query};
+use crate::shared::responses::{Response, ResponseAction};
+use crate::shared::traits::ShoalTable;
+
+/// A table that stores data both in memory and on disk
+#[derive(Debug)]
+pub struct PersistentTable<T: ShoalTable, S: ShoalStorage<T>> {
+    /// The rows in this table
+    pub partitions: BTreeMap<T::Sort, Partition<T>>,
+    /// The storage engine backing this table
+    storage: S,
+}
+
+impl<T: ShoalTable, S: ShoalStorage<T>> PersistentTable<T, S> {
+    /// Create a persistent shoal table
+    ///
+    /// # Arguments
+    ///
+    /// * `shard_name` - The id of the shard that owns this table
+    /// * `conf` - The Shoal config
+    pub async fn new(shard_name: &str, conf: &Conf) -> Self {
+        // build our table
+        let mut table = Self {
+            partitions: BTreeMap::default(),
+            storage: S::new(shard_name, conf).await,
+        };
+        // build the path to this shards intent log
+        let path = PathBuf::from_str(&format!("/opt/shoal/Intents/{shard_name}-active")).unwrap();
+        // load our intent log
+        S::read_intents(&path, &mut table.partitions).await;
+        table
+    }
+
+    /// Cast and handle a serialized query
+    ///
+    /// # Arguments
+    ///
+    /// * `query` - The query to execute
+    pub async fn handle(
+        &mut self,
+        id: Uuid,
+        index: usize,
+        query: Query<T>,
+        end: bool,
+    ) -> Response<T> {
+        // execute the correct query type
+        let data = match query {
+            // insert a row into this partition
+            Query::Insert { row, .. } => self.insert(row).await,
+            // get a row from this partition
+            Query::Get(get) => self.get(&get).await,
+        };
+        // build the response for this query
+        Response {
+            id,
+            index,
+            data,
+            end,
+        }
+    }
+
+    /// Insert some data into a partition in this shards table
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to insert
+    async fn insert(&mut self, row: T) -> ResponseAction<T> {
+        // get our partition key
+        let key = row.get_sort().clone();
+        // get our partition
+        let partition = self.partitions.entry(key).or_default();
+        // wrap our row in an insert intent
+        let intent = Intents::Insert(row);
+        // persist this new row to storage
+        self.storage.insert(&intent).await;
+        // extract our row from our intent
+        let row = match intent {
+            Intents::Insert(row) => row,
+            _ => panic!("ahhhhh!"),
+        };
+        // insert this row into this partition
+        partition.insert(row)
+    }
+
+    /// Get some rows from some partitions
+    ///
+    /// # Arguments
+    ///
+    /// * `get` - The get parameters to use
+    /// * `responses` - The response object to use
+    async fn get(&mut self, get: &Get<T>) -> ResponseAction<T> {
+        // build a vec for the data we found
+        let mut data = Vec::new();
+        // build the sort key
+        for key in &get.partitions {
+            // get the partition for this key
+            if let Some(partition) = self.partitions.get(key) {
+                // get rows from this partition
+                partition.get(get, &mut data);
+            }
+        }
+        // add this data to our response
+        if data.is_empty() {
+            // this query did not find data
+            ResponseAction::Get(None)
+        } else {
+            // this query found data
+            ResponseAction::Get(Some(data))
+        }
+    }
+}

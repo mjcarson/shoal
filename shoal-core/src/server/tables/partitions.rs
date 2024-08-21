@@ -1,4 +1,4 @@
-//! A partition is how Shoal shards tables to horizontally scale
+//! A partition is a collection of data in shoal accesible by a partition key
 
 use std::collections::BTreeMap;
 
