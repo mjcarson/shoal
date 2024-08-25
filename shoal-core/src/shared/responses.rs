@@ -12,6 +12,8 @@ pub enum ResponseAction<D: ShoalTable> {
     Insert(bool),
     /// The response from a get query
     Get(Option<Vec<D>>),
+    /// The response from a delete
+    Delete(bool),
 }
 
 /// A response from a query

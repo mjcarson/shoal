@@ -5,37 +5,12 @@ use rkyv::{
         AlignedSerializer, AllocScratch, CompositeSerializer, FallbackScratch, HeapScratch,
         SharedSerializeMap,
     },
-    AlignedVec, Archive, Deserialize, Serialize,
+    AlignedVec, Archive,
 };
-use std::path::PathBuf;
-
 use uuid::Uuid;
 
-use crate::server::{ring::Ring, shard::ShardInfo, Conf};
-
 use super::queries::Queries;
-
-/// The trait required for a type to be archivable
-pub trait Archivable:
-    std::fmt::Debug
-    + Sized
-    + rkyv::Archive
-    + rkyv::Serialize<
-        CompositeSerializer<
-            AlignedSerializer<AlignedVec>,
-            FallbackScratch<HeapScratch<1024>, AllocScratch>,
-            SharedSerializeMap,
-        >,
-    >
-{
-    fn deserialize(archived: &<Self as Archive>::Archived) -> Self;
-    //    archived.deserialize(&mut rkyv::Infallible).unwrap()
-    //}
-    //fn archive(&self) -> AlignedVec {
-    //    // archive this row
-    //    rkyv::to_bytes::<_, 1024>(&self).unwrap()
-    //}
-}
+use crate::server::{ring::Ring, shard::ShardInfo, Conf};
 
 /// The traits for queries in shoal
 pub trait ShoalQuery:
@@ -122,21 +97,58 @@ pub trait ShoalTable:
     std::fmt::Debug
     + Clone
     + rkyv::Archive
-    + rkyv::Serialize<rkyv::ser::serializers::AllocSerializer<1024>>
+    + rkyv::Serialize<
+        CompositeSerializer<
+            AlignedSerializer<AlignedVec>,
+            FallbackScratch<HeapScratch<1024>, AllocScratch>,
+            SharedSerializeMap,
+        >,
+    > + rkyv::Serialize<rkyv::ser::serializers::AllocSerializer<1024>>
     + Sized
 {
+    /// The partition key type for this data
+    type PartitionKey;
+
     /// The sort type for this data
-    type Sort: Ord + rkyv::Archive + std::fmt::Debug + From<Self::Sort> + Clone;
+    type Sort: Ord
+        + rkyv::Archive
+        + rkyv::Serialize<
+            CompositeSerializer<
+                AlignedSerializer<AlignedVec>,
+                FallbackScratch<HeapScratch<1024>, AllocScratch>,
+                SharedSerializeMap,
+            >,
+        > + rkyv::Serialize<rkyv::ser::serializers::AllocSerializer<1024>>
+        + std::fmt::Debug
+        + From<Self::Sort>
+        + Clone;
 
     /// Build the sort tuple for this row
     fn get_sort(&self) -> &Self::Sort;
 
-    /// Calculate the partition key for this row
+    /// Get this rows partition key
+    fn get_partition_key(&self) -> u64;
+
+    /// Calculate the partition key for this row for this rows sort key
     ///
     /// # Arguments
     ///
     /// * `sort` - The sort key to build our partition key from
-    fn partition_key(sort: &Self::Sort) -> u64;
+    fn get_partition_key_from_values(sort: &Self::PartitionKey) -> u64;
+
+    /// Deserialize a row from its archived format
+    ///
+    /// # Arguments
+    ///
+    /// * `archived` - The archived data to deserialize
+    fn deserialize(archived: &<Self as Archive>::Archived) -> Self;
+
+    /// Deserialize a sort key from its archived format
+    ///
+    /// # Arguments
+    ///
+    /// * `archived` - The archived data to deserialize
+    fn deserialize_sort(archived: &<Self::Sort as Archive>::Archived) -> Self::Sort;
 
     /// Any filters to apply when listing/crawling rows
     type Filters: rkyv::Archive + std::fmt::Debug + Clone;
@@ -149,41 +161,3 @@ pub trait ShoalTable:
     /// * `row` - The row to filter
     fn is_filtered(filter: &Self::Filters, row: &Self) -> bool;
 }
-
-///// The methods required to read/write data from shoal storage
-//pub trait ShoalStorable {
-//    /// Serialize a new row of data into an insert entry
-//    async fn insert(&self) ->
-//}
-//
-//pub trait ShoalStorage {
-//    /// The type we are storing
-//    type Data: ShoalStorable;
-//    /// Create a new instance of this storage engine
-//    ///
-//    /// # Arguments
-//    ///
-//    /// * `shard_name` - The id of the shard that owns this table
-//    /// * `conf` - The Shoal config
-//    async fn new(shard_name: &str, conf: &Conf) -> Self;
-//
-//    /// Write this row to our storage
-//    ///
-//    /// # Arguments
-//    ///
-//    /// * `data` - The data to write
-//    async fn write(&mut self, data: &[u8]);
-//
-//    /// Add a new row to storage
-//    async fn add(&mut self, )
-//
-//    /// Flush all currently pending writes to storage
-//    async fn flush(&mut self);
-//
-//    /// Read an intent log from storage
-//    ///
-//    /// # Arguments
-//    ///
-//    /// * `path` - The path to the intent log to read in
-//    async fn read_intents(path: &PathBuf);
-//}

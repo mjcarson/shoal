@@ -3,6 +3,7 @@
 //! This means that data is retained through restarts at the cost of speed.
 
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::str::FromStr;
 use uuid::Uuid;
@@ -19,7 +20,7 @@ use crate::shared::traits::ShoalTable;
 #[derive(Debug)]
 pub struct PersistentTable<T: ShoalTable, S: ShoalStorage<T>> {
     /// The rows in this table
-    pub partitions: BTreeMap<T::Sort, Partition<T>>,
+    pub partitions: HashMap<u64, Partition<T>>,
     /// The storage engine backing this table
     storage: S,
 }
@@ -34,7 +35,7 @@ impl<T: ShoalTable, S: ShoalStorage<T>> PersistentTable<T, S> {
     pub async fn new(shard_name: &str, conf: &Conf) -> Self {
         // build our table
         let mut table = Self {
-            partitions: BTreeMap::default(),
+            partitions: HashMap::default(),
             storage: S::new(shard_name, conf).await,
         };
         // build the path to this shards intent log
@@ -62,6 +63,8 @@ impl<T: ShoalTable, S: ShoalStorage<T>> PersistentTable<T, S> {
             Query::Insert { row, .. } => self.insert(row).await,
             // get a row from this partition
             Query::Get(get) => self.get(&get).await,
+            // delete a row from this partition
+            Query::Delete { key, sort_key } => self.delete(key, &sort_key).await,
         };
         // build the response for this query
         Response {
@@ -79,7 +82,7 @@ impl<T: ShoalTable, S: ShoalStorage<T>> PersistentTable<T, S> {
     /// * `row` - The row to insert
     async fn insert(&mut self, row: T) -> ResponseAction<T> {
         // get our partition key
-        let key = row.get_sort().clone();
+        let key = row.get_partition_key();
         // get our partition
         let partition = self.partitions.entry(key).or_default();
         // wrap our row in an insert intent
@@ -89,7 +92,7 @@ impl<T: ShoalTable, S: ShoalStorage<T>> PersistentTable<T, S> {
         // extract our row from our intent
         let row = match intent {
             Intents::Insert(row) => row,
-            _ => panic!("ahhhhh!"),
+            _ => panic!("TODO NOT HAVE THIS POINTLESS MATCH!"),
         };
         // insert this row into this partition
         partition.insert(row)
@@ -105,7 +108,7 @@ impl<T: ShoalTable, S: ShoalStorage<T>> PersistentTable<T, S> {
         // build a vec for the data we found
         let mut data = Vec::new();
         // build the sort key
-        for key in &get.partitions {
+        for key in &get.partition_keys {
             // get the partition for this key
             if let Some(partition) = self.partitions.get(key) {
                 // get rows from this partition
@@ -120,5 +123,20 @@ impl<T: ShoalTable, S: ShoalStorage<T>> PersistentTable<T, S> {
             // this query found data
             ResponseAction::Get(Some(data))
         }
+    }
+
+    /// Delete a row from this partition
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key to the partition to dlete data from
+    /// * `sort` - The sort key to delete
+    async fn delete(&mut self, key: u64, sort: &T::Sort) -> ResponseAction<T> {
+        // get this rows partition
+        let removed = match self.partitions.get_mut(&key) {
+            Some(partition) => partition.remove(sort).is_some(),
+            None => false,
+        };
+        ResponseAction::Delete(removed)
     }
 }

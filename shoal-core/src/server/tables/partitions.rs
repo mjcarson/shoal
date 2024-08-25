@@ -64,4 +64,13 @@ impl<D: ShoalTable> Partition<D> {
             }
         }
     }
+
+    /// Remove a row from this partition
+    ///
+    /// # Arguments
+    ///
+    /// * `sort` - The sort key of the row to delete
+    pub fn remove(&mut self, sort: &D::Sort) -> Option<D> {
+        self.rows.remove(sort)
+    }
 }
