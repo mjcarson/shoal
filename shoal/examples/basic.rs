@@ -8,9 +8,7 @@ use shoal_core::{rkyv, FromShoal};
 use shoal_core::server::ring::Ring;
 use shoal_core::shared::queries::{Get, Queries, Query};
 use shoal_core::shared::responses::Response;
-use shoal_core::shared::traits::{
-    Archivable, ShoalDatabase, ShoalQuery, ShoalResponse, ShoalTable,
-};
+use shoal_core::shared::traits::{ShoalDatabase, ShoalQuery, ShoalResponse, ShoalTable};
 
 use glommio::LocalExecutorBuilder;
 use gxhash::GxHasher;
@@ -44,29 +42,57 @@ impl KeyValueRow {
 impl From<KeyValueRow> for BasicQueryKinds {
     fn from(row: KeyValueRow) -> Self {
         // get our rows partition key
-        let key = KeyValueRow::partition_key(&row.key);
+        let key = KeyValueRow::get_partition_key(&row);
         // build our query kind
         BasicQueryKinds::KeyValueQuery(Query::Insert { key, row })
     }
 }
 
 impl ShoalTable for KeyValueRow {
+    /// The partition key type for this data
+    type PartitionKey = String;
+
     /// The sort type for this data
     type Sort = String;
 
     /// Build the sort tuple for this row
     fn get_sort(&self) -> &Self::Sort {
-        &self.key
+        &self.value
     }
 
     /// Calculate the partition key for this row
-    fn partition_key(sort: &Self::Sort) -> u64 {
+    fn get_partition_key(&self) -> u64 {
+        Self::get_partition_key_from_values(&self.key)
+    }
+
+    /// Calculate the partition key for this row
+    fn get_partition_key_from_values(values: &Self::PartitionKey) -> u64 {
         // create a new hasher
         let mut hasher = GxHasher::default();
         // hash the first key
-        hasher.write(sort.as_bytes());
+        hasher.write(values.as_bytes());
         // get our hash
         hasher.finish()
+    }
+
+    /// Deserialize a row from its archived format
+    ///
+    /// # Arguments
+    ///
+    /// * `archived` - The archived data to deserialize
+    fn deserialize(archived: &<Self as Archive>::Archived) -> Self {
+        // deserialize it
+        archived.deserialize(&mut rkyv::Infallible).unwrap()
+    }
+
+    /// Deserialize a sort key from its archived format
+    ///
+    /// # Arguments
+    ///
+    /// * `archived` - The archived data to deserialize
+    fn deserialize_sort(archived: &<Self::Sort as Archive>::Archived) -> Self::Sort {
+        // deserialize it
+        archived.deserialize(&mut rkyv::Infallible).unwrap()
     }
 
     /// Any filters to apply when listing/crawling rows
@@ -80,13 +106,6 @@ impl ShoalTable for KeyValueRow {
     /// * `row` - The row to filter
     fn is_filtered(filter: &Self::Filters, row: &Self) -> bool {
         &row.value == filter
-    }
-}
-
-impl Archivable for KeyValueRow {
-    fn deserialize(archived: &<Self as Archive>::Archived) -> Self {
-        // deserialize it
-        archived.deserialize(&mut rkyv::Infallible).unwrap()
     }
 }
 
@@ -134,16 +153,61 @@ impl From<KeyValueGet> for BasicQueryKinds {
         // build our sort key
         let key = <KeyValueRow as ShoalTable>::Sort::from(specific.key);
         // build our partition key
-        let partition_key = <KeyValueRow as ShoalTable>::partition_key(&key);
+        let partition_key = <KeyValueRow as ShoalTable>::get_partition_key_from_values(&key);
         // build the general query
         let general = Get {
             partition_keys: vec![partition_key],
-            partitions: vec![key],
+            sort_keys: vec![key],
             filters: specific.filters,
             limit: specific.limit,
         };
         // build our query kind
         Self::KeyValueQuery(Query::Get(general))
+    }
+}
+
+/// Delete a key value row
+#[derive(Debug, Archive, Serialize)]
+#[archive(check_bytes)]
+#[archive_attr(derive(Debug))]
+pub struct KeyValueDelete {
+    /// Tkey key to the partition to delete a row from
+    pub partition_key: u64,
+    /// The sort key to delete
+    pub sort_key: String,
+}
+
+impl KeyValueDelete {
+    /// Create a new key value delete
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key for determining the parititon
+    /// * `sort_key` - The values used to sort data
+    pub fn new<S: Into<String>>(key: &String, sort_key: S) -> Self {
+        // calculate our partition key
+        let partition_key = KeyValueRow::get_partition_key_from_values(key);
+        // build a key value delete object
+        KeyValueDelete {
+            partition_key,
+            sort_key: sort_key.into(),
+        }
+    }
+}
+
+impl From<KeyValueDelete> for BasicQueryKinds {
+    /// Build our `QueryKind` for getting `KeyValueRows`
+    ///
+    /// # Arguments
+    ///
+    /// * `delete` - The delete query
+    fn from(delete: KeyValueDelete) -> Self {
+        // build our delete query
+        let query = Query::Delete {
+            key: delete.partition_key,
+            sort_key: delete.sort_key,
+        };
+        BasicQueryKinds::KeyValueQuery(query)
     }
 }
 
@@ -285,15 +349,16 @@ async fn test_queries() {
         .add(KeyValueRow::new("hello", "world1"))
         .add(KeyValueRow::new("hello2", "world3"))
         .add(KeyValueRow::new("hello3", "nope"))
+        .add(KeyValueRow::new("RemoveMe", "Please"))
+        .add(KeyValueDelete::new(&"RemoveMe".to_owned(), "Please"))
         .add(KeyValueGet::new("hello"))
         .add(KeyValueGet::new("hello2"))
         .add(KeyValueGet::new("hello3").filter("nope"))
-        .add(KeyValueGet::new("missing?"));
-
+        .add(KeyValueGet::new("RemoveMe"));
     // send our query
     let mut stream = shoal.send(query).await;
     // skip the next 3 responses since they are just inserts
-    stream.skip(3).await;
+    stream.skip(5).await;
     // try to cast the next response
     while let Some(key_value) = stream.next_typed_first::<KeyValueRow>().await.unwrap() {
         println!("{:?}", key_value);

@@ -1,22 +1,18 @@
 //! The file system storage module for shoal
 
-use std::{collections::BTreeMap, marker::PhantomData, path::PathBuf};
+use std::{collections::HashMap, marker::PhantomData, path::PathBuf};
 
 use futures::AsyncWriteExt;
 use glommio::io::{DmaFile, DmaStreamWriter, DmaStreamWriterBuilder, OpenOptions};
-use rkyv::{Archive, Deserialize};
-use rkyv_with::DeserializeWith;
 
 use super::{Intents, ShoalStorage};
 use crate::{
-    server::Conf,
-    shared::traits::{Archivable, ShoalTable},
-    storage::ArchivedIntents,
+    server::Conf, shared::traits::ShoalTable, storage::ArchivedIntents,
     tables::partitions::Partition,
 };
 
 /// Store shoal data in an existing filesytem for persistence
-pub struct FileSystem<T: std::fmt::Debug + Archive> {
+pub struct FileSystem<T: ShoalTable> {
     /// The name of the shard we are storing data for
     shard_name: String,
     /// The intent log to write too
@@ -25,7 +21,7 @@ pub struct FileSystem<T: std::fmt::Debug + Archive> {
     store_data: PhantomData<T>,
 }
 
-impl<T: ShoalTable + Archivable> ShoalStorage<T> for FileSystem<T> {
+impl<T: ShoalTable> ShoalStorage<T> for FileSystem<T> {
     /// Create a new instance of this storage engine
     ///
     /// # Arguments
@@ -64,8 +60,35 @@ impl<T: ShoalTable + Archivable> ShoalStorage<T> for FileSystem<T> {
     ///
     /// * `insert` - The row to write
     async fn insert(&mut self, insert: &Intents<T>) {
-        // archive our queries
+        // archive this insert intent log entry
         let archived = rkyv::to_bytes::<_, 1024>(insert).unwrap();
+        // get the size of the data to write
+        let size = archived.len().to_le_bytes();
+        // write our size
+        self.intent_log.write_all(&size).await.unwrap();
+        // write our data
+        self.intent_log
+            .write_all(archived.as_slice())
+            .await
+            .unwrap();
+        // flush our data
+        self.flush().await;
+    }
+
+    /// Delete a row from storage
+    ///
+    /// # Arguments
+    ///
+    /// * `partition_key` - The key to the partition we are deleting data from
+    /// * `sort_key` - The sort key to use to delete data from with in a partition
+    async fn delete(&mut self, partition_key: u64, sort_key: T::Sort) {
+        // wrap this delete command in a delete intent
+        let intent = Intents::<T>::Delete {
+            partition_key,
+            sort_key,
+        };
+        // archive this delete intent log entry
+        let archived = rkyv::to_bytes::<_, 1024>(&intent).unwrap();
         // get the size of the data to write
         let size = archived.len().to_le_bytes();
         // write our size
@@ -89,16 +112,14 @@ impl<T: ShoalTable + Archivable> ShoalStorage<T> for FileSystem<T> {
     /// # Arguments
     ///
     /// * `path` - The path to the intent log to read in
-    async fn read_intents(path: &PathBuf, partitions: &mut BTreeMap<T::Sort, Partition<T>>) {
+    async fn read_intents(path: &PathBuf, partitions: &mut HashMap<u64, Partition<T>>) {
         // open the target intent log
         let file = DmaFile::open(path).await.unwrap();
-        println!("{:?} -> {}", path, file.file_size().await.unwrap());
         // don't read a file with 0 bytes
         if file.file_size().await.unwrap() == 0 {
             // bail out since this shards intent log is empty
             return;
         }
-        println!("READ INTENTS?");
         // track the amount of data we have currently read
         let mut pos = 0;
         loop {
@@ -107,7 +128,6 @@ impl<T: ShoalTable + Archivable> ShoalStorage<T> for FileSystem<T> {
             // check if we read any data
             let size = usize::from_le_bytes(read[..8].try_into().unwrap());
             // if size is 0 then stop reading entries
-            println!("size -> {size}");
             if size == 0 {
                 break;
             }
@@ -121,14 +141,25 @@ impl<T: ShoalTable + Archivable> ShoalStorage<T> for FileSystem<T> {
             match intent {
                 ArchivedIntents::Insert(archived) => {
                     // deserialize this row
-                    let row = <T as Archivable>::deserialize(archived);
-                    // get our sort  for this row
-                    let key = row.get_sort().clone();
-                    println!("INSERTING {row:?} at {key:?}");
+                    let row = T::deserialize(archived);
+                    // get the partition key for this row
+                    let key = row.get_partition_key();
                     // get this rows partition
                     let entry = partitions.entry(key).or_default();
                     // insert this row
                     entry.insert(row);
+                }
+                ArchivedIntents::Delete {
+                    partition_key,
+                    sort_key,
+                } => {
+                    // get the partition to delete a row from
+                    if let Some(partition) = partitions.get_mut(partition_key) {
+                        // deserialize this row
+                        let sort_key = T::deserialize_sort(sort_key);
+                        // remove the sort key from this partition
+                        partition.remove(&sort_key);
+                    }
                 }
             }
             pos += size as u64;

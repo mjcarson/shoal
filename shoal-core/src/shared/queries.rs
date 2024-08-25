@@ -50,6 +50,8 @@ pub enum Query<R: ShoalTable + std::fmt::Debug> {
     Insert { key: u64, row: R },
     /// Get some data from shoal
     Get(Get<R>),
+    /// Delete a row from shoal
+    Delete { key: u64, sort_key: R::Sort },
 }
 
 impl<R: ShoalTable + std::fmt::Debug> Query<R> {
@@ -57,7 +59,9 @@ impl<R: ShoalTable + std::fmt::Debug> Query<R> {
     pub fn find_shard<'a>(&self, ring: &'a Ring, tmp: &mut Vec<&'a ShardInfo>) {
         // get the correct shard for this query
         match self {
-            Query::Insert { key, .. } => tmp.push(ring.find_shard(*key)),
+            Query::Insert { key, .. } | Query::Delete { key, .. } => {
+                tmp.push(ring.find_shard(*key))
+            }
             Query::Get(get) => {
                 for key in &get.partition_keys {
                     tmp.push(ring.find_shard(*key))
@@ -97,8 +101,8 @@ impl<R: ShoalTable> TaggedQuery<R> {
 pub struct Get<R: ShoalTable + std::fmt::Debug> {
     /// They partition keys to get data from
     pub partition_keys: Vec<u64>,
-    /// The partitions to get data from
-    pub partitions: Vec<R::Sort>,
+    /// The sort keys to get data from
+    pub sort_keys: Vec<R::Sort>,
     /// Any filters to apply to rows
     pub filters: Option<R::Filters>,
     /// The number of rows to get at most
