@@ -45,16 +45,18 @@ impl<S: ShoalDatabase> Default for Queries<S> {
 /// The different types of queries for a single datatype
 #[derive(Debug, Archive, Serialize, Deserialize, Clone)]
 #[archive(check_bytes)]
-pub enum Query<R: ShoalTable + std::fmt::Debug> {
+pub enum Query<T: ShoalTable + std::fmt::Debug> {
     /// Insert a row into shoal
-    Insert { key: u64, row: R },
+    Insert { key: u64, row: T },
     /// Get some data from shoal
-    Get(Get<R>),
+    Get(Get<T>),
     /// Delete a row from shoal
-    Delete { key: u64, sort_key: R::Sort },
+    Delete { key: u64, sort_key: T::Sort },
+    /// Update a row in a shoal
+    Update(Update<T>),
 }
 
-impl<R: ShoalTable + std::fmt::Debug> Query<R> {
+impl<T: ShoalTable + std::fmt::Debug> Query<T> {
     // sort our queries by shard
     pub fn find_shard<'a>(&self, ring: &'a Ring, tmp: &mut Vec<&'a ShardInfo>) {
         // get the correct shard for this query
@@ -67,6 +69,7 @@ impl<R: ShoalTable + std::fmt::Debug> Query<R> {
                     tmp.push(ring.find_shard(*key))
                 }
             }
+            Query::Update(update) => tmp.push(ring.find_shard(update.partition_key)),
         }
     }
 }
@@ -98,8 +101,8 @@ impl<R: ShoalTable> TaggedQuery<R> {
 #[derive(Debug, Archive, Serialize, Deserialize, Clone)]
 #[archive(check_bytes)]
 //#[archive_attr(derive(Debug))]
-pub struct Get<R: ShoalTable + std::fmt::Debug> {
-    /// They partition keys to get data from
+pub struct Get<R: ShoalTable> {
+    /// The partition keys to get data from
     pub partition_keys: Vec<u64>,
     /// The sort keys to get data from
     pub sort_keys: Vec<R::Sort>,
@@ -108,3 +111,22 @@ pub struct Get<R: ShoalTable + std::fmt::Debug> {
     /// The number of rows to get at most
     pub limit: Option<usize>,
 }
+
+/// An update query for a single row in Shoal
+#[derive(Debug, Archive, Serialize, Deserialize, Clone)]
+#[archive(check_bytes)]
+pub struct Update<T: ShoalTable> {
+    /// The key to the partition to update data in
+    pub partition_key: u64,
+    /// The sort key to apply updates too
+    pub sort_key: T::Sort,
+    /// The updates to apply
+    pub update: T::Update,
+}
+
+//impl<T: ShoalTable> Update<T> {
+//    /// Get this updates sort key
+//    pub fn get_sort_key(&self) -> T::Sort {
+//        self.sort_key
+//    }
+//}

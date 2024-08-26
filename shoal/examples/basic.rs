@@ -6,7 +6,7 @@ use shoal_core::tables::{EphemeralTable, PersistentTable};
 use shoal_core::{rkyv, FromShoal};
 
 use shoal_core::server::ring::Ring;
-use shoal_core::shared::queries::{Get, Queries, Query};
+use shoal_core::shared::queries::{Get, Queries, Query, Update};
 use shoal_core::shared::responses::Response;
 use shoal_core::shared::traits::{ShoalDatabase, ShoalQuery, ShoalResponse, ShoalTable};
 
@@ -25,16 +25,19 @@ use uuid::Uuid;
 pub struct KeyValueRow {
     /// A partition key
     key: String,
-    /// A value
-    value: String,
+    /// A sort key
+    sort: String,
+    /// The data for this sorted row
+    data: String,
 }
 
 impl KeyValueRow {
     /// Create a new key/value row
-    fn new<T: Into<String>>(key: T, value: T) -> Self {
+    fn new<T: Into<String>>(key: T, sort: T, data: T) -> Self {
         KeyValueRow {
             key: key.into(),
-            value: value.into(),
+            sort: sort.into(),
+            data: data.into(),
         }
     }
 }
@@ -52,12 +55,15 @@ impl ShoalTable for KeyValueRow {
     /// The partition key type for this data
     type PartitionKey = String;
 
+    /// The updates that can be applied to this table
+    type Update = String;
+
     /// The sort type for this data
     type Sort = String;
 
     /// Build the sort tuple for this row
     fn get_sort(&self) -> &Self::Sort {
-        &self.value
+        &self.sort
     }
 
     /// Calculate the partition key for this row
@@ -81,7 +87,7 @@ impl ShoalTable for KeyValueRow {
     ///
     /// * `archived` - The archived data to deserialize
     fn deserialize(archived: &<Self as Archive>::Archived) -> Self {
-        // deserialize it
+        // deserialize our row
         archived.deserialize(&mut rkyv::Infallible).unwrap()
     }
 
@@ -91,7 +97,17 @@ impl ShoalTable for KeyValueRow {
     ///
     /// * `archived` - The archived data to deserialize
     fn deserialize_sort(archived: &<Self::Sort as Archive>::Archived) -> Self::Sort {
-        // deserialize it
+        // deserialize our rows sort key
+        archived.deserialize(&mut rkyv::Infallible).unwrap()
+    }
+
+    /// Deserialize an update from its archived format
+    ///
+    /// # Arguments
+    ///
+    /// * `archived` - The archived data to deserialize
+    fn deserialize_update(archived: &<Update<Self> as Archive>::Archived) -> Update<Self> {
+        // deserialize our rows update
         archived.deserialize(&mut rkyv::Infallible).unwrap()
     }
 
@@ -105,7 +121,16 @@ impl ShoalTable for KeyValueRow {
     /// * `filters` - The filters to apply
     /// * `row` - The row to filter
     fn is_filtered(filter: &Self::Filters, row: &Self) -> bool {
-        &row.value == filter
+        &row.data == filter
+    }
+
+    /// Apply an update to a single row
+    ///
+    /// # Arguments
+    ///
+    /// * `update` - The update to apply to a specific row
+    fn update(&mut self, update: &Update<Self>) {
+        self.data = update.update.clone();
     }
 }
 
@@ -196,7 +221,7 @@ impl KeyValueDelete {
 }
 
 impl From<KeyValueDelete> for BasicQueryKinds {
-    /// Build our `QueryKind` for getting `KeyValueRows`
+    /// Build our `QueryKind` for getting `KeyValueDelete`
     ///
     /// # Arguments
     ///
@@ -207,6 +232,56 @@ impl From<KeyValueDelete> for BasicQueryKinds {
             key: delete.partition_key,
             sort_key: delete.sort_key,
         };
+        BasicQueryKinds::KeyValueQuery(query)
+    }
+}
+
+/// An update to apply to a row in this table
+pub struct KeyValueUpdate {
+    /// The partition key to update data in
+    partition_key: u64,
+    /// The sort key for a specific row in a partition
+    sort_key: String,
+    /// The data to update
+    data: String,
+}
+
+impl KeyValueUpdate {
+    /// Create an update for a specific row
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key to the partition to upate data in
+    /// * `sort_key` - The sort key used to identify the specific row to update in a partition
+    /// * `data` - The new data to set
+    pub fn new<S: Into<String>, D: Into<String>>(key: &String, sort_key: S, data: D) -> Self {
+        // calculate our partition key
+        let partition_key = KeyValueRow::get_partition_key_from_values(key);
+        // build a new upidate object
+        KeyValueUpdate {
+            partition_key,
+            sort_key: sort_key.into(),
+            data: data.into(),
+        }
+    }
+}
+
+impl From<KeyValueUpdate> for BasicQueryKinds {
+    /// Build our `QueryKind` for getting `KeyValueUpdate`
+    ///
+    /// # Arguments
+    ///
+    /// * `specific` - The update query to this table/data type
+    fn from(specific: KeyValueUpdate) -> Self {
+        // cast this update to a generalized update
+        let general = Update {
+            partition_key: specific.partition_key,
+            sort_key: specific.sort_key,
+            update: specific.data,
+        };
+        // wrap our general update in a query
+        let query = Query::Update(general);
+        // wrap our general update in a table specific query
         BasicQueryKinds::KeyValueQuery(query)
     }
 }
@@ -346,19 +421,20 @@ async fn test_queries() {
     // build a query
     let query = shoal
         .query()
-        .add(KeyValueRow::new("hello", "world1"))
-        .add(KeyValueRow::new("hello2", "world3"))
-        .add(KeyValueRow::new("hello3", "nope"))
-        .add(KeyValueRow::new("RemoveMe", "Please"))
-        .add(KeyValueDelete::new(&"RemoveMe".to_owned(), "Please"))
+        //.add(KeyValueRow::new("hello", "world1", "1-"))
+        //.add(KeyValueRow::new("hello2", "world2", "2-"))
+        //.add(KeyValueRow::new("hello3", "world3", "why?"))
+        //.add(KeyValueUpdate::new(&"hello3".to_owned(), "world3", "3-"))
+        //.add(KeyValueRow::new("RemoveMe", "Please", ":("))
+        //.add(KeyValueDelete::new(&"RemoveMe".to_owned(), "Please"))
         .add(KeyValueGet::new("hello"))
         .add(KeyValueGet::new("hello2"))
-        .add(KeyValueGet::new("hello3").filter("nope"))
+        .add(KeyValueGet::new("hello3"))
         .add(KeyValueGet::new("RemoveMe"));
     // send our query
     let mut stream = shoal.send(query).await;
     // skip the next 3 responses since they are just inserts
-    stream.skip(5).await;
+    //stream.skip(6).await;
     // try to cast the next response
     while let Some(key_value) = stream.next_typed_first::<KeyValueRow>().await.unwrap() {
         println!("{:?}", key_value);

@@ -5,11 +5,11 @@ use rkyv::{
         AlignedSerializer, AllocScratch, CompositeSerializer, FallbackScratch, HeapScratch,
         SharedSerializeMap,
     },
-    AlignedVec, Archive,
+    AlignedVec, Archive, Deserialize,
 };
 use uuid::Uuid;
 
-use super::queries::Queries;
+use super::queries::{Queries, Update};
 use crate::server::{ring::Ring, shard::ShardInfo, Conf};
 
 /// The traits for queries in shoal
@@ -109,6 +109,18 @@ pub trait ShoalTable:
     /// The partition key type for this data
     type PartitionKey;
 
+    /// The updates that can be applied to this table
+    type Update: rkyv::Archive
+        + rkyv::Serialize<
+            CompositeSerializer<
+                AlignedSerializer<AlignedVec>,
+                FallbackScratch<HeapScratch<1024>, AllocScratch>,
+                SharedSerializeMap,
+            >,
+        > + rkyv::Serialize<rkyv::ser::serializers::AllocSerializer<1024>>
+        + std::fmt::Debug
+        + Clone;
+
     /// The sort type for this data
     type Sort: Ord
         + rkyv::Archive
@@ -150,6 +162,13 @@ pub trait ShoalTable:
     /// * `archived` - The archived data to deserialize
     fn deserialize_sort(archived: &<Self::Sort as Archive>::Archived) -> Self::Sort;
 
+    /// Deserialize an update from its archived format
+    ///
+    /// # Arguments
+    ///
+    /// * `archived` - The archived data to deserialize
+    fn deserialize_update(archived: &<Update<Self> as Archive>::Archived) -> Update<Self>;
+
     /// Any filters to apply when listing/crawling rows
     type Filters: rkyv::Archive + std::fmt::Debug + Clone;
 
@@ -160,4 +179,11 @@ pub trait ShoalTable:
     /// * `filters` - The filters to apply
     /// * `row` - The row to filter
     fn is_filtered(filter: &Self::Filters, row: &Self) -> bool;
+
+    /// Apply an update to a single row
+    ///
+    /// # Arguments
+    ///
+    /// * `update` - The update to apply to a specific row
+    fn update(&mut self, update: &Update<Self>);
 }

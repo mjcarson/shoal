@@ -2,17 +2,17 @@
 
 use std::collections::BTreeMap;
 
-use crate::shared::queries::Get;
+use crate::shared::queries::{Get, Update};
 use crate::shared::responses::ResponseAction;
 use crate::shared::traits::ShoalTable;
 
 #[derive(Debug)]
-pub struct Partition<R: ShoalTable> {
+pub struct Partition<T: ShoalTable> {
     /// The data in this partition
-    rows: BTreeMap<R::Sort, R>,
+    rows: BTreeMap<T::Sort, T>,
 }
 
-impl<R: ShoalTable> Default for Partition<R> {
+impl<T: ShoalTable> Default for Partition<T> {
     /// Create a default partition
     fn default() -> Self {
         Partition {
@@ -21,13 +21,13 @@ impl<R: ShoalTable> Default for Partition<R> {
     }
 }
 
-impl<D: ShoalTable> Partition<D> {
+impl<T: ShoalTable> Partition<T> {
     /// add a new row to this partition
     ///
     /// # Arguments
     ///
     /// * `row` - The row to insert
-    pub fn insert(&mut self, row: D) -> ResponseAction<D> {
+    pub fn insert(&mut self, row: T) -> ResponseAction<T> {
         // get this rows sort key
         let sort_key = row.get_sort().clone();
         // add this row
@@ -42,13 +42,13 @@ impl<D: ShoalTable> Partition<D> {
     ///
     /// * `params` - The parameters to use to get the rows
     /// * `found` - The vector to push the data to return
-    pub fn get(&self, params: &Get<D>, found: &mut Vec<D>) {
+    pub fn get(&self, params: &Get<T>, found: &mut Vec<T>) {
         // get rows from this partition
         for row in self.rows.values() {
             // skip any rows that don't match our filter
             if let Some(filter) = &params.filters {
                 // check if this row should be filtered out
-                if !D::is_filtered(filter, row) {
+                if !T::is_filtered(filter, row) {
                     // skip this row since it doesn't match our filter
                     continue;
                 }
@@ -70,7 +70,20 @@ impl<D: ShoalTable> Partition<D> {
     /// # Arguments
     ///
     /// * `sort` - The sort key of the row to delete
-    pub fn remove(&mut self, sort: &D::Sort) -> Option<D> {
+    pub fn remove(&mut self, sort: &T::Sort) -> Option<T> {
         self.rows.remove(sort)
+    }
+
+    /// Update a row in this partition
+    pub fn update(&mut self, update: &Update<T>) -> bool {
+        // get the row to update
+        match self.rows.get_mut(&update.sort_key) {
+            // we foudn the target row so apply our update
+            Some(row) => {
+                row.update(&update);
+                true
+            }
+            None => false,
+        }
     }
 }

@@ -3,7 +3,10 @@
 use rkyv::{Archive, Deserialize, Serialize};
 use std::{collections::HashMap, path::PathBuf};
 
-use crate::{server::Conf, shared::traits::ShoalTable};
+use crate::{
+    server::Conf,
+    shared::{queries::Update, traits::ShoalTable},
+};
 
 mod fs;
 
@@ -20,6 +23,7 @@ pub enum Intents<T: ShoalTable> {
         partition_key: u64,
         sort_key: T::Sort,
     },
+    Update(Update<T>),
 }
 
 pub trait ShoalStorage<T: ShoalTable> {
@@ -31,7 +35,7 @@ pub trait ShoalStorage<T: ShoalTable> {
     /// * `conf` - The Shoal config
     async fn new(shard_name: &str, conf: &Conf) -> Self;
 
-    /// Write this new row to our storage
+    /// Write this new row to storage
     ///
     /// # Arguments
     ///
@@ -45,6 +49,13 @@ pub trait ShoalStorage<T: ShoalTable> {
     /// * `partition_key` - The key to the partition we are deleting data from
     /// * `sort_key` - The sort key to use to delete data from with in a partition
     async fn delete(&mut self, partition_key: u64, sort_key: T::Sort);
+
+    /// Write a row update to storage
+    ///
+    /// # Arguments
+    ///
+    /// * `update` - The update that was applied to our row
+    async fn update(&mut self, update: Update<T>);
 
     /// Flush all currently pending writes to storage
     async fn flush(&mut self);
