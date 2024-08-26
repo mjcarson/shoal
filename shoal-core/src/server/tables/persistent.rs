@@ -12,6 +12,7 @@ use super::partitions::Partition;
 use super::storage::Intents;
 use super::storage::ShoalStorage;
 use crate::server::Conf;
+use crate::shared::queries::Update;
 use crate::shared::queries::{Get, Query};
 use crate::shared::responses::{Response, ResponseAction};
 use crate::shared::traits::ShoalTable;
@@ -64,7 +65,9 @@ impl<T: ShoalTable, S: ShoalStorage<T>> PersistentTable<T, S> {
             // get a row from this partition
             Query::Get(get) => self.get(&get).await,
             // delete a row from this partition
-            Query::Delete { key, sort_key } => self.delete(key, &sort_key).await,
+            Query::Delete { key, sort_key } => self.delete(key, sort_key).await,
+            // update a row in this partition
+            Query::Update(update) => self.update(update).await,
         };
         // build the response for this query
         Response {
@@ -125,18 +128,51 @@ impl<T: ShoalTable, S: ShoalStorage<T>> PersistentTable<T, S> {
         }
     }
 
-    /// Delete a row from this partition
+    /// Delete a row from this table
     ///
     /// # Arguments
     ///
     /// * `key` - The key to the partition to dlete data from
     /// * `sort` - The sort key to delete
-    async fn delete(&mut self, key: u64, sort: &T::Sort) -> ResponseAction<T> {
+    async fn delete(&mut self, key: u64, sort: T::Sort) -> ResponseAction<T> {
         // get this rows partition
         let removed = match self.partitions.get_mut(&key) {
-            Some(partition) => partition.remove(sort).is_some(),
+            Some(partition) => {
+                // try remove the target row from this partition
+                if partition.remove(&sort).is_some() {
+                    // wite this delete to our intent log
+                    self.storage.delete(key, sort).await;
+                    true
+                } else {
+                    // we didn't find the row to delete
+                    false
+                }
+            }
+            // this partition doesn't exist and so the row can't exist
             None => false,
         };
         ResponseAction::Delete(removed)
+    }
+
+    /// Update a row in this table
+    ///
+    /// # Arguments
+    ///
+    /// * `update` - The update to apply to a row in this table
+    async fn update(&mut self, update: Update<T>) -> ResponseAction<T> {
+        // get this rows partition
+        let updated = match self.partitions.get_mut(&update.partition_key) {
+            Some(partition) => {
+                if partition.update(&update) {
+                    // write this update to storage
+                    self.storage.update(update).await;
+                    true
+                } else {
+                    false
+                }
+            }
+            None => false,
+        };
+        ResponseAction::Update(updated)
     }
 }

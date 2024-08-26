@@ -7,7 +7,9 @@ use glommio::io::{DmaFile, DmaStreamWriter, DmaStreamWriterBuilder, OpenOptions}
 
 use super::{Intents, ShoalStorage};
 use crate::{
-    server::Conf, shared::traits::ShoalTable, storage::ArchivedIntents,
+    server::Conf,
+    shared::{queries::Update, traits::ShoalTable},
+    storage::ArchivedIntents,
     tables::partitions::Partition,
 };
 
@@ -19,6 +21,30 @@ pub struct FileSystem<T: ShoalTable> {
     intent_log: DmaStreamWriter,
     /// The data we are storing
     store_data: PhantomData<T>,
+}
+
+impl<T: ShoalTable> FileSystem<T> {
+    /// Write an intent to storage
+    ///
+    /// # Arguments
+    ///
+    /// * `intent` - The intent to write to disk
+    async fn write_intent(&mut self, intent: &Intents<T>) {
+        println!("Write -> {intent:#?}");
+        // archive this intent log entry
+        let archived = rkyv::to_bytes::<_, 1024>(intent).unwrap();
+        // get the size of the data to write
+        let size = archived.len().to_le_bytes();
+        // write our size
+        self.intent_log.write_all(&size).await.unwrap();
+        // write our data
+        self.intent_log
+            .write_all(archived.as_slice())
+            .await
+            .unwrap();
+        // flush our data
+        self.flush().await;
+    }
 }
 
 impl<T: ShoalTable> ShoalStorage<T> for FileSystem<T> {
@@ -45,7 +71,9 @@ impl<T: ShoalTable> ShoalStorage<T> for FileSystem<T> {
             .await
             .unwrap();
         // wrap our file in a stream writer
-        let intent_log = DmaStreamWriterBuilder::new(file).build();
+        let intent_log = DmaStreamWriterBuilder::new(file)
+            .with_buffer_size(500)
+            .build();
         // build our file system storage module
         FileSystem {
             shard_name: shard_name.to_owned(),
@@ -60,19 +88,8 @@ impl<T: ShoalTable> ShoalStorage<T> for FileSystem<T> {
     ///
     /// * `insert` - The row to write
     async fn insert(&mut self, insert: &Intents<T>) {
-        // archive this insert intent log entry
-        let archived = rkyv::to_bytes::<_, 1024>(insert).unwrap();
-        // get the size of the data to write
-        let size = archived.len().to_le_bytes();
-        // write our size
-        self.intent_log.write_all(&size).await.unwrap();
-        // write our data
-        self.intent_log
-            .write_all(archived.as_slice())
-            .await
-            .unwrap();
-        // flush our data
-        self.flush().await;
+        // write this insert intent log
+        self.write_intent(insert).await
     }
 
     /// Delete a row from storage
@@ -87,19 +104,20 @@ impl<T: ShoalTable> ShoalStorage<T> for FileSystem<T> {
             partition_key,
             sort_key,
         };
-        // archive this delete intent log entry
-        let archived = rkyv::to_bytes::<_, 1024>(&intent).unwrap();
-        // get the size of the data to write
-        let size = archived.len().to_le_bytes();
-        // write our size
-        self.intent_log.write_all(&size).await.unwrap();
-        // write our data
-        self.intent_log
-            .write_all(archived.as_slice())
-            .await
-            .unwrap();
-        // flush our data
-        self.flush().await;
+        // write this delete intent log
+        self.write_intent(&intent).await
+    }
+
+    /// Write a row update to storage
+    ///
+    /// # Arguments
+    ///
+    /// * `update` - The update that was applied to our row
+    async fn update(&mut self, update: Update<T>) {
+        // build our intent log update entry
+        let intent = Intents::Update(update);
+        // write this delete intent log
+        self.write_intent(&intent).await
     }
 
     /// Flush all currently pending writes to storage
@@ -115,24 +133,27 @@ impl<T: ShoalTable> ShoalStorage<T> for FileSystem<T> {
     async fn read_intents(path: &PathBuf, partitions: &mut HashMap<u64, Partition<T>>) {
         // open the target intent log
         let file = DmaFile::open(path).await.unwrap();
+        // get the size of this file
+        let file_size = file.file_size().await.unwrap();
         // don't read a file with 0 bytes
-        if file.file_size().await.unwrap() == 0 {
+        if file_size == 0 {
             // bail out since this shards intent log is empty
             return;
         }
         // track the amount of data we have currently read
         let mut pos = 0;
-        loop {
+        while pos < file_size {
+            println!("{path:?}: {} -> POS -> {pos}", file_size);
             // try to read the size of the next entry in this intent log
             let read = file.read_at(pos, 8).await.unwrap();
             // check if we read any data
             let size = usize::from_le_bytes(read[..8].try_into().unwrap());
-            // if size is 0 then stop reading entries
-            if size == 0 {
-                break;
-            }
             // increment our pos 8
             pos += 8;
+            // if size is 0 then skip to the next read
+            if size == 0 {
+                continue;
+            }
             // try to read the next entry
             let read = file.read_at(pos, size).await.unwrap();
             // try to deserialize this row from our intent log
@@ -142,6 +163,7 @@ impl<T: ShoalTable> ShoalStorage<T> for FileSystem<T> {
                 ArchivedIntents::Insert(archived) => {
                     // deserialize this row
                     let row = T::deserialize(archived);
+                    println!("INSERT -> {row:?}");
                     // get the partition key for this row
                     let key = row.get_partition_key();
                     // get this rows partition
@@ -157,8 +179,21 @@ impl<T: ShoalTable> ShoalStorage<T> for FileSystem<T> {
                     if let Some(partition) = partitions.get_mut(partition_key) {
                         // deserialize this row
                         let sort_key = T::deserialize_sort(sort_key);
+                        println!("DELETE -> {partition_key}:{sort_key:?}");
                         // remove the sort key from this partition
                         partition.remove(&sort_key);
+                    }
+                }
+                ArchivedIntents::Update(archived) => {
+                    // deserialize this row's update
+                    let update = T::deserialize_update(archived);
+                    println!("Update -> {update:?}");
+                    // try to get the partition containing our target row
+                    if let Some(partition) = partitions.get_mut(&update.partition_key) {
+                        // find our target row
+                        if !partition.update(&update) {
+                            panic!("Missing row update?");
+                        }
                     }
                 }
             }

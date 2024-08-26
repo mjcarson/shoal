@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use super::partitions::Partition;
 use crate::server::Conf;
-use crate::shared::queries::{Get, Query};
+use crate::shared::queries::{Get, Query, Update};
 use crate::shared::responses::{Response, ResponseAction};
 use crate::shared::traits::ShoalTable;
 
@@ -59,6 +59,8 @@ impl<T: ShoalTable> EphemeralTable<T> {
             Query::Get(get) => self.get(&get).await,
             // delete a row from this partition
             Query::Delete { key, sort_key } => self.delete(key, &sort_key).await,
+            // Update a row in a target partition
+            Query::Update(update) => self.update(update).await,
         };
         // build the response for this query
         Response {
@@ -123,5 +125,19 @@ impl<T: ShoalTable> EphemeralTable<T> {
             None => false,
         };
         ResponseAction::Delete(removed)
+    }
+
+    /// Update a row in this table
+    ///
+    /// # Arguments
+    ///
+    /// * `update` - The update to apply to a row in this table
+    async fn update(&mut self, update: Update<T>) -> ResponseAction<T> {
+        // get this rows partition
+        let updated = match self.partitions.get_mut(&update.partition_key) {
+            Some(partition) => partition.update(&update),
+            None => false,
+        };
+        ResponseAction::Update(updated)
     }
 }
