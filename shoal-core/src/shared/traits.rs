@@ -5,12 +5,14 @@ use rkyv::{
         AlignedSerializer, AllocScratch, CompositeSerializer, FallbackScratch, HeapScratch,
         SharedSerializeMap,
     },
-    AlignedVec, Archive, Deserialize,
+    AlignedVec, Archive,
 };
 use uuid::Uuid;
 
 use super::queries::{Queries, Update};
-use crate::server::{ring::Ring, shard::ShardInfo, Conf};
+use crate::server::ring::Ring;
+use crate::server::shard::ShardInfo;
+use crate::server::{Conf, ServerError};
 
 /// The traits for queries in shoal
 pub trait ShoalQuery:
@@ -66,7 +68,7 @@ pub trait ShoalDatabase: 'static + Sized {
     ///
     /// * `shard_name` - The name of the shard that owns this table
     /// * `conf` - A shoal config
-    async fn new(shard_name: &str, conf: &Conf) -> Self;
+    async fn new(shard_name: &str, conf: &Conf) -> Result<Self, ServerError>;
 
     /// Build a default queries bundle
     #[must_use]

@@ -203,7 +203,6 @@ async fn client_listener<S: ShoalDatabase>(udp_sock: UdpSocket, kanal_tx: AsyncS
         let mut data = BytesMut::zeroed(8192);
         // try to read a single datagram from our udp socket
         let (read, addr) = udp_sock.recv_from(&mut data).await.unwrap();
-        //println!("coord - read {} from {}", read, addr);
         // forward our clients message
         kanal_tx
             .send(Msg::Client { addr, read, data })

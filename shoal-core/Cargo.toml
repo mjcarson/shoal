@@ -17,7 +17,6 @@ gxhash = "2.2"
 rkyv = { version = "0.7", features = ["arbitrary_enum_discriminant", "uuid", "validation"] }
 rkyv-with = "0.1"
 glommio = { version = "0.8", optional = true }
-async-tungstenite = { version = "0.21", features = ["tokio-runtime"] }
 bytes = "1.5"
 intmap = "2"
 futures = "0.3"

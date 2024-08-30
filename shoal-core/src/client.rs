@@ -45,9 +45,9 @@ impl<S: ShoalDatabase> Shoal<S> {
     /// # Arguments
     ///
     /// * `socket` - The socket to bind too
-    pub async fn new<A: ToSocketAddrs>(addr: A) -> Self {
+    pub async fn new<A: ToSocketAddrs>(addr: A) -> Result<Self, Errors> {
         // bind to our addr twice
-        let socket = Arc::new(UdpSocket::bind(&addr).await.unwrap());
+        let socket = Arc::new(UdpSocket::bind(&addr).await?);
         // build a channel for sending and recieving response streams on
         let (channel_queue_tx, channel_queue_rx) = kanal::bounded_async(8192);
         // create a map for storing what channels to send response streams on
@@ -57,14 +57,15 @@ impl<S: ShoalDatabase> Shoal<S> {
         // start our proxy
         let proxy_handle = tokio::spawn(async move { proxy.start().await });
         // build our client
-        Shoal {
+        let shoal = Shoal {
             socket,
             channel_map,
             channel_queue_tx,
             channel_queue_rx,
             proxy_handle,
             phantom: PhantomData,
-        }
+        };
+        Ok(shoal)
     }
 
     /// Build a new query object
@@ -77,9 +78,9 @@ impl<S: ShoalDatabase> Shoal<S> {
     fn track_response(
         &self,
         queries: &mut Queries<S>,
-    ) -> (AsyncSender<BytesMut>, AsyncReceiver<BytesMut>) {
+    ) -> Result<(AsyncSender<BytesMut>, AsyncReceiver<BytesMut>), Errors> {
         // get the next available response channel or create a new one
-        let (tx, rx) = match self.channel_queue_rx.try_recv().unwrap() {
+        let (tx, rx) = match self.channel_queue_rx.try_recv()? {
             Some((tx, rx)) => (tx, rx),
             None => kanal::unbounded_async(),
         };
@@ -97,11 +98,11 @@ impl<S: ShoalDatabase> Shoal<S> {
             }
         }
         // return our channels
-        (tx, rx)
+        Ok((tx, rx))
     }
 
     /// Send a query to our server
-    pub async fn send(&self, mut queries: Queries<S>) -> ShoalStream<S>
+    pub async fn send(&self, mut queries: Queries<S>) -> Result<ShoalStream<S>, Errors>
     where
         <S as ShoalDatabase>::QueryKinds: rkyv::Serialize<
             CompositeSerializer<
@@ -112,16 +113,15 @@ impl<S: ShoalDatabase> Shoal<S> {
         >,
     {
         // archive our queries
-        let archived = rkyv::to_bytes::<_, 256>(&queries).unwrap();
+        let archived = rkyv::to_bytes::<_, 256>(&queries)?;
         // start tracking this response
-        let (response_tx, response_rx) = self.track_response(&mut queries);
+        let (response_tx, response_rx) = self.track_response(&mut queries)?;
         // send our query
         self.socket
             .send_to(archived.as_slice(), "127.0.0.1:12000")
-            .await
-            .unwrap();
+            .await?;
         // build a new shoal stream
-        ShoalStream {
+        let stream = ShoalStream {
             id: queries.id,
             response_tx: Some(response_tx),
             response_rx: Some(response_rx),
@@ -130,7 +130,8 @@ impl<S: ShoalDatabase> Shoal<S> {
             next_index: 0,
             pending: BTreeMap::default(),
             phantom: PhantomData,
-        }
+        };
+        Ok(stream)
     }
 }
 
@@ -236,11 +237,11 @@ pub struct ShoalStream<S: ShoalDatabase> {
 }
 
 impl<S: ShoalDatabase> ShoalStream<S> {
-    async fn wait_for_next_response(&mut self) -> (bool, S::ResponseKinds) {
+    async fn wait_for_next_response(&mut self) -> Result<(bool, S::ResponseKinds), Errors> {
         // get our response channel if one exists or
         let response_rx = match self.response_rx.as_mut() {
             Some(response_rx) => response_rx,
-            None => panic!("NO CALL STREAM NEXT AFTER END!"),
+            None => return Err(Errors::StreamAlreadyTerminated),
         };
         // loop over our responses until we get the next one
         loop {
@@ -254,12 +255,12 @@ impl<S: ShoalDatabase> ShoalStream<S> {
                         self.next_index += 1;
                         // check if this response is the last one in this stream
                         let end = resp.is_end_of_stream();
-                        return (end, resp);
+                        return Ok((end, resp));
                     }
                 }
             }
             // get the next response from our query
-            let buff = response_rx.recv().await.unwrap();
+            let buff = response_rx.recv().await?;
             // unarchive our response
             let resp = S::unarchive_response(&buff);
             // get this responses order index
@@ -271,7 +272,7 @@ impl<S: ShoalDatabase> ShoalStream<S> {
                 // check if this response is the last one in this stream
                 let end = resp.is_end_of_stream();
                 // this is the next response so just return it
-                return (end, resp);
+                return Ok((end, resp));
             }
             // push this into our pending responses and wait for the next response
             self.pending.insert(index, resp);
@@ -286,9 +287,9 @@ impl<S: ShoalDatabase> ShoalStream<S> {
     /// # Arguments
     ///
     /// * `skip` - The number of responses to skip
-    pub async fn skip(&mut self, mut skip: usize) {
+    pub async fn skip(&mut self, mut skip: usize) -> Result<(), Errors> {
         // get the next message and throw it away
-        while self.next().await.is_some() {
+        while self.next().await?.is_some() {
             // decrement our skip
             skip -= 1;
             // if skip is 0 then we can return
@@ -296,28 +297,29 @@ impl<S: ShoalDatabase> ShoalStream<S> {
                 break;
             }
         }
+        Ok(())
     }
 
     /// Get the next response to our query
-    pub async fn next(&mut self) -> Option<S::ResponseKinds> {
+    pub async fn next(&mut self) -> Result<Option<S::ResponseKinds>, Errors> {
         // try to get our receive channels
         if self.response_rx.is_some() {
             // wait for the next response
-            let (end, resp) = self.wait_for_next_response().await;
+            let (end, resp) = self.wait_for_next_response().await?;
             // if this is the final response then return our channels
             if end {
                 // remove this stream id from our channel map
                 self.channel_map.remove(&self.id);
                 // take the ends of our channel
                 if let (Some(tx), Some(rx)) = (self.response_tx.take(), self.response_rx.take()) {
-                    self.channel_queue_tx.send((tx, rx)).await.unwrap();
+                    self.channel_queue_tx.send((tx, rx)).await?;
                 }
             }
             // return our response
-            Some(resp)
+            Ok(Some(resp))
         } else {
             // this stream has already ended
-            None
+            Ok(None)
         }
     }
 
@@ -326,14 +328,14 @@ impl<S: ShoalDatabase> ShoalStream<S> {
         // try to get our receive channels
         if self.response_rx.is_some() {
             // wait for the next response
-            let (end, resp) = self.wait_for_next_response().await;
+            let (end, resp) = self.wait_for_next_response().await?;
             // if this is the final response then take return our channels
             if end {
                 // remove this stream id from our channel map
                 self.channel_map.remove(&self.id);
                 // take the ends of our channel
                 if let (Some(tx), Some(rx)) = (self.response_tx.take(), self.response_rx.take()) {
-                    self.channel_queue_tx.send((tx, rx)).await.unwrap();
+                    self.channel_queue_tx.send((tx, rx)).await?;
                 }
             }
             // try to cast to the correct type
@@ -365,51 +367,3 @@ impl<S: ShoalDatabase> ShoalStream<S> {
         }
     }
 }
-
-//pub fn unarchive<'a, S: ShoalDatabase>(buff: &'a [u8])
-//where
-//    <<S as ShoalDatabase>::ResponseKinds as Archive>::Archived:
-//        rkyv::CheckBytes<DefaultValidator<'a>>,
-//    <<S as ShoalDatabase>::ResponseKinds as Archive>::Archived: std::fmt::Debug,
-//{
-//    // try to cast this query
-//    let raw = rkyv::check_archived_root::<S::ResponseKinds>(buff).unwrap();
-//    // deserialize it
-//    println!("raw response -> {:#?}", raw);
-//}
-//
-//pub struct ShoalStream<S: ShoalDatabase> {
-//    ///// The buffer to deserialize results with
-//    //buffer: BytesMut,
-//    /// The database we are getting responses from
-//    db_kind: PhantomData<S>,
-//}
-//
-//impl<S: ShoalDatabase> ShoalStream<S> {
-//    /// Create a new response object
-//    pub fn new() -> Self {
-//        Self {
-//            //buffer,
-//            db_kind: PhantomData,
-//        }
-//    }
-//
-//    /// cast our response
-//    pub fn read<'a>(&self, read: usize, data: BytesMut)
-//    where
-//        <<S as ShoalDatabase>::ResponseKinds as Archive>::Archived:
-//            rkyv::CheckBytes<DefaultValidator<'a>>,
-//        <<S as ShoalDatabase>::ResponseKinds as Archive>::Archived: std::fmt::Debug,
-//    {
-//        // get a ref to our readable data
-//        let readable = &data[..read];
-//        // unarchive our data
-//        //unarchive::<S>(readable);
-//        //// try to cast this query
-//        //let raw = rkyv::check_archived_root::<S::ResponseKinds>(&self.buffer).unwrap();
-//        //// deserialize it
-//        //println!("raw response -> {:#?}", raw);
-//        //let response: S::ResponseKinds = raw.deserialize(&mut rkyv::Infallible).unwrap();
-//    }
-//}
-//
