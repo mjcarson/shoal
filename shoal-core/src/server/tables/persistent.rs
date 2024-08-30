@@ -12,6 +12,7 @@ use super::partitions::Partition;
 use super::storage::Intents;
 use super::storage::ShoalStorage;
 use crate::server::Conf;
+use crate::server::ServerError;
 use crate::shared::queries::Update;
 use crate::shared::queries::{Get, Query};
 use crate::shared::responses::{Response, ResponseAction};
@@ -33,17 +34,17 @@ impl<T: ShoalTable, S: ShoalStorage<T>> PersistentTable<T, S> {
     ///
     /// * `shard_name` - The id of the shard that owns this table
     /// * `conf` - The Shoal config
-    pub async fn new(shard_name: &str, conf: &Conf) -> Self {
+    pub async fn new(shard_name: &str, conf: &Conf) -> Result<Self, ServerError> {
         // build our table
         let mut table = Self {
             partitions: HashMap::default(),
-            storage: S::new(shard_name, conf).await,
+            storage: S::new(shard_name, conf).await?,
         };
         // build the path to this shards intent log
-        let path = PathBuf::from_str(&format!("/opt/shoal/Intents/{shard_name}-active")).unwrap();
+        let path = PathBuf::from_str(&format!("/opt/shoal/Intents/{shard_name}-active"))?;
         // load our intent log
-        S::read_intents(&path, &mut table.partitions).await;
-        table
+        S::read_intents(&path, &mut table.partitions).await?;
+        Ok(table)
     }
 
     /// Cast and handle a serialized query

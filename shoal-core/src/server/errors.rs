@@ -2,6 +2,9 @@
 
 use glommio::GlommioError;
 use glommio::{BuilderErrorKind, ExecutorErrorKind, ReactorErrorKind};
+use rkyv::ser::serializers::{
+    AllocScratchError, CompositeSerializerError, SharedSerializeMapError,
+};
 use std::os::fd::RawFd;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -30,10 +33,20 @@ pub enum ServerError {
     GlommioTimedOut(Duration),
     /// An error from glommio with a generic
     GlommioGeneric(String),
-    /// A tungstenite error
-    Tungstenite(async_tungstenite::tungstenite::Error),
     /// An config parsing error
     Config(config::ConfigError),
+    /// An rkyv serialization error
+    RkyvSerialize(
+        CompositeSerializerError<
+            std::convert::Infallible,
+            AllocScratchError,
+            SharedSerializeMapError,
+        >,
+    ),
+    /// An error casting a vec of bytes to a slice
+    IntoSlice(std::array::TryFromSliceError),
+    /// A conversion error
+    Conversion(std::convert::Infallible),
 }
 
 // convert all of our external error types to our error type
@@ -63,32 +76,6 @@ impl<T> From<glommio::GlommioError<T>> for ServerError {
     }
 }
 
-impl From<async_tungstenite::tungstenite::Error> for ServerError {
-    fn from(ext: async_tungstenite::tungstenite::Error) -> Self {
-        ServerError::Tungstenite(ext)
-    }
-}
-
-/// The errors specific to Shoal server code
-#[derive(Debug)]
-pub enum ShoalError {
-    /// An invalid non binary message type was recieved
-    NonBinaryMessage,
-    /// An async tungstenite error was found
-    AsyncTungstenite(async_tungstenite::tungstenite::Error),
-}
-
-impl From<async_tungstenite::tungstenite::Error> for ShoalError {
-    /// convert this error to a shoal error
-    ///
-    /// # Arguments
-    ///
-    /// * `error` - The error to convert
-    fn from(error: async_tungstenite::tungstenite::Error) -> Self {
-        ShoalError::AsyncTungstenite(error)
-    }
-}
-
 impl From<config::ConfigError> for ServerError {
     /// Convert this error to our error type
     ///
@@ -98,4 +85,69 @@ impl From<config::ConfigError> for ServerError {
     fn from(error: config::ConfigError) -> Self {
         ServerError::Config(error)
     }
+}
+
+impl From<std::io::Error> for ServerError {
+    /// Convert this error to our error type
+    ///
+    /// # Arguments
+    ///
+    /// * `error` - The errot to convert
+    fn from(error: std::io::Error) -> Self {
+        ServerError::IO(error)
+    }
+}
+
+impl
+    From<
+        CompositeSerializerError<
+            std::convert::Infallible,
+            AllocScratchError,
+            SharedSerializeMapError,
+        >,
+    > for ServerError
+{
+    /// Convert this error to our error type
+    ///
+    /// # Arguments
+    ///
+    /// * `error` - The errot to convert
+    fn from(
+        error: CompositeSerializerError<
+            std::convert::Infallible,
+            AllocScratchError,
+            SharedSerializeMapError,
+        >,
+    ) -> Self {
+        ServerError::RkyvSerialize(error)
+    }
+}
+
+impl From<std::array::TryFromSliceError> for ServerError {
+    /// Convert this error to our error type
+    ///
+    /// # Arguments
+    ///
+    /// * `error` - The errot to convert
+    fn from(error: std::array::TryFromSliceError) -> Self {
+        ServerError::IntoSlice(error)
+    }
+}
+
+impl From<std::convert::Infallible> for ServerError {
+    /// Convert this error to our error type
+    ///
+    /// # Arguments
+    ///
+    /// * `error` - The errot to convert
+    fn from(error: std::convert::Infallible) -> Self {
+        ServerError::Conversion(error)
+    }
+}
+
+/// The errors specific to Shoal server code
+#[derive(Debug)]
+pub enum ShoalError {
+    /// An invalid non binary message type was recieved
+    NonBinaryMessage,
 }

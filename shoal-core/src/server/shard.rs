@@ -84,7 +84,7 @@ impl<S: ShoalDatabase> Shard<S> {
         // bind a udp socket to send responses out on
         let socket = UdpSocket::bind(addr)?;
         // build our shards tables
-        let tables = S::new(&info.name, conf).await;
+        let tables = S::new(&info.name, conf).await?;
         // build our shard
         let shard = Shard {
             info,
@@ -127,7 +127,7 @@ impl<S: ShoalDatabase> Shard<S> {
         >,
     {
         // archive our response
-        let archived = rkyv::to_bytes::<_, 256>(&response).unwrap();
+        let archived = rkyv::to_bytes::<_, 256>(&response)?;
         // send our archived response back to the client
         self.socket.send_to(archived.as_slice(), addr).await?;
         Ok(())

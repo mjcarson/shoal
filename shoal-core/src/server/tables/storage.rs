@@ -4,7 +4,7 @@ use rkyv::{Archive, Deserialize, Serialize};
 use std::{collections::HashMap, path::PathBuf};
 
 use crate::{
-    server::Conf,
+    server::{Conf, ServerError},
     shared::{queries::Update, traits::ShoalTable},
 };
 
@@ -26,21 +26,21 @@ pub enum Intents<T: ShoalTable> {
     Update(Update<T>),
 }
 
-pub trait ShoalStorage<T: ShoalTable> {
+pub trait ShoalStorage<T: ShoalTable>: Sized {
     /// Create a new instance of this storage engine
     ///
     /// # Arguments
     ///
     /// * `shard_name` - The id of the shard that owns this table
     /// * `conf` - The Shoal config
-    async fn new(shard_name: &str, conf: &Conf) -> Self;
+    async fn new(shard_name: &str, conf: &Conf) -> Result<Self, ServerError>;
 
     /// Write this new row to storage
     ///
     /// # Arguments
     ///
     /// * `insert` - The row to insert
-    async fn insert(&mut self, insert: &Intents<T>);
+    async fn insert(&mut self, insert: &Intents<T>) -> Result<(), ServerError>;
 
     /// Delete a row from storage
     ///
@@ -48,22 +48,25 @@ pub trait ShoalStorage<T: ShoalTable> {
     ///
     /// * `partition_key` - The key to the partition we are deleting data from
     /// * `sort_key` - The sort key to use to delete data from with in a partition
-    async fn delete(&mut self, partition_key: u64, sort_key: T::Sort);
+    async fn delete(&mut self, partition_key: u64, sort_key: T::Sort) -> Result<(), ServerError>;
 
     /// Write a row update to storage
     ///
     /// # Arguments
     ///
     /// * `update` - The update that was applied to our row
-    async fn update(&mut self, update: Update<T>);
+    async fn update(&mut self, update: Update<T>) -> Result<(), ServerError>;
 
     /// Flush all currently pending writes to storage
-    async fn flush(&mut self);
+    async fn flush(&mut self) -> Result<(), ServerError>;
 
     /// Read an intent log from storage
     ///
     /// # Arguments
     ///
     /// * `path` - The path to the intent log to read in
-    async fn read_intents(path: &PathBuf, partitions: &mut HashMap<u64, Partition<T>>);
+    async fn read_intents(
+        path: &PathBuf,
+        partitions: &mut HashMap<u64, Partition<T>>,
+    ) -> Result<(), ServerError>;
 }

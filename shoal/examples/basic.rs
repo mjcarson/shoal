@@ -1,6 +1,6 @@
 //! A basic key/value database example
 
-use shoal_core::server::Conf;
+use shoal_core::server::{Conf, ServerError};
 use shoal_core::storage::FileSystem;
 use shoal_core::tables::{EphemeralTable, PersistentTable};
 use shoal_core::{rkyv, FromShoal};
@@ -374,10 +374,11 @@ impl ShoalDatabase for Basic {
     ///
     /// * `shard_name` - The id of the shard that owns this table
     /// * `conf` - A shoal config
-    async fn new(shard_name: &str, conf: &Conf) -> Self {
-        Basic {
-            key_value: PersistentTable::new(shard_name, conf).await,
-        }
+    async fn new(shard_name: &str, conf: &Conf) -> Result<Self, ServerError> {
+        let db = Basic {
+            key_value: PersistentTable::new(shard_name, conf).await?,
+        };
+        Ok(db)
     }
 
     /// Deserialize our query types
@@ -417,7 +418,9 @@ impl ShoalDatabase for Basic {
 #[tokio::main]
 async fn test_queries() {
     // build a client for Shoal
-    let shoal = shoal_core::client::Shoal::<Basic>::new("0.0.0.0:0").await;
+    let shoal = shoal_core::client::Shoal::<Basic>::new("0.0.0.0:0")
+        .await
+        .unwrap();
     // build a query
     let query = shoal
         .query()
@@ -432,7 +435,7 @@ async fn test_queries() {
         .add(KeyValueGet::new("hello3"))
         .add(KeyValueGet::new("RemoveMe"));
     // send our query
-    let mut stream = shoal.send(query).await;
+    let mut stream = shoal.send(query).await.unwrap();
     // skip the next 3 responses since they are just inserts
     //stream.skip(6).await;
     // try to cast the next response
