@@ -14,6 +14,7 @@ use rkyv::{
     AlignedVec,
 };
 use std::net::SocketAddr;
+use tracing::instrument;
 use uuid::Uuid;
 
 use super::ServerError;
@@ -135,6 +136,7 @@ impl<S: ShoalDatabase> Shard<S> {
 
     /// Handle a query on this shard
     #[allow(clippy::future_not_send)]
+    #[instrument(name = "Shard::handle_query", skip(self, query))]
     async fn handle_query(
         &mut self,
         addr: SocketAddr,

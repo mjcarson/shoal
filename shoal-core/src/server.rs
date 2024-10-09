@@ -6,6 +6,7 @@ pub mod messages;
 pub mod ring;
 pub mod shard;
 pub mod tables;
+pub mod tracing;
 
 use clap::Parser;
 use glommio::{
@@ -25,7 +26,6 @@ pub use conf::Conf;
 use coordinator::Coordinator;
 pub use errors::ServerError;
 use messages::MeshMsg;
-//pub use table::Table;
 
 use crate::shared::traits::ShoalDatabase;
 
@@ -64,6 +64,8 @@ where
     let args = Args::parse();
     // load our config
     let conf = Conf::new(&args.conf)?;
+    // setup tracing/telemetry
+    tracing::setup();
     // get the total number of cpus that we have
     let cpus = conf.compute.cpus()?;
     // build this mesh for this node to talk over

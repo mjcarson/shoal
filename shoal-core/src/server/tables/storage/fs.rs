@@ -30,7 +30,6 @@ impl<T: ShoalTable> FileSystem<T> {
     ///
     /// * `intent` - The intent to write to disk
     async fn write_intent(&mut self, intent: &Intents<T>) -> Result<(), ServerError> {
-        println!("Write -> {intent:#?}");
         // archive this intent log entry
         let archived = rkyv::to_bytes::<_, 1024>(intent)?;
         // get the size of the data to write
@@ -145,7 +144,6 @@ impl<T: ShoalTable> ShoalStorage<T> for FileSystem<T> {
         // track the amount of data we have currently read
         let mut pos = 0;
         while pos < file_size {
-            println!("{path:?}: {} -> POS -> {pos}", file_size);
             // try to read the size of the next entry in this intent log
             let read = file.read_at(pos, 8).await?;
             // check if we read any data
@@ -165,7 +163,6 @@ impl<T: ShoalTable> ShoalStorage<T> for FileSystem<T> {
                 ArchivedIntents::Insert(archived) => {
                     // deserialize this row
                     let row = T::deserialize(archived);
-                    println!("INSERT -> {row:?}");
                     // get the partition key for this row
                     let key = row.get_partition_key();
                     // get this rows partition
@@ -181,7 +178,6 @@ impl<T: ShoalTable> ShoalStorage<T> for FileSystem<T> {
                     if let Some(partition) = partitions.get_mut(partition_key) {
                         // deserialize this row
                         let sort_key = T::deserialize_sort(sort_key);
-                        println!("DELETE -> {partition_key}:{sort_key:?}");
                         // remove the sort key from this partition
                         partition.remove(&sort_key);
                     }
@@ -189,7 +185,6 @@ impl<T: ShoalTable> ShoalStorage<T> for FileSystem<T> {
                 ArchivedIntents::Update(archived) => {
                     // deserialize this row's update
                     let update = T::deserialize_update(archived);
-                    println!("Update -> {update:?}");
                     // try to get the partition containing our target row
                     if let Some(partition) = partitions.get_mut(&update.partition_key) {
                         // find our target row
