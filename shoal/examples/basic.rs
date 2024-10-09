@@ -424,12 +424,12 @@ async fn test_queries() {
     // build a query
     let query = shoal
         .query()
-        //.add(KeyValueRow::new("hello", "world1", "1-"))
-        //.add(KeyValueRow::new("hello2", "world2", "2-"))
-        //.add(KeyValueRow::new("hello3", "world3", "why?"))
-        //.add(KeyValueUpdate::new(&"hello3".to_owned(), "world3", "3-"))
-        //.add(KeyValueRow::new("RemoveMe", "Please", ":("))
-        //.add(KeyValueDelete::new(&"RemoveMe".to_owned(), "Please"))
+        .add(KeyValueRow::new("hello", "world1", "1-"))
+        .add(KeyValueRow::new("hello2", "world2", "2-"))
+        .add(KeyValueRow::new("hello3", "world3", "why?"))
+        .add(KeyValueUpdate::new(&"hello3".to_owned(), "world3", "3-"))
+        .add(KeyValueRow::new("RemoveMe", "Please", ":("))
+        .add(KeyValueDelete::new(&"RemoveMe".to_owned(), "Please"))
         .add(KeyValueGet::new("hello"))
         .add(KeyValueGet::new("hello2"))
         .add(KeyValueGet::new("hello3"))
@@ -437,7 +437,7 @@ async fn test_queries() {
     // send our query
     let mut stream = shoal.send(query).await.unwrap();
     // skip the next 3 responses since they are just inserts
-    //stream.skip(6).await;
+    stream.skip(6).await.unwrap();
     // try to cast the next response
     while let Some(key_value) = stream.next_typed_first::<KeyValueRow>().await.unwrap() {
         println!("{:?}", key_value);
