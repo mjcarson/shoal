@@ -1,9 +1,9 @@
 //! The file system storage module for shoal
 
-use std::{collections::HashMap, marker::PhantomData, path::PathBuf};
-
 use futures::AsyncWriteExt;
 use glommio::io::{DmaFile, DmaStreamWriter, DmaStreamWriterBuilder, OpenOptions};
+use std::{collections::HashMap, marker::PhantomData, path::PathBuf};
+use tracing::instrument;
 
 use super::{Intents, ShoalStorage};
 use crate::{
@@ -29,6 +29,7 @@ impl<T: ShoalTable> FileSystem<T> {
     /// # Arguments
     ///
     /// * `intent` - The intent to write to disk
+    #[instrument(name = "FileSystem::write_intent", skip_all, fields(shard = &self.shard_name), err(Debug))]
     async fn write_intent(&mut self, intent: &Intents<T>) -> Result<(), ServerError> {
         // archive this intent log entry
         let archived = rkyv::to_bytes::<_, 1024>(intent)?;
@@ -51,6 +52,7 @@ impl<T: ShoalTable> ShoalStorage<T> for FileSystem<T> {
     ///
     /// * `shard_name` - The id of the shard that owns this table
     /// * `conf` - The Shoal config
+    #[instrument(name = "ShoalStorage::new", skip(conf), err(Debug))]
     async fn new(shard_name: &str, conf: &Conf) -> Result<Self, ServerError> {
         // build the path to this shards intent log
         let path = conf
@@ -84,6 +86,7 @@ impl<T: ShoalTable> ShoalStorage<T> for FileSystem<T> {
     /// # Arguments
     ///
     /// * `insert` - The row to write
+    #[instrument(name = "ShoalStorage::insert", skip_all, err(Debug))]
     async fn insert(&mut self, insert: &Intents<T>) -> Result<(), ServerError> {
         // write this insert intent log
         self.write_intent(insert).await
@@ -95,6 +98,7 @@ impl<T: ShoalTable> ShoalStorage<T> for FileSystem<T> {
     ///
     /// * `partition_key` - The key to the partition we are deleting data from
     /// * `sort_key` - The sort key to use to delete data from with in a partition
+    #[instrument(name = "ShoalStorage::delete", skip(self), err(Debug))]
     async fn delete(&mut self, partition_key: u64, sort_key: T::Sort) -> Result<(), ServerError> {
         // wrap this delete command in a delete intent
         let intent = Intents::<T>::Delete {
@@ -110,6 +114,7 @@ impl<T: ShoalTable> ShoalStorage<T> for FileSystem<T> {
     /// # Arguments
     ///
     /// * `update` - The update that was applied to our row
+    #[instrument(name = "ShoalStorage::update", skip_all, err(Debug))]
     async fn update(&mut self, update: Update<T>) -> Result<(), ServerError> {
         // build our intent log update entry
         let intent = Intents::Update(update);
@@ -118,6 +123,7 @@ impl<T: ShoalTable> ShoalStorage<T> for FileSystem<T> {
     }
 
     /// Flush all currently pending writes to storage
+    #[instrument(name = "ShoalStorage::flush", skip_all, err(Debug))]
     async fn flush(&mut self) -> Result<(), ServerError> {
         self.intent_log.flush().await?;
         Ok(())
@@ -128,6 +134,7 @@ impl<T: ShoalTable> ShoalStorage<T> for FileSystem<T> {
     /// # Arguments
     ///
     /// * `path` - The path to the intent log to read in
+    #[instrument(name = "ShoalStorage::read_intents", skip(partitions), err(Debug))]
     async fn read_intents(
         path: &PathBuf,
         partitions: &mut HashMap<u64, Partition<T>>,
@@ -138,6 +145,8 @@ impl<T: ShoalTable> ShoalStorage<T> for FileSystem<T> {
         let file_size = file.file_size().await?;
         // don't read a file with 0 bytes
         if file_size == 0 {
+            // close this file handle
+            file.close().await.unwrap();
             // bail out since this shards intent log is empty
             return Ok(());
         }
@@ -196,6 +205,8 @@ impl<T: ShoalTable> ShoalStorage<T> for FileSystem<T> {
             }
             pos += size as u64;
         }
+        // close this file handle
+        file.close().await.unwrap();
         Ok(())
     }
 }

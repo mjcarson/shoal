@@ -72,6 +72,7 @@ impl<S: ShoalDatabase> Shard<S> {
     /// # Arguments
     ///
     /// * `addr` - The address to bind our udp socket too
+    #[instrument(name = "Shard::new", skip_all, err(Debug))]
     pub async fn new(
         conf: &Conf,
         local_tx: Senders<MeshMsg<S>>,
@@ -103,6 +104,7 @@ impl<S: ShoalDatabase> Shard<S> {
     ///
     /// This will only fail if the coordinator has not joined the local mesh.
     #[allow(clippy::future_not_send)]
+    #[instrument(name = "Shard::init", skip_all, err(Debug))]
     async fn init(&mut self) -> Result<(), ServerError> {
         // build our join message
         let join_msg = MeshMsg::Join(self.info.clone());
@@ -113,6 +115,7 @@ impl<S: ShoalDatabase> Shard<S> {
 
     /// Send a respones back to the client
     #[allow(clippy::future_not_send)]
+    #[instrument(name = "Shard::reply", skip_all, err(Debug))]
     async fn reply(
         &mut self,
         addr: SocketAddr,

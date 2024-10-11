@@ -33,6 +33,7 @@ pub trait ShoalStorage<T: ShoalTable>: Sized {
     ///
     /// * `shard_name` - The id of the shard that owns this table
     /// * `conf` - The Shoal config
+    #[allow(async_fn_in_trait)]
     async fn new(shard_name: &str, conf: &Conf) -> Result<Self, ServerError>;
 
     /// Write this new row to storage
@@ -40,6 +41,7 @@ pub trait ShoalStorage<T: ShoalTable>: Sized {
     /// # Arguments
     ///
     /// * `insert` - The row to insert
+    #[allow(async_fn_in_trait)]
     async fn insert(&mut self, insert: &Intents<T>) -> Result<(), ServerError>;
 
     /// Delete a row from storage
@@ -48,6 +50,7 @@ pub trait ShoalStorage<T: ShoalTable>: Sized {
     ///
     /// * `partition_key` - The key to the partition we are deleting data from
     /// * `sort_key` - The sort key to use to delete data from with in a partition
+    #[allow(async_fn_in_trait)]
     async fn delete(&mut self, partition_key: u64, sort_key: T::Sort) -> Result<(), ServerError>;
 
     /// Write a row update to storage
@@ -55,9 +58,11 @@ pub trait ShoalStorage<T: ShoalTable>: Sized {
     /// # Arguments
     ///
     /// * `update` - The update that was applied to our row
+    #[allow(async_fn_in_trait)]
     async fn update(&mut self, update: Update<T>) -> Result<(), ServerError>;
 
     /// Flush all currently pending writes to storage
+    #[allow(async_fn_in_trait)]
     async fn flush(&mut self) -> Result<(), ServerError>;
 
     /// Read an intent log from storage
@@ -65,6 +70,7 @@ pub trait ShoalStorage<T: ShoalTable>: Sized {
     /// # Arguments
     ///
     /// * `path` - The path to the intent log to read in
+    #[allow(async_fn_in_trait)]
     async fn read_intents(
         path: &PathBuf,
         partitions: &mut HashMap<u64, Partition<T>>,

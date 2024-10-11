@@ -2,10 +2,10 @@
 //!
 //! This means that data is retained through restarts at the cost of speed.
 
-use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::str::FromStr;
+use tracing::instrument;
 use uuid::Uuid;
 
 use super::partitions::Partition;
@@ -34,6 +34,7 @@ impl<T: ShoalTable, S: ShoalStorage<T>> PersistentTable<T, S> {
     ///
     /// * `shard_name` - The id of the shard that owns this table
     /// * `conf` - The Shoal config
+    #[instrument(name = "PersistentTable::new", skip(conf), err(Debug))]
     pub async fn new(shard_name: &str, conf: &Conf) -> Result<Self, ServerError> {
         // build our table
         let mut table = Self {
@@ -52,6 +53,7 @@ impl<T: ShoalTable, S: ShoalStorage<T>> PersistentTable<T, S> {
     /// # Arguments
     ///
     /// * `query` - The query to execute
+    #[instrument(name = "PersistentTable::handle", skip(self, query))]
     pub async fn handle(
         &mut self,
         id: Uuid,
@@ -84,6 +86,7 @@ impl<T: ShoalTable, S: ShoalStorage<T>> PersistentTable<T, S> {
     /// # Arguments
     ///
     /// * `row` - The row to insert
+    #[instrument(name = "PersistentTable::insert", skip_all)]
     async fn insert(&mut self, row: T) -> ResponseAction<T> {
         // get our partition key
         let key = row.get_partition_key();
@@ -108,6 +111,7 @@ impl<T: ShoalTable, S: ShoalStorage<T>> PersistentTable<T, S> {
     ///
     /// * `get` - The get parameters to use
     /// * `responses` - The response object to use
+    #[instrument(name = "PersistentTable::get", skip_all)]
     async fn get(&mut self, get: &Get<T>) -> ResponseAction<T> {
         // build a vec for the data we found
         let mut data = Vec::new();
@@ -135,6 +139,7 @@ impl<T: ShoalTable, S: ShoalStorage<T>> PersistentTable<T, S> {
     ///
     /// * `key` - The key to the partition to dlete data from
     /// * `sort` - The sort key to delete
+    #[instrument(name = "PersistentTable::delete", skip_all)]
     async fn delete(&mut self, key: u64, sort: T::Sort) -> ResponseAction<T> {
         // get this rows partition
         let removed = match self.partitions.get_mut(&key) {
@@ -160,6 +165,7 @@ impl<T: ShoalTable, S: ShoalStorage<T>> PersistentTable<T, S> {
     /// # Arguments
     ///
     /// * `update` - The update to apply to a row in this table
+    #[instrument(name = "PersistentTable::update", skip_all)]
     async fn update(&mut self, update: Update<T>) -> ResponseAction<T> {
         // get this rows partition
         let updated = match self.partitions.get_mut(&update.partition_key) {

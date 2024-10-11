@@ -3,7 +3,7 @@ extern crate proc_macro;
 use darling::FromAttributes;
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{Data, DataStruct, GenericArgument, Ident, LitStr, PathArguments};
+use syn::{Data, DataStruct, Ident};
 
 /// The arguments for a FromShoal derive
 #[derive(Debug, darling::FromAttributes)]

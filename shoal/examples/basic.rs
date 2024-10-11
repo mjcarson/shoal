@@ -1,9 +1,9 @@
 //! A basic key/value database example
 
+use shoal_core::rkyv;
 use shoal_core::server::{Conf, ServerError};
 use shoal_core::storage::FileSystem;
-use shoal_core::tables::{EphemeralTable, PersistentTable};
-use shoal_core::{rkyv, FromShoal};
+use shoal_core::tables::PersistentTable;
 
 use shoal_core::server::ring::Ring;
 use shoal_core::shared::queries::{Get, Queries, Query, Update};
