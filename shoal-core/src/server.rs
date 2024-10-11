@@ -65,7 +65,7 @@ where
     // load our config
     let conf = Conf::new(&args.conf)?;
     // setup tracing/telemetry
-    tracing::setup();
+    tracing::setup(&conf);
     // get the total number of cpus that we have
     let cpus = conf.compute.cpus()?;
     // build this mesh for this node to talk over

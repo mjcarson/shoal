@@ -5,6 +5,7 @@ use std::{path::PathBuf, str::FromStr};
 use config::{Config, ConfigError};
 use glommio::CpuSet;
 use serde::{Deserialize, Serialize};
+use tracing::level_filters::LevelFilter;
 
 use super::ServerError;
 
@@ -99,6 +100,46 @@ pub struct Storage {
     pub fs: FileSystemStorage,
 }
 
+/// The different levels to log tracing info at
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub enum TraceLevel {
+    /// Log everything include high verbosity low priority info
+    Trace,
+    /// Log low priority debug infomation and up
+    Debug,
+    /// Log standard priority information and up
+    #[default]
+    Info,
+    /// Log only warning and Errors
+    Warn,
+    /// Log only errors
+    Error,
+    /// Do not log anything
+    Off,
+}
+
+impl TraceLevel {
+    /// Convert this [`TraceLevels`] to a [`LevelFilter`]
+    pub fn to_filter(&self) -> LevelFilter {
+        match self {
+            TraceLevel::Trace => LevelFilter::TRACE,
+            TraceLevel::Debug => LevelFilter::DEBUG,
+            TraceLevel::Info => LevelFilter::INFO,
+            TraceLevel::Warn => LevelFilter::WARN,
+            TraceLevel::Error => LevelFilter::ERROR,
+            TraceLevel::Off => LevelFilter::OFF,
+        }
+    }
+}
+
+/// The tracing settings for Shoal
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub struct Tracing {
+    // The level to log traces at
+    #[serde(default)]
+    pub level: TraceLevel,
+}
+
 /// The config for running Shoal
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Conf {
@@ -111,6 +152,9 @@ pub struct Conf {
     /// The storage settings to use
     #[serde(default)]
     pub storage: Storage,
+    /// The tracing settings to use
+    #[serde(default)]
+    pub tracing: Tracing,
 }
 
 impl Conf {

@@ -28,7 +28,7 @@ dashmap = "5.5"
 # tracing dependencies
 opentelemetry = "0.25"
 opentelemetry_sdk = "0.25"
-opentelemetry_otlp = "0.25"
+opentelemetry-otlp = "0.25"
 tracing = "0.1"
 tracing-opentelemetry = "0.26"
 tracing-subscriber = "0.3"

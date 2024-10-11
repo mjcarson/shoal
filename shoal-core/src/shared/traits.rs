@@ -68,6 +68,7 @@ pub trait ShoalDatabase: 'static + Sized {
     ///
     /// * `shard_name` - The name of the shard that owns this table
     /// * `conf` - A shoal config
+    #[allow(async_fn_in_trait)]
     async fn new(shard_name: &str, conf: &Conf) -> Result<Self, ServerError>;
 
     /// Build a default queries bundle
