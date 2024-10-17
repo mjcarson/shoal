@@ -193,7 +193,9 @@ impl<S: ShoalDatabase> Shard<S> {
                     query,
                     end,
                 } => self.handle_query(addr, id, index, query, end).await?,
-                //MeshMsg::Query(query) => self.tables.handle(query).await?,
+                MeshMsg::Shutdown => {
+                    break;
+                }
             }
         }
         Ok(())

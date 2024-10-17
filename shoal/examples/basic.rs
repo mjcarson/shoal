@@ -1,19 +1,20 @@
 //! A basic key/value database example
 
-use shoal_core::rkyv;
-use shoal_core::server::{Conf, ServerError};
-use shoal_core::storage::FileSystem;
-use shoal_core::tables::PersistentTable;
-
+use shoal::bencher::Bencher;
 use shoal_core::server::ring::Ring;
+use shoal_core::server::{Conf, ServerError};
 use shoal_core::shared::queries::{Get, Queries, Query, Update};
 use shoal_core::shared::responses::Response;
 use shoal_core::shared::traits::{ShoalDatabase, ShoalQuery, ShoalResponse, ShoalTable};
+use shoal_core::storage::FileSystem;
+use shoal_core::tables::PersistentTable;
+use shoal_core::{rkyv, ShoalPool};
 
-use glommio::LocalExecutorBuilder;
 use gxhash::GxHasher;
 use rkyv::{Archive, Deserialize, Serialize};
 use std::hash::Hasher;
+use std::time::Duration;
+use tokio::time::Instant;
 use uuid::Uuid;
 
 // A basic key/value table in Shoal
@@ -413,6 +414,12 @@ impl ShoalDatabase for Basic {
             }
         }
     }
+
+    /// Shutdown this table and flush any data to disk if needed
+    async fn shutdown(&mut self) -> Result<(), ServerError> {
+        // shutdown the key value table
+        self.key_value.shutdown().await
+    }
 }
 
 #[tokio::main]
@@ -421,39 +428,47 @@ async fn test_queries() {
     let shoal = shoal_core::client::Shoal::<Basic>::new("0.0.0.0:0")
         .await
         .unwrap();
-    // build a query
-    let query = shoal
-        .query()
-        .add(KeyValueRow::new("hello", "world1", "1-"))
-        .add(KeyValueRow::new("hello2", "world2", "2-"))
-        .add(KeyValueRow::new("hello3", "world3", "why?"))
-        .add(KeyValueUpdate::new(&"hello3".to_owned(), "world3", "3-"))
-        .add(KeyValueRow::new("RemoveMe", "Please", ":("))
-        .add(KeyValueDelete::new(&"RemoveMe".to_owned(), "Please"))
-        .add(KeyValueGet::new("hello"))
-        .add(KeyValueGet::new("hello2"))
-        .add(KeyValueGet::new("hello3"))
-        .add(KeyValueGet::new("RemoveMe"));
-    // send our query
-    let mut stream = shoal.send(query).await.unwrap();
-    // skip the next 3 responses since they are just inserts
-    stream.skip(6).await.unwrap();
-    // try to cast the next response
-    while let Some(key_value) = stream.next_typed_first::<KeyValueRow>().await.unwrap() {
-        println!("{:?}", key_value);
+    // create a new bencher
+    let mut bencher = Bencher::new(".benchmark", 1000);
+    for _ in 0..1000 {
+        // start this instance timer
+        bencher.instance_start();
+        // build a query
+        let query = shoal
+            .query()
+            .add(KeyValueRow::new("hello", "world1", "1"))
+            .add(KeyValueRow::new("hello", "world2", "2"))
+            .add(KeyValueRow::new("hello", "world1", "3"))
+            .add(KeyValueUpdate::new(&"hello3".to_owned(), "world3", "3-"))
+            .add(KeyValueRow::new("RemoveMe", "Please", "1"))
+            .add(KeyValueDelete::new(&"RemoveMe".to_owned(), "Please"))
+            .add(KeyValueGet::new("hello"))
+            .add(KeyValueGet::new("hello2"))
+            .add(KeyValueGet::new("hello3"))
+            .add(KeyValueGet::new("RemoveMe"));
+        // send our query
+        let mut stream = shoal.send(query).await.unwrap();
+        // skip the next 3 responses since they are just inserts
+        stream.skip(10).await.unwrap();
+        //// try to cast the next response
+        //while let Some(key_value) = stream.next_typed_first::<KeyValueRow>().await.unwrap() {
+        //    println!("{:?}", key_value);
+        //}
+        // stop this instance timer
+        bencher.instance_stop();
     }
+    // finish this benchmark
+    bencher.finish(false);
 }
 
 fn main() {
-    // start our shards
-    let db = LocalExecutorBuilder::default()
-        .spawn(|| async move { shoal_core::server::start::<Basic>().unwrap() })
-        .unwrap();
+    // start Shoal
+    let pool = ShoalPool::<Basic>::start().unwrap();
     // sleep for 1s
     std::thread::sleep(std::time::Duration::from_secs(1));
     // test our queries
     test_queries();
-    std::thread::sleep(std::time::Duration::from_secs(20));
+    //std::thread::sleep(std::time::Duration::from_secs(20));
     // wait for our db to exit
-    db.join().unwrap();
+    pool.exit().unwrap();
 }

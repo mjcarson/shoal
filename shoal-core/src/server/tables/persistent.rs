@@ -182,4 +182,11 @@ impl<T: ShoalTable, S: ShoalStorage<T>> PersistentTable<T, S> {
         };
         ResponseAction::Update(updated)
     }
+
+    /// Shutdown this table
+    #[instrument(name = "PersistentTable::shutdown", skip_all)]
+    pub async fn shutdown(&mut self) -> Result<(), ServerError> {
+        // flush any remaining writes to disk
+        self.storage.flush().await
+    }
 }

@@ -18,7 +18,7 @@ pub struct Ring {
     /// The ring detailing where shards should be at
     ring: BTreeMap<u64, usize>,
     /// A map of node info
-    shards: Vec<ShardInfo>,
+    pub shards: Vec<ShardInfo>,
 }
 
 impl Ring {

@@ -1,7 +1,5 @@
 //! Coordinates traffic between this node and others
 
-use std::{marker::PhantomData, net::SocketAddr};
-
 use bytes::BytesMut;
 use glommio::{
     channels::{
@@ -12,6 +10,8 @@ use glommio::{
     Task,
 };
 use kanal::{AsyncReceiver, AsyncSender};
+use std::{marker::PhantomData, net::SocketAddr};
+use tracing::{event, instrument, Level};
 
 use super::ring::Ring;
 use super::{
@@ -46,11 +46,11 @@ impl<S: ShoalDatabase> Coordinator<S> {
     pub async fn start<'a>(
         conf: Conf,
         mesh: MeshBuilder<MeshMsg<S>, Full>,
+        kanal_tx: AsyncSender<Msg<S>>,
+        kanal_rx: AsyncReceiver<Msg<S>>,
     ) -> Result<(), ServerError> {
         // join our mesh
         let (mesh_tx, mesh_rx) = mesh.join().await?;
-        // create our kanal channels
-        let (kanal_tx, kanal_rx) = kanal::bounded_async(8192);
         // build our coordinator
         let mut coordinator: Coordinator<S> = Coordinator {
             conf,
@@ -97,16 +97,19 @@ impl<S: ShoalDatabase> Coordinator<S> {
     }
 
     /// Handle a mesh messages
+    #[instrument(name = "Coordinator::handle_mesh", skip(self, msg))]
     fn handle_mesh(&mut self, _shard: usize, msg: MeshMsg<S>) {
         match msg {
             MeshMsg::Join(info) => self.ring.add(info),
             MeshMsg::Query { addr, query, .. } => {
                 println!("QUERY -> {:#?} from {:#?}", query, addr)
             }
+            MeshMsg::Shutdown => panic!("SHUTDOWN MESH MSG?"),
         }
     }
 
     /// Forward our queries to the correct shards
+    #[instrument(name = "Coordinator::send_to_shard", skip_all)]
     async fn send_to_shard(
         &mut self,
         addr: SocketAddr,
@@ -151,6 +154,7 @@ impl<S: ShoalDatabase> Coordinator<S> {
     ///
     /// * `addr` - The address
     #[allow(clippy::future_not_send)]
+    #[instrument(name = "Coordinator::handle_client", skip(self, addr, data))]
     async fn handle_client<'a>(&mut self, addr: SocketAddr, read: usize, data: BytesMut) {
         // get the slice to deserialize
         let readable = &data[..read];
@@ -158,6 +162,26 @@ impl<S: ShoalDatabase> Coordinator<S> {
         let queries = S::unarchive(readable);
         // send each query to the correct shard
         self.send_to_shard(addr, queries).await.unwrap();
+    }
+
+    /// Handle a shutdown command
+    #[instrument(name = "Coordinator::shutdown", skip_all, err(Debug))]
+    async fn handle_shutdown(&mut self) -> Result<(), ServerError> {
+        // get all shards
+        let shards = &self.ring.shards;
+        // forward this shutdown comman dot all shards
+        for shard in shards {
+            // if this is a local shard then send this message over the local mesh
+            match &shard.contact {
+                ShardContact::Local(id) => {
+                    // forward this shutdown command to this shard
+                    self.mesh_tx.send_to(*id, MeshMsg::Shutdown).await?;
+                    // log that we told this shard to shutdown
+                    event!(Level::INFO, shard = shard.name, id);
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Start handling messages
@@ -174,8 +198,16 @@ impl<S: ShoalDatabase> Coordinator<S> {
             match msg {
                 Msg::Mesh { shard, msg } => self.handle_mesh(shard, msg),
                 Msg::Client { addr, read, data } => self.handle_client(addr, read, data).await,
+                Msg::Shutdown => {
+                    // forward this shutdown command to others
+                    self.handle_shutdown().await.unwrap();
+                    // exit the coordinator
+                    break;
+                }
             }
         }
+        // log that this coordinator is shutting down
+        event!(Level::INFO, msg = "Shutting Down");
     }
 }
 

@@ -16,3 +16,4 @@ gxhash = "2.2"
 uuid = { version = "1", features = ["v4"] }
 glommio = { version = "0.8" }
 tokio = { version = "1", features = ["full"] }
+owo-colors = "4.1"

@@ -94,6 +94,11 @@ pub trait ShoalDatabase: 'static + Sized {
         typed_query: Self::QueryKinds,
         end: bool,
     ) -> Self::ResponseKinds;
+
+    /// Shutdown this table and flush any data to disk if needed
+    #[allow(async_fn_in_trait)]
+    #[cfg(feature = "server")]
+    async fn shutdown(&mut self) -> Result<(), ServerError>;
 }
 
 pub trait ShoalTable:

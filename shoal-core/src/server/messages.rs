@@ -21,6 +21,8 @@ pub enum Msg<S: ShoalDatabase> {
         /// The raw data for our request
         data: BytesMut,
     },
+    /// Tell Shoal to shutdown
+    Shutdown,
 }
 
 /// The messages that can be sent over of node local mesh
@@ -41,4 +43,6 @@ pub enum MeshMsg<S: ShoalDatabase> {
         /// Whether this is the last query in a query bundle
         end: bool,
     },
+    /// Tell this shard to shutdown
+    Shutdown,
 }

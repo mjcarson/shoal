@@ -61,8 +61,8 @@ impl<T: ShoalTable> ShoalStorage<T> for FileSystem<T> {
             .path
             .join(format!("Intents/{shard_name}-active"));
         // open this file
+        // don't open with append or new writes will overwrite old ones
         let file = OpenOptions::new()
-            .append(true)
             .create(true)
             .read(true)
             .write(true)
@@ -70,7 +70,7 @@ impl<T: ShoalTable> ShoalStorage<T> for FileSystem<T> {
             .await?;
         // wrap our file in a stream writer
         let intent_log = DmaStreamWriterBuilder::new(file)
-            .with_buffer_size(500)
+            //.with_buffer_size(500)
             .build();
         // build our file system storage module
         let fs = FileSystem {
@@ -125,7 +125,7 @@ impl<T: ShoalTable> ShoalStorage<T> for FileSystem<T> {
     /// Flush all currently pending writes to storage
     #[instrument(name = "ShoalStorage::flush", skip_all, err(Debug))]
     async fn flush(&mut self) -> Result<(), ServerError> {
-        self.intent_log.flush().await?;
+        self.intent_log.sync().await?;
         Ok(())
     }
 
@@ -163,7 +163,6 @@ impl<T: ShoalTable> ShoalStorage<T> for FileSystem<T> {
             if size == 0 {
                 continue;
             }
-            // try to read the next entry
             let read = file.read_at(pos, size).await?;
             // try to deserialize this row from our intent log
             let intent = unsafe { rkyv::archived_root::<Intents<T>>(&read[..]) };
