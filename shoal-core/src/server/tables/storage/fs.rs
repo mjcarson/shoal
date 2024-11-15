@@ -2,10 +2,15 @@
 
 use futures::AsyncWriteExt;
 use glommio::io::{DmaFile, DmaStreamWriter, DmaStreamWriterBuilder, OpenOptions};
-use std::{collections::HashMap, marker::PhantomData, path::PathBuf};
+use std::collections::{HashMap, VecDeque};
+use std::marker::PhantomData;
+use std::net::SocketAddr;
+use std::path::PathBuf;
 use tracing::instrument;
 
 use super::{Intents, ShoalStorage};
+use crate::server::messages::QueryMetadata;
+use crate::shared::responses::{Response, ResponseAction};
 use crate::{
     server::{Conf, ServerError},
     shared::{queries::Update, traits::ShoalTable},
@@ -13,14 +18,20 @@ use crate::{
     tables::partitions::Partition,
 };
 
+/// A write that has not yet been flushed
+pub struct PendingWrite {
+    /// The position at which this write will be flushed
+    pub pos: u64,
+}
+
 /// Store shoal data in an existing filesytem for persistence
 pub struct FileSystem<T: ShoalTable> {
     /// The name of the shard we are storing data for
     shard_name: String,
     /// The intent log to write too
     intent_log: DmaStreamWriter,
-    /// The data we are storing
-    store_data: PhantomData<T>,
+    /// The still pending writes
+    pending: VecDeque<(u64, QueryMetadata, ResponseAction<T>)>,
 }
 
 impl<T: ShoalTable> FileSystem<T> {
@@ -39,8 +50,8 @@ impl<T: ShoalTable> FileSystem<T> {
         self.intent_log.write_all(&size).await?;
         // write our data
         self.intent_log.write_all(archived.as_slice()).await?;
-        // flush our data
-        self.flush().await;
+        //// flush our data
+        //self.flush().await;
         Ok(())
     }
 }
@@ -76,7 +87,7 @@ impl<T: ShoalTable> ShoalStorage<T> for FileSystem<T> {
         let fs = FileSystem {
             shard_name: shard_name.to_owned(),
             intent_log,
-            store_data: PhantomData,
+            pending: VecDeque::with_capacity(1000),
         };
         Ok(fs)
     }
@@ -87,9 +98,12 @@ impl<T: ShoalTable> ShoalStorage<T> for FileSystem<T> {
     ///
     /// * `insert` - The row to write
     #[instrument(name = "ShoalStorage::insert", skip_all, err(Debug))]
-    async fn insert(&mut self, insert: &Intents<T>) -> Result<(), ServerError> {
+    async fn insert(&mut self, insert: &Intents<T>) -> Result<u64, ServerError> {
         // write this insert intent log
-        self.write_intent(insert).await
+        self.write_intent(insert).await?;
+        // get the current position of the stream writer
+        let current = self.intent_log.current_pos();
+        Ok(current)
     }
 
     /// Delete a row from storage
@@ -99,14 +113,17 @@ impl<T: ShoalTable> ShoalStorage<T> for FileSystem<T> {
     /// * `partition_key` - The key to the partition we are deleting data from
     /// * `sort_key` - The sort key to use to delete data from with in a partition
     #[instrument(name = "ShoalStorage::delete", skip(self), err(Debug))]
-    async fn delete(&mut self, partition_key: u64, sort_key: T::Sort) -> Result<(), ServerError> {
+    async fn delete(&mut self, partition_key: u64, sort_key: T::Sort) -> Result<u64, ServerError> {
         // wrap this delete command in a delete intent
         let intent = Intents::<T>::Delete {
             partition_key,
             sort_key,
         };
         // write this delete intent log
-        self.write_intent(&intent).await
+        self.write_intent(&intent).await?;
+        // get the current position of the stream writer
+        let current = self.intent_log.current_pos();
+        Ok(current)
     }
 
     /// Write a row update to storage
@@ -115,11 +132,63 @@ impl<T: ShoalTable> ShoalStorage<T> for FileSystem<T> {
     ///
     /// * `update` - The update that was applied to our row
     #[instrument(name = "ShoalStorage::update", skip_all, err(Debug))]
-    async fn update(&mut self, update: Update<T>) -> Result<(), ServerError> {
+    async fn update(&mut self, update: Update<T>) -> Result<u64, ServerError> {
         // build our intent log update entry
         let intent = Intents::Update(update);
         // write this delete intent log
-        self.write_intent(&intent).await
+        self.write_intent(&intent).await?;
+        // get the current position of the stream writer
+        let current = self.intent_log.current_pos();
+        Ok(current)
+    }
+
+    /// Add a pending response action thats data is still being flushed
+    ///
+    /// # Arguments
+    ///
+    /// * `meta` - The metadata for this query
+    /// * `pos` - The position at which this entry will have been flushed to disk
+    /// * `response` - The pending response action
+    fn add_pending(&mut self, meta: QueryMetadata, pos: u64, response: ResponseAction<T>) {
+        // add this pending action to our pending queue
+        self.pending.push_back((pos, meta, response));
+    }
+
+    /// Get all flushed response actions
+    ///
+    /// # Arguments
+    ///
+    /// * `flushed` - The flushed actions to return
+    fn get_flushed(&mut self, flushed: &mut Vec<(SocketAddr, Response<T>)>) {
+        // get the current position of flushed data
+        let flushed_pos = self.intent_log.current_flushed_pos();
+        // keep popping response actions until we find one that isn't yet flushed
+        // or we have no more response actions to check
+        while !self.pending.is_empty() {
+            // check if the first item has been flushed
+            let is_flushed = match self.pending.front() {
+                Some((pending_pos, _, _)) => flushed_pos >= *pending_pos,
+                None => break,
+            };
+            // if this action has been flushed to disk then pop it
+            if is_flushed {
+                // pop this flushed action
+                if let Some((_, meta, data)) = self.pending.pop_front() {
+                    // build the response for this query
+                    let response = Response {
+                        id: meta.id,
+                        index: meta.index,
+                        data,
+                        end: meta.end,
+                    };
+                    // add this action to our flushed vec
+                    flushed.push((meta.addr, response));
+                }
+            } else {
+                // we don't have any flushed data yet
+                break;
+            }
+        }
     }
 
     /// Flush all currently pending writes to storage

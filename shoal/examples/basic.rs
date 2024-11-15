@@ -1,6 +1,7 @@
 //! A basic key/value database example
 
 use shoal::bencher::Bencher;
+use shoal_core::server::messages::QueryMetadata;
 use shoal_core::server::ring::Ring;
 use shoal_core::server::{Conf, ServerError};
 use shoal_core::shared::queries::{Get, Queries, Query, Update};
@@ -13,8 +14,7 @@ use shoal_core::{rkyv, ShoalPool};
 use gxhash::GxHasher;
 use rkyv::{Archive, Deserialize, Serialize};
 use std::hash::Hasher;
-use std::time::Duration;
-use tokio::time::Instant;
+use std::net::SocketAddr;
 use uuid::Uuid;
 
 // A basic key/value table in Shoal
@@ -401,18 +401,44 @@ impl ShoalDatabase for Basic {
     /// Handle messages for different table types
     async fn handle(
         &mut self,
-        id: Uuid,
-        index: usize,
+        meta: QueryMetadata,
         typed_query: Self::QueryKinds,
-        end: bool,
-    ) -> Self::ResponseKinds {
+    ) -> Option<(SocketAddr, Self::ResponseKinds)> {
         // match on the right query and execute it
         match typed_query {
             BasicQueryKinds::KeyValueQuery(query) => {
                 // handle these queries
-                BasicResponseKinds::KeyValueRow(self.key_value.handle(id, index, query, end).await)
+                match self.key_value.handle(meta, query).await {
+                    Some((addr, response)) => {
+                        // wrap our response with the right table kind
+                        let wrapped = BasicResponseKinds::KeyValueRow(response);
+                        Some((addr, wrapped))
+                    }
+                    None => None,
+                }
             }
         }
+    }
+
+    /// Flush any in flight writes to disk
+    async fn flush(&mut self) -> Result<(), ServerError> {
+        self.key_value.flush().await
+    }
+
+    /// Get all flushed messages and send their response back
+    ///
+    /// # Arguments
+    ///
+    /// * `flushed` - The flushed response to send back
+    fn handle_flushed(&mut self, flushed: &mut Vec<(SocketAddr, Self::ResponseKinds)>) {
+        // get all flushed queries in their specific format
+        let specific = self.key_value.get_flushed();
+        // wrap and add our specific queries
+        let wrapped = specific
+            .drain(..)
+            .map(|(addr, resp)| (addr, BasicResponseKinds::KeyValueRow(resp)));
+        // extend our response list with our wrapped queries
+        flushed.extend(wrapped);
     }
 
     /// Shutdown this table and flush any data to disk if needed

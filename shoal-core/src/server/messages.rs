@@ -25,6 +25,38 @@ pub enum Msg<S: ShoalDatabase> {
     Shutdown,
 }
 
+/// The metadata about a query from a client
+#[derive(Debug)]
+pub struct QueryMetadata {
+    /// The address of the client this query came from
+    pub addr: SocketAddr,
+    /// The id for this query
+    pub id: Uuid,
+    /// This queries index in the queries vec
+    pub index: usize,
+    /// Whether this is the last query in a query bundle
+    pub end: bool,
+}
+
+impl QueryMetadata {
+    /// Create a new query metadata object
+    ///
+    /// # Arguments
+    ///
+    /// * `addr` - The address to respond to this query at
+    /// * `id` - The id of this query
+    /// * `index` - The index for this query in a bundle of queries
+    /// * `end` - Whether this is the last query in a bundle or not
+    pub fn new(addr: SocketAddr, id: Uuid, index: usize, end: bool) -> Self {
+        QueryMetadata {
+            addr,
+            id,
+            index,
+            end,
+        }
+    }
+}
+
 /// The messages that can be sent over of node local mesh
 #[derive(Debug)]
 pub enum MeshMsg<S: ShoalDatabase> {
@@ -32,16 +64,23 @@ pub enum MeshMsg<S: ShoalDatabase> {
     Join(ShardInfo),
     /// A query to execute
     Query {
-        /// The address of the client this query came from
-        addr: SocketAddr,
-        /// The id for this query
-        id: Uuid,
-        /// This queries index in the queries vec
-        index: usize,
+        /// The metadata about a query
+        meta: QueryMetadata,
         /// The query to execute
         query: S::QueryKinds,
-        /// Whether this is the last query in a query bundle
-        end: bool,
+    },
+    /// Tell this shard to shutdown
+    Shutdown,
+}
+
+/// The messages that can be sent between workers in a shard
+pub enum ShardMsg<D: ShoalDatabase> {
+    /// A query to execute
+    Query {
+        /// The metadata about a query
+        meta: QueryMetadata,
+        /// The query to execute
+        query: D::QueryKinds,
     },
     /// Tell this shard to shutdown
     Shutdown,

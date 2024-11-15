@@ -4,8 +4,10 @@ use glommio::{
     channels::channel_mesh::{Full, MeshBuilder, Receivers, Senders},
     enclose,
     net::UdpSocket,
-    CpuSet, LocalExecutorPoolBuilder, PoolPlacement, PoolThreadHandles,
+    CpuSet, Latency, LocalExecutorPoolBuilder, PoolPlacement, PoolThreadHandles, Shares, Task,
+    TaskQueueHandle,
 };
+use kanal::{AsyncReceiver, AsyncSender};
 use rkyv::{
     ser::serializers::{
         AlignedSerializer, AllocScratch, CompositeSerializer, FallbackScratch, HeapScratch,
@@ -13,13 +15,15 @@ use rkyv::{
     },
     AlignedVec,
 };
-use std::net::SocketAddr;
+use std::{net::SocketAddr, time::Duration};
 use tracing::instrument;
-use uuid::Uuid;
 
-use super::ServerError;
-use super::{messages::MeshMsg, Conf};
-use crate::shared::traits::ShoalDatabase;
+use super::{messages::QueryMetadata, ServerError};
+use super::{
+    messages::{MeshMsg, ShardMsg},
+    Conf,
+};
+use crate::shared::traits::{ShoalDatabase, ShoalResponse};
 
 /// How to message a specific shard
 #[derive(Clone, Debug)]
@@ -53,6 +57,51 @@ impl ShardInfo {
     }
 }
 
+pub struct MeshRelay<S: ShoalDatabase> {
+    /// The glommio channel to receive messages on
+    mesh_rx: Receivers<MeshMsg<S>>,
+    /// The channel to send shard local messages on
+    node_local_tx: AsyncSender<ShardMsg<S>>,
+}
+
+impl<S: ShoalDatabase> MeshRelay<S> {
+    /// Create a new mesh relay
+    ///
+    /// # Arguments
+    ///
+    /// * `mesh_rx` - The glommio channel to receive mesh messages on
+    /// * `node_local_tx` - The kanal channel to send shard local messages on
+    pub fn new(mesh_rx: Receivers<MeshMsg<S>>, node_local_tx: &AsyncSender<ShardMsg<S>>) -> Self {
+        MeshRelay {
+            mesh_rx,
+            node_local_tx: node_local_tx.clone(),
+        }
+    }
+
+    /// Start relaying messages from this nodes mesh to our shard
+    pub async fn start(self) -> Result<(), ServerError> {
+        // wait for a message on our mesh
+        while let Some(msg) = self.mesh_rx.recv_from(0).await? {
+            // handle this message
+            match msg {
+                MeshMsg::Join(_) => panic!("Join on shard?"),
+                MeshMsg::Query { meta, query } => self
+                    .node_local_tx
+                    .send(ShardMsg::Query { meta, query })
+                    .await
+                    .unwrap(),
+                MeshMsg::Shutdown => {
+                    // forward this shutdown command
+                    self.node_local_tx.send(ShardMsg::Shutdown).await.unwrap();
+                    // stop relaying messages
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 pub struct Shard<S: ShoalDatabase> {
     /// This shards info
     info: ShardInfo,
@@ -60,10 +109,20 @@ pub struct Shard<S: ShoalDatabase> {
     pub tables: S,
     /// The glommio channel to send messages on
     local_tx: Senders<MeshMsg<S>>,
-    /// The glommio channel to receive messages on
-    local_rx: Receivers<MeshMsg<S>>,
+    /// The channel to send shard local messages on
+    node_local_tx: AsyncSender<ShardMsg<S>>,
+    /// The channel to Receive shard local messages on
+    node_local_rx: AsyncReceiver<ShardMsg<S>>,
     /// The UDP socket to send responses on
     socket: UdpSocket,
+    /// The responses whose queries have been flushed to disk
+    flushed: Vec<(SocketAddr, S::ResponseKinds)>,
+    /// The latency sensitive task queue
+    high_priority: TaskQueueHandle,
+    /// The low priority task queue
+    low_priority: TaskQueueHandle,
+    /// The tasks we have spawned
+    tasks: Vec<Task<Result<(), ServerError>>>,
 }
 
 impl<S: ShoalDatabase> Shard<S> {
@@ -76,7 +135,7 @@ impl<S: ShoalDatabase> Shard<S> {
     pub async fn new(
         conf: &Conf,
         local_tx: Senders<MeshMsg<S>>,
-        local_rx: Receivers<MeshMsg<S>>,
+        //local_rx: Receivers<MeshMsg<S>>,
     ) -> Result<Self, ServerError> {
         // build our shard info
         let info = ShardInfo::new(local_tx.peer_id());
@@ -87,29 +146,62 @@ impl<S: ShoalDatabase> Shard<S> {
         let socket = UdpSocket::bind(addr)?;
         // build our shards tables
         let tables = S::new(&info.name, conf).await?;
+        // create our node local channel for this shard
+        let (node_local_tx, node_local_rx) = kanal::unbounded_async();
+        // create names for our high and low priority task queues
+        let high_name = format!("HighPriority:{}", info.name);
+        let low_name = format!("LowPriority:{}", info.name);
+        // get a handle to our current executor
+        let executor = glommio::executor();
+        // create a high priority queue for this task queue
+        let high_priority = executor.create_task_queue(
+            Shares::Static(2),
+            Latency::Matters(Duration::from_millis(10)),
+            &high_name,
+        );
+        // create a low priority queue for this task queue
+        let low_priority =
+            executor.create_task_queue(Shares::Static(1), Latency::NotImportant, &low_name);
         // build our shard
         let shard = Shard {
             info,
             tables,
             local_tx,
-            local_rx,
+            node_local_tx,
+            node_local_rx,
             socket,
+            flushed: Vec::with_capacity(1000),
+            high_priority,
+            low_priority,
+            tasks: Vec::with_capacity(100),
         };
         Ok(shard)
     }
 
     /// Initialize this shard
     ///
+    /// # Arguments
+    ///
+    /// * `mesh_rx` - The glommio channel to receive node local messages on
+    ///
     /// # Errors
     ///
     /// This will only fail if the coordinator has not joined the local mesh.
     #[allow(clippy::future_not_send)]
     #[instrument(name = "Shard::init", skip_all, err(Debug))]
-    async fn init(&mut self) -> Result<(), ServerError> {
+    async fn init(&mut self, mesh_rx: Receivers<MeshMsg<S>>) -> Result<(), ServerError> {
         // build our join message
         let join_msg = MeshMsg::Join(self.info.clone());
         // send a message to our coordinator that we are ready to join
         self.local_tx.send_to(0, join_msg).await?;
+        // build our mesh relay
+        let relay = MeshRelay::new(mesh_rx, &self.node_local_tx);
+        // start relaying messages
+        let relay =
+            glommio::spawn_local_into(async move { relay.start().await }, self.high_priority)
+                .unwrap();
+        // track this task
+        self.tasks.push(relay);
         Ok(())
     }
 
@@ -142,11 +234,8 @@ impl<S: ShoalDatabase> Shard<S> {
     #[instrument(name = "Shard::handle_query", skip(self, query))]
     async fn handle_query(
         &mut self,
-        addr: SocketAddr,
-        id: Uuid,
-        index: usize,
+        meta: QueryMetadata,
         query: S::QueryKinds,
-        end: bool,
     ) -> Result<(), ServerError>
     where
         <S as ShoalDatabase>::ResponseKinds: rkyv::Serialize<
@@ -158,19 +247,45 @@ impl<S: ShoalDatabase> Shard<S> {
         >,
     {
         // try to handle this query
-        let response = self.tables.handle(id, index, query, end).await;
-        // send this response back to the client
-        self.reply(addr, response).await?;
+        if let Some((addr, response)) = self.tables.handle(meta, query).await {
+            // send this response back to the client
+            self.reply(addr, response).await?;
+        }
+        Ok(())
+    }
+
+    /// Get all flushed messages and send their response back
+    async fn handle_flushed(&mut self) -> Result<(), ServerError>
+    where
+        <S as ShoalDatabase>::ResponseKinds: rkyv::Serialize<
+            CompositeSerializer<
+                AlignedSerializer<AlignedVec>,
+                FallbackScratch<HeapScratch<256>, AllocScratch>,
+                SharedSerializeMap,
+            >,
+        >,
+    {
+        // get all flushed query responses
+        self.tables.handle_flushed(&mut self.flushed);
+        // pop all of our flushed responses
+        while let Some((addr, response)) = self.flushed.pop() {
+            // send our responses
+            self.reply(addr, response).await?;
+        }
         Ok(())
     }
 
     /// Start handling queries from users
     ///
+    /// # Arguments
+    ///
+    /// * `mesh_rx` - The glommio channel to receive node local messages on
+    ///
     /// # Errors
     ///
     /// This wil return an error if a message cannot be sent to a coordinator or if a query fails
     #[allow(clippy::future_not_send)]
-    pub async fn start<'a>(mut self) -> Result<(), ServerError>
+    pub async fn start<'a>(mut self, mesh_rx: Receivers<MeshMsg<S>>) -> Result<(), ServerError>
     where
         <S as ShoalDatabase>::ResponseKinds: rkyv::Serialize<
             CompositeSerializer<
@@ -181,26 +296,32 @@ impl<S: ShoalDatabase> Shard<S> {
         >,
     {
         // initalize this shard
-        self.init().await?;
-        // wait for a message on our mesh
-        while let Some(msg) = self.local_rx.recv_from(0).await? {
+        self.init(mesh_rx).await?;
+        // keep handling messages until we get a shutdown command
+        loop {
+            // wait for a message on our mesh
+            let msg = self.node_local_rx.recv().await.unwrap();
+            // handle this message
             match msg {
-                MeshMsg::Join(_) => panic!("Join on shard?"),
-                MeshMsg::Query {
-                    addr,
-                    id,
-                    index,
-                    query,
-                    end,
-                } => self.handle_query(addr, id, index, query, end).await?,
-                MeshMsg::Shutdown => {
+                ShardMsg::Query { meta, query } => self.handle_query(meta, query).await?,
+                ShardMsg::Shutdown => {
                     break;
                 }
             }
+            // if we have no more messages then flush our current queries to disk
+            if self.node_local_rx.is_empty() {
+                self.tables.flush().await?;
+            }
+            // check for any flushed response to handle
+            self.handle_flushed().await?;
         }
         Ok(())
     }
 }
+
+///// Periodically send a flush message to our shard
+//async fn periodic_send_flush<S: ShoalDatabase>(local_tx: Senders<MeshMsg<S>>) -> {
+//}
 
 pub fn start<S: ShoalDatabase>(
     conf: Conf,
@@ -217,16 +338,21 @@ where
     >,
 {
     // setup our executor
-    let executor = LocalExecutorPoolBuilder::new(PoolPlacement::MaxSpread(cpus.len(), Some(cpus)));
+    let executor_builder =
+        LocalExecutorPoolBuilder::new(PoolPlacement::MaxSpread(cpus.len(), Some(cpus)));
     // build and spawn our shards on all of our cores
-    let shards = executor.on_all_shards(enclose!((mesh) move || {
+    let shards = executor_builder.on_all_shards(enclose!((mesh) move || {
         async move {
             // join this nodes mesh
             let (sender, receiver) = mesh.join().await?;
             // build an empty shard
-            let shard: Shard<S> = Shard::new(&conf, sender, receiver).await?;
+            let shard: Shard<S> = Shard::new(&conf, sender).await?;
             // start this shard
-            shard.start().await
+            shard.start(receiver).await
+            //// start this shard
+            //let query_handler = glommio::spawn_local_into( async move { shard.start().await }, high_priority).unwrap();
+            //// wait for our query handler to exit
+            //query_handler.await
         }
     }))?;
     Ok(shards)

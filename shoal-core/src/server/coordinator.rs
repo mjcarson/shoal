@@ -13,6 +13,7 @@ use kanal::{AsyncReceiver, AsyncSender};
 use std::{marker::PhantomData, net::SocketAddr};
 use tracing::{event, instrument, Level};
 
+use super::messages::QueryMetadata;
 use super::ring::Ring;
 use super::{
     messages::{MeshMsg, Msg},
@@ -101,8 +102,8 @@ impl<S: ShoalDatabase> Coordinator<S> {
     fn handle_mesh(&mut self, _shard: usize, msg: MeshMsg<S>) {
         match msg {
             MeshMsg::Join(info) => self.ring.add(info),
-            MeshMsg::Query { addr, query, .. } => {
-                println!("QUERY -> {:#?} from {:#?}", query, addr)
+            MeshMsg::Query { meta, query, .. } => {
+                println!("QUERY -> {:#?} from {:#?}", query, meta.addr)
             }
             MeshMsg::Shutdown => panic!("SHUTDOWN MESH MSG?"),
         }
@@ -127,20 +128,17 @@ impl<S: ShoalDatabase> Coordinator<S> {
             for shard_info in found.drain(..) {
                 match &shard_info.contact {
                     ShardContact::Local(id) => {
-                        //println!("coord - sending query to shard: {id}");
-                        self.mesh_tx
-                            .send_to(
-                                *id,
-                                MeshMsg::Query {
-                                    addr,
-                                    id: queries.id,
-                                    index,
-                                    query: kind.clone(),
-                                    end: index == end_index,
-                                },
-                            )
-                            .await
-                            .unwrap();
+                        // check if this is the last query or not
+                        let end = index == end_index;
+                        // build the metadata for this query
+                        let meta = QueryMetadata::new(addr, queries.id, index, end);
+                        // build our mesh message
+                        let msg = MeshMsg::Query {
+                            meta,
+                            query: kind.clone(),
+                        };
+                        // send our query mesh message to the right shard
+                        self.mesh_tx.send_to(*id, msg).await.unwrap();
                     }
                 };
             }
