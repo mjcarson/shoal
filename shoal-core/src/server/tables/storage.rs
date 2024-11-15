@@ -1,11 +1,15 @@
 //! The different storage backends supported by shoal
 
 use rkyv::{Archive, Deserialize, Serialize};
-use std::{collections::HashMap, path::PathBuf};
+use std::{collections::HashMap, net::SocketAddr, path::PathBuf};
 
 use crate::{
-    server::{Conf, ServerError},
-    shared::{queries::Update, traits::ShoalTable},
+    server::{messages::QueryMetadata, Conf, ServerError},
+    shared::{
+        queries::Update,
+        responses::{Response, ResponseAction},
+        traits::ShoalTable,
+    },
 };
 
 mod fs;
@@ -42,7 +46,7 @@ pub trait ShoalStorage<T: ShoalTable>: Sized {
     ///
     /// * `insert` - The row to insert
     #[allow(async_fn_in_trait)]
-    async fn insert(&mut self, insert: &Intents<T>) -> Result<(), ServerError>;
+    async fn insert(&mut self, insert: &Intents<T>) -> Result<u64, ServerError>;
 
     /// Delete a row from storage
     ///
@@ -51,7 +55,7 @@ pub trait ShoalStorage<T: ShoalTable>: Sized {
     /// * `partition_key` - The key to the partition we are deleting data from
     /// * `sort_key` - The sort key to use to delete data from with in a partition
     #[allow(async_fn_in_trait)]
-    async fn delete(&mut self, partition_key: u64, sort_key: T::Sort) -> Result<(), ServerError>;
+    async fn delete(&mut self, partition_key: u64, sort_key: T::Sort) -> Result<u64, ServerError>;
 
     /// Write a row update to storage
     ///
@@ -59,7 +63,23 @@ pub trait ShoalStorage<T: ShoalTable>: Sized {
     ///
     /// * `update` - The update that was applied to our row
     #[allow(async_fn_in_trait)]
-    async fn update(&mut self, update: Update<T>) -> Result<(), ServerError>;
+    async fn update(&mut self, update: Update<T>) -> Result<u64, ServerError>;
+
+    /// Add a pending response action thats data is still being flushed
+    ///
+    /// # Arguments
+    ///
+    /// * `meta` - The metadata for this query
+    /// * `pos` - The position at which this entry will have been flushed to disk
+    /// * `response` - The pending response action
+    fn add_pending(&mut self, meta: QueryMetadata, pos: u64, response: ResponseAction<T>);
+
+    /// Get all flushed response actions
+    ///
+    /// # Arguments
+    ///
+    /// * `flushed` - The response to return
+    fn get_flushed(&mut self, flushed: &mut Vec<(SocketAddr, Response<T>)>);
 
     /// Flush all currently pending writes to storage
     #[allow(async_fn_in_trait)]

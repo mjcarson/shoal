@@ -289,7 +289,7 @@ impl<S: ShoalDatabase> ShoalStream<S> {
     /// * `skip` - The number of responses to skip
     pub async fn skip(&mut self, mut skip: usize) -> Result<(), Errors> {
         // get the next message and throw it away
-        while self.next().await?.is_some() {
+        while let Some(msg) = self.next().await? {
             // decrement our skip
             skip -= 1;
             // if skip is 0 then we can return

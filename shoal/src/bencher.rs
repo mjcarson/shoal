@@ -15,22 +15,38 @@ macro_rules! print_bench {
             Ordering::Less => {
                 // get the difference to check if its a large change
                 let diff = $current - $prior;
+                // get the % change
+                let change = diff.as_nanos() as f64 / $prior.as_nanos() as f64;
+                // convert our change to a %
+                let change_percent = change * 100.0;
                 // check if this change is more then 2%
                 if diff.as_nanos() as f64 > ($prior.as_nanos() as f64 * 0.02) {
-                    format!("+{:?}", diff).bright_red().to_string()
+                    format!("+{:.2?} (+{:.2}%)", diff, change_percent)
+                        .bright_red()
+                        .to_string()
                 } else {
-                    format!("+{:?}", diff).bright_blue().to_string()
+                    format!("+{:.2?} (+{:.2}%)", diff, change_percent)
+                        .bright_blue()
+                        .to_string()
                 }
             }
-            Ordering::Equal => format!("{:?}", Duration::from_secs(0))
+            Ordering::Equal => format!("{:.2?} (0.00%)", Duration::from_secs(0))
                 .bright_blue()
                 .to_string(),
-            Ordering::Greater => format!("-{:?}", $prior - $current)
-                .bright_green()
-                .to_string(),
+            Ordering::Greater => {
+                // get the difference to check if its a large change
+                let diff = $prior - $current;
+                // get the % change
+                let change = diff.as_nanos() as f64 / $prior.as_nanos() as f64;
+                // convert our change to a %
+                let change_percent = change * 100.0;
+                format!("-{:.2?} (-{:.2}%)", diff, change_percent)
+                    .bright_green()
+                    .to_string()
+            }
         };
         // print our result and the change
-        println!("{}: {:?} ({})", $name, $current, diff);
+        println!("{}: {:.2?} ({})", $name, $current, diff);
     };
 }
 

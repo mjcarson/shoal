@@ -1,5 +1,7 @@
 //! The root traits that shoal is built upon that are shared between the client and server
 
+use std::net::SocketAddr;
+
 use rkyv::{
     ser::serializers::{
         AlignedSerializer, AllocScratch, CompositeSerializer, FallbackScratch, HeapScratch,
@@ -10,6 +12,7 @@ use rkyv::{
 use uuid::Uuid;
 
 use super::queries::{Queries, Update};
+use crate::server::messages::QueryMetadata;
 use crate::server::ring::Ring;
 use crate::server::shard::ShardInfo;
 use crate::server::{Conf, ServerError};
@@ -89,11 +92,22 @@ pub trait ShoalDatabase: 'static + Sized {
     #[cfg(feature = "server")]
     async fn handle(
         &mut self,
-        id: Uuid,
-        index: usize,
+        meta: QueryMetadata,
         typed_query: Self::QueryKinds,
-        end: bool,
-    ) -> Self::ResponseKinds;
+    ) -> Option<(SocketAddr, Self::ResponseKinds)>;
+
+    /// Flush any in flight writes to disk
+    #[allow(async_fn_in_trait)]
+    #[cfg(feature = "server")]
+    async fn flush(&mut self) -> Result<(), ServerError>;
+
+    /// Get all flushed messages and send their response back
+    ///
+    /// # Arguments
+    ///
+    /// * `flushed` - The flushed response to send back
+    #[cfg(feature = "server")]
+    fn handle_flushed(&mut self, flushed: &mut Vec<(SocketAddr, Self::ResponseKinds)>);
 
     /// Shutdown this table and flush any data to disk if needed
     #[allow(async_fn_in_trait)]
