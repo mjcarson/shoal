@@ -16,13 +16,9 @@ use glommio::{
     ExecutorJoinHandle, LocalExecutorBuilder, Placement, PoolThreadHandles,
 };
 use kanal::AsyncSender;
-use rkyv::{
-    ser::serializers::{
-        AlignedSerializer, AllocScratch, CompositeSerializer, FallbackScratch, HeapScratch,
-        SharedSerializeMap,
-    },
-    AlignedVec,
-};
+use rkyv::de::Pool;
+use rkyv::rancor::Strategy;
+use rkyv::Archive;
 
 use args::Args;
 pub use conf::Conf;
@@ -47,7 +43,11 @@ fn spawn_coordinator<S: ShoalDatabase>(
         ExecutorJoinHandle<Result<(), ServerError>>,
     ),
     ServerError,
-> {
+>
+where
+    <S::QueryKinds as Archive>::Archived:
+        rkyv::Deserialize<S::QueryKinds, Strategy<Pool, rkyv::rancor::Error>>,
+{
     // clone our mesh to pass to our coordinator
     let mesh = mesh.clone();
     // clone our conf for our coordinator
@@ -74,19 +74,14 @@ pub struct ShoalPool<S: ShoalDatabase> {
     kanal_tx: AsyncSender<Msg<S>>,
 }
 
-impl<S: ShoalDatabase> ShoalPool<S> {
+impl<S: ShoalDatabase> ShoalPool<S>
+where
+    <S::QueryKinds as Archive>::Archived:
+        rkyv::Deserialize<S::QueryKinds, Strategy<Pool, rkyv::rancor::Error>>,
+{
     /// Start this shoal database
     #[instrument(name = "ShoalPool::start", skip_all, err(Debug))]
-    pub fn start() -> Result<Self, ServerError>
-    where
-        <S as ShoalDatabase>::ResponseKinds: rkyv::Serialize<
-            CompositeSerializer<
-                AlignedSerializer<AlignedVec>,
-                FallbackScratch<HeapScratch<256>, AllocScratch>,
-                SharedSerializeMap,
-            >,
-        >,
-    {
+    pub fn start() -> Result<Self, ServerError> {
         // get our command line args
         let args = Args::parse();
         // load our config

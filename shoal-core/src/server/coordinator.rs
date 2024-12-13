@@ -10,6 +10,9 @@ use glommio::{
     Task,
 };
 use kanal::{AsyncReceiver, AsyncSender};
+use rkyv::de::Pool;
+use rkyv::rancor::Strategy;
+use rkyv::Archive;
 use std::{marker::PhantomData, net::SocketAddr};
 use tracing::{event, instrument, Level};
 
@@ -21,7 +24,7 @@ use super::{
 };
 use super::{Conf, ServerError};
 use crate::shared::queries::Queries;
-use crate::shared::traits::{ShoalDatabase, ShoalQuery};
+use crate::shared::traits::{RkyvSupport, ShoalDatabase, ShoalQuery};
 
 /// Coordinates traffic between this node and others
 pub struct Coordinator<S: ShoalDatabase> {
@@ -41,7 +44,11 @@ pub struct Coordinator<S: ShoalDatabase> {
     table_kind: PhantomData<S>,
 }
 
-impl<S: ShoalDatabase> Coordinator<S> {
+impl<S: ShoalDatabase> Coordinator<S>
+where
+    <S::QueryKinds as Archive>::Archived:
+        rkyv::Deserialize<S::QueryKinds, Strategy<Pool, rkyv::rancor::Error>>,
+{
     /// Start a new coordinator thread
     #[allow(clippy::future_not_send)]
     pub async fn start<'a>(
@@ -156,8 +163,13 @@ impl<S: ShoalDatabase> Coordinator<S> {
     async fn handle_client<'a>(&mut self, addr: SocketAddr, read: usize, data: BytesMut) {
         // get the slice to deserialize
         let readable = &data[..read];
+        // load our arhived query from buffer
+        //let archived = S::QueryKinds::load(readable);d
+        let archived = S::unarchive_queries(readable);
         // deserialize our queries
-        let queries = S::unarchive(readable);
+        // TODO do we have to do this every time?
+        let queries = rkyv::deserialize::<Queries<S>, rkyv::rancor::Error>(archived).unwrap();
+        // let quries = S::QueryKinds::deserialize(archived).unwrap();
         // send each query to the correct shard
         self.send_to_shard(addr, queries).await.unwrap();
     }

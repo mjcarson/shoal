@@ -52,7 +52,6 @@ macro_rules! print_bench {
 
 /// A benchmarks past results
 #[derive(Debug, Archive, Serialize, Deserialize)]
-#[archive(check_bytes)]
 pub struct BenchResult {
     /// The max time seen in the last bench
     max: Duration,
@@ -110,9 +109,10 @@ impl Bencher {
             // load our prior results from disk
             let buff = std::fs::read(&path).unwrap();
             // unarchive our results
-            let archive = rkyv::check_archived_root::<BenchResult>(&buff[..]).unwrap();
+            let archive =
+                rkyv::access::<ArchivedBenchResult, rkyv::rancor::Error>(&buff[..]).unwrap();
             // deserialize our prior results
-            let prior = archive.deserialize(&mut rkyv::Infallible).unwrap();
+            let prior = rkyv::deserialize::<BenchResult, rkyv::rancor::Error>(archive).unwrap();
             Some(prior)
         } else {
             None
@@ -178,8 +178,8 @@ impl Bencher {
         // write a new benchmark to disk if requested
         if write {
             // serialize our latest benchmark
-            let archived =
-                rkyv::to_bytes::<_, 256>(&result).expect("Failed to serialize benchmark");
+            let archived = rkyv::to_bytes::<rkyv::rancor::Error>(&result)
+                .expect("Failed to serialize benchmark");
             // write our archived benchmark to disk
             std::fs::write(&self.path, archived).expect("Failed to write benchmark to disk")
         }

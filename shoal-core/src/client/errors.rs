@@ -1,9 +1,5 @@
 //! The errors that can be returned from the Shoal client.
 
-use rkyv::ser::serializers::{
-    AllocScratchError, CompositeSerializerError, SharedSerializeMapError,
-};
-
 /// The errors that can be returned from the Shoal client
 #[derive(Debug)]
 pub enum Errors {
@@ -11,14 +7,8 @@ pub enum Errors {
     WrongType(String),
     /// An IO error occured
     IO(std::io::Error),
-    /// An rkyv serialization error
-    RkyvSerialize(
-        CompositeSerializerError<
-            std::convert::Infallible,
-            AllocScratchError,
-            SharedSerializeMapError,
-        >,
-    ),
+    /// An rkyv error
+    Rkyv(rkyv::rancor::Error),
     /// An error sending data to a kanal channel
     KanalSend(kanal::SendError),
     /// An error receiving data from a kanal channel
@@ -32,34 +22,20 @@ impl From<std::io::Error> for Errors {
     ///
     /// # Arguments
     ///
-    /// * `error` - The errot to convert
+    /// * `error` - The error to convert
     fn from(error: std::io::Error) -> Self {
         Errors::IO(error)
     }
 }
 
-impl
-    From<
-        CompositeSerializerError<
-            std::convert::Infallible,
-            AllocScratchError,
-            SharedSerializeMapError,
-        >,
-    > for Errors
-{
+impl From<rkyv::rancor::Error> for Errors {
     /// Convert this error to our error type
     ///
     /// # Arguments
     ///
-    /// * `error` - The errot to convert
-    fn from(
-        error: CompositeSerializerError<
-            std::convert::Infallible,
-            AllocScratchError,
-            SharedSerializeMapError,
-        >,
-    ) -> Self {
-        Errors::RkyvSerialize(error)
+    /// * `error` - The error to convert
+    fn from(error: rkyv::rancor::Error) -> Self {
+        Errors::Rkyv(error)
     }
 }
 
@@ -68,7 +44,7 @@ impl From<kanal::SendError> for Errors {
     ///
     /// # Arguments
     ///
-    /// * `error` - The errot to convert
+    /// * `error` - The error to convert
     fn from(error: kanal::SendError) -> Self {
         Errors::KanalSend(error)
     }
@@ -79,7 +55,7 @@ impl From<kanal::ReceiveError> for Errors {
     ///
     /// # Arguments
     ///
-    /// * `error` - The errot to convert
+    /// * `error` - The error to convert
     fn from(error: kanal::ReceiveError) -> Self {
         Errors::KanalReceive(error)
     }

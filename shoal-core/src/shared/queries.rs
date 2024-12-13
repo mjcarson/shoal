@@ -11,7 +11,6 @@ use crate::server::shard::ShardInfo;
 
 /// A bundle of different query kinds
 #[derive(Debug, Archive, Serialize, Deserialize)]
-#[archive(check_bytes)]
 pub struct Queries<S: ShoalDatabase> {
     /// The id for this query
     pub id: Uuid,
@@ -44,7 +43,6 @@ impl<S: ShoalDatabase> Default for Queries<S> {
 
 /// The different types of queries for a single datatype
 #[derive(Debug, Archive, Serialize, Deserialize, Clone)]
-#[archive(check_bytes)]
 pub enum Query<T: ShoalTable + std::fmt::Debug> {
     /// Insert a row into shoal
     Insert { key: u64, row: T },
@@ -99,7 +97,6 @@ impl<R: ShoalTable> TaggedQuery<R> {
 
 /// A get query
 #[derive(Debug, Archive, Serialize, Deserialize, Clone)]
-#[archive(check_bytes)]
 //#[archive_attr(derive(Debug))]
 pub struct Get<R: ShoalTable> {
     /// The partition keys to get data from
@@ -114,7 +111,6 @@ pub struct Get<R: ShoalTable> {
 
 /// An update query for a single row in Shoal
 #[derive(Debug, Archive, Serialize, Deserialize, Clone)]
-#[archive(check_bytes)]
 pub struct Update<T: ShoalTable> {
     /// The key to the partition to update data in
     pub partition_key: u64,

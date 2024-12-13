@@ -1,3 +1,5 @@
+#![feature(trivial_bounds)]
+
 pub mod client;
 pub mod server;
 pub mod shared;

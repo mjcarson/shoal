@@ -4,13 +4,9 @@ use bytes::BytesMut;
 use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
 use kanal::{AsyncReceiver, AsyncSender};
-use rkyv::{
-    ser::serializers::{
-        AlignedSerializer, AllocScratch, CompositeSerializer, FallbackScratch, HeapScratch,
-        SharedSerializeMap,
-    },
-    AlignedVec,
-};
+use rkyv::de::Pool;
+use rkyv::rancor::Strategy;
+use rkyv::Archive;
 use std::collections::BTreeMap;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -21,7 +17,7 @@ use uuid::Uuid;
 pub mod errors;
 
 use super::shared::queries::Queries;
-use crate::shared::traits::{ShoalDatabase, ShoalQuery, ShoalResponse};
+use crate::shared::traits::{RkyvSupport, ShoalDatabase, ShoalQuery, ShoalResponse};
 pub use errors::Errors;
 
 pub struct Shoal<S: ShoalDatabase> {
@@ -102,18 +98,9 @@ impl<S: ShoalDatabase> Shoal<S> {
     }
 
     /// Send a query to our server
-    pub async fn send(&self, mut queries: Queries<S>) -> Result<ShoalStream<S>, Errors>
-    where
-        <S as ShoalDatabase>::QueryKinds: rkyv::Serialize<
-            CompositeSerializer<
-                AlignedSerializer<AlignedVec>,
-                FallbackScratch<HeapScratch<256>, AllocScratch>,
-                SharedSerializeMap,
-            >,
-        >,
-    {
+    pub async fn send(&self, mut queries: Queries<S>) -> Result<ShoalStream<S>, Errors> {
         // archive our queries
-        let archived = rkyv::to_bytes::<_, 256>(&queries)?;
+        let archived = rkyv::to_bytes::<_>(&queries)?;
         // start tracking this response
         let (response_tx, response_rx) = self.track_response(&mut queries)?;
         // send our query
@@ -236,7 +223,11 @@ pub struct ShoalStream<S: ShoalDatabase> {
     phantom: PhantomData<S>,
 }
 
-impl<S: ShoalDatabase> ShoalStream<S> {
+impl<S: ShoalDatabase> ShoalStream<S>
+where
+    <S::ResponseKinds as Archive>::Archived:
+        rkyv::Deserialize<S::ResponseKinds, Strategy<Pool, rkyv::rancor::Error>>,
+{
     async fn wait_for_next_response(&mut self) -> Result<(bool, S::ResponseKinds), Errors> {
         // get our response channel if one exists or
         let response_rx = match self.response_rx.as_mut() {
@@ -261,8 +252,11 @@ impl<S: ShoalDatabase> ShoalStream<S> {
             }
             // get the next response from our query
             let buff = response_rx.recv().await?;
-            // unarchive our response
-            let resp = S::unarchive_response(&buff);
+            // unarchive our response'
+            let archived = S::ResponseKinds::load(&buff);
+            // deserialize our response
+            // TODO do we have to do this?
+            let resp = S::ResponseKinds::deserialize(archived)?;
             // get this responses order index
             let index = resp.get_index();
             // if this is the next row then return it
