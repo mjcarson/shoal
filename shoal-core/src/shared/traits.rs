@@ -1,31 +1,54 @@
 //! The root traits that shoal is built upon that are shared between the client and server
 
+use rkyv::de::Pool;
+use rkyv::rancor::{Error, Strategy};
+use rkyv::ser::allocator::ArenaHandle;
+use rkyv::ser::sharing::Share;
+use rkyv::ser::Serializer;
+use rkyv::util::AlignedVec;
+use rkyv::{Archive, Deserialize, Serialize};
 use std::net::SocketAddr;
-
-use rkyv::{
-    ser::serializers::{
-        AlignedSerializer, AllocScratch, CompositeSerializer, FallbackScratch, HeapScratch,
-        SharedSerializeMap,
-    },
-    AlignedVec, Archive,
-};
 use uuid::Uuid;
 
+use super::queries::ArchivedQueries;
 use super::queries::{Queries, Update};
 use crate::server::messages::QueryMetadata;
 use crate::server::ring::Ring;
 use crate::server::shard::ShardInfo;
 use crate::server::{Conf, ServerError};
 
-/// The traits for queries in shoal
-pub trait ShoalQuery:
-    std::fmt::Debug
-    + rkyv::Archive
-    + rkyv::Serialize<rkyv::ser::serializers::AllocSerializer<1024>>
+impl RkyvSupport for String {}
+
+pub trait RkyvSupport: Archive
+    + for<'a> Serialize<Strategy<Serializer<AlignedVec, ArenaHandle<'a>, Share>, rkyv::rancor::Error>>
     + Sized
-    + Send
-    + Clone
 {
+    /// Archive this type to an aligned vec
+    fn serialize(&self) -> AlignedVec {
+        rkyv::to_bytes::<Error>(self).unwrap()
+    }
+
+    /// Load our archived type from a slice
+    ///
+    /// # Arguments
+    ///
+    /// * `raw` - The raw bytes to load an archive from
+    fn load(raw: &[u8]) -> &<Self as Archive>::Archived {
+        // load an archived type from a slice
+        unsafe { rkyv::access_unchecked::<<Self as Archive>::Archived>(&raw) }
+    }
+
+    /// Deserialize our archived type
+    fn deserialize(archived: &<Self as Archive>::Archived) -> Result<Self, rkyv::rancor::Error>
+    where
+        <Self as Archive>::Archived: rkyv::Deserialize<Self, Strategy<Pool, rkyv::rancor::Error>>,
+    {
+        rkyv::deserialize::<Self, rkyv::rancor::Error>(archived)
+    }
+}
+
+/// The traits for queries in shoal
+pub trait ShoalQuery: std::fmt::Debug + RkyvSupport + Sized + Send + Clone {
     /// Deserialize our response types
     ///
     /// # Arguments
@@ -43,13 +66,7 @@ pub trait ShoalQuery:
 }
 
 /// The traits ror responses from shoal
-pub trait ShoalResponse:
-    std::fmt::Debug
-    + rkyv::Archive
-    + rkyv::Serialize<rkyv::ser::serializers::AllocSerializer<1024>>
-    + Sized
-    + Send
-{
+pub trait ShoalResponse: std::fmt::Debug + RkyvSupport + Sized + Send {
     /// Get the index of a single [`Self::ResponseKinds`]
     fn get_index(&self) -> usize;
 
@@ -82,10 +99,10 @@ pub trait ShoalDatabase: 'static + Sized {
 
     /// Deserialize our query types
     #[cfg(feature = "server")]
-    fn unarchive(buff: &[u8]) -> Queries<Self>;
-
-    // Deserialize our response types
-    fn unarchive_response(buff: &[u8]) -> Self::ResponseKinds;
+    fn unarchive_queries(buff: &[u8]) -> &ArchivedQueries<Self> {
+        // load an archived type from a slice
+        unsafe { rkyv::access_unchecked::<ArchivedQueries<Self>>(&buff) }
+    }
 
     /// Handle messages for different table types
     #[allow(async_fn_in_trait)]
@@ -115,47 +132,15 @@ pub trait ShoalDatabase: 'static + Sized {
     async fn shutdown(&mut self) -> Result<(), ServerError>;
 }
 
-pub trait ShoalTable:
-    std::fmt::Debug
-    + Clone
-    + rkyv::Archive
-    + rkyv::Serialize<
-        CompositeSerializer<
-            AlignedSerializer<AlignedVec>,
-            FallbackScratch<HeapScratch<1024>, AllocScratch>,
-            SharedSerializeMap,
-        >,
-    > + rkyv::Serialize<rkyv::ser::serializers::AllocSerializer<1024>>
-    + Sized
-{
+pub trait ShoalTable: std::fmt::Debug + Clone + RkyvSupport + Sized {
     /// The partition key type for this data
     type PartitionKey;
 
     /// The updates that can be applied to this table
-    type Update: rkyv::Archive
-        + rkyv::Serialize<
-            CompositeSerializer<
-                AlignedSerializer<AlignedVec>,
-                FallbackScratch<HeapScratch<1024>, AllocScratch>,
-                SharedSerializeMap,
-            >,
-        > + rkyv::Serialize<rkyv::ser::serializers::AllocSerializer<1024>>
-        + std::fmt::Debug
-        + Clone;
+    type Update: RkyvSupport + std::fmt::Debug + Clone;
 
     /// The sort type for this data
-    type Sort: Ord
-        + rkyv::Archive
-        + rkyv::Serialize<
-            CompositeSerializer<
-                AlignedSerializer<AlignedVec>,
-                FallbackScratch<HeapScratch<1024>, AllocScratch>,
-                SharedSerializeMap,
-            >,
-        > + rkyv::Serialize<rkyv::ser::serializers::AllocSerializer<1024>>
-        + std::fmt::Debug
-        + From<Self::Sort>
-        + Clone;
+    type Sort: Ord + RkyvSupport + std::fmt::Debug + From<Self::Sort> + Clone;
 
     /// Build the sort tuple for this row
     fn get_sort(&self) -> &Self::Sort;
@@ -170,26 +155,29 @@ pub trait ShoalTable:
     /// * `sort` - The sort key to build our partition key from
     fn get_partition_key_from_values(sort: &Self::PartitionKey) -> u64;
 
-    /// Deserialize a row from its archived format
-    ///
-    /// # Arguments
-    ///
-    /// * `archived` - The archived data to deserialize
-    fn deserialize(archived: &<Self as Archive>::Archived) -> Self;
+    ///// Deserialize a row from its archived format
+    /////
+    ///// # Arguments
+    /////
+    ///// * `archived` - The archived data to deserialize
+    //fn deserialize(archived: &<Self as Archive>::Archived) -> Self;
+    ////    // deserialize our row
+    ////    archived.deserialize(&mut rkyv::Infallible).unwrap()
+    ////}
 
-    /// Deserialize a sort key from its archived format
-    ///
-    /// # Arguments
-    ///
-    /// * `archived` - The archived data to deserialize
-    fn deserialize_sort(archived: &<Self::Sort as Archive>::Archived) -> Self::Sort;
+    ///// Deserialize a sort key from its archived format
+    /////
+    ///// # Arguments
+    /////
+    ///// * `archived` - The archived data to deserialize
+    //fn deserialize_sort(archived: &<Self::Sort as Archive>::Archived) -> Self::Sort;
 
-    /// Deserialize an update from its archived format
-    ///
-    /// # Arguments
-    ///
-    /// * `archived` - The archived data to deserialize
-    fn deserialize_update(archived: &<Update<Self> as Archive>::Archived) -> Update<Self>;
+    ///// Deserialize an update from its archived format
+    /////
+    ///// # Arguments
+    /////
+    ///// * `archived` - The archived data to deserialize
+    //fn deserialize_update(archived: &<Update<Self> as Archive>::Archived) -> Update<Self>;
 
     /// Any filters to apply when listing/crawling rows
     type Filters: rkyv::Archive + std::fmt::Debug + Clone;

@@ -8,13 +8,6 @@ use glommio::{
     TaskQueueHandle,
 };
 use kanal::{AsyncReceiver, AsyncSender};
-use rkyv::{
-    ser::serializers::{
-        AlignedSerializer, AllocScratch, CompositeSerializer, FallbackScratch, HeapScratch,
-        SharedSerializeMap,
-    },
-    AlignedVec,
-};
 use std::{net::SocketAddr, time::Duration};
 use tracing::instrument;
 
@@ -23,7 +16,7 @@ use super::{
     messages::{MeshMsg, ShardMsg},
     Conf,
 };
-use crate::shared::traits::{ShoalDatabase, ShoalResponse};
+use crate::shared::traits::ShoalDatabase;
 
 /// How to message a specific shard
 #[derive(Clone, Debug)]
@@ -213,17 +206,17 @@ impl<S: ShoalDatabase> Shard<S> {
         addr: SocketAddr,
         response: S::ResponseKinds,
     ) -> Result<(), ServerError>
-    where
-        <S as ShoalDatabase>::ResponseKinds: rkyv::Serialize<
-            CompositeSerializer<
-                AlignedSerializer<AlignedVec>,
-                FallbackScratch<HeapScratch<256>, AllocScratch>,
-                SharedSerializeMap,
-            >,
-        >,
+//where
+    //    <S as ShoalDatabase>::ResponseKinds: rkyv::Serialize<
+    //        CompositeSerializer<
+    //            AlignedSerializer<AlignedVec>,
+    //            FallbackScratch<HeapScratch<256>, AllocScratch>,
+    //            SharedSerializeMap,
+    //        >,
+    //    >,
     {
         // archive our response
-        let archived = rkyv::to_bytes::<_, 256>(&response)?;
+        let archived = rkyv::to_bytes::<_>(&response)?;
         // send our archived response back to the client
         self.socket.send_to(archived.as_slice(), addr).await?;
         Ok(())
@@ -237,14 +230,14 @@ impl<S: ShoalDatabase> Shard<S> {
         meta: QueryMetadata,
         query: S::QueryKinds,
     ) -> Result<(), ServerError>
-    where
-        <S as ShoalDatabase>::ResponseKinds: rkyv::Serialize<
-            CompositeSerializer<
-                AlignedSerializer<AlignedVec>,
-                FallbackScratch<HeapScratch<256>, AllocScratch>,
-                SharedSerializeMap,
-            >,
-        >,
+//where
+    //    <S as ShoalDatabase>::ResponseKinds: rkyv::Serialize<
+    //        CompositeSerializer<
+    //            AlignedSerializer<AlignedVec>,
+    //            FallbackScratch<HeapScratch<256>, AllocScratch>,
+    //            SharedSerializeMap,
+    //        >,
+    //    >,
     {
         // try to handle this query
         if let Some((addr, response)) = self.tables.handle(meta, query).await {
@@ -256,14 +249,14 @@ impl<S: ShoalDatabase> Shard<S> {
 
     /// Get all flushed messages and send their response back
     async fn handle_flushed(&mut self) -> Result<(), ServerError>
-    where
-        <S as ShoalDatabase>::ResponseKinds: rkyv::Serialize<
-            CompositeSerializer<
-                AlignedSerializer<AlignedVec>,
-                FallbackScratch<HeapScratch<256>, AllocScratch>,
-                SharedSerializeMap,
-            >,
-        >,
+//where
+    //    <S as ShoalDatabase>::ResponseKinds: rkyv::Serialize<
+    //        CompositeSerializer<
+    //            AlignedSerializer<AlignedVec>,
+    //            FallbackScratch<HeapScratch<256>, AllocScratch>,
+    //            SharedSerializeMap,
+    //        >,
+    //    >,
     {
         // get all flushed query responses
         self.tables.handle_flushed(&mut self.flushed);
@@ -286,14 +279,14 @@ impl<S: ShoalDatabase> Shard<S> {
     /// This wil return an error if a message cannot be sent to a coordinator or if a query fails
     #[allow(clippy::future_not_send)]
     pub async fn start<'a>(mut self, mesh_rx: Receivers<MeshMsg<S>>) -> Result<(), ServerError>
-    where
-        <S as ShoalDatabase>::ResponseKinds: rkyv::Serialize<
-            CompositeSerializer<
-                AlignedSerializer<AlignedVec>,
-                FallbackScratch<HeapScratch<256>, AllocScratch>,
-                SharedSerializeMap,
-            >,
-        >,
+//where
+    //    <S as ShoalDatabase>::ResponseKinds: rkyv::Serialize<
+    //        CompositeSerializer<
+    //            AlignedSerializer<AlignedVec>,
+    //            FallbackScratch<HeapScratch<256>, AllocScratch>,
+    //            SharedSerializeMap,
+    //        >,
+    //    >,
     {
         // initalize this shard
         self.init(mesh_rx).await?;
@@ -328,14 +321,14 @@ pub fn start<S: ShoalDatabase>(
     cpus: CpuSet,
     mesh: MeshBuilder<MeshMsg<S>, Full>,
 ) -> Result<PoolThreadHandles<Result<(), ServerError>>, ServerError>
-where
-    <S as ShoalDatabase>::ResponseKinds: rkyv::Serialize<
-        CompositeSerializer<
-            AlignedSerializer<AlignedVec>,
-            FallbackScratch<HeapScratch<256>, AllocScratch>,
-            SharedSerializeMap,
-        >,
-    >,
+//where
+//    <S as ShoalDatabase>::ResponseKinds: rkyv::Serialize<
+//        CompositeSerializer<
+//            AlignedSerializer<AlignedVec>,
+//            FallbackScratch<HeapScratch<256>, AllocScratch>,
+//            SharedSerializeMap,
+//        >,
+//    >,
 {
     // setup our executor
     let executor_builder =

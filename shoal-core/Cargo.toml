@@ -14,7 +14,7 @@ serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
 config = "0.13" 
 gxhash = "2.2"
-rkyv = { version = "0.7", features = ["arbitrary_enum_discriminant", "uuid", "validation"] }
+rkyv = { version = "0.8.9", features = ["uuid-1"] }
 rkyv-with = "0.1"
 glommio = { version = "0.9", optional = true }
 bytes = "1.5"

@@ -1,6 +1,6 @@
 //! The different storage backends supported by shoal
 
-use rkyv::{Archive, Deserialize, Serialize};
+use rkyv::{de::Pool, rancor::Strategy, Archive, Deserialize, Portable, Serialize};
 use std::{collections::HashMap, net::SocketAddr, path::PathBuf};
 
 use crate::{
@@ -20,7 +20,7 @@ use super::partitions::Partition;
 
 /// The different types of entries in a shoal intent log
 #[derive(Debug, Archive, Serialize, Deserialize)]
-#[archive(check_bytes)]
+#[repr(u8)]
 pub enum Intents<T: ShoalTable> {
     Insert(T),
     Delete {

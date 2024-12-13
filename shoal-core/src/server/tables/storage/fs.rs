@@ -2,8 +2,10 @@
 
 use futures::AsyncWriteExt;
 use glommio::io::{DmaFile, DmaStreamWriter, DmaStreamWriterBuilder, OpenOptions};
+use rkyv::de::Pool;
+use rkyv::rancor::Strategy;
+use rkyv::Archive;
 use std::collections::{HashMap, VecDeque};
-use std::marker::PhantomData;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use tracing::instrument;
@@ -18,12 +20,6 @@ use crate::{
     tables::partitions::Partition,
 };
 
-/// A write that has not yet been flushed
-pub struct PendingWrite {
-    /// The position at which this write will be flushed
-    pub pos: u64,
-}
-
 /// Store shoal data in an existing filesytem for persistence
 pub struct FileSystem<T: ShoalTable> {
     /// The name of the shard we are storing data for
@@ -34,7 +30,10 @@ pub struct FileSystem<T: ShoalTable> {
     pending: VecDeque<(u64, QueryMetadata, ResponseAction<T>)>,
 }
 
-impl<T: ShoalTable> FileSystem<T> {
+impl<T: ShoalTable> FileSystem<T>
+where
+    <T as Archive>::Archived: rkyv::Deserialize<T, Strategy<Pool, rkyv::rancor::Error>>,
+{
     /// Write an intent to storage
     ///
     /// # Arguments
@@ -43,7 +42,7 @@ impl<T: ShoalTable> FileSystem<T> {
     #[instrument(name = "FileSystem::write_intent", skip_all, fields(shard = &self.shard_name), err(Debug))]
     async fn write_intent(&mut self, intent: &Intents<T>) -> Result<(), ServerError> {
         // archive this intent log entry
-        let archived = rkyv::to_bytes::<_, 1024>(intent)?;
+        let archived = rkyv::to_bytes::<_>(intent)?;
         // get the size of the data to write
         let size = archived.len().to_le_bytes();
         // write our size
@@ -56,7 +55,13 @@ impl<T: ShoalTable> FileSystem<T> {
     }
 }
 
-impl<T: ShoalTable> ShoalStorage<T> for FileSystem<T> {
+impl<T: ShoalTable> ShoalStorage<T> for FileSystem<T>
+where
+    <T as Archive>::Archived: rkyv::Deserialize<T, Strategy<Pool, rkyv::rancor::Error>>,
+    <T::Sort as Archive>::Archived: rkyv::Deserialize<T::Sort, Strategy<Pool, rkyv::rancor::Error>>,
+    <T::Update as Archive>::Archived:
+        rkyv::Deserialize<T::Update, Strategy<Pool, rkyv::rancor::Error>>,
+{
     /// Create a new instance of this storage engine
     ///
     /// # Arguments
@@ -234,12 +239,12 @@ impl<T: ShoalTable> ShoalStorage<T> for FileSystem<T> {
             }
             let read = file.read_at(pos, size).await?;
             // try to deserialize this row from our intent log
-            let intent = unsafe { rkyv::archived_root::<Intents<T>>(&read[..]) };
+            let intent = unsafe { rkyv::access_unchecked::<ArchivedIntents<T>>(&read[..]) };
             // add this intent to our btreemap
             match intent {
                 ArchivedIntents::Insert(archived) => {
                     // deserialize this row
-                    let row = T::deserialize(archived);
+                    let row = T::deserialize(archived)?;
                     // get the partition key for this row
                     let key = row.get_partition_key();
                     // get this rows partition
@@ -251,17 +256,19 @@ impl<T: ShoalTable> ShoalStorage<T> for FileSystem<T> {
                     partition_key,
                     sort_key,
                 } => {
+                    // convert our partition key to its native endianess
+                    let partition_key = partition_key.to_native();
                     // get the partition to delete a row from
-                    if let Some(partition) = partitions.get_mut(partition_key) {
-                        // deserialize this row
-                        let sort_key = T::deserialize_sort(sort_key);
+                    if let Some(partition) = partitions.get_mut(&partition_key) {
+                        // deserialize this rows sort key
+                        let sort_key = rkyv::deserialize::<T::Sort, rkyv::rancor::Error>(sort_key)?;
                         // remove the sort key from this partition
                         partition.remove(&sort_key);
                     }
                 }
                 ArchivedIntents::Update(archived) => {
                     // deserialize this row's update
-                    let update = T::deserialize_update(archived);
+                    let update = rkyv::deserialize::<Update<T>, rkyv::rancor::Error>(archived)?;
                     // try to get the partition containing our target row
                     if let Some(partition) = partitions.get_mut(&update.partition_key) {
                         // find our target row

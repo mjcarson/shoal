@@ -2,9 +2,6 @@
 
 use glommio::GlommioError;
 use glommio::{BuilderErrorKind, ExecutorErrorKind, ReactorErrorKind};
-use rkyv::ser::serializers::{
-    AllocScratchError, CompositeSerializerError, SharedSerializeMapError,
-};
 use std::os::fd::RawFd;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -35,14 +32,8 @@ pub enum ServerError {
     GlommioGeneric(String),
     /// An config parsing error
     Config(config::ConfigError),
-    /// An rkyv serialization error
-    RkyvSerialize(
-        CompositeSerializerError<
-            std::convert::Infallible,
-            AllocScratchError,
-            SharedSerializeMapError,
-        >,
-    ),
+    /// An rkyv error
+    Rkyv(rkyv::rancor::Error),
     /// An error casting a vec of bytes to a slice
     IntoSlice(std::array::TryFromSliceError),
     /// A conversion error
@@ -98,28 +89,14 @@ impl From<std::io::Error> for ServerError {
     }
 }
 
-impl
-    From<
-        CompositeSerializerError<
-            std::convert::Infallible,
-            AllocScratchError,
-            SharedSerializeMapError,
-        >,
-    > for ServerError
-{
+impl From<rkyv::rancor::Error> for ServerError {
     /// Convert this error to our error type
     ///
     /// # Arguments
     ///
-    /// * `error` - The errot to convert
-    fn from(
-        error: CompositeSerializerError<
-            std::convert::Infallible,
-            AllocScratchError,
-            SharedSerializeMapError,
-        >,
-    ) -> Self {
-        ServerError::RkyvSerialize(error)
+    /// * `error` - The error to convert
+    fn from(error: rkyv::rancor::Error) -> Self {
+        ServerError::Rkyv(error)
     }
 }
 

@@ -2,8 +2,8 @@ extern crate proc_macro;
 
 use darling::FromAttributes;
 use proc_macro::TokenStream;
-use quote::quote;
-use syn::{Data, DataStruct, Ident};
+use quote::{format_ident, quote};
+use syn::{Data, DataStruct, Fields, Ident};
 
 /// The arguments for a FromShoal derive
 #[derive(Debug, darling::FromAttributes)]
@@ -51,30 +51,42 @@ fn add_from_shoal(
     );
 }
 
-// TODO make this generic if possible
-///// Extend a token stream with a FromShoal implementation
-/////
-///// # Arguments
-/////
-///// * `stream` - The stream to extend
-///// * `name` - The name of the type we are extending
-///// * `query_name` - The name of the query type
-//fn add_from_for_query(stream: &mut proc_macro2::TokenStream, name: &Ident, query_name: &Ident) {
-//    // extend our token stream
-//    stream.extend(quote! {
-//        #[automatically_derived]
-//        impl From<#name> for #query_name {
-//            fn from(row: #name) -> #query_name {
-//                // get our rows partition key
-//                let key = #name::partition_key(&row.key);
-//                // build our query kind
-//                #query_name::KeyValueQuery(Query::Insert { key, row })
-//            }
-//        }
-//    });
-//}
+/// Extend a token stream with a RkyvSupport impl
+///
+/// # Arguments
+///
+/// * `stream` - The stream to extend
+/// * `name` - The name of the type we are extending
+fn add_rkyv_support(stream: &mut proc_macro2::TokenStream, name: &Ident) {
+    // extend our token stream
+    stream.extend(quote! {
+        #[automatically_derived]
+        impl shoal_core::shared::traits::RkyvSupport for #name {}
+    });
+}
 
-// TODO make this generic if possible
+/// Extend a token stream with a From<#name> for *QueryKinds implementation
+///
+/// # Arguments
+///
+/// * `stream` - The stream to extend
+/// * `name` - The name of the type we are extending
+/// * `query_name` - The name of the query type
+fn add_from_for_query(stream: &mut proc_macro2::TokenStream, name: &Ident, query_name: &Ident) {
+    // extend our token stream
+    stream.extend(quote! {
+        #[automatically_derived]
+        impl From<#name> for #query_name {
+            fn from(row: #name) -> #query_name {
+                // get our rows partition key
+                let key = #name::get_partition_key(&row);
+                // build our query kind
+                #query_name::#name(Query::Insert { key, row })
+            }
+        }
+    });
+}
+
 ///// Extend a token stream with a FromShoal implementation
 /////
 ///// # Arguments
@@ -142,12 +154,151 @@ pub fn derive_shoal_table(stream: TokenStream) -> TokenStream {
     let db_name = Ident::new(&attrs.db, name.span());
     //let table_name = Ident::new(&attrs.name, name.span());
     // build the name of our kinds
-    //let query_name = syn::Ident::new(&format!("{}QueryKinds", db_name), name.span());
+    let query_name = syn::Ident::new(&format!("{}QueryKinds", db_name), name.span());
     let response_name = syn::Ident::new(&format!("{}ResponseKinds", db_name), name.span());
     // extend this type
     add_from_shoal(&mut output, name, &db_name, &response_name);
-    //add_from_for_query(&mut output, name, &query_name);
+    add_rkyv_support(&mut output, name);
+    add_from_for_query(&mut output, name, &query_name);
     //add_shoal_table(&mut output, name);
+    // convert and return our stream
+    output.into()
+}
+
+fn add_query_kinds(name: &Ident) -> proc_macro2::TokenStream {
+    // build the query kinds type to set
+    quote!(
+        type QueryKinds = concat!(#name, QueryKinds);
+    )
+}
+
+fn add_db_new(name: &Ident, fields: &Fields) -> proc_macro2::TokenStream {
+    // build the entry for each field name and type
+    let field_iter = fields.iter().map(|field| {
+        // get this fields name
+        let ident = &field.ident;
+        let ftype = format_ident!("{}", stringify!(field.ty).split_once('<').unwrap().0);
+        // build this fields entry
+        quote! { #ident: #ftype::new(shared_name, conf).await? }
+    });
+    // build the query kinds type to set
+    quote!(
+        async fn new(shard_name: &str, conf: &Conf) -> Result<Self, ServerError> {
+            let db = #name {
+            //    key_value: PersistentTable::new(shard_name, conf).await?,
+                #(#field_iter,)*
+            };
+            Ok(db)
+        }
+    )
+}
+
+fn add_db_trait(name: &Ident, fields: &Fields, stream: &mut proc_macro2::TokenStream) {
+    // build our new idents
+    let query_kinds = format_ident!("{}QueryKinds", name);
+    let response_kinds = format_ident!("{}ResponseKinds", name);
+    // build our different function implementations
+    let new = add_db_new(name, fields);
+    // build the entry for each field name and type
+    let field_iter = fields.iter().map(|field| {
+        // get this fields name
+        let ident = &field.ident;
+        let ftype = format_ident!("{}", stringify!(field.ty).split_once('<').unwrap().0);
+        // build this fields entry
+        quote! { #ident: #ftype::new(shared_name, conf).await? }
+    });
+    stream.extend(quote! {
+        impl ShoalDatabase for Basic {
+            /// The different tables or types of queries we will handle
+            type QueryKinds = #query_kinds;
+
+            /// The different tables we can get responses from
+            type ResponseKinds = #response_kinds;
+
+            /// Create a new shoal db instance
+            ///
+            /// # Arguments
+            ///
+            /// * `shard_name` - The id of the shard that owns this table
+            /// * `conf` - A shoal config
+            //#new
+            async fn new(shard_name: &str, conf: &Conf) -> Result<Self, ServerError> {
+                let db = Basic {
+                    key_value: PersistentTable::new(shard_name, conf).await?,
+                };
+                Ok(db)
+            }
+
+            /// Handle messages for different table types
+            async fn handle(
+                &mut self,
+                meta: QueryMetadata,
+                typed_query: Self::QueryKinds,
+            ) -> Option<(SocketAddr, Self::ResponseKinds)> {
+                // match on the right query and execute it
+                match typed_query {
+                    BasicQueryKinds::KeyValue(query) => {
+                        // handle these queries
+                        match self.key_value.handle(meta, query).await {
+                            Some((addr, response)) => {
+                                // wrap our response with the right table kind
+                                let wrapped = BasicResponseKinds::KeyValue(response);
+                                Some((addr, wrapped))
+                            }
+                            None => None,
+                        }
+                    }
+                }
+            }
+
+            /// Flush any in flight writes to disk
+            async fn flush(&mut self) -> Result<(), ServerError> {
+                self.key_value.flush().await
+            }
+
+            /// Get all flushed messages and send their response back
+            ///
+            /// # Arguments
+            ///
+            /// * `flushed` - The flushed response to send back
+            fn handle_flushed(&mut self, flushed: &mut Vec<(SocketAddr, Self::ResponseKinds)>) {
+                // get all flushed queries in their specific format
+                let specific = self.key_value.get_flushed();
+                // wrap and add our specific queries
+                let wrapped = specific
+                    .drain(..)
+                    .map(|(addr, resp)| (addr, BasicResponseKinds::KeyValue(resp)));
+                // extend our response list with our wrapped queries
+                flushed.extend(wrapped);
+            }
+
+            /// Shutdown this table and flush any data to disk if needed
+            async fn shutdown(&mut self) -> Result<(), ServerError> {
+                // shutdown the key value table
+                self.key_value.shutdown().await
+            }
+        }
+
+    });
+}
+
+/// Derive the basic traits and functions for a type to be a table in shoal
+#[proc_macro_derive(ShoalDB)]
+pub fn derive_shoal_db(stream: TokenStream) -> TokenStream {
+    // parse our target struct
+    let ast = syn::parse_macro_input!(stream as syn::DeriveInput);
+    // get the name of our struct
+    let name = &ast.ident;
+    // we only support structs right now
+    let struct_data = match &ast.data {
+        Data::Struct(struct_data) => struct_data,
+        _ => unimplemented!("Only structs are currently supported"),
+    };
+    let fields = &struct_data.fields;
+    // start with an empty stream
+    let mut output = quote! {};
+    // add our shoal db trait
+    add_db_trait(name, fields, &mut output);
     // convert and return our stream
     output.into()
 }

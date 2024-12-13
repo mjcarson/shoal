@@ -4,12 +4,15 @@ use shoal::bencher::Bencher;
 use shoal_core::server::messages::QueryMetadata;
 use shoal_core::server::ring::Ring;
 use shoal_core::server::{Conf, ServerError};
-use shoal_core::shared::queries::{Get, Queries, Query, Update};
+use shoal_core::shared::queries::{Get, Query, Update};
 use shoal_core::shared::responses::Response;
-use shoal_core::shared::traits::{ShoalDatabase, ShoalQuery, ShoalResponse, ShoalTable};
+use shoal_core::shared::traits::{
+    RkyvSupport, ShoalDatabase, ShoalQuery, ShoalResponse, ShoalTable,
+};
 use shoal_core::storage::FileSystem;
 use shoal_core::tables::PersistentTable;
 use shoal_core::{rkyv, ShoalPool};
+use shoal_derive::ShoalTable;
 
 use gxhash::GxHasher;
 use rkyv::{Archive, Deserialize, Serialize};
@@ -18,12 +21,9 @@ use std::net::SocketAddr;
 use uuid::Uuid;
 
 // A basic key/value table in Shoal
-#[derive(Debug, Archive, Serialize, Deserialize, Clone)]
-#[archive(check_bytes)]
-#[archive_attr(derive(Debug))]
-#[derive(shoal_derive::ShoalTable)]
+#[derive(Debug, Archive, Serialize, Deserialize, Clone, ShoalTable)]
 #[shoal_table(db = "Basic")]
-pub struct KeyValueRow {
+pub struct KeyValue {
     /// A partition key
     key: String,
     /// A sort key
@@ -32,10 +32,10 @@ pub struct KeyValueRow {
     data: String,
 }
 
-impl KeyValueRow {
+impl KeyValue {
     /// Create a new key/value row
     fn new<T: Into<String>>(key: T, sort: T, data: T) -> Self {
-        KeyValueRow {
+        KeyValue {
             key: key.into(),
             sort: sort.into(),
             data: data.into(),
@@ -43,16 +43,7 @@ impl KeyValueRow {
     }
 }
 
-impl From<KeyValueRow> for BasicQueryKinds {
-    fn from(row: KeyValueRow) -> Self {
-        // get our rows partition key
-        let key = KeyValueRow::get_partition_key(&row);
-        // build our query kind
-        BasicQueryKinds::KeyValueQuery(Query::Insert { key, row })
-    }
-}
-
-impl ShoalTable for KeyValueRow {
+impl ShoalTable for KeyValue {
     /// The partition key type for this data
     type PartitionKey = String;
 
@@ -82,36 +73,6 @@ impl ShoalTable for KeyValueRow {
         hasher.finish()
     }
 
-    /// Deserialize a row from its archived format
-    ///
-    /// # Arguments
-    ///
-    /// * `archived` - The archived data to deserialize
-    fn deserialize(archived: &<Self as Archive>::Archived) -> Self {
-        // deserialize our row
-        archived.deserialize(&mut rkyv::Infallible).unwrap()
-    }
-
-    /// Deserialize a sort key from its archived format
-    ///
-    /// # Arguments
-    ///
-    /// * `archived` - The archived data to deserialize
-    fn deserialize_sort(archived: &<Self::Sort as Archive>::Archived) -> Self::Sort {
-        // deserialize our rows sort key
-        archived.deserialize(&mut rkyv::Infallible).unwrap()
-    }
-
-    /// Deserialize an update from its archived format
-    ///
-    /// # Arguments
-    ///
-    /// * `archived` - The archived data to deserialize
-    fn deserialize_update(archived: &<Update<Self> as Archive>::Archived) -> Update<Self> {
-        // deserialize our rows update
-        archived.deserialize(&mut rkyv::Infallible).unwrap()
-    }
-
     /// Any filters to apply when listing/crawling rows
     type Filters = String;
 
@@ -136,8 +97,7 @@ impl ShoalTable for KeyValueRow {
 }
 
 #[derive(Debug, Archive, Serialize)]
-#[archive(check_bytes)]
-#[archive_attr(derive(Debug))]
+#[rkyv(derive(Debug))]
 pub struct KeyValueGet {
     /// The key to get rows with
     pub key: String,
@@ -177,9 +137,9 @@ impl From<KeyValueGet> for BasicQueryKinds {
     /// Build our a `QueryKind` for getting `KeyValueRows`
     fn from(specific: KeyValueGet) -> Self {
         // build our sort key
-        let key = <KeyValueRow as ShoalTable>::Sort::from(specific.key);
+        let key = <KeyValue as ShoalTable>::Sort::from(specific.key);
         // build our partition key
-        let partition_key = <KeyValueRow as ShoalTable>::get_partition_key_from_values(&key);
+        let partition_key = <KeyValue as ShoalTable>::get_partition_key_from_values(&key);
         // build the general query
         let general = Get {
             partition_keys: vec![partition_key],
@@ -188,14 +148,13 @@ impl From<KeyValueGet> for BasicQueryKinds {
             limit: specific.limit,
         };
         // build our query kind
-        Self::KeyValueQuery(Query::Get(general))
+        Self::KeyValue(Query::Get(general))
     }
 }
 
 /// Delete a key value row
 #[derive(Debug, Archive, Serialize)]
-#[archive(check_bytes)]
-#[archive_attr(derive(Debug))]
+#[rkyv(derive(Debug))]
 pub struct KeyValueDelete {
     /// Tkey key to the partition to delete a row from
     pub partition_key: u64,
@@ -212,7 +171,7 @@ impl KeyValueDelete {
     /// * `sort_key` - The values used to sort data
     pub fn new<S: Into<String>>(key: &String, sort_key: S) -> Self {
         // calculate our partition key
-        let partition_key = KeyValueRow::get_partition_key_from_values(key);
+        let partition_key = KeyValue::get_partition_key_from_values(key);
         // build a key value delete object
         KeyValueDelete {
             partition_key,
@@ -233,7 +192,7 @@ impl From<KeyValueDelete> for BasicQueryKinds {
             key: delete.partition_key,
             sort_key: delete.sort_key,
         };
-        BasicQueryKinds::KeyValueQuery(query)
+        BasicQueryKinds::KeyValue(query)
     }
 }
 
@@ -257,7 +216,7 @@ impl KeyValueUpdate {
     /// * `data` - The new data to set
     pub fn new<S: Into<String>, D: Into<String>>(key: &String, sort_key: S, data: D) -> Self {
         // calculate our partition key
-        let partition_key = KeyValueRow::get_partition_key_from_values(key);
+        let partition_key = KeyValue::get_partition_key_from_values(key);
         // build a new upidate object
         KeyValueUpdate {
             partition_key,
@@ -283,17 +242,18 @@ impl From<KeyValueUpdate> for BasicQueryKinds {
         // wrap our general update in a query
         let query = Query::Update(general);
         // wrap our general update in a table specific query
-        BasicQueryKinds::KeyValueQuery(query)
+        BasicQueryKinds::KeyValue(query)
     }
 }
 
 /// The different tables we can query
 #[derive(Debug, Archive, Serialize, Deserialize, Clone)]
-#[archive(check_bytes)]
 pub enum BasicQueryKinds {
     /// A query for the key/value table
-    KeyValueQuery(Query<KeyValueRow>),
+    KeyValue(Query<KeyValue>),
 }
+
+impl RkyvSupport for BasicQueryKinds {}
 
 impl ShoalQuery for BasicQueryKinds {
     /// Deserialize our response types
@@ -303,10 +263,11 @@ impl ShoalQuery for BasicQueryKinds {
     /// * `buff` - The buffer to deserialize into a response
     fn response_query_id(buff: &[u8]) -> &Uuid {
         // try to cast this query
-        let kinds = shoal_core::rkyv::check_archived_root::<BasicResponseKinds>(buff).unwrap();
+        let archive = BasicResponseKinds::load(buff);
+        //let kinds = shoal_core::rkyv::check_archived_root::<BasicResponseKinds>(buff).unwrap();
         // get our response query id
-        match kinds {
-            ArchivedBasicResponseKinds::KeyValueRow(resp) => &resp.id,
+        match archive {
+            ArchivedBasicResponseKinds::KeyValue(resp) => &resp.id,
         }
     }
 
@@ -322,7 +283,7 @@ impl ShoalQuery for BasicQueryKinds {
         found: &mut Vec<&'a shoal_core::server::shard::ShardInfo>,
     ) {
         match &self {
-            BasicQueryKinds::KeyValueQuery(query) => {
+            BasicQueryKinds::KeyValue(query) => {
                 // get our shards info
                 query.find_shard(ring, found);
             }
@@ -332,17 +293,18 @@ impl ShoalQuery for BasicQueryKinds {
 
 /// The different tables we can get responses from
 #[derive(Debug, Archive, Serialize, Deserialize)]
-#[archive(check_bytes)]
 pub enum BasicResponseKinds {
-    KeyValueRow(Response<KeyValueRow>),
+    KeyValue(Response<KeyValue>),
 }
+
+impl RkyvSupport for BasicResponseKinds {}
 
 impl ShoalResponse for BasicResponseKinds {
     /// Get the index of a single [`Self::ResponseKinds`]
     fn get_index(&self) -> usize {
         // get our response index
         match self {
-            BasicResponseKinds::KeyValueRow(resp) => resp.index,
+            BasicResponseKinds::KeyValue(resp) => resp.index,
         }
     }
 
@@ -350,16 +312,17 @@ impl ShoalResponse for BasicResponseKinds {
     fn is_end_of_stream(&self) -> bool {
         // check if this is the end of the stream
         match self {
-            BasicResponseKinds::KeyValueRow(resp) => resp.end,
+            BasicResponseKinds::KeyValue(resp) => resp.end,
         }
     }
 }
 
 /// The tables we are adding to to shoal
+//#[derive(ShoalDB)]
 //#[shoal_db(name = "Basic")]
 pub struct Basic {
     /// A basic key value table
-    pub key_value: PersistentTable<KeyValueRow, FileSystem<KeyValueRow>>,
+    pub key_value: PersistentTable<KeyValue, FileSystem<KeyValue>>,
 }
 
 impl ShoalDatabase for Basic {
@@ -382,22 +345,6 @@ impl ShoalDatabase for Basic {
         Ok(db)
     }
 
-    /// Deserialize our query types
-    fn unarchive(buff: &[u8]) -> Queries<Self> {
-        // try to cast this query
-        let query = shoal_core::rkyv::check_archived_root::<Queries<Self>>(buff).unwrap();
-        // deserialize it
-        query.deserialize(&mut rkyv::Infallible).unwrap()
-    }
-
-    // Deserialize our response types
-    fn unarchive_response(buff: &[u8]) -> Self::ResponseKinds {
-        // try to cast this query
-        let query = shoal_core::rkyv::check_archived_root::<Self::ResponseKinds>(buff).unwrap();
-        // deserialize it
-        query.deserialize(&mut rkyv::Infallible).unwrap()
-    }
-
     /// Handle messages for different table types
     async fn handle(
         &mut self,
@@ -406,12 +353,12 @@ impl ShoalDatabase for Basic {
     ) -> Option<(SocketAddr, Self::ResponseKinds)> {
         // match on the right query and execute it
         match typed_query {
-            BasicQueryKinds::KeyValueQuery(query) => {
+            BasicQueryKinds::KeyValue(query) => {
                 // handle these queries
                 match self.key_value.handle(meta, query).await {
                     Some((addr, response)) => {
                         // wrap our response with the right table kind
-                        let wrapped = BasicResponseKinds::KeyValueRow(response);
+                        let wrapped = BasicResponseKinds::KeyValue(response);
                         Some((addr, wrapped))
                     }
                     None => None,
@@ -436,7 +383,7 @@ impl ShoalDatabase for Basic {
         // wrap and add our specific queries
         let wrapped = specific
             .drain(..)
-            .map(|(addr, resp)| (addr, BasicResponseKinds::KeyValueRow(resp)));
+            .map(|(addr, resp)| (addr, BasicResponseKinds::KeyValue(resp)));
         // extend our response list with our wrapped queries
         flushed.extend(wrapped);
     }
@@ -462,11 +409,11 @@ async fn test_queries() {
         // build a query
         let query = shoal
             .query()
-            .add(KeyValueRow::new("hello", "world1", "1"))
-            .add(KeyValueRow::new("hello", "world2", "2"))
-            .add(KeyValueRow::new("hello", "world1", "3"))
+            .add(KeyValue::new("hello", "world1", "1"))
+            .add(KeyValue::new("hello", "world2", "2"))
+            .add(KeyValue::new("hello", "world1", "3"))
             .add(KeyValueUpdate::new(&"hello3".to_owned(), "world3", "3-"))
-            .add(KeyValueRow::new("RemoveMe", "Please", "1"))
+            .add(KeyValue::new("RemoveMe", "Please", "1"))
             .add(KeyValueDelete::new(&"RemoveMe".to_owned(), "Please"))
             .add(KeyValueGet::new("hello"))
             .add(KeyValueGet::new("hello2"))

@@ -6,7 +6,6 @@ use crate::shared::traits::ShoalTable;
 
 /// The different response kinds from a query
 #[derive(Debug, Archive, Serialize, Deserialize)]
-#[archive(check_bytes)]
 pub enum ResponseAction<D: ShoalTable> {
     /// Whether an insert was successful or not
     Insert(bool),
@@ -20,7 +19,6 @@ pub enum ResponseAction<D: ShoalTable> {
 
 /// A response from a query
 #[derive(Debug, Archive, Serialize, Deserialize)]
-#[archive(check_bytes)]
 pub struct Response<T: ShoalTable> {
     /// The id for the query we are responding too
     pub id: Uuid,
@@ -41,7 +39,6 @@ impl<T: ShoalTable> Response<T> {
 
 /// The responses from a set of queries
 #[derive(Debug, Archive, Serialize, Deserialize)]
-#[archive(check_bytes)]
 pub struct Responses<D: ShoalTable> {
     /// The responses for our queries
     pub responses: Vec<Response<D>>,
