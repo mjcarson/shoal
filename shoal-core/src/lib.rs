@@ -1,4 +1,4 @@
-#![feature(trivial_bounds)]
+#![feature(trivial_bounds, integer_sign_cast)]
 
 pub mod client;
 pub mod server;

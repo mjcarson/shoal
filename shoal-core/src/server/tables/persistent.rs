@@ -27,6 +27,8 @@ pub struct PersistentTable<T: ShoalTable, S: ShoalStorage<T>> {
     pub partitions: HashMap<u64, Partition<T>>,
     /// The storage engine backing this table
     storage: S,
+    /// The total size of all data on this shard
+    memory_usage: usize,
     /// The responses for queries that have been flushed to disk
     flushed: Vec<(SocketAddr, Response<T>)>,
 }
@@ -44,6 +46,7 @@ impl<T: ShoalTable, S: ShoalStorage<T>> PersistentTable<T, S> {
         let mut table = Self {
             partitions: HashMap::default(),
             storage: S::new(shard_name, conf).await?,
+            memory_usage: 0,
             flushed: Vec::with_capacity(1000),
         };
         // build the path to this shards intent log
@@ -100,9 +103,11 @@ impl<T: ShoalTable, S: ShoalStorage<T>> PersistentTable<T, S> {
             _ => panic!("TODO NOT HAVE THIS POINTLESS MATCH!"),
         };
         // insert this row into this partition
-        let action = partition.insert(row);
+        let (size_diff, action) = partition.insert(row);
         // add this action to our pending queue
         self.storage.add_pending(meta, pos, action);
+        // adjust our total shards memory usage
+        self.memory_usage = self.memory_usage.saturating_add_signed(size_diff);
         // An insert never returns anything immediately
         None
     }
@@ -151,7 +156,7 @@ impl<T: ShoalTable, S: ShoalStorage<T>> PersistentTable<T, S> {
     ///
     /// # Arguments
     ///
-    /// * `meta` - The metadata about this insert query
+    /// * `meta` - The metadata about this delete query
     /// * `key` - The key to the partition to dlete data from
     /// * `sort` - The sort key to delete
     #[instrument(name = "PersistentTable::delete", skip_all)]
@@ -164,13 +169,15 @@ impl<T: ShoalTable, S: ShoalStorage<T>> PersistentTable<T, S> {
         // get this rows partition
         if let Some(partition) = self.partitions.get_mut(&key) {
             // try remove the target row from this partition
-            if partition.remove(&sort).is_some() {
+            if let Some((size_diff, _)) = partition.remove(&sort) {
                 // wite this delete to our intent log
                 let pos = self.storage.delete(key, sort).await.unwrap();
                 // build the pending action to store
                 let action = ResponseAction::Delete(true);
                 // add this action to our pending queue
                 self.storage.add_pending(meta, pos, action);
+                // adjust this shards total memory usage
+                self.memory_usage = self.memory_usage.saturating_sub(size_diff);
                 // wait for this delete to get flushed to disk
                 return None;
             }

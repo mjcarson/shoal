@@ -17,6 +17,8 @@ use crate::shared::traits::ShoalTable;
 pub struct EphemeralTable<T: ShoalTable> {
     /// The rows in this table
     pub partitions: BTreeMap<u64, Partition<T>>,
+    /// The total size of all data on this shard
+    memory_usage: usize,
 }
 
 impl<T: ShoalTable> Default for EphemeralTable<T> {
@@ -24,6 +26,7 @@ impl<T: ShoalTable> Default for EphemeralTable<T> {
     fn default() -> Self {
         Self {
             partitions: BTreeMap::default(),
+            memory_usage: 0,
         }
     }
 }
@@ -35,9 +38,7 @@ impl<T: ShoalTable> EphemeralTable<T> {
     ///
     /// * `conf` - The Shoal config
     pub fn new(_conf: &Conf) -> Self {
-        Self {
-            partitions: BTreeMap::default(),
-        }
+        Self::default()
     }
     /// Cast and handle a serialized query
     ///
@@ -82,7 +83,10 @@ impl<T: ShoalTable> EphemeralTable<T> {
         // get our partition
         let partition = self.partitions.entry(key).or_default();
         // insert this row into this partition
-        partition.insert(row)
+        let (size_diff, action) = partition.insert(row);
+        // adjust our total shards memory usage
+        self.memory_usage = self.memory_usage.saturating_add_signed(size_diff);
+        action
     }
 
     /// Get some rows from some partitions
@@ -121,7 +125,17 @@ impl<T: ShoalTable> EphemeralTable<T> {
     async fn delete(&mut self, key: u64, sort: &T::Sort) -> ResponseAction<T> {
         // get this rows partition
         let removed = match self.partitions.get_mut(&key) {
-            Some(partition) => partition.remove(sort).is_some(),
+            Some(partition) => {
+                match partition.remove(sort) {
+                    Some((diff, _)) => {
+                        // adjust this shards total memory usage
+                        self.memory_usage = self.memory_usage.saturating_sub(diff);
+                        // return our removed row
+                        true
+                    }
+                    None => false,
+                }
+            }
             None => false,
         };
         ResponseAction::Delete(removed)

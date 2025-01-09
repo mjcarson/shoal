@@ -10,6 +10,8 @@ use crate::shared::traits::ShoalTable;
 pub struct Partition<T: ShoalTable> {
     /// The data in this partition
     rows: BTreeMap<T::Sort, T>,
+    /// The size of this partition
+    size: usize,
 }
 
 impl<T: ShoalTable> Default for Partition<T> {
@@ -17,6 +19,7 @@ impl<T: ShoalTable> Default for Partition<T> {
     fn default() -> Self {
         Partition {
             rows: BTreeMap::default(),
+            size: 0,
         }
     }
 }
@@ -27,13 +30,26 @@ impl<T: ShoalTable> Partition<T> {
     /// # Arguments
     ///
     /// * `row` - The row to insert
-    pub fn insert(&mut self, row: T) -> ResponseAction<T> {
+    pub fn insert(&mut self, row: T) -> (isize, ResponseAction<T>) {
         // get this rows sort key
         let sort_key = row.get_sort().clone();
+        // calculate the size of our new row
+        let row_size = std::mem::size_of_val(&row);
         // add this row
-        self.rows.insert(sort_key, row);
+        let diff = match self.rows.insert(sort_key, row) {
+            // we replaced an existing row so find the delta in size
+            Some(replaced) => {
+                // calculate our old rows size
+                let old_size = std::mem::size_of_val(&replaced);
+                // calculate the diff in sizes
+                row_size.cast_signed() - old_size.cast_signed()
+            }
+            None => row_size.cast_signed(),
+        };
+        // adjust this parititons size correctly
+        self.size = self.size.saturating_add_signed(diff);
         // respond that we inserted a row
-        ResponseAction::Insert(true)
+        (diff, ResponseAction::Insert(true))
     }
 
     /// Get some rows from this partition
@@ -70,8 +86,17 @@ impl<T: ShoalTable> Partition<T> {
     /// # Arguments
     ///
     /// * `sort` - The sort key of the row to delete
-    pub fn remove(&mut self, sort: &T::Sort) -> Option<T> {
-        self.rows.remove(sort)
+    pub fn remove(&mut self, sort: &T::Sort) -> Option<(usize, T)> {
+        match self.rows.remove(sort) {
+            Some(removed) => {
+                // calculate the size of the row we removed
+                let row_size = std::mem::size_of_val(&removed);
+                // decrement our paritions size with this estimate
+                self.size = self.size.saturating_sub(row_size);
+                Some((row_size, removed))
+            }
+            None => None,
+        }
     }
 
     /// Update a row in this partition
