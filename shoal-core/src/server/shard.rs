@@ -205,16 +205,7 @@ impl<S: ShoalDatabase> Shard<S> {
         &mut self,
         addr: SocketAddr,
         response: S::ResponseKinds,
-    ) -> Result<(), ServerError>
-//where
-    //    <S as ShoalDatabase>::ResponseKinds: rkyv::Serialize<
-    //        CompositeSerializer<
-    //            AlignedSerializer<AlignedVec>,
-    //            FallbackScratch<HeapScratch<256>, AllocScratch>,
-    //            SharedSerializeMap,
-    //        >,
-    //    >,
-    {
+    ) -> Result<(), ServerError> {
         // archive our response
         let archived = rkyv::to_bytes::<_>(&response)?;
         // send our archived response back to the client
@@ -229,16 +220,7 @@ impl<S: ShoalDatabase> Shard<S> {
         &mut self,
         meta: QueryMetadata,
         query: S::QueryKinds,
-    ) -> Result<(), ServerError>
-//where
-    //    <S as ShoalDatabase>::ResponseKinds: rkyv::Serialize<
-    //        CompositeSerializer<
-    //            AlignedSerializer<AlignedVec>,
-    //            FallbackScratch<HeapScratch<256>, AllocScratch>,
-    //            SharedSerializeMap,
-    //        >,
-    //    >,
-    {
+    ) -> Result<(), ServerError> {
         // try to handle this query
         if let Some((addr, response)) = self.tables.handle(meta, query).await {
             // send this response back to the client
@@ -248,16 +230,7 @@ impl<S: ShoalDatabase> Shard<S> {
     }
 
     /// Get all flushed messages and send their response back
-    async fn handle_flushed(&mut self) -> Result<(), ServerError>
-//where
-    //    <S as ShoalDatabase>::ResponseKinds: rkyv::Serialize<
-    //        CompositeSerializer<
-    //            AlignedSerializer<AlignedVec>,
-    //            FallbackScratch<HeapScratch<256>, AllocScratch>,
-    //            SharedSerializeMap,
-    //        >,
-    //    >,
-    {
+    async fn handle_flushed(&mut self) -> Result<(), ServerError> {
         // get all flushed query responses
         self.tables.handle_flushed(&mut self.flushed);
         // pop all of our flushed responses
@@ -278,16 +251,7 @@ impl<S: ShoalDatabase> Shard<S> {
     ///
     /// This wil return an error if a message cannot be sent to a coordinator or if a query fails
     #[allow(clippy::future_not_send)]
-    pub async fn start<'a>(mut self, mesh_rx: Receivers<MeshMsg<S>>) -> Result<(), ServerError>
-//where
-    //    <S as ShoalDatabase>::ResponseKinds: rkyv::Serialize<
-    //        CompositeSerializer<
-    //            AlignedSerializer<AlignedVec>,
-    //            FallbackScratch<HeapScratch<256>, AllocScratch>,
-    //            SharedSerializeMap,
-    //        >,
-    //    >,
-    {
+    pub async fn start<'a>(mut self, mesh_rx: Receivers<MeshMsg<S>>) -> Result<(), ServerError> {
         // initalize this shard
         self.init(mesh_rx).await?;
         // keep handling messages until we get a shutdown command
@@ -308,28 +272,19 @@ impl<S: ShoalDatabase> Shard<S> {
             // check for any flushed response to handle
             self.handle_flushed().await?;
         }
+        // check for any flushed response to handle
+        self.handle_flushed().await?;
+        // shudown
+        self.tables.shutdown().await?;
         Ok(())
     }
 }
-
-///// Periodically send a flush message to our shard
-//async fn periodic_send_flush<S: ShoalDatabase>(local_tx: Senders<MeshMsg<S>>) -> {
-//}
 
 pub fn start<S: ShoalDatabase>(
     conf: Conf,
     cpus: CpuSet,
     mesh: MeshBuilder<MeshMsg<S>, Full>,
-) -> Result<PoolThreadHandles<Result<(), ServerError>>, ServerError>
-//where
-//    <S as ShoalDatabase>::ResponseKinds: rkyv::Serialize<
-//        CompositeSerializer<
-//            AlignedSerializer<AlignedVec>,
-//            FallbackScratch<HeapScratch<256>, AllocScratch>,
-//            SharedSerializeMap,
-//        >,
-//    >,
-{
+) -> Result<PoolThreadHandles<Result<(), ServerError>>, ServerError> {
     // setup our executor
     let executor_builder =
         LocalExecutorPoolBuilder::new(PoolPlacement::MaxSpread(cpus.len(), Some(cpus)));
@@ -342,10 +297,6 @@ pub fn start<S: ShoalDatabase>(
             let shard: Shard<S> = Shard::new(&conf, sender).await?;
             // start this shard
             shard.start(receiver).await
-            //// start this shard
-            //let query_handler = glommio::spawn_local_into( async move { shard.start().await }, high_priority).unwrap();
-            //// wait for our query handler to exit
-            //query_handler.await
         }
     }))?;
     Ok(shards)

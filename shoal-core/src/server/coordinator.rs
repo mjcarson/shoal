@@ -24,7 +24,7 @@ use super::{
 };
 use super::{Conf, ServerError};
 use crate::shared::queries::Queries;
-use crate::shared::traits::{RkyvSupport, ShoalDatabase, ShoalQuery};
+use crate::shared::traits::{ShoalDatabase, ShoalQuery};
 
 /// Coordinates traffic between this node and others
 pub struct Coordinator<S: ShoalDatabase> {

@@ -40,18 +40,16 @@ where
     ///
     /// * `intent` - The intent to write to disk
     #[instrument(name = "FileSystem::write_intent", skip_all, fields(shard = &self.shard_name), err(Debug))]
-    async fn write_intent(&mut self, intent: &Intents<T>) -> Result<(), ServerError> {
+    async fn write_intent(&mut self, intent: &Intents<T>) -> Result<usize, ServerError> {
         // archive this intent log entry
         let archived = rkyv::to_bytes::<_>(intent)?;
         // get the size of the data to write
-        let size = archived.len().to_le_bytes();
+        let size = archived.len();
         // write our size
-        self.intent_log.write_all(&size).await?;
+        self.intent_log.write_all(&size.to_le_bytes()).await?;
         // write our data
         self.intent_log.write_all(archived.as_slice()).await?;
-        //// flush our data
-        //self.flush().await;
-        Ok(())
+        Ok(size)
     }
 }
 
