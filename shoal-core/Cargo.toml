@@ -14,7 +14,7 @@ serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
 config = "0.13" 
 gxhash = "2.2"
-rkyv = { version = "0.8.9", features = ["uuid-1"] }
+rkyv = { version = "0.8.10", features = ["uuid-1"] }
 rkyv-with = "0.1"
 glommio = { version = "0.9", optional = true }
 bytes = "1.5"
@@ -24,6 +24,8 @@ kanal = "0.1.0-pre8"
 tokio = { version = "1", features = ["full"] }
 uuid = { version = "1", features = ["v4"] }
 dashmap = "5.5"
+papaya = "0.2"
+byte-unit = "5.1"
 
 # tracing dependencies
 opentelemetry = "0.25"

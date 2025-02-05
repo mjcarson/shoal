@@ -81,7 +81,10 @@ impl<T: ShoalTable> EphemeralTable<T> {
         // get our partition key
         let key = row.get_partition_key().clone();
         // get our partition
-        let partition = self.partitions.entry(key).or_default();
+        let partition = self
+            .partitions
+            .entry(key)
+            .or_insert_with(|| Partition::new(key));
         // insert this row into this partition
         let (size_diff, action) = partition.insert(row);
         // adjust our total shards memory usage

@@ -2,29 +2,46 @@
 
 use std::collections::BTreeMap;
 
+use rkyv::{Archive, Deserialize, Portable, Serialize};
+
 use crate::shared::queries::{Get, Update};
 use crate::shared::responses::ResponseAction;
-use crate::shared::traits::ShoalTable;
+use crate::shared::traits::{RkyvSupport, ShoalTable};
 
-#[derive(Debug)]
+#[derive(Debug, Archive, Serialize, Deserialize)]
 pub struct Partition<T: ShoalTable> {
+    /// This partitions key
+    key: u64,
     /// The data in this partition
     rows: BTreeMap<T::Sort, T>,
     /// The size of this partition
     size: usize,
 }
 
-impl<T: ShoalTable> Default for Partition<T> {
-    /// Create a default partition
-    fn default() -> Self {
+//impl<T: ShoalTable> Default for Partition<T> {
+//    /// Create a default partition
+//    fn default() -> Self {
+//        Partition {
+//            rows: BTreeMap::default(),
+//            size: 0,
+//        }
+//    }
+//}
+
+impl<T: ShoalTable> Partition<T> {
+    /// Create a new partition
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key to this partition
+    pub fn new(key: u64) -> Self {
         Partition {
+            key,
             rows: BTreeMap::default(),
             size: 0,
         }
     }
-}
 
-impl<T: ShoalTable> Partition<T> {
     /// add a new row to this partition
     ///
     /// # Arguments
@@ -111,4 +128,9 @@ impl<T: ShoalTable> Partition<T> {
             None => false,
         }
     }
+}
+
+impl<T: ShoalTable> RkyvSupport for Partition<T> where
+    <<T as ShoalTable>::Sort as Archive>::Archived: Ord
+{
 }

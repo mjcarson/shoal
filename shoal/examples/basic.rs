@@ -1,5 +1,6 @@
 //! A basic key/value database example
 
+use glommio::TaskQueueHandle;
 use shoal::bencher::Bencher;
 use shoal_core::server::messages::QueryMetadata;
 use shoal_core::server::ring::Ring;
@@ -69,6 +70,16 @@ impl ShoalTable for KeyValue {
         let mut hasher = GxHasher::default();
         // hash the first key
         hasher.write(values.as_bytes());
+        // get our hash
+        hasher.finish()
+    }
+
+    /// Get the partition key for this row from an archived value
+    fn get_partition_key_from_archived_insert(intent: &<Self as Archive>::Archived) -> u64 {
+        // create a new hasher
+        let mut hasher = GxHasher::default();
+        // hash the first key
+        hasher.write(intent.key.as_bytes());
         // get our hash
         hasher.finish()
     }
@@ -338,9 +349,13 @@ impl ShoalDatabase for Basic {
     ///
     /// * `shard_name` - The id of the shard that owns this table
     /// * `conf` - A shoal config
-    async fn new(shard_name: &str, conf: &Conf) -> Result<Self, ServerError> {
+    async fn new(
+        shard_name: &str,
+        conf: &Conf,
+        medium_priority: TaskQueueHandle,
+    ) -> Result<Self, ServerError> {
         let db = Basic {
-            key_value: PersistentTable::new(shard_name, conf).await?,
+            key_value: PersistentTable::new(shard_name, conf, medium_priority).await?,
         };
         Ok(db)
     }
@@ -377,15 +392,19 @@ impl ShoalDatabase for Basic {
     /// # Arguments
     ///
     /// * `flushed` - The flushed response to send back
-    fn handle_flushed(&mut self, flushed: &mut Vec<(SocketAddr, Self::ResponseKinds)>) {
+    async fn handle_flushed(
+        &mut self,
+        flushed: &mut Vec<(SocketAddr, Self::ResponseKinds)>,
+    ) -> Result<(), ServerError> {
         // get all flushed queries in their specific format
-        let specific = self.key_value.get_flushed();
+        let specific = self.key_value.get_flushed().await?;
         // wrap and add our specific queries
         let wrapped = specific
             .drain(..)
             .map(|(addr, resp)| (addr, BasicResponseKinds::KeyValue(resp)));
         // extend our response list with our wrapped queries
         flushed.extend(wrapped);
+        Ok(())
     }
 
     /// Shutdown this table and flush any data to disk if needed
@@ -441,7 +460,6 @@ fn main() {
     std::thread::sleep(std::time::Duration::from_secs(1));
     // test our queries
     test_queries();
-    //std::thread::sleep(std::time::Duration::from_secs(20));
     // wait for our db to exit
     pool.exit().unwrap();
 }

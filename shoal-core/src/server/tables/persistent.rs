@@ -2,12 +2,12 @@
 //!
 //! This means that data is retained through restarts at the cost of speed.
 
+use glommio::TaskQueueHandle;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::str::FromStr;
 use tracing::instrument;
-use uuid::Uuid;
 
 use super::partitions::Partition;
 use super::storage::Intents;
@@ -41,16 +41,20 @@ impl<T: ShoalTable, S: ShoalStorage<T>> PersistentTable<T, S> {
     /// * `shard_name` - The id of the shard that owns this table
     /// * `conf` - The Shoal config
     #[instrument(name = "PersistentTable::new", skip(conf), err(Debug))]
-    pub async fn new(shard_name: &str, conf: &Conf) -> Result<Self, ServerError> {
+    pub async fn new(
+        shard_name: &str,
+        conf: &Conf,
+        medium_priority: TaskQueueHandle,
+    ) -> Result<Self, ServerError> {
         // build our table
         let mut table = Self {
             partitions: HashMap::default(),
-            storage: S::new(shard_name, conf).await?,
+            storage: S::new(shard_name, conf, medium_priority).await?,
             memory_usage: 0,
             flushed: Vec::with_capacity(1000),
         };
         // build the path to this shards intent log
-        let path = PathBuf::from_str(&format!("/opt/shoal/Intents/{shard_name}-active"))?;
+        let path = PathBuf::from_str(&format!("/opt/shoal/intents/{shard_name}-active"))?;
         // load our intent log
         S::read_intents(&path, &mut table.partitions).await?;
         Ok(table)
@@ -92,7 +96,10 @@ impl<T: ShoalTable, S: ShoalStorage<T>> PersistentTable<T, S> {
         // get our partition key
         let key = row.get_partition_key();
         // get our partition
-        let partition = self.partitions.entry(key).or_default();
+        let partition = self
+            .partitions
+            .entry(key)
+            .or_insert_with(|| Partition::new(key));
         // wrap our row in an insert intent
         let intent = Intents::Insert(row);
         // persist this new row to storage
@@ -241,17 +248,19 @@ impl<T: ShoalTable, S: ShoalStorage<T>> PersistentTable<T, S> {
     /// # Arguments
     ///
     /// * `flushed` - The flushed actions to return
-    pub fn get_flushed(&mut self) -> &mut Vec<(SocketAddr, Response<T>)> {
+    pub async fn get_flushed(
+        &mut self,
+    ) -> Result<&mut Vec<(SocketAddr, Response<T>)>, ServerError> {
         // check if we have any flushed actions to return
-        self.storage.get_flushed(&mut self.flushed);
+        self.storage.get_flushed(&mut self.flushed).await?;
         // return a ref to our flushed responses
-        &mut self.flushed
+        Ok(&mut self.flushed)
     }
 
     /// Shutdown this table
     #[instrument(name = "PersistentTable::shutdown", skip_all)]
     pub async fn shutdown(&mut self) -> Result<(), ServerError> {
-        // flush any remaining writes to disk
-        self.storage.flush().await
+        // shutdown our storage engine
+        self.storage.shutdown().await
     }
 }

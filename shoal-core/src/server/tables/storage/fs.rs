@@ -1,16 +1,29 @@
 //! The file system storage module for shoal
 
-use futures::AsyncWriteExt;
-use glommio::io::{DmaFile, DmaStreamWriter, DmaStreamWriterBuilder, OpenOptions};
+use byte_unit::Byte;
+use futures::stream::FuturesUnordered;
+use futures::{AsyncWriteExt, StreamExt};
+use glommio::io::{DmaStreamWriter, DmaStreamWriterBuilder, OpenOptions};
+use glommio::{Task, TaskQueueHandle};
+use kanal::{AsyncReceiver, AsyncSender};
 use rkyv::de::Pool;
 use rkyv::rancor::Strategy;
 use rkyv::Archive;
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tracing::instrument;
 
-use super::{Intents, ShoalStorage};
+mod compactor;
+mod map;
+mod reader;
+
+use compactor::FileSystemCompactor;
+use map::ArchiveMap;
+use reader::IntentLogReader;
+
+use super::{CompactionJob, Intents, ShoalStorage};
 use crate::server::messages::QueryMetadata;
 use crate::shared::responses::{Response, ResponseAction};
 use crate::{
@@ -20,19 +33,40 @@ use crate::{
     tables::partitions::Partition,
 };
 
+/// The max size for our data intent log
+const INTENT_LIMIT: Byte = Byte::MEBIBYTE.multiply(50).unwrap();
+
 /// Store shoal data in an existing filesytem for persistence
 pub struct FileSystem<T: ShoalTable> {
     /// The name of the shard we are storing data for
     shard_name: String,
+    /// The path to our current intent log
+    intent_path: PathBuf,
     /// The intent log to write too
     intent_log: DmaStreamWriter,
+    /// The current intent log generation
+    generation: u64,
     /// The still pending writes
     pending: VecDeque<(u64, QueryMetadata, ResponseAction<T>)>,
+    /// The medium priority task queue
+    medium_priority: TaskQueueHandle,
+    /// The config for shoal
+    pub conf: Conf,
+    /// The channel to send intent log compactions on
+    pub intent_tx: AsyncSender<CompactionJob>,
+    /// The different tasks spawned by this shards file system storage engine
+    pub tasks: FuturesUnordered<Task<Result<(), ServerError>>>,
+    /// The shard local shared map of archive/partition data
+    map: Arc<ArchiveMap>,
 }
 
-impl<T: ShoalTable> FileSystem<T>
+impl<T: ShoalTable + 'static> FileSystem<T>
 where
     <T as Archive>::Archived: rkyv::Deserialize<T, Strategy<Pool, rkyv::rancor::Error>>,
+    <T::Sort as Archive>::Archived: rkyv::Deserialize<T::Sort, Strategy<Pool, rkyv::rancor::Error>>,
+    <T::Update as Archive>::Archived:
+        rkyv::Deserialize<T::Update, Strategy<Pool, rkyv::rancor::Error>>,
+    <<T as ShoalTable>::Sort as Archive>::Archived: Ord,
 {
     /// Write an intent to storage
     ///
@@ -51,14 +85,94 @@ where
         self.intent_log.write_all(archived.as_slice()).await?;
         Ok(size)
     }
+
+    /// Spawn a compactor on this shard
+    async fn spawn_intent_compactor(
+        &mut self,
+        compact_rx: AsyncReceiver<CompactionJob>,
+    ) -> Result<(), ServerError> {
+        // build a compactor
+        let compactor = FileSystemCompactor::<T>::with_capacity(
+            &self.shard_name,
+            &self.conf,
+            compact_rx,
+            &self.map,
+            1000,
+        )
+        .await?;
+        // spawn this compactor
+        let compactor_handle = glommio::spawn_local_into(
+            async move { compactor.start().await },
+            self.medium_priority,
+        )?;
+        // add this compactor to our task list
+        self.tasks.push(compactor_handle);
+        Ok(())
+    }
+
+    /// Get a new stream writer for this shard
+    async fn new_writer(name: &str, conf: &Conf) -> Result<DmaStreamWriter, ServerError> {
+        // build the path to this shards intent log
+        let intent_path = conf.storage.fs.intent.join(format!("{name}-active"));
+        // open this file
+        // don't open with append or new writes will overwrite old ones
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .dma_open(&intent_path)
+            .await?;
+        // wrap our file in a stream writer
+        let writer = DmaStreamWriterBuilder::new(file)
+            //.with_buffer_size(500)
+            .build();
+        Ok(writer)
+    }
+
+    /// Check if we need to compact the current intent log
+    async fn is_compactable(&mut self) -> Result<u64, ServerError> {
+        // check if this intent log is over 50MiB
+        if self.intent_log.current_pos() > INTENT_LIMIT {
+            // flush this intent log
+            self.flush().await?;
+            // get the current flushed position
+            let flushed_pos = self.intent_log.current_flushed_pos();
+            // close our intent log
+            self.intent_log.close().await?;
+            // build the file name to rename our current intent log too
+            let name = format!("{}-inactive-{}", self.shard_name, self.generation);
+            // build the path to this shards new intent log
+            let new_path = self.conf.storage.fs.intent.join(name);
+            // rename our old intent log
+            glommio::io::rename(&self.intent_path, &new_path).await?;
+            // create an intent log compaction job
+            self.intent_tx
+                .send(CompactionJob::IntentLog(new_path))
+                .await?;
+            // get a new writer
+            let new_writer = Self::new_writer(&self.shard_name, &self.conf).await?;
+            // set our new writer
+            self.intent_log = new_writer;
+            // increment our writer generation
+            self.generation += 1;
+            // increment the attempt
+            self.intent_tx.send(CompactionJob::Archives).await?;
+            Ok(flushed_pos)
+        } else {
+            // get the current position of flushed data
+            let flushed_pos = self.intent_log.current_flushed_pos();
+            Ok(flushed_pos)
+        }
+    }
 }
 
-impl<T: ShoalTable> ShoalStorage<T> for FileSystem<T>
+impl<T: ShoalTable + 'static> ShoalStorage<T> for FileSystem<T>
 where
     <T as Archive>::Archived: rkyv::Deserialize<T, Strategy<Pool, rkyv::rancor::Error>>,
     <T::Sort as Archive>::Archived: rkyv::Deserialize<T::Sort, Strategy<Pool, rkyv::rancor::Error>>,
     <T::Update as Archive>::Archived:
         rkyv::Deserialize<T::Update, Strategy<Pool, rkyv::rancor::Error>>,
+    <<T as ShoalTable>::Sort as Archive>::Archived: Ord,
 {
     /// Create a new instance of this storage engine
     ///
@@ -66,32 +180,45 @@ where
     ///
     /// * `shard_name` - The id of the shard that owns this table
     /// * `conf` - The Shoal config
-    #[instrument(name = "ShoalStorage::new", skip(conf), err(Debug))]
-    async fn new(shard_name: &str, conf: &Conf) -> Result<Self, ServerError> {
+    #[instrument(name = "ShoalStorage::<FileSystem>::new", skip(conf), err(Debug))]
+    async fn new(
+        shard_name: &str,
+        conf: &Conf,
+        medium_priority: TaskQueueHandle,
+    ) -> Result<Self, ServerError> {
         // build the path to this shards intent log
-        let path = conf
-            .storage
-            .fs
-            .path
-            .join(format!("Intents/{shard_name}-active"));
+        let intent_path = conf.storage.fs.intent.join(format!("{shard_name}-active"));
         // open this file
         // don't open with append or new writes will overwrite old ones
         let file = OpenOptions::new()
             .create(true)
             .read(true)
             .write(true)
-            .dma_open(&path)
+            .dma_open(&intent_path)
             .await?;
         // wrap our file in a stream writer
         let intent_log = DmaStreamWriterBuilder::new(file)
             //.with_buffer_size(500)
             .build();
+        // build the channel to our compactor
+        let (intent_tx, intent_rx) = kanal::unbounded_async();
+        // get this shards shared archive map
+        let map = Arc::new(ArchiveMap::new(shard_name, conf).await?);
         // build our file system storage module
-        let fs = FileSystem {
+        let mut fs = FileSystem {
             shard_name: shard_name.to_owned(),
+            intent_path,
             intent_log,
+            generation: 0,
             pending: VecDeque::with_capacity(1000),
+            medium_priority,
+            conf: conf.clone(),
+            intent_tx,
+            tasks: FuturesUnordered::default(),
+            map,
         };
+        // spawn our intent compactor
+        fs.spawn_intent_compactor(intent_rx).await?;
         Ok(fs)
     }
 
@@ -100,7 +227,7 @@ where
     /// # Arguments
     ///
     /// * `insert` - The row to write
-    #[instrument(name = "ShoalStorage::insert", skip_all, err(Debug))]
+    #[instrument(name = "ShoalStorage::<FileSystem>::insert", skip_all, err(Debug))]
     async fn insert(&mut self, insert: &Intents<T>) -> Result<u64, ServerError> {
         // write this insert intent log
         self.write_intent(insert).await?;
@@ -115,7 +242,7 @@ where
     ///
     /// * `partition_key` - The key to the partition we are deleting data from
     /// * `sort_key` - The sort key to use to delete data from with in a partition
-    #[instrument(name = "ShoalStorage::delete", skip(self), err(Debug))]
+    #[instrument(name = "ShoalStorage::<FileSystem>::delete", skip(self), err(Debug))]
     async fn delete(&mut self, partition_key: u64, sort_key: T::Sort) -> Result<u64, ServerError> {
         // wrap this delete command in a delete intent
         let intent = Intents::<T>::Delete {
@@ -134,7 +261,7 @@ where
     /// # Arguments
     ///
     /// * `update` - The update that was applied to our row
-    #[instrument(name = "ShoalStorage::update", skip_all, err(Debug))]
+    #[instrument(name = "ShoalStorage::<FileSystem>::update", skip_all, err(Debug))]
     async fn update(&mut self, update: Update<T>) -> Result<u64, ServerError> {
         // build our intent log update entry
         let intent = Intents::Update(update);
@@ -162,9 +289,13 @@ where
     /// # Arguments
     ///
     /// * `flushed` - The flushed actions to return
-    fn get_flushed(&mut self, flushed: &mut Vec<(SocketAddr, Response<T>)>) {
-        // get the current position of flushed data
-        let flushed_pos = self.intent_log.current_flushed_pos();
+    async fn get_flushed(
+        &mut self,
+        flushed: &mut Vec<(SocketAddr, Response<T>)>,
+    ) -> Result<(), ServerError> {
+        // check if our current intent log large enough to be compacted
+        // this will also get the current flushed position
+        let flushed_pos = self.is_compactable().await?;
         // keep popping response actions until we find one that isn't yet flushed
         // or we have no more response actions to check
         while !self.pending.is_empty() {
@@ -192,10 +323,11 @@ where
                 break;
             }
         }
+        Ok(())
     }
 
     /// Flush all currently pending writes to storage
-    #[instrument(name = "ShoalStorage::flush", skip_all, err(Debug))]
+    #[instrument(name = "ShoalStorage::<FileSystem>::flush", skip_all, err(Debug))]
     async fn flush(&mut self) -> Result<(), ServerError> {
         self.intent_log.sync().await?;
         Ok(())
@@ -206,36 +338,19 @@ where
     /// # Arguments
     ///
     /// * `path` - The path to the intent log to read in
-    #[instrument(name = "ShoalStorage::read_intents", skip(partitions), err(Debug))]
+    #[instrument(
+        name = "ShoalStorage::<FileSystem>::read_intents",
+        skip(partitions),
+        err(Debug)
+    )]
     async fn read_intents(
         path: &PathBuf,
         partitions: &mut HashMap<u64, Partition<T>>,
     ) -> Result<(), ServerError> {
-        // open the target intent log
-        let file = DmaFile::open(path).await?;
-        // get the size of this file
-        let file_size = file.file_size().await?;
-        // don't read a file with 0 bytes
-        if file_size == 0 {
-            // close this file handle
-            file.close().await.unwrap();
-            // bail out since this shards intent log is empty
-            return Ok(());
-        }
-        // track the amount of data we have currently read
-        let mut pos = 0;
-        while pos < file_size {
-            // try to read the size of the next entry in this intent log
-            let read = file.read_at(pos, 8).await?;
-            // check if we read any data
-            let size = usize::from_le_bytes(read[..8].try_into()?);
-            // increment our pos 8
-            pos += 8;
-            // if size is 0 then skip to the next read
-            if size == 0 {
-                continue;
-            }
-            let read = file.read_at(pos, size).await?;
+        // create an intent log reader
+        let mut reader = IntentLogReader::new(path).await?;
+        // iterate over the entries in this intent log
+        while let Some(read) = reader.next_buff().await? {
             // try to deserialize this row from our intent log
             let intent = unsafe { rkyv::access_unchecked::<ArchivedIntents<T>>(&read[..]) };
             // add this intent to our btreemap
@@ -246,7 +361,7 @@ where
                     // get the partition key for this row
                     let key = row.get_partition_key();
                     // get this rows partition
-                    let entry = partitions.entry(key).or_default();
+                    let entry = partitions.entry(key).or_insert_with(|| Partition::new(key));
                     // insert this row
                     entry.insert(row);
                 }
@@ -276,10 +391,22 @@ where
                     }
                 }
             }
-            pos += size as u64;
         }
-        // close this file handle
-        file.close().await.unwrap();
+        Ok(())
+    }
+
+    /// Shutdown this storage engine
+    #[allow(async_fn_in_trait)]
+    async fn shutdown(&mut self) -> Result<(), ServerError> {
+        // flush any remaining intent log writes to disk
+        self.flush().await?;
+        // signal our intent log compactor to shutdown
+        self.intent_tx.send(CompactionJob::Shutdown).await?;
+        // wait for all of our tasks to complete
+        while let Some(task) = self.tasks.next().await {
+            // check if this task has failed
+            task?;
+        }
         Ok(())
     }
 }

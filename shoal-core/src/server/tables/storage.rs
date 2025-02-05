@@ -1,5 +1,7 @@
 //! The different storage backends supported by shoal
 
+use glommio::TaskQueueHandle;
+use kanal::AsyncReceiver;
 use rkyv::{de::Pool, rancor::Strategy, Archive, Deserialize, Portable, Serialize};
 use std::{collections::HashMap, net::SocketAddr, path::PathBuf};
 
@@ -30,6 +32,16 @@ pub enum Intents<T: ShoalTable> {
     Update(Update<T>),
 }
 
+/// A compaction job
+pub enum CompactionJob {
+    /// A path to an intent log to compact
+    IntentLog(PathBuf),
+    /// Compact this shards archive data
+    Archives,
+    /// Shutdown this compactor
+    Shutdown,
+}
+
 pub trait ShoalStorage<T: ShoalTable>: Sized {
     /// Create a new instance of this storage engine
     ///
@@ -37,8 +49,13 @@ pub trait ShoalStorage<T: ShoalTable>: Sized {
     ///
     /// * `shard_name` - The id of the shard that owns this table
     /// * `conf` - The Shoal config
+    /// * `medium_priority` - The medium priority task queue
     #[allow(async_fn_in_trait)]
-    async fn new(shard_name: &str, conf: &Conf) -> Result<Self, ServerError>;
+    async fn new(
+        shard_name: &str,
+        conf: &Conf,
+        medium_priority: TaskQueueHandle,
+    ) -> Result<Self, ServerError>;
 
     /// Write this new row to storage
     ///
@@ -79,7 +96,11 @@ pub trait ShoalStorage<T: ShoalTable>: Sized {
     /// # Arguments
     ///
     /// * `flushed` - The response to return
-    fn get_flushed(&mut self, flushed: &mut Vec<(SocketAddr, Response<T>)>);
+    #[allow(async_fn_in_trait)]
+    async fn get_flushed(
+        &mut self,
+        flushed: &mut Vec<(SocketAddr, Response<T>)>,
+    ) -> Result<(), ServerError>;
 
     /// Flush all currently pending writes to storage
     #[allow(async_fn_in_trait)]
@@ -95,4 +116,8 @@ pub trait ShoalStorage<T: ShoalTable>: Sized {
         path: &PathBuf,
         partitions: &mut HashMap<u64, Partition<T>>,
     ) -> Result<(), ServerError>;
+
+    /// Shutdown this storage engine
+    #[allow(async_fn_in_trait)]
+    async fn shutdown(&mut self) -> Result<(), ServerError>;
 }

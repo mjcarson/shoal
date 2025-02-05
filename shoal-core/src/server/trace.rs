@@ -2,6 +2,7 @@
 
 use tracing::level_filters::LevelFilter;
 use tracing_subscriber::filter::Filtered;
+use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::fmt::Layer as LayerFmt;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -12,7 +13,9 @@ use super::conf::{Conf, Tracing};
 /// Setup local tracing to stdout
 fn setup_local(conf: &Tracing) -> Filtered<LayerFmt<Registry>, LevelFilter, Registry> {
     //-> Filtered<tracing_subscriber::fmt::Layer<_>, LevelFilter, _> {
-    tracing_subscriber::fmt::layer().with_filter(conf.level.to_filter())
+    tracing_subscriber::fmt::layer()
+        //.with_span_events(FmtSpan::FULL)
+        .with_filter(conf.level.to_filter())
 }
 
 //fn setup_grpc() {
