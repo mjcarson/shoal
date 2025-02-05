@@ -11,7 +11,11 @@ use kanal::{AsyncReceiver, AsyncSender};
 use std::{net::SocketAddr, time::Duration};
 use tracing::instrument;
 
-use super::{messages::QueryMetadata, ServerError};
+use super::{
+    compactor::{CompactionController, CompactionMsg},
+    messages::QueryMetadata,
+    ServerError,
+};
 use super::{
     messages::{MeshMsg, ShardMsg},
     Conf,
@@ -106,14 +110,18 @@ pub struct Shard<S: ShoalDatabase> {
     node_local_tx: AsyncSender<ShardMsg<S>>,
     /// The channel to Receive shard local messages on
     node_local_rx: AsyncReceiver<ShardMsg<S>>,
+    /// The channel to send compaction messages on
+    compaction_tx: AsyncSender<CompactionMsg>,
+    /// The channel to receive compaction messages on
+    compaction_rx: AsyncReceiver<CompactionMsg>,
     /// The UDP socket to send responses on
     socket: UdpSocket,
     /// The responses whose queries have been flushed to disk
     flushed: Vec<(SocketAddr, S::ResponseKinds)>,
     /// The latency sensitive task queue
     high_priority: TaskQueueHandle,
-    /// The low priority task queue
-    low_priority: TaskQueueHandle,
+    /// The medium priority task queue
+    medium_priority: TaskQueueHandle,
     /// The tasks we have spawned
     tasks: Vec<Task<Result<(), ServerError>>>,
 }
@@ -128,6 +136,8 @@ impl<S: ShoalDatabase> Shard<S> {
     pub async fn new(
         conf: &Conf,
         local_tx: Senders<MeshMsg<S>>,
+        compaction_tx: AsyncSender<CompactionMsg>,
+        compaction_rx: AsyncReceiver<CompactionMsg>,
         //local_rx: Receivers<MeshMsg<S>>,
     ) -> Result<Self, ServerError> {
         // build our shard info
@@ -137,24 +147,27 @@ impl<S: ShoalDatabase> Shard<S> {
         let addr = format!("{}:0", conf.networking.interface);
         // bind a udp socket to send responses out on
         let socket = UdpSocket::bind(addr)?;
-        // build our shards tables
-        let tables = S::new(&info.name, conf).await?;
-        // create our node local channel for this shard
-        let (node_local_tx, node_local_rx) = kanal::unbounded_async();
         // create names for our high and low priority task queues
         let high_name = format!("HighPriority:{}", info.name);
-        let low_name = format!("LowPriority:{}", info.name);
+        let medium_name = format!("MediumPriority:{}", info.name);
         // get a handle to our current executor
         let executor = glommio::executor();
         // create a high priority queue for this task queue
         let high_priority = executor.create_task_queue(
-            Shares::Static(2),
+            Shares::Static(1000),
             Latency::Matters(Duration::from_millis(10)),
             &high_name,
         );
         // create a low priority queue for this task queue
-        let low_priority =
-            executor.create_task_queue(Shares::Static(1), Latency::NotImportant, &low_name);
+        let medium_priority = executor.create_task_queue(
+            Shares::Static(500),
+            Latency::Matters(Duration::from_millis(100)),
+            &medium_name,
+        );
+        // build our shards tables
+        let tables = S::new(&info.name, conf, medium_priority).await?;
+        // create our node local channel for this shard
+        let (node_local_tx, node_local_rx) = kanal::unbounded_async();
         // build our shard
         let shard = Shard {
             info,
@@ -162,10 +175,12 @@ impl<S: ShoalDatabase> Shard<S> {
             local_tx,
             node_local_tx,
             node_local_rx,
+            compaction_tx,
+            compaction_rx,
             socket,
             flushed: Vec::with_capacity(1000),
             high_priority,
-            low_priority,
+            medium_priority,
             tasks: Vec::with_capacity(100),
         };
         Ok(shard)
@@ -194,11 +209,26 @@ impl<S: ShoalDatabase> Shard<S> {
             glommio::spawn_local_into(async move { relay.start().await }, self.high_priority)
                 .unwrap();
         // track this task
+        // TODO: allow tracked tasks to be differentiated
         self.tasks.push(relay);
+        // build a compactor controller for this shard
+        let compactor = CompactionController::<S>::new(&self.compaction_rx);
+        // start compacting things
+        let compactor =
+            glommio::spawn_local_into(async move { compactor.start().await }, self.medium_priority)
+                .unwrap();
+        // track this task
+        // TODO: allow tracked tasks to be differentiated
+        self.tasks.push(compactor);
         Ok(())
     }
 
     /// Send a respones back to the client
+    ///
+    /// # Arguments
+    ///
+    /// * `addr` - The address to send this reply too
+    /// * `response` - The response to send
     #[allow(clippy::future_not_send)]
     #[instrument(name = "Shard::reply", skip_all, err(Debug))]
     async fn reply(
@@ -214,6 +244,11 @@ impl<S: ShoalDatabase> Shard<S> {
     }
 
     /// Handle a query on this shard
+    ///
+    /// # Arguments
+    ///
+    /// `meta` - The metadata about the query to handle
+    /// `query` - The query to handle
     #[allow(clippy::future_not_send)]
     #[instrument(name = "Shard::handle_query", skip(self, query))]
     async fn handle_query(
@@ -232,12 +267,17 @@ impl<S: ShoalDatabase> Shard<S> {
     /// Get all flushed messages and send their response back
     async fn handle_flushed(&mut self) -> Result<(), ServerError> {
         // get all flushed query responses
-        self.tables.handle_flushed(&mut self.flushed);
+        self.tables.handle_flushed(&mut self.flushed).await?;
         // pop all of our flushed responses
         while let Some((addr, response)) = self.flushed.pop() {
             // send our responses
             self.reply(addr, response).await?;
         }
+        Ok(())
+    }
+
+    /// Spawn a compactor on this shard
+    pub async fn spawn_compactor(&mut self) -> Result<(), ServerError> {
         Ok(())
     }
 
@@ -276,6 +316,11 @@ impl<S: ShoalDatabase> Shard<S> {
         self.handle_flushed().await?;
         // shudown
         self.tables.shutdown().await?;
+        // shutdown our compactor
+        self.compaction_tx
+            .send(CompactionMsg::Shutdown)
+            .await
+            .unwrap();
         Ok(())
     }
 }
@@ -288,13 +333,15 @@ pub fn start<S: ShoalDatabase>(
     // setup our executor
     let executor_builder =
         LocalExecutorPoolBuilder::new(PoolPlacement::MaxSpread(cpus.len(), Some(cpus)));
-    // build and spawn our shards on all of our cores
+    // build our compaction message channels
+    let (compaction_tx, compaction_rx) = kanal::unbounded_async();
+    // build and spawn our shards on all of remaining available cores
     let shards = executor_builder.on_all_shards(enclose!((mesh) move || {
         async move {
             // join this nodes mesh
             let (sender, receiver) = mesh.join().await?;
             // build an empty shard
-            let shard: Shard<S> = Shard::new(&conf, sender).await?;
+            let shard: Shard<S> = Shard::new(&conf, sender, compaction_tx, compaction_rx).await?;
             // start this shard
             shard.start(receiver).await
         }

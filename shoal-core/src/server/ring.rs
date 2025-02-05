@@ -24,6 +24,7 @@ pub struct Ring {
 impl Ring {
     /// Add a shard to our ring
     pub fn add(&mut self, shard: ShardInfo) {
+        println!("Adding shard: {:?}", shard);
         // build a default hasher
         let mut hasher = GxHasher::default();
         // add our hards name

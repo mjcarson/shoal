@@ -318,7 +318,7 @@ where
     }
 
     /// Get the next response to our query and cast it to a specific type
-    pub async fn next_typed<T: FromShoal<S>>(&mut self) -> Result<Option<Option<Vec<T>>>, Errors> {
+    pub async fn next_typed<T: FromShoal<S>>(&mut self) -> Result<Option<Vec<T>>, Errors> {
         // try to get our receive channels
         if self.response_rx.is_some() {
             // wait for the next response
@@ -333,7 +333,7 @@ where
                 }
             }
             // try to cast to the correct type
-            T::retrieve(resp).map(Some)
+            Ok(T::retrieve(resp)?)
         } else {
             // this stream has already ended
             Ok(None)
@@ -346,7 +346,7 @@ where
     pub async fn next_typed_first<T: FromShoal<S>>(&mut self) -> Result<Option<Option<T>>, Errors> {
         // try to get the next response
         match self.next_typed().await? {
-            Some(Some(mut rows)) => {
+            Some(mut rows) => {
                 // check how may rows we found
                 if rows.len() == 1 {
                     // if we only have a single row then just remove it
@@ -356,7 +356,7 @@ where
                     Ok(Some(Some(rows.swap_remove(1))))
                 }
             }
-            Some(None) => Ok(Some(None)),
+            //Some(None) => Ok(Some(None)),
             None => Ok(None),
         }
     }

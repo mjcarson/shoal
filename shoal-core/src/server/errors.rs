@@ -38,6 +38,10 @@ pub enum ServerError {
     IntoSlice(std::array::TryFromSliceError),
     /// A conversion error
     Conversion(std::convert::Infallible),
+    /// An error sending a message over a kanal channel
+    KanalSend(kanal::SendError),
+    /// An error receiving a message over a kanal channel
+    KanalRecv(kanal::ReceiveError),
 }
 
 // convert all of our external error types to our error type
@@ -119,6 +123,28 @@ impl From<std::convert::Infallible> for ServerError {
     /// * `error` - The errot to convert
     fn from(error: std::convert::Infallible) -> Self {
         ServerError::Conversion(error)
+    }
+}
+
+impl From<kanal::SendError> for ServerError {
+    /// Conver this error to our error type
+    ///
+    /// # Arguments
+    ///
+    /// * `error` - The error to convert
+    fn from(error: kanal::SendError) -> Self {
+        ServerError::KanalSend(error)
+    }
+}
+
+impl From<kanal::ReceiveError> for ServerError {
+    /// Conver this error to our error type
+    ///
+    /// # Arguments
+    ///
+    /// * `error` - The error to convert
+    fn from(error: kanal::ReceiveError) -> Self {
+        ServerError::KanalRecv(error)
     }
 }
 

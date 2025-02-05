@@ -3,9 +3,13 @@
 use std::{path::PathBuf, str::FromStr};
 
 use config::{Config, ConfigError};
-use glommio::CpuSet;
+use glommio::{
+    io::{DmaFile, DmaStreamReaderBuilder, DmaStreamWriter, DmaStreamWriterBuilder, OpenOptions},
+    CpuSet,
+};
 use serde::{Deserialize, Serialize};
 use tracing::level_filters::LevelFilter;
+use uuid::Uuid;
 
 use super::ServerError;
 
@@ -14,6 +18,8 @@ use super::ServerError;
 pub struct Compute {
     /// Configure the number of cores to use, default to all
     cores: Option<usize>,
+    /// The max amount of memory to use
+    memory: Option<usize>,
 }
 
 impl Compute {
@@ -72,23 +78,116 @@ impl Networking {
 }
 
 /// Help serde set a default file system storage path
-fn default_fs_path() -> PathBuf {
-    PathBuf::from_str("/opt/shoal").expect("Failed to build default filesystem storage path")
+fn default_fs_intent_path() -> PathBuf {
+    PathBuf::from_str("/opt/shoal/intents")
+        .expect("Failed to build default filesystem storage path")
+}
+
+/// Help serde set a default file system storage path
+fn default_fs_archives_path() -> PathBuf {
+    PathBuf::from_str("/opt/shoal/archives")
+        .expect("Failed to build default filesystem storage path")
+}
+
+/// Help serde set a default file system storage path
+fn default_fs_map_path() -> PathBuf {
+    PathBuf::from_str("/opt/shoal/maps").expect("Failed to build default filesystem storage path")
 }
 
 /// The settings for file system based storage
 #[derive(Serialize, Deserialize, Clone)]
 pub struct FileSystemStorage {
-    /// Where to store our data on disk by default
-    #[serde(default = "default_fs_path")]
-    pub path: PathBuf,
+    /// Where to store intent logs
+    #[serde(default = "default_fs_intent_path")]
+    pub intent: PathBuf,
+    /// Where to store compacted partitions
+    #[serde(default = "default_fs_archives_path")]
+    pub archives: PathBuf,
+    /// Where to store map data
+    #[serde(default = "default_fs_map_path")]
+    pub maps: PathBuf,
 }
 
 impl Default for FileSystemStorage {
     fn default() -> Self {
         FileSystemStorage {
-            path: default_fs_path(),
+            intent: default_fs_intent_path(),
+            archives: default_fs_archives_path(),
+            maps: default_fs_map_path(),
         }
+    }
+}
+
+impl FileSystemStorage {
+    /// Get a handle to a new empty archive stream writer
+    pub async fn get_new_archive_path(
+        &self,
+    ) -> Result<(Uuid, DmaFile, DmaStreamWriter), ServerError> {
+        // build the path to this new file
+        let mut path = self.archives.clone();
+        // get a random uuid for our file name
+        let id = Uuid::new_v4();
+        // append this random id
+        path.push(id.to_string());
+        // set the options to ensure we create a new writable file
+        let file = OpenOptions::new()
+            .create_new(true)
+            .read(true)
+            .write(true)
+            .dma_open(&path)
+            .await?;
+        // wrap our file in a stream writer
+        let writer = DmaStreamWriterBuilder::new(file.dup()?).build();
+        Ok((id, file, writer))
+    }
+
+    ///  Get a reader to an archive file
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The ID of the archive to build a path too
+    pub fn get_archive_path(&self, id: &Uuid) -> PathBuf {
+        // clone our base path
+        let mut path = self.archives.clone();
+        // build the path to this archive file
+        path.push(id.to_string());
+        path
+    }
+
+    /// Get the path to the archive map file for this shard
+    pub fn get_archive_intent_path(&self, shard_name: &str) -> PathBuf {
+        // get the base path for our map data
+        let mut path = self.maps.clone();
+        // build the path to this shards map intent log
+        path.push(format!("{}-intents", &shard_name));
+        path
+    }
+
+    /// Get the path to the temp archive map file for this shard
+    pub fn get_temp_archive_intent_path(&self, shard_name: &str) -> PathBuf {
+        // get the base path for our map data
+        let mut path = self.maps.clone();
+        // build the path to this shards map intent log
+        path.push(format!("{}-intents-temp", &shard_name));
+        path
+    }
+
+    /// Get the path to the temp archive map file for this shard
+    pub fn get_temp_archive_map_path(&self, shard_name: &str) -> PathBuf {
+        // clone our archive map base path
+        let mut path = self.maps.clone();
+        // add our shard name to this path
+        path.push(format!("{shard_name}-temp"));
+        path
+    }
+
+    /// Get the path to the archive map file
+    pub fn get_archive_map_path(&self, shard_name: &str) -> PathBuf {
+        // clone our archive map base path
+        let mut path = self.maps.clone();
+        // add our shard name to this path
+        path.push(format!("{shard_name}"));
+        path
     }
 }
 

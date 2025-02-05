@@ -1,5 +1,6 @@
 //! The root traits that shoal is built upon that are shared between the client and server
 
+use glommio::TaskQueueHandle;
 use rkyv::de::Pool;
 use rkyv::rancor::{Error, Strategy};
 use rkyv::ser::allocator::ArenaHandle;
@@ -89,7 +90,11 @@ pub trait ShoalDatabase: 'static + Sized {
     /// * `shard_name` - The name of the shard that owns this table
     /// * `conf` - A shoal config
     #[allow(async_fn_in_trait)]
-    async fn new(shard_name: &str, conf: &Conf) -> Result<Self, ServerError>;
+    async fn new(
+        shard_name: &str,
+        conf: &Conf,
+        medium_priority: TaskQueueHandle,
+    ) -> Result<Self, ServerError>;
 
     /// Build a default queries bundle
     #[must_use]
@@ -123,8 +128,12 @@ pub trait ShoalDatabase: 'static + Sized {
     /// # Arguments
     ///
     /// * `flushed` - The flushed response to send back
+    #[allow(async_fn_in_trait)]
     #[cfg(feature = "server")]
-    fn handle_flushed(&mut self, flushed: &mut Vec<(SocketAddr, Self::ResponseKinds)>);
+    async fn handle_flushed(
+        &mut self,
+        flushed: &mut Vec<(SocketAddr, Self::ResponseKinds)>,
+    ) -> Result<(), ServerError>;
 
     /// Shutdown this table and flush any data to disk if needed
     #[allow(async_fn_in_trait)]
@@ -154,6 +163,9 @@ pub trait ShoalTable: std::fmt::Debug + Clone + RkyvSupport + Sized {
     ///
     /// * `sort` - The sort key to build our partition key from
     fn get_partition_key_from_values(sort: &Self::PartitionKey) -> u64;
+
+    /// Get the partition key for this row from an archived value
+    fn get_partition_key_from_archived_insert(intent: &<Self as Archive>::Archived) -> u64;
 
     ///// Deserialize a row from its archived format
     /////
