@@ -2,6 +2,8 @@
 name = "shoal"
 version = "0.1.0"
 edition = "2021"
+description = "A batteries not included database."
+license = "MIT"
 
 [lib]
 name = "shoal"
@@ -9,8 +11,8 @@ path = "src/lib.rs"
 
 
 [dependencies]
-shoal-core = { version = "*", path = "../shoal-core" }
-shoal-derive = { version = "*", path = "../shoal-derive" }
+shoal-core = "0.1.0"
+shoal-derive = { version = "0.1.0" }
 rkyv = { version = "0.8.10", features = ["uuid-1"] }
 gxhash = "2.2"
 uuid = { version = "1", features = ["v4"] }

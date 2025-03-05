@@ -2,6 +2,8 @@
 name = "shoal-core"
 version = "0.1.0"
 edition = "2021"
+description = "The core parts of Shoal. A batteries not included database."
+license = "MIT"
 
 [features]
 default = ["server"]
