@@ -2,6 +2,8 @@
 name = "shoal-derive"
 version = "0.1.0"
 edition = "2021"
+description = "The derive featues for Shoal."
+license = "MIT"
 
 [lib]
 name = "shoal_derive"
@@ -9,7 +11,7 @@ path = "src/lib.rs"
 proc-macro = true
 
 [dependencies]
-shoal-core = { version = "*", path = "../shoal-core"}
+shoal-core = "0.1.0"
 darling = "0.20.10"
 proc-macro2 = "1.0.86"
 quote = "1.0.36"

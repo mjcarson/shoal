@@ -1914,7 +1914,7 @@ dependencies = [
  "gxhash",
  "owo-colors",
  "rkyv 0.8.10",
- "shoal-core",
+ "shoal-core 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "shoal-derive",
  "tokio",
  "uuid",
@@ -1950,13 +1950,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "shoal-core"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "625fadaa3b3f17f35ab9b8a035fbe15eb68f3939c7b732556d83bd370a8d6328"
+dependencies = [
+ "byte-unit",
+ "bytes",
+ "clap",
+ "config",
+ "dashmap",
+ "futures",
+ "glommio",
+ "gxhash",
+ "intmap",
+ "kanal",
+ "opentelemetry",
+ "opentelemetry-otlp",
+ "opentelemetry_sdk",
+ "papaya",
+ "rkyv 0.8.10",
+ "rkyv-with",
+ "serde",
+ "serde_yaml",
+ "tokio",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "shoal-derive"
 version = "0.1.0"
 dependencies = [
  "darling",
  "proc-macro2",
  "quote",
- "shoal-core",
+ "shoal-core 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "syn 2.0.98",
 ]
 
