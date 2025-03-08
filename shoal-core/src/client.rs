@@ -283,7 +283,7 @@ where
     /// * `skip` - The number of responses to skip
     pub async fn skip(&mut self, mut skip: usize) -> Result<(), Errors> {
         // get the next message and throw it away
-        while let Some(msg) = self.next().await? {
+        while let Some(_) = self.next().await? {
             // decrement our skip
             skip -= 1;
             // if skip is 0 then we can return

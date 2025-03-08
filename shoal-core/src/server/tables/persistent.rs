@@ -5,8 +5,6 @@
 use glommio::TaskQueueHandle;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::path::PathBuf;
-use std::str::FromStr;
 use tracing::instrument;
 
 use super::partitions::Partition;
@@ -53,10 +51,8 @@ impl<T: ShoalTable, S: ShoalStorage<T>> PersistentTable<T, S> {
             memory_usage: 0,
             flushed: Vec::with_capacity(1000),
         };
-        // build the path to this shards intent log
-        let path = PathBuf::from_str(&format!("/opt/shoal/intents/{shard_name}-active"))?;
         // load our intent log
-        S::read_intents(&path, &mut table.partitions).await?;
+        S::read_intents(shard_name, conf, &mut table.partitions).await?;
         Ok(table)
     }
 

@@ -54,6 +54,11 @@ impl ShoalTable for KeyValue {
     /// The sort type for this data
     type Sort = String;
 
+    /// The name of this table
+    fn name() -> &'static str {
+        "KeyValue"
+    }
+
     /// Build the sort tuple for this row
     fn get_sort(&self) -> &Self::Sort {
         &self.sort
