@@ -11,7 +11,7 @@ path = "src/lib.rs"
 
 
 [dependencies]
-shoal-core = "0.1.0"
+shoal-core = { version = "0.1.0", path = "../shoal-core" }
 shoal-derive = { version = "0.1.0" }
 rkyv = { version = "0.8.10", features = ["uuid-1"] }
 gxhash = "2.2"

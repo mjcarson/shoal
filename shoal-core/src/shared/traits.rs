@@ -7,7 +7,7 @@ use rkyv::ser::allocator::ArenaHandle;
 use rkyv::ser::sharing::Share;
 use rkyv::ser::Serializer;
 use rkyv::util::AlignedVec;
-use rkyv::{Archive, Deserialize, Serialize};
+use rkyv::{Archive, Serialize};
 use std::net::SocketAddr;
 use uuid::Uuid;
 
@@ -150,6 +150,9 @@ pub trait ShoalTable: std::fmt::Debug + Clone + RkyvSupport + Sized {
 
     /// The sort type for this data
     type Sort: Ord + RkyvSupport + std::fmt::Debug + From<Self::Sort> + Clone;
+
+    /// The name of this table
+    fn name() -> &'static str;
 
     /// Build the sort tuple for this row
     fn get_sort(&self) -> &Self::Sort;
