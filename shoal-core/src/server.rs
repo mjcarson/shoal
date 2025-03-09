@@ -9,12 +9,11 @@ pub mod ring;
 pub mod shard;
 pub mod tables;
 pub mod trace;
-mod compactor;
 
 use clap::Parser;
 use glommio::{
     channels::channel_mesh::{Full, MeshBuilder},
-    CpuSet, ExecutorJoinHandle, LocalExecutorBuilder, Placement, PoolThreadHandles,
+    ExecutorJoinHandle, LocalExecutorBuilder, Placement, PoolThreadHandles,
 };
 use kanal::AsyncSender;
 use rkyv::de::Pool;

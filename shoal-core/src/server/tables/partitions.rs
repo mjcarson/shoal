@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use rkyv::{Archive, Deserialize, Portable, Serialize};
+use rkyv::{Archive, Deserialize, Serialize};
 
 use crate::shared::queries::{Get, Update};
 use crate::shared::responses::ResponseAction;

@@ -2,6 +2,7 @@
 
 use glommio::io::{DmaFile, OpenOptions, ReadResult};
 use std::path::PathBuf;
+use tracing::instrument;
 
 use crate::server::ServerError;
 
@@ -18,6 +19,7 @@ pub struct IntentLogReader {
 
 impl IntentLogReader {
     /// Create a new intent log reader
+    #[instrument(name = "IntentLogReader::new", err(Debug))]
     pub async fn new(path: &PathBuf) -> Result<Self, ServerError> {
         // open the target intent log or create it if it doesn't exist
         let file = OpenOptions::new()

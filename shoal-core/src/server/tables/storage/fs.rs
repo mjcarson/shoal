@@ -1,6 +1,7 @@
 //! The file system storage module for shoal
 
 use byte_unit::Byte;
+use conf::FileSystemTableConf;
 use futures::stream::FuturesUnordered;
 use futures::{AsyncWriteExt, StreamExt};
 use glommio::io::{DmaStreamWriter, DmaStreamWriterBuilder, OpenOptions};
@@ -16,6 +17,7 @@ use std::sync::Arc;
 use tracing::instrument;
 
 mod compactor;
+pub mod conf;
 mod map;
 mod reader;
 
@@ -24,6 +26,7 @@ use map::ArchiveMap;
 use reader::IntentLogReader;
 
 use super::{CompactionJob, Intents, ShoalStorage};
+use crate::server::conf::TableSettings;
 use crate::server::messages::QueryMetadata;
 use crate::shared::responses::{Response, ResponseAction};
 use crate::{
@@ -50,8 +53,8 @@ pub struct FileSystem<T: ShoalTable> {
     pending: VecDeque<(u64, QueryMetadata, ResponseAction<T>)>,
     /// The medium priority task queue
     medium_priority: TaskQueueHandle,
-    /// The config for shoal
-    pub conf: Conf,
+    /// The config for this table
+    pub table_conf: FileSystemTableConf,
     /// The channel to send intent log compactions on
     pub intent_tx: AsyncSender<CompactionJob>,
     /// The different tasks spawned by this shards file system storage engine
@@ -92,14 +95,9 @@ where
         compact_rx: AsyncReceiver<CompactionJob>,
     ) -> Result<(), ServerError> {
         // build a compactor
-        let compactor = FileSystemCompactor::<T>::with_capacity(
-            &self.shard_name,
-            &self.conf,
-            compact_rx,
-            &self.map,
-            1000,
-        )
-        .await?;
+        let compactor =
+            FileSystemCompactor::<T>::with_capacity(&self.table_conf, compact_rx, &self.map, 1000)
+                .await?;
         // spawn this compactor
         let compactor_handle = glommio::spawn_local_into(
             async move { compactor.start().await },
@@ -111,9 +109,15 @@ where
     }
 
     /// Get a new stream writer for this shard
-    async fn new_writer(name: &str, conf: &Conf) -> Result<DmaStreamWriter, ServerError> {
-        // build the path to this shards intent log
-        let intent_path = conf.storage.fs.intent.join(format!("{name}-active"));
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - This shards name
+    /// * `table_conf` - The config for this table's storage engine
+    async fn new_writer(
+        intent_path: &PathBuf,
+        table_conf: &FileSystemTableConf,
+    ) -> Result<DmaStreamWriter, ServerError> {
         // open this file
         // don't open with append or new writes will overwrite old ones
         let file = OpenOptions::new()
@@ -124,7 +128,8 @@ where
             .await?;
         // wrap our file in a stream writer
         let writer = DmaStreamWriterBuilder::new(file)
-            //.with_buffer_size(500)
+            .with_buffer_size(table_conf.latency_sensitive.buffer_size)
+            .with_write_behind(table_conf.latency_sensitive.write_behind)
             .build();
         Ok(writer)
     }
@@ -139,10 +144,12 @@ where
             let flushed_pos = self.intent_log.current_flushed_pos();
             // close our intent log
             self.intent_log.close().await?;
+            // get our base intent path
+            let mut new_path = self.table_conf.get_intent_path(T::name());
             // build the file name to rename our current intent log too
             let name = format!("{}-inactive-{}", self.shard_name, self.generation);
             // build the path to this shards new intent log
-            let new_path = self.conf.storage.fs.intent.join(name);
+            new_path.push(name);
             // rename our old intent log
             glommio::io::rename(&self.intent_path, &new_path).await?;
             // create an intent log compaction job
@@ -150,7 +157,7 @@ where
                 .send(CompactionJob::IntentLog(new_path))
                 .await?;
             // get a new writer
-            let new_writer = Self::new_writer(&self.shard_name, &self.conf).await?;
+            let new_writer = Self::new_writer(&self.intent_path, &self.table_conf).await?;
             // set our new writer
             self.intent_log = new_writer;
             // increment our writer generation
@@ -174,6 +181,9 @@ where
         rkyv::Deserialize<T::Update, Strategy<Pool, rkyv::rancor::Error>>,
     <<T as ShoalTable>::Sort as Archive>::Archived: Ord,
 {
+    /// The settings for this storage engine
+    type Settings = FileSystemTableConf;
+
     /// Create a new instance of this storage engine
     ///
     /// # Arguments
@@ -186,24 +196,20 @@ where
         conf: &Conf,
         medium_priority: TaskQueueHandle,
     ) -> Result<Self, ServerError> {
+        // get this tables config
+        let table_conf = Self::get_settings(conf)?;
+        // setup our paths
+        table_conf.setup_paths(T::name()).await?;
         // build the path to this shards intent log
-        let intent_path = conf.storage.fs.intent.join(format!("{shard_name}-active"));
-        // open this file
-        // don't open with append or new writes will overwrite old ones
-        let file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .dma_open(&intent_path)
-            .await?;
-        // wrap our file in a stream writer
-        let intent_log = DmaStreamWriterBuilder::new(file)
-            //.with_buffer_size(500)
-            .build();
+        let mut intent_path = table_conf.get_intent_path(T::name());
+        // add our shard name
+        intent_path.push(format!("{shard_name}-active"));
+        // build the writer for this shards intent log
+        let intent_log = Self::new_writer(&intent_path, &table_conf).await?;
         // build the channel to our compactor
         let (intent_tx, intent_rx) = kanal::unbounded_async();
         // get this shards shared archive map
-        let map = Arc::new(ArchiveMap::new(shard_name, conf).await?);
+        let map = Arc::new(ArchiveMap::new(shard_name, T::name(), &table_conf).await?);
         // build our file system storage module
         let mut fs = FileSystem {
             shard_name: shard_name.to_owned(),
@@ -212,7 +218,7 @@ where
             generation: 0,
             pending: VecDeque::with_capacity(1000),
             medium_priority,
-            conf: conf.clone(),
+            table_conf,
             intent_tx,
             tasks: FuturesUnordered::default(),
             map,
@@ -220,6 +226,21 @@ where
         // spawn our intent compactor
         fs.spawn_intent_compactor(intent_rx).await?;
         Ok(fs)
+    }
+
+    /// Get a tables config or use default settings
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - The shoal config to get settings from
+    fn get_settings(conf: &Conf) -> Result<Self::Settings, ServerError> {
+        match conf.storage.tables.get(T::name()) {
+            // make sure these are the right type of settings
+            Some(conf_enum) => match conf_enum {
+                TableSettings::FS(table_conf) => Ok(table_conf.clone()),
+            },
+            None => Ok(conf.storage.default.filesystem.clone()),
+        }
     }
 
     /// Write this new row to our storage
@@ -340,15 +361,22 @@ where
     /// * `path` - The path to the intent log to read in
     #[instrument(
         name = "ShoalStorage::<FileSystem>::read_intents",
-        skip(partitions),
+        skip(conf, partitions),
         err(Debug)
     )]
     async fn read_intents(
-        path: &PathBuf,
+        shard_name: &str,
+        conf: &Conf,
         partitions: &mut HashMap<u64, Partition<T>>,
     ) -> Result<(), ServerError> {
+        // get this tables settings
+        let table_conf = Self::get_settings(conf)?;
+        // get our intent log path for this table
+        let mut intent_path = table_conf.get_intent_path(T::name());
+        // add our shard name
+        intent_path.push(shard_name);
         // create an intent log reader
-        let mut reader = IntentLogReader::new(path).await?;
+        let mut reader = IntentLogReader::new(&intent_path).await?;
         // iterate over the entries in this intent log
         while let Some(read) = reader.next_buff().await? {
             // try to deserialize this row from our intent log

@@ -1,8 +1,7 @@
 //! The different storage backends supported by shoal
 
 use glommio::TaskQueueHandle;
-use kanal::AsyncReceiver;
-use rkyv::{de::Pool, rancor::Strategy, Archive, Deserialize, Portable, Serialize};
+use rkyv::{Archive, Deserialize, Serialize};
 use std::{collections::HashMap, net::SocketAddr, path::PathBuf};
 
 use crate::{
@@ -14,7 +13,7 @@ use crate::{
     },
 };
 
-mod fs;
+pub mod fs;
 
 pub use fs::FileSystem;
 
@@ -43,6 +42,9 @@ pub enum CompactionJob {
 }
 
 pub trait ShoalStorage<T: ShoalTable>: Sized {
+    /// The settings for this storage engine
+    type Settings;
+
     /// Create a new instance of this storage engine
     ///
     /// # Arguments
@@ -56,6 +58,13 @@ pub trait ShoalStorage<T: ShoalTable>: Sized {
         conf: &Conf,
         medium_priority: TaskQueueHandle,
     ) -> Result<Self, ServerError>;
+
+    /// Get a tables config or use default settings
+    ///
+    /// # Arguments
+    ///
+    /// * `conf` - The shoal config to get settings from
+    fn get_settings(conf: &Conf) -> Result<Self::Settings, ServerError>;
 
     /// Write this new row to storage
     ///
@@ -110,10 +119,13 @@ pub trait ShoalStorage<T: ShoalTable>: Sized {
     ///
     /// # Arguments
     ///
+    /// * `shard_name` - The name of the shard to read intents for
+    /// * `conf` - A Shoal config
     /// * `path` - The path to the intent log to read in
     #[allow(async_fn_in_trait)]
     async fn read_intents(
-        path: &PathBuf,
+        shard_name: &str,
+        conf: &Conf,
         partitions: &mut HashMap<u64, Partition<T>>,
     ) -> Result<(), ServerError>;
 

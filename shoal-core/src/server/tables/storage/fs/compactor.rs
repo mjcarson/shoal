@@ -2,7 +2,7 @@
 
 use byte_unit::Byte;
 use futures::AsyncWriteExt;
-use glommio::io::{DmaFile, DmaStreamWriter, OpenOptions};
+use glommio::io::{DmaFile, DmaStreamWriter};
 use kanal::AsyncReceiver;
 use rkyv::de::Pool;
 use rkyv::rancor::{Error, Strategy};
@@ -12,9 +12,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{event, instrument, Level};
 
+use super::conf::FileSystemTableConf;
 use super::map::{ArchiveEntry, ArchiveMap};
 use super::IntentLogReader;
-use crate::server::{Conf, ServerError};
+use crate::server::ServerError;
 use crate::shared::traits::{RkyvSupport, ShoalTable};
 use crate::storage::{ArchivedIntents, CompactionJob, Intents};
 use crate::tables::partitions::Partition;
@@ -32,10 +33,12 @@ pub struct FileSystemCompactor<T: ShoalTable> {
     loaded: HashMap<u64, Partition<T>>,
     /// The entries to add to our archive map after syncing writes
     entries: Vec<(u64, ArchiveEntry)>,
-    /// The config for shoal
-    conf: Conf,
+    /// The config for this table
+    table_conf: FileSystemTableConf,
     /// The channel to listen for paths to intent logs to compact
     jobs_rx: AsyncReceiver<CompactionJob>,
+    /// The path to this tables archive folder
+    archive_path: PathBuf,
 }
 
 impl<T: ShoalTable> FileSystemCompactor<T>
@@ -49,8 +52,7 @@ where
     /// Create a new filesystem compactor
     #[instrument(name = "FileSystemCompactor::with_capacity", skip_all, err(Debug))]
     pub async fn with_capacity(
-        shard_name: &str,
-        conf: &Conf,
+        conf: &FileSystemTableConf,
         jobs_rx: AsyncReceiver<CompactionJob>,
         map: &Arc<ArchiveMap>,
         capacity: usize,
@@ -69,8 +71,9 @@ where
             changes: HashMap::with_capacity(capacity),
             loaded: HashMap::with_capacity(capacity),
             entries: Vec::with_capacity(capacity),
-            conf: conf.clone(),
+            table_conf: conf.clone(),
             jobs_rx,
+            archive_path: conf.get_archive_path(T::name()),
         };
         Ok(compactor)
     }
@@ -117,8 +120,8 @@ where
                 let handle = match pinned.get(&entry.archive) {
                     Some(archive) => archive,
                     None => {
-                        // get the path to this archive
-                        let path = self.conf.storage.fs.get_archive_path(&entry.archive);
+                        // add this archive id onto our path
+                        let path = self.archive_path.join(&entry.archive.to_string());
                         // get a handle to this archive
                         let handle = DmaFile::open(&path).await?;
                         // insert this handle
@@ -253,7 +256,7 @@ where
                 // get this archives valid data entries
                 if let Some(entries) = sorted.entries.remove(&old_id) {
                     // build the path to this archive file
-                    let path = self.conf.storage.fs.get_archive_path(&old_id);
+                    let path = self.archive_path.join(old_id.to_string());
                     // get a handle to this archive
                     let archive = DmaFile::open(&path).await?;
                     // skip this file if its more then 50% utilized

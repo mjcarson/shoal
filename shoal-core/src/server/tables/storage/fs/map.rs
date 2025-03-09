@@ -7,14 +7,15 @@ use papaya::HashMap;
 use rkyv::collections::swiss_table::ArchivedHashMap;
 use rkyv::primitive::ArchivedU64;
 use rkyv::rancor::Error;
-use rkyv::util::AlignedVec;
 use rkyv::{Archive, Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use tracing::instrument;
 use uuid::Uuid;
 
-use crate::server::{Conf, ServerError};
+use crate::server::ServerError;
 
+use super::conf::FileSystemTableConf;
 use super::reader::IntentLogReader;
 
 /// An entry for a partitions data in an archive
@@ -59,6 +60,7 @@ pub struct SerializedMap {
 }
 
 impl SerializedMap {
+    #[instrument(name = "SerializableMap::load_intent_log", skip(self), err(Debug))]
     async fn load_intent_log(&mut self, intent_path: &PathBuf) -> Result<(), ServerError> {
         // get a reader for this intent file
         let mut reader = IntentLogReader::new(intent_path).await?;
@@ -80,6 +82,7 @@ impl SerializedMap {
     /// # Arguments
     ///
     /// * `map_path` - The path to an existing serialized archive map path
+    #[instrument(name = "SerializableMap::new", err(Debug))]
     pub async fn new(map_path: &PathBuf, intent_path: &PathBuf) -> Result<Self, ServerError> {
         // open this shards map file
         let file = OpenOptions::new()
@@ -111,6 +114,7 @@ impl SerializedMap {
         }
     }
 
+    #[instrument(name = "SerializableMap::save", skip_all, err(Debug))]
     pub async fn save(map: &ArchiveMap) -> Result<(), ServerError> {
         // load our current committed map data from disk
         let serializable = Self::new(&map.map_path, &map.intent_path).await?;
@@ -139,6 +143,7 @@ impl SerializedMap {
 /// load a map from disk
 ///
 /// Wow the types are ugly in this function :(
+#[instrument(name = "fs::map::load_map", err(Debug))]
 async fn load_map(
     map_path: &PathBuf,
 ) -> Result<std::collections::HashMap<u64, ArchiveEntry>, ServerError> {
@@ -195,6 +200,8 @@ impl SortedUsageMap {
 /// A map of archives for the file system storage engine
 #[derive(Debug)]
 pub struct ArchiveMap {
+    /// The name of the table we are an archive map for
+    table_name: String,
     /// The currently active archive id
     pub active: Uuid,
     /// A shard local map of what archives contain what data
@@ -211,11 +218,20 @@ pub struct ArchiveMap {
 
 impl ArchiveMap {
     /// Load an archive map for this shard from disk if one exists
-    pub async fn new(shard_name: &str, conf: &Conf) -> Result<Self, ServerError> {
+    #[instrument(name = "ArchiveMap::new", skip(conf), err(Debug))]
+    pub async fn new(
+        shard_name: &str,
+        table_name: &str,
+        conf: &FileSystemTableConf,
+    ) -> Result<Self, ServerError> {
         // get the path to this shards map and its intent log
-        let map_path = conf.storage.fs.get_archive_map_path(shard_name);
-        let temp_map_path = conf.storage.fs.get_temp_archive_map_path(shard_name);
-        let intent_path = conf.storage.fs.get_archive_intent_path(shard_name);
+        let mut map_path = conf.get_archive_map_path(table_name);
+        let mut temp_map_path = conf.get_archive_map_temp_path(table_name);
+        let mut intent_path = conf.get_archive_intent_path(table_name);
+        // add our shard name to our paths
+        map_path.push(shard_name);
+        temp_map_path.push(shard_name);
+        intent_path.push(shard_name);
         // load our serializable map from disk so we can load it into our papaya map
         let serializable = SerializedMap::new(&map_path, &intent_path).await?;
         // start out with an empty papaya map with room for 1k partitions
@@ -227,6 +243,7 @@ impl ArchiveMap {
         }
         // just use empty maps for now
         let map = ArchiveMap {
+            table_name: table_name.to_owned(),
             active: serializable.active,
             to_archive,
             archives: HashMap::with_capacity(1000),
@@ -238,6 +255,7 @@ impl ArchiveMap {
     }
 
     /// Build a writer for this maps data
+    #[instrument(name = "ArchiveMap::new_writer", skip_all, err(Debug))]
     pub async fn new_writer(&self) -> Result<DmaStreamWriter, ServerError> {
         // open a file to our intent log
         let file = OpenOptions::new()
@@ -252,13 +270,19 @@ impl ArchiveMap {
     }
 
     /// Build a writer for the currently active archive writer
-    pub async fn get_active_writer(&self, conf: &Conf) -> Result<DmaStreamWriter, ServerError> {
+    #[instrument(name = "ArchiveMap::get_active_writer", skip_all, err(Debug))]
+    pub async fn get_active_writer(
+        &self,
+        conf: &FileSystemTableConf,
+    ) -> Result<DmaStreamWriter, ServerError> {
         // if we already have the current active file open then just make a writer for it
         match self.archives.pin().get(&self.active) {
             Some(file) => Ok(DmaStreamWriterBuilder::new(file.dup()?).build()),
             None => {
-                // get a new file handle to write too
-                let path = conf.storage.fs.get_archive_path(&self.active);
+                // build the path to this archive
+                let mut path = conf.get_archive_path(&self.table_name);
+                // add our active id
+                path.push(self.active.to_string());
                 // open this file
                 let file = OpenOptions::new()
                     .create(true)
@@ -304,6 +328,7 @@ impl ArchiveMap {
     /// Sort our archives by how much data they have
     ///
     /// They will be sorted from least used to most used.
+    #[instrument(name = "ArchiveMap::sort_by_load", skip_all)]
     pub fn sort_by_load(&self, active_id: Uuid) -> SortedUsageMap {
         // count how many times each archive is used
         let mut used_by: std::collections::HashMap<Uuid, usize> =
@@ -335,6 +360,7 @@ impl ArchiveMap {
     }
 
     /// Serialize and save an archive map to disk
+    #[instrument(name = "ArchiveMap::compact_map", skip_all)]
     pub async fn compact_map(&self) -> Result<DmaStreamWriter, ServerError> {
         // compact and save our current committed map data
         SerializedMap::save(self).await?;
