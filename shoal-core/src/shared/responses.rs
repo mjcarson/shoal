@@ -2,15 +2,15 @@
 use rkyv::{Archive, Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::shared::traits::ShoalTable;
+use crate::shared::traits::ShoalSortedTable;
 
 /// The different response kinds from a query
 #[derive(Debug, Archive, Serialize, Deserialize)]
-pub enum ResponseAction<D: ShoalTable> {
+pub enum ResponseAction<T> {
     /// Whether an insert was successful or not
     Insert(bool),
     /// The response from a get query
-    Get(Option<Vec<D>>),
+    Get(Option<Vec<T>>),
     /// The response from a delete
     Delete(bool),
     /// The response from an update
@@ -19,7 +19,7 @@ pub enum ResponseAction<D: ShoalTable> {
 
 /// A response from a query
 #[derive(Debug, Archive, Serialize, Deserialize)]
-pub struct Response<T: ShoalTable> {
+pub struct Response<T> {
     /// The id for the query we are responding too
     pub id: Uuid,
     /// This response index in the queries vec
@@ -30,7 +30,7 @@ pub struct Response<T: ShoalTable> {
     pub end: bool,
 }
 
-impl<T: ShoalTable> Response<T> {
+impl<T> Response<T> {
     /// Mark this response as the last one
     pub fn end(&mut self) {
         self.end = true;
@@ -39,12 +39,12 @@ impl<T: ShoalTable> Response<T> {
 
 /// The responses from a set of queries
 #[derive(Debug, Archive, Serialize, Deserialize)]
-pub struct Responses<D: ShoalTable> {
+pub struct Responses<D: ShoalSortedTable> {
     /// The responses for our queries
     pub responses: Vec<Response<D>>,
 }
 
-impl<D: ShoalTable> Responses<D> {
+impl<D: ShoalSortedTable> Responses<D> {
     /// Create an empty responses object of the correct size
     ///
     /// # Arguments

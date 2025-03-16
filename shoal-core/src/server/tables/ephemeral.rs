@@ -6,22 +6,22 @@
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
-use super::partitions::Partition;
+use super::partitions::SortedPartition;
 use crate::server::Conf;
-use crate::shared::queries::{Get, Query, Update};
+use crate::shared::queries::{SortedGet, SortedQuery, SortedUpdate};
 use crate::shared::responses::{Response, ResponseAction};
-use crate::shared::traits::ShoalTable;
+use crate::shared::traits::ShoalSortedTable;
 
 /// A Table that stores all data only in memory
 #[derive(Debug)]
-pub struct EphemeralTable<T: ShoalTable> {
+pub struct EphemeralTable<T: ShoalSortedTable> {
     /// The rows in this table
-    pub partitions: BTreeMap<u64, Partition<T>>,
+    pub partitions: BTreeMap<u64, SortedPartition<T>>,
     /// The total size of all data on this shard
     memory_usage: usize,
 }
 
-impl<T: ShoalTable> Default for EphemeralTable<T> {
+impl<T: ShoalSortedTable> Default for EphemeralTable<T> {
     /// Build a default empty table
     fn default() -> Self {
         Self {
@@ -31,7 +31,7 @@ impl<T: ShoalTable> Default for EphemeralTable<T> {
     }
 }
 
-impl<T: ShoalTable> EphemeralTable<T> {
+impl<T: ShoalSortedTable> EphemeralTable<T> {
     /// Create an ephemeral shoal table
     ///
     /// # Arguments
@@ -49,19 +49,19 @@ impl<T: ShoalTable> EphemeralTable<T> {
         &mut self,
         id: Uuid,
         index: usize,
-        query: Query<T>,
+        query: SortedQuery<T>,
         end: bool,
     ) -> Response<T> {
         // execute the correct query type
         let data = match query {
             // insert a row into this partition
-            Query::Insert { row, .. } => self.insert(row).await,
+            SortedQuery::Insert { row, .. } => self.insert(row).await,
             // get a row from this partition
-            Query::Get(get) => self.get(&get).await,
+            SortedQuery::Get(get) => self.get(&get).await,
             // delete a row from this partition
-            Query::Delete { key, sort_key } => self.delete(key, &sort_key).await,
+            SortedQuery::Delete { key, sort_key } => self.delete(key, &sort_key).await,
             // Update a row in a target partition
-            Query::Update(update) => self.update(update).await,
+            SortedQuery::Update(update) => self.update(update).await,
         };
         // build the response for this query
         Response {
@@ -84,7 +84,7 @@ impl<T: ShoalTable> EphemeralTable<T> {
         let partition = self
             .partitions
             .entry(key)
-            .or_insert_with(|| Partition::new(key));
+            .or_insert_with(|| SortedPartition::new(key));
         // insert this row into this partition
         let (size_diff, action) = partition.insert(row);
         // adjust our total shards memory usage
@@ -98,7 +98,7 @@ impl<T: ShoalTable> EphemeralTable<T> {
     ///
     /// * `get` - The get parameters to use
     /// * `responses` - The response object to use
-    async fn get(&mut self, get: &Get<T>) -> ResponseAction<T> {
+    async fn get(&mut self, get: &SortedGet<T>) -> ResponseAction<T> {
         // build a vec for the data we found
         let mut data = Vec::new();
         // build the sort key
@@ -149,7 +149,7 @@ impl<T: ShoalTable> EphemeralTable<T> {
     /// # Arguments
     ///
     /// * `update` - The update to apply to a row in this table
-    async fn update(&mut self, update: Update<T>) -> ResponseAction<T> {
+    async fn update(&mut self, update: SortedUpdate<T>) -> ResponseAction<T> {
         // get this rows partition
         let updated = match self.partitions.get_mut(&update.partition_key) {
             Some(partition) => partition.update(&update),

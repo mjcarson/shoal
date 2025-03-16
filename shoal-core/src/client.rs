@@ -2,8 +2,9 @@
 
 use bytes::BytesMut;
 use dashmap::mapref::entry::Entry;
-use dashmap::DashMap;
+//use dashmap::DashMap;
 use kanal::{AsyncReceiver, AsyncSender};
+use papaya::HashMap;
 use rkyv::de::Pool;
 use rkyv::rancor::Strategy;
 use rkyv::Archive;
@@ -17,14 +18,14 @@ use uuid::Uuid;
 pub mod errors;
 
 use super::shared::queries::Queries;
-use crate::shared::traits::{RkyvSupport, ShoalDatabase, ShoalQuery, ShoalResponse};
+use crate::shared::traits::{QuerySupport, RkyvSupport, ShoalQuery, ShoalResponse};
 pub use errors::Errors;
 
-pub struct Shoal<S: ShoalDatabase> {
+pub struct Shoal<S: QuerySupport> {
     /// The udp socket to send and receive messages on
     socket: Arc<UdpSocket>,
     /// A concurrent map of what channel to send streaming results too
-    pub channel_map: Arc<DashMap<Uuid, AsyncSender<BytesMut>>>,
+    pub channel_map: Arc<HashMap<Uuid, AsyncSender<BytesMut>>>,
     /// The channel to add unused response streams too
     channel_queue_tx: AsyncSender<(AsyncSender<BytesMut>, AsyncReceiver<BytesMut>)>,
     /// A channel of channels to send streaming results over
@@ -35,7 +36,7 @@ pub struct Shoal<S: ShoalDatabase> {
     phantom: PhantomData<S>,
 }
 
-impl<S: ShoalDatabase> Shoal<S> {
+impl<S: QuerySupport> Shoal<S> {
     /// Create a new shoal client
     ///
     /// # Arguments
@@ -47,7 +48,7 @@ impl<S: ShoalDatabase> Shoal<S> {
         // build a channel for sending and recieving response streams on
         let (channel_queue_tx, channel_queue_rx) = kanal::bounded_async(8192);
         // create a map for storing what channels to send response streams on
-        let channel_map = Arc::new(DashMap::with_capacity(100));
+        let channel_map = Arc::new(HashMap::with_capacity(1024));
         // create the response proxy for this client
         let proxy = ShoalUdpProxy::<S::QueryKinds>::new(socket.clone(), channel_map.clone());
         // start our proxy
@@ -82,16 +83,15 @@ impl<S: ShoalDatabase> Shoal<S> {
         };
         // keep trying new query ids until we don't hit a collision
         loop {
-            // try to add this query to our reponse stream
-            match self.channel_map.entry(queries.id) {
-                Entry::Occupied(_) => queries.id = Uuid::new_v4(),
-                Entry::Vacant(entry) => {
-                    // add the tx side of our channel
-                    entry.insert(tx.clone());
-                    // stop generating new ids
-                    break;
-                }
+            // check if this id already exists in our channel map
+            if self.channel_map.pin().get(&queries.id).is_none() {
+                // insert this id
+                self.channel_map.pin().insert(queries.id, tx.clone());
+                // we found a unique query id so stop trying to find a new id
+                break;
             }
+            // try to generate a unique query id
+            queries.id = Uuid::new_v4();
         }
         // return our channels
         Ok((tx, rx))
@@ -122,7 +122,7 @@ impl<S: ShoalDatabase> Shoal<S> {
     }
 }
 
-impl<S: ShoalDatabase> Drop for Shoal<S> {
+impl<S: QuerySupport> Drop for Shoal<S> {
     fn drop(&mut self) {
         // stop our proxy
         self.proxy_handle.abort();
@@ -135,7 +135,7 @@ struct ShoalUdpProxy<S: ShoalQuery> {
     /// The udp socket to listen on
     socket: Arc<UdpSocket>,
     /// A concurrent map of what channel to send streaming results too
-    channel_map: Arc<DashMap<Uuid, AsyncSender<BytesMut>>>,
+    channel_map: Arc<HashMap<Uuid, AsyncSender<BytesMut>>>,
     /// The database we are getting responses from
     phantom: PhantomData<S>,
 }
@@ -150,7 +150,7 @@ impl<S: ShoalQuery> ShoalUdpProxy<S> {
     /// * `shutdown` - A flag used to tell the proxy to shutdown
     pub fn new(
         socket: Arc<UdpSocket>,
-        channel_map: Arc<DashMap<Uuid, AsyncSender<BytesMut>>>,
+        channel_map: Arc<HashMap<Uuid, AsyncSender<BytesMut>>>,
     ) -> Self {
         // Init our pool of bytes
         let pool = BytesMut::zeroed(8192);
@@ -167,7 +167,7 @@ impl<S: ShoalQuery> ShoalUdpProxy<S> {
     pub async fn start(mut self) {
         // Wait for new messages from our server and proxy the respones to the right channel
         loop {
-            if self.pool.len() < 256 {
+            if self.pool.len() < 2048 {
                 // try to extend our pool to reclaim storage
                 self.pool.reserve(4192);
                 // zero out our pool
@@ -179,19 +179,18 @@ impl<S: ShoalQuery> ShoalUdpProxy<S> {
             let data = self.pool.split_to(read);
             // try to deserialize our responses query id
             let id = S::response_query_id(&data[..]);
-            //let id = S::response_query_id(&data[..]);
             // get the channel for this query
-            match self.channel_map.get(id) {
+            match self.channel_map.pin_owned().get(id) {
                 // send our response to the right shoal stream
                 Some(tx) => tx.send(data).await.unwrap(),
-                None => panic!("Missing stream channel!"),
+                None => panic!("Missing stream channel! -> {id} {read}"),
             }
         }
     }
 }
 
 /// Allow types to be retrieved from a [`ShoalStream`]
-pub trait FromShoal<S: ShoalDatabase>: Sized {
+pub trait FromShoal<S: QuerySupport>: Sized {
     /// The response kinds to deserialize from
     type ResponseKinds: std::fmt::Debug;
 
@@ -204,7 +203,7 @@ pub trait FromShoal<S: ShoalDatabase>: Sized {
 }
 
 /// The reponses from our queries in a stream
-pub struct ShoalStream<S: ShoalDatabase> {
+pub struct ShoalStream<S: QuerySupport> {
     /// This channels id
     id: Uuid,
     /// The transmission side of the response stream channel
@@ -212,7 +211,7 @@ pub struct ShoalStream<S: ShoalDatabase> {
     /// the receive side of the response stream channel
     response_rx: Option<AsyncReceiver<BytesMut>>,
     /// A concurrent map of what channel to send streaming results too
-    channel_map: Arc<DashMap<Uuid, AsyncSender<BytesMut>>>,
+    channel_map: Arc<HashMap<Uuid, AsyncSender<BytesMut>>>,
     /// The channel to add unused response streams too
     channel_queue_tx: AsyncSender<(AsyncSender<BytesMut>, AsyncReceiver<BytesMut>)>,
     /// The next message to be returned
@@ -223,7 +222,7 @@ pub struct ShoalStream<S: ShoalDatabase> {
     phantom: PhantomData<S>,
 }
 
-impl<S: ShoalDatabase> ShoalStream<S>
+impl<S: QuerySupport> ShoalStream<S>
 where
     <S::ResponseKinds as Archive>::Archived:
         rkyv::Deserialize<S::ResponseKinds, Strategy<Pool, rkyv::rancor::Error>>,
@@ -303,7 +302,7 @@ where
             // if this is the final response then return our channels
             if end {
                 // remove this stream id from our channel map
-                self.channel_map.remove(&self.id);
+                self.channel_map.pin().remove(&self.id);
                 // take the ends of our channel
                 if let (Some(tx), Some(rx)) = (self.response_tx.take(), self.response_rx.take()) {
                     self.channel_queue_tx.send((tx, rx)).await?;
@@ -326,7 +325,7 @@ where
             // if this is the final response then take return our channels
             if end {
                 // remove this stream id from our channel map
-                self.channel_map.remove(&self.id);
+                self.channel_map.pin().remove(&self.id);
                 // take the ends of our channel
                 if let (Some(tx), Some(rx)) = (self.response_tx.take(), self.response_rx.take()) {
                     self.channel_queue_tx.send((tx, rx)).await?;

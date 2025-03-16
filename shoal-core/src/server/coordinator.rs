@@ -23,8 +23,11 @@ use super::{
     shard::ShardContact,
 };
 use super::{Conf, ServerError};
-use crate::shared::queries::Queries;
-use crate::shared::traits::{ShoalDatabase, ShoalQuery};
+use crate::shared::{
+    queries::ArchivedQueries,
+    traits::{RkyvSupport, ShoalDatabase, ShoalQuery},
+};
+use crate::shared::{queries::Queries, traits::QuerySupport};
 
 /// Coordinates traffic between this node and others
 pub struct Coordinator<S: ShoalDatabase> {
@@ -46,8 +49,10 @@ pub struct Coordinator<S: ShoalDatabase> {
 
 impl<S: ShoalDatabase> Coordinator<S>
 where
-    <S::QueryKinds as Archive>::Archived:
-        rkyv::Deserialize<S::QueryKinds, Strategy<Pool, rkyv::rancor::Error>>,
+    <<S::ClientType as QuerySupport>::QueryKinds as Archive>::Archived: rkyv::Deserialize<
+        <S::ClientType as QuerySupport>::QueryKinds,
+        Strategy<Pool, rkyv::rancor::Error>,
+    >,
 {
     /// Start a new coordinator thread
     #[allow(clippy::future_not_send)]
@@ -121,7 +126,7 @@ where
     async fn send_to_shard(
         &mut self,
         addr: SocketAddr,
-        queries: Queries<S>,
+        queries: Queries<S::ClientType>,
     ) -> Result<(), ServerError> {
         // initialize a vec to store the shards we find
         let mut found = Vec::with_capacity(3);
@@ -164,12 +169,9 @@ where
         // get the slice to deserialize
         let readable = &data[..read];
         // load our arhived query from buffer
-        //let archived = S::QueryKinds::load(readable);d
-        let archived = S::unarchive_queries(readable);
+        let archived = <Queries<S::ClientType> as RkyvSupport>::load(readable);
         // deserialize our queries
-        // TODO do we have to do this every time?
-        let queries = rkyv::deserialize::<Queries<S>, rkyv::rancor::Error>(archived).unwrap();
-        // let quries = S::QueryKinds::deserialize(archived).unwrap();
+        let queries = <Queries<S::ClientType> as RkyvSupport>::deserialize(archived).unwrap();
         // send each query to the correct shard
         self.send_to_shard(addr, queries).await.unwrap();
     }
@@ -242,7 +244,7 @@ async fn mesh_listener<S: ShoalDatabase>(
 async fn client_listener<S: ShoalDatabase>(udp_sock: UdpSocket, kanal_tx: AsyncSender<Msg<S>>) {
     loop {
         // TODO reuse buffers instead of making new ones
-        let mut data = BytesMut::zeroed(8192);
+        let mut data = BytesMut::zeroed(16384);
         // try to read a single datagram from our udp socket
         let (read, addr) = udp_sock.recv_from(&mut data).await.unwrap();
         // forward our clients message

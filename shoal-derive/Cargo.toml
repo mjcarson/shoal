@@ -11,7 +11,7 @@ path = "src/lib.rs"
 proc-macro = true
 
 [dependencies]
-shoal-core = "0.1.0"
+shoal-core = { version = "0.1.0", path = "../shoal-core" }
 darling = "0.20.10"
 proc-macro2 = "1.0.86"
 quote = "1.0.36"

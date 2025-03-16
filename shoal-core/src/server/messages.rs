@@ -5,10 +5,9 @@ use std::net::SocketAddr;
 use uuid::Uuid;
 
 use super::shard::ShardInfo;
-use crate::shared::traits::ShoalDatabase;
+use crate::shared::traits::{QuerySupport, ShoalDatabase};
 
 /// The messages that can be sent in shoal
-#[derive(Debug)]
 pub enum Msg<S: ShoalDatabase> {
     /// A message from our node local mesh
     Mesh { shard: usize, msg: MeshMsg<S> },
@@ -58,7 +57,6 @@ impl QueryMetadata {
 }
 
 /// The messages that can be sent over of node local mesh
-#[derive(Debug)]
 pub enum MeshMsg<S: ShoalDatabase> {
     /// Join this nodes token ring
     Join(ShardInfo),
@@ -67,7 +65,7 @@ pub enum MeshMsg<S: ShoalDatabase> {
         /// The metadata about a query
         meta: QueryMetadata,
         /// The query to execute
-        query: S::QueryKinds,
+        query: <S::ClientType as QuerySupport>::QueryKinds,
     },
     /// Tell this shard to shutdown
     Shutdown,
@@ -80,7 +78,7 @@ pub enum ShardMsg<D: ShoalDatabase> {
         /// The metadata about a query
         meta: QueryMetadata,
         /// The query to execute
-        query: D::QueryKinds,
+        query: <D::ClientType as QuerySupport>::QueryKinds,
     },
     /// Tell this shard to shutdown
     Shutdown,
