@@ -11,12 +11,17 @@ use rkyv::{Archive, Serialize};
 use std::net::SocketAddr;
 use uuid::Uuid;
 
+mod storable;
+mod unsorted;
+
 use super::queries::ArchivedQueries;
-use super::queries::{Queries, Update};
+use super::queries::{Queries, SortedUpdate};
 use crate::server::messages::QueryMetadata;
 use crate::server::ring::Ring;
 use crate::server::shard::ShardInfo;
 use crate::server::{Conf, ServerError};
+
+pub use unsorted::ShoalUnsortedTable;
 
 impl RkyvSupport for String {}
 
@@ -75,13 +80,24 @@ pub trait ShoalResponse: std::fmt::Debug + RkyvSupport + Sized + Send {
     fn is_end_of_stream(&self) -> bool;
 }
 
-/// The core trait that all databases in shoal must support
-pub trait ShoalDatabase: 'static + Sized {
+pub trait QuerySupport: 'static {
     /// The different tables or types of queries we will handle
     type QueryKinds: ShoalQuery;
 
     /// The different tables we can get responses from
     type ResponseKinds: ShoalResponse;
+}
+
+/// The core trait that all databases in shoal must support
+pub trait ShoalDatabase: 'static + Sized {
+    /// This databases external client type
+    type ClientType: QuerySupport;
+
+    ///// The different tables or types of queries we will handle
+    //type QueryKinds: ShoalQuery;
+
+    ///// The different tables we can get responses from
+    //type ResponseKinds: ShoalResponse;
 
     /// Create a new shoal db instance
     ///
@@ -98,15 +114,15 @@ pub trait ShoalDatabase: 'static + Sized {
 
     /// Build a default queries bundle
     #[must_use]
-    fn queries() -> Queries<Self> {
+    fn queries() -> Queries<Self::ClientType> {
         Queries::default()
     }
 
     /// Deserialize our query types
     #[cfg(feature = "server")]
-    fn unarchive_queries(buff: &[u8]) -> &ArchivedQueries<Self> {
+    fn unarchive_queries(buff: &[u8]) -> &ArchivedQueries<Self::ClientType> {
         // load an archived type from a slice
-        unsafe { rkyv::access_unchecked::<ArchivedQueries<Self>>(&buff) }
+        unsafe { rkyv::access_unchecked::<ArchivedQueries<Self::ClientType>>(&buff) }
     }
 
     /// Handle messages for different table types
@@ -115,8 +131,11 @@ pub trait ShoalDatabase: 'static + Sized {
     async fn handle(
         &mut self,
         meta: QueryMetadata,
-        typed_query: Self::QueryKinds,
-    ) -> Option<(SocketAddr, Self::ResponseKinds)>;
+        typed_query: <Self::ClientType as QuerySupport>::QueryKinds,
+    ) -> Option<(
+        SocketAddr,
+        <Self::ClientType as QuerySupport>::ResponseKinds,
+    )>;
 
     /// Flush any in flight writes to disk
     #[allow(async_fn_in_trait)]
@@ -132,7 +151,10 @@ pub trait ShoalDatabase: 'static + Sized {
     #[cfg(feature = "server")]
     async fn handle_flushed(
         &mut self,
-        flushed: &mut Vec<(SocketAddr, Self::ResponseKinds)>,
+        flushed: &mut Vec<(
+            SocketAddr,
+            <Self::ClientType as QuerySupport>::ResponseKinds,
+        )>,
     ) -> Result<(), ServerError>;
 
     /// Shutdown this table and flush any data to disk if needed
@@ -141,21 +163,12 @@ pub trait ShoalDatabase: 'static + Sized {
     async fn shutdown(&mut self) -> Result<(), ServerError>;
 }
 
-pub trait ShoalTable: std::fmt::Debug + Clone + RkyvSupport + Sized {
+pub trait PartitionKeySupport: std::fmt::Debug + Clone + RkyvSupport + Sized {
     /// The partition key type for this data
     type PartitionKey;
 
-    /// The updates that can be applied to this table
-    type Update: RkyvSupport + std::fmt::Debug + Clone;
-
-    /// The sort type for this data
-    type Sort: Ord + RkyvSupport + std::fmt::Debug + From<Self::Sort> + Clone;
-
     /// The name of this table
     fn name() -> &'static str;
-
-    /// Build the sort tuple for this row
-    fn get_sort(&self) -> &Self::Sort;
 
     /// Get this rows partition key
     fn get_partition_key(&self) -> u64;
@@ -169,30 +182,19 @@ pub trait ShoalTable: std::fmt::Debug + Clone + RkyvSupport + Sized {
 
     /// Get the partition key for this row from an archived value
     fn get_partition_key_from_archived_insert(intent: &<Self as Archive>::Archived) -> u64;
+}
 
-    ///// Deserialize a row from its archived format
-    /////
-    ///// # Arguments
-    /////
-    ///// * `archived` - The archived data to deserialize
-    //fn deserialize(archived: &<Self as Archive>::Archived) -> Self;
-    ////    // deserialize our row
-    ////    archived.deserialize(&mut rkyv::Infallible).unwrap()
-    ////}
+pub trait ShoalSortedTable:
+    std::fmt::Debug + Clone + RkyvSupport + PartitionKeySupport + Sized
+{
+    /// The updates that can be applied to this table
+    type Update: RkyvSupport + std::fmt::Debug + Clone;
 
-    ///// Deserialize a sort key from its archived format
-    /////
-    ///// # Arguments
-    /////
-    ///// * `archived` - The archived data to deserialize
-    //fn deserialize_sort(archived: &<Self::Sort as Archive>::Archived) -> Self::Sort;
+    /// The sort type for this data
+    type Sort: Ord + RkyvSupport + std::fmt::Debug + From<Self::Sort> + Clone;
 
-    ///// Deserialize an update from its archived format
-    /////
-    ///// # Arguments
-    /////
-    ///// * `archived` - The archived data to deserialize
-    //fn deserialize_update(archived: &<Update<Self> as Archive>::Archived) -> Update<Self>;
+    /// Build the sort tuple for this row
+    fn get_sort(&self) -> &Self::Sort;
 
     /// Any filters to apply when listing/crawling rows
     type Filters: rkyv::Archive + std::fmt::Debug + Clone;
@@ -210,5 +212,5 @@ pub trait ShoalTable: std::fmt::Debug + Clone + RkyvSupport + Sized {
     /// # Arguments
     ///
     /// * `update` - The update to apply to a specific row
-    fn update(&mut self, update: &Update<Self>);
+    fn update(&mut self, update: &SortedUpdate<Self>);
 }

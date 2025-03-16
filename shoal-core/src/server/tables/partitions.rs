@@ -4,12 +4,64 @@ use std::collections::BTreeMap;
 
 use rkyv::{Archive, Deserialize, Serialize};
 
-use crate::shared::queries::{Get, Update};
+use crate::shared::queries::{SortedGet, SortedUpdate, UnsortedGet, UnsortedUpdate};
 use crate::shared::responses::ResponseAction;
-use crate::shared::traits::{RkyvSupport, ShoalTable};
+use crate::shared::traits::{RkyvSupport, ShoalSortedTable, ShoalUnsortedTable};
 
 #[derive(Debug, Archive, Serialize, Deserialize)]
-pub struct Partition<T: ShoalTable> {
+pub struct UnsortedPartition<R: ShoalUnsortedTable> {
+    /// This partitions key
+    pub key: u64,
+    /// The data in this partition
+    pub row: R,
+    /// The size of this partition
+    pub size: usize,
+}
+
+impl<R: ShoalUnsortedTable> UnsortedPartition<R> {
+    /// Create a new partition
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key to this partition
+    pub fn new(key: u64, row: R) -> Self {
+        // get the size of this row
+        let size = std::mem::size_of_val(&row);
+        UnsortedPartition { key, row, size }
+    }
+
+    /// Get some rows from this partition
+    ///
+    /// # Arguments
+    ///
+    /// * `params` - The parameters to use to get the rows
+    /// * `found` - The vector to push the data to return
+    pub fn get(&self, params: &UnsortedGet<R>, found: &mut Vec<R>) {
+        // skip any rows that don't match our filter
+        if let Some(filter) = &params.filters {
+            // check if this row should be filtered out
+            if !R::is_filtered(filter, &self.row) {
+                // skip this row since it doesn't match our filteri
+                return;
+            }
+        }
+        // add this row to our response
+        found.push(self.row.clone());
+    }
+
+    /// Update a row in this partition
+    pub fn update(&mut self, update: &UnsortedUpdate<R>) {
+        // update this rows data
+        self.row.update(&update);
+        // update the size of our row
+        self.size = std::mem::size_of_val(&self.row);
+    }
+}
+
+impl<T: ShoalUnsortedTable> RkyvSupport for UnsortedPartition<T> {}
+
+#[derive(Debug, Archive, Serialize, Deserialize)]
+pub struct SortedPartition<T: ShoalSortedTable> {
     /// This partitions key
     key: u64,
     /// The data in this partition
@@ -18,24 +70,14 @@ pub struct Partition<T: ShoalTable> {
     size: usize,
 }
 
-//impl<T: ShoalTable> Default for Partition<T> {
-//    /// Create a default partition
-//    fn default() -> Self {
-//        Partition {
-//            rows: BTreeMap::default(),
-//            size: 0,
-//        }
-//    }
-//}
-
-impl<T: ShoalTable> Partition<T> {
+impl<T: ShoalSortedTable> SortedPartition<T> {
     /// Create a new partition
     ///
     /// # Arguments
     ///
     /// * `key` - The key to this partition
     pub fn new(key: u64) -> Self {
-        Partition {
+        SortedPartition {
             key,
             rows: BTreeMap::default(),
             size: 0,
@@ -75,7 +117,7 @@ impl<T: ShoalTable> Partition<T> {
     ///
     /// * `params` - The parameters to use to get the rows
     /// * `found` - The vector to push the data to return
-    pub fn get(&self, params: &Get<T>, found: &mut Vec<T>) {
+    pub fn get(&self, params: &SortedGet<T>, found: &mut Vec<T>) {
         // get rows from this partition
         for row in self.rows.values() {
             // skip any rows that don't match our filter
@@ -117,7 +159,7 @@ impl<T: ShoalTable> Partition<T> {
     }
 
     /// Update a row in this partition
-    pub fn update(&mut self, update: &Update<T>) -> bool {
+    pub fn update(&mut self, update: &SortedUpdate<T>) -> bool {
         // get the row to update
         match self.rows.get_mut(&update.sort_key) {
             // we foudn the target row so apply our update
@@ -130,7 +172,7 @@ impl<T: ShoalTable> Partition<T> {
     }
 }
 
-impl<T: ShoalTable> RkyvSupport for Partition<T> where
-    <<T as ShoalTable>::Sort as Archive>::Archived: Ord
+impl<T: ShoalSortedTable> RkyvSupport for SortedPartition<T> where
+    <<T as ShoalSortedTable>::Sort as Archive>::Archived: Ord
 {
 }

@@ -34,7 +34,7 @@ fn add_from_shoal(
         quote! {
             #[automatically_derived]
             impl shoal_core::FromShoal<#db_name> for #name  {
-                type ResponseKinds = <#db_name as shoal_core::shared::traits::ShoalDatabase>::ResponseKinds;
+                type ResponseKinds = <#db_name as shoal_core::shared::traits::QuerySupport>::ResponseKinds;
 
                 fn retrieve(kind: #response_name) -> Result<Option<Vec<Self>>, shoal_core::client::Errors> {
                     // make sure its the right data kind
@@ -65,14 +65,18 @@ fn add_rkyv_support(stream: &mut proc_macro2::TokenStream, name: &Ident) {
     });
 }
 
-/// Extend a token stream with a From<#name> for *QueryKinds implementation
+/// Extend a token stream with a From<#name> for *SortedQueryKinds implementation
 ///
 /// # Arguments
 ///
 /// * `stream` - The stream to extend
 /// * `name` - The name of the type we are extending
 /// * `query_name` - The name of the query type
-fn add_from_for_query(stream: &mut proc_macro2::TokenStream, name: &Ident, query_name: &Ident) {
+fn add_from_for_sorted_query(
+    stream: &mut proc_macro2::TokenStream,
+    name: &Ident,
+    query_name: &Ident,
+) {
     // extend our token stream
     stream.extend(quote! {
         #[automatically_derived]
@@ -81,7 +85,33 @@ fn add_from_for_query(stream: &mut proc_macro2::TokenStream, name: &Ident, query
                 // get our rows partition key
                 let key = #name::get_partition_key(&row);
                 // build our query kind
-                #query_name::#name(Query::Insert { key, row })
+                #query_name::#name(shoal_core::shared::queries::SortedQuery::Insert { key, row })
+            }
+        }
+    });
+}
+
+/// Extend a token stream with a From<#name> for *UnsortedQueryKinds implementation
+///
+/// # Arguments
+///
+/// * `stream` - The stream to extend
+/// * `name` - The name of the type we are extending
+/// * `query_name` - The name of the query type
+fn add_from_for_unsorted_query(
+    stream: &mut proc_macro2::TokenStream,
+    name: &Ident,
+    query_name: &Ident,
+) {
+    // extend our token stream
+    stream.extend(quote! {
+        #[automatically_derived]
+        impl From<#name> for #query_name {
+            fn from(row: #name) -> #query_name {
+                // get our rows partition key
+                let key = #name::get_partition_key(&row);
+                // build our query kind
+                #query_name::#name(shoal_core::shared::queries::UnsortedQuery::Insert { key, row })
             }
         }
     });
@@ -135,8 +165,40 @@ fn add_from_for_query(stream: &mut proc_macro2::TokenStream, name: &Ident, query
 //}
 
 /// Derive the basic traits and functions for a type to be a table in shoal
-#[proc_macro_derive(ShoalTable, attributes(shoal_table))]
-pub fn derive_shoal_table(stream: TokenStream) -> TokenStream {
+#[proc_macro_derive(ShoalSortedTable, attributes(shoal_table))]
+pub fn derive_shoal_sorted_table(stream: TokenStream) -> TokenStream {
+    // parse our target struct
+    let ast = syn::parse_macro_input!(stream as syn::DeriveInput);
+    // get the name of our struct
+    let name = &ast.ident;
+    // we only support structs right now
+    match &ast.data {
+        Data::Struct(DataStruct { .. }) => (),
+        _ => unimplemented!("Only structs are currently supported"),
+    }
+    // start with an empty stream
+    let mut output = quote! {};
+    let attrs =
+        ShoalTable::from_attributes(&ast.attrs).expect("Failed to parse ShoalTable attributes");
+    // get our db and table name as a ident
+    let db_name = Ident::new(&attrs.db, name.span());
+    // get our db and table name as a ident
+    //let table_name = Ident::new(&attrs.name, name.span());
+    // build the name of our kinds
+    let query_name = syn::Ident::new(&format!("{}QueryKinds", db_name), name.span());
+    let response_name = syn::Ident::new(&format!("{}ResponseKinds", db_name), name.span());
+    // extend this type
+    add_from_shoal(&mut output, name, &db_name, &response_name);
+    add_rkyv_support(&mut output, name);
+    add_from_for_sorted_query(&mut output, name, &query_name);
+    //add_shoal_table(&mut output, name);
+    // convert and return our stream
+    output.into()
+}
+
+/// Derive the basic traits and functions for a type to be a table in shoal
+#[proc_macro_derive(ShoalUnsortedTable, attributes(shoal_table))]
+pub fn derive_shoal_unsorted_table(stream: TokenStream) -> TokenStream {
     // parse our target struct
     let ast = syn::parse_macro_input!(stream as syn::DeriveInput);
     // get the name of our struct
@@ -153,13 +215,14 @@ pub fn derive_shoal_table(stream: TokenStream) -> TokenStream {
     // get our db and table name as a ident
     let db_name = Ident::new(&attrs.db, name.span());
     //let table_name = Ident::new(&attrs.name, name.span());
+    let client_name = syn::Ident::new(&format!("{}Client", db_name), name.span());
     // build the name of our kinds
     let query_name = syn::Ident::new(&format!("{}QueryKinds", db_name), name.span());
     let response_name = syn::Ident::new(&format!("{}ResponseKinds", db_name), name.span());
     // extend this type
-    add_from_shoal(&mut output, name, &db_name, &response_name);
+    add_from_shoal(&mut output, name, &client_name, &response_name);
     add_rkyv_support(&mut output, name);
-    add_from_for_query(&mut output, name, &query_name);
+    add_from_for_unsorted_query(&mut output, name, &query_name);
     //add_shoal_table(&mut output, name);
     // convert and return our stream
     output.into()

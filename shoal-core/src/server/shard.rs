@@ -16,7 +16,7 @@ use super::{
     messages::{MeshMsg, ShardMsg},
     Conf,
 };
-use crate::shared::traits::ShoalDatabase;
+use crate::shared::traits::{QuerySupport, ShoalDatabase};
 
 /// How to message a specific shard
 #[derive(Clone, Debug)]
@@ -109,7 +109,7 @@ pub struct Shard<S: ShoalDatabase> {
     /// The UDP socket to send responses on
     socket: UdpSocket,
     /// The responses whose queries have been flushed to disk
-    flushed: Vec<(SocketAddr, S::ResponseKinds)>,
+    flushed: Vec<(SocketAddr, <S::ClientType as QuerySupport>::ResponseKinds)>,
     /// The latency sensitive task queue
     high_priority: TaskQueueHandle,
     /// The medium priority task queue
@@ -213,7 +213,7 @@ impl<S: ShoalDatabase> Shard<S> {
     async fn reply(
         &mut self,
         addr: SocketAddr,
-        response: S::ResponseKinds,
+        response: <S::ClientType as QuerySupport>::ResponseKinds,
     ) -> Result<(), ServerError> {
         // archive our response
         let archived = rkyv::to_bytes::<_>(&response)?;
@@ -233,7 +233,7 @@ impl<S: ShoalDatabase> Shard<S> {
     async fn handle_query(
         &mut self,
         meta: QueryMetadata,
-        query: S::QueryKinds,
+        query: <S::ClientType as QuerySupport>::QueryKinds,
     ) -> Result<(), ServerError> {
         // try to handle this query
         if let Some((addr, response)) = self.tables.handle(meta, query).await {

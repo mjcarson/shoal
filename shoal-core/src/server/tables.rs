@@ -10,4 +10,4 @@ mod persistent;
 pub mod storage;
 
 pub use ephemeral::EphemeralTable;
-pub use persistent::PersistentTable;
+pub use persistent::{PersistentSortedTable, PersistentUnsortedTable};

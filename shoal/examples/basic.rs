@@ -1,20 +1,21 @@
 //! A basic key/value database example
 
-use glommio::TaskQueueHandle;
 use shoal::bencher::Bencher;
 use shoal_core::server::messages::QueryMetadata;
 use shoal_core::server::ring::Ring;
 use shoal_core::server::{Conf, ServerError};
-use shoal_core::shared::queries::{Get, Query, Update};
+use shoal_core::shared::queries::{SortedGet, SortedQuery, SortedUpdate};
 use shoal_core::shared::responses::Response;
 use shoal_core::shared::traits::{
-    RkyvSupport, ShoalDatabase, ShoalQuery, ShoalResponse, ShoalTable,
+    PartitionKeySupport, QuerySupport, RkyvSupport, ShoalDatabase, ShoalQuery, ShoalResponse,
+    ShoalSortedTable,
 };
 use shoal_core::storage::FileSystem;
-use shoal_core::tables::PersistentTable;
+use shoal_core::tables::PersistentSortedTable;
 use shoal_core::{rkyv, ShoalPool};
-use shoal_derive::ShoalTable;
+use shoal_derive::ShoalSortedTable;
 
+use glommio::TaskQueueHandle;
 use gxhash::GxHasher;
 use rkyv::{Archive, Deserialize, Serialize};
 use std::hash::Hasher;
@@ -22,7 +23,7 @@ use std::net::SocketAddr;
 use uuid::Uuid;
 
 // A basic key/value table in Shoal
-#[derive(Debug, Archive, Serialize, Deserialize, Clone, ShoalTable)]
+#[derive(Debug, Archive, Serialize, Deserialize, Clone, ShoalSortedTable)]
 #[shoal_table(db = "Basic")]
 pub struct KeyValue {
     /// A partition key
@@ -44,24 +45,13 @@ impl KeyValue {
     }
 }
 
-impl ShoalTable for KeyValue {
+impl PartitionKeySupport for KeyValue {
     /// The partition key type for this data
     type PartitionKey = String;
-
-    /// The updates that can be applied to this table
-    type Update = String;
-
-    /// The sort type for this data
-    type Sort = String;
 
     /// The name of this table
     fn name() -> &'static str {
         "KeyValue"
-    }
-
-    /// Build the sort tuple for this row
-    fn get_sort(&self) -> &Self::Sort {
-        &self.sort
     }
 
     /// Calculate the partition key for this row
@@ -88,6 +78,19 @@ impl ShoalTable for KeyValue {
         // get our hash
         hasher.finish()
     }
+}
+
+impl ShoalSortedTable for KeyValue {
+    /// The updates that can be applied to this table
+    type Update = String;
+
+    /// The sort type for this data
+    type Sort = String;
+
+    /// Build the sort tuple for this row
+    fn get_sort(&self) -> &Self::Sort {
+        &self.sort
+    }
 
     /// Any filters to apply when listing/crawling rows
     type Filters = String;
@@ -107,7 +110,7 @@ impl ShoalTable for KeyValue {
     /// # Arguments
     ///
     /// * `update` - The update to apply to a specific row
-    fn update(&mut self, update: &Update<Self>) {
+    fn update(&mut self, update: &SortedUpdate<Self>) {
         self.data = update.update.clone();
     }
 }
@@ -153,18 +156,18 @@ impl From<KeyValueGet> for BasicQueryKinds {
     /// Build our a `QueryKind` for getting `KeyValueRows`
     fn from(specific: KeyValueGet) -> Self {
         // build our sort key
-        let key = <KeyValue as ShoalTable>::Sort::from(specific.key);
+        let key = <KeyValue as ShoalSortedTable>::Sort::from(specific.key);
         // build our partition key
-        let partition_key = <KeyValue as ShoalTable>::get_partition_key_from_values(&key);
+        let partition_key = <KeyValue as PartitionKeySupport>::get_partition_key_from_values(&key);
         // build the general query
-        let general = Get {
+        let general = SortedGet {
             partition_keys: vec![partition_key],
             sort_keys: vec![key],
             filters: specific.filters,
             limit: specific.limit,
         };
         // build our query kind
-        Self::KeyValue(Query::Get(general))
+        Self::KeyValue(SortedQuery::Get(general))
     }
 }
 
@@ -204,7 +207,7 @@ impl From<KeyValueDelete> for BasicQueryKinds {
     /// * `delete` - The delete query
     fn from(delete: KeyValueDelete) -> Self {
         // build our delete query
-        let query = Query::Delete {
+        let query = SortedQuery::Delete {
             key: delete.partition_key,
             sort_key: delete.sort_key,
         };
@@ -250,13 +253,13 @@ impl From<KeyValueUpdate> for BasicQueryKinds {
     /// * `specific` - The update query to this table/data type
     fn from(specific: KeyValueUpdate) -> Self {
         // cast this update to a generalized update
-        let general = Update {
+        let general = SortedUpdate {
             partition_key: specific.partition_key,
             sort_key: specific.sort_key,
             update: specific.data,
         };
         // wrap our general update in a query
-        let query = Query::Update(general);
+        let query = SortedQuery::Update(general);
         // wrap our general update in a table specific query
         BasicQueryKinds::KeyValue(query)
     }
@@ -266,7 +269,7 @@ impl From<KeyValueUpdate> for BasicQueryKinds {
 #[derive(Debug, Archive, Serialize, Deserialize, Clone)]
 pub enum BasicQueryKinds {
     /// A query for the key/value table
-    KeyValue(Query<KeyValue>),
+    KeyValue(SortedQuery<KeyValue>),
 }
 
 impl RkyvSupport for BasicQueryKinds {}
@@ -338,16 +341,18 @@ impl ShoalResponse for BasicResponseKinds {
 //#[shoal_db(name = "Basic")]
 pub struct Basic {
     /// A basic key value table
-    pub key_value: PersistentTable<KeyValue, FileSystem<KeyValue>>,
+    pub key_value: PersistentSortedTable<KeyValue, FileSystem>,
 }
 
-impl ShoalDatabase for Basic {
+impl QuerySupport for Basic {
     /// The different tables or types of queries we will handle
     type QueryKinds = BasicQueryKinds;
 
     /// The different tables we can get responses from
     type ResponseKinds = BasicResponseKinds;
+}
 
+impl ShoalDatabase for Basic {
     /// Create a new shoal db instance
     ///
     /// # Arguments
@@ -360,7 +365,7 @@ impl ShoalDatabase for Basic {
         medium_priority: TaskQueueHandle,
     ) -> Result<Self, ServerError> {
         let db = Basic {
-            key_value: PersistentTable::new(shard_name, conf, medium_priority).await?,
+            key_value: PersistentSortedTable::new(shard_name, conf, medium_priority).await?,
         };
         Ok(db)
     }

@@ -8,6 +8,7 @@ use rkyv::de::Pool;
 use rkyv::rancor::{Error, Strategy};
 use rkyv::Archive;
 use std::collections::HashMap;
+use std::marker::PhantomData;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{event, instrument, Level};
@@ -16,11 +17,10 @@ use super::conf::FileSystemTableConf;
 use super::map::{ArchiveEntry, ArchiveMap};
 use super::IntentLogReader;
 use crate::server::ServerError;
-use crate::shared::traits::{RkyvSupport, ShoalTable};
-use crate::storage::{ArchivedIntents, CompactionJob, Intents};
-use crate::tables::partitions::Partition;
+use crate::shared::traits::{PartitionKeySupport, RkyvSupport};
+use crate::storage::{CompactionJob, IntentReadSupport};
 
-pub struct FileSystemCompactor<T: ShoalTable> {
+pub struct FileSystemCompactor<T: IntentReadSupport, R: PartitionKeySupport> {
     /// The shard local shared map of archive/partition data
     map: Arc<ArchiveMap>,
     /// The file to write compacted partition data too
@@ -28,27 +28,20 @@ pub struct FileSystemCompactor<T: ShoalTable> {
     /// The writer for updates to our archive maps partition data
     map_writer: DmaStreamWriter,
     /// The changes to apply to the already compacted partitions on disk
-    changes: HashMap<u64, Vec<Intents<T>>>,
+    changes: HashMap<u64, Vec<T::Intent>>,
     /// The partitions in this intent log
-    loaded: HashMap<u64, Partition<T>>,
+    loaded: HashMap<u64, T>,
     /// The entries to add to our archive map after syncing writes
     entries: Vec<(u64, ArchiveEntry)>,
-    /// The config for this table
-    table_conf: FileSystemTableConf,
     /// The channel to listen for paths to intent logs to compact
     jobs_rx: AsyncReceiver<CompactionJob>,
     /// The path to this tables archive folder
     archive_path: PathBuf,
+    /// The row type this table contains
+    row_kind: PhantomData<R>,
 }
 
-impl<T: ShoalTable> FileSystemCompactor<T>
-where
-    <T as Archive>::Archived: rkyv::Deserialize<T, Strategy<Pool, rkyv::rancor::Error>>,
-    <T::Sort as Archive>::Archived: rkyv::Deserialize<T::Sort, Strategy<Pool, rkyv::rancor::Error>>,
-    <T::Update as Archive>::Archived:
-        rkyv::Deserialize<T::Update, Strategy<Pool, rkyv::rancor::Error>>,
-    <<T as ShoalTable>::Sort as Archive>::Archived: Ord,
-{
+impl<T: IntentReadSupport, R: PartitionKeySupport> FileSystemCompactor<T, R> {
     /// Create a new filesystem compactor
     #[instrument(name = "FileSystemCompactor::with_capacity", skip_all, err(Debug))]
     pub async fn with_capacity(
@@ -71,9 +64,9 @@ where
             changes: HashMap::with_capacity(capacity),
             loaded: HashMap::with_capacity(capacity),
             entries: Vec::with_capacity(capacity),
-            table_conf: conf.clone(),
             jobs_rx,
-            archive_path: conf.get_archive_path(T::name()),
+            archive_path: conf.get_archive_path(R::name()),
+            row_kind: PhantomData,
         };
         Ok(compactor)
     }
@@ -85,16 +78,8 @@ where
         let mut reader = IntentLogReader::new(&path).await?;
         // read all of the intent from this intent log
         while let Some(read) = reader.next_buff().await? {
-            // try to deserialize this row from our intent log
-            let archived = unsafe { rkyv::access_unchecked::<ArchivedIntents<T>>(&read[..]) };
-            // deserialize this intent
-            let intent = rkyv::deserialize::<Intents<T>, rkyv::rancor::Error>(archived)?;
-            // get this intent entries partition key
-            let partition_key = match &intent {
-                Intents::Insert(row) => row.get_partition_key(),
-                Intents::Delete { partition_key, .. } => *partition_key,
-                Intents::Update(update) => update.partition_key,
-            };
+            // get the partition key for this intent
+            let (partition_key, intent) = T::partition_key_and_intent(&read)?;
             // add this change to our changes vec
             let entry = self.changes.entry(partition_key).or_default();
             // add our change
@@ -109,7 +94,10 @@ where
         skip_all,
         err(Debug)
     )]
-    async fn load_partitions_for_intents(&mut self) -> Result<(), ServerError> {
+    async fn load_partitions_for_intents(&mut self) -> Result<(), ServerError>
+    where
+        <T as Archive>::Archived: rkyv::Deserialize<T, Strategy<Pool, rkyv::rancor::Error>>,
+    {
         // crawl over all partitions with intents
         for partition in self.changes.keys() {
             // get this partiitons current archive it it exists
@@ -133,9 +121,9 @@ where
                 // set options for reading from this file
                 let read = handle.read_at(entry.start, entry.size).await?;
                 // load this partitions data
-                let archived = Partition::<T>::load(&read[..]);
+                let archived = <T as RkyvSupport>::load(&read);
                 // deserialize this partition
-                let deserialized = Partition::<T>::deserialize(archived)?;
+                let deserialized = <T as RkyvSupport>::deserialize(archived)?;
                 // add this deserialized partition to our loaded partition map
                 self.loaded.insert(*partition, deserialized);
             }
@@ -148,24 +136,22 @@ where
     async fn apply_intents(&mut self) -> Result<(), ServerError> {
         // replay all intents over our partitions
         for (partition, intents) in self.changes.drain() {
-            // get this partitions data
-            let entry = self
-                .loaded
-                .entry(partition)
-                .or_insert_with(|| Partition::new(partition));
-            // apply all of this partitions intents
-            for intent in intents {
-                match intent {
-                    Intents::Insert(row) => {
-                        entry.insert(row);
-                    }
-                    Intents::Delete { sort_key, .. } => {
-                        entry.remove(&sort_key);
-                    }
-                    Intents::Update(update) => {
-                        entry.update(&update);
-                    }
-                }
+            //// get this partitions current data or start with an empty one
+            //let entry = self
+            //    .loaded
+            //    .entry(partition)
+            //    .or_insert_with(|| T::new(partition));
+            //// apply all of this partitions intents
+            //for intent in intents {
+            //    // apply this intent
+            //    entry.apply_intent(intent);
+            //}
+            // apply these intents to the correct partition
+            if !T::apply_intents(&mut self.loaded, partition, intents) {
+                // this partition should be pruned as it is empty
+                self.loaded.remove(&partition);
+                // TODO: does anything else need to be done to remove this partition
+                // from archive maps?
             }
         }
         Ok(())
@@ -222,7 +208,10 @@ where
     ///
     /// * `path` - The path to the intent log to compact
     #[instrument(name = "FileSystemCompactor::compact_intent", skip_all, err(Debug))]
-    async fn compact_intent(&mut self, path: PathBuf) -> Result<(), ServerError> {
+    async fn compact_intent(&mut self, path: PathBuf) -> Result<(), ServerError>
+    where
+        <T as Archive>::Archived: rkyv::Deserialize<T, Strategy<Pool, rkyv::rancor::Error>>,
+    {
         // read and sort this intent log
         self.sort_intent_log(&path).await?;
         // check if we have any compacted partitions to write
@@ -329,7 +318,10 @@ where
     }
 
     /// Start this compactor
-    pub async fn start(mut self) -> Result<(), ServerError> {
+    pub async fn start(mut self) -> Result<(), ServerError>
+    where
+        <T as Archive>::Archived: rkyv::Deserialize<T, Strategy<Pool, rkyv::rancor::Error>>,
+    {
         loop {
             // wait for a intent log compaction job
             let job = self.jobs_rx.recv().await?;

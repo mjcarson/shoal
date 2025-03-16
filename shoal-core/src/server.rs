@@ -26,7 +26,7 @@ use coordinator::Coordinator;
 pub use errors::ServerError;
 use messages::{MeshMsg, Msg};
 
-use crate::shared::traits::ShoalDatabase;
+use crate::shared::traits::{QuerySupport, ShoalDatabase};
 
 /// Spawns our shard coordinator
 ///
@@ -45,8 +45,10 @@ fn spawn_coordinator<S: ShoalDatabase>(
     ServerError,
 >
 where
-    <S::QueryKinds as Archive>::Archived:
-        rkyv::Deserialize<S::QueryKinds, Strategy<Pool, rkyv::rancor::Error>>,
+    <<S::ClientType as QuerySupport>::QueryKinds as Archive>::Archived: rkyv::Deserialize<
+        <S::ClientType as QuerySupport>::QueryKinds,
+        Strategy<Pool, rkyv::rancor::Error>,
+    >,
 {
     // clone our mesh to pass to our coordinator
     let mesh = mesh.clone();
@@ -76,8 +78,10 @@ pub struct ShoalPool<S: ShoalDatabase> {
 
 impl<S: ShoalDatabase> ShoalPool<S>
 where
-    <S::QueryKinds as Archive>::Archived:
-        rkyv::Deserialize<S::QueryKinds, Strategy<Pool, rkyv::rancor::Error>>,
+    <<S::ClientType as QuerySupport>::QueryKinds as Archive>::Archived: rkyv::Deserialize<
+        <S::ClientType as QuerySupport>::QueryKinds,
+        Strategy<Pool, rkyv::rancor::Error>,
+    >,
 {
     /// Start this shoal database
     #[instrument(name = "ShoalPool::start", skip_all, err(Debug))]
