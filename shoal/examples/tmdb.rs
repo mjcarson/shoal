@@ -2,6 +2,7 @@
 
 use kanal::{AsyncReceiver, AsyncSender};
 use owo_colors::OwoColorize;
+use shoal::bencher::{BenchWorker, Bencher};
 use shoal_core::client::Shoal;
 use shoal_core::server::messages::QueryMetadata;
 use shoal_core::server::ring::Ring;
@@ -317,12 +318,12 @@ impl ShoalQuery for TmdbQueryKinds {
     /// # Arguments
     ///
     /// * `buff` - The buffer to deserialize into a response
-    fn response_query_id(buff: &[u8]) -> &Uuid {
+    fn response_query_id(buff: &[u8]) -> Result<&Uuid, rkyv::rancor::Error> {
         // try to cast this query
-        let archive = TmdbResponseKinds::load(buff);
+        let archive = TmdbResponseKinds::access(buff)?;
         // get our response query id
         match archive {
-            ArchivedTmdbResponseKinds::Movie(resp) => &resp.id,
+            ArchivedTmdbResponseKinds::Movie(resp) => Ok(&resp.id),
         }
     }
 
@@ -368,6 +369,14 @@ impl ShoalResponse for TmdbResponseKinds {
         // check if this is the end of the stream
         match self {
             TmdbResponseKinds::Movie(resp) => resp.end,
+        }
+    }
+
+    /// Get the query id from the response
+    fn get_query_id(archived: &<Self as Archive>::Archived) -> Uuid {
+        // get our response query id
+        match archived {
+            ArchivedTmdbResponseKinds::Movie(resp) => resp.id.to_owned(),
         }
     }
 }
@@ -489,6 +498,8 @@ pub struct MovieWorker {
     movies_rx: AsyncReceiver<MovieMsg>,
     // keep a list so we can send our movies in 10 at a time
     insert_buffer: Vec<Movie>,
+    /// The benchmark worker for this worker
+    bencher: BenchWorker,
 }
 
 impl MovieWorker {
@@ -498,16 +509,19 @@ impl MovieWorker {
     ///
     /// * `shoal` - A client for shoal
     /// * `movies_rx` - A channel to receive movies on
+    /// * `bencher` - The benchmark worker to use
     pub fn new(
         shoal: &Arc<Shoal<TmdbClient>>,
         movies_tx: &AsyncSender<MovieMsg>,
         movies_rx: &AsyncReceiver<MovieMsg>,
+        bencher: BenchWorker,
     ) -> Self {
         MovieWorker {
             shoal: shoal.clone(),
             movies_tx: movies_tx.clone(),
             movies_rx: movies_rx.clone(),
             insert_buffer: Vec::with_capacity(10),
+            bencher,
         }
     }
 
@@ -529,7 +543,7 @@ impl MovieWorker {
     }
 
     /// Start streaming movies into Shoal
-    pub async fn start(mut self) {
+    pub async fn start(mut self) -> BenchWorker {
         // keep looping until we have no more movies to send
         loop {
             // wait for a intent log compaction job
@@ -538,14 +552,20 @@ impl MovieWorker {
             match job {
                 MovieMsg::Insert(movie) => {
                     // add this movie to  our buffer
-                    self.insert_buffer.push(movie);
+                    self.insert_buffer.push(movie.clone());
                     // check if we have 10 movies to send
                     if self.insert_buffer.len() > 10 {
+                        // benchmark only commands to the db when it comes to inserts
+                        self.bencher.instance_start();
                         // send all of our buffered movies
                         self.send().await;
+                        // stop our command benchmark for inserts
+                        self.bencher.instance_stop();
                     }
                 }
                 MovieMsg::Verify(movie) => {
+                    // benchmark the entire verify operation
+                    self.bencher.instance_start();
                     // build the query to get this movies info
                     let query = self.shoal.query().add(MovieGet::new(movie.id));
                     // start this query
@@ -560,6 +580,8 @@ impl MovieWorker {
                         }
                         _ => panic!("{} is missing", movie.title),
                     }
+                    // stop our command benchmark for verifying
+                    self.bencher.instance_stop();
                 }
                 MovieMsg::Shutdown => {
                     // reemit the shutdown order
@@ -571,9 +593,15 @@ impl MovieWorker {
         }
         // check if we have any remaining buffered movies
         if !self.insert_buffer.is_empty() {
+            // benchmark any remaining sends
+            self.bencher.instance_start();
             // send all of our remaining buffered movies
             self.send().await;
+            // stop this instance benchmark
+            self.bencher.instance_stop();
         }
+        // return our benchmark worker
+        self.bencher
     }
 }
 
@@ -585,7 +613,7 @@ pub struct MovieController {
     /// The channel to receive movies on
     movies_rx: AsyncReceiver<MovieMsg>,
     /// The tasks for this controllers workers
-    tasks: JoinSet<()>,
+    tasks: JoinSet<BenchWorker>,
 }
 
 impl MovieController {
@@ -607,10 +635,13 @@ impl MovieController {
 
 impl MovieController {
     /// Spawn workers for this controller
-    fn spawn(&mut self, count: usize) {
+    fn spawn(&mut self, count: usize, bencher: &Bencher) {
         for _ in 0..count {
+            // get a new bench worker
+            let bench_worker = bencher.worker(10000);
             // create a new worker
-            let worker = MovieWorker::new(&self.shoal, &self.movies_tx, &self.movies_rx);
+            let worker =
+                MovieWorker::new(&self.shoal, &self.movies_tx, &self.movies_rx, bench_worker);
             // spawn this worker
             self.tasks.spawn(worker.start());
         }
@@ -648,8 +679,10 @@ impl MovieController {
 
     /// Start streaming jobs to our workers
     pub async fn start<P: AsRef<Path>>(&mut self, path: P) {
+        // create a new bencher
+        let mut bencher = Bencher::new(".benchmark", 10000);
         // spawn 5 workers
-        self.spawn(5);
+        self.spawn(5, &bencher);
         // upload our tmdb data
         self.upload(&path).await;
         // emit that workers should shutdown once all movie info has been streamed to shoal
@@ -657,12 +690,12 @@ impl MovieController {
         // swap our task with with a default one
         let tasks = std::mem::take(&mut self.tasks);
         // wait for all workers to complete
-        tasks.join_all().await;
+        let insert_bench_workers = tasks.join_all().await;
         // pop the last shutdown message
         self.movies_rx.recv().await.unwrap();
+        println!("--------------");
         // spawn 5 workers
-        self.spawn(5);
-        tokio::time::sleep(Duration::from_secs(3)).await;
+        self.spawn(5, &bencher);
         // verify our tmdb data
         self.verify(&path).await;
         // emit that workers should shutdown once all movie info has been streamed to shoal
@@ -670,7 +703,12 @@ impl MovieController {
         // swap our task with with a default one
         let tasks = std::mem::take(&mut self.tasks);
         // wait for all workers to complete
-        tasks.join_all().await;
+        let verify_bench_workers = tasks.join_all().await;
+        // merge our workers back into our main bencher
+        bencher.merge_workers(insert_bench_workers);
+        bencher.merge_workers(verify_bench_workers);
+        // log our benchmark results
+        bencher.finish(false);
     }
 }
 
@@ -688,7 +726,7 @@ fn main() {
     // start Shoal
     let pool = ShoalPool::<Tmdb>::start().unwrap();
     // sleep for 1s
-    std::thread::sleep(std::time::Duration::from_secs(1));
+    std::thread::sleep(std::time::Duration::from_secs(5));
     // read and insert our csv
     read_csv();
     // wait for our db to exit

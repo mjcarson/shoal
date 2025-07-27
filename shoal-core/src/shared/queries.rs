@@ -1,6 +1,7 @@
 //! The types needed for querying the database
 
 use rkyv::{Archive, Deserialize, Serialize};
+use tracing::instrument;
 use uuid::Uuid;
 
 mod sorted;
@@ -41,6 +42,23 @@ impl<S: QuerySupport> Queries<S> {
     pub fn add_mut<Q: Into<S::QueryKinds>>(&mut self, query: Q) {
         // add our query
         self.queries.push(query.into());
+    }
+
+    /// Load our queries
+    #[instrument(name = "Queries<S>::access", skip_all, err(Debug))]
+    pub fn access(raw: &[u8]) -> Result<&ArchivedQueries<S>, rkyv::rancor::Error>
+    where
+        for<'a> <Self as Archive>::Archived: rkyv::bytecheck::CheckBytes<
+            rkyv::rancor::Strategy<
+                rkyv::validation::Validator<
+                    rkyv::validation::archive::ArchiveValidator<'a>,
+                    rkyv::validation::shared::SharedValidator,
+                >,
+                rkyv::rancor::Error,
+            >,
+        >,
+    {
+        <Self as RkyvSupport>::access(raw)
     }
 }
 

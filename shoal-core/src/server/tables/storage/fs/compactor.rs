@@ -97,6 +97,15 @@ impl<T: IntentReadSupport, R: PartitionKeySupport> FileSystemCompactor<T, R> {
     async fn load_partitions_for_intents(&mut self) -> Result<(), ServerError>
     where
         <T as Archive>::Archived: rkyv::Deserialize<T, Strategy<Pool, rkyv::rancor::Error>>,
+        for<'a> <T as Archive>::Archived: rkyv::bytecheck::CheckBytes<
+            Strategy<
+                rkyv::validation::Validator<
+                    rkyv::validation::archive::ArchiveValidator<'a>,
+                    rkyv::validation::shared::SharedValidator,
+                >,
+                rkyv::rancor::Error,
+            >,
+        >,
     {
         // crawl over all partitions with intents
         for partition in self.changes.keys() {
@@ -121,7 +130,7 @@ impl<T: IntentReadSupport, R: PartitionKeySupport> FileSystemCompactor<T, R> {
                 // set options for reading from this file
                 let read = handle.read_at(entry.start, entry.size).await?;
                 // load this partitions data
-                let archived = <T as RkyvSupport>::load(&read);
+                let archived = <T as RkyvSupport>::access(&read)?;
                 // deserialize this partition
                 let deserialized = <T as RkyvSupport>::deserialize(archived)?;
                 // add this deserialized partition to our loaded partition map
@@ -211,6 +220,15 @@ impl<T: IntentReadSupport, R: PartitionKeySupport> FileSystemCompactor<T, R> {
     async fn compact_intent(&mut self, path: PathBuf) -> Result<(), ServerError>
     where
         <T as Archive>::Archived: rkyv::Deserialize<T, Strategy<Pool, rkyv::rancor::Error>>,
+        for<'a> <T as Archive>::Archived: rkyv::bytecheck::CheckBytes<
+            Strategy<
+                rkyv::validation::Validator<
+                    rkyv::validation::archive::ArchiveValidator<'a>,
+                    rkyv::validation::shared::SharedValidator,
+                >,
+                rkyv::rancor::Error,
+            >,
+        >,
     {
         // read and sort this intent log
         self.sort_intent_log(&path).await?;
@@ -321,6 +339,15 @@ impl<T: IntentReadSupport, R: PartitionKeySupport> FileSystemCompactor<T, R> {
     pub async fn start(mut self) -> Result<(), ServerError>
     where
         <T as Archive>::Archived: rkyv::Deserialize<T, Strategy<Pool, rkyv::rancor::Error>>,
+        for<'a> <T as Archive>::Archived: rkyv::bytecheck::CheckBytes<
+            Strategy<
+                rkyv::validation::Validator<
+                    rkyv::validation::archive::ArchiveValidator<'a>,
+                    rkyv::validation::shared::SharedValidator,
+                >,
+                rkyv::rancor::Error,
+            >,
+        >,
     {
         loop {
             // wait for a intent log compaction job

@@ -56,6 +56,8 @@ impl Ring {
             .next()
         {
             Some((vnode, index)) => (vnode, index),
+            // we didn't find a node with our partition from our partition -> MAX
+            // so search from MIN -> our partition instead
             None => self
                 .ring
                 .range((Included(&0), Excluded(&partition)))

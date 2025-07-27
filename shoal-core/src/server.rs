@@ -26,7 +26,10 @@ use coordinator::Coordinator;
 pub use errors::ServerError;
 use messages::{MeshMsg, Msg};
 
-use crate::shared::traits::{QuerySupport, ShoalDatabase};
+use crate::shared::{
+    queries::Queries,
+    traits::{QuerySupport, ShoalDatabase},
+};
 
 /// Spawns our shard coordinator
 ///
@@ -48,6 +51,15 @@ where
     <<S::ClientType as QuerySupport>::QueryKinds as Archive>::Archived: rkyv::Deserialize<
         <S::ClientType as QuerySupport>::QueryKinds,
         Strategy<Pool, rkyv::rancor::Error>,
+    >,
+    for<'a> <Queries<S::ClientType> as Archive>::Archived: rkyv::bytecheck::CheckBytes<
+        rkyv::rancor::Strategy<
+            rkyv::validation::Validator<
+                rkyv::validation::archive::ArchiveValidator<'a>,
+                rkyv::validation::shared::SharedValidator,
+            >,
+            rkyv::rancor::Error,
+        >,
     >,
 {
     // clone our mesh to pass to our coordinator
@@ -81,6 +93,15 @@ where
     <<S::ClientType as QuerySupport>::QueryKinds as Archive>::Archived: rkyv::Deserialize<
         <S::ClientType as QuerySupport>::QueryKinds,
         Strategy<Pool, rkyv::rancor::Error>,
+    >,
+    for<'a> <Queries<S::ClientType> as Archive>::Archived: rkyv::bytecheck::CheckBytes<
+        rkyv::rancor::Strategy<
+            rkyv::validation::Validator<
+                rkyv::validation::archive::ArchiveValidator<'a>,
+                rkyv::validation::shared::SharedValidator,
+            >,
+            rkyv::rancor::Error,
+        >,
     >,
 {
     /// Start this shoal database
