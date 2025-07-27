@@ -7,8 +7,10 @@ use kanal::{AsyncReceiver, AsyncSender};
 use papaya::HashMap;
 use rkyv::de::Pool;
 use rkyv::rancor::Strategy;
+use rkyv::util::AlignedVec;
 use rkyv::Archive;
 use std::collections::BTreeMap;
+use std::hash::Hasher;
 use std::marker::PhantomData;
 use std::sync::Arc;
 use tokio::net::{ToSocketAddrs, UdpSocket};
@@ -25,11 +27,11 @@ pub struct Shoal<S: QuerySupport> {
     /// The udp socket to send and receive messages on
     socket: Arc<UdpSocket>,
     /// A concurrent map of what channel to send streaming results too
-    pub channel_map: Arc<HashMap<Uuid, AsyncSender<BytesMut>>>,
+    pub channel_map: Arc<HashMap<Uuid, AsyncSender<AlignedVec>>>,
     /// The channel to add unused response streams too
-    channel_queue_tx: AsyncSender<(AsyncSender<BytesMut>, AsyncReceiver<BytesMut>)>,
+    channel_queue_tx: AsyncSender<(AsyncSender<AlignedVec>, AsyncReceiver<AlignedVec>)>,
     /// A channel of channels to send streaming results over
-    channel_queue_rx: AsyncReceiver<(AsyncSender<BytesMut>, AsyncReceiver<BytesMut>)>,
+    channel_queue_rx: AsyncReceiver<(AsyncSender<AlignedVec>, AsyncReceiver<AlignedVec>)>,
     /// The handle to this clients proxy
     proxy_handle: JoinHandle<()>,
     /// The database kind we are querying
@@ -42,7 +44,19 @@ impl<S: QuerySupport> Shoal<S> {
     /// # Arguments
     ///
     /// * `socket` - The socket to bind too
-    pub async fn new<A: ToSocketAddrs>(addr: A) -> Result<Self, Errors> {
+    pub async fn new<A: ToSocketAddrs>(addr: A) -> Result<Self, Errors>
+    where
+        for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived:
+            rkyv::bytecheck::CheckBytes<
+                Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'a>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            >,
+    {
         // bind to our addr twice
         let socket = Arc::new(UdpSocket::bind(&addr).await?);
         // build a channel for sending and recieving response streams on
@@ -50,7 +64,10 @@ impl<S: QuerySupport> Shoal<S> {
         // create a map for storing what channels to send response streams on
         let channel_map = Arc::new(HashMap::with_capacity(1024));
         // create the response proxy for this client
-        let proxy = ShoalUdpProxy::<S::QueryKinds>::new(socket.clone(), channel_map.clone());
+        let proxy = ShoalUdpProxy::<S::QueryKinds, S::ResponseKinds>::new(
+            socket.clone(),
+            channel_map.clone(),
+        );
         // start our proxy
         let proxy_handle = tokio::spawn(async move { proxy.start().await });
         // build our client
@@ -75,7 +92,7 @@ impl<S: QuerySupport> Shoal<S> {
     fn track_response(
         &self,
         queries: &mut Queries<S>,
-    ) -> Result<(AsyncSender<BytesMut>, AsyncReceiver<BytesMut>), Errors> {
+    ) -> Result<(AsyncSender<AlignedVec>, AsyncReceiver<AlignedVec>), Errors> {
         // get the next available response channel or create a new one
         let (tx, rx) = match self.channel_queue_rx.try_recv()? {
             Some((tx, rx)) => (tx, rx),
@@ -129,18 +146,18 @@ impl<S: QuerySupport> Drop for Shoal<S> {
     }
 }
 
-struct ShoalUdpProxy<S: ShoalQuery> {
-    /// A pool of memory to use
-    pool: BytesMut,
+struct ShoalUdpProxy<S: ShoalQuery, R: ShoalResponse> {
     /// The udp socket to listen on
     socket: Arc<UdpSocket>,
     /// A concurrent map of what channel to send streaming results too
-    channel_map: Arc<HashMap<Uuid, AsyncSender<BytesMut>>>,
+    channel_map: Arc<HashMap<Uuid, AsyncSender<AlignedVec>>>,
     /// The database we are getting responses from
-    phantom: PhantomData<S>,
+    phantom_query: PhantomData<S>,
+    /// The database we are getting responses from
+    phantom_response: PhantomData<R>,
 }
 
-impl<S: ShoalQuery> ShoalUdpProxy<S> {
+impl<S: ShoalQuery, R: ShoalResponse> ShoalUdpProxy<S, R> {
     /// Create a new udp proxy
     ///
     /// # Arguments
@@ -150,39 +167,49 @@ impl<S: ShoalQuery> ShoalUdpProxy<S> {
     /// * `shutdown` - A flag used to tell the proxy to shutdown
     pub fn new(
         socket: Arc<UdpSocket>,
-        channel_map: Arc<HashMap<Uuid, AsyncSender<BytesMut>>>,
+        channel_map: Arc<HashMap<Uuid, AsyncSender<AlignedVec>>>,
     ) -> Self {
-        // Init our pool of bytes
-        let pool = BytesMut::zeroed(8192);
         // create our proxy
         ShoalUdpProxy {
-            pool,
             socket,
             channel_map,
-            phantom: PhantomData,
+            phantom_query: PhantomData,
+            phantom_response: PhantomData,
         }
     }
 
     /// Continuously proxy responses from shoal to the correct client channel
-    pub async fn start(mut self) {
+    pub async fn start(self)
+    where
+        for<'a> <R as Archive>::Archived: rkyv::bytecheck::CheckBytes<
+            Strategy<
+                rkyv::validation::Validator<
+                    rkyv::validation::archive::ArchiveValidator<'a>,
+                    rkyv::validation::shared::SharedValidator,
+                >,
+                rkyv::rancor::Error,
+            >,
+        >,
+    {
         // Wait for new messages from our server and proxy the respones to the right channel
         loop {
-            if self.pool.len() < 2048 {
-                // try to extend our pool to reclaim storage
-                self.pool.reserve(4192);
-                // zero out our pool
-                self.pool.extend((0..4192).map(|_| 0));
-            }
+            // Create an aligned vec to act as a pool of bytes
+            let mut aligned_buff = AlignedVec::with_capacity(4096);
+            // resize our aligned vec
+            aligned_buff.resize(4096, 0);
             // try to read a single datagram from our udp socket
-            let (read, _) = self.socket.recv_from(&mut self.pool).await.unwrap();
-            // split the bytes we read into from our bytes pool
-            let data = self.pool.split_to(read);
-            // try to deserialize our responses query id
-            let id = S::response_query_id(&data[..]);
+            let (read, _) = self.socket.recv_from(&mut aligned_buff).await.unwrap();
+            // shrink our aligned vec to just the data read
+            aligned_buff.resize(read, 0);
+            // get this responses id
+            let id = match R::access(&aligned_buff) {
+                Ok(archived) => R::get_query_id(archived),
+                Err(error) => panic!("SPEC FAIL -> {error:#?}"),
+            };
             // get the channel for this query
-            match self.channel_map.pin_owned().get(id) {
+            match self.channel_map.pin_owned().get(&id) {
                 // send our response to the right shoal stream
-                Some(tx) => tx.send(data).await.unwrap(),
+                Some(tx) => tx.send(aligned_buff).await.unwrap(),
                 None => panic!("Missing stream channel! -> {id} {read}"),
             }
         }
@@ -207,13 +234,13 @@ pub struct ShoalStream<S: QuerySupport> {
     /// This channels id
     id: Uuid,
     /// The transmission side of the response stream channel
-    response_tx: Option<AsyncSender<BytesMut>>,
+    response_tx: Option<AsyncSender<AlignedVec>>,
     /// the receive side of the response stream channel
-    response_rx: Option<AsyncReceiver<BytesMut>>,
+    response_rx: Option<AsyncReceiver<AlignedVec>>,
     /// A concurrent map of what channel to send streaming results too
-    channel_map: Arc<HashMap<Uuid, AsyncSender<BytesMut>>>,
+    channel_map: Arc<HashMap<Uuid, AsyncSender<AlignedVec>>>,
     /// The channel to add unused response streams too
-    channel_queue_tx: AsyncSender<(AsyncSender<BytesMut>, AsyncReceiver<BytesMut>)>,
+    channel_queue_tx: AsyncSender<(AsyncSender<AlignedVec>, AsyncReceiver<AlignedVec>)>,
     /// The next message to be returned
     next_index: usize,
     /// The messages that are to be returned later to ensure the correct order of receipt
@@ -227,7 +254,19 @@ where
     <S::ResponseKinds as Archive>::Archived:
         rkyv::Deserialize<S::ResponseKinds, Strategy<Pool, rkyv::rancor::Error>>,
 {
-    async fn wait_for_next_response(&mut self) -> Result<(bool, S::ResponseKinds), Errors> {
+    async fn wait_for_next_response(&mut self) -> Result<(bool, S::ResponseKinds), Errors>
+    where
+        for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived:
+            rkyv::bytecheck::CheckBytes<
+                Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'a>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            >,
+    {
         // get our response channel if one exists or
         let response_rx = match self.response_rx.as_mut() {
             Some(response_rx) => response_rx,
@@ -252,7 +291,7 @@ where
             // get the next response from our query
             let buff = response_rx.recv().await?;
             // unarchive our response'
-            let archived = S::ResponseKinds::load(&buff);
+            let archived = S::ResponseKinds::access(&buff)?;
             // deserialize our response
             // TODO do we have to do this?
             let resp = S::ResponseKinds::deserialize(archived)?;
@@ -280,7 +319,19 @@ where
     /// # Arguments
     ///
     /// * `skip` - The number of responses to skip
-    pub async fn skip(&mut self, mut skip: usize) -> Result<(), Errors> {
+    pub async fn skip(&mut self, mut skip: usize) -> Result<(), Errors>
+    where
+        for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived:
+            rkyv::bytecheck::CheckBytes<
+                Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'a>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            >,
+    {
         // get the next message and throw it away
         while let Some(_) = self.next().await? {
             // decrement our skip
@@ -294,7 +345,19 @@ where
     }
 
     /// Get the next response to our query
-    pub async fn next(&mut self) -> Result<Option<S::ResponseKinds>, Errors> {
+    pub async fn next(&mut self) -> Result<Option<S::ResponseKinds>, Errors>
+    where
+        for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived:
+            rkyv::bytecheck::CheckBytes<
+                Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'a>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            >,
+    {
         // try to get our receive channels
         if self.response_rx.is_some() {
             // wait for the next response
@@ -317,7 +380,19 @@ where
     }
 
     /// Get the next response to our query and cast it to a specific type
-    pub async fn next_typed<T: FromShoal<S>>(&mut self) -> Result<Option<Vec<T>>, Errors> {
+    pub async fn next_typed<T: FromShoal<S>>(&mut self) -> Result<Option<Vec<T>>, Errors>
+    where
+        for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived:
+            rkyv::bytecheck::CheckBytes<
+                Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'a>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            >,
+    {
         // try to get our receive channels
         if self.response_rx.is_some() {
             // wait for the next response
@@ -342,7 +417,19 @@ where
     /// Get the next response to our query and get the first row returned and cast it to our specific type
     ///
     /// This will ignore any remaining rows in the next response.
-    pub async fn next_typed_first<T: FromShoal<S>>(&mut self) -> Result<Option<Option<T>>, Errors> {
+    pub async fn next_typed_first<T: FromShoal<S>>(&mut self) -> Result<Option<Option<T>>, Errors>
+    where
+        for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived:
+            rkyv::bytecheck::CheckBytes<
+                Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'a>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            >,
+    {
         // try to get the next response
         match self.next_typed().await? {
             Some(mut rows) => {

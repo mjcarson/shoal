@@ -1,5 +1,6 @@
 //! Benchmarks shoal
 
+use kanal::{AsyncReceiver, AsyncSender};
 use owo_colors::OwoColorize;
 use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
@@ -82,10 +83,35 @@ impl BenchResult {
     }
 }
 
+/// A bench worker for benching across workers/processes
+pub struct BenchWorker {
+    /// The timer for a specific instance
+    instance: Option<Instant>,
+    /// The instance trimes recorded by this bencher
+    instance_times: Vec<Duration>,
+}
+
+impl BenchWorker {
+    /// Start a new instance timer
+    pub fn instance_start(&mut self) {
+        self.instance = Some(Instant::now());
+    }
+
+    /// Start a new instance timer
+    pub fn instance_stop(&mut self) {
+        match self.instance.take() {
+            Some(instance) => self.instance_times.push(instance.elapsed()),
+            None => panic!("NO INSTANT TIMER ACTIVE?"),
+        }
+    }
+}
+
 /// A benchmarking tool for Shoal
 pub struct Bencher {
-    /// The total timer
-    total_timer: Instant,
+    /// The total timer start time
+    total_timer_start: Instant,
+    /// The total timer end time
+    total_timer_end: Option<Instant>,
     /// The timer for a specific instance
     instance: Option<Instant>,
     /// The instance trimes recorded by this bencher
@@ -120,12 +146,52 @@ impl Bencher {
         // try to load our old benchmark from disk
         // build our bencher
         Bencher {
-            total_timer: Instant::now(),
+            total_timer_start: Instant::now(),
+            total_timer_end: None,
             instance: None,
             instance_times: Vec::with_capacity(instances),
             path: path.as_ref().to_path_buf(),
             prior,
         }
+    }
+
+    /// Get a new bench worker
+    ///
+    /// # Arguments
+    ///
+    /// * `instances` - The estimated number of instances times this worker will gather
+    pub fn worker(&self, instances: usize) -> BenchWorker {
+        BenchWorker {
+            instance: None,
+            instance_times: Vec::with_capacity(instances),
+        }
+    }
+
+    /// Merge a workers times into our own
+    ///
+    /// # Arguments
+    ///
+    /// * `worker` - The worker to merge in
+    pub fn merge_worker(&mut self, mut worker: BenchWorker) {
+        self.instance_times.append(&mut worker.instance_times);
+    }
+
+    /// Merge workers times into our own
+    ///
+    /// # Arguments
+    ///
+    /// * `worker` - The worker to merge in
+    pub fn merge_workers(&mut self, workers: Vec<BenchWorker>) {
+        // step over all workers and merge them in
+        for worker in workers {
+            // merge in this worker
+            self.merge_worker(worker);
+        }
+    }
+
+    /// Reset our total time start
+    pub fn reset_total_time_start(&mut self) {
+        self.total_timer_start = Instant::now()
     }
 
     /// Start a new instance timer
@@ -139,6 +205,11 @@ impl Bencher {
             Some(instance) => self.instance_times.push(instance.elapsed()),
             None => panic!("NO INSTANT TIMER ACTIVE?"),
         }
+    }
+
+    /// Stop our total time now
+    pub fn stop_total(&mut self) {
+        self.total_timer_end = Some(Instant::now());
     }
 
     /// Print the latest benchmark results to screen
@@ -159,6 +230,12 @@ impl Bencher {
 
     /// Get our total times and write them to disk if needed
     pub fn finish(&mut self, write: bool) {
+        // get the total amount of time that this benchmark took
+        let total = match self.total_timer_end {
+            Some(end) => end.duration_since(self.total_timer_start),
+            // we don't have an end time set so just use until now
+            None => self.total_timer_start.elapsed(),
+        };
         // find the average in nano seconds
         let sum = self
             .instance_times
@@ -169,8 +246,6 @@ impl Bencher {
         // find the maximum and minimum
         let max = self.instance_times.iter().max().unwrap();
         let min = self.instance_times.iter().min().unwrap();
-        // get the total time this test took
-        let total = self.total_timer.elapsed();
         // build a benchmark result
         let result = BenchResult::new(*max, avg, *min, total);
         // print our results

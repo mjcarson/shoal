@@ -9,6 +9,7 @@ use rkyv::ser::Serializer;
 use rkyv::util::AlignedVec;
 use rkyv::{Archive, Serialize};
 use std::net::SocketAddr;
+use tracing::instrument;
 use uuid::Uuid;
 
 mod storable;
@@ -39,9 +40,21 @@ pub trait RkyvSupport: Archive
     /// # Arguments
     ///
     /// * `raw` - The raw bytes to load an archive from
-    fn load(raw: &[u8]) -> &<Self as Archive>::Archived {
+    #[instrument(name = "RkyvSupport::access", skip_all, err(Debug))]
+    fn access(raw: &[u8]) -> Result<&<Self as Archive>::Archived, rkyv::rancor::Error>
+    where
+        for<'a> <Self as Archive>::Archived: rkyv::bytecheck::CheckBytes<
+            Strategy<
+                rkyv::validation::Validator<
+                    rkyv::validation::archive::ArchiveValidator<'a>,
+                    rkyv::validation::shared::SharedValidator,
+                >,
+                rkyv::rancor::Error,
+            >,
+        >,
+    {
         // load an archived type from a slice
-        unsafe { rkyv::access_unchecked::<<Self as Archive>::Archived>(&raw) }
+        rkyv::access::<<Self as Archive>::Archived, rkyv::rancor::Error>(raw)
     }
 
     /// Deserialize our archived type
@@ -60,7 +73,7 @@ pub trait ShoalQuery: std::fmt::Debug + RkyvSupport + Sized + Send + Clone {
     /// # Arguments
     ///
     /// * `buff` - The buffer to deserialize into a response
-    fn response_query_id(buff: &[u8]) -> &Uuid;
+    fn response_query_id(buff: &[u8]) -> Result<&Uuid, rkyv::rancor::Error>;
 
     /// Find the right shards for this query
     ///
@@ -78,6 +91,13 @@ pub trait ShoalResponse: std::fmt::Debug + RkyvSupport + Sized + Send {
 
     /// Get whether this is the last response in a response stream
     fn is_end_of_stream(&self) -> bool;
+
+    /// Get the query id from the response
+    ///
+    /// # Arguments
+    ///
+    /// * `archived` - The archived type to get our query id from
+    fn get_query_id(archived: &<Self as Archive>::Archived) -> Uuid;
 }
 
 pub trait QuerySupport: 'static {

@@ -8,6 +8,7 @@ use glommio::{
     TaskQueueHandle,
 };
 use kanal::{AsyncReceiver, AsyncSender};
+use std::hash::Hasher;
 use std::{net::SocketAddr, time::Duration};
 use tracing::instrument;
 
@@ -16,7 +17,7 @@ use super::{
     messages::{MeshMsg, ShardMsg},
     Conf,
 };
-use crate::shared::traits::{QuerySupport, ShoalDatabase};
+use crate::shared::traits::{QuerySupport, RkyvSupport, ShoalDatabase, ShoalQuery};
 
 /// How to message a specific shard
 #[derive(Clone, Debug)]

@@ -92,6 +92,15 @@ impl<R: ShoalUnsortedTable + 'static, S: StorageSupport> PersistentUnsortedTable
             Strategy<Pool, rkyv::rancor::Error>,
         >,
         <R as Archive>::Archived: rkyv::Deserialize<R, Strategy<Pool, rkyv::rancor::Error>>,
+        for<'a> <R as Archive>::Archived: rkyv::bytecheck::CheckBytes<
+            Strategy<
+                rkyv::validation::Validator<
+                    rkyv::validation::archive::ArchiveValidator<'a>,
+                    rkyv::validation::shared::SharedValidator,
+                >,
+                rkyv::rancor::Error,
+            >,
+        >,
     {
         // build our table
         let mut table = Self {
@@ -119,7 +128,7 @@ impl<R: ShoalUnsortedTable + 'static, S: StorageSupport> PersistentUnsortedTable
         query: UnsortedQuery<R>,
     ) -> Option<(SocketAddr, Response<R>)> {
         // execute the correct query type
-        match query {
+        let response = match query {
             // insert a row into this partition
             UnsortedQuery::Insert { row, .. } => self.insert(meta, row).await,
             // get a row from this partition
@@ -128,7 +137,10 @@ impl<R: ShoalUnsortedTable + 'static, S: StorageSupport> PersistentUnsortedTable
             UnsortedQuery::Delete { key } => self.delete(meta, key).await,
             // update a row in this partition
             UnsortedQuery::Update(update) => self.update(meta, update).await,
-        }
+        };
+        // log our memory usage
+        //println!("memory usage: {}", self.memory_usage);
+        response
     }
 
     /// Insert some data into a partition in this shards table
