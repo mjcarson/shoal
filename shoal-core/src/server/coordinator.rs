@@ -53,6 +53,15 @@ where
         <S::ClientType as QuerySupport>::QueryKinds,
         Strategy<Pool, rkyv::rancor::Error>,
     >,
+    for<'a> <Queries<S::ClientType> as Archive>::Archived: rkyv::bytecheck::CheckBytes<
+        rkyv::rancor::Strategy<
+            rkyv::validation::Validator<
+                rkyv::validation::archive::ArchiveValidator<'a>,
+                rkyv::validation::shared::SharedValidator,
+            >,
+            rkyv::rancor::Error,
+        >,
+    >,
 {
     /// Start a new coordinator thread
     #[allow(clippy::future_not_send)]
@@ -169,7 +178,8 @@ where
         // get the slice to deserialize
         let readable = &data[..read];
         // load our arhived query from buffer
-        let archived = <Queries<S::ClientType> as RkyvSupport>::load(readable);
+        //let archived = <Queries<S::ClientType> as RkyvSupport>::load(readable);
+        let archived = Queries::load(readable);
         // deserialize our queries
         let queries = <Queries<S::ClientType> as RkyvSupport>::deserialize(archived).unwrap();
         // send each query to the correct shard

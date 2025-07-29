@@ -39,9 +39,21 @@ pub trait RkyvSupport: Archive
     /// # Arguments
     ///
     /// * `raw` - The raw bytes to load an archive from
-    fn load(raw: &[u8]) -> &<Self as Archive>::Archived {
+    fn load(raw: &[u8]) -> &<Self as Archive>::Archived
+    where
+        for<'a> <Self as Archive>::Archived: rkyv::bytecheck::CheckBytes<
+            Strategy<
+                rkyv::validation::Validator<
+                    rkyv::validation::archive::ArchiveValidator<'a>,
+                    rkyv::validation::shared::SharedValidator,
+                >,
+                rkyv::rancor::Error,
+            >,
+        >,
+    {
         // load an archived type from a slice
-        unsafe { rkyv::access_unchecked::<<Self as Archive>::Archived>(&raw) }
+        rkyv::access::<<Self as Archive>::Archived, rkyv::rancor::Error>(raw).unwrap()
+        //unsafe { rkyv::access_unchecked::<<Self as Archive>::Archived>(&raw) }
     }
 
     /// Deserialize our archived type

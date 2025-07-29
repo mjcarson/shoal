@@ -227,7 +227,19 @@ where
     <S::ResponseKinds as Archive>::Archived:
         rkyv::Deserialize<S::ResponseKinds, Strategy<Pool, rkyv::rancor::Error>>,
 {
-    async fn wait_for_next_response(&mut self) -> Result<(bool, S::ResponseKinds), Errors> {
+    async fn wait_for_next_response(&mut self) -> Result<(bool, S::ResponseKinds), Errors>
+    where
+        for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived:
+            rkyv::bytecheck::CheckBytes<
+                Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'a>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            >,
+    {
         // get our response channel if one exists or
         let response_rx = match self.response_rx.as_mut() {
             Some(response_rx) => response_rx,
@@ -280,7 +292,19 @@ where
     /// # Arguments
     ///
     /// * `skip` - The number of responses to skip
-    pub async fn skip(&mut self, mut skip: usize) -> Result<(), Errors> {
+    pub async fn skip(&mut self, mut skip: usize) -> Result<(), Errors>
+    where
+        for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived:
+            rkyv::bytecheck::CheckBytes<
+                Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'a>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            >,
+    {
         // get the next message and throw it away
         while let Some(_) = self.next().await? {
             // decrement our skip
@@ -294,7 +318,19 @@ where
     }
 
     /// Get the next response to our query
-    pub async fn next(&mut self) -> Result<Option<S::ResponseKinds>, Errors> {
+    pub async fn next(&mut self) -> Result<Option<S::ResponseKinds>, Errors>
+    where
+        for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived:
+            rkyv::bytecheck::CheckBytes<
+                Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'a>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            >,
+    {
         // try to get our receive channels
         if self.response_rx.is_some() {
             // wait for the next response
@@ -317,7 +353,19 @@ where
     }
 
     /// Get the next response to our query and cast it to a specific type
-    pub async fn next_typed<T: FromShoal<S>>(&mut self) -> Result<Option<Vec<T>>, Errors> {
+    pub async fn next_typed<T: FromShoal<S>>(&mut self) -> Result<Option<Vec<T>>, Errors>
+    where
+        for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived:
+            rkyv::bytecheck::CheckBytes<
+                Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'a>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            >,
+    {
         // try to get our receive channels
         if self.response_rx.is_some() {
             // wait for the next response
@@ -342,7 +390,19 @@ where
     /// Get the next response to our query and get the first row returned and cast it to our specific type
     ///
     /// This will ignore any remaining rows in the next response.
-    pub async fn next_typed_first<T: FromShoal<S>>(&mut self) -> Result<Option<Option<T>>, Errors> {
+    pub async fn next_typed_first<T: FromShoal<S>>(&mut self) -> Result<Option<Option<T>>, Errors>
+    where
+        for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived:
+            rkyv::bytecheck::CheckBytes<
+                Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'a>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            >,
+    {
         // try to get the next response
         match self.next_typed().await? {
             Some(mut rows) => {

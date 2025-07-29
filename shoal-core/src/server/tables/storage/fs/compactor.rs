@@ -97,6 +97,15 @@ impl<T: IntentReadSupport, R: PartitionKeySupport> FileSystemCompactor<T, R> {
     async fn load_partitions_for_intents(&mut self) -> Result<(), ServerError>
     where
         <T as Archive>::Archived: rkyv::Deserialize<T, Strategy<Pool, rkyv::rancor::Error>>,
+        for<'a> <T as Archive>::Archived: rkyv::bytecheck::CheckBytes<
+            Strategy<
+                rkyv::validation::Validator<
+                    rkyv::validation::archive::ArchiveValidator<'a>,
+                    rkyv::validation::shared::SharedValidator,
+                >,
+                rkyv::rancor::Error,
+            >,
+        >,
     {
         // crawl over all partitions with intents
         for partition in self.changes.keys() {
@@ -211,6 +220,15 @@ impl<T: IntentReadSupport, R: PartitionKeySupport> FileSystemCompactor<T, R> {
     async fn compact_intent(&mut self, path: PathBuf) -> Result<(), ServerError>
     where
         <T as Archive>::Archived: rkyv::Deserialize<T, Strategy<Pool, rkyv::rancor::Error>>,
+        for<'a> <T as Archive>::Archived: rkyv::bytecheck::CheckBytes<
+            Strategy<
+                rkyv::validation::Validator<
+                    rkyv::validation::archive::ArchiveValidator<'a>,
+                    rkyv::validation::shared::SharedValidator,
+                >,
+                rkyv::rancor::Error,
+            >,
+        >,
     {
         // read and sort this intent log
         self.sort_intent_log(&path).await?;
@@ -231,6 +249,7 @@ impl<T: IntentReadSupport, R: PartitionKeySupport> FileSystemCompactor<T, R> {
     /// Compact archives with the least amount of active data
     #[instrument(name = "FileSystemCompactor::compact_archives", skip_all, err(Debug))]
     async fn compact_archives(&mut self) -> Result<(), ServerError> {
+        println!("COMPACTING NOW!");
         // find the archives with the least amount of active data
         let mut sorted = self.map.sort_by_load(self.map.active);
         // keep a list of old archive paths to delete
@@ -238,6 +257,7 @@ impl<T: IntentReadSupport, R: PartitionKeySupport> FileSystemCompactor<T, R> {
         // track the stats for this compaction attempt
         let start_pos = self.writer.current_pos();
         let mut precompaction = 0;
+        println!("CA Sorted {:?}", &sorted.sorted);
         // start compacting from the lowest utilization to the highest
         for (used, archive_ids) in &sorted.sorted {
             // compact this group of archives
@@ -246,6 +266,7 @@ impl<T: IntentReadSupport, R: PartitionKeySupport> FileSystemCompactor<T, R> {
                 if let Some(entries) = sorted.entries.remove(&old_id) {
                     // build the path to this archive file
                     let path = self.archive_path.join(old_id.to_string());
+                    println!("Reading from {path:?}");
                     // get a handle to this archive
                     let archive = DmaFile::open(&path).await?;
                     // skip this file if its more then 50% utilized
@@ -284,6 +305,7 @@ impl<T: IntentReadSupport, R: PartitionKeySupport> FileSystemCompactor<T, R> {
                 }
             }
         }
+        println!("CA: PRE FLUSH");
         // flush our current writers
         self.writer.sync().await?;
         self.map_writer.sync().await?;
@@ -298,8 +320,10 @@ impl<T: IntentReadSupport, R: PartitionKeySupport> FileSystemCompactor<T, R> {
         }
         // check how large our map intent log is and if needed compact it
         if self.map_writer.current_flushed_pos() > Byte::MEBIBYTE {
+            println!("CA: PRE COMPACT MAP");
             // compact our map data
             self.map_writer = self.map.compact_map().await?;
+            println!("CA: POST COMPACT MAP");
         }
         // delete our old archive files
         for (old_id, old_archive) in old_paths {
@@ -321,6 +345,15 @@ impl<T: IntentReadSupport, R: PartitionKeySupport> FileSystemCompactor<T, R> {
     pub async fn start(mut self) -> Result<(), ServerError>
     where
         <T as Archive>::Archived: rkyv::Deserialize<T, Strategy<Pool, rkyv::rancor::Error>>,
+        for<'a> <T as Archive>::Archived: rkyv::bytecheck::CheckBytes<
+            Strategy<
+                rkyv::validation::Validator<
+                    rkyv::validation::archive::ArchiveValidator<'a>,
+                    rkyv::validation::shared::SharedValidator,
+                >,
+                rkyv::rancor::Error,
+            >,
+        >,
     {
         loop {
             // wait for a intent log compaction job

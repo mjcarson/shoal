@@ -42,6 +42,22 @@ impl<S: QuerySupport> Queries<S> {
         // add our query
         self.queries.push(query.into());
     }
+
+    /// Load our queries
+    pub fn load(raw: &[u8]) -> &ArchivedQueries<S>
+    where
+        for<'a> <Self as Archive>::Archived: rkyv::bytecheck::CheckBytes<
+            rkyv::rancor::Strategy<
+                rkyv::validation::Validator<
+                    rkyv::validation::archive::ArchiveValidator<'a>,
+                    rkyv::validation::shared::SharedValidator,
+                >,
+                rkyv::rancor::Error,
+            >,
+        >,
+    {
+        <Self as RkyvSupport>::load(raw)
+    }
 }
 
 impl<S: QuerySupport> Default for Queries<S> {
