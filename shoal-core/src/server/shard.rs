@@ -8,6 +8,7 @@ use glommio::{
     TaskQueueHandle,
 };
 use kanal::{AsyncReceiver, AsyncSender};
+use std::hash::Hasher;
 use std::{net::SocketAddr, time::Duration};
 use tracing::instrument;
 
@@ -16,7 +17,7 @@ use super::{
     messages::{MeshMsg, ShardMsg},
     Conf,
 };
-use crate::shared::traits::{QuerySupport, ShoalDatabase};
+use crate::shared::traits::{QuerySupport, RkyvSupport, ShoalDatabase, ShoalQuery};
 
 /// How to message a specific shard
 #[derive(Clone, Debug)]
@@ -215,8 +216,23 @@ impl<S: ShoalDatabase> Shard<S> {
         addr: SocketAddr,
         response: <S::ClientType as QuerySupport>::ResponseKinds,
     ) -> Result<(), ServerError> {
+        println!("response: {:#?}", response);
         // archive our response
         let archived = rkyv::to_bytes::<_>(&response)?;
+        // build a default hasher
+        let mut hasher = gxhash::GxHasher::default();
+        // hash our archived bytes
+        hasher.write(&archived);
+        println!("archived tx -> {:?} -> {}", archived.len(), hasher.finish());
+        //println!("archived tx dat -> {:?}", &archived[..]);
+        // try to deserialize our responses query id
+        match <<S::ClientType as QuerySupport>::QueryKinds>::response_query_id(archived.as_slice())
+        {
+            Ok(id) => println!("SERVER FOUND ID: {id}"),
+            Err(error) => {
+                println!("SHARD FAILED TO GET RESP ID: {error:#?}");
+            }
+        };
         // send our archived response back to the client
         self.socket.send_to(archived.as_slice(), addr).await?;
         Ok(())

@@ -179,7 +179,7 @@ where
         let readable = &data[..read];
         // load our arhived query from buffer
         //let archived = <Queries<S::ClientType> as RkyvSupport>::load(readable);
-        let archived = Queries::load(readable);
+        let archived = Queries::access(readable).unwrap();
         // deserialize our queries
         let queries = <Queries<S::ClientType> as RkyvSupport>::deserialize(archived).unwrap();
         // send each query to the correct shard

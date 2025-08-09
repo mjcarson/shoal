@@ -130,7 +130,7 @@ impl<T: IntentReadSupport, R: PartitionKeySupport> FileSystemCompactor<T, R> {
                 // set options for reading from this file
                 let read = handle.read_at(entry.start, entry.size).await?;
                 // load this partitions data
-                let archived = <T as RkyvSupport>::load(&read);
+                let archived = <T as RkyvSupport>::access(&read)?;
                 // deserialize this partition
                 let deserialized = <T as RkyvSupport>::deserialize(archived)?;
                 // add this deserialized partition to our loaded partition map

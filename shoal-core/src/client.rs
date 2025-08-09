@@ -9,6 +9,7 @@ use rkyv::de::Pool;
 use rkyv::rancor::Strategy;
 use rkyv::Archive;
 use std::collections::BTreeMap;
+use std::hash::Hasher;
 use std::marker::PhantomData;
 use std::sync::Arc;
 use tokio::net::{ToSocketAddrs, UdpSocket};
@@ -42,7 +43,19 @@ impl<S: QuerySupport> Shoal<S> {
     /// # Arguments
     ///
     /// * `socket` - The socket to bind too
-    pub async fn new<A: ToSocketAddrs>(addr: A) -> Result<Self, Errors> {
+    pub async fn new<A: ToSocketAddrs>(addr: A) -> Result<Self, Errors>
+    where
+        for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived:
+            rkyv::bytecheck::CheckBytes<
+                Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'a>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            >,
+    {
         // bind to our addr twice
         let socket = Arc::new(UdpSocket::bind(&addr).await?);
         // build a channel for sending and recieving response streams on
@@ -50,7 +63,10 @@ impl<S: QuerySupport> Shoal<S> {
         // create a map for storing what channels to send response streams on
         let channel_map = Arc::new(HashMap::with_capacity(1024));
         // create the response proxy for this client
-        let proxy = ShoalUdpProxy::<S::QueryKinds>::new(socket.clone(), channel_map.clone());
+        let proxy = ShoalUdpProxy::<S::QueryKinds, S::ResponseKinds>::new(
+            socket.clone(),
+            channel_map.clone(),
+        );
         // start our proxy
         let proxy_handle = tokio::spawn(async move { proxy.start().await });
         // build our client
@@ -129,7 +145,7 @@ impl<S: QuerySupport> Drop for Shoal<S> {
     }
 }
 
-struct ShoalUdpProxy<S: ShoalQuery> {
+struct ShoalUdpProxy<S: ShoalQuery, R: ShoalResponse> {
     /// A pool of memory to use
     pool: BytesMut,
     /// The udp socket to listen on
@@ -137,10 +153,12 @@ struct ShoalUdpProxy<S: ShoalQuery> {
     /// A concurrent map of what channel to send streaming results too
     channel_map: Arc<HashMap<Uuid, AsyncSender<BytesMut>>>,
     /// The database we are getting responses from
-    phantom: PhantomData<S>,
+    phantom_query: PhantomData<S>,
+    /// The database we are getting responses from
+    phantom_response: PhantomData<R>,
 }
 
-impl<S: ShoalQuery> ShoalUdpProxy<S> {
+impl<S: ShoalQuery, R: ShoalResponse> ShoalUdpProxy<S, R> {
     /// Create a new udp proxy
     ///
     /// # Arguments
@@ -159,28 +177,70 @@ impl<S: ShoalQuery> ShoalUdpProxy<S> {
             pool,
             socket,
             channel_map,
-            phantom: PhantomData,
+            phantom_query: PhantomData,
+            phantom_response: PhantomData,
         }
     }
 
     /// Continuously proxy responses from shoal to the correct client channel
-    pub async fn start(mut self) {
+    pub async fn start(mut self)
+    where
+        for<'a> <R as Archive>::Archived: rkyv::bytecheck::CheckBytes<
+            Strategy<
+                rkyv::validation::Validator<
+                    rkyv::validation::archive::ArchiveValidator<'a>,
+                    rkyv::validation::shared::SharedValidator,
+                >,
+                rkyv::rancor::Error,
+            >,
+        >,
+    {
         // Wait for new messages from our server and proxy the respones to the right channel
         loop {
-            if self.pool.len() < 2048 {
-                // try to extend our pool to reclaim storage
-                self.pool.reserve(4192);
-                // zero out our pool
-                self.pool.extend((0..4192).map(|_| 0));
-            }
+            //if self.pool.len() < 2048 {
+            //    // try to extend our pool to reclaim storage
+            //    self.pool.reserve(4096);
+            //    // zero out our pool
+            //    self.pool.extend((0..4096).map(|_| 0));
+            //}
+            // allocate our read to an aligned vec
+            let mut aligned = rkyv::util::AlignedVec::<4096>::with_capacity(4096);
+            println!("aligned len: -> {}", aligned.len());
+            // ensure our aligned vec is initialized
+            unsafe { aligned.set_len(4096) };
+            aligned.reserve(4096);
+            aligned.fill(0);
+            println!("aligned len: -> {}", aligned.len());
             // try to read a single datagram from our udp socket
-            let (read, _) = self.socket.recv_from(&mut self.pool).await.unwrap();
-            // split the bytes we read into from our bytes pool
-            let data = self.pool.split_to(read);
+            let (read, _) = self.socket.recv_from(&mut aligned).await.unwrap();
+            //// split the bytes we read into from our bytes pool
+            //let data = self.pool.split_to(read);
+            //println!("{read} -> {data:?}");
+            // build a default hasher
+            let mut hasher = gxhash::GxHasher::default();
+            // hash our archived bytes
+            hasher.write(&aligned[..read]);
+            println!("archived  rx-> {} -> {}", read, hasher.finish());
+            //match rkyv::access::<R::Archived, rkyv::rancor::Error>(&data) {
+            let id = match R::access(&aligned[..read]) {
+                Ok(archived) => R::get_query_id(archived),
+                Err(error) => panic!("SPEC FAIL -> {error:#?}"),
+            };
+            println!("GOT ID -> {id}");
+            //println!("data -> {} : {:?}", read, &data[..]);
             // try to deserialize our responses query id
-            let id = S::response_query_id(&data[..]);
+            //let id = match S::response_query_id(&data) {
+            //    Ok(id) => id,
+            //    Err(error) => {
+            //        panic!("FAILED TO GET RESP ID: {error:#?}");
+            //    }
+            //};
+            // get a ref to our aligned vec read
+            let data = &aligned[..read];
+            // convert our data to a bytes mut
+            let data = BytesMut::from(data);
             // get the channel for this query
-            match self.channel_map.pin_owned().get(id) {
+            match self.channel_map.pin_owned().get(&id) {
                 // send our response to the right shoal stream
                 Some(tx) => tx.send(data).await.unwrap(),
                 None => panic!("Missing stream channel! -> {id} {read}"),
@@ -264,7 +324,7 @@ where
             // get the next response from our query
             let buff = response_rx.recv().await?;
             // unarchive our response'
-            let archived = S::ResponseKinds::load(&buff);
+            let archived = S::ResponseKinds::access(&buff)?;
             // deserialize our response
             // TODO do we have to do this?
             let resp = S::ResponseKinds::deserialize(archived)?;

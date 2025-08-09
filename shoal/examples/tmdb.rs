@@ -317,12 +317,13 @@ impl ShoalQuery for TmdbQueryKinds {
     /// # Arguments
     ///
     /// * `buff` - The buffer to deserialize into a response
-    fn response_query_id(buff: &[u8]) -> &Uuid {
+    fn response_query_id(buff: &[u8]) -> Result<&Uuid, rkyv::rancor::Error> {
         // try to cast this query
-        let archive = TmdbResponseKinds::load(buff);
+        // TODO return result
+        let archive = TmdbResponseKinds::access(buff)?;
         // get our response query id
         match archive {
-            ArchivedTmdbResponseKinds::Movie(resp) => &resp.id,
+            ArchivedTmdbResponseKinds::Movie(resp) => Ok(&resp.id),
         }
     }
 
@@ -368,6 +369,14 @@ impl ShoalResponse for TmdbResponseKinds {
         // check if this is the end of the stream
         match self {
             TmdbResponseKinds::Movie(resp) => resp.end,
+        }
+    }
+
+    /// Get the query id from the response
+    fn get_query_id(archived: &<Self as Archive>::Archived) -> Uuid {
+        // get our response query id
+        match archived {
+            ArchivedTmdbResponseKinds::Movie(resp) => resp.id.to_owned(),
         }
     }
 }
@@ -538,7 +547,7 @@ impl MovieWorker {
             match job {
                 MovieMsg::Insert(movie) => {
                     // add this movie to  our buffer
-                    self.insert_buffer.push(movie);
+                    self.insert_buffer.push(movie.clone());
                     // check if we have 10 movies to send
                     if self.insert_buffer.len() > 10 {
                         // send all of our buffered movies
@@ -550,6 +559,7 @@ impl MovieWorker {
                     let query = self.shoal.query().add(MovieGet::new(movie.id));
                     // start this query
                     let mut stream = self.shoal.send(query).await.unwrap();
+                    println!("preverify? - {}:{}", movie.title, movie.id);
                     // this query will only ever return a single row
                     match stream.next_typed_first::<Movie>().await.unwrap() {
                         Some(Some(movie_data)) => {
@@ -560,6 +570,7 @@ impl MovieWorker {
                         }
                         _ => panic!("{} is missing", movie.title),
                     }
+                    println!("postverify?");
                 }
                 MovieMsg::Shutdown => {
                     // reemit the shutdown order
@@ -660,6 +671,7 @@ impl MovieController {
         tasks.join_all().await;
         // pop the last shutdown message
         self.movies_rx.recv().await.unwrap();
+        println!("--------------");
         // spawn 5 workers
         self.spawn(5);
         tokio::time::sleep(Duration::from_secs(3)).await;
