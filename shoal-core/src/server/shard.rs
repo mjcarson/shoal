@@ -8,7 +8,7 @@ use glommio::{
     TaskQueueHandle,
 };
 use kanal::{AsyncReceiver, AsyncSender};
-use std::hash::Hasher;
+use std::collections::HashMap;
 use std::{net::SocketAddr, time::Duration};
 use tracing::instrument;
 
@@ -17,7 +17,10 @@ use super::{
     messages::{MeshMsg, ShardMsg},
     Conf,
 };
-use crate::shared::traits::{QuerySupport, RkyvSupport, ShoalDatabase, ShoalQuery};
+use crate::{
+    shared::traits::{QuerySupport, ShoalDatabase},
+    storage::{FullArchiveMap, LoaderMsg, Loaders},
+};
 
 /// How to message a specific shard
 #[derive(Clone, Debug)]
@@ -101,12 +104,22 @@ pub struct Shard<S: ShoalDatabase> {
     info: ShardInfo,
     /// The tables we are responsible for on this shard
     pub tables: S,
+    /// The full archive map for all tables
+    table_map: FullArchiveMap<S::TableNames>,
     /// The glommio channel to send messages on
     local_tx: Senders<MeshMsg<S>>,
     /// The channel to send shard local messages on
-    node_local_tx: AsyncSender<ShardMsg<S>>,
+    shard_local_tx: AsyncSender<ShardMsg<S>>,
     /// The channel to Receive shard local messages on
-    node_local_rx: AsyncReceiver<ShardMsg<S>>,
+    shard_local_rx: AsyncReceiver<ShardMsg<S>>,
+    /// A map of storage systems and their loader channel
+    loader_channels: HashMap<
+        Loaders,
+        (
+            AsyncSender<LoaderMsg<S::TableNames>>,
+            AsyncReceiver<LoaderMsg<S::TableNames>>,
+        ),
+    >,
     /// The UDP socket to send responses on
     socket: UdpSocket,
     /// The responses whose queries have been flushed to disk
@@ -114,7 +127,7 @@ pub struct Shard<S: ShoalDatabase> {
     /// The latency sensitive task queue
     high_priority: TaskQueueHandle,
     /// The medium priority task queue
-    medium_priority: TaskQueueHandle,
+    _medium_priority: TaskQueueHandle,
     /// The tasks we have spawned
     tasks: Vec<Task<Result<(), ServerError>>>,
 }
@@ -146,30 +159,43 @@ impl<S: ShoalDatabase> Shard<S> {
         // create a high priority queue for this task queue
         let high_priority = executor.create_task_queue(
             Shares::Static(1000),
-            Latency::Matters(Duration::from_millis(10)),
+            Latency::Matters(Duration::from_millis(1)),
             &high_name,
         );
-        // create a low priority queue for this task queue
+        // create a medium priority queue for this task queue
         let medium_priority = executor.create_task_queue(
             Shares::Static(500),
             Latency::Matters(Duration::from_millis(100)),
             &medium_name,
         );
+        // build an archive map across all tables
+        let table_map = FullArchiveMap::default();
+        // start with an empty loader channel map
+        let mut loader_channels = HashMap::with_capacity(1);
         // build our shards tables
-        let tables = S::new(&info.name, conf, medium_priority).await?;
+        let tables = S::new(
+            &info.name,
+            &table_map,
+            &mut loader_channels,
+            conf,
+            medium_priority,
+        )
+        .await?;
         // create our node local channel for this shard
-        let (node_local_tx, node_local_rx) = kanal::unbounded_async();
+        let (shard_local_tx, shard_local_rx) = kanal::unbounded_async();
         // build our shard
         let shard = Shard {
             info,
             tables,
+            table_map,
             local_tx,
-            node_local_tx,
-            node_local_rx,
+            shard_local_tx,
+            shard_local_rx,
+            loader_channels,
             socket,
             flushed: Vec::with_capacity(1000),
             high_priority,
-            medium_priority,
+            _medium_priority: medium_priority,
             tasks: Vec::with_capacity(100),
         };
         Ok(shard)
@@ -192,11 +218,19 @@ impl<S: ShoalDatabase> Shard<S> {
         // send a message to our coordinator that we are ready to join
         self.local_tx.send_to(0, join_msg).await?;
         // build our mesh relay
-        let relay = MeshRelay::new(mesh_rx, &self.node_local_tx);
+        let relay = MeshRelay::new(mesh_rx, &self.shard_local_tx);
         // start relaying messages
         let relay =
             glommio::spawn_local_into(async move { relay.start().await }, self.high_priority)
                 .unwrap();
+        // start our loaders
+        self.tables
+            .init_storage_loaders(
+                &self.table_map,
+                &mut self.loader_channels,
+                &self.shard_local_tx,
+            )
+            .await?;
         // track this task
         // TODO: allow tracked tasks to be differentiated
         self.tasks.push(relay);
@@ -277,16 +311,28 @@ impl<S: ShoalDatabase> Shard<S> {
         // keep handling messages until we get a shutdown command
         loop {
             // wait for a message on our mesh
-            let msg = self.node_local_rx.recv().await.unwrap();
+            let msg = self.shard_local_rx.recv().await.unwrap();
             // handle this message
             match msg {
+                // handle this query from the user
                 ShardMsg::Query { meta, query } => self.handle_query(meta, query).await?,
+                // load this partition from disk
+                ShardMsg::Partition(loaded) => {
+                    self.tables
+                        .load_partition(loaded, &self.shard_local_tx)
+                        .await?
+                }
                 ShardMsg::Shutdown => {
+                    // signal all of our loaders to shutdown
+                    for (_, (loader_tx, _)) in &self.loader_channels {
+                        // signal this loader to shutdown
+                        loader_tx.send(LoaderMsg::Shutdown).await.unwrap();
+                    }
                     break;
                 }
             }
             // if we have no more messages then flush our current queries to disk
-            if self.node_local_rx.is_empty() {
+            if self.shard_local_rx.is_empty() {
                 self.tables.flush().await?;
             }
             // check for any flushed response to handle

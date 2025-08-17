@@ -3,7 +3,7 @@ extern crate proc_macro;
 use darling::FromAttributes;
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
-use syn::{Data, DataStruct, Fields, Ident};
+use syn::{Data, DataStruct, Fields, FieldsNamed, Ident};
 
 /// The arguments for a FromShoal derive
 #[derive(Debug, darling::FromAttributes)]
@@ -228,55 +228,320 @@ pub fn derive_shoal_unsorted_table(stream: TokenStream) -> TokenStream {
     output.into()
 }
 
-fn add_query_kinds(name: &Ident) -> proc_macro2::TokenStream {
-    // build the query kinds type to set
-    quote!(
-        type QueryKinds = concat!(#name, QueryKinds);
-    )
+//fn add_query_kinds(name: &Ident) -> proc_macro2::TokenStream {
+//    // build the query kinds type to set
+//    quote!(
+//        type QueryKinds = concat!(#name, QueryKinds);
+//    )
+//}
+//
+//fn add_db_new(name: &Ident, fields: &Fields) -> proc_macro2::TokenStream {
+//    // build the entry for each field name and type
+//    let field_iter = fields.iter().map(|field| {
+//        // get this fields name
+//        let ident = &field.ident;
+//        let ftype = format_ident!("{}", stringify!(field.ty).split_once('<').unwrap().0);
+//        // build this fields entry
+//        quote! { #ident: #ftype::new(shared_name, conf).await? }
+//    });
+//    // build the query kinds type to set
+//    quote!(
+//        async fn new(shard_name: &str, conf: &Conf) -> Result<Self, ServerError> {
+//            let db = #name {
+//            //    key_value: PersistentTable::new(shard_name, conf).await?,
+//                #(#field_iter,)*
+//            };
+//            Ok(db)
+//        }
+//    )
+//}
+//
+//fn add_db_trait(name: &Ident, fields: &Fields, stream: &mut proc_macro2::TokenStream) {
+//    // build our new idents
+//    let query_kinds = format_ident!("{}QueryKinds", name);
+//    let response_kinds = format_ident!("{}ResponseKinds", name);
+//    // build our different function implementations
+//    let new = add_db_new(name, fields);
+//    // build the entry for each field name and type
+//    let field_iter = fields.iter().map(|field| {
+//        // get this fields name
+//        let ident = &field.ident;
+//        let ftype = format_ident!("{}", stringify!(field.ty).split_once('<').unwrap().0);
+//        // build this fields entry
+//        quote! { #ident: #ftype::new(shared_name, conf).await? }
+//    });
+//    stream.extend(quote! {
+//        impl ShoalDatabase for Basic {
+//            /// The different tables or types of queries we will handle
+//            type QueryKinds = #query_kinds;
+//
+//            /// The different tables we can get responses from
+//            type ResponseKinds = #response_kinds;
+//
+//            /// Create a new shoal db instance
+//            ///
+//            /// # Arguments
+//            ///
+//            /// * `shard_name` - The id of the shard that owns this table
+//            /// * `conf` - A shoal config
+//            //#new
+//            async fn new(shard_name: &str, conf: &Conf) -> Result<Self, ServerError> {
+//                let db = Basic {
+//                    key_value: PersistentTable::new(shard_name, conf).await?,
+//                };
+//                Ok(db)
+//            }
+//
+//            /// Handle messages for different table types
+//            async fn handle(
+//                &mut self,
+//                meta: QueryMetadata,
+//                typed_query: Self::QueryKinds,
+//            ) -> Option<(SocketAddr, Self::ResponseKinds)> {
+//                // match on the right query and execute it
+//                match typed_query {
+//                    BasicQueryKinds::KeyValue(query) => {
+//                        // handle these queries
+//                        match self.key_value.handle(meta, query).await {
+//                            Some((addr, response)) => {
+//                                // wrap our response with the right table kind
+//                                let wrapped = BasicResponseKinds::KeyValue(response);
+//                                Some((addr, wrapped))
+//                            }
+//                            None => None,
+//                        }
+//                    }
+//                }
+//            }
+//
+//            /// Flush any in flight writes to disk
+//            async fn flush(&mut self) -> Result<(), ServerError> {
+//                self.key_value.flush().await
+//            }
+//
+//            /// Get all flushed messages and send their response back
+//            ///
+//            /// # Arguments
+//            ///
+//            /// * `flushed` - The flushed response to send back
+//            fn handle_flushed(&mut self, flushed: &mut Vec<(SocketAddr, Self::ResponseKinds)>) {
+//                // get all flushed queries in their specific format
+//                let specific = self.key_value.get_flushed();
+//                // wrap and add our specific queries
+//                let wrapped = specific
+//                    .drain(..)
+//                    .map(|(addr, resp)| (addr, BasicResponseKinds::KeyValue(resp)));
+//                // extend our response list with our wrapped queries
+//                flushed.extend(wrapped);
+//            }
+//
+//            /// Shutdown this table and flush any data to disk if needed
+//            async fn shutdown(&mut self) -> Result<(), ServerError> {
+//                // shutdown the key value table
+//                self.key_value.shutdown().await
+//            }
+//        }
+//
+//    });
+//}
+
+/// Convert snake case strings to pascal case
+///
+/// # Arguments
+///
+/// * `snake_case` - The snake case string to convert
+fn snake_to_pascal_case(snake_case: &str) -> String {
+    snake_case
+        .split('_')
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                None => String::new(),
+                Some(first) => {
+                    first.to_uppercase().collect::<String>() + &chars.as_str().to_lowercase()
+                }
+            }
+        })
+        .collect()
+}
+/// Get the variant names for our enum
+fn get_variant_names(fields: &FieldsNamed) -> Vec<Ident> {
+    // Extract field names and convert to PascalCase for enum variants
+    fields
+        .named
+        .iter()
+        .filter_map(|field| field.ident.as_ref())
+        .map(|field_name| {
+            // Convert snake_case to PascalCase
+            let variant_name = snake_to_pascal_case(&field_name.to_string());
+            format_ident!("{}", variant_name)
+        })
+        .collect()
 }
 
-fn add_db_new(name: &Ident, fields: &Fields) -> proc_macro2::TokenStream {
-    // build the entry for each field name and type
-    let field_iter = fields.iter().map(|field| {
-        // get this fields name
-        let ident = &field.ident;
-        let ftype = format_ident!("{}", stringify!(field.ty).split_once('<').unwrap().0);
-        // build this fields entry
-        quote! { #ident: #ftype::new(shared_name, conf).await? }
-    });
-    // build the query kinds type to set
-    quote!(
-        async fn new(shard_name: &str, conf: &Conf) -> Result<Self, ServerError> {
-            let db = #name {
-            //    key_value: PersistentTable::new(shard_name, conf).await?,
-                #(#field_iter,)*
-            };
-            Ok(db)
-        }
-    )
-}
-
-fn add_db_trait(name: &Ident, fields: &Fields, stream: &mut proc_macro2::TokenStream) {
-    // build our new idents
-    let query_kinds = format_ident!("{}QueryKinds", name);
-    let response_kinds = format_ident!("{}ResponseKinds", name);
-    // build our different function implementations
-    let new = add_db_new(name, fields);
-    // build the entry for each field name and type
-    let field_iter = fields.iter().map(|field| {
-        // get this fields name
-        let ident = &field.ident;
-        let ftype = format_ident!("{}", stringify!(field.ty).split_once('<').unwrap().0);
-        // build this fields entry
-        quote! { #ident: #ftype::new(shared_name, conf).await? }
-    });
+/// Build the enum for this struct
+fn build_enum(stream: &mut proc_macro2::TokenStream, enum_ident: &Ident, variants: &Vec<Ident>) {
+    // Generate the enum and add it to our token stream
     stream.extend(quote! {
-        impl ShoalDatabase for Basic {
-            /// The different tables or types of queries we will handle
-            type QueryKinds = #query_kinds;
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+        pub enum #enum_ident {
+            #(#variants),*
+        }
+    });
+}
 
-            /// The different tables we can get responses from
-            type ResponseKinds = #response_kinds;
+/// Build our table name support impl
+fn add_table_name_support(stream: &mut proc_macro2::TokenStream, enum_ident: &Ident) {
+    // Generate and add a table name support impl
+    stream.extend(quote! {
+        impl shoal_core::shared::traits::TableNameSupport for #enum_ident {}
+    });
+}
+
+/// Build the FromStr implementation
+fn build_display(stream: &mut proc_macro2::TokenStream, enum_ident: &Ident, variants: &Vec<Ident>) {
+    // get the variant names as a string
+    let variant_names: Vec<_> = variants
+        .iter()
+        .map(|variant_name| variant_name.to_string())
+        .collect();
+    // build our from str arms
+    let to_str_arms = variants
+        .iter()
+        .zip(&variant_names)
+        .map(|(variant, variant_name)| {
+            quote! {
+                #enum_ident::#variant => write!(f, "{}", #variant_name),
+            }
+        });
+    // add our FromStr impl to our token stream
+    stream.extend(quote! {
+        impl std::fmt::Display for #enum_ident {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                match self {
+                    #(#to_str_arms)*
+                }
+            }
+        }
+    });
+}
+
+fn add_db_trait2(
+    stream: &mut proc_macro2::TokenStream,
+    struct_ident: &Ident,
+    fields: &FieldsNamed,
+    variants: &Vec<Ident>,
+) {
+    // build our new idents
+    let client_ident = format_ident!("{}Client", struct_ident);
+    let table_names_ident = format_ident!("{}TableNames", struct_ident);
+    let query_ident = format_ident!("{struct_ident}QueryKinds");
+    let response_ident = format_ident!("{struct_ident}ResponseKinds");
+    // build our new table arms
+    // get the field idents
+    let new_arms = fields.named.iter().zip(variants.iter()).map(|(field, variant)| {
+        // get our field ident and type
+        let field_ident = field.ident.as_ref().unwrap();
+        let field_type = &field.ty;
+        // build our new arm for this field
+        quote! {
+            #field_ident: <#field_type>::new(shard_name, #table_names_ident::#variant, shard_archive_map, loader_channels, conf, medium_priority).await?,
+        }
+    });
+    // build our handle query arms
+    let handle_arms = fields.named.iter().map(|field| {
+        // get our field ident and type
+        let field_ident = field.ident.as_ref().unwrap();
+        // convert this field name to pascal case
+        let variant_str = snake_to_pascal_case(&field_ident.to_string());
+        // convert our variant name to an ident
+        let variant_ident = format_ident!("{variant_str}");
+        // build our handle query arm for this field
+        quote! {
+            #query_ident::#variant_ident(query) => {
+                // handle these queries
+                match self.#field_ident.handle(meta, query).await {
+                    Some((addr, response)) => {
+                        // wrap our response with the right table kind
+                        let wrapped = #response_ident::#variant_ident(response);
+                        Some((addr, wrapped))
+                    }
+                    None => None,
+                }
+            },
+        }
+    });
+    // build our flush arms
+    let flush_arms = fields.named.iter().map(|field| {
+        // get our field ident and type
+        let field_ident = field.ident.as_ref().unwrap();
+        // build our flush arm for this field
+        quote! {
+            self.#field_ident.flush().await?;
+        }
+    });
+    // build our handle flushed arms
+    let handle_flushed_arms = fields.named.iter().map(|field| {
+        // get our field ident and type
+        let field_ident = field.ident.as_ref().unwrap();
+        // convert this field name to pascal case
+        let variant_str = snake_to_pascal_case(&field_ident.to_string());
+        // convert our variant name to an ident
+        let variant_ident = format_ident!("{variant_str}");
+        // build our handle flushed  arm for this field
+        quote! {
+            // get all flushed queries in their specific format
+            let specific = self.#field_ident.get_flushed().await?;
+            // wrap and add our specific queries
+            let wrapped = specific
+                .drain(..)
+                .map(|(addr, resp)| (addr, #response_ident::#variant_ident(resp)));
+            // extend our response list with our wrapped queries
+            flushed.extend(wrapped);
+        }
+    });
+    // build our load partition arms
+    let load_partition_arms = fields
+        .named
+        .iter()
+        .zip(variants)
+        .map(|(field, variant_ident)| {
+        // get our field ident and type
+        let field_ident = field.ident.as_ref().unwrap();
+        // build our load partition arm for this field
+        quote! {
+            #table_names_ident::#variant_ident=> {
+                if let Some(unblocked) = self.#field_ident.load_partition(loaded_kinds.loaded).await {
+                    // convert our unblocked queries into shard messages
+                    for (meta, unwrapped) in unblocked {
+                        // wrap our query
+                        let query = #query_ident::#variant_ident(unwrapped);
+                        // build our shard message
+                        let msg = ShardMsg::Query { meta, query };
+                        // send this message
+                        shard_local_tx.send(msg).await.unwrap();
+                    }
+                }
+            }
+        }
+    });
+    // build our shutdown arms
+    let shutdown_arms = fields.named.iter().map(|field| {
+        // get our field ident and type
+        let field_ident = field.ident.as_ref().unwrap();
+        // build our shutdown arm for this field
+        quote! {
+            self.#field_ident.shutdown().await?;
+        }
+    });
+    // build our ShoalDatabase impl
+    stream.extend(quote! {
+        impl ShoalDatabase for #struct_ident {
+            /// This databases external client type
+            type ClientType = #client_ident;
+
+            /// The different tables in this database
+            type TableNames = #table_names_ident;
 
             /// Create a new shoal db instance
             ///
@@ -284,39 +549,73 @@ fn add_db_trait(name: &Ident, fields: &Fields, stream: &mut proc_macro2::TokenSt
             ///
             /// * `shard_name` - The id of the shard that owns this table
             /// * `conf` - A shoal config
-            //#new
-            async fn new(shard_name: &str, conf: &Conf) -> Result<Self, ServerError> {
-                let db = Basic {
-                    key_value: PersistentTable::new(shard_name, conf).await?,
+            async fn new(
+                shard_name: &str,
+                shard_archive_map: &FullArchiveMap<Self::TableNames>,
+                loader_channels: &mut HashMap<
+                    Loaders,
+                    (AsyncSender<LoaderMsg<Self::TableNames>>, AsyncReceiver<LoaderMsg<Self::TableNames>>),
+                >,
+                conf: &Conf,
+                medium_priority: TaskQueueHandle,
+            ) -> Result<Self, ServerError> {
+                let db = Tmdb {
+                    #(#new_arms)*
                 };
                 Ok(db)
+            }
+
+            /// Initialize the different loaders for our storage kinds
+            async fn init_storage_loaders(
+                &self,
+                table_map: &FullArchiveMap<Self::TableNames>,
+                loader_channels: &mut HashMap<
+                    Loaders,
+                    (AsyncSender<LoaderMsg<Self::TableNames>>, AsyncReceiver<LoaderMsg<Self::TableNames>>),
+                >,
+                shard_local_tx: &AsyncSender<ShardMsg<Self>>,
+            ) -> Result<(), ServerError> {
+                // create a list to keep track of our spawned loaders
+                let mut spawned = Vec::with_capacity(1);
+                // get the storage engine this table needs
+                let needed = self.movie.loader_kind();
+                // only spawn this loader if it has not yet been spawned
+                if !spawned.contains(&needed) {
+                    // get this tables loader kind
+                    let loader_kind = self.movie.loader_kind();
+                    // get the correct load rx channel
+                    let (_, loader_rx) = loader_channels
+                        .entry(loader_kind)
+                        .or_insert_with(|| kanal::unbounded_async());
+                    // spawn this loader
+                    self.movie
+                        .spawn_loader(table_map, loader_rx, shard_local_tx)
+                        .await?;
+                    // add our newly spawned loader to our spawned loader set
+                    spawned.push(needed);
+                }
+                Ok(())
             }
 
             /// Handle messages for different table types
             async fn handle(
                 &mut self,
                 meta: QueryMetadata,
-                typed_query: Self::QueryKinds,
-            ) -> Option<(SocketAddr, Self::ResponseKinds)> {
+                typed_query: <Self::ClientType as QuerySupport>::QueryKinds,
+            ) -> Option<(
+                SocketAddr,
+                <Self::ClientType as QuerySupport>::ResponseKinds,
+            )> {
                 // match on the right query and execute it
                 match typed_query {
-                    BasicQueryKinds::KeyValue(query) => {
-                        // handle these queries
-                        match self.key_value.handle(meta, query).await {
-                            Some((addr, response)) => {
-                                // wrap our response with the right table kind
-                                let wrapped = BasicResponseKinds::KeyValue(response);
-                                Some((addr, wrapped))
-                            }
-                            None => None,
-                        }
-                    }
+                    #(#handle_arms)*
                 }
             }
 
             /// Flush any in flight writes to disk
             async fn flush(&mut self) -> Result<(), ServerError> {
-                self.key_value.flush().await
+                #(#flush_arms)*
+                Ok(())
             }
 
             /// Get all flushed messages and send their response back
@@ -324,24 +623,56 @@ fn add_db_trait(name: &Ident, fields: &Fields, stream: &mut proc_macro2::TokenSt
             /// # Arguments
             ///
             /// * `flushed` - The flushed response to send back
-            fn handle_flushed(&mut self, flushed: &mut Vec<(SocketAddr, Self::ResponseKinds)>) {
-                // get all flushed queries in their specific format
-                let specific = self.key_value.get_flushed();
-                // wrap and add our specific queries
-                let wrapped = specific
-                    .drain(..)
-                    .map(|(addr, resp)| (addr, BasicResponseKinds::KeyValue(resp)));
-                // extend our response list with our wrapped queries
-                flushed.extend(wrapped);
+            async fn handle_flushed(
+                &mut self,
+                flushed: &mut Vec<(
+                    SocketAddr,
+                    <Self::ClientType as QuerySupport>::ResponseKinds,
+                )>,
+            ) -> Result<(), ServerError> {
+                #(#handle_flushed_arms)*
+                Ok(())
             }
+
+            /// Load a partition and execute any pending queries
+            async fn load_partition(
+                &mut self,
+                loaded_kinds: shoal_core::server::messages::LoadedPartitionKinds<Self>,
+                shard_local_tx: &AsyncSender<ShardMsg<Self>>,
+            ) -> Result<(), ServerError> {
+                match loaded_kinds.table {
+                    #(#load_partition_arms)*
+                };
+                Ok(())
+            }
+            
 
             /// Shutdown this table and flush any data to disk if needed
             async fn shutdown(&mut self) -> Result<(), ServerError> {
-                // shutdown the key value table
-                self.key_value.shutdown().await
+                #(#shutdown_arms)*
+                Ok(())
             }
         }
+    });
+}
 
+// Add a client for this database
+fn add_client(stream: &mut proc_macro2::TokenStream, struct_ident: &Ident) {
+    // build our new idents
+    let client_ident = format_ident!("{}Client", struct_ident);
+    let query_ident = format_ident!("{struct_ident}QueryKinds");
+    let response_ident = format_ident!("{struct_ident}ResponseKinds");
+    // add our client struct and query support for the client
+    stream.extend(quote! {
+        pub struct #client_ident {}
+
+        impl QuerySupport for #client_ident {
+            /// The different tables or types of queries we will handle
+            type QueryKinds = #query_ident;
+
+            /// The different tables we can get responses from
+            type ResponseKinds = #response_ident;
+        }
     });
 }
 
@@ -351,19 +682,83 @@ pub fn derive_shoal_db(stream: TokenStream) -> TokenStream {
     // parse our target struct
     let ast = syn::parse_macro_input!(stream as syn::DeriveInput);
     // get the name of our struct
-    let name = &ast.ident;
-    // we only support structs right now
-    let struct_data = match &ast.data {
-        Data::Struct(struct_data) => struct_data,
-        _ => unimplemented!("Only structs are currently supported"),
-    };
-    let fields = &struct_data.fields;
+    let struct_ident = &ast.ident;
+    // Parse attributes to get custom enum name
+    let enum_ident = format_ident!("{struct_ident}TableNames");
     // start with an empty stream
     let mut output = quote! {};
-    // add our shoal db trait
-    add_db_trait(name, fields, &mut output);
+    // handle each possible type of data structure
+    // for anything other then a struct well return an error
+    match &ast.data {
+        Data::Struct(data_struct) => {
+            // handle the diferrent type of fields
+            // we can only support named fields and will return an error for all others
+            match &data_struct.fields {
+                Fields::Named(fields) => {
+                    // make sure we have some fields in this struct
+                    // if we don't then we have to return an error
+                    if fields.named.is_empty() {
+                        return syn::Error::new_spanned(
+                            &ast,
+                            "Struct must have named fields to generate enum",
+                        )
+                        .to_compile_error()
+                        .into();
+                    }
+                    // get our field names converted to pascal case
+                    let variants = get_variant_names(fields);
+                    // build the enum from our variant names
+                    build_enum(&mut output, &enum_ident, &variants);
+                    // add TableNameSupport to this enum
+                    add_table_name_support(&mut output, &enum_ident);
+                    // add display support to this enum
+                    build_display(&mut output, &enum_ident, &variants);
+                    // add ShoalDatabase support to our root struct
+                    add_db_trait2(&mut output, struct_ident, fields, &variants);
+                    // add our client
+                    add_client(&mut output, struct_ident);
+                }
+                Fields::Unnamed(_) => {
+                    return syn::Error::new_spanned(
+                        &ast,
+                        "FieldsEnum only supports structs with named fields",
+                    )
+                    .to_compile_error()
+                    .into();
+                }
+                Fields::Unit => {
+                    return syn::Error::new_spanned(
+                        &ast,
+                        "FieldsEnum only supports structs with named fields",
+                    )
+                    .to_compile_error()
+                    .into();
+                }
+            }
+        }
+        Data::Enum(_) => {
+            return syn::Error::new_spanned(&ast, "FieldsEnum only supports structs, not enums")
+                .to_compile_error()
+                .into();
+        }
+        Data::Union(_) => {
+            return syn::Error::new_spanned(&ast, "FieldsEnum does not support unions")
+                .to_compile_error()
+                .into();
+        }
+    }
     // convert and return our stream
     output.into()
+    //// we only support structs right now
+    //let struct_data = match &ast.data {
+    //    Data::Struct(struct_data) => struct_data,
+    //    _ => unimplemented!("Only structs are currently supported"),
+    //};
+    //let fields = &struct_data.fields;
+    // start with an empty stream
+    //let mut output = quote! {};
+    //// add our shoal db trait
+    //add_db_trait(name, fields, &mut output);
 }
 
 ///// The arguments for a ShoalDB derive

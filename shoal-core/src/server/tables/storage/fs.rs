@@ -7,8 +7,12 @@ use futures::{AsyncWriteExt, StreamExt};
 use glommio::io::{DmaStreamWriter, DmaStreamWriterBuilder, OpenOptions};
 use glommio::{Task, TaskQueueHandle};
 use kanal::{AsyncReceiver, AsyncSender};
+use rkyv::bytecheck::CheckBytes;
 use rkyv::de::Pool;
 use rkyv::rancor::Strategy;
+use rkyv::validation::archive::ArchiveValidator;
+use rkyv::validation::shared::SharedValidator;
+use rkyv::validation::Validator;
 use rkyv::Archive;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -16,17 +20,22 @@ use std::sync::Arc;
 
 mod compactor;
 pub mod conf;
+mod loader;
 mod map;
 mod reader;
 
 use compactor::FileSystemCompactor;
-use map::ArchiveMap;
+pub use map::ArchiveMap;
 use reader::IntentLogReader;
 
 use super::{CompactionJob, IntentReadSupport, StorageSupport};
 use crate::server::conf::TableSettings;
+use crate::server::messages::ShardMsg;
 use crate::server::{Conf, ServerError};
-use crate::shared::traits::{PartitionKeySupport, RkyvSupport};
+use crate::shared::traits::{PartitionKeySupport, RkyvSupport, ShoalDatabase, TableNameSupport};
+use crate::storage::{ArchiveMapKinds, FilteredFullArchiveMap, FullArchiveMap, LoaderMsg, Loaders};
+use crate::tables::partitions::{MaybeLoaded, PartitionSupport};
+use loader::FsLoader;
 
 /// The max size for our data intent log
 const INTENT_LIMIT: Byte = Byte::MEBIBYTE.multiply(50).unwrap();
@@ -82,7 +91,7 @@ impl FileSystem {
 
     /// Spawn a compactor on this shard
     async fn spawn_intent_compactor<
-        T: IntentReadSupport + 'static,
+        T: IntentReadSupport<R> + 'static,
         R: PartitionKeySupport + 'static,
     >(
         &mut self,
@@ -90,14 +99,11 @@ impl FileSystem {
     ) -> Result<(), ServerError>
     where
         <T as Archive>::Archived: rkyv::Deserialize<T, Strategy<Pool, rkyv::rancor::Error>>,
-        for<'a> <T as Archive>::Archived: rkyv::bytecheck::CheckBytes<
-            Strategy<
-                rkyv::validation::Validator<
-                    rkyv::validation::archive::ArchiveValidator<'a>,
-                    rkyv::validation::shared::SharedValidator,
-                >,
-                rkyv::rancor::Error,
-            >,
+        for<'a> <T as Archive>::Archived: CheckBytes<
+            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+        >,
+        for<'a> <T::Intent as Archive>::Archived: CheckBytes<
+            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
         >,
     {
         // build a compactor
@@ -123,6 +129,9 @@ impl StorageSupport for FileSystem {
     /// The settings for this storage engine
     type Settings = FileSystemTableConf;
 
+    /// The archive map this storage engine uses
+    type ArchiveMap = ArchiveMap;
+
     /// Create a new instance of this storage engine
     ///
     /// # Arguments
@@ -131,8 +140,14 @@ impl StorageSupport for FileSystem {
     /// * `conf` - The Shoal config
     /// * `medium_priority` - The medium priority task queue
     #[allow(async_fn_in_trait)]
-    async fn new<P: IntentReadSupport + 'static, R: PartitionKeySupport + 'static>(
+    async fn new<
+        P: IntentReadSupport<R> + 'static,
+        R: PartitionKeySupport + 'static,
+        N: TableNameSupport,
+    >(
         shard_name: &str,
+        table_name: N,
+        shard_archive_map: &FullArchiveMap<N>,
         conf: &Conf,
         medium_priority: TaskQueueHandle,
     ) -> Result<Self, ServerError>
@@ -147,6 +162,9 @@ impl StorageSupport for FileSystem {
                 >,
                 rkyv::rancor::Error,
             >,
+        >,
+        for<'a> <P::Intent as Archive>::Archived: CheckBytes<
+            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
         >,
     {
         // get this tables config
@@ -163,6 +181,10 @@ impl StorageSupport for FileSystem {
         let (intent_tx, intent_rx) = kanal::unbounded_async();
         // get this shards shared archive map
         let map = Arc::new(ArchiveMap::new(shard_name, R::name(), &table_conf).await?);
+        // wrap a clone of our archive map in the filesystem kind
+        let wrapped = ArchiveMapKinds::FileSystem(map.clone());
+        // add our wrapped map to our shards full map
+        shard_archive_map.insert(table_name, wrapped);
         // build our file system storage module
         let mut fs = FileSystem {
             shard_name: shard_name.to_owned(),
@@ -216,10 +238,17 @@ impl StorageSupport for FileSystem {
     }
 
     /// Set our intent log to be compact if its needed
+    ///
+    /// # Arguments
+    ///
+    /// * `force` - Whether to force a compaction of the intent logs
     #[allow(async_fn_in_trait)]
-    async fn compact_if_needed<R: PartitionKeySupport>(&mut self) -> Result<u64, ServerError> {
-        // check if this intent log is over 50MiB
-        if self.intent_log.current_pos() > INTENT_LIMIT {
+    async fn compact_if_needed<R: PartitionKeySupport>(
+        &mut self,
+        force: bool,
+    ) -> Result<u64, ServerError> {
+        // check if this intent log is over 50MiB or if compaction is being forced
+        if self.intent_log.current_pos() > INTENT_LIMIT || force {
             // flush this intent log
             self.flush().await?;
             // get the current flushed position
@@ -244,7 +273,7 @@ impl StorageSupport for FileSystem {
             self.intent_log = new_writer;
             // increment our writer generation
             self.generation += 1;
-            // increment the attempt
+            // create an archive compaction job
             self.intent_tx.send(CompactionJob::Archives).await?;
             Ok(flushed_pos)
         } else {
@@ -269,10 +298,10 @@ impl StorageSupport for FileSystem {
     /// * `conf` - A Shoal config
     /// * `path` - The path to the intent log to read in
     #[allow(async_fn_in_trait)]
-    async fn read_intents<P: IntentReadSupport, R: PartitionKeySupport>(
+    async fn read_intents<P: IntentReadSupport<R> + PartitionSupport, R: PartitionKeySupport>(
         shard_name: &str,
         conf: &Conf,
-        partitions: &mut HashMap<u64, P>,
+        partitions: &mut HashMap<u64, MaybeLoaded<P>>,
     ) -> Result<(), ServerError> {
         // get this tables settings
         let table_conf = Self::get_settings::<R>(conf)?;
@@ -286,9 +315,71 @@ impl StorageSupport for FileSystem {
         // iterate over the entries in this intent log
         while let Some(read) = reader.next_buff().await? {
             // load this partitions data
-            <P as IntentReadSupport>::load(&read, partitions)?;
+            if <P as IntentReadSupport<R>>::load(&read, partitions).is_err() {
+                panic!("Skipping intent data that was not fully committed");
+            }
         }
+        // close our reader
+        reader.close().await?;
         Ok(())
+    }
+
+    /// Get the type of loader this storage kind requires
+    fn loader_kind() -> Loaders {
+        // return the filesystem loader
+        Loaders::FileSystem
+    }
+
+    /// Spawn a loader for this storage type if not yet spawned
+    async fn spawn_loader<D: ShoalDatabase>(
+        &self,
+        table_map: &FullArchiveMap<D::TableNames>,
+        loader_rx: &AsyncReceiver<LoaderMsg<D::TableNames>>,
+        shard_local_tx: &AsyncSender<ShardMsg<D>>,
+    ) -> Result<(), ServerError> {
+        // filter down to just our filesystem archive maps
+        let filtered = FilteredFullArchiveMap::<D::TableNames, ArchiveMap>::from(table_map);
+        // build a new filesystem loader
+        let loader =
+            FsLoader::new(&self.medium_priority, filtered, &loader_rx, shard_local_tx).await;
+        // spawn our loader onto our medium priority task queue
+        let task =
+            glommio::spawn_local_into(async move { loader.start().await }, self.medium_priority)
+                .unwrap();
+        // add this task to our task queue
+        self.tasks.push(task);
+        Ok(())
+    }
+
+    /// Load a partition from disk if it exists
+    ///
+    /// Returns true if a partition exists and will be loaded from disk and
+    /// false if it does not and wont.
+    async fn load_partition<N: TableNameSupport>(
+        &self,
+        table_name: N,
+        partition_id: u64,
+        loader_tx: &AsyncSender<LoaderMsg<N>>,
+    ) -> Result<bool, ServerError> {
+        // check if this partition is in our archive map
+        match self.map.find_partition(partition_id) {
+            // we don't actually care about the entry yet but if the partition
+            // doesn't yet exist then it hasn't been made yet. We don't want
+            // to use the entry info yet to avoid ToCToU issues.
+            Some(_) => {
+                // send our partition load request
+                loader_tx
+                    .send(LoaderMsg::Request {
+                        table_name,
+                        partition_id,
+                    })
+                    .await?;
+                // return true to let our caller know we are loading this
+                // partition from disk
+                Ok(true)
+            }
+            None => Ok(false),
+        }
     }
 
     /// Shutdown this storage engine
@@ -303,6 +394,10 @@ impl StorageSupport for FileSystem {
             // check if this task has failed
             task?;
         }
+        // close any glommio files
+        self.intent_log.close().await?;
+        // close our archive map
+        self.map.close_all().await?;
         Ok(())
     }
 }

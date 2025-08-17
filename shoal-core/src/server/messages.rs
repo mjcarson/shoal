@@ -1,6 +1,7 @@
 //! The different messages that can be sent in shoal
 
 use bytes::BytesMut;
+use glommio::io::ReadResult;
 use std::net::SocketAddr;
 use uuid::Uuid;
 
@@ -71,6 +72,20 @@ pub enum MeshMsg<S: ShoalDatabase> {
     Shutdown,
 }
 
+pub struct LoadedPartition {
+    /// The partition that is being read from disk
+    pub partition_id: u64,
+    /// The result for this read
+    pub data: ReadResult,
+}
+
+pub struct LoadedPartitionKinds<D: ShoalDatabase> {
+    /// The table this partition is for
+    pub table: D::TableNames,
+    /// The partition that was loaded from storage
+    pub loaded: LoadedPartition,
+}
+
 /// The messages that can be sent between workers in a shard
 pub enum ShardMsg<D: ShoalDatabase> {
     /// A query to execute
@@ -80,6 +95,8 @@ pub enum ShardMsg<D: ShoalDatabase> {
         /// The query to execute
         query: <D::ClientType as QuerySupport>::QueryKinds,
     },
+    /// A partition loaded from disk
+    Partition(LoadedPartitionKinds<D>),
     /// Tell this shard to shutdown
     Shutdown,
 }

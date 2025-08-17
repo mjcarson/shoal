@@ -153,4 +153,6 @@ impl From<kanal::ReceiveError> for ServerError {
 pub enum ShoalError {
     /// An invalid non binary message type was recieved
     NonBinaryMessage,
+    /// The map hash was not valid
+    MapCorruption { found: u64, expected: u64 },
 }

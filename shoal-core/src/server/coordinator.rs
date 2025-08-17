@@ -13,7 +13,7 @@ use kanal::{AsyncReceiver, AsyncSender};
 use rkyv::de::Pool;
 use rkyv::rancor::Strategy;
 use rkyv::Archive;
-use std::{marker::PhantomData, net::SocketAddr};
+use std::{marker::PhantomData, net::SocketAddr, time::Duration};
 use tracing::{event, instrument, Level};
 
 use super::messages::QueryMetadata;
@@ -23,10 +23,7 @@ use super::{
     shard::ShardContact,
 };
 use super::{Conf, ServerError};
-use crate::shared::{
-    queries::ArchivedQueries,
-    traits::{RkyvSupport, ShoalDatabase, ShoalQuery},
-};
+use crate::shared::traits::{RkyvSupport, ShoalDatabase, ShoalQuery};
 use crate::shared::{queries::Queries, traits::QuerySupport};
 
 /// Coordinates traffic between this node and others
@@ -84,7 +81,7 @@ where
             table_kind: PhantomData,
         };
         // spawn our mesh listeners
-        coordinator.spawn_mesh_listeners(&kanal_tx);
+        coordinator.spawn_mesh_listeners(&kanal_tx).await;
         // spawmn our client litener
         coordinator.spawn_client_listener(&kanal_tx)?;
         // start handling messages
@@ -93,15 +90,26 @@ where
     }
 
     /// Spawn our mesh listeners
-    fn spawn_mesh_listeners(&mut self, kanal_tx: &AsyncSender<Msg<S>>) {
-        // connect to all of our channels
-        for (id, local_rx) in self.mesh_rx.streams() {
-            // clone our kanal transmitter
-            let kanal_tx = kanal_tx.clone();
-            // spawn a future waiting for a message on this channel
-            let handle = glommio::spawn_local(mesh_listener(id, local_rx, kanal_tx));
-            // add this task to our task list
-            self.tasks.push(handle);
+    async fn spawn_mesh_listeners(&mut self, kanal_tx: &AsyncSender<Msg<S>>) {
+        // wait for the full number of listeners to have connected
+        loop {
+            // check how many of our shards have connected
+            if self.mesh_rx.nr_producers() < self.conf.compute.cpus().unwrap().len() - 1 {
+                // not all of our shards are ready so sleep
+                glommio::timer::sleep(Duration::from_millis(100)).await;
+                // restart our loop
+                continue;
+            }
+            // connect to all of our channels
+            for (id, local_rx) in self.mesh_rx.streams() {
+                // clone our kanal transmitter
+                let kanal_tx = kanal_tx.clone();
+                // spawn a future waiting for a message on this channel
+                let handle = glommio::spawn_local(mesh_listener(id, local_rx, kanal_tx));
+                // add this task to our task list
+                self.tasks.push(handle);
+            }
+            break;
         }
     }
 

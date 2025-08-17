@@ -1,6 +1,7 @@
 //! The root traits that shoal is built upon that are shared between the client and server
 
 use glommio::TaskQueueHandle;
+use kanal::{AsyncReceiver, AsyncSender};
 use rkyv::de::Pool;
 use rkyv::rancor::{Error, Strategy};
 use rkyv::ser::allocator::ArenaHandle;
@@ -8,6 +9,7 @@ use rkyv::ser::sharing::Share;
 use rkyv::ser::Serializer;
 use rkyv::util::AlignedVec;
 use rkyv::{Archive, Serialize};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use tracing::instrument;
 use uuid::Uuid;
@@ -17,10 +19,11 @@ mod unsorted;
 
 use super::queries::ArchivedQueries;
 use super::queries::{Queries, SortedUpdate};
-use crate::server::messages::QueryMetadata;
+use crate::server::messages::{LoadedPartitionKinds, QueryMetadata, ShardMsg};
 use crate::server::ring::Ring;
 use crate::server::shard::ShardInfo;
 use crate::server::{Conf, ServerError};
+use crate::storage::{FullArchiveMap, LoaderMsg, Loaders};
 
 pub use unsorted::ShoalUnsortedTable;
 
@@ -108,10 +111,18 @@ pub trait QuerySupport: 'static {
     type ResponseKinds: ShoalResponse;
 }
 
+pub trait TableNameSupport:
+    std::fmt::Display + std::fmt::Debug + PartialEq + Eq + Ord + std::hash::Hash + Clone + Copy
+{
+}
+
 /// The core trait that all databases in shoal must support
 pub trait ShoalDatabase: 'static + Sized {
     /// This databases external client type
     type ClientType: QuerySupport;
+
+    /// The different tables in this database
+    type TableNames: TableNameSupport;
 
     ///// The different tables or types of queries we will handle
     //type QueryKinds: ShoalQuery;
@@ -128,9 +139,32 @@ pub trait ShoalDatabase: 'static + Sized {
     #[allow(async_fn_in_trait)]
     async fn new(
         shard_name: &str,
+        shard_archive_map: &FullArchiveMap<Self::TableNames>,
+        loader_channels: &mut HashMap<
+            Loaders,
+            (
+                AsyncSender<LoaderMsg<Self::TableNames>>,
+                AsyncReceiver<LoaderMsg<Self::TableNames>>,
+            ),
+        >,
         conf: &Conf,
         medium_priority: TaskQueueHandle,
     ) -> Result<Self, ServerError>;
+
+    /// Initialize the different loaders for our storage kinds
+    #[allow(async_fn_in_trait)]
+    async fn init_storage_loaders(
+        &self,
+        table_map: &FullArchiveMap<Self::TableNames>,
+        loader_channels: &mut HashMap<
+            Loaders,
+            (
+                AsyncSender<LoaderMsg<Self::TableNames>>,
+                AsyncReceiver<LoaderMsg<Self::TableNames>>,
+            ),
+        >,
+        shard_local_tx: &AsyncSender<ShardMsg<Self>>,
+    ) -> Result<(), ServerError>;
 
     /// Build a default queries bundle
     #[must_use]
@@ -177,6 +211,14 @@ pub trait ShoalDatabase: 'static + Sized {
         )>,
     ) -> Result<(), ServerError>;
 
+    /// Load a partition and execute any pending queries
+    #[allow(async_fn_in_trait)]
+    async fn load_partition(
+        &mut self,
+        loaded: LoadedPartitionKinds<Self>,
+        shard_local_tx: &AsyncSender<ShardMsg<Self>>,
+    ) -> Result<(), ServerError>;
+
     /// Shutdown this table and flush any data to disk if needed
     #[allow(async_fn_in_trait)]
     #[cfg(feature = "server")]
@@ -202,6 +244,9 @@ pub trait PartitionKeySupport: std::fmt::Debug + Clone + RkyvSupport + Sized {
 
     /// Get the partition key for this row from an archived value
     fn get_partition_key_from_archived_insert(intent: &<Self as Archive>::Archived) -> u64;
+
+    ///// Get the table name for this data type
+    //fn get_table_name<S: ShoalDatabase>() -> S::TableNames;
 }
 
 pub trait ShoalSortedTable:
