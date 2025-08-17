@@ -2,8 +2,12 @@
 
 use glommio::io::ReadResult;
 use glommio::TaskQueueHandle;
+use rkyv::bytecheck::CheckBytes;
 use rkyv::de::Pool;
 use rkyv::rancor::Strategy;
+use rkyv::validation::archive::ArchiveValidator;
+use rkyv::validation::shared::SharedValidator;
+use rkyv::validation::Validator;
 use rkyv::{Archive, Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -16,8 +20,9 @@ use crate::server::ServerError;
 use crate::shared::queries::SortedUpdate;
 use crate::shared::queries::{SortedGet, SortedQuery};
 use crate::shared::responses::{Response, ResponseAction};
-use crate::shared::traits::{RkyvSupport, ShoalSortedTable};
-use crate::storage::{IntentReadSupport, PendingResponse, StorageSupport};
+use crate::shared::traits::{RkyvSupport, ShoalSortedTable, TableNameSupport};
+use crate::storage::{IntentReadSupport, PendingResponse, ShouldPrune, StorageSupport};
+use crate::tables::partitions::MaybeLoaded;
 
 /// The different types of entries in a shoal intent log
 #[derive(Debug, Archive, Serialize, Deserialize)]
@@ -88,10 +93,10 @@ impl<R: ShoalSortedTable + 'static, S: StorageSupport> PersistentSortedTable<R, 
     ///
     /// * `shard_name` - The id of the shard that owns this table
     /// * `conf` - The Shoal config
-    #[instrument(name = "PersistentTable::new", skip(conf), err(Debug))]
-    pub async fn new(
+    #[instrument(name = "PersistentTable::new", skip(_conf), err(Debug))]
+    pub async fn new<N: TableNameSupport>(
         shard_name: &str,
-        conf: &Conf,
+        _conf: &Conf,
         medium_priority: TaskQueueHandle,
     ) -> Result<Self, ServerError>
     where
@@ -119,18 +124,23 @@ impl<R: ShoalSortedTable + 'static, S: StorageSupport> PersistentSortedTable<R, 
                 rkyv::rancor::Error,
             >,
         >,
+        for<'a> <<SortedPartition<R> as IntentReadSupport<R>>::Intent as Archive>::Archived:
+            CheckBytes<
+                Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+            >,
     {
-        // build our table
-        let mut table = Self {
-            partitions: HashMap::default(),
-            storage: S::new::<SortedPartition<R>, R>(shard_name, conf, medium_priority).await?,
-            pending: PendingResponse::<R>::with_capacity(100),
-            memory_usage: 0,
-            flushed: Vec::with_capacity(1000),
-        };
-        // load our intent log
-        S::read_intents::<SortedPartition<R>, R>(shard_name, conf, &mut table.partitions).await?;
-        Ok(table)
+        panic!("ahh");
+        //// build our table
+        //let mut table = Self {
+        //    partitions: HashMap::default(),
+        //    storage: S::new::<SortedPartition<R>, R, N>(shard_name, conf, medium_priority).await?,
+        //    pending: PendingResponse::<R>::with_capacity(100),
+        //    memory_usage: 0,
+        //    flushed: Vec::with_capacity(1000),
+        //};
+        //// load our intent log
+        //S::read_intents::<SortedPartition<R>, R>(shard_name, conf, &mut table.partitions).await?;
+        //Ok(table)
     }
 
     /// Cast and handle a serialized query
@@ -330,7 +340,7 @@ impl<R: ShoalSortedTable + 'static, S: StorageSupport> PersistentSortedTable<R, 
         &mut self,
     ) -> Result<&mut Vec<(SocketAddr, Response<R>)>, ServerError> {
         // check if our current intent log should be compacted
-        let flushed_pos = self.storage.compact_if_needed::<R>().await?;
+        let flushed_pos = self.storage.compact_if_needed::<R>(false).await?;
         // get all of the responses whose data has been flushed to disk
         self.pending.get(flushed_pos, &mut self.flushed);
         // return a ref to our flushed responses
@@ -345,7 +355,7 @@ impl<R: ShoalSortedTable + 'static, S: StorageSupport> PersistentSortedTable<R, 
     }
 }
 
-impl<T: ShoalSortedTable + RkyvSupport> IntentReadSupport for SortedPartition<T>
+impl<T: ShoalSortedTable + RkyvSupport> IntentReadSupport<T> for SortedPartition<T>
 where
     <T as Archive>::Archived: rkyv::Deserialize<T, Strategy<Pool, rkyv::rancor::Error>>,
     <T::Sort as Archive>::Archived: rkyv::Deserialize<T::Sort, Strategy<Pool, rkyv::rancor::Error>>,
@@ -357,8 +367,8 @@ where
     type Intent = SortedIntents<T>;
 
     fn load(
-        read: &glommio::io::ReadResult,
-        partitions: &mut HashMap<u64, Self>,
+        read: &ReadResult,
+        partitions: &mut HashMap<u64, MaybeLoaded<Self>>,
     ) -> Result<(), ServerError> {
         // try to deserialize this row from our intent log
         let intent = unsafe { rkyv::access_unchecked::<ArchivedSortedIntents<T>>(&read[..]) };
@@ -372,9 +382,10 @@ where
                 // get this rows partition
                 let entry = partitions
                     .entry(key)
-                    .or_insert_with(|| SortedPartition::new(key));
+                    .or_insert_with(|| MaybeLoaded::Loaded(SortedPartition::new(key)));
                 // insert this row
-                entry.insert(row);
+                // TODO support this
+                //entry.insert(row);
             }
             ArchivedSortedIntents::Delete {
                 partition_key,
@@ -386,8 +397,9 @@ where
                 if let Some(partition) = partitions.get_mut(&partition_key) {
                     // deserialize this rows sort key
                     let sort_key = rkyv::deserialize::<T::Sort, rkyv::rancor::Error>(sort_key)?;
+                    // TODO this
                     // remove the sort key from this partition
-                    partition.remove(&sort_key);
+                    //partition.remove(&sort_key);
                 }
             }
             ArchivedSortedIntents::Update(archived) => {
@@ -395,10 +407,11 @@ where
                 let update = rkyv::deserialize::<SortedUpdate<T>, rkyv::rancor::Error>(archived)?;
                 // try to get the partition containing our target row
                 if let Some(partition) = partitions.get_mut(&update.partition_key) {
-                    // find our target row
-                    if !partition.update(&update) {
-                        panic!("Missing row update?");
-                    }
+                    // TODO this
+                    //// find our target row
+                    //if !partition.update(&update) {
+                    //    panic!("Missing row update?");
+                    //}
                 }
             }
         }
@@ -414,7 +427,7 @@ where
         loaded: &mut HashMap<u64, Self>,
         key: u64,
         intents: Vec<Self::Intent>,
-    ) -> bool {
+    ) -> ShouldPrune {
         // get this partitions current data or start with an empty one
         let entry = loaded.entry(key).or_insert_with(|| Self::new(key));
         // apply each intent to this partition
@@ -431,7 +444,14 @@ where
                 }
             }
         }
-        false
+        // if our entry is empty then prune this partition
+        if entry.is_empty() {
+            // This partition is empty so prune it
+            ShouldPrune::Yes
+        } else {
+            // This partition is not empty so don't prune it
+            ShouldPrune::No
+        }
     }
 
     /// Get the partition key for a specific intent

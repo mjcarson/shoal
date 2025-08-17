@@ -1,12 +1,41 @@
 //! A partition is a collection of data in shoal accesible by a partition key
 
-use std::collections::BTreeMap;
-
+use glommio::io::ReadResult;
+use rkyv::bytecheck::CheckBytes;
+use rkyv::de::Pool;
+use rkyv::rancor::Strategy;
+use rkyv::validation::archive::ArchiveValidator;
+use rkyv::validation::shared::SharedValidator;
+use rkyv::validation::Validator;
 use rkyv::{Archive, Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 use crate::shared::queries::{SortedGet, SortedUpdate, UnsortedGet, UnsortedUpdate};
 use crate::shared::responses::ResponseAction;
 use crate::shared::traits::{RkyvSupport, ShoalSortedTable, ShoalUnsortedTable};
+
+pub trait PartitionSupport {
+    /// Get this partitions size
+    fn size(&self) -> usize;
+}
+
+#[derive(Debug)]
+pub enum MaybeLoaded<P: PartitionSupport> {
+    /// A fully loaded partition
+    Loaded(P),
+    /// An accessible but not fully loaded partition
+    Accessible(ReadResult),
+}
+
+impl<P: PartitionSupport> MaybeLoaded<P> {
+    /// Get this partitions size
+    pub fn size(&self) -> usize {
+        match self {
+            Self::Loaded(loaded) => loaded.size(),
+            Self::Accessible(read) => read.len(),
+        }
+    }
+}
 
 #[derive(Debug, Archive, Serialize, Deserialize)]
 pub struct UnsortedPartition<R: ShoalUnsortedTable> {
@@ -32,21 +61,24 @@ impl<R: ShoalUnsortedTable> UnsortedPartition<R> {
 
     /// Get some rows from this partition
     ///
+    /// Returns true if data was returned and false if it wasn't
+    ///
     /// # Arguments
     ///
     /// * `params` - The parameters to use to get the rows
     /// * `found` - The vector to push the data to return
-    pub fn get(&self, params: &UnsortedGet<R>, found: &mut Vec<R>) {
+    pub fn get(&self, params: &UnsortedGet<R>, found: &mut Vec<R>) -> bool {
         // skip any rows that don't match our filter
         if let Some(filter) = &params.filters {
             // check if this row should be filtered out
             if !R::is_filtered(filter, &self.row) {
                 // skip this row since it doesn't match our filteri
-                return;
+                return false;
             }
         }
         // add this row to our response
         found.push(self.row.clone());
+        true
     }
 
     /// Update a row in this partition
@@ -58,8 +90,99 @@ impl<R: ShoalUnsortedTable> UnsortedPartition<R> {
     }
 }
 
+impl<R: ShoalUnsortedTable> MaybeLoaded<UnsortedPartition<R>>
+where
+    for<'a> <R as Archive>::Archived:
+        CheckBytes<Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>>,
+    <R as Archive>::Archived: rkyv::Deserialize<R, Strategy<Pool, rkyv::rancor::Error>>,
+{
+    /// Get some rows from this partition
+    ///
+    /// Returns true if data was returned and false if it wasn't
+    ///
+    /// # Arguments
+    ///
+    /// * `params` - The parameters to use to get the rows
+    /// * `found` - The vector to push the data to return
+    pub fn get(&self, params: &UnsortedGet<R>, found: &mut Vec<R>) -> bool {
+        // if this row is loaded then use the get on the row
+        match self {
+            MaybeLoaded::Loaded(loaded) => loaded.get(params, found),
+            MaybeLoaded::Accessible(read) => {
+                // access our data
+                let access = match UnsortedPartition::<R>::access(read) {
+                    Ok(access) => access,
+                    Err(error) => {
+                        // build a hasher to verify this map
+                        let mut hasher = xxhash_rust::xxh3::Xxh3::new();
+                        // hash our map
+                        hasher.update(&read[..]);
+                        // get theh hash for our
+                        let partition_hash = hasher.digest();
+                        panic!(
+                            "ML - get {} -> {:?} ? {} : {:?} .. {:?}",
+                            params.partition_key,
+                            error,
+                            partition_hash,
+                            &read[..16],
+                            &read[read.len() - 16..]
+                        )
+                    }
+                };
+                // skip any rows that don't match our filter
+                if let Some(filter) = &params.filters {
+                    // check if this row should be filtered out
+                    if !R::is_filtered_archived(filter, &access.row) {
+                        // skip this row since it doesn't match our filteri
+                        return false;
+                    }
+                }
+                // deserialize our row
+                let row = R::deserialize(&access.row).unwrap();
+                // add this row to our response
+                found.push(row);
+                true
+            }
+        }
+    }
+
+    /// Update a row in this partition
+    pub fn update(&mut self, update: &UnsortedUpdate<R>) -> Option<UnsortedPartition<R>> {
+        // get our row or deserialize it
+        match self {
+            MaybeLoaded::Loaded(loaded) => {
+                // this row is already loaded so just update it in place
+                loaded.update(update);
+                // update the size of our row
+                loaded.size = std::mem::size_of_val(&loaded.row);
+                // we don't need to replace our wrapped row so return none
+                None
+            }
+            MaybeLoaded::Accessible(read) => {
+                // access our data
+                let access = UnsortedPartition::<R>::access(read).unwrap();
+                // deserialize our row
+                let mut loaded = UnsortedPartition::<R>::deserialize(&access).unwrap();
+                // update this rows data
+                loaded.update(&update);
+                // update the size of our row
+                loaded.size = std::mem::size_of_val(&loaded.row);
+                // we loaded an updated our row so return it
+                Some(loaded)
+            }
+        }
+    }
+}
+
 impl<T: ShoalUnsortedTable> RkyvSupport for UnsortedPartition<T> {}
 
+impl<R: ShoalUnsortedTable> PartitionSupport for UnsortedPartition<R> {
+    fn size(&self) -> usize {
+        self.size
+    }
+}
+
+/// A partition that can contain multiple sorted rows
 #[derive(Debug, Archive, Serialize, Deserialize)]
 pub struct SortedPartition<T: ShoalSortedTable> {
     /// This partitions key
@@ -170,9 +293,24 @@ impl<T: ShoalSortedTable> SortedPartition<T> {
             None => false,
         }
     }
+
+    /// Check if this partition is empty
+    pub fn is_empty(&self) -> bool {
+        // check if our rows is empty
+        self.rows.is_empty()
+    }
 }
 
 impl<T: ShoalSortedTable> RkyvSupport for SortedPartition<T> where
     <<T as ShoalSortedTable>::Sort as Archive>::Archived: Ord
 {
+}
+
+impl<T: ShoalSortedTable> PartitionSupport for SortedPartition<T>
+where
+    <<T as ShoalSortedTable>::Sort as Archive>::Archived: Ord,
+{
+    fn size(&self) -> usize {
+        self.size
+    }
 }

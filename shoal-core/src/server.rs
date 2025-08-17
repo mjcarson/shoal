@@ -38,8 +38,8 @@ use crate::shared::{
 /// * `conf` - The shoal config
 /// * `mesh` - The mesh to send  messages over
 fn spawn_coordinator<S: ShoalDatabase>(
-    conf: &Conf,
-    mesh: &MeshBuilder<MeshMsg<S>, Full>,
+    conf: Conf,
+    mesh: MeshBuilder<MeshMsg<S>, Full>,
 ) -> Result<
     (
         AsyncSender<Msg<S>>,
@@ -62,19 +62,16 @@ where
         >,
     >,
 {
-    // clone our mesh to pass to our coordinator
-    let mesh = mesh.clone();
-    // clone our conf for our coordinator
-    let conf = conf.clone();
     // create our kanal chaannels
     let (kanal_tx, kanal_rx) = kanal::bounded_async(8192);
     // get a copy of our kanal transmission channel for the coordinator
     let kanal_tx_coord = kanal_tx.clone();
     // start our coordinator node
-    let coord_handle =
-        LocalExecutorBuilder::new(glommio::Placement::Fixed(0)).spawn(|| async move {
-            Coordinator::<S>::start(conf, mesh, kanal_tx_coord, kanal_rx).await
-        })?;
+    let coord_handle = LocalExecutorBuilder::new(glommio::Placement::Fixed(0))
+        .io_memory(300 << 20)
+        .spawn(
+            || async move { Coordinator::<S>::start(conf, mesh, kanal_tx_coord, kanal_rx).await },
+        )?;
     Ok((kanal_tx, coord_handle))
 }
 
@@ -115,12 +112,13 @@ where
         trace::setup(&conf);
         // get the total number of cpus that we have
         let cpus = conf.compute.cpus()?;
+        // our mesh should always be one larger then the number of cores
+        // so that the coordinator can also join the mesh
+        let mesh_size = cpus.len() + 1;
         // build the mesh for this node to talk over
-        let mesh: MeshBuilder<MeshMsg<S>, Full> = MeshBuilder::full(cpus.len(), 8192);
+        let mesh: MeshBuilder<MeshMsg<S>, Full> = MeshBuilder::full(mesh_size, 8192);
         // spawn our coordinator
-        let (kanal_tx, coordinator_handle) = spawn_coordinator::<S>(&conf, &mesh)?;
-        // remove one core from our cpuset for the coordinator
-        let cpus = cpus.filter(|core| core.cpu != 0);
+        let (kanal_tx, coordinator_handle) = spawn_coordinator::<S>(conf.clone(), mesh.clone())?;
         // spawn our shards
         let shard_handles = shard::start::<S>(conf, cpus, mesh)?;
         // build the shoal pool object

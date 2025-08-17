@@ -1,6 +1,5 @@
 //! Benchmarks shoal
 
-use kanal::{AsyncReceiver, AsyncSender};
 use owo_colors::OwoColorize;
 use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
@@ -56,6 +55,14 @@ macro_rules! print_bench {
 pub struct BenchResult {
     /// The max time seen in the last bench
     max: Duration,
+    /// The p99 of times seen in the last bench
+    p99: Duration,
+    /// The p95 of times seen in the last bench
+    p95: Duration,
+    /// The p90 of times seen in the last bench
+    p90: Duration,
+    /// The p50 of times seen in the last bench
+    p50: Duration,
     /// The average time seen in the last bench
     avg: Duration,
     // The lowest time seen in the last bench
@@ -70,12 +77,29 @@ impl BenchResult {
     /// # Arguments
     ///
     /// * `max` - The maximum time it took perform an action in a benchmark
+    /// * `p99` - The p99 for time it took to perform an action in a benchmark
+    /// * `p95` - The p95 for time it took to perform an action in a benchmark
+    /// * `p90` - The p90 for time it took to perform an action in a benchmark
+    /// * `p50` - The p50 for time it took to perform an action in a benchmark
     /// * `avg` - The average time it took to perform an action in a benchmark
     /// * `min` - The minimum time it took to perform an action in a benchmark
     /// * `total` - The total time it took to perform an action in a benchmark
-    fn new(max: Duration, avg: Duration, min: Duration, total: Duration) -> Self {
+    fn new(
+        max: Duration,
+        p99: Duration,
+        p95: Duration,
+        p90: Duration,
+        p50: Duration,
+        avg: Duration,
+        min: Duration,
+        total: Duration,
+    ) -> Self {
         BenchResult {
             max,
+            p99,
+            p95,
+            p90,
+            p50,
             avg,
             min,
             total,
@@ -120,6 +144,8 @@ pub struct Bencher {
     path: PathBuf,
     /// The last branches run
     prior: Option<BenchResult>,
+    /// Whether our time data has already been sorted
+    sorted: bool,
 }
 
 impl Bencher {
@@ -152,6 +178,7 @@ impl Bencher {
             instance_times: Vec::with_capacity(instances),
             path: path.as_ref().to_path_buf(),
             prior,
+            sorted: false,
         }
     }
 
@@ -212,16 +239,42 @@ impl Bencher {
         self.total_timer_end = Some(Instant::now());
     }
 
+    /// Calculate the p99 for all of our times
+    fn percentile(&mut self, percentile: f64) -> Duration {
+        // skip sorting if our data has already been sorted
+        if !self.sorted {
+            // sort our times
+            self.instance_times.sort_unstable();
+            // mark that our data has already been sorted
+            self.sorted = true;
+        }
+        // calculate the index for the item in the 99th percentile
+        let index = (self.instance_times.len() as f64 * percentile).ceil() as usize;
+        // get the time at the target percentile
+        self.instance_times
+            .get(index)
+            .expect("Failed to get p{percentile}")
+            .clone()
+    }
+
     /// Print the latest benchmark results to screen
     pub fn print(&self, result: &BenchResult) {
         // if we have prior results then also log the difference
         if let Some(prior) = &self.prior {
             print_bench!("max", prior.max, result.max);
+            print_bench!("p99", prior.p99, result.p99);
+            print_bench!("p95", prior.p95, result.p95);
+            print_bench!("p90", prior.p90, result.p90);
+            print_bench!("p50", prior.p50, result.p50);
             print_bench!("average", prior.avg, result.avg);
             print_bench!("min", prior.min, result.min);
             print_bench!("total", prior.total, result.total);
         } else {
             println!("max: {:?}", result.max);
+            println!("p99: {:?}", result.p99);
+            println!("p95: {:?}", result.p95);
+            println!("p90: {:?}", result.p90);
+            println!("p50: {:?}", result.p50);
             println!("average: {:?}", result.avg);
             println!("min: {:?}", result.min);
             println!("total: {:?}", result.total);
@@ -242,12 +295,17 @@ impl Bencher {
             .iter()
             .map(|time| time.as_nanos())
             .sum::<u128>();
+        // get our p99, p95, p90
+        let p99 = self.percentile(0.99);
+        let p95 = self.percentile(0.95);
+        let p90 = self.percentile(0.90);
+        let p50 = self.percentile(0.50);
         let avg = Duration::from_nanos((sum / self.instance_times.len() as u128) as u64);
         // find the maximum and minimum
         let max = self.instance_times.iter().max().unwrap();
         let min = self.instance_times.iter().min().unwrap();
         // build a benchmark result
-        let result = BenchResult::new(*max, avg, *min, total);
+        let result = BenchResult::new(*max, p99, p95, p90, p50, avg, *min, total);
         // print our results
         self.print(&result);
         // write a new benchmark to disk if requested

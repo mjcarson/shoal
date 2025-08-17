@@ -24,12 +24,14 @@ impl Compute {
     /// Get the cpuset to run shoal on
     pub fn cpus(&self) -> Result<CpuSet, ServerError> {
         // get all online cpus
-        let online = CpuSet::online()?;
+        let online = CpuSet::online()?
+            // never run on cpu 0 as that is the coordinator cpu
+            .filter(|location| location.cpu != 0);
         // if the user specified a limted number of cores then force that
         if let Some(cores) = self.cores {
             // limit our cores to just number specfied
-            let cores = online.into_iter().take(cores).collect::<CpuSet>();
-            Ok(cores)
+            let cpus = online.into_iter().take(cores).collect::<CpuSet>();
+            Ok(cpus)
         } else {
             Ok(online)
         }

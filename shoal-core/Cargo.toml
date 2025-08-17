@@ -28,6 +28,7 @@ uuid = { version = "1", features = ["v4"] }
 dashmap = "5.5"
 papaya = "0.2"
 byte-unit = "5.1"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 # tracing dependencies
 opentelemetry = "0.28"

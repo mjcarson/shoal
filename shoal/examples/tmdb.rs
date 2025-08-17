@@ -1,35 +1,34 @@
 //! A shoal example on TMDB data
 
 use kanal::{AsyncReceiver, AsyncSender};
-use owo_colors::OwoColorize;
 use shoal::bencher::{BenchWorker, Bencher};
 use shoal_core::client::Shoal;
-use shoal_core::server::messages::QueryMetadata;
+use shoal_core::server::messages::{QueryMetadata, ShardMsg};
 use shoal_core::server::ring::Ring;
 use shoal_core::server::{Conf, ServerError};
 use shoal_core::shared::queries::{UnsortedGet, UnsortedQuery, UnsortedUpdate};
 use shoal_core::shared::responses::Response;
+use shoal_core::shared::traits::ShoalDatabase;
 use shoal_core::shared::traits::{
     PartitionKeySupport, QuerySupport, RkyvSupport, ShoalQuery, ShoalResponse, ShoalUnsortedTable,
 };
-use shoal_core::shared::traits::{ShoalDatabase, ShoalSortedTable};
-use shoal_core::storage::FileSystem;
+use shoal_core::storage::{FileSystem, FullArchiveMap, LoaderMsg, Loaders};
 use shoal_core::tables::PersistentUnsortedTable;
 use shoal_core::ShoalPool;
-use shoal_derive::ShoalUnsortedTable;
+use shoal_derive::{ShoalDB, ShoalUnsortedTable};
 
-use futures::stream::{FuturesUnordered, StreamExt};
+use futures::stream::StreamExt;
 use glommio::TaskQueueHandle;
 use gxhash::GxHasher;
 use rkyv::{Archive, Deserialize, Serialize};
+use std::collections::HashMap;
 use std::hash::Hasher;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::fs::File;
 use tokio::net::ToSocketAddrs;
-use tokio::task::{JoinHandle, JoinSet};
+use tokio::task::JoinSet;
 use uuid::Uuid;
 
 #[derive(
@@ -95,16 +94,6 @@ pub struct Movie {
     pub keywords: Vec<String>,
 }
 
-//impl Movie {
-//    /// Create a new movie row
-//    fn new<T: Into<String>>(title: T, overview: T) -> Self {
-//        Movie {
-//            title: title.into(),
-//            overview: overview.into(),
-//        }
-//    }
-//}
-
 impl PartitionKeySupport for Movie {
     /// The partition key type for this data
     type PartitionKey = u64;
@@ -154,6 +143,19 @@ impl ShoalUnsortedTable for Movie {
     /// * `filters` - The filters to apply
     /// * `row` - The row to filter
     fn is_filtered(filter: &Self::Filters, row: &Self) -> bool {
+        &row.title == filter
+    }
+
+    /// Determine if a row should be filtered
+    ///
+    /// # Arguments
+    ///
+    /// * `filters` - The filters to apply
+    /// * `row` - The row to filter
+    fn is_filtered_archived(
+        filter: &Self::Filters,
+        row: &<Self as rkyv::Archive>::Archived,
+    ) -> bool {
         &row.title == filter
     }
 
@@ -212,7 +214,7 @@ impl From<MovieGet> for TmdbQueryKinds {
             <Movie as PartitionKeySupport>::get_partition_key_from_values(&specific.id);
         // build the general query
         let general = UnsortedGet {
-            partition_keys: vec![partition_key],
+            partition_key,
             filters: specific.filters,
             limit: specific.limit,
         };
@@ -381,103 +383,12 @@ impl ShoalResponse for TmdbResponseKinds {
     }
 }
 
-pub struct TmdbClient {}
-
-impl QuerySupport for TmdbClient {
-    /// The different tables or types of queries we will handle
-    type QueryKinds = TmdbQueryKinds;
-
-    /// The different tables we can get responses from
-    type ResponseKinds = TmdbResponseKinds;
-}
-
 /// The tables we are adding to to shoal
-//#[derive(ShoalDB)]
+#[derive(ShoalDB)]
 //#[shoal_db(name = "Basic")]
 pub struct Tmdb {
     /// A basic key value table
-    pub movies: PersistentUnsortedTable<Movie, FileSystem>,
-}
-
-impl ShoalDatabase for Tmdb {
-    /// This databases external client type
-    type ClientType = TmdbClient;
-
-    /// Create a new shoal db instance
-    ///
-    /// # Arguments
-    ///
-    /// * `shard_name` - The id of the shard that owns this table
-    /// * `conf` - A shoal config
-    async fn new(
-        shard_name: &str,
-        conf: &Conf,
-        medium_priority: TaskQueueHandle,
-    ) -> Result<Self, ServerError> {
-        let db = Tmdb {
-            movies: PersistentUnsortedTable::new(shard_name, conf, medium_priority).await?,
-        };
-        Ok(db)
-    }
-
-    /// Handle messages for different table types
-    async fn handle(
-        &mut self,
-        meta: QueryMetadata,
-        typed_query: <Self::ClientType as QuerySupport>::QueryKinds,
-    ) -> Option<(
-        SocketAddr,
-        <Self::ClientType as QuerySupport>::ResponseKinds,
-    )> {
-        // match on the right query and execute it
-        match typed_query {
-            TmdbQueryKinds::Movie(query) => {
-                // handle these queries
-                match self.movies.handle(meta, query).await {
-                    Some((addr, response)) => {
-                        // wrap our response with the right table kind
-                        let wrapped = TmdbResponseKinds::Movie(response);
-                        Some((addr, wrapped))
-                    }
-                    None => None,
-                }
-            }
-        }
-    }
-
-    /// Flush any in flight writes to disk
-    async fn flush(&mut self) -> Result<(), ServerError> {
-        self.movies.flush().await
-    }
-
-    /// Get all flushed messages and send their response back
-    ///
-    /// # Arguments
-    ///
-    /// * `flushed` - The flushed response to send back
-    async fn handle_flushed(
-        &mut self,
-        flushed: &mut Vec<(
-            SocketAddr,
-            <Self::ClientType as QuerySupport>::ResponseKinds,
-        )>,
-    ) -> Result<(), ServerError> {
-        // get all flushed queries in their specific format
-        let specific = self.movies.get_flushed().await?;
-        // wrap and add our specific queries
-        let wrapped = specific
-            .drain(..)
-            .map(|(addr, resp)| (addr, TmdbResponseKinds::Movie(resp)));
-        // extend our response list with our wrapped queries
-        flushed.extend(wrapped);
-        Ok(())
-    }
-
-    /// Shutdown this table and flush any data to disk if needed
-    async fn shutdown(&mut self) -> Result<(), ServerError> {
-        // shutdown the key value table
-        self.movies.shutdown().await
-    }
+    pub movie: PersistentUnsortedTable<Movie, FileSystem, TmdbTableNames>,
 }
 
 pub enum MovieMsg {
@@ -577,8 +488,9 @@ impl MovieWorker {
                             if movie != movie_data {
                                 panic!("{} has invalid data - {movie_data:#?}", movie.title);
                             }
+                            //println!("verified - {}", movie.title);
                         }
-                        _ => panic!("{} is missing", movie.title),
+                        _ => println!("{} is missing", movie.title),
                     }
                     // stop our command benchmark for verifying
                     self.bencher.instance_stop();
@@ -622,7 +534,7 @@ impl MovieController {
         // build a client for Shoal
         let shoal = Shoal::<TmdbClient>::new(addr).await.unwrap();
         // instance a large but bounded channel
-        let (movies_tx, movies_rx) = kanal::bounded_async(1);
+        let (movies_tx, movies_rx) = kanal::unbounded_async();
         // create our controller
         MovieController {
             shoal: Arc::new(shoal),
@@ -655,10 +567,16 @@ impl MovieController {
         let mut reader = csv_async::AsyncDeserializer::from_reader(file);
         // set the type we are going to deserialize
         let mut typed_reader = reader.deserialize::<Movie>();
+        //// only upload a limited number of movies
+        //let mut cap = 100;
         // skip any movies we fail to deserialize
         while let Some(Ok(movie)) = typed_reader.next().await {
             // add our movie to our channel
             self.movies_tx.send(MovieMsg::Insert(movie)).await.unwrap();
+            //cap -= 1;
+            //if cap == 0 {
+            //    break;
+            //}
         }
     }
 
@@ -670,45 +588,57 @@ impl MovieController {
         let mut reader = csv_async::AsyncDeserializer::from_reader(file);
         // set the type we are going to deserialize
         let mut typed_reader = reader.deserialize::<Movie>();
+        //// only upload a limited number of movies
+        //let mut cap = 100;
         // skip any movies we fail to deserialize
         while let Some(Ok(movie)) = typed_reader.next().await {
             // add our movie to our channel to be verified
             self.movies_tx.send(MovieMsg::Verify(movie)).await.unwrap();
+            //cap -= 1;
+            //if cap == 0 {
+            //    break;
+            //}
         }
     }
 
     /// Start streaming jobs to our workers
     pub async fn start<P: AsRef<Path>>(&mut self, path: P) {
-        // create a new bencher
-        let mut bencher = Bencher::new(".benchmark", 10000);
-        // spawn 5 workers
-        self.spawn(5, &bencher);
-        // upload our tmdb data
-        self.upload(&path).await;
-        // emit that workers should shutdown once all movie info has been streamed to shoal
-        self.movies_tx.send(MovieMsg::Shutdown).await.unwrap();
-        // swap our task with with a default one
-        let tasks = std::mem::take(&mut self.tasks);
-        // wait for all workers to complete
-        let insert_bench_workers = tasks.join_all().await;
-        // pop the last shutdown message
-        self.movies_rx.recv().await.unwrap();
-        println!("--------------");
-        // spawn 5 workers
-        self.spawn(5, &bencher);
-        // verify our tmdb data
-        self.verify(&path).await;
-        // emit that workers should shutdown once all movie info has been streamed to shoal
-        self.movies_tx.send(MovieMsg::Shutdown).await.unwrap();
-        // swap our task with with a default one
-        let tasks = std::mem::take(&mut self.tasks);
-        // wait for all workers to complete
-        let verify_bench_workers = tasks.join_all().await;
-        // merge our workers back into our main bencher
-        bencher.merge_workers(insert_bench_workers);
-        bencher.merge_workers(verify_bench_workers);
-        // log our benchmark results
-        bencher.finish(false);
+        // loop over our reads/writes 500 times
+        for i in 0..1 {
+            println!("\n\n $$$$ {i} $$$$");
+            // create a new bencher
+            let mut bencher = Bencher::new(".benchmark", 10000);
+            // spawn 5 workers
+            self.spawn(5, &bencher);
+            // upload our tmdb data
+            self.upload(&path).await;
+            // emit that workers should shutdown once all movie info has been streamed to shoal
+            self.movies_tx.send(MovieMsg::Shutdown).await.unwrap();
+            // swap our task with with a default one
+            let tasks = std::mem::take(&mut self.tasks);
+            // wait for all workers to complete
+            let insert_bench_workers = tasks.join_all().await;
+            // pop the last shutdown message
+            self.movies_rx.recv().await.unwrap();
+            println!("--------------");
+            // spawn 5 workers
+            self.spawn(5, &bencher);
+            // verify our tmdb data
+            self.verify(&path).await;
+            // emit that workers should shutdown once all movie info has been streamed to shoal
+            self.movies_tx.send(MovieMsg::Shutdown).await.unwrap();
+            // swap our task with with a default one
+            let tasks = std::mem::take(&mut self.tasks);
+            // wait for all workers to complete
+            let verify_bench_workers = tasks.join_all().await;
+            // merge our workers back into our main bencher
+            bencher.merge_workers(insert_bench_workers);
+            bencher.merge_workers(verify_bench_workers);
+            // log our benchmark results
+            bencher.finish(false);
+            // pop the last shutdown message
+            self.movies_rx.recv().await.unwrap();
+        }
     }
 }
 

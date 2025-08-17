@@ -1,8 +1,5 @@
 //! The client for a Shoal database
 
-use bytes::BytesMut;
-use dashmap::mapref::entry::Entry;
-//use dashmap::DashMap;
 use kanal::{AsyncReceiver, AsyncSender};
 use papaya::HashMap;
 use rkyv::de::Pool;
@@ -10,7 +7,6 @@ use rkyv::rancor::Strategy;
 use rkyv::util::AlignedVec;
 use rkyv::Archive;
 use std::collections::BTreeMap;
-use std::hash::Hasher;
 use std::marker::PhantomData;
 use std::sync::Arc;
 use tokio::net::{ToSocketAddrs, UdpSocket};

@@ -24,7 +24,7 @@ fn default_latency_write_behind() -> usize {
 }
 
 /// The settings to use for a specific writer
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct FileSystemLatencyWriterConf {
     /// The path to write too (table name will be added before the final filename)
     #[serde(default = "default_path")]
@@ -59,7 +59,7 @@ fn default_throughput_write_behind() -> usize {
 }
 
 /// The settings to use for a specific writer
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct FileSystemThroughputWriterConf {
     /// The path to write too (table name will be added before the final filename)
     #[serde(default = "default_path")]
@@ -92,13 +92,15 @@ async fn mkdir_all(path: &PathBuf) -> Result<(), ServerError> {
         // add this component to our path
         built.push(component);
         // create this component of our path
-        Directory::create(&built).await?;
+        let dir = Directory::create(&built).await?;
+        // close this directory
+        dir.close().await?;
     }
     Ok(())
 }
 
 /// The settings for a specific tables file system based storage
-#[derive(Serialize, Deserialize, Clone, Default)]
+#[derive(Serialize, Deserialize, Clone, Default, Debug)]
 pub struct FileSystemTableConf {
     /// The settings for the highly latency sensistive io
     #[serde(default)]
