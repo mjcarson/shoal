@@ -445,7 +445,7 @@ fn add_db_trait2(
         let field_type = &field.ty;
         // build our new arm for this field
         quote! {
-            #field_ident: <#field_type>::new(shard_name, #table_names_ident::#variant, shard_archive_map, loader_channels, conf, medium_priority).await?,
+            #field_ident: <#field_type>::new(shard_name, #table_names_ident::#variant, #table_names_ident::#variant, shard_archive_map, loader_channels, conf, medium_priority, memory_usage, lru, shard_local_tx).await?,
         }
     });
     // build our handle query arms
@@ -469,6 +469,32 @@ fn add_db_trait2(
                     None => None,
                 }
             },
+        }
+    });
+    // build our mark evictable partitions arms
+    let mark_evictable_arms = fields
+        .named
+        .iter()
+        .zip(variants)
+        .map(|(field, variant_ident)| {
+        // get our field ident and type
+        let field_ident = field.ident.as_ref().unwrap();
+        // build our evict partition arm for this table
+        quote! {
+            #table_names_ident::#variant_ident=> self.#field_ident.mark_evictable(generation, partitions),
+        }
+    });
+    // build our evict partitions arms
+    let evict_arms = fields
+        .named
+        .iter()
+        .zip(variants)
+        .map(|(field, variant_ident)| {
+        // get our field ident and type
+        let field_ident = field.ident.as_ref().unwrap();
+        // build our evict partition arm for this table
+        quote! {
+            #table_names_ident::#variant_ident=> self.#field_ident.evict(victims),
         }
     });
     // build our flush arms
@@ -511,16 +537,25 @@ fn add_db_trait2(
         // build our load partition arm for this field
         quote! {
             #table_names_ident::#variant_ident=> {
-                if let Some(unblocked) = self.#field_ident.load_partition(loaded_kinds.loaded).await {
+                //  get this partition loads table name and partition id
+                let table = loaded_kinds.table;
+                let id = loaded_kinds.loaded.partition_id;
+                if let Some((unblocked, generation)) = self.#field_ident.load_partition(loaded_kinds.loaded).await {
+                    // build a mark evictable message for this partition so we don't mark this as
+                    // evictable until we have completed all blocked queries to prevent load/reloading
+                    // the same partition over and over again
+                    let mark_evict_msg = ShardMsg::MarkEvictable { generation, table, partitions: vec![id] };
                     // convert our unblocked queries into shard messages
                     for (meta, unwrapped) in unblocked {
                         // wrap our query
                         let query = #query_ident::#variant_ident(unwrapped);
                         // build our shard message
-                        let msg = ShardMsg::Query { meta, query };
+                        let query_msg = ShardMsg::Query { meta, query };
                         // send this message
-                        shard_local_tx.send(msg).await.unwrap();
+                        shard_local_tx.send(query_msg).await.unwrap();
                     }
+                    // send our partition is evictable message after this query is finished
+                    shard_local_tx.send(mark_evict_msg).await.unwrap();
                 }
             }
         }
@@ -558,6 +593,9 @@ fn add_db_trait2(
                 >,
                 conf: &Conf,
                 medium_priority: TaskQueueHandle,
+                memory_usage: &std::sync::Arc<std::cell::RefCell<usize>>,
+                lru: &std::sync::Arc<std::cell::RefCell<shoal_core::lru::LruCache<(Self::TableNames, u64), usize, std::hash::BuildHasherDefault<shoal_core::xxhash_rust::xxh3::Xxh3>>>>,
+                shard_local_tx: &AsyncSender<ShardMsg<Self>>,
             ) -> Result<Self, ServerError> {
                 let db = Tmdb {
                     #(#new_arms)*
@@ -610,6 +648,37 @@ fn add_db_trait2(
                 match typed_query {
                     #(#handle_arms)*
                 }
+            }
+
+            /// Mark partitions as evictable if they are no longer in the intent log
+            ///
+            /// # Arguments
+            ///
+            /// * `table_name` - The name of the table with the partition to mark as evictable
+            /// * `generation` - The generation of data to mark as evictable
+            /// * `partitions` - The partitions to mark as evictable
+            fn mark_evictable(
+                &mut self,
+                table_name: Self::TableNames,
+                generation: u64,
+                partitions: Vec<u64>,
+            ) {
+                match table_name {
+                    #(#mark_evictable_arms)*
+                }    
+            }
+
+
+            /// Evict specific partitions from a table
+            ///
+            /// # Arguments
+            ///
+            /// * `table_name` - The name of the table to evict data from
+            /// * `victims` - The partitions to evict
+            fn evict(&mut self, table_name: Self::TableNames, victims: Vec<u64>) {
+                match table_name {
+                    #(#evict_arms)*
+                }    
             }
 
             /// Flush any in flight writes to disk

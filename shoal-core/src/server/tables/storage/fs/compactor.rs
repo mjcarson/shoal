@@ -3,7 +3,7 @@
 use byte_unit::Byte;
 use futures::AsyncWriteExt;
 use glommio::io::{DmaFile, DmaStreamWriter, OpenOptions};
-use kanal::AsyncReceiver;
+use kanal::{AsyncReceiver, AsyncSender};
 use rkyv::bytecheck::CheckBytes;
 use rkyv::de::Pool;
 use rkyv::rancor::{Error, Strategy};
@@ -21,8 +21,9 @@ use uuid::Uuid;
 use super::conf::FileSystemTableConf;
 use super::map::{ArchiveEntry, ArchiveMap, MapIntent, MapIntentKinds};
 use super::IntentLogReader;
+use crate::server::messages::ShardMsg;
 use crate::server::ServerError;
-use crate::shared::traits::{PartitionKeySupport, RkyvSupport};
+use crate::shared::traits::{PartitionKeySupport, RkyvSupport, ShoalDatabase};
 use crate::storage::{CompactionJob, IntentReadSupport, ShouldPrune};
 
 /// Write a new intent to our maps intent log
@@ -53,7 +54,9 @@ macro_rules! write_map_intent {
     }};
 }
 
-pub struct FileSystemCompactor<T: IntentReadSupport<R>, R: PartitionKeySupport> {
+pub struct FileSystemCompactor<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase> {
+    /// The name of this table
+    table_name: S::TableNames,
     /// The shard local shared map of archive/partition data
     map: Arc<ArchiveMap>,
     /// The file to write compacted partition data too
@@ -68,18 +71,24 @@ pub struct FileSystemCompactor<T: IntentReadSupport<R>, R: PartitionKeySupport> 
     entries: Vec<(u64, ArchiveEntry)>,
     /// The channel to listen for paths to intent logs to compact
     jobs_rx: AsyncReceiver<CompactionJob>,
+    /// The channel to send shard local messages on
+    shard_local_tx: AsyncSender<ShardMsg<S>>,
     /// The path to this tables archive folder
     archive_path: PathBuf,
     /// The row type this table contains
     row_kind: PhantomData<R>,
 }
 
-impl<T: IntentReadSupport<R>, R: PartitionKeySupport> FileSystemCompactor<T, R> {
+impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
+    FileSystemCompactor<T, R, S>
+{
     /// Create a new filesystem compactor
     #[instrument(name = "FileSystemCompactor::with_capacity", skip_all, err(Debug))]
     pub async fn with_capacity(
+        table_name: S::TableNames,
         conf: &FileSystemTableConf,
         jobs_rx: AsyncReceiver<CompactionJob>,
+        shard_local_tx: &AsyncSender<ShardMsg<S>>,
         map: &Arc<ArchiveMap>,
         capacity: usize,
     ) -> Result<Self, ServerError> {
@@ -89,6 +98,7 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport> FileSystemCompactor<T, R> 
         let writer = map.get_active_writer().await?;
         // build a file system compactor
         let compactor = FileSystemCompactor {
+            table_name,
             map: map.clone(),
             writer,
             map_writer,
@@ -96,6 +106,7 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport> FileSystemCompactor<T, R> 
             loaded: HashMap::with_capacity(capacity),
             entries: Vec::with_capacity(capacity),
             jobs_rx,
+            shard_local_tx: shard_local_tx.clone(),
             archive_path: conf.get_archive_path(R::name()),
             row_kind: PhantomData,
         };
@@ -196,7 +207,9 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport> FileSystemCompactor<T, R> 
 
     /// Write parititons to disk
     #[instrument(name = "FileSystemCompactor::write_partition", skip_all, err(Debug))]
-    async fn write_partition(&mut self) -> Result<(), ServerError> {
+    async fn write_partition(&mut self) -> Result<Vec<u64>, ServerError> {
+        // preallocate a vec to store the partition ids to mark as evictable
+        let mut to_mark = Vec::with_capacity(1000);
         // get a copy of our active archive id
         let active_id = *self.map.active.borrow();
         // write all of our compacted partitions to disk
@@ -217,7 +230,10 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport> FileSystemCompactor<T, R> 
             // write this map intent to our map intent log
             let entry = write_map_intent!(self.map_writer, intent, Entry);
             // add this entry to our entries list
-            self.entries.push((*key, entry))
+            self.entries.push((*key, entry));
+            // add this partition to the list of partitions we want to mark
+            // as potentially evictable
+            to_mark.push(*key);
         }
         // flush our current writers
         self.writer.sync().await?;
@@ -234,6 +250,23 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport> FileSystemCompactor<T, R> 
             // compact our map data and get a new intent writer
             self.map_writer = self.map.compact_map().await?;
         }
+        Ok(to_mark)
+    }
+
+    /// Tell our shard to mark these partitions as evictable
+    async fn send_mark_evictables(
+        &mut self,
+        generation: u64,
+        partitions: Vec<u64>,
+    ) -> Result<(), ServerError> {
+        // build our message to mark these these nodes as evictable
+        let msg = ShardMsg::MarkEvictable {
+            generation,
+            table: self.table_name,
+            partitions,
+        };
+        // send our mark evictable shard message
+        self.shard_local_tx.send(msg).await?;
         Ok(())
     }
 
@@ -243,7 +276,7 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport> FileSystemCompactor<T, R> 
     ///
     /// * `path` - The path to the intent log to compact
     #[instrument(name = "FileSystemCompactor::compact_intent", skip_all, err(Debug))]
-    async fn compact_intent(&mut self, path: PathBuf) -> Result<(), ServerError>
+    async fn compact_intent(&mut self, path: PathBuf, generation: u64) -> Result<(), ServerError>
     where
         <T as Archive>::Archived: rkyv::Deserialize<T, Strategy<Pool, rkyv::rancor::Error>>,
         for<'a> <T as Archive>::Archived: rkyv::bytecheck::CheckBytes<
@@ -268,7 +301,9 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport> FileSystemCompactor<T, R> 
             // apply the new intents to our loaded partitions
             self.apply_intents().await?;
             // write our compacted partitions to disk
-            self.write_partition().await?;
+            let partitions = self.write_partition().await?;
+            // send a message to our shard with the partitions to mark as evictable
+            self.send_mark_evictables(generation, partitions).await?;
             // delete our no longer needed inactive intent log
             glommio::io::remove(path).await?;
         }
@@ -323,6 +358,10 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport> FileSystemCompactor<T, R> 
                         let mut old_writer = std::mem::replace(&mut self.writer, new_writer);
                         // close our old writer
                         old_writer.close().await?;
+                        // don't compact/delete our old active archive this loop as that can lead to
+                        // dangling partitions if we have already compacted data to
+                        // the prior active archive in this compaction
+                        continue;
                     }
                     // get a copy of our active archive id
                     let active_id = *self.map.active.borrow();
@@ -498,7 +537,9 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport> FileSystemCompactor<T, R> 
             let job = self.jobs_rx.recv().await?;
             // handle this job;
             match job.clone() {
-                CompactionJob::IntentLog(path) => self.compact_intent(path).await?,
+                CompactionJob::IntentLog { path, generation } => {
+                    self.compact_intent(path, generation).await?
+                }
                 CompactionJob::Archives => self.compact_archives().await?,
                 CompactionJob::Shutdown => {
                     // shutdown this compactor

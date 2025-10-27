@@ -1,6 +1,5 @@
 //! The file system storage module for shoal
 
-use byte_unit::Byte;
 use conf::FileSystemTableConf;
 use futures::stream::FuturesUnordered;
 use futures::{AsyncWriteExt, StreamExt};
@@ -14,6 +13,7 @@ use rkyv::validation::archive::ArchiveValidator;
 use rkyv::validation::shared::SharedValidator;
 use rkyv::validation::Validator;
 use rkyv::Archive;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -37,9 +37,6 @@ use crate::storage::{ArchiveMapKinds, FilteredFullArchiveMap, FullArchiveMap, Lo
 use crate::tables::partitions::{MaybeLoaded, PartitionSupport};
 use loader::FsLoader;
 
-/// The max size for our data intent log
-const INTENT_LIMIT: Byte = Byte::MEBIBYTE.multiply(50).unwrap();
-
 /// Store shoal data in an existing filesytem for persistence
 pub struct FileSystem {
     /// The name of the shard we are storing data for
@@ -49,7 +46,7 @@ pub struct FileSystem {
     /// The intent log to write too
     intent_log: DmaStreamWriter,
     /// The current intent log generation
-    generation: u64,
+    pub generation: u64,
     /// The medium priority task queue
     medium_priority: TaskQueueHandle,
     /// The config for this table
@@ -93,9 +90,12 @@ impl FileSystem {
     async fn spawn_intent_compactor<
         T: IntentReadSupport<R> + 'static,
         R: PartitionKeySupport + 'static,
+        S: ShoalDatabase,
     >(
         &mut self,
+        table_name: S::TableNames,
         compact_rx: AsyncReceiver<CompactionJob>,
+        shard_local_tx: &AsyncSender<ShardMsg<S>>,
     ) -> Result<(), ServerError>
     where
         <T as Archive>::Archived: rkyv::Deserialize<T, Strategy<Pool, rkyv::rancor::Error>>,
@@ -107,9 +107,11 @@ impl FileSystem {
         >,
     {
         // build a compactor
-        let compactor = FileSystemCompactor::<T, R>::with_capacity(
+        let compactor = FileSystemCompactor::<T, R, S>::with_capacity(
+            table_name,
             &self.table_conf,
             compact_rx,
+            shard_local_tx,
             &self.map,
             1000,
         )
@@ -144,12 +146,15 @@ impl StorageSupport for FileSystem {
         P: IntentReadSupport<R> + 'static,
         R: PartitionKeySupport + 'static,
         N: TableNameSupport,
+        S: ShoalDatabase,
     >(
         shard_name: &str,
         table_name: N,
+        shard_table_name: S::TableNames,
         shard_archive_map: &FullArchiveMap<N>,
         conf: &Conf,
         medium_priority: TaskQueueHandle,
+        shard_local_tx: &AsyncSender<ShardMsg<S>>,
     ) -> Result<Self, ServerError>
     where
         <P as Archive>::Archived: rkyv::Deserialize<P, Strategy<Pool, rkyv::rancor::Error>>,
@@ -198,7 +203,8 @@ impl StorageSupport for FileSystem {
             map,
         };
         // spawn our intent compactor
-        fs.spawn_intent_compactor::<P, R>(intent_rx).await?;
+        fs.spawn_intent_compactor::<P, R, S>(shard_table_name, intent_rx, shard_local_tx)
+            .await?;
         Ok(fs)
     }
 
@@ -239,6 +245,8 @@ impl StorageSupport for FileSystem {
 
     /// Set our intent log to be compact if its needed
     ///
+    /// Returns the current flushed position of the writer and the current generation
+    ///
     /// # Arguments
     ///
     /// * `force` - Whether to force a compaction of the intent logs
@@ -246,9 +254,11 @@ impl StorageSupport for FileSystem {
     async fn compact_if_needed<R: PartitionKeySupport>(
         &mut self,
         force: bool,
-    ) -> Result<u64, ServerError> {
+    ) -> Result<(u64, u64), ServerError> {
+        // get the latency sensistive max intent log size
+        let max_size = self.table_conf.latency_sensitive.intent_log_size;
         // check if this intent log is over 50MiB or if compaction is being forced
-        if self.intent_log.current_pos() > INTENT_LIMIT || force {
+        if force || self.intent_log.current_pos() > max_size {
             // flush this intent log
             self.flush().await?;
             // get the current flushed position
@@ -265,7 +275,10 @@ impl StorageSupport for FileSystem {
             glommio::io::rename(&self.intent_path, &new_path).await?;
             // create an intent log compaction job
             self.intent_tx
-                .send(CompactionJob::IntentLog(new_path))
+                .send(CompactionJob::IntentLog {
+                    path: new_path,
+                    generation: self.generation,
+                })
                 .await?;
             // get a new writer
             let new_writer = Self::new_writer(&self.intent_path, &self.table_conf).await?;
@@ -275,11 +288,11 @@ impl StorageSupport for FileSystem {
             self.generation += 1;
             // create an archive compaction job
             self.intent_tx.send(CompactionJob::Archives).await?;
-            Ok(flushed_pos)
+            Ok((flushed_pos, self.generation))
         } else {
             // get the current position of flushed data
             let flushed_pos = self.intent_log.current_flushed_pos();
-            Ok(flushed_pos)
+            Ok((flushed_pos, self.generation))
         }
     }
 
@@ -301,7 +314,9 @@ impl StorageSupport for FileSystem {
     async fn read_intents<P: IntentReadSupport<R> + PartitionSupport, R: PartitionKeySupport>(
         shard_name: &str,
         conf: &Conf,
+        generation: u64,
         partitions: &mut HashMap<u64, MaybeLoaded<P>>,
+        memory_usage: &mut Arc<RefCell<usize>>,
     ) -> Result<(), ServerError> {
         // get this tables settings
         let table_conf = Self::get_settings::<R>(conf)?;
@@ -315,7 +330,9 @@ impl StorageSupport for FileSystem {
         // iterate over the entries in this intent log
         while let Some(read) = reader.next_buff().await? {
             // load this partitions data
-            if <P as IntentReadSupport<R>>::load(&read, partitions).is_err() {
+            if <P as IntentReadSupport<R>>::load(&read, generation, partitions, memory_usage)
+                .is_err()
+            {
                 panic!("Skipping intent data that was not fully committed");
             }
         }

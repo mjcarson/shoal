@@ -97,6 +97,12 @@ pub enum ShardMsg<D: ShoalDatabase> {
     },
     /// A partition loaded from disk
     Partition(LoadedPartitionKinds<D>),
+    /// Mark some partitions as evictable
+    MarkEvictable {
+        generation: u64,
+        table: D::TableNames,
+        partitions: Vec<u64>,
+    },
     /// Tell this shard to shutdown
     Shutdown,
 }

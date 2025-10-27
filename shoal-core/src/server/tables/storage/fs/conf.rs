@@ -1,5 +1,6 @@
 //! The config for FileSystem based storage
 
+use byte_unit::Byte;
 use glommio::io::Directory;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -15,12 +16,43 @@ fn default_path() -> PathBuf {
 
 /// Set default buffer_size for latency files
 fn default_latency_buffer_size() -> usize {
-    1024
+    Byte::BYTE.multiply(1024).unwrap().try_into().unwrap()
 }
 
 /// Set default write behind for latency files
 fn default_latency_write_behind() -> usize {
     128
+}
+
+/// Set default intent log size
+fn default_intent_log_size() -> u64 {
+    Byte::MEBIBYTE.multiply(100).unwrap().as_u64()
+}
+
+fn deserialize_byte_size<'de, D>(deserializer: D) -> Result<usize, D::Error>
+where
+    D: serde::de::Deserializer<'de>,
+{
+    // deserialize our size as bytes
+    let byte_size: Byte = serde::de::Deserialize::deserialize(deserializer)?;
+    // convert our size to a usize
+    byte_size
+        .as_u64()
+        .try_into()
+        .map_err(serde::de::Error::custom)
+}
+
+fn deserialize_byte_size_u64<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::de::Deserializer<'de>,
+{
+    // deserialize our size as bytes
+    let byte_size: Byte = serde::de::Deserialize::deserialize(deserializer)?;
+    // convert our size to a usize
+    byte_size
+        .as_u64()
+        .try_into()
+        .map_err(serde::de::Error::custom)
 }
 
 /// The settings to use for a specific writer
@@ -31,10 +63,15 @@ pub struct FileSystemLatencyWriterConf {
     pub path: PathBuf,
     /// The buffer size to use when writting data
     #[serde(default = "default_latency_buffer_size")]
+    #[serde(deserialize_with = "deserialize_byte_size")]
     pub buffer_size: usize,
     /// The number of write behind buffers to use
     #[serde(default = "default_latency_write_behind")]
     pub write_behind: usize,
+    /// The size of the intent log for this table
+    #[serde(default = "default_intent_log_size")]
+    #[serde(deserialize_with = "deserialize_byte_size_u64")]
+    pub intent_log_size: u64,
 }
 
 impl Default for FileSystemLatencyWriterConf {
@@ -44,13 +81,14 @@ impl Default for FileSystemLatencyWriterConf {
             path: default_path(),
             buffer_size: default_latency_buffer_size(),
             write_behind: default_latency_write_behind(),
+            intent_log_size: default_intent_log_size(),
         }
     }
 }
 
 /// Set default buffer_size for throughput files
 fn default_throughput_buffer_size() -> usize {
-    128 << 10
+    Byte::KIBIBYTE.multiply(128).unwrap().try_into().unwrap()
 }
 
 /// Set default write behind for throughput files

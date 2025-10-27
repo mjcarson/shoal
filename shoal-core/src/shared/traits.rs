@@ -1,7 +1,9 @@
 //! The root traits that shoal is built upon that are shared between the client and server
 
+use deepsize2::DeepSizeOf;
 use glommio::TaskQueueHandle;
 use kanal::{AsyncReceiver, AsyncSender};
+use lru::LruCache;
 use rkyv::de::Pool;
 use rkyv::rancor::{Error, Strategy};
 use rkyv::ser::allocator::ArenaHandle;
@@ -9,10 +11,14 @@ use rkyv::ser::sharing::Share;
 use rkyv::ser::Serializer;
 use rkyv::util::AlignedVec;
 use rkyv::{Archive, Serialize};
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::hash::BuildHasherDefault;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tracing::instrument;
 use uuid::Uuid;
+use xxhash_rust::xxh3::Xxh3;
 
 mod storable;
 mod unsorted;
@@ -124,12 +130,6 @@ pub trait ShoalDatabase: 'static + Sized {
     /// The different tables in this database
     type TableNames: TableNameSupport;
 
-    ///// The different tables or types of queries we will handle
-    //type QueryKinds: ShoalQuery;
-
-    ///// The different tables we can get responses from
-    //type ResponseKinds: ShoalResponse;
-
     /// Create a new shoal db instance
     ///
     /// # Arguments
@@ -149,6 +149,9 @@ pub trait ShoalDatabase: 'static + Sized {
         >,
         conf: &Conf,
         medium_priority: TaskQueueHandle,
+        memory_usage: &Arc<RefCell<usize>>,
+        lru: &Arc<RefCell<LruCache<(Self::TableNames, u64), usize, BuildHasherDefault<Xxh3>>>>,
+        shard_local_tx: &AsyncSender<ShardMsg<Self>>,
     ) -> Result<Self, ServerError>;
 
     /// Initialize the different loaders for our storage kinds
@@ -190,6 +193,31 @@ pub trait ShoalDatabase: 'static + Sized {
         SocketAddr,
         <Self::ClientType as QuerySupport>::ResponseKinds,
     )>;
+
+    /// Mark partitions as evictable if they are no longer in the intent log
+    ///
+    /// # Arguments
+    ///
+    /// * `table_name` - The name of the table with the partition to mark as evictable
+    /// * `generation` - The generation of data to mark as evictable
+    /// * `partitions` - The partitions to mark as evictable
+    #[cfg(feature = "server")]
+    fn mark_evictable(
+        &mut self,
+        table_name: Self::TableNames,
+        generation: u64,
+        partitions: Vec<u64>,
+    );
+
+    /// Evict specific partitions from a table
+    ///
+    /// # Arguments
+    ///
+    /// * `table_name` - The name of the table to evict data from
+    /// * `victims` - The partitions to evict
+    #[allow(async_fn_in_trait)]
+    #[cfg(feature = "server")]
+    fn evict(&mut self, table_name: Self::TableNames, victims: Vec<u64>);
 
     /// Flush any in flight writes to disk
     #[allow(async_fn_in_trait)]
@@ -250,13 +278,13 @@ pub trait PartitionKeySupport: std::fmt::Debug + Clone + RkyvSupport + Sized {
 }
 
 pub trait ShoalSortedTable:
-    std::fmt::Debug + Clone + RkyvSupport + PartitionKeySupport + Sized
+    std::fmt::Debug + Clone + RkyvSupport + PartitionKeySupport + Sized + DeepSizeOf
 {
     /// The updates that can be applied to this table
     type Update: RkyvSupport + std::fmt::Debug + Clone;
 
     /// The sort type for this data
-    type Sort: Ord + RkyvSupport + std::fmt::Debug + From<Self::Sort> + Clone;
+    type Sort: Ord + RkyvSupport + std::fmt::Debug + From<Self::Sort> + Clone + DeepSizeOf;
 
     /// Build the sort tuple for this row
     fn get_sort(&self) -> &Self::Sort;

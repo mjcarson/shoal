@@ -82,7 +82,7 @@ where
         };
         // spawn our mesh listeners
         coordinator.spawn_mesh_listeners(&kanal_tx).await;
-        // spawmn our client litener
+        // spawn our client litener
         coordinator.spawn_client_listener(&kanal_tx)?;
         // start handling messages
         coordinator.start_handling().await;
@@ -94,7 +94,7 @@ where
         // wait for the full number of listeners to have connected
         loop {
             // check how many of our shards have connected
-            if self.mesh_rx.nr_producers() < self.conf.compute.cpus().unwrap().len() - 1 {
+            if self.mesh_rx.nr_producers() < self.conf.resources.cpus().unwrap().len() - 1 {
                 // not all of our shards are ready so sleep
                 glommio::timer::sleep(Duration::from_millis(100)).await;
                 // restart our loop

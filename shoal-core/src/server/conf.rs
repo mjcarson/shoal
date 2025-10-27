@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 
+use byte_unit::Byte;
 use config::{Config, ConfigError};
 use glommio::CpuSet;
 use serde::{Deserialize, Serialize};
@@ -11,16 +12,16 @@ use super::ServerError;
 // The table specific configs
 pub use crate::server::tables::storage::fs::conf::FileSystemTableConf;
 
-/// The compute settings to use
+/// The resource settings to use
 #[derive(Serialize, Deserialize, Default, Clone)]
-pub struct Compute {
+pub struct Resources {
     /// Configure the number of cores to use, default to all
-    cores: Option<usize>,
+    pub cores: Option<usize>,
     /// The max amount of memory to use
-    memory: Option<usize>,
+    pub memory: Byte,
 }
 
-impl Compute {
+impl Resources {
     /// Get the cpuset to run shoal on
     pub fn cpus(&self) -> Result<CpuSet, ServerError> {
         // get all online cpus
@@ -148,7 +149,7 @@ pub struct Tracing {
 pub struct Conf {
     /// The compute settings to use
     #[serde(default)]
-    pub compute: Compute,
+    pub resources: Resources,
     /// The networking settings to use
     #[serde(default)]
     pub networking: Networking,

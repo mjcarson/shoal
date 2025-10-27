@@ -250,10 +250,15 @@ impl Bencher {
         }
         // calculate the index for the item in the 99th percentile
         let index = (self.instance_times.len() as f64 * percentile).ceil() as usize;
+        // if our index is larger then the number of times then just use the max
+        let index = std::cmp::min(index, self.instance_times.len() - 1);
         // get the time at the target percentile
         self.instance_times
             .get(index)
-            .expect("Failed to get p{percentile}")
+            .expect(&format!(
+                "Failed to get p{percentile} at {index}/{}",
+                self.instance_times.len()
+            ))
             .clone()
     }
 

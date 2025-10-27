@@ -1,5 +1,6 @@
 //! A partition is a collection of data in shoal accesible by a partition key
 
+use deepsize2::DeepSizeOf;
 use glommio::io::ReadResult;
 use rkyv::bytecheck::CheckBytes;
 use rkyv::de::Pool;
@@ -14,15 +15,17 @@ use crate::shared::queries::{SortedGet, SortedUpdate, UnsortedGet, UnsortedUpdat
 use crate::shared::responses::ResponseAction;
 use crate::shared::traits::{RkyvSupport, ShoalSortedTable, ShoalUnsortedTable};
 
-pub trait PartitionSupport {
+pub trait PartitionSupport: DeepSizeOf {
     /// Get this partitions size
-    fn size(&self) -> usize;
+    fn size(&self) -> usize {
+        self.deep_size_of()
+    }
 }
 
 #[derive(Debug)]
 pub enum MaybeLoaded<P: PartitionSupport> {
     /// A fully loaded partition
-    Loaded(P),
+    Loaded { partition: P, generation: u64 },
     /// An accessible but not fully loaded partition
     Accessible(ReadResult),
 }
@@ -31,13 +34,21 @@ impl<P: PartitionSupport> MaybeLoaded<P> {
     /// Get this partitions size
     pub fn size(&self) -> usize {
         match self {
-            Self::Loaded(loaded) => loaded.size(),
+            Self::Loaded { partition, .. } => partition.size(),
             Self::Accessible(read) => read.len(),
+        }
+    }
+
+    ///  Check if this partition is evictable or not
+    pub fn is_evictable(&self, flushed_generation: u64) -> bool {
+        match self {
+            Self::Loaded { generation, .. } => *generation <= flushed_generation,
+            Self::Accessible(_) => true,
         }
     }
 }
 
-#[derive(Debug, Archive, Serialize, Deserialize)]
+#[derive(Debug, Archive, Serialize, Deserialize, DeepSizeOf)]
 pub struct UnsortedPartition<R: ShoalUnsortedTable> {
     /// This partitions key
     pub key: u64,
@@ -54,8 +65,8 @@ impl<R: ShoalUnsortedTable> UnsortedPartition<R> {
     ///
     /// * `key` - The key to this partition
     pub fn new(key: u64, row: R) -> Self {
-        // get the size of this row
-        let size = std::mem::size_of_val(&row);
+        // get the size of this row + 17 bytes (8 for key, 8 for size, 1 for evictable)
+        let size = row.deep_size_of() + 17;
         UnsortedPartition { key, row, size }
     }
 
@@ -86,7 +97,7 @@ impl<R: ShoalUnsortedTable> UnsortedPartition<R> {
         // update this rows data
         self.row.update(&update);
         // update the size of our row
-        self.size = std::mem::size_of_val(&self.row);
+        self.size = self.deep_size_of();
     }
 }
 
@@ -107,7 +118,7 @@ where
     pub fn get(&self, params: &UnsortedGet<R>, found: &mut Vec<R>) -> bool {
         // if this row is loaded then use the get on the row
         match self {
-            MaybeLoaded::Loaded(loaded) => loaded.get(params, found),
+            MaybeLoaded::Loaded { partition, .. } => partition.get(params, found),
             MaybeLoaded::Accessible(read) => {
                 // access our data
                 let access = match UnsortedPartition::<R>::access(read) {
@@ -150,11 +161,11 @@ where
     pub fn update(&mut self, update: &UnsortedUpdate<R>) -> Option<UnsortedPartition<R>> {
         // get our row or deserialize it
         match self {
-            MaybeLoaded::Loaded(loaded) => {
+            MaybeLoaded::Loaded { partition, .. } => {
                 // this row is already loaded so just update it in place
-                loaded.update(update);
+                partition.update(update);
                 // update the size of our row
-                loaded.size = std::mem::size_of_val(&loaded.row);
+                partition.size = partition.deep_size_of();
                 // we don't need to replace our wrapped row so return none
                 None
             }
@@ -166,9 +177,22 @@ where
                 // update this rows data
                 loaded.update(&update);
                 // update the size of our row
-                loaded.size = std::mem::size_of_val(&loaded.row);
+                loaded.size = loaded.deep_size_of();
                 // we loaded an updated our row so return it
                 Some(loaded)
+            }
+        }
+    }
+
+    /// Get the data from a loaded partition or deserialize it from an accesible one
+    pub fn deserialize(self) -> Result<UnsortedPartition<R>, rkyv::rancor::Error> {
+        match self {
+            MaybeLoaded::Loaded { partition, .. } => Ok(partition),
+            MaybeLoaded::Accessible(read) => {
+                // access our data
+                let access = UnsortedPartition::<R>::access(&read)?;
+                // deserialize our row
+                UnsortedPartition::<R>::deserialize(&access)
             }
         }
     }
@@ -183,7 +207,7 @@ impl<R: ShoalUnsortedTable> PartitionSupport for UnsortedPartition<R> {
 }
 
 /// A partition that can contain multiple sorted rows
-#[derive(Debug, Archive, Serialize, Deserialize)]
+#[derive(Debug, Archive, Serialize, Deserialize, DeepSizeOf)]
 pub struct SortedPartition<T: ShoalSortedTable> {
     /// This partitions key
     key: u64,
@@ -216,19 +240,19 @@ impl<T: ShoalSortedTable> SortedPartition<T> {
         // get this rows sort key
         let sort_key = row.get_sort().clone();
         // calculate the size of our new row
-        let row_size = std::mem::size_of_val(&row);
+        let row_size = row.deep_size_of();
         // add this row
         let diff = match self.rows.insert(sort_key, row) {
             // we replaced an existing row so find the delta in size
             Some(replaced) => {
                 // calculate our old rows size
-                let old_size = std::mem::size_of_val(&replaced);
+                let old_size = replaced.deep_size_of();
                 // calculate the diff in sizes
                 row_size.cast_signed() - old_size.cast_signed()
             }
             None => row_size.cast_signed(),
         };
-        // adjust this parititons size correctly
+        // adjust this partitions size correctly
         self.size = self.size.saturating_add_signed(diff);
         // respond that we inserted a row
         (diff, ResponseAction::Insert(true))
@@ -272,7 +296,7 @@ impl<T: ShoalSortedTable> SortedPartition<T> {
         match self.rows.remove(sort) {
             Some(removed) => {
                 // calculate the size of the row we removed
-                let row_size = std::mem::size_of_val(&removed);
+                let row_size = removed.deep_size_of();
                 // decrement our paritions size with this estimate
                 self.size = self.size.saturating_sub(row_size);
                 Some((row_size, removed))
@@ -287,6 +311,8 @@ impl<T: ShoalSortedTable> SortedPartition<T> {
         match self.rows.get_mut(&update.sort_key) {
             // we foudn the target row so apply our update
             Some(row) => {
+                // TODO update row size
+                // update our row
                 row.update(&update);
                 true
             }
