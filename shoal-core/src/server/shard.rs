@@ -8,9 +8,13 @@ use glommio::{
     TaskQueueHandle,
 };
 use kanal::{AsyncReceiver, AsyncSender};
+use lru::LruCache;
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::{cell::RefCell, hash::BuildHasherDefault};
 use std::{net::SocketAddr, time::Duration};
 use tracing::instrument;
+use xxhash_rust::xxh3::Xxh3;
 
 use super::{messages::QueryMetadata, ServerError};
 use super::{
@@ -102,6 +106,8 @@ impl<S: ShoalDatabase> MeshRelay<S> {
 pub struct Shard<S: ShoalDatabase> {
     /// This shards info
     info: ShardInfo,
+    /// The config for shoal
+    conf: Conf,
     /// The tables we are responsible for on this shard
     pub tables: S,
     /// The full archive map for all tables
@@ -130,6 +136,10 @@ pub struct Shard<S: ShoalDatabase> {
     _medium_priority: TaskQueueHandle,
     /// The tasks we have spawned
     tasks: Vec<Task<Result<(), ServerError>>>,
+    /// The total size of all data on this shard
+    memory_usage: Arc<RefCell<usize>>,
+    /// The most recently used tables/partitions on this shard
+    lru: Arc<RefCell<LruCache<(S::TableNames, u64), usize, BuildHasherDefault<Xxh3>>>>,
 }
 
 impl<S: ShoalDatabase> Shard<S> {
@@ -172,6 +182,14 @@ impl<S: ShoalDatabase> Shard<S> {
         let table_map = FullArchiveMap::default();
         // start with an empty loader channel map
         let mut loader_channels = HashMap::with_capacity(1);
+        // start with an initial memory usage of 0
+        let memory_usage = Arc::new(RefCell::new(0));
+        // setup an xxh3 hasher for our lru cache
+        let lru_hasher = BuildHasherDefault::<Xxh3>::default();
+        // build our lru cache
+        let lru = Arc::new(RefCell::new(LruCache::unbounded_with_hasher(lru_hasher)));
+        // create our node local channel for this shard
+        let (shard_local_tx, shard_local_rx) = kanal::unbounded_async();
         // build our shards tables
         let tables = S::new(
             &info.name,
@@ -179,13 +197,15 @@ impl<S: ShoalDatabase> Shard<S> {
             &mut loader_channels,
             conf,
             medium_priority,
+            &memory_usage,
+            &lru,
+            &shard_local_tx,
         )
         .await?;
-        // create our node local channel for this shard
-        let (shard_local_tx, shard_local_rx) = kanal::unbounded_async();
         // build our shard
         let shard = Shard {
             info,
+            conf: conf.clone(),
             tables,
             table_map,
             local_tx,
@@ -197,6 +217,8 @@ impl<S: ShoalDatabase> Shard<S> {
             high_priority,
             _medium_priority: medium_priority,
             tasks: Vec::with_capacity(100),
+            memory_usage,
+            lru,
         };
         Ok(shard)
     }
@@ -290,8 +312,41 @@ impl<S: ShoalDatabase> Shard<S> {
         Ok(())
     }
 
-    /// Spawn a compactor on this shard
-    pub async fn spawn_compactor(&mut self) -> Result<(), ServerError> {
+    /// Find partitions to evict
+    async fn evict_data(&mut self) -> Result<(), ServerError> {
+        // track how much data we are trying to evict
+        // we will always try to evict at least 40% of our cache when we hit memory pressure
+        let mut need = (*self.memory_usage.borrow() as f64 * 0.40).ceil() as usize;
+        // build a map of tables and the partitions we can remove from them
+        let mut evictable = HashMap::with_capacity(10);
+        // keep popping from our lru cache until we have meet our eviction needs
+        loop {
+            // try to pop something from our lru
+            match self.lru.borrow_mut().pop_lru() {
+                Some(((table_name, key), size)) => {
+                    // get an entry to this tables evictable partitions
+                    let entry = evictable
+                        .entry(table_name)
+                        .or_insert_with(|| Vec::with_capacity(1000));
+                    // add this partition we are going to evict
+                    entry.push(key);
+                    // decrement the amount of data we need to evict still
+                    need = need.saturating_sub(size);
+                    // if we have found enough partitions to evict then stop looking
+                    // and start evicting
+                    if need == 0 {
+                        break;
+                    }
+                }
+                // we have no more rows we could evict even if we wanted too
+                None => break,
+            }
+        }
+        // step over each table with evictions and evict its data
+        for (table_name, victims) in evictable {
+            // evict this tables data
+            self.tables.evict(table_name, victims);
+        }
         Ok(())
     }
 
@@ -322,6 +377,13 @@ impl<S: ShoalDatabase> Shard<S> {
                         .load_partition(loaded, &self.shard_local_tx)
                         .await?
                 }
+                // Mark some partitions as evictable
+                ShardMsg::MarkEvictable {
+                    generation,
+                    table,
+                    partitions,
+                } => self.tables.mark_evictable(table, generation, partitions),
+                // shutdown this shard
                 ShardMsg::Shutdown => {
                     // signal all of our loaders to shutdown
                     for (_, (loader_tx, _)) in &self.loader_channels {
@@ -337,6 +399,11 @@ impl<S: ShoalDatabase> Shard<S> {
             }
             // check for any flushed response to handle
             self.handle_flushed().await?;
+            // check if we need to evict any data
+            if *self.memory_usage.borrow() as u64 > self.conf.resources.memory {
+                // try to evict our least recently used data
+                self.evict_data().await?;
+            }
         }
         // check for any flushed response to handle
         self.handle_flushed().await?;

@@ -16,19 +16,20 @@ serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
 config = "0.13" 
 gxhash = "2.2"
-rkyv = { version = "0.8.10", features = ["uuid-1"] }
+rkyv = { workspace = true }
 rkyv-with = "0.1"
-glommio = { version = "0.9", optional = true }
+glommio = { workspace = true, optional = true }
 bytes = "1.5"
 intmap = "2"
 futures = "0.3"
-kanal = "0.1.0-pre8"
-tokio = { version = "1", features = ["full"] }
-uuid = { version = "1", features = ["v4"] }
-dashmap = "5.5"
+kanal = { workspace = true }
+tokio = { workspace = true }
+uuid = { workspace = true }
 papaya = "0.2"
-byte-unit = "5.1"
+byte-unit = { version = "5.1", features = ["serde"] }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
+deepsize2 = "0.1"
+lru = "0.16"
 
 # tracing dependencies
 opentelemetry = "0.28"

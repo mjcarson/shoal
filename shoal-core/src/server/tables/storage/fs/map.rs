@@ -457,10 +457,12 @@ impl ArchiveMap {
     ///
     /// * `id` - The id of the archive we are removing
     pub async fn remove_archive(&self, id: &Uuid) -> Result<(), ServerError> {
-        // insert or update this partitions entry to disk
+        // remove this archive from our loaded archive file handle map
         if let Some(removed) = self.loaded_archives.borrow_mut().remove(id) {
             removed.close().await?;
         }
+        // remove this archive from our map of all archives
+        self.all_archives.borrow_mut().remove(id);
         Ok(())
     }
 

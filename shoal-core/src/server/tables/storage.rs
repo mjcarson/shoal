@@ -90,7 +90,7 @@ impl<T> PendingResponse<T> {
 #[derive(Debug, Clone)]
 pub enum CompactionJob {
     /// A path to an intent log to compact
-    IntentLog(PathBuf),
+    IntentLog { path: PathBuf, generation: u64 },
     /// Compact this shards archive data
     Archives,
     /// Shutdown this compactor
@@ -109,17 +109,12 @@ pub trait IntentReadSupport<T: RkyvSupport>: Sized + RkyvSupport + PartitionSupp
     /// The intent type to use
     type Intent: RkyvSupport;
 
-    ///// Create a new partition
-    /////
-    ///// # Arguments
-    /////
-    ///// * `key` - The key for this new partition
-    //fn new(key: u64) -> Self;
-
     /// Load a partition from a read and insert it into our map
     fn load(
         read: &ReadResult,
+        generation: u64,
         partitions: &mut HashMap<u64, MaybeLoaded<Self>>,
+        memory_usage: &mut Arc<RefCell<usize>>,
     ) -> Result<(), ServerError>;
 
     /// Apply an intent to this partition
@@ -216,12 +211,15 @@ pub trait StorageSupport: Sized {
         P: IntentReadSupport<R> + 'static,
         R: PartitionKeySupport + 'static,
         N: TableNameSupport,
+        S: ShoalDatabase,
     >(
         shard_name: &str,
         table_name: N,
+        shard_table_name: S::TableNames,
         shard_archive_map: &FullArchiveMap<N>,
         conf: &Conf,
         medium_priority: TaskQueueHandle,
+        shard_local_tx: &AsyncSender<ShardMsg<S>>,
     ) -> Result<Self, ServerError>
     where
         <P as Archive>::Archived: rkyv::Deserialize<P, Strategy<Pool, rkyv::rancor::Error>>,
@@ -256,6 +254,8 @@ pub trait StorageSupport: Sized {
 
     /// Set our intent log to be compact if its needed
     ///
+    /// Returns the current flushed position of the writer and the current generation
+    ///
     /// # Arguments
     ///
     /// * `force` - Whether to force a compaction of the intent logs
@@ -263,7 +263,7 @@ pub trait StorageSupport: Sized {
     async fn compact_if_needed<T: PartitionKeySupport>(
         &mut self,
         force: bool,
-    ) -> Result<u64, ServerError>;
+    ) -> Result<(u64, u64), ServerError>;
 
     /// Flush all currently pending writes to storage
     #[allow(async_fn_in_trait)]
@@ -275,12 +275,15 @@ pub trait StorageSupport: Sized {
     ///
     /// * `shard_name` - The name of the shard to read intents for
     /// * `conf` - A Shoal config
-    /// * `path` - The path to the intent log to read in
+    /// * `partitions` - The map of partitions to load read our intent data into
+    /// * `memory_usage` - The memory usage for this node
     #[allow(async_fn_in_trait)]
     async fn read_intents<T: IntentReadSupport<R> + PartitionSupport, R: PartitionKeySupport>(
         shard_name: &str,
         conf: &Conf,
+        generation: u64,
         partitions: &mut HashMap<u64, MaybeLoaded<T>>,
+        memory_usage: &mut Arc<RefCell<usize>>,
     ) -> Result<(), ServerError>;
 
     /// Get the type of loader this storage kind requires

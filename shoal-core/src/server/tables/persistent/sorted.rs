@@ -9,8 +9,10 @@ use rkyv::validation::archive::ArchiveValidator;
 use rkyv::validation::shared::SharedValidator;
 use rkyv::validation::Validator;
 use rkyv::{Archive, Deserialize, Serialize};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tracing::instrument;
 
 use crate::server::messages::QueryMetadata;
@@ -340,7 +342,7 @@ impl<R: ShoalSortedTable + 'static, S: StorageSupport> PersistentSortedTable<R, 
         &mut self,
     ) -> Result<&mut Vec<(SocketAddr, Response<R>)>, ServerError> {
         // check if our current intent log should be compacted
-        let flushed_pos = self.storage.compact_if_needed::<R>(false).await?;
+        let (flushed_pos, generation) = self.storage.compact_if_needed::<R>(false).await?;
         // get all of the responses whose data has been flushed to disk
         self.pending.get(flushed_pos, &mut self.flushed);
         // return a ref to our flushed responses
@@ -368,7 +370,9 @@ where
 
     fn load(
         read: &ReadResult,
+        generation: u64,
         partitions: &mut HashMap<u64, MaybeLoaded<Self>>,
+        memory_usage: &mut Arc<RefCell<usize>>,
     ) -> Result<(), ServerError> {
         // try to deserialize this row from our intent log
         let intent = unsafe { rkyv::access_unchecked::<ArchivedSortedIntents<T>>(&read[..]) };
@@ -380,9 +384,10 @@ where
                 // get the partition key for this row
                 let key = row.get_partition_key();
                 // get this rows partition
-                let entry = partitions
-                    .entry(key)
-                    .or_insert_with(|| MaybeLoaded::Loaded(SortedPartition::new(key)));
+                todo!("USE A REAL GENEATION VALUE NOT 0");
+                //let entry = partitions
+                //    .entry(key)
+                //    .or_insert_with(|| MaybeLoaded::Loaded { SortedPartition::new(key), 0 });
                 // insert this row
                 // TODO support this
                 //entry.insert(row);

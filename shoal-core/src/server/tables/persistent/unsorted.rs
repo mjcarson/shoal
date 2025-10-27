@@ -3,6 +3,7 @@
 use glommio::io::ReadResult;
 use glommio::TaskQueueHandle;
 use kanal::{AsyncReceiver, AsyncSender};
+use lru::LruCache;
 use rkyv::bytecheck::CheckBytes;
 use rkyv::de::Pool;
 use rkyv::rancor::Strategy;
@@ -10,9 +11,14 @@ use rkyv::validation::archive::ArchiveValidator;
 use rkyv::validation::shared::SharedValidator;
 use rkyv::validation::Validator;
 use rkyv::{Archive, Deserialize, Serialize};
+use std::cell::RefCell;
+use std::collections::hash_map;
 use std::collections::HashMap;
+use std::hash::BuildHasherDefault;
 use std::net::SocketAddr;
-use tracing::instrument;
+use std::sync::Arc;
+use tracing::{event, instrument, Level};
+use xxhash_rust::xxh3::Xxh3;
 
 use crate::server::messages::{LoadedPartition, QueryMetadata, ShardMsg};
 use crate::server::tables::partitions::UnsortedPartition;
@@ -79,16 +85,20 @@ pub struct PersistentUnsortedTable<R: ShoalUnsortedTable, S: StorageSupport, N: 
     pub partitions: HashMap<u64, MaybeLoaded<UnsortedPartition<R>>>,
     /// The storage engine backing this table
     storage: S,
+    /// The current generation of flushed data
+    generation: u64,
     /// The commits that are still pending storage confirmation
     pending: PendingResponse<R>,
-    /// The total size of all data on this shard
-    memory_usage: usize,
     /// The responses for queries that have been flushed to disk
     flushed: Vec<(SocketAddr, Response<R>)>,
     /// The channel to send loader jobs on
     loader_tx: AsyncSender<LoaderMsg<N>>,
     /// A map of queries blocked on partitions being loaded from disk
     blocked: HashMap<u64, Vec<(QueryMetadata, UnsortedQuery<R>)>>,
+    /// The total size of all data on this shard
+    memory_usage: Arc<RefCell<usize>>,
+    /// The most recently used tables/partitions on this shard
+    lru: Arc<RefCell<LruCache<(N, u64), usize, BuildHasherDefault<Xxh3>>>>,
 }
 
 impl<R: ShoalUnsortedTable + 'static, S: StorageSupport, N: TableNameSupport>
@@ -100,14 +110,19 @@ where
 {
     /// Create a persistent shoal table
     ///
+    /// The double TableNames is strange but its an easy way to work around
+    /// an issue where I could have cyclical generics (The table type requires
+    /// itself as its own generic).
+    ///
     /// # Arguments
     ///
     /// * `shard_name` - The id of the shard that owns this table
     /// * `conf` - The Shoal config
     #[instrument(name = "PersistentTable::new", skip(conf), err(Debug))]
-    pub async fn new(
+    pub async fn new<D: ShoalDatabase>(
         shard_name: &str,
         table_name: N,
+        shard_table_name: D::TableNames,
         shard_archive_map: &FullArchiveMap<N>,
         loader_channels: &mut HashMap<
             Loaders,
@@ -115,6 +130,9 @@ where
         >,
         conf: &Conf,
         medium_priority: TaskQueueHandle,
+        memory_usage: &Arc<RefCell<usize>>,
+        lru: &Arc<RefCell<LruCache<(N, u64), usize, BuildHasherDefault<Xxh3>>>>,
+        shard_local_tx: &AsyncSender<ShardMsg<D>>,
     ) -> Result<Self, ServerError>
     where
         <<R as ShoalUnsortedTable>::Update as Archive>::Archived: rkyv::Deserialize<
@@ -137,23 +155,34 @@ where
         // build our table
         let mut table = Self {
             table_name,
-            partitions: HashMap::with_capacity(1_000_000),
-            storage: S::new::<UnsortedPartition<R>, R, N>(
+            partitions: HashMap::with_capacity(1000),
+            storage: S::new::<UnsortedPartition<R>, R, N, D>(
                 shard_name,
                 table_name,
+                shard_table_name,
                 shard_archive_map,
                 conf,
                 medium_priority,
+                shard_local_tx,
             )
             .await?,
+            generation: 0,
             pending: PendingResponse::<R>::with_capacity(100),
-            memory_usage: 0,
             flushed: Vec::with_capacity(1000),
             loader_tx: loader_tx.clone(),
             blocked: HashMap::with_capacity(1000),
+            memory_usage: memory_usage.clone(),
+            lru: lru.clone(),
         };
         // load our intent log
-        S::read_intents::<UnsortedPartition<R>, R>(shard_name, conf, &mut table.partitions).await?;
+        S::read_intents::<UnsortedPartition<R>, R>(
+            shard_name,
+            conf,
+            table.generation,
+            &mut table.partitions,
+            &mut table.memory_usage,
+        )
+        .await?;
         // compact our intent log
         table.storage.compact_if_needed::<R>(true).await?;
         Ok(table)
@@ -181,13 +210,47 @@ where
     pub async fn load_partition(
         &mut self,
         loaded: LoadedPartition,
-    ) -> Option<Vec<(QueryMetadata, UnsortedQuery<R>)>> {
-        // wrap our raw data so that we can access it only when needed
-        let wrapped = MaybeLoaded::Accessible(loaded.data);
-        // add this partition to our partition map
-        self.partitions.insert(loaded.partition_id, wrapped);
+    ) -> Option<(Vec<(QueryMetadata, UnsortedQuery<R>)>, u64)> {
+        // if we have an existing loaded partition then do not use our newly loaded data
+        // as that should be older
+        match self.partitions.entry(loaded.partition_id) {
+            hash_map::Entry::Occupied(mut entry) => {
+                // if this partition contains already loaded data then we should use that
+                if let &mut MaybeLoaded::Accessible(_) = entry.get_mut() {
+                    // get the size of our dat
+                    let size = loaded.data.len();
+                    // wrap our raw data so that we can access it only when needed
+                    let wrapped = MaybeLoaded::Accessible(loaded.data);
+                    // overwrite our data with newly loaded data
+                    entry.insert(wrapped);
+                    // increment our memory usage
+                    *self.memory_usage.borrow_mut() += size;
+                    // remove this partition from our cache until any blocked queries have completed
+                    self.lru
+                        .borrow_mut()
+                        .pop(&(self.table_name, loaded.partition_id));
+                }
+            }
+            // this partition does not have any already loaded data
+            hash_map::Entry::Vacant(entry) => {
+                // get the size of our dat
+                let size = loaded.data.len();
+                // wrap our raw data so that we can access it only when needed
+                let wrapped = MaybeLoaded::Accessible(loaded.data);
+                // insert our newly loaded and wrapped data
+                entry.insert(wrapped);
+                // increment our memory usage
+                *self.memory_usage.borrow_mut() += size;
+                // remove this partition from our cache until any blocked queries have completed
+                self.lru
+                    .borrow_mut()
+                    .pop(&(self.table_name, loaded.partition_id));
+            }
+        }
         // get the queries that were blocked on this partition
-        self.blocked.remove(&loaded.partition_id)
+        self.blocked
+            .remove(&loaded.partition_id)
+            .map(|unblocked| (unblocked, self.generation))
     }
 
     /// Cast and handle a serialized query
@@ -196,6 +259,7 @@ where
     ///
     /// * `meta` - The metadata for this query
     /// * `query` - The query to execute
+    /// * `was_blocked` - Whether this query was blocked before being executed
     #[instrument(name = "PersistentTable::handle", skip(self, query))]
     pub async fn handle(
         &mut self,
@@ -218,8 +282,6 @@ where
             // update a row in this partition
             UnsortedQuery::Update(update) => self.update(meta, update).await,
         };
-        // log our memory usage
-        //println!("memory usage: {}", self.memory_usage);
         response
     }
 
@@ -252,7 +314,10 @@ where
         // get the size of our new partition
         let new_size = partition.size;
         // wrap our new partition that we have loaded
-        let wrapped = MaybeLoaded::Loaded(partition);
+        let wrapped = MaybeLoaded::Loaded {
+            partition,
+            generation: self.generation,
+        };
         // insert our row and get the change in memory usage
         let size_diff = match self.partitions.insert(key, wrapped) {
             // we had an old row calculate the size diff
@@ -261,8 +326,12 @@ where
         };
         // add this action to our pending queue
         self.pending.add(meta, pos, ResponseAction::Insert(true));
+        // do a saturating add on our memory usage
+        let new_size = self.memory_usage.borrow().saturating_add_signed(size_diff);
         // adjust our total shards memory usage
-        self.memory_usage = self.memory_usage.saturating_add_signed(size_diff);
+        *self.memory_usage.borrow_mut() = new_size;
+        // remove this partition from our lru cache as its no longer evictable
+        self.lru.borrow_mut().pop(&(self.table_name, key));
         // An insert never returns anything immediately
         None
     }
@@ -273,6 +342,7 @@ where
     ///
     /// * `meta` - The metadata about this insert query
     /// * `get` - The get parameters to use
+    /// * `was_blocked` - Whether this query was blocked before being executed
     #[instrument(name = "PersistentTable::get", skip_all)]
     async fn get(
         &mut self,
@@ -286,6 +356,10 @@ where
             Some(partition) => {
                 // get this partitions data
                 let action = if partition.get(&get, &mut data) {
+                    // mark this partition as recently used in our lru cache
+                    self.lru
+                        .borrow_mut()
+                        .promote(&(self.table_name, get.partition_key));
                     // this query found data
                     ResponseAction::Get(Some(data))
                 } else {
@@ -360,7 +434,9 @@ where
                 // add this action to our pending queue
                 self.pending.add(meta, pos, action);
                 // adjust this shards total memory usage
-                self.memory_usage = self.memory_usage.saturating_sub(old.size());
+                *self.memory_usage.borrow_mut() = old.size();
+                // remove this partition from our lru cache as its no longer evictable
+                self.lru.borrow_mut().pop(&(self.table_name, key));
                 // wait for this delete to get flushed to disk
                 return None;
             }
@@ -400,8 +476,13 @@ where
                 // update this paritions data
                 if let Some(loaded) = partition.update(&update) {
                     // replace our accessible partition with our loaded one
-                    *partition = MaybeLoaded::Loaded(loaded);
+                    *partition = MaybeLoaded::Loaded {
+                        partition: loaded,
+                        generation: self.generation,
+                    };
                 }
+                // get our partition key so we can remove this from our lru cache later
+                let key = update.partition_key;
                 // wrap our row in an delete intent
                 let intent = UnsortedIntents::<R>::update(update);
                 // write this update to storage
@@ -410,6 +491,8 @@ where
                 let action = ResponseAction::Update(true);
                 // add this action to our pending queue
                 self.pending.add(meta, pos, action);
+                // remove this partition from our lru cache as its no longer evictable
+                self.lru.borrow_mut().pop(&(self.table_name, key));
                 // wait for this delete to get flushed to disk
                 None
             }
@@ -428,6 +511,57 @@ where
         }
     }
 
+    /// Mark partitions as evictable if they are no longer in the intent log
+    #[instrument(name = "PersistentTable::mark_evictable", skip(self, partitions), fields(partition_count = partitions.len()))]
+    pub fn mark_evictable(&mut self, generation: u64, partitions: Vec<u64>) {
+        let mut marked = 0;
+        // check each partition that we find might be evictable now
+        for partition in partitions {
+            // try to get this partition
+            if let Some(maybe_loaded) = self.partitions.get(&partition) {
+                // check if this partition is now evictable
+                if maybe_loaded.is_evictable(generation) {
+                    // get this partitions size
+                    let size = maybe_loaded.size();
+                    // insert this partition into our lru cache
+                    self.lru
+                        .borrow_mut()
+                        .put((self.table_name, partition), size);
+                    marked += size;
+                }
+            }
+        }
+        event!(Level::INFO, marked);
+    }
+
+    /// Evict partitions from memory
+    #[instrument(name = "PersistentTable::evict", skip_all, fields(victim_count = victims.len()))]
+    pub fn evict(&mut self, victims: Vec<u64>) {
+        // get our current memory usage
+        let pre = *self.memory_usage.borrow();
+        // step over and remove all of our victim partitions
+        for victim in victims {
+            // remove this partition if it exists
+            if let Some(partition) = self.partitions.remove(&victim) {
+                // get our new memory usage amount with this partition removed
+                let decreased = self.memory_usage.borrow().saturating_sub(partition.size());
+                // update our memory usage
+                *self.memory_usage.borrow_mut() = decreased;
+            }
+        }
+        // get our post eviction memory usage
+        let post = *self.memory_usage.borrow();
+        // log the change in memory usage
+        event!(
+            Level::INFO,
+            pre,
+            post,
+            diff = pre - post,
+            partitions = self.partitions.len(),
+            evictable = self.lru.borrow().len(),
+        );
+    }
+
     /// Flush all pending writes to disk
     pub async fn flush(&mut self) -> Result<(), ServerError> {
         self.storage.flush().await
@@ -442,7 +576,9 @@ where
         &mut self,
     ) -> Result<&mut Vec<(SocketAddr, Response<R>)>, ServerError> {
         // check if our current intent log should be compacted
-        let flushed_pos = self.storage.compact_if_needed::<R>(false).await?;
+        let (flushed_pos, generation) = self.storage.compact_if_needed::<R>(false).await?;
+        // update our current generation
+        self.generation = generation;
         // get all of the responses whose data has been flushed to disk
         self.pending.get(flushed_pos, &mut self.flushed);
         // return a ref to our flushed responses
@@ -472,7 +608,9 @@ where
 
     fn load(
         read: &ReadResult,
+        generation: u64,
         partitions: &mut HashMap<u64, MaybeLoaded<Self>>,
+        memory_usage: &mut Arc<RefCell<usize>>,
     ) -> Result<(), ServerError> {
         // access our data
         let intent = UnsortedIntents::<T>::access(read)?;
@@ -481,18 +619,41 @@ where
             ArchivedUnsortedIntents::Insert(archived) => {
                 // deserialize this row
                 let row: T = RkyvSupport::deserialize(archived)?;
+                // get the size of our row
+                let size = row.deep_size_of();
                 // get the partition key for this row
                 let key = row.get_partition_key();
                 // build a new partition for this row
                 let partition = UnsortedPartition::new(key, row);
                 // insert this new partition
-                partitions.insert(key, MaybeLoaded::Loaded(partition));
+                match partitions.insert(
+                    key,
+                    MaybeLoaded::Loaded {
+                        partition,
+                        generation,
+                    },
+                ) {
+                    // if we had an existing partition then get the difference in size
+                    Some(old) => {
+                        // calculate the change in size
+                        let size_diff = size.cast_signed() - old.size().cast_signed();
+                        // do a saturating add on our memory usage
+                        let new_size = memory_usage.borrow().saturating_add_signed(size_diff);
+                        // adjust our memory usage correctly
+                        *memory_usage.borrow_mut() = new_size;
+                    }
+                    // we did not have an existing partition so just increment our sizes
+                    None => *memory_usage.borrow_mut() += size,
+                }
             }
             ArchivedUnsortedIntents::Delete { partition_key } => {
                 // convert our partition key to its native endianess
                 let partition_key = partition_key.to_native();
                 // try to delete this partition
-                partitions.remove(&partition_key);
+                if let Some(removed) = partitions.remove(&partition_key) {
+                    // we are removing a loaded partition so adjust our memory usage
+                    *memory_usage.borrow_mut() -= removed.size();
+                }
             }
             ArchivedUnsortedIntents::Update(archived) => {
                 // deserialize this row's update
@@ -501,11 +662,22 @@ where
                 match partitions.get_mut(&update.partition_key) {
                     // update this row
                     Some(partition) => {
+                        // get the size of not yet updated partition
+                        let old_size = partition.size();
                         // update our row in place if its loaded or by replacement if its not
                         if let Some(loaded) = partition.update(&update) {
                             // replace our old partition with its updated data
-                            *partition = MaybeLoaded::Loaded(loaded);
+                            *partition = MaybeLoaded::Loaded {
+                                partition: loaded,
+                                generation,
+                            };
                         }
+                        // calculate the change in size
+                        let size_diff = partition.size().cast_signed() - old_size.cast_signed();
+                        // do a saturating add on our memory usage
+                        let new_size = memory_usage.borrow().saturating_add_signed(size_diff);
+                        // adjust our total memory usage based on our newly updated row
+                        *memory_usage.borrow_mut() = new_size;
                     }
                     // TODO handling a row missing
                     None => panic!("Missing row?"),

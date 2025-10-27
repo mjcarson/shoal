@@ -1,11 +1,13 @@
 //! The traits for a basic unsorted table where each partition contains a
 //! single row
 
+use deepsize2::DeepSizeOf;
+
 use super::{PartitionKeySupport, RkyvSupport};
 use crate::shared::queries::UnsortedUpdate;
 
 pub trait ShoalUnsortedTable:
-    std::fmt::Debug + Clone + RkyvSupport + PartitionKeySupport + Sized
+    std::fmt::Debug + Clone + RkyvSupport + PartitionKeySupport + Sized + DeepSizeOf
 {
     /// The updates that can be applied to this table
     type Update: RkyvSupport + std::fmt::Debug + Clone;

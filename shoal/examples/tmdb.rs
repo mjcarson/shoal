@@ -1,6 +1,5 @@
 //! A shoal example on TMDB data
 
-use kanal::{AsyncReceiver, AsyncSender};
 use shoal::bencher::{BenchWorker, Bencher};
 use shoal_core::client::Shoal;
 use shoal_core::server::messages::{QueryMetadata, ShardMsg};
@@ -17,9 +16,12 @@ use shoal_core::tables::PersistentUnsortedTable;
 use shoal_core::ShoalPool;
 use shoal_derive::{ShoalDB, ShoalUnsortedTable};
 
+use deepsize2::DeepSizeOf;
 use futures::stream::StreamExt;
 use glommio::TaskQueueHandle;
 use gxhash::GxHasher;
+use kanal::{AsyncReceiver, AsyncSender};
+use mimalloc::MiMalloc;
 use rkyv::{Archive, Deserialize, Serialize};
 use std::collections::HashMap;
 use std::hash::Hasher;
@@ -31,6 +33,9 @@ use tokio::net::ToSocketAddrs;
 use tokio::task::JoinSet;
 use uuid::Uuid;
 
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
+
 #[derive(
     Debug,
     Archive,
@@ -41,6 +46,7 @@ use uuid::Uuid;
     serde::Deserialize,
     serde::Serialize,
     PartialEq,
+    DeepSizeOf,
 )]
 #[shoal_table(db = "Tmdb")]
 pub struct Movie {
@@ -589,9 +595,12 @@ impl MovieController {
         // set the type we are going to deserialize
         let mut typed_reader = reader.deserialize::<Movie>();
         //// only upload a limited number of movies
-        //let mut cap = 100;
+        //let mut cap = 3;
+        //let mut orig_total = 0;
         // skip any movies we fail to deserialize
         while let Some(Ok(movie)) = typed_reader.next().await {
+            //println!("ORIG: {} -> {}", movie.title, movie.deep_size_of());
+            //orig_total += movie.deep_size_of();
             // add our movie to our channel to be verified
             self.movies_tx.send(MovieMsg::Verify(movie)).await.unwrap();
             //cap -= 1;
@@ -599,6 +608,7 @@ impl MovieController {
             //    break;
             //}
         }
+        //println!("ORIG TOTAL -> {}", orig_total);
     }
 
     /// Start streaming jobs to our workers
@@ -662,4 +672,3 @@ fn main() {
     // wait for our db to exit
     pool.exit().unwrap();
 }
-//
