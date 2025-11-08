@@ -36,11 +36,11 @@ fn add_from_shoal(
             impl shoal_core::FromShoal<#db_name> for #name  {
                 type ResponseKinds = <#db_name as shoal_core::shared::traits::QuerySupport>::ResponseKinds;
 
-                fn retrieve(kind: #response_name) -> Result<Option<Vec<Self>>, shoal_core::client::Errors> {
+                fn retrieve(kind: &#response_name) -> Result<&rkyv::option::ArchivedOption<rkyv::vec::ArchivedVec<<Self as Archive>::Archived>>, shoal_core::client::Errors> {
                     // make sure its the right data kind
                     if let #response_name::#name(action) = kind {
                         // make sure its a get action
-                        if let shoal_core::shared::responses::ResponseAction::Get(rows) = action.data {
+                       if let shoal_core::shared::responses::ArchivedResponseAction::Get(rows) = &action.data {
                             return Ok(rows);
                         }
                     }
@@ -186,7 +186,7 @@ pub fn derive_shoal_sorted_table(stream: TokenStream) -> TokenStream {
     //let table_name = Ident::new(&attrs.name, name.span());
     // build the name of our kinds
     let query_name = syn::Ident::new(&format!("{}QueryKinds", db_name), name.span());
-    let response_name = syn::Ident::new(&format!("{}ResponseKinds", db_name), name.span());
+    let response_name = syn::Ident::new(&format!("Archived{}ResponseKinds", db_name), name.span());
     // extend this type
     add_from_shoal(&mut output, name, &db_name, &response_name);
     add_rkyv_support(&mut output, name);
@@ -218,7 +218,7 @@ pub fn derive_shoal_unsorted_table(stream: TokenStream) -> TokenStream {
     let client_name = syn::Ident::new(&format!("{}Client", db_name), name.span());
     // build the name of our kinds
     let query_name = syn::Ident::new(&format!("{}QueryKinds", db_name), name.span());
-    let response_name = syn::Ident::new(&format!("{}ResponseKinds", db_name), name.span());
+    let response_name = syn::Ident::new(&format!("Archived{}ResponseKinds", db_name), name.span());
     // extend this type
     add_from_shoal(&mut output, name, &client_name, &response_name);
     add_rkyv_support(&mut output, name);

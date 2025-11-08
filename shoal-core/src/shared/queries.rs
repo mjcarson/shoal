@@ -66,7 +66,7 @@ impl<S: QuerySupport> Default for Queries<S> {
     fn default() -> Self {
         Queries {
             id: Uuid::new_v4(),
-            queries: Vec::default(),
+            queries: Vec::with_capacity(1),
         }
     }
 }

@@ -23,7 +23,7 @@ use super::{
     shard::ShardContact,
 };
 use super::{Conf, ServerError};
-use crate::shared::traits::{RkyvSupport, ShoalDatabase, ShoalQuery};
+use crate::shared::traits::{RkyvSupport, ShoalDatabase, ShoalQuerySupport};
 use crate::shared::{queries::Queries, traits::QuerySupport};
 
 /// Coordinates traffic between this node and others
@@ -186,7 +186,6 @@ where
         // get the slice to deserialize
         let readable = &data[..read];
         // load our arhived query from buffer
-        //let archived = <Queries<S::ClientType> as RkyvSupport>::load(readable);
         let archived = Queries::access(readable).unwrap();
         // deserialize our queries
         let queries = <Queries<S::ClientType> as RkyvSupport>::deserialize(archived).unwrap();

@@ -76,7 +76,7 @@ pub trait RkyvSupport: Archive
 }
 
 /// The traits for queries in shoal
-pub trait ShoalQuery: std::fmt::Debug + RkyvSupport + Sized + Send + Clone {
+pub trait ShoalQuerySupport: std::fmt::Debug + RkyvSupport + Sized + Send + Clone {
     /// Deserialize our response types
     ///
     /// # Arguments
@@ -94,12 +94,12 @@ pub trait ShoalQuery: std::fmt::Debug + RkyvSupport + Sized + Send + Clone {
 }
 
 /// The traits ror responses from shoal
-pub trait ShoalResponse: std::fmt::Debug + RkyvSupport + Sized + Send {
-    /// Get the index of a single [`Self::ResponseKinds`]
-    fn get_index(&self) -> usize;
+pub trait ShoalResponseSupport: std::fmt::Debug + RkyvSupport + Sized + Send {
+    /// Get the index of a single [`<Self::ResponseKinds as Archive>::Archived`]
+    fn get_index_archived(archived: &<Self as Archive>::Archived) -> usize;
 
     /// Get whether this is the last response in a response stream
-    fn is_end_of_stream(&self) -> bool;
+    fn is_end_of_stream(archived: &<Self as Archive>::Archived) -> bool;
 
     /// Get the query id from the response
     ///
@@ -111,10 +111,10 @@ pub trait ShoalResponse: std::fmt::Debug + RkyvSupport + Sized + Send {
 
 pub trait QuerySupport: 'static {
     /// The different tables or types of queries we will handle
-    type QueryKinds: ShoalQuery;
+    type QueryKinds: ShoalQuerySupport;
 
     /// The different tables we can get responses from
-    type ResponseKinds: ShoalResponse;
+    type ResponseKinds: ShoalResponseSupport;
 }
 
 pub trait TableNameSupport:
