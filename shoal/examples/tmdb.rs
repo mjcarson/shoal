@@ -411,26 +411,28 @@ pub enum MovieMsg<Q: QuerySupport> {
     Shutdown,
 }
 
-pub async fn response_streamer(
-    movies_tx: AsyncSender<MovieMsg<TmdbClient>>,
-    mut response_stream: ShoalResultStream<TmdbClient>,
-) {
-    // keep getting responses until this stream closes
-    while let Some(response) = response_stream.next().await.unwrap() {
-        // wrap our response in a MovieMsg
-        let wrapped = MovieMsg::Response(response);
-        // send this response to our main worker
-        movies_tx.send(wrapped).await.unwrap();
-    }
-}
+//pub async fn response_streamer(
+//    movies_tx: AsyncSender<MovieMsg<TmdbClient>>,
+//    mut response_stream: ShoalResultStream<TmdbClient>,
+//) {
+//    // keep getting responses until this stream closes
+//    while let Some(response) = response_stream.next().await.unwrap() {
+//        // wrap our response in a MovieMsg
+//        let wrapped = MovieMsg::Response(response);
+//        // send this response to our main worker
+//        movies_tx.send(wrapped).await.unwrap();
+//    }
+//}
 
 pub struct MovieWorker {
+    /// A shoal client
+    shoal: Arc<Shoal<TmdbClient>>,
     /// The channel to add movies too
     movies_tx: AsyncSender<MovieMsg<TmdbClient>>,
     /// The channel to receive movies on
     movies_rx: AsyncReceiver<MovieMsg<TmdbClient>>,
-    /// A Shoal query stream
-    query_stream: ShoalQueryStream<TmdbClient>,
+    ///// A Shoal query stream
+    //query_stream: ShoalQueryStream<TmdbClient>,
     /// keep a list so we can insert our movies 10 at a time
     insert_buffer: Vec<Movie>,
     /// keep a list so we can get our movies 10 at a time
@@ -448,16 +450,18 @@ impl MovieWorker {
     /// * `movies_rx` - A channel to receive movies on
     /// * `bencher` - The benchmark worker to use
     pub async fn new(
+        shoal: Arc<Shoal<TmdbClient>>,
         movies_tx: &AsyncSender<MovieMsg<TmdbClient>>,
         movies_rx: &AsyncReceiver<MovieMsg<TmdbClient>>,
-        query_stream: ShoalQueryStream<TmdbClient>,
+        //query_stream: ShoalQueryStream<TmdbClient>,
         bencher: BenchWorker,
     ) -> Self {
         // create our movie worker
         MovieWorker {
+            shoal,
             movies_tx: movies_tx.clone(),
             movies_rx: movies_rx.clone(),
-            query_stream,
+            //query_stream,
             insert_buffer: Vec::with_capacity(10),
             get_buffer: Vec::with_capacity(10),
             bencher,
@@ -467,16 +471,22 @@ impl MovieWorker {
     /// Send our currently buffered movies to shoal
     async fn send(&mut self) {
         // Start building a query to shoal
-        let mut query = self
-            .query_stream
-            .query_with_capacity(self.insert_buffer.len());
+        // let mut query = self
+        //     .query_stream
+        //     .query_with_capacity(self.insert_buffer.len());
+        let mut query = self.shoal.query();
         // add each movie to this query
         for movie in self.insert_buffer.drain(..) {
             // add this movie to our query
             query.add_mut(movie);
         }
+        // get the number of queries we are sending
+        let skip = query.queries.len();
         // send this query to shoal
-        self.query_stream.add(query).await.unwrap();
+        let mut stream = self.shoal.send(query).await.unwrap();
+        // wait for these results to complete
+        stream.skip(skip).await.unwrap();
+        //self.query_stream.add(query).await.unwrap();
     }
 
     /// Start streaming movies into Shoal
@@ -501,51 +511,52 @@ impl MovieWorker {
                     }
                 }
                 MovieMsg::Verify(movie) => {
-                    // add a get query for this movie
-                    self.get_buffer.push(MovieGet::new(movie.id));
-                    // check if we have 10 movies to send
-                    if self.get_buffer.len() > 10 {
-                        //// benchmark only commands to the db when it comes to inserts
-                        //self.bencher.instance_start();
-                        // send all of our buffered movies
-                        self.send().await;
-                        //// stop our command benchmark for inserts
-                        //self.bencher.instance_stop();
-                    }
-                    //// benchmark the entire verify operation
-                    //self.bencher.instance_start();
-                    //// build the query to get this movies info
-                    //let query = self.shoal.query().add(MovieGet::new(movie.id));
-                    //// start this query
-                    //let mut stream = self.shoal.send(query).await.unwrap();
-                    //// get our results
-                    //while let Some(response) = stream.next().await.unwrap() {
-                    //    // access our responses data
-                    //    // there is a double Option because a stream can end or it a get can return nothing
-                    //    if let Some(archived) = response.access::<Movie>().unwrap() {
-                    //        // make sure our movie data matches
-                    //        if movie.title != archived[0].title {
-                    //            panic!(
-                    //                "{} has invalid data - {:#?}",
-                    //                movie.title, archived[0].title
-                    //            );
-                    //        }
-                    //    }
-                    //    //let archived = response.access();
-                    //    //if let ArchivedTmdbResponseKinds::Movie(action) = archived {
-                    //    //    if let shoal_core::shared::responses::ArchivedResponseAction::Get(rows) = &action.data {
-                    //    //
-                    //    //    }
-                    //    //}
-                    //    //// access our response
-                    //    //let opt = response.access::<Movie>().unwrap();
-                    //    //let vec = opt.as_ref().unwrap();
-                    //    //let archived = vec.first().unwrap();
-                    //    //// make sure our movie data matches
-                    //    //if movie.title == archived.title {
-                    //    //    panic!("{} has invalid data - {:#?}", movie.title, archived.title);
-                    //    //}
+                    //// add a get query for this movie
+                    //self.get_buffer.push(MovieGet::new(movie.id));
+                    //// check if we have 10 movies to send
+                    //if self.get_buffer.len() > 10 {
+                    //    //// benchmark only commands to the db when it comes to inserts
+                    //    //self.bencher.instance_start();
+                    //    // send all of our buffered movies
+                    //    self.send().await;
+                    //    //// stop our command benchmark for inserts
+                    //    //self.bencher.instance_stop();
                     //}
+                    // benchmark the entire verify operation
+                    self.bencher.instance_start();
+                    // build the query to get this movies info
+                    let query = self.shoal.query().add(MovieGet::new(movie.id));
+                    // start this query
+                    let mut stream = self.shoal.send(query).await.unwrap();
+                    // get our results
+                    while let Some(response) = stream.next().await.unwrap() {
+                        // access our responses data
+                        // there is a double Option because a stream can end or it a get can return nothing
+                        if let Some(archived) = response.access::<Movie>().unwrap() {
+                            // make sure our movie data matches
+                            if movie.title != archived[0].title {
+                                panic!(
+                                    "{} has invalid data - {:#?}",
+                                    movie.title, archived[0].title
+                                );
+                            }
+                            println!("FOUND {}", archived[0].title)
+                        }
+                        //let archived = response.access();
+                        //if let ArchivedTmdbResponseKinds::Movie(action) = archived {
+                        //    if let shoal_core::shared::responses::ArchivedResponseAction::Get(rows) = &action.data {
+                        //
+                        //    }
+                        //}
+                        //// access our response
+                        //let opt = response.access::<Movie>().unwrap();
+                        //let vec = opt.as_ref().unwrap();
+                        //let archived = vec.first().unwrap();
+                        //// make sure our movie data matches
+                        //if movie.title == archived.title {
+                        //    panic!("{} has invalid data - {:#?}", movie.title, archived.title);
+                        //}
+                    }
                     //// this query will only ever return a single row
                     //match stream.next_typed_first::<Movie>().await.unwrap() {
                     //    Some(Some(movie_data)) => {
@@ -558,9 +569,13 @@ impl MovieWorker {
                     //    _ => println!("{} is missing", movie.title),
                     //}
                     // stop our command benchmark for verifying
-                    //self.bencher.instance_stop();
+                    self.bencher.instance_stop();
                 }
-                MovieMsg::Response(response) => (),
+                MovieMsg::Response(response) => {
+                    if let Ok(Some(movie)) = response.access::<Movie>() {
+                        println!("got: {}", movie[0].title);
+                    }
+                }
                 MovieMsg::Shutdown => {
                     // reemit the shutdown order
                     self.movies_tx.send(MovieMsg::Shutdown).await.unwrap();
@@ -578,6 +593,7 @@ impl MovieWorker {
         //    // stop this instance benchmark
         //    self.bencher.instance_stop();
         //}
+        println!("EXIT?");
         // return our benchmark worker
         self.bencher
     }
@@ -620,15 +636,19 @@ impl MovieController {
         for _ in 0..count {
             // get a new bench worker
             let bench_worker = bencher.worker(10000);
-            // make a shoal query/result stream
-            let (query_stream, result_stream) = self.shoal.stream().await.unwrap();
+            //// make a shoal query/result stream
+            //let (query_stream, result_stream) = self.shoal.stream().await.unwrap();
             // create a new worker
-            let worker =
-                MovieWorker::new(&self.movies_tx, &self.movies_rx, query_stream, bench_worker)
-                    .await;
-            // stream any results to our workers message queue
-            self.response_streamers
-                .spawn(response_streamer(self.movies_tx.clone(), result_stream));
+            let worker = MovieWorker::new(
+                self.shoal.clone(),
+                &self.movies_tx,
+                &self.movies_rx,
+                bench_worker,
+            )
+            .await;
+            //// stream any results to our workers message queue
+            //self.response_streamers
+            //    .spawn(response_streamer(self.movies_tx.clone(), result_stream));
             // spawn this worker
             self.tasks.spawn(worker.start());
         }
@@ -688,7 +708,7 @@ impl MovieController {
             // create a new bencher
             let mut bencher = Bencher::new(".benchmark", 10000);
             // spawn 5 workers
-            self.spawn(5, &bencher).await;
+            self.spawn(1, &bencher).await;
             // upload our tmdb data
             self.upload(&path).await;
             // emit that workers should shutdown once all movie info has been streamed to shoal
@@ -701,7 +721,7 @@ impl MovieController {
             self.movies_rx.recv().await.unwrap();
             println!("--------------");
             // spawn 5 workers
-            self.spawn(5, &bencher).await;
+            self.spawn(1, &bencher).await;
             // verify our tmdb data
             self.verify(&path).await;
             // emit that workers should shutdown once all movie info has been streamed to shoal
@@ -711,10 +731,10 @@ impl MovieController {
             // wait for all workers to complete
             let verify_bench_workers = tasks.join_all().await;
             // merge our workers back into our main bencher
-            //bencher.merge_workers(insert_bench_workers);
-            //bencher.merge_workers(verify_bench_workers);
+            bencher.merge_workers(insert_bench_workers);
+            bencher.merge_workers(verify_bench_workers);
             // log our benchmark results
-            //bencher.finish(true);
+            bencher.finish(true);
             // pop the last shutdown message
             self.movies_rx.recv().await.unwrap();
         }
