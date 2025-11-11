@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing::instrument;
+use uuid::Uuid;
 
 use crate::server::messages::QueryMetadata;
 use crate::server::tables::partitions::SortedPartition;
@@ -85,7 +86,7 @@ pub struct PersistentSortedTable<R: ShoalSortedTable, S: StorageSupport> {
     /// The total size of all data on this shard
     memory_usage: usize,
     /// The responses for queries that have been flushed to disk
-    flushed: Vec<(SocketAddr, Response<R>)>,
+    flushed: Vec<(Uuid, Response<R>)>,
 }
 
 impl<R: ShoalSortedTable + 'static, S: StorageSupport> PersistentSortedTable<R, S> {
@@ -156,7 +157,7 @@ impl<R: ShoalSortedTable + 'static, S: StorageSupport> PersistentSortedTable<R, 
         &mut self,
         meta: QueryMetadata,
         query: SortedQuery<R>,
-    ) -> Option<(SocketAddr, Response<R>)> {
+    ) -> Option<(Uuid, Response<R>)> {
         // execute the correct query type
         match query {
             // insert a row into this partition
@@ -177,7 +178,7 @@ impl<R: ShoalSortedTable + 'static, S: StorageSupport> PersistentSortedTable<R, 
     /// * `meta` - The metadata about this insert query
     /// * `row` - The row to insert
     #[instrument(name = "PersistentTable::insert", skip_all)]
-    async fn insert(&mut self, meta: QueryMetadata, row: R) -> Option<(SocketAddr, Response<R>)> {
+    async fn insert(&mut self, meta: QueryMetadata, row: R) -> Option<(Uuid, Response<R>)> {
         // get our partition key
         let key = row.get_partition_key();
         // get our partition
@@ -215,7 +216,7 @@ impl<R: ShoalSortedTable + 'static, S: StorageSupport> PersistentSortedTable<R, 
         &mut self,
         meta: QueryMetadata,
         get: &SortedGet<R>,
-    ) -> Option<(SocketAddr, Response<R>)> {
+    ) -> Option<(Uuid, Response<R>)> {
         // build a vec for the data we found
         let mut data = Vec::new();
         // build the sort key
@@ -241,7 +242,7 @@ impl<R: ShoalSortedTable + 'static, S: StorageSupport> PersistentSortedTable<R, 
             data: action,
             end: meta.end,
         };
-        Some((meta.addr, response))
+        Some((meta.client, response))
     }
 
     /// Delete a row from this table
@@ -257,7 +258,7 @@ impl<R: ShoalSortedTable + 'static, S: StorageSupport> PersistentSortedTable<R, 
         meta: QueryMetadata,
         key: u64,
         sort: R::Sort,
-    ) -> Option<(SocketAddr, Response<R>)> {
+    ) -> Option<(Uuid, Response<R>)> {
         // get this rows partition
         if let Some(partition) = self.partitions.get_mut(&key) {
             // try remove the target row from this partition
@@ -285,7 +286,7 @@ impl<R: ShoalSortedTable + 'static, S: StorageSupport> PersistentSortedTable<R, 
             data: action,
             end: meta.end,
         };
-        Some((meta.addr, response))
+        Some((meta.client, response))
     }
 
     /// Update a row in this table
@@ -299,7 +300,7 @@ impl<R: ShoalSortedTable + 'static, S: StorageSupport> PersistentSortedTable<R, 
         &mut self,
         meta: QueryMetadata,
         update: SortedUpdate<R>,
-    ) -> Option<(SocketAddr, Response<R>)> {
+    ) -> Option<(Uuid, Response<R>)> {
         // get this rows partition
         if let Some(partition) = self.partitions.get_mut(&update.partition_key) {
             if partition.update(&update) {
@@ -325,7 +326,7 @@ impl<R: ShoalSortedTable + 'static, S: StorageSupport> PersistentSortedTable<R, 
             data: action,
             end: meta.end,
         };
-        Some((meta.addr, response))
+        Some((meta.client, response))
     }
 
     /// Flush all pending writes to disk
@@ -338,9 +339,7 @@ impl<R: ShoalSortedTable + 'static, S: StorageSupport> PersistentSortedTable<R, 
     /// # Arguments
     ///
     /// * `flushed` - The flushed actions to return
-    pub async fn get_flushed(
-        &mut self,
-    ) -> Result<&mut Vec<(SocketAddr, Response<R>)>, ServerError> {
+    pub async fn get_flushed(&mut self) -> Result<&mut Vec<(Uuid, Response<R>)>, ServerError> {
         // check if our current intent log should be compacted
         let (flushed_pos, generation) = self.storage.compact_if_needed::<R>(false).await?;
         // get all of the responses whose data has been flushed to disk

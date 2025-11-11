@@ -189,10 +189,7 @@ pub trait ShoalDatabase: 'static + Sized {
         &mut self,
         meta: QueryMetadata,
         typed_query: <Self::ClientType as QuerySupport>::QueryKinds,
-    ) -> Option<(
-        SocketAddr,
-        <Self::ClientType as QuerySupport>::ResponseKinds,
-    )>;
+    ) -> Option<(Uuid, <Self::ClientType as QuerySupport>::ResponseKinds)>;
 
     /// Mark partitions as evictable if they are no longer in the intent log
     ///
@@ -233,10 +230,7 @@ pub trait ShoalDatabase: 'static + Sized {
     #[cfg(feature = "server")]
     async fn handle_flushed(
         &mut self,
-        flushed: &mut Vec<(
-            SocketAddr,
-            <Self::ClientType as QuerySupport>::ResponseKinds,
-        )>,
+        flushed: &mut Vec<(Uuid, <Self::ClientType as QuerySupport>::ResponseKinds)>,
     ) -> Result<(), ServerError>;
 
     /// Load a partition and execute any pending queries

@@ -30,6 +30,8 @@ byte-unit = { version = "5.1", features = ["serde"] }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 deepsize2 = "0.1"
 lru = "0.16"
+bb8 = "0.8"
+async-trait = "0.1"
 
 # tracing dependencies
 opentelemetry = "0.28"

@@ -9,11 +9,13 @@ use glommio::{
 };
 use kanal::{AsyncReceiver, AsyncSender};
 use lru::LruCache;
+use rkyv::util::AlignedVec;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::{cell::RefCell, hash::BuildHasherDefault};
 use std::{net::SocketAddr, time::Duration};
 use tracing::instrument;
+use uuid::Uuid;
 use xxhash_rust::xxh3::Xxh3;
 
 use super::{messages::QueryMetadata, ServerError};
@@ -62,7 +64,7 @@ pub struct MeshRelay<S: ShoalDatabase> {
     /// The glommio channel to receive messages on
     mesh_rx: Receivers<MeshMsg<S>>,
     /// The channel to send shard local messages on
-    node_local_tx: AsyncSender<ShardMsg<S>>,
+    shard_local_tx: AsyncSender<ShardMsg<S>>,
 }
 
 impl<S: ShoalDatabase> MeshRelay<S> {
@@ -72,10 +74,10 @@ impl<S: ShoalDatabase> MeshRelay<S> {
     ///
     /// * `mesh_rx` - The glommio channel to receive mesh messages on
     /// * `node_local_tx` - The kanal channel to send shard local messages on
-    pub fn new(mesh_rx: Receivers<MeshMsg<S>>, node_local_tx: &AsyncSender<ShardMsg<S>>) -> Self {
+    pub fn new(mesh_rx: Receivers<MeshMsg<S>>, shard_local_tx: &AsyncSender<ShardMsg<S>>) -> Self {
         MeshRelay {
             mesh_rx,
-            node_local_tx: node_local_tx.clone(),
+            shard_local_tx: shard_local_tx.clone(),
         }
     }
 
@@ -87,13 +89,20 @@ impl<S: ShoalDatabase> MeshRelay<S> {
             match msg {
                 MeshMsg::Join(_) => panic!("Join on shard?"),
                 MeshMsg::Query { meta, query } => self
-                    .node_local_tx
+                    .shard_local_tx
                     .send(ShardMsg::Query { meta, query })
                     .await
                     .unwrap(),
+                MeshMsg::NewClient { client, client_tx } => {
+                    // forward this new client command
+                    self.shard_local_tx
+                        .send(ShardMsg::NewClient { client, client_tx })
+                        .await
+                        .unwrap();
+                }
                 MeshMsg::Shutdown => {
                     // forward this shutdown command
-                    self.node_local_tx.send(ShardMsg::Shutdown).await.unwrap();
+                    self.shard_local_tx.send(ShardMsg::Shutdown).await.unwrap();
                     // stop relaying messages
                     break;
                 }
@@ -112,6 +121,8 @@ pub struct Shard<S: ShoalDatabase> {
     pub tables: S,
     /// The full archive map for all tables
     table_map: FullArchiveMap<S::TableNames>,
+    /// A map of channels to send responses to our client relays over
+    client_map: HashMap<Uuid, AsyncSender<AlignedVec>>,
     /// The glommio channel to send messages on
     local_tx: Senders<MeshMsg<S>>,
     /// The channel to send shard local messages on
@@ -126,10 +137,8 @@ pub struct Shard<S: ShoalDatabase> {
             AsyncReceiver<LoaderMsg<S::TableNames>>,
         ),
     >,
-    /// The UDP socket to send responses on
-    socket: UdpSocket,
     /// The responses whose queries have been flushed to disk
-    flushed: Vec<(SocketAddr, <S::ClientType as QuerySupport>::ResponseKinds)>,
+    flushed: Vec<(Uuid, <S::ClientType as QuerySupport>::ResponseKinds)>,
     /// The latency sensitive task queue
     high_priority: TaskQueueHandle,
     /// The medium priority task queue
@@ -156,11 +165,6 @@ impl<S: ShoalDatabase> Shard<S> {
     ) -> Result<Self, ServerError> {
         // build our shard info
         let info = ShardInfo::new(local_tx.peer_id());
-        // build the addr to bind too
-        // bind to port 0 so we get the next available port
-        let addr = format!("{}:0", conf.networking.interface);
-        // bind a udp socket to send responses out on
-        let socket = UdpSocket::bind(addr)?;
         // create names for our high and low priority task queues
         let high_name = format!("HighPriority:{}", info.name);
         let medium_name = format!("MediumPriority:{}", info.name);
@@ -208,11 +212,11 @@ impl<S: ShoalDatabase> Shard<S> {
             conf: conf.clone(),
             tables,
             table_map,
+            client_map: HashMap::with_capacity(500),
             local_tx,
             shard_local_tx,
             shard_local_rx,
             loader_channels,
-            socket,
             flushed: Vec::with_capacity(1000),
             high_priority,
             _medium_priority: medium_priority,
@@ -269,13 +273,16 @@ impl<S: ShoalDatabase> Shard<S> {
     #[instrument(name = "Shard::reply", skip_all, err(Debug))]
     async fn reply(
         &mut self,
-        addr: SocketAddr,
+        client: Uuid,
         response: <S::ClientType as QuerySupport>::ResponseKinds,
     ) -> Result<(), ServerError> {
         // archive our response
         let archived = rkyv::to_bytes::<_>(&response)?;
-        // send our archived response back to the client
-        self.socket.send_to(archived.as_slice(), addr).await?;
+        // get this clients channel to send replies over
+        match self.client_map.get(&client) {
+            Some(client_tx) => client_tx.send(archived).await.unwrap(),
+            None => panic!("Missing client channel?"),
+        }
         Ok(())
     }
 
@@ -305,9 +312,9 @@ impl<S: ShoalDatabase> Shard<S> {
         // get all flushed query responses
         self.tables.handle_flushed(&mut self.flushed).await?;
         // pop all of our flushed responses
-        while let Some((addr, response)) = self.flushed.pop() {
+        while let Some((client, response)) = self.flushed.pop() {
             // send our responses
-            self.reply(addr, response).await?;
+            self.reply(client, response).await?;
         }
         Ok(())
     }
@@ -369,6 +376,14 @@ impl<S: ShoalDatabase> Shard<S> {
             let msg = self.shard_local_rx.recv().await.unwrap();
             // handle this message
             match msg {
+                // Add this new client to our client map
+                ShardMsg::NewClient { client, client_tx } => {
+                    // add this client to our client map
+                    if self.client_map.insert(client, client_tx).is_some() {
+                        // panic if we had a client id collision
+                        panic!("Client ID collision?");
+                    }
+                }
                 // handle this query from the user
                 ShardMsg::Query { meta, query } => self.handle_query(meta, query).await?,
                 // load this partition from disk

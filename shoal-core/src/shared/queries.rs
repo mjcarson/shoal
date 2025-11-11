@@ -19,6 +19,11 @@ pub struct Queries<S: QuerySupport> {
     pub id: Uuid,
     /// The individual queries to execute
     pub queries: Vec<S::QueryKinds>,
+    /// The base index for these queries
+    ///
+    /// This is used for stream queries to correctly increment our index values
+    /// across streamed queries.
+    pub base_index: usize,
 }
 
 impl<S: QuerySupport> Queries<S> {
@@ -67,6 +72,7 @@ impl<S: QuerySupport> Default for Queries<S> {
         Queries {
             id: Uuid::new_v4(),
             queries: Vec::with_capacity(1),
+            base_index: 0,
         }
     }
 }

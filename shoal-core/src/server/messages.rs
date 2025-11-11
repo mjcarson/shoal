@@ -2,6 +2,8 @@
 
 use bytes::BytesMut;
 use glommio::io::ReadResult;
+use kanal::AsyncSender;
+use rkyv::util::AlignedVec;
 use std::net::SocketAddr;
 use uuid::Uuid;
 
@@ -14,8 +16,8 @@ pub enum Msg<S: ShoalDatabase> {
     Mesh { shard: usize, msg: MeshMsg<S> },
     /// A message from a client
     Client {
-        /// The address this request came from
-        addr: SocketAddr,
+        /// This peers id
+        peer: Uuid,
         /// The number of bytes to read
         read: usize,
         /// The raw data for our request
@@ -28,8 +30,8 @@ pub enum Msg<S: ShoalDatabase> {
 /// The metadata about a query from a client
 #[derive(Debug)]
 pub struct QueryMetadata {
-    /// The address of the client this query came from
-    pub addr: SocketAddr,
+    /// The id of the client this query came from
+    pub client: Uuid,
     /// The id for this query
     pub id: Uuid,
     /// This queries index in the queries vec
@@ -43,13 +45,13 @@ impl QueryMetadata {
     ///
     /// # Arguments
     ///
-    /// * `addr` - The address to respond to this query at
+    /// * `client` - The id for this client
     /// * `id` - The id of this query
     /// * `index` - The index for this query in a bundle of queries
     /// * `end` - Whether this is the last query in a bundle or not
-    pub fn new(addr: SocketAddr, id: Uuid, index: usize, end: bool) -> Self {
+    pub fn new(client: Uuid, id: Uuid, index: usize, end: bool) -> Self {
         QueryMetadata {
-            addr,
+            client,
             id,
             index,
             end,
@@ -67,6 +69,13 @@ pub enum MeshMsg<S: ShoalDatabase> {
         meta: QueryMetadata,
         /// The query to execute
         query: <S::ClientType as QuerySupport>::QueryKinds,
+    },
+    /// Tell this shard about a new client
+    NewClient {
+        /// This clients id
+        client: Uuid,
+        /// The channel to send responses for this client on
+        client_tx: AsyncSender<AlignedVec>,
     },
     /// Tell this shard to shutdown
     Shutdown,
@@ -88,6 +97,11 @@ pub struct LoadedPartitionKinds<D: ShoalDatabase> {
 
 /// The messages that can be sent between workers in a shard
 pub enum ShardMsg<D: ShoalDatabase> {
+    /// A New client connected to shoal
+    NewClient {
+        client: Uuid,
+        client_tx: AsyncSender<AlignedVec>,
+    },
     /// A query to execute
     Query {
         /// The metadata about a query

@@ -13,6 +13,7 @@ use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use uuid::Uuid;
 
 pub mod fs;
 
@@ -55,7 +56,7 @@ impl<T> PendingResponse<T> {
     }
 
     /// Get all responses that have had their data committed to disk
-    pub fn get(&mut self, flushed_pos: u64, flushed: &mut Vec<(SocketAddr, Response<T>)>) {
+    pub fn get(&mut self, flushed_pos: u64, flushed: &mut Vec<(Uuid, Response<T>)>) {
         // keep popping response actions until we find one that isn't yet flushed
         // or we have no more response actions to check
         while !self.pending.is_empty() {
@@ -76,7 +77,7 @@ impl<T> PendingResponse<T> {
                         end: meta.end,
                     };
                     // add this action to our flushed vec
-                    flushed.push((meta.addr, response));
+                    flushed.push((meta.client, response));
                 }
             } else {
                 // we don't have any flushed data yet

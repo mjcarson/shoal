@@ -18,6 +18,7 @@ use std::hash::BuildHasherDefault;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing::{event, instrument, Level};
+use uuid::Uuid;
 use xxhash_rust::xxh3::Xxh3;
 
 use crate::server::messages::{LoadedPartition, QueryMetadata, ShardMsg};
@@ -90,7 +91,7 @@ pub struct PersistentUnsortedTable<R: ShoalUnsortedTable, S: StorageSupport, N: 
     /// The commits that are still pending storage confirmation
     pending: PendingResponse<R>,
     /// The responses for queries that have been flushed to disk
-    flushed: Vec<(SocketAddr, Response<R>)>,
+    flushed: Vec<(Uuid, Response<R>)>,
     /// The channel to send loader jobs on
     loader_tx: AsyncSender<LoaderMsg<N>>,
     /// A map of queries blocked on partitions being loaded from disk
@@ -265,7 +266,7 @@ where
         &mut self,
         meta: QueryMetadata,
         query: UnsortedQuery<R>,
-    ) -> Option<(SocketAddr, Response<R>)>
+    ) -> Option<(Uuid, Response<R>)>
     where
         for<'a> <<R as ShoalUnsortedTable>::Update as Archive>::Archived: CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
@@ -292,7 +293,7 @@ where
     /// * `meta` - The metadata about this insert query
     /// * `row` - The row to insert
     #[instrument(name = "PersistentTable::insert", skip_all)]
-    async fn insert(&mut self, meta: QueryMetadata, row: R) -> Option<(SocketAddr, Response<R>)>
+    async fn insert(&mut self, meta: QueryMetadata, row: R) -> Option<(Uuid, Response<R>)>
     where
         for<'a> <<R as ShoalUnsortedTable>::Update as Archive>::Archived: CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
@@ -348,7 +349,7 @@ where
         &mut self,
         meta: QueryMetadata,
         get: UnsortedGet<R>,
-    ) -> Option<(SocketAddr, Response<R>)> {
+    ) -> Option<(Uuid, Response<R>)> {
         // build a vec for the data we found
         let mut data = Vec::new();
         // try to get the partition for this key
@@ -373,7 +374,7 @@ where
                     data: action,
                     end: meta.end,
                 };
-                Some((meta.addr, response))
+                Some((meta.client, response))
             }
             // this partition isn't loaded so lets try and load it from disk
             None => {
@@ -402,7 +403,7 @@ where
                         end: meta.end,
                     };
                     // the requested partition doesn't exist
-                    Some((meta.addr, response))
+                    Some((meta.client, response))
                 }
             }
         }
@@ -416,7 +417,7 @@ where
     /// * `key` - The key to the partition to dlete data from
     /// * `sort` - The sort key to delete
     #[instrument(name = "PersistentTable::delete", skip_all)]
-    async fn delete(&mut self, meta: QueryMetadata, key: u64) -> Option<(SocketAddr, Response<R>)>
+    async fn delete(&mut self, meta: QueryMetadata, key: u64) -> Option<(Uuid, Response<R>)>
     where
         for<'a> <<R as ShoalUnsortedTable>::Update as Archive>::Archived: CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
@@ -448,7 +449,7 @@ where
                     data: ResponseAction::Delete(false),
                     end: meta.end,
                 };
-                Some((meta.addr, response))
+                Some((meta.client, response))
             }
         }
     }
@@ -464,7 +465,7 @@ where
         &mut self,
         meta: QueryMetadata,
         update: UnsortedUpdate<R>,
-    ) -> Option<(SocketAddr, Response<R>)>
+    ) -> Option<(Uuid, Response<R>)>
     where
         for<'a> <<R as ShoalUnsortedTable>::Update as Archive>::Archived: CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
@@ -506,7 +507,7 @@ where
                     data: action,
                     end: meta.end,
                 };
-                Some((meta.addr, response))
+                Some((meta.client, response))
             }
         }
     }
@@ -572,9 +573,7 @@ where
     /// # Arguments
     ///
     /// * `flushed` - The flushed actions to return
-    pub async fn get_flushed(
-        &mut self,
-    ) -> Result<&mut Vec<(SocketAddr, Response<R>)>, ServerError> {
+    pub async fn get_flushed(&mut self) -> Result<&mut Vec<(Uuid, Response<R>)>, ServerError> {
         // check if our current intent log should be compacted
         let (flushed_pos, generation) = self.storage.compact_if_needed::<R>(false).await?;
         // update our current generation

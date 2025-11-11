@@ -128,6 +128,20 @@ impl BenchWorker {
             None => panic!("NO INSTANT TIMER ACTIVE?"),
         }
     }
+
+    /// Get a timer instance
+    pub fn get_timer(&self) -> Instant {
+        Instant::now()
+    }
+
+    /// Add a timer to
+    ///
+    /// # Arguments
+    ///
+    /// * `timer` - The timer to add
+    pub fn add_timer(&mut self, timer: Instant) {
+        self.instance_times.push(timer.elapsed());
+    }
 }
 
 /// A benchmarking tool for Shoal
@@ -226,12 +240,26 @@ impl Bencher {
         self.instance = Some(Instant::now());
     }
 
+    /// Get a timer instance
+    pub fn get_timer(&self) -> Instant {
+        Instant::now()
+    }
+
     /// Start a new instance timer
     pub fn instance_stop(&mut self) {
         match self.instance.take() {
             Some(instance) => self.instance_times.push(instance.elapsed()),
             None => panic!("NO INSTANT TIMER ACTIVE?"),
         }
+    }
+
+    /// Add a timer to
+    ///
+    /// # Arguments
+    ///
+    /// * `timer` - The timer to add
+    pub fn add_timer(&mut self, timer: &mut Instant) {
+        self.instance_times.push(timer.elapsed());
     }
 
     /// Stop our total time now
