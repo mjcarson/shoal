@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 use std::marker::PhantomData;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::io::{ReadHalf, WriteHalf};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpSocket, TcpStream, ToSocketAddrs};
 use tokio::task::JoinHandle;
@@ -42,9 +42,9 @@ struct ShoalConnectionManager {
 
 impl ShoalConnectionManager {
     /// Create a new shoal connection manager
-    pub fn new<T: Into<SocketAddr>>(server_addr: T, proxy_tx: AsyncSender<OwnedReadHalf>) -> Self {
+    pub fn new(server_addr: SocketAddr, proxy_tx: AsyncSender<OwnedReadHalf>) -> Self {
         ShoalConnectionManager {
-            server_addr: server_addr.into(),
+            server_addr,
             proxy_tx,
         }
     }
@@ -111,7 +111,7 @@ impl<S: QuerySupport> Shoal<S> {
     /// # Arguments
     ///
     /// * `socket` - The socket to bind too
-    pub async fn new<A: Into<SocketAddr>>(addr: A) -> Result<Self, Errors>
+    pub async fn new<A: ToSocketAddrs>(addr: A) -> Result<Self, Errors>
     where
         for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived:
             rkyv::bytecheck::CheckBytes<
@@ -124,6 +124,8 @@ impl<S: QuerySupport> Shoal<S> {
                 >,
             >,
     {
+        // convert our address into a socker addr
+        let addr = tokio::net::lookup_host(addr).await.unwrap().next().unwrap();
         // create a channel for our connection pool and our tcp proxy
         let (proxy_tx, proxy_rx) = kanal::unbounded_async();
         // Create a new shoal connection manager
@@ -136,7 +138,8 @@ impl<S: QuerySupport> Shoal<S> {
             .idle_timeout(Some(std::time::Duration::from_secs(300)))
             .max_lifetime(Some(std::time::Duration::from_secs(1800)))
             .build(manager)
-            .await?;
+            .await
+            .unwrap();
         //// create a new tcp socket to connect to our server at
         //let tcp_sock = TcpSocket::new_v4()?;
         //// bind to our addr
@@ -154,7 +157,7 @@ impl<S: QuerySupport> Shoal<S> {
         let proxy_handle = tokio::spawn(async move { proxy.start().await });
         // build our client
         let shoal = Shoal {
-            socket,
+            pool,
             channel_map,
             channel_queue_tx,
             channel_queue_rx,
@@ -202,10 +205,10 @@ impl<S: QuerySupport> Shoal<S> {
         let archived = rkyv::to_bytes::<_>(&queries)?;
         // start tracking this response
         let (response_tx, response_rx) = self.track_response(&mut queries.id)?;
+        // get a connection from our connection pool and send our query
+        let mut conn = self.pool.get().await.unwrap();
         // send our query
-        self.socket
-            .send_to(archived.as_slice(), "127.0.0.1:12000")
-            .await?;
+        conn.write_all(&archived).await.unwrap();
         // build a new shoal result stream
         let result_stream = ShoalResultStream {
             id: queries.id,
@@ -221,41 +224,96 @@ impl<S: QuerySupport> Shoal<S> {
         Ok(result_stream)
     }
 
-    /// Create a new stream to send and receive results on
-    pub async fn stream(&self) -> Result<(ShoalQueryStream<S>, ShoalResultStream<S>), Errors> {
-        // generate a random ID to override all of the ids used in our queries
-        let mut id = Uuid::new_v4();
-        // start tracking this response
-        let (response_tx, response_rx) = self.track_response(&mut id)?;
-        // build a new shoal result stream
-        let result_stream = ShoalResultStream {
-            id,
-            response_tx: Some(response_tx.clone()),
-            response_rx: Some(response_rx),
-            channel_map: self.channel_map.clone(),
-            channel_queue_tx: self.channel_queue_tx.clone(),
-            next_index: 0,
-            unbounded_queries: true,
-            pending: BTreeMap::default(),
-            phantom: PhantomData,
-        };
-        // wraap our result in a stream that supports queries and results
-        let query_stream = ShoalQueryStream {
-            id,
-            queries_sent: 0,
-            socket: self.socket.clone(),
-            response_tx,
-            data_kind: PhantomData,
-            base_index: 0,
-        };
-        Ok((query_stream, result_stream))
-    }
+    ///// Create a new stream to send and receive results on
+    //pub async fn stream(&self) -> Result<(ShoalQueryStream<S>, ShoalResultStream<S>), Errors> {
+    //    // generate a random ID to override all of the ids used in our queries
+    //    let mut id = Uuid::new_v4();
+    //    // start tracking this response
+    //    let (response_tx, response_rx) = self.track_response(&mut id)?;
+    //    // build a new shoal result stream
+    //    let result_stream = ShoalResultStream {
+    //        id,
+    //        response_tx: Some(response_tx.clone()),
+    //        response_rx: Some(response_rx),
+    //        channel_map: self.channel_map.clone(),
+    //        channel_queue_tx: self.channel_queue_tx.clone(),
+    //        next_index: 0,
+    //        unbounded_queries: true,
+    //        pending: BTreeMap::default(),
+    //        phantom: PhantomData,
+    //    };
+    //    // wraap our result in a stream that supports queries and results
+    //    let query_stream = ShoalQueryStream {
+    //        id,
+    //        queries_sent: 0,
+    //        socket: self.socket.clone(),
+    //        response_tx,
+    //        data_kind: PhantomData,
+    //        base_index: 0,
+    //    };
+    //    Ok((query_stream, result_stream))
+    //}
 }
 
 impl<S: QuerySupport> Drop for Shoal<S> {
     fn drop(&mut self) {
         // stop our proxy
         self.proxy_handle.abort();
+    }
+}
+
+pub struct TcpProxyHelper<R: ShoalResponseSupport> {
+    reader: OwnedReadHalf,
+    channel_map: Arc<HashMap<Uuid, AsyncSender<ClientMsg>>>,
+    phantom: PhantomData<R>,
+}
+
+impl<R: ShoalResponseSupport> TcpProxyHelper<R> {
+    async fn tcp_proxy(mut self)
+    where
+        for<'a> <R as Archive>::Archived: rkyv::bytecheck::CheckBytes<
+            Strategy<
+                rkyv::validation::Validator<
+                    rkyv::validation::archive::ArchiveValidator<'a>,
+                    rkyv::validation::shared::SharedValidator,
+                >,
+                rkyv::rancor::Error,
+            >,
+        >,
+    {
+        // keep reading from our tcp socket
+        loop {
+            // have a buffer for our query_id and for our length
+            let mut query_id_buff: [u8; 16] = [0; 16];
+            let mut len_buff: [u8; 8] = [0; 8];
+            // try to read from our tcp socket
+            self.reader.read_exact(&mut query_id_buff).await.unwrap();
+            self.reader.read_exact(&mut len_buff).await.unwrap();
+            // convert our uuid from bytes
+            let query_id = Uuid::from_slice(&query_id_buff).unwrap();
+            // parse our message length from our length bytes
+            let len = u64::from_le_bytes(len_buff) as usize;
+            // Create an aligned vec to act as a pool of bytes
+            let mut aligned_buff = AlignedVec::<16>::with_capacity(len);
+            // resize our aligned vec
+            aligned_buff.resize(len, 0);
+            self.reader.read_exact(&mut aligned_buff).await.unwrap();
+            //// shrink our aligned vec to just the data read
+            //aligned_buff.resize(read, 0);
+            // get this responses id
+            //let id = match R::access(&aligned_buff) {
+            //    Ok(archived) => R::get_query_id(archived),
+            //    Err(error) => panic!("SPEC FAIL -> {error:#?}"),
+            //};
+            // wrap our response in a client message
+            let wrapped = ClientMsg::Response(aligned_buff);
+            // get the channel for this query
+            match self.channel_map.pin_owned().get(&query_id) {
+                // send our response to the right shoal stream
+                Some(tx) => tx.send(wrapped).await.unwrap(),
+                None => panic!("Missing stream channel! -> {query_id} {len}"),
+            }
+        }
     }
 }
 
@@ -270,7 +328,7 @@ struct ShoalTcpProxy<S: ShoalQuerySupport, R: ShoalResponseSupport> {
     phantom_response: PhantomData<R>,
 }
 
-impl<S: ShoalQuerySupport, R: ShoalResponseSupport> ShoalTcpProxy<S, R> {
+impl<S: ShoalQuerySupport, R: ShoalResponseSupport + 'static> ShoalTcpProxy<S, R> {
     /// Create a new udp proxy
     ///
     /// # Arguments
@@ -304,10 +362,18 @@ impl<S: ShoalQuerySupport, R: ShoalResponseSupport> ShoalTcpProxy<S, R> {
             >,
         >,
     {
-        /// Wait for new tcp readers to read from
+        // Wait for new tcp readers to read from
         loop {
             // wait for a new tcp reader to watch
             let reader = self.proxy_rx.recv().await.unwrap();
+            // create a tcp proxy helper
+            let helper = TcpProxyHelper {
+                reader,
+                channel_map: self.channel_map.clone(),
+                phantom: self.phantom_response,
+            };
+            // spawn a task to watch this tcp reader for results
+            tokio::task::spawn(helper.tcp_proxy());
         }
         //// Wait for new messages from our server and proxy the respones to the right channel
         //loop {
@@ -711,8 +777,8 @@ pub struct ShoalQueryStream<Q: QuerySupport> {
     pub id: Uuid,
     /// The number of messages that have been sent
     pub queries_sent: usize,
-    /// The udp socket to send and receive messages on
-    socket: Arc<UdpSocket>,
+    ///// The udp socket to send and receive messages on
+    //socket: Arc<>,
     /// The transmission side of the response stream channel
     response_tx: AsyncSender<ClientMsg>,
     /// The data we are sending queries for
@@ -751,10 +817,10 @@ impl<Q: QuerySupport> ShoalQueryStream<Q> {
         queries.base_index = self.base_index;
         // archive our queries
         let archived = rkyv::to_bytes::<_>(&queries)?;
-        // send our query
-        self.socket
-            .send_to(archived.as_slice(), "127.0.0.1:12000")
-            .await?;
+        //// send our query
+        //self.socket
+        //    .send_to(archived.as_slice(), "127.0.0.1:12000")
+        //    .await?;
         // increment the number of queries sent and our base index
         self.queries_sent += 1;
         self.base_index += queries.queries.len();

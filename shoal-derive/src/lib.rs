@@ -461,10 +461,10 @@ fn add_db_trait2(
             #query_ident::#variant_ident(query) => {
                 // handle these queries
                 match self.#field_ident.handle(meta, query).await {
-                    Some((client, response)) => {
+                    Some((client, query_id, response)) => {
                         // wrap our response with the right table kind
                         let wrapped = #response_ident::#variant_ident(response);
-                        Some((client, wrapped))
+                        Some((client, query_id, wrapped))
                     }
                     None => None,
                 }
@@ -521,7 +521,7 @@ fn add_db_trait2(
             // wrap and add our specific queries
             let wrapped = specific
                 .drain(..)
-                .map(|(client, resp)| (client, #response_ident::#variant_ident(resp)));
+                .map(|(client, query_id, resp)| (client, query_id, #response_ident::#variant_ident(resp)));
             // extend our response list with our wrapped queries
             flushed.extend(wrapped);
         }
@@ -642,6 +642,7 @@ fn add_db_trait2(
                 typed_query: <Self::ClientType as QuerySupport>::QueryKinds,
             ) -> Option<(
                 uuid::Uuid,
+                uuid::Uuid,
                 <Self::ClientType as QuerySupport>::ResponseKinds,
             )> {
                 // match on the right query and execute it
@@ -695,6 +696,7 @@ fn add_db_trait2(
             async fn handle_flushed(
                 &mut self,
                 flushed: &mut Vec<(
+                    uuid::Uuid,
                     uuid::Uuid,
                     <Self::ClientType as QuerySupport>::ResponseKinds,
                 )>,

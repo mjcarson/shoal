@@ -113,8 +113,8 @@ where
         // get the total number of cpus that we have
         let cpus = conf.resources.cpus()?;
         // our mesh should always be one larger then the number of cores
-        // so that the coordinator and client acceptor can also join the mesh
-        let mesh_size = cpus.len() + 2;
+        // so that the coordinator can also join the mesh
+        let mesh_size = cpus.len() + 1;
         // build the mesh for this node to talk over
         let mesh: MeshBuilder<MeshMsg<S>, Full> = MeshBuilder::full(mesh_size, 8192);
         // spawn our coordinator

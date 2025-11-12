@@ -547,7 +547,7 @@ impl MovieWorker {
                                     movie.title, archived[0].title
                                 );
                             }
-                            println!("FOUND {}", archived[0].title)
+                            //println!("FOUND {}", archived[0].title)
                         }
                         //let archived = response.access();
                         //if let ArchivedTmdbResponseKinds::Movie(action) = archived {
@@ -914,7 +914,9 @@ impl MovieController {
 #[tokio::main]
 async fn read_csv() {
     // start ou controller
-    let mut controller = MovieController::new("0.0.0.0:0").await;
+    let mut controller = MovieController::new("127.0.0.1:12000").await;
+    // sleep for 5s
+    std::thread::sleep(std::time::Duration::from_secs(5));
     // start streaming movies to shoal with multiple workers
     controller
         .start("/home/mcarson/datasets/TMDB_movie_dataset_v11.csv")
@@ -924,7 +926,7 @@ async fn read_csv() {
 fn main() {
     // start Shoal
     let pool = ShoalPool::<Tmdb>::start().unwrap();
-    // sleep for 1s
+    // sleep for 5s
     std::thread::sleep(std::time::Duration::from_secs(5));
     // read and insert our csv
     read_csv();

@@ -16,7 +16,8 @@ use rkyv::de::Pool;
 use rkyv::rancor::Strategy;
 use rkyv::util::AlignedVec;
 use rkyv::Archive;
-use std::{marker::PhantomData, net::SocketAddr, time::Duration};
+use std::io::IoSlice;
+use std::{marker::PhantomData, time::Duration};
 use tracing::{event, instrument, Level};
 use uuid::Uuid;
 
@@ -73,8 +74,7 @@ where
         kanal_rx: AsyncReceiver<Msg<S>>,
     ) -> Result<(), ServerError> {
         // join our mesh for the coordinator and the client acceptor
-        let (mesh_tx, mesh_rx) = mesh.clone().join().await?;
-        let (client_mesh_tx, client_mesh_rx) = mesh.join().await?;
+        let (mesh_tx, mesh_rx) = mesh.join().await?;
         // build our coordinator
         let mut coordinator: Coordinator<S> = Coordinator {
             conf,
@@ -88,7 +88,7 @@ where
         // spawn our mesh listeners
         coordinator.spawn_mesh_listeners(&kanal_tx).await;
         // spawn our client litener
-        coordinator.spawn_client_listener(&kanal_tx, client_mesh_tx, client_mesh_rx)?;
+        coordinator.spawn_client_listener(&kanal_tx)?;
         // start handling messages
         coordinator.start_handling().await;
         Ok(())
@@ -119,18 +119,13 @@ where
     }
 
     /// Spawn our client network listener
-    fn spawn_client_listener(
-        &mut self,
-        kanal_tx: &AsyncSender<Msg<S>>,
-        mesh_tx: Senders<MeshMsg<S>>,
-        mesh_rx: Receivers<MeshMsg<S>>,
-    ) -> Result<(), ServerError> {
+    fn spawn_client_listener(&mut self, kanal_tx: &AsyncSender<Msg<S>>) -> Result<(), ServerError> {
         // bind our udp socket
         let tcp_sock = TcpListener::bind(self.conf.networking.to_addr())?;
         // clone our kanal transmitter
         let kanal_tx = kanal_tx.clone();
         // spawn our client listener
-        let handle = glommio::spawn_local(client_acceptor(tcp_sock, kanal_tx, mesh_tx, mesh_rx));
+        let handle = glommio::spawn_local(client_acceptor(tcp_sock, kanal_tx));
         // add this task to our task list
         self.tasks.push(handle);
         Ok(())
@@ -231,6 +226,8 @@ where
     /// Start handling messages
     #[allow(clippy::future_not_send)]
     async fn start_handling<'a>(&mut self) {
+        // get mesh id so we don't send a message to ourselves
+        let our_id = self.mesh_tx.peer_id();
         // handle messages across any of our channels
         loop {
             // try to get a message from our channel
@@ -241,6 +238,28 @@ where
             // handle this message based on its type
             match msg {
                 Msg::Mesh { shard, msg } => self.handle_mesh(shard, msg),
+                Msg::NewClient { id, client_tx } => {
+                    // tell every shard about our new client
+                    for mesh_peer in 1..self.mesh_tx.nr_consumers() {
+                        // skip ourselves
+                        if mesh_peer == our_id {
+                            continue;
+                        }
+                        //  clone our client sender
+                        let client_tx = client_tx.clone();
+                        // tell this shard about this new client
+                        self.mesh_tx
+                            .send_to(
+                                mesh_peer,
+                                MeshMsg::NewClient {
+                                    client: id,
+                                    client_tx,
+                                },
+                            )
+                            .await
+                            .unwrap();
+                    }
+                }
                 Msg::Client { peer, read, data } => self.handle_client(peer, read, data).await,
                 Msg::Shutdown => {
                     // forward this shutdown command to others
@@ -292,65 +311,77 @@ async fn client_rx_relay<S: ShoalDatabase>(
 }
 
 async fn client_tx_relay<S: ShoalDatabase>(
-    client_rx: AsyncReceiver<AlignedVec>,
+    client_rx: AsyncReceiver<(Uuid, AlignedVec)>,
     mut tcp_tx: WriteHalf<TcpStream>,
 ) {
     // loop over messages to send back to our client
     loop {
         // try to get a message from our channel
-        let archived = client_rx.recv().await.unwrap();
-        println!("Replying to client with {} bytes", archived.len());
-        // send this data back to our client
-        tcp_tx.write_all(&archived).await.unwrap();
+        let (query_id, archived) = client_rx.recv().await.unwrap();
+        // get the size of the archive we are sending to the client
+        let len = archived.len().to_le_bytes();
+        // build our vectored byte slices to send
+        let mut bufs = &mut [
+            IoSlice::new(query_id.as_bytes()),
+            IoSlice::new(&len),
+            IoSlice::new(&archived),
+        ][..];
+        // keep sending our data until all of this archive has been sent
+        while !bufs.is_empty() {
+            // send this data back to our client
+            match tcp_tx.write_vectored(bufs).await {
+                Ok(0) => panic!("No bytes were written?"),
+                Ok(n) => IoSlice::advance_slices(&mut bufs, n),
+                Err(error) => panic!("Ahhh error?: {error:#?}"),
+            }
+        }
     }
 }
 
 #[allow(clippy::future_not_send)]
-async fn client_acceptor<S: ShoalDatabase>(
-    tcp_sock: TcpListener,
-    kanal_tx: AsyncSender<Msg<S>>,
-    mesh_tx: Senders<MeshMsg<S>>,
-    _mesh_rx: Receivers<MeshMsg<S>>,
-) {
-    // get our mesh id
-    let id = mesh_tx.peer_id();
+async fn client_acceptor<S: ShoalDatabase>(tcp_sock: TcpListener, kanal_tx: AsyncSender<Msg<S>>) {
     loop {
         // TODO reuse buffers instead of making new ones
         //let mut data = BytesMut::zeroed(16384);
         // try to read a single datagram from our udp socket
         let stream = tcp_sock.accept().await.unwrap();
+        // disable nagles algorithm on this socket
+        stream.set_nodelay(true).unwrap();
         // generate an id for this peer
         // TODO: detect collisions?
-        let peer = Uuid::new_v4();
+        let id = Uuid::new_v4();
         // break this stream up into a writer and a reader
         let (tcp_rx, tcp_tx) = stream.split();
-        // clone our kanal channel so each client listener can have their own channel to our coordinator
-        let kanal_tx = kanal_tx.clone();
         // create a channel for all of our shards to give data to send back to clients
-        let (client_tx, client_rx) = kanal::unbounded_async::<AlignedVec>();
+        let (client_tx, client_rx) = kanal::unbounded_async();
         // TODO: do this with a task queue?
-        glommio::spawn_local(client_rx_relay(peer, tcp_rx, kanal_tx)).await;
-        glommio::spawn_local(client_tx_relay::<S>(client_rx, tcp_tx)).await;
-        // tell every shard about our new client
-        for i in 0..mesh_tx.nr_consumers() {
-            // skip ourselves
-            if i != id {
-                break;
-            }
-            //  clone our client sender
-            let client_tx = client_tx.clone();
-            // tell this shard about this new client
-            mesh_tx
-                .send_to(
-                    i,
-                    MeshMsg::NewClient {
-                        client: peer,
-                        client_tx,
-                    },
-                )
-                .await
-                .unwrap();
-        }
+        glommio::spawn_local(client_rx_relay(id, tcp_rx, kanal_tx.clone())).detach();
+        glommio::spawn_local(client_tx_relay::<S>(client_rx, tcp_tx)).detach();
+        // tell our coordinator we have a new client so it can let our shards know
+        kanal_tx
+            .send(Msg::NewClient { id, client_tx })
+            .await
+            .unwrap();
+        //// tell every shard about our new client
+        //for i in 0..mesh_tx.nr_consumers() {
+        //    // skip ourselves
+        //    if i != id {
+        //        break;
+        //    }
+        //    //  clone our client sender
+        //    let client_tx = client_tx.clone();
+        //    // tell this shard about this new client
+        //    mesh_tx
+        //        .send_to(
+        //            i,
+        //            MeshMsg::NewClient {
+        //                client: peer,
+        //                client_tx,
+        //            },
+        //        )
+        //        .await
+        //        .unwrap();
+        //}
         //// listen for data from this tcp stream
         ////let read = accept.read(&mut data).await.unwrap();
         ////let (read, addr) = udp_sock.recv_from(&mut data).await.unwrap();

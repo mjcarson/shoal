@@ -24,7 +24,10 @@ use super::{
     Conf,
 };
 use crate::{
-    shared::traits::{QuerySupport, ShoalDatabase},
+    shared::{
+        responses::ArchivedResponses,
+        traits::{QuerySupport, ShoalDatabase},
+    },
     storage::{FullArchiveMap, LoaderMsg, Loaders},
 };
 
@@ -122,7 +125,7 @@ pub struct Shard<S: ShoalDatabase> {
     /// The full archive map for all tables
     table_map: FullArchiveMap<S::TableNames>,
     /// A map of channels to send responses to our client relays over
-    client_map: HashMap<Uuid, AsyncSender<AlignedVec>>,
+    client_map: HashMap<Uuid, AsyncSender<(Uuid, AlignedVec)>>,
     /// The glommio channel to send messages on
     local_tx: Senders<MeshMsg<S>>,
     /// The channel to send shard local messages on
@@ -138,7 +141,7 @@ pub struct Shard<S: ShoalDatabase> {
         ),
     >,
     /// The responses whose queries have been flushed to disk
-    flushed: Vec<(Uuid, <S::ClientType as QuerySupport>::ResponseKinds)>,
+    flushed: Vec<(Uuid, Uuid, <S::ClientType as QuerySupport>::ResponseKinds)>,
     /// The latency sensitive task queue
     high_priority: TaskQueueHandle,
     /// The medium priority task queue
@@ -274,14 +277,15 @@ impl<S: ShoalDatabase> Shard<S> {
     async fn reply(
         &mut self,
         client: Uuid,
+        query_id: Uuid,
         response: <S::ClientType as QuerySupport>::ResponseKinds,
     ) -> Result<(), ServerError> {
         // archive our response
         let archived = rkyv::to_bytes::<_>(&response)?;
         // get this clients channel to send replies over
         match self.client_map.get(&client) {
-            Some(client_tx) => client_tx.send(archived).await.unwrap(),
-            None => panic!("Missing client channel?"),
+            Some(client_tx) => client_tx.send((query_id, archived)).await.unwrap(),
+            None => panic!("{} Missing client channel? {client}", self.info.name),
         }
         Ok(())
     }
@@ -300,9 +304,9 @@ impl<S: ShoalDatabase> Shard<S> {
         query: <S::ClientType as QuerySupport>::QueryKinds,
     ) -> Result<(), ServerError> {
         // try to handle this query
-        if let Some((addr, response)) = self.tables.handle(meta, query).await {
+        if let Some((addr, query_id, response)) = self.tables.handle(meta, query).await {
             // send this response back to the client
-            self.reply(addr, response).await?;
+            self.reply(addr, query_id, response).await?;
         }
         Ok(())
     }
@@ -312,9 +316,9 @@ impl<S: ShoalDatabase> Shard<S> {
         // get all flushed query responses
         self.tables.handle_flushed(&mut self.flushed).await?;
         // pop all of our flushed responses
-        while let Some((client, response)) = self.flushed.pop() {
+        while let Some((client, query_id, response)) = self.flushed.pop() {
             // send our responses
-            self.reply(client, response).await?;
+            self.reply(client, query_id, response).await?;
         }
         Ok(())
     }

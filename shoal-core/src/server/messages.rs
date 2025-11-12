@@ -14,6 +14,11 @@ use crate::shared::traits::{QuerySupport, ShoalDatabase};
 pub enum Msg<S: ShoalDatabase> {
     /// A message from our node local mesh
     Mesh { shard: usize, msg: MeshMsg<S> },
+    /// A new client has connected
+    NewClient {
+        id: Uuid,
+        client_tx: AsyncSender<(Uuid, AlignedVec)>,
+    },
     /// A message from a client
     Client {
         /// This peers id
@@ -75,7 +80,7 @@ pub enum MeshMsg<S: ShoalDatabase> {
         /// This clients id
         client: Uuid,
         /// The channel to send responses for this client on
-        client_tx: AsyncSender<AlignedVec>,
+        client_tx: AsyncSender<(Uuid, AlignedVec)>,
     },
     /// Tell this shard to shutdown
     Shutdown,
@@ -100,7 +105,7 @@ pub enum ShardMsg<D: ShoalDatabase> {
     /// A New client connected to shoal
     NewClient {
         client: Uuid,
-        client_tx: AsyncSender<AlignedVec>,
+        client_tx: AsyncSender<(Uuid, AlignedVec)>,
     },
     /// A query to execute
     Query {

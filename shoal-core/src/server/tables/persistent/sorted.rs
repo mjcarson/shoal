@@ -86,7 +86,7 @@ pub struct PersistentSortedTable<R: ShoalSortedTable, S: StorageSupport> {
     /// The total size of all data on this shard
     memory_usage: usize,
     /// The responses for queries that have been flushed to disk
-    flushed: Vec<(Uuid, Response<R>)>,
+    flushed: Vec<(Uuid, Uuid, Response<R>)>,
 }
 
 impl<R: ShoalSortedTable + 'static, S: StorageSupport> PersistentSortedTable<R, S> {
@@ -339,7 +339,9 @@ impl<R: ShoalSortedTable + 'static, S: StorageSupport> PersistentSortedTable<R, 
     /// # Arguments
     ///
     /// * `flushed` - The flushed actions to return
-    pub async fn get_flushed(&mut self) -> Result<&mut Vec<(Uuid, Response<R>)>, ServerError> {
+    pub async fn get_flushed(
+        &mut self,
+    ) -> Result<&mut Vec<(Uuid, Uuid, Response<R>)>, ServerError> {
         // check if our current intent log should be compacted
         let (flushed_pos, generation) = self.storage.compact_if_needed::<R>(false).await?;
         // get all of the responses whose data has been flushed to disk
