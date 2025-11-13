@@ -17,9 +17,9 @@ use std::collections::BTreeMap;
 use std::marker::PhantomData;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::net::{TcpSocket, TcpStream, ToSocketAddrs};
+use tokio::net::{TcpStream, ToSocketAddrs};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
@@ -66,20 +66,15 @@ impl ManageConnection for ShoalConnectionManager {
         Ok(tcp_tx)
     }
 
+    /// Check if a connection is still valid
+    ///
+    /// # Arguments
+    ///
+    /// * `conn` - The conn to check
     async fn is_valid(&self, conn: &mut Self::Connection) -> Result<(), Self::Error> {
-        // figure out how to health check this half
+        // TODO implement a ping/pong type request?
+        conn.peer_addr()?;
         Ok(())
-        //// Simple health check: try to peek at the socket
-        //let mut buf = [0u8; 1];
-        //match conn.try_read(&mut buf) {
-        //    Ok(0) => Err(std::io::Error::new(
-        //        std::io::ErrorKind::ConnectionReset,
-        //        "Connection closed",
-        //    )),
-        //    Ok(_) => Ok(()), // Data available but not consumed
-        //    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(()),
-        //    Err(e) => Err(e),
-        //}
     }
 
     fn has_broken(&self, conn: &mut Self::Connection) -> bool {
@@ -89,8 +84,6 @@ impl ManageConnection for ShoalConnectionManager {
 }
 
 pub struct Shoal<S: QuerySupport> {
-    /// The udp socket to send and receive messages on
-    //socket: Arc<TcpSocket>,
     // A pool of tcp connections to send messages over
     pool: bb8::Pool<ShoalConnectionManager>,
     /// A concurrent map of what channel to send streaming results too
@@ -140,12 +133,6 @@ impl<S: QuerySupport> Shoal<S> {
             .build(manager)
             .await
             .unwrap();
-        //// create a new tcp socket to connect to our server at
-        //let tcp_sock = TcpSocket::new_v4()?;
-        //// bind to our addr
-        //let socket = Arc::new(tcp_sock.connect(addr.into()).await?);
-        //// split our socket into write and read half
-        //let (tcp_rx, tcp_tx) = socket.split();
         // build a channel for sending and recieving response streams on
         let (channel_queue_tx, channel_queue_rx) = kanal::bounded_async(8192);
         // create a map for storing what channels to send response streams on
@@ -253,6 +240,11 @@ impl<S: QuerySupport> Shoal<S> {
     //    };
     //    Ok((query_stream, result_stream))
     //}
+
+    //pub async fn close(self) -> Result<(), Errors> {
+    //    // drain our connections
+    //    for _ in 0..self.pool.state().connections
+    //}
 }
 
 impl<S: QuerySupport> Drop for Shoal<S> {
@@ -262,60 +254,56 @@ impl<S: QuerySupport> Drop for Shoal<S> {
     }
 }
 
-pub struct TcpProxyHelper<R: ShoalResponseSupport> {
-    reader: OwnedReadHalf,
+//pub struct TcpProxyHelper<R: ShoalResponseSupport> {
+//    reader: OwnedReadHalf,
+//    channel_map: Arc<HashMap<Uuid, AsyncSender<ClientMsg>>>,
+//    phantom: PhantomData<R>,
+//}
+//
+//impl<R: ShoalResponseSupport> TcpProxyHelper<R> {
+async fn tcp_proxy_helper(
+    mut reader: OwnedReadHalf,
     channel_map: Arc<HashMap<Uuid, AsyncSender<ClientMsg>>>,
-    phantom: PhantomData<R>,
-}
-
-impl<R: ShoalResponseSupport> TcpProxyHelper<R> {
-    async fn tcp_proxy(mut self)
-    where
-        for<'a> <R as Archive>::Archived: rkyv::bytecheck::CheckBytes<
-            Strategy<
-                rkyv::validation::Validator<
-                    rkyv::validation::archive::ArchiveValidator<'a>,
-                    rkyv::validation::shared::SharedValidator,
-                >,
-                rkyv::rancor::Error,
-            >,
-        >,
-    {
-        // keep reading from our tcp socket
-        loop {
-            // have a buffer for our query_id and for our length
-            let mut query_id_buff: [u8; 16] = [0; 16];
-            let mut len_buff: [u8; 8] = [0; 8];
-            // try to read from our tcp socket
-            self.reader.read_exact(&mut query_id_buff).await.unwrap();
-            self.reader.read_exact(&mut len_buff).await.unwrap();
-            // convert our uuid from bytes
-            let query_id = Uuid::from_slice(&query_id_buff).unwrap();
-            // parse our message length from our length bytes
-            let len = u64::from_le_bytes(len_buff) as usize;
-            // Create an aligned vec to act as a pool of bytes
-            let mut aligned_buff = AlignedVec::<16>::with_capacity(len);
-            // resize our aligned vec
-            aligned_buff.resize(len, 0);
-            self.reader.read_exact(&mut aligned_buff).await.unwrap();
-            //// shrink our aligned vec to just the data read
-            //aligned_buff.resize(read, 0);
-            // get this responses id
-            //let id = match R::access(&aligned_buff) {
-            //    Ok(archived) => R::get_query_id(archived),
-            //    Err(error) => panic!("SPEC FAIL -> {error:#?}"),
-            //};
-            // wrap our response in a client message
-            let wrapped = ClientMsg::Response(aligned_buff);
-            // get the channel for this query
-            match self.channel_map.pin_owned().get(&query_id) {
-                // send our response to the right shoal stream
-                Some(tx) => tx.send(wrapped).await.unwrap(),
-                None => panic!("Missing stream channel! -> {query_id} {len}"),
-            }
+)
+//where
+//    for<'a> <R as Archive>::Archived: rkyv::bytecheck::CheckBytes<
+//        Strategy<
+//            rkyv::validation::Validator<
+//                rkyv::validation::archive::ArchiveValidator<'a>,
+//                rkyv::validation::shared::SharedValidator,
+//            >,
+//            rkyv::rancor::Error,
+//        >,
+//    >,
+{
+    // keep reading from our tcp socket
+    loop {
+        // have a buffer for our query_id and for our length
+        let mut preamble: [u8; 24] = [0; 24];
+        // try to read from our tcp socket
+        reader.read_exact(&mut preamble).await.unwrap();
+        // convert our uuid from bytes
+        let query_id = Uuid::from_slice(&preamble[..16]).unwrap();
+        // get a fixed size slice for our u64
+        let u64_bytes = preamble[16..24].try_into().unwrap();
+        // parse our message length from our length bytes
+        let len = u64::from_le_bytes(u64_bytes) as usize;
+        // Create an aligned vec to act as a pool of bytes
+        let mut aligned_buff = AlignedVec::<16>::with_capacity(len);
+        // resize our aligned vec
+        aligned_buff.resize(len, 0);
+        reader.read_exact(&mut aligned_buff).await.unwrap();
+        // wrap our response in a client message
+        let wrapped = ClientMsg::Response(aligned_buff);
+        // get the channel for this query
+        match channel_map.pin_owned().get(&query_id) {
+            // send our response to the right shoal stream
+            Some(tx) => tx.send(wrapped).await.unwrap(),
+            None => panic!("Missing stream channel! -> {query_id} {len}"),
         }
     }
 }
+//}
 
 struct ShoalTcpProxy<S: ShoalQuerySupport, R: ShoalResponseSupport> {
     /// The channel to listen for new tcp readers on
@@ -366,14 +354,14 @@ impl<S: ShoalQuerySupport, R: ShoalResponseSupport + 'static> ShoalTcpProxy<S, R
         loop {
             // wait for a new tcp reader to watch
             let reader = self.proxy_rx.recv().await.unwrap();
-            // create a tcp proxy helper
-            let helper = TcpProxyHelper {
-                reader,
-                channel_map: self.channel_map.clone(),
-                phantom: self.phantom_response,
-            };
+            //// create a tcp proxy helper
+            //let helper = TcpProxyHelper {
+            //    reader,
+            //    channel_map: self.channel_map.clone(),
+            //    phantom: self.phantom_response,
+            //};
             // spawn a task to watch this tcp reader for results
-            tokio::task::spawn(helper.tcp_proxy());
+            tokio::task::spawn(tcp_proxy_helper(reader, self.channel_map.clone()));
         }
         //// Wait for new messages from our server and proxy the respones to the right channel
         //loop {

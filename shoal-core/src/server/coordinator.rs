@@ -302,6 +302,10 @@ async fn client_rx_relay<S: ShoalDatabase>(
         let mut data = BytesMut::zeroed(16384);
         // wait for messages from our client
         let read = tcp_rx.read(&mut data).await.unwrap();
+        // if we read 0 bytes then exit this client rx relay
+        if read == 0 {
+            break;
+        }
         // forward our clients message
         kanal_tx
             .send(Msg::Client { peer, read, data })
