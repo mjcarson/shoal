@@ -1,5 +1,6 @@
 //! A single shard in Shoal
 
+use bytes::Bytes;
 use glommio::{
     channels::channel_mesh::{Full, MeshBuilder, Receivers, Senders},
     enclose,
@@ -9,7 +10,13 @@ use glommio::{
 };
 use kanal::{AsyncReceiver, AsyncSender};
 use lru::LruCache;
-use rkyv::util::AlignedVec;
+use rkyv::{
+    bytecheck::CheckBytes,
+    rancor::Strategy,
+    util::AlignedVec,
+    validation::{archive::ArchiveValidator, shared::SharedValidator, Validator},
+    Archive,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::{cell::RefCell, hash::BuildHasherDefault};
@@ -26,7 +33,7 @@ use super::{
 use crate::{
     shared::{
         responses::ArchivedResponses,
-        traits::{QuerySupport, ShoalDatabase},
+        traits::{QuerySupport, RkyvSupport, ShoalDatabase},
     },
     storage::{FullArchiveMap, LoaderMsg, Loaders},
 };
@@ -65,7 +72,7 @@ impl ShardInfo {
 
 pub struct MeshRelay<S: ShoalDatabase> {
     /// The glommio channel to receive messages on
-    mesh_rx: Receivers<MeshMsg<S>>,
+    mesh_rx: Receivers<MeshMsg>,
     /// The channel to send shard local messages on
     shard_local_tx: AsyncSender<ShardMsg<S>>,
 }
@@ -77,7 +84,7 @@ impl<S: ShoalDatabase> MeshRelay<S> {
     ///
     /// * `mesh_rx` - The glommio channel to receive mesh messages on
     /// * `node_local_tx` - The kanal channel to send shard local messages on
-    pub fn new(mesh_rx: Receivers<MeshMsg<S>>, shard_local_tx: &AsyncSender<ShardMsg<S>>) -> Self {
+    pub fn new(mesh_rx: Receivers<MeshMsg>, shard_local_tx: &AsyncSender<ShardMsg<S>>) -> Self {
         MeshRelay {
             mesh_rx,
             shard_local_tx: shard_local_tx.clone(),
@@ -91,9 +98,9 @@ impl<S: ShoalDatabase> MeshRelay<S> {
             // handle this message
             match msg {
                 MeshMsg::Join(_) => panic!("Join on shard?"),
-                MeshMsg::Query { meta, query } => self
+                MeshMsg::Query { meta, archived } => self
                     .shard_local_tx
-                    .send(ShardMsg::Query { meta, query })
+                    .send(ShardMsg::ArchivedQuery { meta, archived })
                     .await
                     .unwrap(),
                 MeshMsg::NewClient { client, client_tx } => {
@@ -127,7 +134,7 @@ pub struct Shard<S: ShoalDatabase> {
     /// A map of channels to send responses to our client relays over
     client_map: HashMap<Uuid, AsyncSender<(Uuid, AlignedVec)>>,
     /// The glommio channel to send messages on
-    local_tx: Senders<MeshMsg<S>>,
+    local_tx: Senders<MeshMsg>,
     /// The channel to send shard local messages on
     shard_local_tx: AsyncSender<ShardMsg<S>>,
     /// The channel to Receive shard local messages on
@@ -163,7 +170,7 @@ impl<S: ShoalDatabase> Shard<S> {
     #[instrument(name = "Shard::new", skip_all, err(Debug))]
     pub async fn new(
         conf: &Conf,
-        local_tx: Senders<MeshMsg<S>>,
+        local_tx: Senders<MeshMsg>,
         //local_rx: Receivers<MeshMsg<S>>,
     ) -> Result<Self, ServerError> {
         // build our shard info
@@ -241,7 +248,7 @@ impl<S: ShoalDatabase> Shard<S> {
     /// This will only fail if the coordinator has not joined the local mesh.
     #[allow(clippy::future_not_send)]
     #[instrument(name = "Shard::init", skip_all, err(Debug))]
-    async fn init(&mut self, mesh_rx: Receivers<MeshMsg<S>>) -> Result<(), ServerError> {
+    async fn init(&mut self, mesh_rx: Receivers<MeshMsg>) -> Result<(), ServerError> {
         // build our join message
         let join_msg = MeshMsg::Join(self.info.clone());
         // send a message to our coordinator that we are ready to join
@@ -297,14 +304,21 @@ impl<S: ShoalDatabase> Shard<S> {
     /// `meta` - The metadata about the query to handle
     /// `query` - The query to handle
     #[allow(clippy::future_not_send)]
-    #[instrument(name = "Shard::handle_query", skip(self, query))]
+    #[instrument(name = "Shard::handle_query", skip(self, archived))]
     async fn handle_query(
         &mut self,
         meta: QueryMetadata,
-        query: <S::ClientType as QuerySupport>::QueryKinds,
-    ) -> Result<(), ServerError> {
+        //query: <S::ClientType as QuerySupport>::QueryKinds,
+        archived: Bytes,
+    ) -> Result<(), ServerError>
+    where
+        for<'a> <<<S as ShoalDatabase>::ClientType as QuerySupport>::QueryKinds as Archive>::Archived:
+            CheckBytes<
+                Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+            >,
+    {
         // try to handle this query
-        if let Some((addr, query_id, response)) = self.tables.handle(meta, query).await {
+        if let Some((addr, query_id, response)) = self.tables.handle(meta, archived).await {
             // send this response back to the client
             self.reply(addr, query_id, response).await?;
         }
@@ -371,7 +385,13 @@ impl<S: ShoalDatabase> Shard<S> {
     ///
     /// This wil return an error if a message cannot be sent to a coordinator or if a query fails
     #[allow(clippy::future_not_send)]
-    pub async fn start<'a>(mut self, mesh_rx: Receivers<MeshMsg<S>>) -> Result<(), ServerError> {
+    pub async fn start<'a>(mut self, mesh_rx: Receivers<MeshMsg>) -> Result<(), ServerError>
+    where
+        for<'b> <<<S as ShoalDatabase>::ClientType as QuerySupport>::QueryKinds as Archive>::Archived:
+            CheckBytes<
+                Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
+            >,
+    {
         // initalize this shard
         self.init(mesh_rx).await?;
         // keep handling messages until we get a shutdown command
@@ -389,7 +409,9 @@ impl<S: ShoalDatabase> Shard<S> {
                     }
                 }
                 // handle this query from the user
-                ShardMsg::Query { meta, query } => self.handle_query(meta, query).await?,
+                ShardMsg::ArchivedQuery { meta, archived } => {
+                    self.handle_query(meta, archived).await?
+                }
                 // load this partition from disk
                 ShardMsg::Partition(loaded) => {
                     self.tables
@@ -435,8 +457,12 @@ impl<S: ShoalDatabase> Shard<S> {
 pub fn start<S: ShoalDatabase>(
     conf: Conf,
     cpus: CpuSet,
-    mesh: MeshBuilder<MeshMsg<S>, Full>,
-) -> Result<PoolThreadHandles<Result<(), ServerError>>, ServerError> {
+    mesh: MeshBuilder<MeshMsg, Full>,
+) -> Result<PoolThreadHandles<Result<(), ServerError>>, ServerError>
+where
+    for<'a> <<<S as ShoalDatabase>::ClientType as QuerySupport>::QueryKinds as Archive>::Archived:
+        CheckBytes<Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>>,
+{
     // setup our executor
     let executor_builder =
         LocalExecutorPoolBuilder::new(PoolPlacement::MaxSpread(cpus.len(), Some(cpus)));

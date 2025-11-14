@@ -14,6 +14,7 @@ use rkyv::validation::Validator;
 use rkyv::vec::ArchivedVec;
 use rkyv::Archive;
 use std::collections::BTreeMap;
+use std::io::IoSlice;
 use std::marker::PhantomData;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -190,12 +191,23 @@ impl<S: QuerySupport> Shoal<S> {
     pub async fn send(&self, mut queries: Queries<S>) -> Result<ShoalResultStream<S>, Errors> {
         // archive our queries
         let archived = rkyv::to_bytes::<_>(&queries)?;
+        // get the size of the archive we are sending to the client
+        let len = archived.len().to_le_bytes();
         // start tracking this response
         let (response_tx, response_rx) = self.track_response(&mut queries.id)?;
         // get a connection from our connection pool and send our query
         let mut conn = self.pool.get().await.unwrap();
-        // send our query
-        conn.write_all(&archived).await.unwrap();
+        // build our vectored byte slices to send
+        let mut bufs = &mut [IoSlice::new(&len), IoSlice::new(&archived)][..];
+        // keep sending our data until all of this archive has been sent
+        while !bufs.is_empty() {
+            // send this data back to our client
+            match conn.write_vectored(bufs).await {
+                Ok(0) => panic!("No bytes were written?"),
+                Ok(n) => IoSlice::advance_slices(&mut bufs, n),
+                Err(error) => panic!("Ahhh error?: {error:#?}"),
+            }
+        }
         // build a new shoal result stream
         let result_stream = ShoalResultStream {
             id: queries.id,

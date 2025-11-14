@@ -151,18 +151,18 @@ impl ShoalUnsortedTable for Movie {
     ///
     /// * `filters` - The filters to apply
     /// * `row` - The row to filter
-    fn is_filtered(filter: &Self::Filters, row: &Self) -> bool {
+    fn is_filtered(filter: &<Self::Filters as Archive>::Archived, row: &Self) -> bool {
         &row.title == filter
     }
 
-    /// Determine if a row should be filtered
+    /// Determine if a row should be filtered against an archived row
     ///
     /// # Arguments
     ///
     /// * `filters` - The filters to apply
     /// * `row` - The row to filter
     fn is_filtered_archived(
-        filter: &Self::Filters,
+        filter: &<Self::Filters as Archive>::Archived,
         row: &<Self as rkyv::Archive>::Archived,
     ) -> bool {
         &row.title == filter

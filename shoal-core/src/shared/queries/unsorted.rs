@@ -1,6 +1,10 @@
 //! The queries for an unsorted table in shoal. This is a table where each
 //! partition contains only a single row.
 
+use rkyv::rancor::Strategy;
+use rkyv::ser::allocator::ArenaHandle;
+use rkyv::ser::sharing::Share;
+use rkyv::util::AlignedVec;
 use rkyv::{Archive, Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -10,7 +14,7 @@ use crate::shared::traits::{RkyvSupport, ShoalUnsortedTable};
 
 /// The different types of queries for a single datatype
 #[derive(Debug, Archive, Serialize, Deserialize, Clone)]
-pub enum UnsortedQuery<T: ShoalUnsortedTable + std::fmt::Debug> {
+pub enum UnsortedQuery<T: ShoalUnsortedTable + std::fmt::Debug + RkyvSupport> {
     /// Insert a row into shoal
     Insert { key: u64, row: T },
     /// Get some data from shoal
@@ -33,6 +37,13 @@ impl<T: ShoalUnsortedTable + std::fmt::Debug> UnsortedQuery<T> {
             UnsortedQuery::Update(update) => tmp.push(ring.find_shard(update.partition_key)),
         }
     }
+}
+
+impl<T: ShoalUnsortedTable> RkyvSupport for UnsortedQuery<T> where
+    for<'a> <T as ShoalUnsortedTable>::Filters: rkyv::Serialize<
+        Strategy<rkyv::ser::Serializer<AlignedVec, ArenaHandle<'a>, Share>, rkyv::rancor::Error>,
+    >
+{
 }
 
 /// A single query tagged with client info
@@ -77,3 +88,5 @@ pub struct UnsortedUpdate<T: ShoalUnsortedTable + RkyvSupport> {
     /// The updates to apply
     pub update: T::Update,
 }
+
+impl<T: ShoalUnsortedTable> RkyvSupport for UnsortedUpdate<T> {}

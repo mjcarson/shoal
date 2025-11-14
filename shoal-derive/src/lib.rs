@@ -436,6 +436,7 @@ fn add_db_trait2(
     let client_ident = format_ident!("{}Client", struct_ident);
     let table_names_ident = format_ident!("{}TableNames", struct_ident);
     let query_ident = format_ident!("{struct_ident}QueryKinds");
+    let archived_query_ident = format_ident!("Archived{struct_ident}QueryKinds");
     let response_ident = format_ident!("{struct_ident}ResponseKinds");
     // build our new table arms
     // get the field idents
@@ -458,7 +459,7 @@ fn add_db_trait2(
         let variant_ident = format_ident!("{variant_str}");
         // build our handle query arm for this field
         quote! {
-            #query_ident::#variant_ident(query) => {
+            #archived_query_ident::#variant_ident(query) => {
                 // handle these queries
                 match self.#field_ident.handle(meta, query).await {
                     Some((client, query_id, response)) => {
@@ -546,11 +547,11 @@ fn add_db_trait2(
                     // the same partition over and over again
                     let mark_evict_msg = ShardMsg::MarkEvictable { generation, table, partitions: vec![id] };
                     // convert our unblocked queries into shard messages
-                    for (meta, unwrapped) in unblocked {
+                    for (meta, archived) in unblocked {
                         // wrap our query
                         let query = #query_ident::#variant_ident(unwrapped);
                         // build our shard message
-                        let query_msg = ShardMsg::Query { meta, query };
+                        let query_msg = ShardMsg::Query { meta, archived };
                         // send this message
                         shard_local_tx.send(query_msg).await.unwrap();
                     }
@@ -639,7 +640,7 @@ fn add_db_trait2(
             async fn handle(
                 &mut self,
                 meta: QueryMetadata,
-                typed_query: <Self::ClientType as QuerySupport>::QueryKinds,
+                typed_query: &<<Self::ClientType as QuerySupport>::QueryKinds as Archive>::Archived,
             ) -> Option<(
                 uuid::Uuid,
                 uuid::Uuid,

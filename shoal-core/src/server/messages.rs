@@ -1,10 +1,11 @@
 //! The different messages that can be sent in shoal
 
-use bytes::BytesMut;
+use std::marker::PhantomData;
+
+use bytes::{Bytes, BytesMut};
 use glommio::io::ReadResult;
 use kanal::AsyncSender;
 use rkyv::util::AlignedVec;
-use std::net::SocketAddr;
 use uuid::Uuid;
 
 use super::shard::ShardInfo;
@@ -23,8 +24,6 @@ pub enum Msg<S: ShoalDatabase> {
     Client {
         /// This peers id
         peer: Uuid,
-        /// The number of bytes to read
-        read: usize,
         /// The raw data for our request
         data: BytesMut,
     },
@@ -65,15 +64,15 @@ impl QueryMetadata {
 }
 
 /// The messages that can be sent over of node local mesh
-pub enum MeshMsg<S: ShoalDatabase> {
+pub enum MeshMsg {
     /// Join this nodes token ring
     Join(ShardInfo),
     /// A query to execute
     Query {
         /// The metadata about a query
         meta: QueryMetadata,
-        /// The query to execute
-        query: <S::ClientType as QuerySupport>::QueryKinds,
+        /// The archived query to execute
+        archived: Bytes,
     },
     /// Tell this shard about a new client
     NewClient {
@@ -107,12 +106,12 @@ pub enum ShardMsg<D: ShoalDatabase> {
         client: Uuid,
         client_tx: AsyncSender<(Uuid, AlignedVec)>,
     },
-    /// A query to execute
-    Query {
+    /// A still archived query to execute
+    ArchivedQuery {
         /// The metadata about a query
         meta: QueryMetadata,
-        /// The query to execute
-        query: <D::ClientType as QuerySupport>::QueryKinds,
+        /// The archvied query to execute
+        archived: Bytes,
     },
     /// A partition loaded from disk
     Partition(LoadedPartitionKinds<D>),

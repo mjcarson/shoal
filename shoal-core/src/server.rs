@@ -16,9 +16,13 @@ use glommio::{
     ExecutorJoinHandle, LocalExecutorBuilder, Placement, PoolThreadHandles,
 };
 use kanal::AsyncSender;
-use rkyv::de::Pool;
 use rkyv::rancor::Strategy;
 use rkyv::Archive;
+use rkyv::{
+    bytecheck::CheckBytes,
+    de::Pool,
+    validation::{archive::ArchiveValidator, shared::SharedValidator, Validator},
+};
 
 use args::Args;
 pub use conf::Conf;
@@ -103,7 +107,13 @@ where
 {
     /// Start this shoal database
     #[instrument(name = "ShoalPool::start", skip_all, err(Debug))]
-    pub fn start() -> Result<Self, ServerError> {
+    pub fn start() -> Result<Self, ServerError>
+    where
+        for<'a> <<<S as ShoalDatabase>::ClientType as QuerySupport>::QueryKinds as Archive>::Archived:
+            CheckBytes<
+                Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+            >,
+    {
         // get our command line args
         let args = Args::parse();
         // load our config

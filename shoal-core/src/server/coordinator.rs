@@ -1,6 +1,6 @@
 //! Coordinates traffic between this node and others
 
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use futures::io::{ReadHalf, WriteHalf};
 use futures::{AsyncReadExt, AsyncWriteExt};
 use glommio::net::{TcpListener, TcpStream};
@@ -152,6 +152,7 @@ where
         &mut self,
         client: Uuid,
         queries: Queries<S::ClientType>,
+        archived: Bytes,
     ) -> Result<(), ServerError> {
         // initialize a vec to store the shards we find
         let mut found = Vec::with_capacity(3);
@@ -175,6 +176,7 @@ where
                         let msg = MeshMsg::Query {
                             meta,
                             query: kind.clone(),
+                            archived: archived.clone(),
                         };
                         // send our query mesh message to the right shard
                         self.mesh_tx.send_to(*id, msg).await.unwrap();
@@ -192,15 +194,15 @@ where
     /// * `addr` - The address
     #[allow(clippy::future_not_send)]
     #[instrument(name = "Coordinator::handle_client", skip(self, peer, data))]
-    async fn handle_client<'a>(&mut self, peer: Uuid, read: usize, data: BytesMut) {
-        // get the slice to deserialize
-        let readable = &data[..read];
+    async fn handle_client<'a>(&mut self, peer: Uuid, data: BytesMut) {
         // load our arhived query from buffer
-        let archived = Queries::access(readable).unwrap();
+        let archived = Queries::access(&data).unwrap();
         // deserialize our queries
         let queries = <Queries<S::ClientType> as RkyvSupport>::deserialize(archived).unwrap();
+        // freeze our bytes
+        let archived = data.freeze();
         // send each query to the correct shard
-        self.send_to_shard(peer, queries).await.unwrap();
+        self.send_to_shard(peer, queries, archived).await.unwrap();
     }
 
     /// Handle a shutdown command
@@ -260,7 +262,7 @@ where
                             .unwrap();
                     }
                 }
-                Msg::Client { peer, read, data } => self.handle_client(peer, read, data).await,
+                Msg::Client { peer, data } => self.handle_client(peer, data).await,
                 Msg::Shutdown => {
                     // forward this shutdown command to others
                     self.handle_shutdown().await.unwrap();
@@ -298,19 +300,25 @@ async fn client_rx_relay<S: ShoalDatabase>(
 ) {
     // keep waiting for messages until  our tcp socket closes
     loop {
-        // TODO reuse buffers instead of making new ones
-        let mut data = BytesMut::zeroed(16384);
-        // wait for messages from our client
-        let read = tcp_rx.read(&mut data).await.unwrap();
-        // if we read 0 bytes then exit this client rx relay
-        if read == 0 {
-            break;
+        // have a buffer for our query_id and for our length
+        let mut len_bytes: [u8; 8] = [0; 8];
+        // try to read the size of the next message from our tcp socket
+        if let Err(error) = tcp_rx.read_exact(&mut len_bytes).await {
+            // if this was an unexpected EOF error then assume the client died
+            if error.kind() == std::io::ErrorKind::UnexpectedEof {
+                break;
+            }
+            // TODO do something with this error
+            panic!("client_rx_relay: {error:#?}")
         }
+        // parse the upcoming messages size
+        let len = u64::from_le_bytes(len_bytes) as usize;
+        // allocate a buffer that is exactly the right size
+        let mut data = BytesMut::zeroed(len);
+        // wait for messages from our client
+        tcp_rx.read_exact(&mut data).await.unwrap();
         // forward our clients message
-        kanal_tx
-            .send(Msg::Client { peer, read, data })
-            .await
-            .unwrap();
+        kanal_tx.send(Msg::Client { peer, data }).await.unwrap();
     }
 }
 
@@ -345,8 +353,6 @@ async fn client_tx_relay<S: ShoalDatabase>(
 #[allow(clippy::future_not_send)]
 async fn client_acceptor<S: ShoalDatabase>(tcp_sock: TcpListener, kanal_tx: AsyncSender<Msg<S>>) {
     loop {
-        // TODO reuse buffers instead of making new ones
-        //let mut data = BytesMut::zeroed(16384);
         // try to read a single datagram from our udp socket
         let stream = tcp_sock.accept().await.unwrap();
         // disable nagles algorithm on this socket
@@ -366,33 +372,5 @@ async fn client_acceptor<S: ShoalDatabase>(tcp_sock: TcpListener, kanal_tx: Asyn
             .send(Msg::NewClient { id, client_tx })
             .await
             .unwrap();
-        //// tell every shard about our new client
-        //for i in 0..mesh_tx.nr_consumers() {
-        //    // skip ourselves
-        //    if i != id {
-        //        break;
-        //    }
-        //    //  clone our client sender
-        //    let client_tx = client_tx.clone();
-        //    // tell this shard about this new client
-        //    mesh_tx
-        //        .send_to(
-        //            i,
-        //            MeshMsg::NewClient {
-        //                client: peer,
-        //                client_tx,
-        //            },
-        //        )
-        //        .await
-        //        .unwrap();
-        //}
-        //// listen for data from this tcp stream
-        ////let read = accept.read(&mut data).await.unwrap();
-        ////let (read, addr) = udp_sock.recv_from(&mut data).await.unwrap();
-        //// forward our clients message
-        //kanal_tx
-        //    .send(Msg::Client { addr, read, data })
-        //    .await
-        //    .unwrap();
     }
 }
