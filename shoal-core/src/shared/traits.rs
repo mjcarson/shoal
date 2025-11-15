@@ -14,7 +14,6 @@ use rkyv::{Archive, Serialize};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::hash::BuildHasherDefault;
-use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing::instrument;
 use uuid::Uuid;

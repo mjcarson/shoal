@@ -49,6 +49,21 @@ impl<S: QuerySupport> Queries<S> {
         self.queries.push(query.into());
     }
 
+    /// Add queries from an iterator onto this queries bundle
+    ///
+    /// # Arguments
+    ///
+    /// * `queries` - An iterator of queries to add
+    #[must_use]
+    pub fn add_from_iter<Q, I>(mut self, queries: I) -> Self
+    where
+        Q: Into<S::QueryKinds>,
+        I: IntoIterator<Item = Q>,
+    {
+        self.queries.extend(queries.into_iter().map(Into::into));
+        self
+    }
+
     /// Load our queries
     #[instrument(name = "Queries<S>::access", skip_all, err(Debug))]
     pub fn access(raw: &[u8]) -> Result<&ArchivedQueries<S>, rkyv::rancor::Error>
@@ -64,6 +79,16 @@ impl<S: QuerySupport> Queries<S> {
         >,
     {
         <Self as RkyvSupport>::access(raw)
+    }
+
+    ///  Get the number of sub queries in this query bundle
+    pub fn len(&self) -> usize {
+        self.queries.len()
+    }
+
+    /// Returns true if this query bundle has no queries
+    pub fn is_empty(&self) -> bool {
+        self.queries.is_empty()
     }
 }
 

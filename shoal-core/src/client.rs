@@ -223,35 +223,35 @@ impl<S: QuerySupport> Shoal<S> {
         Ok(result_stream)
     }
 
-    ///// Create a new stream to send and receive results on
-    //pub async fn stream(&self) -> Result<(ShoalQueryStream<S>, ShoalResultStream<S>), Errors> {
-    //    // generate a random ID to override all of the ids used in our queries
-    //    let mut id = Uuid::new_v4();
-    //    // start tracking this response
-    //    let (response_tx, response_rx) = self.track_response(&mut id)?;
-    //    // build a new shoal result stream
-    //    let result_stream = ShoalResultStream {
-    //        id,
-    //        response_tx: Some(response_tx.clone()),
-    //        response_rx: Some(response_rx),
-    //        channel_map: self.channel_map.clone(),
-    //        channel_queue_tx: self.channel_queue_tx.clone(),
-    //        next_index: 0,
-    //        unbounded_queries: true,
-    //        pending: BTreeMap::default(),
-    //        phantom: PhantomData,
-    //    };
-    //    // wraap our result in a stream that supports queries and results
-    //    let query_stream = ShoalQueryStream {
-    //        id,
-    //        queries_sent: 0,
-    //        socket: self.socket.clone(),
-    //        response_tx,
-    //        data_kind: PhantomData,
-    //        base_index: 0,
-    //    };
-    //    Ok((query_stream, result_stream))
-    //}
+    /// Create a new stream to send and receive results on
+    pub fn stream(&self) -> Result<(ShoalQueryStream<S>, ShoalResultStream<S>), Errors> {
+        // generate a random ID to override all of the ids used in our queries
+        let mut id = Uuid::new_v4();
+        // start tracking this response
+        let (response_tx, response_rx) = self.track_response(&mut id)?;
+        // build a new shoal result stream
+        let result_stream = ShoalResultStream {
+            id,
+            response_tx: Some(response_tx.clone()),
+            response_rx: Some(response_rx),
+            channel_map: self.channel_map.clone(),
+            channel_queue_tx: self.channel_queue_tx.clone(),
+            next_index: 0,
+            unbounded_queries: true,
+            pending: BTreeMap::default(),
+            phantom: PhantomData,
+        };
+        // wraap our result in a stream that supports queries and results
+        let query_stream = ShoalQueryStream {
+            id,
+            queries_sent: 0,
+            pool: self.pool.clone(),
+            response_tx,
+            data_kind: PhantomData,
+            base_index: 0,
+        };
+        Ok((query_stream, result_stream))
+    }
 
     //pub async fn close(self) -> Result<(), Errors> {
     //    // drain our connections
@@ -777,8 +777,8 @@ pub struct ShoalQueryStream<Q: QuerySupport> {
     pub id: Uuid,
     /// The number of messages that have been sent
     pub queries_sent: usize,
-    ///// The udp socket to send and receive messages on
-    //socket: Arc<>,
+    // A pool of tcp connections to send messages over
+    pool: bb8::Pool<ShoalConnectionManager>,
     /// The transmission side of the response stream channel
     response_tx: AsyncSender<ClientMsg>,
     /// The data we are sending queries for
@@ -808,8 +808,12 @@ impl<Q: QuerySupport> ShoalQueryStream<Q> {
         }
     }
 
-    // Add a query to this stream
-    pub async fn add(&mut self, mut queries: Queries<Q>) -> Result<(), Errors> {
+    /// Some queries to this stream without ending it
+    ///
+    /// # Arguments
+    ///
+    /// * `queries` - The queries to send
+    pub async fn send(&mut self, mut queries: Queries<Q>) -> Result<(), Errors> {
         // override our query id
         // TODO make it so we don't need to do this
         queries.id = self.id;
@@ -817,10 +821,21 @@ impl<Q: QuerySupport> ShoalQueryStream<Q> {
         queries.base_index = self.base_index;
         // archive our queries
         let archived = rkyv::to_bytes::<_>(&queries)?;
-        //// send our query
-        //self.socket
-        //    .send_to(archived.as_slice(), "127.0.0.1:12000")
-        //    .await?;
+        // get the size of the archive we are sending to the client
+        let len = archived.len().to_le_bytes();
+        // get a connection from our connection pool and send our query
+        let mut conn = self.pool.get().await.unwrap();
+        // build our vectored byte slices to send
+        let mut bufs = &mut [IoSlice::new(&len), IoSlice::new(&archived)][..];
+        // keep sending our data until all of this archive has been sent
+        while !bufs.is_empty() {
+            // send this data back to our client
+            match conn.write_vectored(bufs).await {
+                Ok(0) => panic!("No bytes were written?"),
+                Ok(n) => IoSlice::advance_slices(&mut bufs, n),
+                Err(error) => panic!("Ahhh error?: {error:#?}"),
+            }
+        }
         // increment the number of queries sent and our base index
         self.queries_sent += 1;
         self.base_index += queries.queries.len();
