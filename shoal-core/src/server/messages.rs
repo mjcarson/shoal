@@ -64,15 +64,15 @@ impl QueryMetadata {
 }
 
 /// The messages that can be sent over of node local mesh
-pub enum MeshMsg {
+pub enum MeshMsg<D: ShoalDatabase> {
     /// Join this nodes token ring
     Join(ShardInfo),
     /// A query to execute
     Query {
         /// The metadata about a query
         meta: QueryMetadata,
-        /// The archived query to execute
-        archived: Bytes,
+        /// The query to execute
+        query: <D::ClientType as QuerySupport>::QueryKinds,
     },
     /// Tell this shard about a new client
     NewClient {
@@ -107,11 +107,11 @@ pub enum ShardMsg<D: ShoalDatabase> {
         client_tx: AsyncSender<(Uuid, AlignedVec)>,
     },
     /// A still archived query to execute
-    ArchivedQuery {
+    Query {
         /// The metadata about a query
         meta: QueryMetadata,
-        /// The archvied query to execute
-        archived: Bytes,
+        /// The query to execute
+        query: <D::ClientType as QuerySupport>::QueryKinds,
     },
     /// A partition loaded from disk
     Partition(LoadedPartitionKinds<D>),

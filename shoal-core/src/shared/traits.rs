@@ -188,7 +188,7 @@ pub trait ShoalDatabase: 'static + Sized {
     async fn handle(
         &mut self,
         meta: QueryMetadata,
-        typed_query: &<<Self::ClientType as QuerySupport>::QueryKinds as Archive>::Archived,
+        typed_query: <Self::ClientType as QuerySupport>::QueryKinds,
     ) -> Option<(
         Uuid,
         Uuid,

@@ -32,8 +32,8 @@ use crate::server::tables::partitions::UnsortedPartition;
 use crate::server::tables::storage::StorageSupport;
 use crate::server::{Conf, ServerError};
 use crate::shared::queries::{
-    ArchivedUnsortedGet, ArchivedUnsortedQuery, ArchivedUnsortedUpdate, QueryKinds, UnsortedGet,
-    UnsortedQuery, UnsortedUpdate,
+    ArchivedUnsortedGet, ArchivedUnsortedQuery, ArchivedUnsortedUpdate, UnsortedGet, UnsortedQuery,
+    UnsortedUpdate,
 };
 use crate::shared::responses::{Response, ResponseAction};
 use crate::shared::traits::{RkyvSupport, ShoalDatabase, ShoalUnsortedTable, TableNameSupport};
@@ -117,7 +117,7 @@ pub struct PersistentUnsortedTable<R: ShoalUnsortedTable, S: StorageSupport, N: 
     /// The channel to send loader jobs on
     loader_tx: AsyncSender<LoaderMsg<N>>,
     /// A map of queries blocked on partitions being loaded from disk
-    blocked: HashMap<u64, Vec<(QueryMetadata, Bytes)>>,
+    blocked: HashMap<u64, Vec<(QueryMetadata, UnsortedQuery<R>)>>,
     /// The total size of all data on this shard
     memory_usage: Arc<RefCell<usize>>,
     /// The most recently used tables/partitions on this shard
@@ -233,7 +233,7 @@ where
     pub async fn load_partition(
         &mut self,
         loaded: LoadedPartition,
-    ) -> Option<(Vec<(QueryMetadata, Bytes)>, u64)> {
+    ) -> Option<(Vec<(QueryMetadata, UnsortedQuery<R>)>, u64)> {
         // if we have an existing loaded partition then do not use our newly loaded data
         // as that should be older
         match self.partitions.entry(loaded.partition_id) {
@@ -282,11 +282,11 @@ where
     ///
     /// * `meta` - The metadata for this query
     /// * `archived` - The archived query to execute
-    #[instrument(name = "PersistentTable::handle", skip(self, archived))]
+    #[instrument(name = "PersistentTable::handle", skip(self, query))]
     pub async fn handle(
         &mut self,
         meta: QueryMetadata,
-        archived: Bytes,
+        query: UnsortedQuery<R>,
     ) -> Option<(Uuid, Uuid, Response<R>)>
     where
         for<'a> <<R as ShoalUnsortedTable>::Update as Archive>::Archived: CheckBytes<
@@ -306,42 +306,40 @@ where
             Strategy<rkyv::de::Pool, rkyv::rancor::Error>,
         >,
     {
-        // access our query
-        let accessed = UnsortedQuery::<R>::access(&archived).unwrap();
         // execute the correct query type
-        let handled = match accessed {
+        match query {
             // insert a row into this partition
-            ArchivedUnsortedQuery::Insert { row, .. } => self.insert(row).await,
+            UnsortedQuery::Insert { row, .. } => self.insert(meta, row).await,
             // get a row from this partition
-            ArchivedUnsortedQuery::Get(get) => self.get(&meta, get).await,
+            UnsortedQuery::Get(get) => self.get(meta, get).await,
             // delete a row from this partition
-            ArchivedUnsortedQuery::Delete { key } => self.delete(&meta, key).await,
+            UnsortedQuery::Delete { key } => self.delete(meta, key).await,
             // update a row in this partition
-            ArchivedUnsortedQuery::Update(update) => self.update(&meta, update).await,
-        };
-        match handled {
-            HandledKinds::Success {
-                client_id,
-                query_id,
-                response,
-            } => Some((client_id, query_id, response)),
-            HandledKinds::Pending { action, pos } => {
-                // add this action to our pending queue
-                self.pending.add(meta, pos, action);
-                // return none since we have pending intent commits still
-                None
-            }
-            HandledKinds::NeedsLoad(partition_key) => {
-                // if we need to load this then add this query to a map of queries
-                // are blocked on patitions being loaded from disk
-                // get an entry to our partitions blocked queries
-                let entry = self.blocked.entry(partition_key).or_default();
-                // add our blocked query for this partitions blocked query list
-                entry.push((meta, archived));
-                // return none since we need a partition to be loaded
-                None
-            }
+            UnsortedQuery::Update(update) => self.update(meta, update).await,
         }
+        //match handled {
+        //    HandledKinds::Success {
+        //        client_id,
+        //        query_id,
+        //        response,
+        //    } => Some((client_id, query_id, response)),
+        //    HandledKinds::Pending { action, pos } => {
+        //        // add this action to our pending queue
+        //        self.pending.add(meta, pos, action);
+        //        // return none since we have pending intent commits still
+        //        None
+        //    }
+        //    HandledKinds::NeedsLoad(partition_key) => {
+        //        // if we need to load this then add this query to a map of queries
+        //        // are blocked on patitions being loaded from disk
+        //        // get an entry to our partitions blocked queries
+        //        let entry = self.blocked.entry(partition_key).or_default();
+        //        // add our blocked query for this partitions blocked query list
+        //        entry.push((meta, ));
+        //        // return none since we need a partition to be loaded
+        //        None
+        //    }
+        //}
     }
 
     /// Insert some data into a partition in this shards table
@@ -351,18 +349,12 @@ where
     /// * `meta` - The metadata about this insert query
     /// * `row` - The row to insert
     #[instrument(name = "PersistentTable::insert", skip_all)]
-    async fn insert(
-        &mut self,
-        accessed: &R::Archived,
-        //) -> Option<(Uuid, Uuid, Response<R>)>
-    ) -> HandledKinds<R>
+    async fn insert(&mut self, meta: QueryMetadata, row: R) -> Option<(Uuid, Uuid, Response<R>)>
     where
         for<'a> <<R as ShoalUnsortedTable>::Update as Archive>::Archived: CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
         >,
     {
-        // deserialize our row
-        let row = R::deserialize(&accessed).unwrap();
         // get our partition key
         let key = row.get_partition_key();
         // wrap our row in an insert intent
@@ -389,6 +381,8 @@ where
             Some(old_row) => new_size.cast_signed() - old_row.size().cast_signed(),
             None => new_size.cast_signed(),
         };
+        // add this action to our pending queue
+        self.pending.add(meta, pos, ResponseAction::Insert(true));
         // do a saturating add on our memory usage
         let new_size = self.memory_usage.borrow().saturating_add_signed(size_diff);
         // adjust our total shards memory usage
@@ -396,10 +390,7 @@ where
         // remove this partition from our lru cache as its no longer evictable
         self.lru.borrow_mut().pop(&(self.table_name, key));
         // An insert never returns anything immediately
-        HandledKinds::Pending {
-            action: ResponseAction::Insert(true),
-            pos,
-        }
+        None
     }
 
     /// Get some rows from some partitions
@@ -412,23 +403,20 @@ where
     #[instrument(name = "PersistentTable::get", skip_all)]
     async fn get(
         &mut self,
-        meta: &QueryMetadata,
-        get: &ArchivedUnsortedGet<R>,
-        //) -> Option<(Uuid, Uuid, Response<R>)> {
-    ) -> HandledKinds<R> {
+        meta: QueryMetadata,
+        get: UnsortedGet<R>,
+    ) -> Option<(Uuid, Uuid, Response<R>)> {
         // build a vec for the data we found
         let mut data = Vec::new();
-        // get our partition key in its native form
-        let native_key = get.partition_key.to_native();
         // try to get the partition for this key
-        match self.partitions.get(&native_key) {
+        match self.partitions.get(&get.partition_key) {
             Some(partition) => {
                 // get this partitions data
                 let action = if partition.get(&get, &mut data) {
                     // mark this partition as recently used in our lru cache
                     self.lru
                         .borrow_mut()
-                        .promote(&(self.table_name, native_key));
+                        .promote(&(self.table_name, get.partition_key));
                     // this query found data
                     ResponseAction::Get(Some(data))
                 } else {
@@ -442,25 +430,26 @@ where
                     data: action,
                     end: meta.end,
                 };
-                //Some((meta.client, meta.id, response))
-                HandledKinds::Success {
-                    client_id: meta.client,
-                    query_id: meta.id,
-                    response,
-                }
+                Some((meta.client, meta.id, response))
             }
             // this partition isn't loaded so lets try and load it from disk
             None => {
                 // try to load this partition from disk if it exists
                 let will_load = self
                     .storage
-                    .load_partition(self.table_name, native_key, &self.loader_tx)
+                    .load_partition(self.table_name, get.partition_key, &self.loader_tx)
                     .await
                     .unwrap();
                 // if we aren't going to load data then return that this partition doesn't exist
                 if will_load {
+                    // if we need to load this then add this query to a map of queries
+                    // are blocked on patitions being loaded from disk
+                    // get an entry to our partitions blocked queries
+                    let entry = self.blocked.entry(get.partition_key).or_default();
+                    // add our blocked query for this partitions blocked query list
+                    entry.push((meta, UnsortedQuery::Get(get)));
                     // return None since we don't yet have a response for this query
-                    HandledKinds::NeedsLoad(native_key)
+                    None
                 } else {
                     // cast this action to a response
                     let response = Response {
@@ -470,12 +459,7 @@ where
                         end: meta.end,
                     };
                     // the requested partition doesn't exist
-                    //Some((meta.client, meta.id, response))
-                    HandledKinds::Success {
-                        client_id: meta.client,
-                        query_id: meta.id,
-                        response,
-                    }
+                    Some((meta.client, meta.id, response))
                 }
             }
         }
@@ -489,29 +473,29 @@ where
     /// * `key` - The key to the partition to dlete data from
     /// * `sort` - The sort key to delete
     #[instrument(name = "PersistentTable::delete", skip_all)]
-    async fn delete(&mut self, meta: &QueryMetadata, key: &u64_le) -> HandledKinds<R>
+    async fn delete(&mut self, meta: QueryMetadata, key: u64) -> Option<(Uuid, Uuid, Response<R>)>
     where
         for<'a> <<R as ShoalUnsortedTable>::Update as Archive>::Archived: CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
         >,
     {
-        // convert our key to its native format
-        let native_key = key.to_native();
         // remove this partition
-        match self.partitions.remove(&native_key) {
+        match self.partitions.remove(&key) {
             Some(old) => {
                 // wrap our row in an insert intent
-                let intent = UnsortedIntents::<R>::delete(native_key);
+                let intent = UnsortedIntents::<R>::delete(key);
                 // wite this delete to our intent log
                 let pos = self.storage.commit(&intent).await.unwrap();
                 // build the pending action to store
                 let action = ResponseAction::Delete(true);
+                // add this action to our pending queue
+                self.pending.add(meta, pos, action);
                 // adjust this shards total memory usage
                 *self.memory_usage.borrow_mut() = old.size();
                 // remove this partition from our lru cache as its no longer evictable
-                self.lru.borrow_mut().pop(&(self.table_name, native_key));
+                self.lru.borrow_mut().pop(&(self.table_name, key));
                 // wait for this delete to get flushed to disk
-                HandledKinds::Pending { action, pos }
+                None
             }
             None => {
                 // cast this action to a response
@@ -522,11 +506,7 @@ where
                     end: meta.end,
                 };
                 // theres nothing to delete so return our response
-                HandledKinds::Success {
-                    client_id: meta.client,
-                    query_id: meta.id,
-                    response,
-                }
+                Some((meta.client, meta.id, response))
             }
         }
     }
@@ -540,26 +520,17 @@ where
     #[instrument(name = "PersistentTable::update", skip_all)]
     async fn update(
         &mut self,
-        meta: &QueryMetadata,
-        update: &ArchivedUnsortedUpdate<R>,
-        //) -> Option<(Uuid, Uuid, Response<R>)>
-    ) -> HandledKinds<R>
+        meta: QueryMetadata,
+        update: UnsortedUpdate<R>,
+    ) -> Option<(Uuid, Uuid, Response<R>)>
     where
         for<'a> <<R as ShoalUnsortedTable>::Update as Archive>::Archived: CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
         >,
-        <<R as ShoalUnsortedTable>::Update as Archive>::Archived: rkyv::Deserialize<
-            <R as ShoalUnsortedTable>::Update,
-            Strategy<rkyv::de::Pool, rkyv::rancor::Error>,
-        >,
     {
-        // convert our partition key to its native format
-        let partition_key = update.partition_key.to_native();
         // get this rows partition
-        match self.partitions.get_mut(&partition_key) {
+        match self.partitions.get_mut(&update.partition_key) {
             Some(partition) => {
-                // deserialize our row
-                let update = UnsortedUpdate::<R>::deserialize(update).unwrap();
                 // update this paritions data
                 if let Some(loaded) = partition.update(&update) {
                     // replace our accessible partition with our loaded one
@@ -576,10 +547,12 @@ where
                 let pos = self.storage.commit(&intent).await.unwrap();
                 // we updated some data
                 let action = ResponseAction::Update(true);
+                // add this action to our pending queue
+                self.pending.add(meta, pos, action);
                 // remove this partition from our lru cache as its no longer evictable
                 self.lru.borrow_mut().pop(&(self.table_name, key));
                 // wait for this delete to get flushed to disk
-                HandledKinds::Pending { action, pos }
+                None
             }
             None => {
                 // we didn't find any data to update
@@ -592,11 +565,7 @@ where
                     end: meta.end,
                 };
                 // theres nothing to update so return our response
-                HandledKinds::Success {
-                    client_id: meta.client,
-                    query_id: meta.id,
-                    response,
-                }
+                Some((meta.client, meta.id, response))
             }
         }
     }

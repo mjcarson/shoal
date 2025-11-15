@@ -72,7 +72,7 @@ impl ShardInfo {
 
 pub struct MeshRelay<S: ShoalDatabase> {
     /// The glommio channel to receive messages on
-    mesh_rx: Receivers<MeshMsg>,
+    mesh_rx: Receivers<MeshMsg<S>>,
     /// The channel to send shard local messages on
     shard_local_tx: AsyncSender<ShardMsg<S>>,
 }
@@ -84,7 +84,7 @@ impl<S: ShoalDatabase> MeshRelay<S> {
     ///
     /// * `mesh_rx` - The glommio channel to receive mesh messages on
     /// * `node_local_tx` - The kanal channel to send shard local messages on
-    pub fn new(mesh_rx: Receivers<MeshMsg>, shard_local_tx: &AsyncSender<ShardMsg<S>>) -> Self {
+    pub fn new(mesh_rx: Receivers<MeshMsg<S>>, shard_local_tx: &AsyncSender<ShardMsg<S>>) -> Self {
         MeshRelay {
             mesh_rx,
             shard_local_tx: shard_local_tx.clone(),
@@ -98,9 +98,9 @@ impl<S: ShoalDatabase> MeshRelay<S> {
             // handle this message
             match msg {
                 MeshMsg::Join(_) => panic!("Join on shard?"),
-                MeshMsg::Query { meta, archived } => self
+                MeshMsg::Query { meta, query } => self
                     .shard_local_tx
-                    .send(ShardMsg::ArchivedQuery { meta, archived })
+                    .send(ShardMsg::Query { meta, query })
                     .await
                     .unwrap(),
                 MeshMsg::NewClient { client, client_tx } => {
@@ -134,7 +134,7 @@ pub struct Shard<S: ShoalDatabase> {
     /// A map of channels to send responses to our client relays over
     client_map: HashMap<Uuid, AsyncSender<(Uuid, AlignedVec)>>,
     /// The glommio channel to send messages on
-    local_tx: Senders<MeshMsg>,
+    local_tx: Senders<MeshMsg<S>>,
     /// The channel to send shard local messages on
     shard_local_tx: AsyncSender<ShardMsg<S>>,
     /// The channel to Receive shard local messages on
@@ -168,11 +168,7 @@ impl<S: ShoalDatabase> Shard<S> {
     ///
     /// * `addr` - The address to bind our udp socket too
     #[instrument(name = "Shard::new", skip_all, err(Debug))]
-    pub async fn new(
-        conf: &Conf,
-        local_tx: Senders<MeshMsg>,
-        //local_rx: Receivers<MeshMsg<S>>,
-    ) -> Result<Self, ServerError> {
+    pub async fn new(conf: &Conf, local_tx: Senders<MeshMsg<S>>) -> Result<Self, ServerError> {
         // build our shard info
         let info = ShardInfo::new(local_tx.peer_id());
         // create names for our high and low priority task queues
@@ -248,7 +244,7 @@ impl<S: ShoalDatabase> Shard<S> {
     /// This will only fail if the coordinator has not joined the local mesh.
     #[allow(clippy::future_not_send)]
     #[instrument(name = "Shard::init", skip_all, err(Debug))]
-    async fn init(&mut self, mesh_rx: Receivers<MeshMsg>) -> Result<(), ServerError> {
+    async fn init(&mut self, mesh_rx: Receivers<MeshMsg<S>>) -> Result<(), ServerError> {
         // build our join message
         let join_msg = MeshMsg::Join(self.info.clone());
         // send a message to our coordinator that we are ready to join
@@ -304,12 +300,11 @@ impl<S: ShoalDatabase> Shard<S> {
     /// `meta` - The metadata about the query to handle
     /// `query` - The query to handle
     #[allow(clippy::future_not_send)]
-    #[instrument(name = "Shard::handle_query", skip(self, archived))]
+    #[instrument(name = "Shard::handle_query", skip(self, query))]
     async fn handle_query(
         &mut self,
         meta: QueryMetadata,
-        //query: <S::ClientType as QuerySupport>::QueryKinds,
-        archived: Bytes,
+        query: <S::ClientType as QuerySupport>::QueryKinds,
     ) -> Result<(), ServerError>
     where
         for<'a> <<<S as ShoalDatabase>::ClientType as QuerySupport>::QueryKinds as Archive>::Archived:
@@ -318,7 +313,7 @@ impl<S: ShoalDatabase> Shard<S> {
             >,
     {
         // try to handle this query
-        if let Some((addr, query_id, response)) = self.tables.handle(meta, archived).await {
+        if let Some((addr, query_id, response)) = self.tables.handle(meta, query).await {
             // send this response back to the client
             self.reply(addr, query_id, response).await?;
         }
@@ -385,7 +380,7 @@ impl<S: ShoalDatabase> Shard<S> {
     ///
     /// This wil return an error if a message cannot be sent to a coordinator or if a query fails
     #[allow(clippy::future_not_send)]
-    pub async fn start<'a>(mut self, mesh_rx: Receivers<MeshMsg>) -> Result<(), ServerError>
+    pub async fn start<'a>(mut self, mesh_rx: Receivers<MeshMsg<S>>) -> Result<(), ServerError>
     where
         for<'b> <<<S as ShoalDatabase>::ClientType as QuerySupport>::QueryKinds as Archive>::Archived:
             CheckBytes<
@@ -409,9 +404,7 @@ impl<S: ShoalDatabase> Shard<S> {
                     }
                 }
                 // handle this query from the user
-                ShardMsg::ArchivedQuery { meta, archived } => {
-                    self.handle_query(meta, archived).await?
-                }
+                ShardMsg::Query { meta, query } => self.handle_query(meta, query).await?,
                 // load this partition from disk
                 ShardMsg::Partition(loaded) => {
                     self.tables
@@ -457,7 +450,7 @@ impl<S: ShoalDatabase> Shard<S> {
 pub fn start<S: ShoalDatabase>(
     conf: Conf,
     cpus: CpuSet,
-    mesh: MeshBuilder<MeshMsg, Full>,
+    mesh: MeshBuilder<MeshMsg<S>, Full>,
 ) -> Result<PoolThreadHandles<Result<(), ServerError>>, ServerError>
 where
     for<'a> <<<S as ShoalDatabase>::ClientType as QuerySupport>::QueryKinds as Archive>::Archived:

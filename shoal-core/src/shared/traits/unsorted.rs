@@ -22,7 +22,7 @@ pub trait ShoalUnsortedTable:
     ///
     /// * `filters` - The filters to apply
     /// * `row` - The row to filter
-    fn is_filtered(filter: &<Self::Filters as Archive>::Archived, row: &Self) -> bool;
+    fn is_filtered(filter: &Self::Filters, row: &Self) -> bool;
 
     /// Determine if a row should be filtered
     ///
@@ -31,7 +31,7 @@ pub trait ShoalUnsortedTable:
     /// * `filters` - The filters to apply
     /// * `row` - The row to filter
     fn is_filtered_archived(
-        filter: &<Self::Filters as Archive>::Archived,
+        filter: &Self::Filters,
         row: &<Self as rkyv::Archive>::Archived,
     ) -> bool;
 

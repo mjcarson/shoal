@@ -152,7 +152,6 @@ where
         &mut self,
         client: Uuid,
         queries: Queries<S::ClientType>,
-        archived: Bytes,
     ) -> Result<(), ServerError> {
         // initialize a vec to store the shards we find
         let mut found = Vec::with_capacity(3);
@@ -176,7 +175,6 @@ where
                         let msg = MeshMsg::Query {
                             meta,
                             query: kind.clone(),
-                            archived: archived.clone(),
                         };
                         // send our query mesh message to the right shard
                         self.mesh_tx.send_to(*id, msg).await.unwrap();
@@ -199,10 +197,8 @@ where
         let archived = Queries::access(&data).unwrap();
         // deserialize our queries
         let queries = <Queries<S::ClientType> as RkyvSupport>::deserialize(archived).unwrap();
-        // freeze our bytes
-        let archived = data.freeze();
         // send each query to the correct shard
-        self.send_to_shard(peer, queries, archived).await.unwrap();
+        self.send_to_shard(peer, queries).await.unwrap();
     }
 
     /// Handle a shutdown command

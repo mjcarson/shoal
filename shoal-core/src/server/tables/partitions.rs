@@ -82,9 +82,9 @@ impl<R: ShoalUnsortedTable> UnsortedPartition<R> {
     ///
     /// * `params` - The parameters to use to get the rows
     /// * `found` - The vector to push the data to return
-    pub fn get(&self, params: &ArchivedUnsortedGet<R>, found: &mut Vec<R>) -> bool {
+    pub fn get(&self, params: &UnsortedGet<R>, found: &mut Vec<R>) -> bool {
         // skip any rows that don't match our filter
-        if let ArchivedOption::Some(filter) = &params.filters {
+        if let Some(filter) = &params.filters {
             // check if this row should be filtered out
             if !R::is_filtered(filter, &self.row) {
                 // skip this row since it doesn't match our filteri
@@ -119,7 +119,7 @@ where
     ///
     /// * `params` - The parameters to use to get the rows
     /// * `found` - The vector to push the data to return
-    pub fn get(&self, params: &ArchivedUnsortedGet<R>, found: &mut Vec<R>) -> bool {
+    pub fn get(&self, params: &UnsortedGet<R>, found: &mut Vec<R>) -> bool {
         // if this row is loaded then use the get on the row
         match self {
             MaybeLoaded::Loaded { partition, .. } => partition.get(params, found),
@@ -145,7 +145,7 @@ where
                     }
                 };
                 // skip any rows that don't match our filter
-                if let ArchivedOption::Some(filter) = &params.filters {
+                if let Some(filter) = &params.filters {
                     // check if this row should be filtered out
                     if !R::is_filtered_archived(filter, &access.row) {
                         // skip this row since it doesn't match our filteri
