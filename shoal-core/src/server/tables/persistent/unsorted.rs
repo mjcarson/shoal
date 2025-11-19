@@ -271,9 +271,16 @@ where
             }
         }
         // get the queries that were blocked on this partition
-        self.blocked
+        let unblocked = self
+            .blocked
             .remove(&loaded.partition_id)
-            .map(|unblocked| (unblocked, self.generation))
+            .map(|unblocked| (unblocked, self.generation));
+        if let Some((unblocked, _)) = &unblocked {
+            for (meta, _) in unblocked {
+                println!("S3: UNBLOCKED: {}", meta.index);
+            }
+        }
+        unblocked
     }
 
     /// Cast and handle a serialized query
@@ -306,6 +313,7 @@ where
             Strategy<rkyv::de::Pool, rkyv::rancor::Error>,
         >,
     {
+        println!("S2: HANDLE -> {}", meta.index);
         // execute the correct query type
         match query {
             // insert a row into this partition

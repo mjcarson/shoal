@@ -1,7 +1,9 @@
 //! A shoal example on TMDB data
 
 use shoal::bencher::{BenchWorker, Bencher};
-use shoal_core::client::{Shoal, ShoalQueryStream, ShoalResponse, ShoalResultStream};
+use shoal_core::client::{
+    Shoal, ShoalQueryStream, ShoalResponse, ShoalResultStream, ShoalUnorderedResultStream,
+};
 use shoal_core::server::messages::{QueryMetadata, ShardMsg};
 use shoal_core::server::ring::Ring;
 use shoal_core::server::{Conf, ServerError};
@@ -402,28 +404,39 @@ pub struct Tmdb {
     pub movie: PersistentUnsortedTable<Movie, FileSystem, TmdbTableNames>,
 }
 
-pub enum MovieMsg<Q: QuerySupport> {
+pub enum MovieMsg {
     /// Insert a movie into shoal
     Insert(Movie),
     /// Verify a movies data in shoal
     Verify(Movie),
+    /// Shutdown this worker
+    Shutdown,
+}
+
+/// The messages from a response streamer to a worker
+pub enum WorkerMsg<Q: QuerySupport> {
     /// A Response from a shoal query
     Response(ShoalResponse<Q>),
-    /// Shutdown this worker
-    Shutdown(Vec<u8>),
+    /// All responses have been received for this worker
+    AllResponsesReceived,
 }
 
 pub async fn response_streamer(
-    movies_tx: AsyncSender<MovieMsg<TmdbClient>>,
-    mut response_stream: ShoalResultStream<TmdbClient>,
+    movies_tx: AsyncSender<WorkerMsg<TmdbClient>>,
+    mut response_stream: ShoalUnorderedResultStream<TmdbClient>,
 ) {
     // keep getting responses until this stream closes
     while let Some(response) = response_stream.next().await.unwrap() {
         // wrap our response in a MovieMsg
-        let wrapped = MovieMsg::Response(response);
+        let wrapped = WorkerMsg::Response(response);
         // send this response to our main worker
         movies_tx.send(wrapped).await.unwrap();
     }
+    // All responses have been recieved for our worker
+    movies_tx
+        .send(WorkerMsg::AllResponsesReceived)
+        .await
+        .unwrap();
 }
 
 pub struct MovieWorker {
@@ -432,17 +445,17 @@ pub struct MovieWorker {
     /// A shoal client
     shoal: Arc<Shoal<TmdbClient>>,
     /// The channel to add movies too
-    movies_tx: AsyncSender<MovieMsg<TmdbClient>>,
+    movies_tx: AsyncSender<MovieMsg>,
     /// The channel to receive movies on
-    movies_rx: AsyncReceiver<MovieMsg<TmdbClient>>,
+    movies_rx: AsyncReceiver<MovieMsg>,
     /// Buffered queries to send to shoal
     buffer: Queries<TmdbClient>,
     /// The benchmark worker for this worker
     bencher: BenchWorker,
     /// A map of timers for benchmarking
-    timers: HashMap<u64, Instant>,
-    /// Whether this worker has already reemitted the shutdown order or not
-    reemitted_shutdown: bool,
+    timers: HashMap<usize, Instant>,
+    /// Whether this worker should shutdown once all responses are finished processing
+    shutdown: bool,
 }
 
 impl MovieWorker {
@@ -456,8 +469,8 @@ impl MovieWorker {
     pub async fn new(
         id: u8,
         shoal: Arc<Shoal<TmdbClient>>,
-        movies_tx: &AsyncSender<MovieMsg<TmdbClient>>,
-        movies_rx: &AsyncReceiver<MovieMsg<TmdbClient>>,
+        movies_tx: &AsyncSender<MovieMsg>,
+        movies_rx: &AsyncReceiver<MovieMsg>,
         bencher: BenchWorker,
     ) -> Self {
         // get a default query object
@@ -471,7 +484,7 @@ impl MovieWorker {
             buffer,
             bencher,
             timers: HashMap::with_capacity(10000),
-            reemitted_shutdown: false,
+            shutdown: false,
         }
     }
 
@@ -630,14 +643,65 @@ impl MovieWorker {
     //    self.bencher
     //}
 
+    fn verify_movie(&mut self, response: ShoalResponse<TmdbClient>, verify: &mut u64) {
+        // get this responses index
+        let index = response.get_index();
+        // get and add our get timer
+        if let Some(timer) = self.timers.remove(&index) {
+            println!("S7: TIMER {index} -> {:?}", timer.elapsed());
+            // add this timer to our benchmark
+            self.bencher.add_timer(timer);
+        }
+        //match response
+        if let Ok(Some(_movie)) = response.access::<Movie>() {
+            *verify += 1;
+            //println!("got: {}", movie[0].title);
+        }
+    }
+
     pub async fn stream_start(mut self) -> BenchWorker {
-        println!("STARTING: {}", self.id);
         // get a new stream to send results over
-        let (mut stream_tx, stream_rx) = self.shoal.stream().unwrap();
+        let (mut stream_tx, stream_rx) = self.shoal.stream_unordered().unwrap();
+        // create a queue just for this worker
+        let (worker_tx, worker_rx) = kanal::unbounded_async();
         // stream any results to our workers message queue
-        let handle = tokio::spawn(response_streamer(self.movies_tx.clone(), stream_rx));
+        let handle = tokio::spawn(response_streamer(worker_tx, stream_rx));
+        let mut insert = 0;
+        let mut verify_sent = 0;
+        let mut verified = 0;
+        let mut in_flight = 0;
         // keep looping until we have no more movies to send
-        loop {
+        'outer: loop {
+            // first check for any messages from our response streamer
+            loop {
+                match worker_rx.try_recv().unwrap() {
+                    Some(WorkerMsg::Response(response)) => {
+                        // decrement our in_flight count
+                        in_flight -= 1;
+                        self.verify_movie(response, &mut verified)
+                    }
+                    // all responses should have been processed so break
+                    Some(WorkerMsg::AllResponsesReceived) => break 'outer,
+                    // nothing from our response streamer yet
+                    None => break,
+                }
+            }
+            // if we have more then 10 in flight requests then wait for one to complete
+            if in_flight >= 10 {
+                // wait for a response from any currently in flight_queries
+                match worker_rx.recv().await.unwrap() {
+                    WorkerMsg::Response(response) => {
+                        // decrement our in_flight count
+                        in_flight -= 1;
+                        // verify this movie
+                        self.verify_movie(response, &mut verified);
+                        // restart our loop from the top
+                        continue;
+                    }
+                    // all responses should have been processed so break
+                    WorkerMsg::AllResponsesReceived => break 'outer,
+                }
+            }
             // wait for a intent log compaction job
             let job = self.movies_rx.recv().await.unwrap();
             // handle this movie
@@ -647,43 +711,16 @@ impl MovieWorker {
                     //self.timers.insert(movie.id, Instant::now());
                     // insert this movie into shoal into our buffer
                     self.buffer.add_mut(movie);
+                    insert += 1;
                 }
                 MovieMsg::Verify(movie) => {
-                    // add a timer for this movie
-                    self.timers.insert(movie.id, Instant::now());
+                    verify_sent += 1;
                     // add the query to get this movie to our query buffer
-                    self.buffer.add_mut(MovieGet::new(movie.id))
+                    self.buffer.add_mut(MovieGet::new(movie.id));
                 }
-                MovieMsg::Response(response) => {
-                    //match response
-                    if let Ok(Some(movie)) = response.access::<Movie>() {
-                        // get and add our get timer
-                        if let Some(timer) = self.timers.remove(&movie[0].id.to_native()) {
-                            // add this timer to our benchmark
-                            self.bencher.add_timer(timer);
-                        }
-                        //println!("got: {}", movie[0].title);
-                    }
-                    //    // this query will only ever return a single row
-                    //    match stream.next_typed_first::<Movie>().await.unwrap() {
-                    //        Some(Some(movie_data)) => {
-                    //            // make sure this movies data matches
-                    //            if movie != movie_data {
-                    //                panic!("{} has invalid data - {movie_data:#?}", movie.title);
-                    //            }
-                    //            //println!("verified - {}", movie.title);
-                    //        }
-                    //        _ => println!("{} is missing", movie.title),
-                    //    }
-                    //    // stop our command benchmark for verifying
-                    //    self.bencher.instance_stop();
-                }
-                // all responses should have been processed so break
-                MovieMsg::AllResponsesReceived => break,
                 // all commands have been sent so this worker can shutdown once everything
                 // has been processed
-                MovieMsg::Shutdown(mut received) => {
-                    println!("SHUTDOWN {} -> {received:?}", self.id);
+                MovieMsg::Shutdown => {
                     // check if we still have any buffered queries
                     if !self.buffer.is_empty() {
                         // swap our full query buffer with a new one
@@ -691,92 +728,49 @@ impl MovieWorker {
                         // send any remaining buffered queries
                         stream_tx.send(queries).await.unwrap();
                     }
-                    // add ourselves to the shutdown received vec if we aren't already in it
-                    if !received.contains(&self.id) {
-                        // add ourselves to shutdown recieved list
-                        received.push(self.id);
-                    }
-                    // if the shutdown recieve list is full then close our query stream and stop reemitting the shutdown command
-                    if received.len() == 5 {
-                        println!(
-                            "SHUTDOWN {} -> break {received:?} @ {}",
-                            self.id,
-                            received.len()
-                        );
-                        //stream_tx.close().await.unwrap();
-                        break;
-                    }
-                    println!("SHUTDOWN {} -> reemit {received:?}", self.id);
-                    // reemit our shutdown command until all workers have recieved it
-                    self.movies_tx
-                        .send(MovieMsg::Shutdown(received))
-                        .await
-                        .unwrap()
+                    // emit this shutdown order for our other workers
+                    self.movies_tx.send(MovieMsg::Shutdown).await.unwrap();
+                    // shutdown our query stream
+                    stream_tx.close().await.unwrap();
+                    // we only need to process worker responses now
+                    break;
                 }
             }
-            // if we have 10 movies to insert then send them to shoal
+            // if we have 10 movies to insert or get then send them to shoal
             if self.buffer.len() > 10 {
                 // swap our full query buffer with a new one
                 let queries = std::mem::take(&mut self.buffer);
+                // get the current time
+                let timer = Instant::now();
+                // get our current query index
+                let mut index = stream_tx.base_index;
+                // setup timers for all of our movies
+                for _ in &queries.queries {
+                    println!("{in_flight} ADDING TIMER {index} ");
+                    // add a timer for this movie
+                    self.timers.insert(index, timer);
+                    index += 1;
+                }
+                // increment our in flight query count
+                in_flight += queries.queries.len();
                 // send our buffered queries
                 stream_tx.send(queries).await.unwrap();
             }
         }
-        // we should only have responses to handle now so panic if we get any others
+        // keep processing our worker responses until there are no more
         loop {
-            println!("PRE: {}", self.id);
-            // wait for a intent log compaction job
-            let job = self.movies_rx.recv().await.unwrap();
-            println!("POST: {}", self.id);
-            // handle this movie
-            match job {
-                MovieMsg::Insert(_) => panic!("insert?"),
-                MovieMsg::Verify(_) => panic!("verify?"),
-                MovieMsg::Response(response) => {
-                    //match response
-                    if let Ok(Some(movie)) = response.access::<Movie>() {
-                        // get and add our get timer
-                        if let Some(timer) = self.timers.remove(&movie[0].id.to_native()) {
-                            // add this timer to our benchmark
-                            self.bencher.add_timer(timer);
-                        }
-                        //println!("got: {}", movie[0].title);
-                    }
-                }
+            // first check for any messages from our response streamer
+            match worker_rx.recv().await.unwrap() {
+                // handle this response
+                WorkerMsg::Response(response) => self.verify_movie(response, &mut verified),
                 // all responses should have been processed so break
-                MovieMsg::AllResponsesReceived => break,
-                // all commands have been sent so this worker can shutdown once everything
-                // has been processed
-                MovieMsg::Shutdown(mut received) => {
-                    // check if we still have any buffered queries
-                    if !self.buffer.is_empty() {
-                        // swap our full query buffer with a new one
-                        let queries = std::mem::take(&mut self.buffer);
-                        // send any remaining buffered queries
-                        stream_tx.send(queries).await.unwrap();
-                    }
-                    // add ourselves to the shutdown received vec if we aren't already in it
-                    if !received.contains(&self.id) {
-                        // add ourselves to shutdown recieved list
-                        received.push(self.id);
-                    }
-                    // if the shutdown recieve list is full then close our query stream and stop reemitting the shutdown command
-                    if received.len() == 5 {
-                        //stream_tx.close().await.unwrap();
-                        continue;
-                    }
-                    // reemit our shutdown command until all workers have recieved it
-                    self.movies_tx
-                        .send(MovieMsg::Shutdown(received))
-                        .await
-                        .unwrap()
-                }
+                WorkerMsg::AllResponsesReceived => break,
             }
         }
-        println!("WAITING FOR RESP: {}", self.id);
         // loop and just handle responses since our
         // wait for our response streamer to exit
         handle.await.unwrap();
+        println!("{} -> {insert} & {verified} / {verify_sent}", self.id);
         // return our bench worker
         self.bencher
     }
@@ -926,9 +920,9 @@ pub struct MovieController {
     /// A shoal client
     shoal: Arc<Shoal<TmdbClient>>,
     /// The channel to add movies too
-    movies_tx: AsyncSender<MovieMsg<TmdbClient>>,
+    movies_tx: AsyncSender<MovieMsg>,
     /// The channel to receive movies on
-    movies_rx: AsyncReceiver<MovieMsg<TmdbClient>>,
+    movies_rx: AsyncReceiver<MovieMsg>,
     /// Our respons streamer tasks
     response_streamers: JoinSet<()>,
     /// The tasks for this controllers workers
@@ -983,8 +977,8 @@ impl MovieController {
         let mut reader = csv_async::AsyncDeserializer::from_reader(file);
         // set the type we are going to deserialize
         let mut typed_reader = reader.deserialize::<Movie>();
-        ////// only upload a limited number of movies
-        //let mut cap = 50;
+        // only upload a limited number of movies
+        //let mut cap = 100;
         // skip any movies we fail to deserialize
         while let Some(Ok(movie)) = typed_reader.next().await {
             // add our movie to our channel
@@ -1004,8 +998,8 @@ impl MovieController {
         let mut reader = csv_async::AsyncDeserializer::from_reader(file);
         // set the type we are going to deserialize
         let mut typed_reader = reader.deserialize::<Movie>();
-        ////// only upload a limited number of movies
-        //let mut cap = 50;
+        // only upload a limited number of movies
+        //let mut cap = 100;
         //let mut orig_total = 0;
         // skip any movies we fail to deserialize
         while let Some(Ok(movie)) = typed_reader.next().await {
@@ -1029,27 +1023,25 @@ impl MovieController {
             // create a new bencher
             let mut bencher = Bencher::new(".benchmark", 10000);
             // spawn 5 workers
-            self.spawn(5, &bencher).await;
+            self.spawn(1, &bencher).await;
             // upload our tmdb data
-            self.upload(&path).await;
-            //// emit that workers should shutdown once all movie info has been streamed to shoal
+            //self.upload(&path).await;
+            ////// emit that workers should shutdown once all movie info has been streamed to shoal
             //self.movies_tx.send(MovieMsg::Shutdown).await.unwrap();
-            ///// swap our task with with a default one
+            /////// swap our task with with a default one
             //let tasks = std::mem::take(&mut self.tasks);
-            //// wait for all workers to complete
+            ////// wait for all workers to complete
             //let insert_bench_workers = tasks.join_all().await;
-            //// pop the last shutdown message
+            ////// pop the last shutdown message
             //self.movies_rx.recv().await.unwrap();
             println!("--------------");
-            //// spawn 5 workers
-            //self.spawn(5, &bencher).await;
+            ////// spawn 5 workers
+            //self.spawn(1, &bencher).await;
             // verify our tmdb data
             self.verify(&path).await;
+            println!("DONE?");
             // emit that workers should shutdown once all movie info has been streamed to shoal
-            self.movies_tx
-                .send(MovieMsg::Shutdown(Vec::with_capacity(5)))
-                .await
-                .unwrap();
+            self.movies_tx.send(MovieMsg::Shutdown).await.unwrap();
             // swap our task with with a default one
             let tasks = std::mem::take(&mut self.tasks);
             // wait for all workers to complete

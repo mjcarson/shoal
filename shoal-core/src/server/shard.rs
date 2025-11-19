@@ -312,8 +312,10 @@ impl<S: ShoalDatabase> Shard<S> {
                 Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
             >,
     {
+        let index = meta.index;
         // try to handle this query
         if let Some((addr, query_id, response)) = self.tables.handle(meta, query).await {
+            println!("S4:{}: REPLY -> {index}", self.info.name);
             // send this response back to the client
             self.reply(addr, query_id, response).await?;
         }
@@ -429,12 +431,14 @@ impl<S: ShoalDatabase> Shard<S> {
             }
             // if we have no more messages then flush our current queries to disk
             if self.shard_local_rx.is_empty() {
+                println!("{}: flush now?", self.info.name);
                 self.tables.flush().await?;
             }
             // check for any flushed response to handle
             self.handle_flushed().await?;
             // check if we need to evict any data
             if *self.memory_usage.borrow() as u64 > self.conf.resources.memory {
+                println!("EVICT?: {}", self.info.name);
                 // try to evict our least recently used data
                 self.evict_data().await?;
             }

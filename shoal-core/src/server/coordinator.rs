@@ -176,6 +176,7 @@ where
                             meta,
                             query: kind.clone(),
                         };
+                        println!("S1: COORD -> STS {index} @ {id}");
                         // send our query mesh message to the right shard
                         self.mesh_tx.send_to(*id, msg).await.unwrap();
                     }

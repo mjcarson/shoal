@@ -13,7 +13,7 @@ use rkyv::validation::shared::SharedValidator;
 use rkyv::validation::Validator;
 use rkyv::vec::ArchivedVec;
 use rkyv::Archive;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::IoSlice;
 use std::marker::PhantomData;
 use std::net::SocketAddr;
@@ -240,6 +240,39 @@ impl<S: QuerySupport> Shoal<S> {
             unbounded_queries: true,
             pending: BTreeMap::default(),
             phantom: PhantomData,
+        };
+        // wraap our result in a stream that supports queries and results
+        let query_stream = ShoalQueryStream {
+            id,
+            queries_sent: 0,
+            pool: self.pool.clone(),
+            response_tx,
+            data_kind: PhantomData,
+            base_index: 0,
+        };
+        Ok((query_stream, result_stream))
+    }
+
+    /// Create a new stream to send and receive results on
+    pub fn stream_unordered(
+        &self,
+    ) -> Result<(ShoalQueryStream<S>, ShoalUnorderedResultStream<S>), Errors> {
+        // generate a random ID to override all of the ids used in our queries
+        let mut id = Uuid::new_v4();
+        // start tracking this response
+        let (response_tx, response_rx) = self.track_response(&mut id)?;
+        // build a new shoal result stream
+        let result_stream = ShoalUnorderedResultStream {
+            id,
+            response_tx: Some(response_tx.clone()),
+            response_rx: Some(response_rx),
+            channel_map: self.channel_map.clone(),
+            channel_queue_tx: self.channel_queue_tx.clone(),
+            next_index: 0,
+            unbounded_queries: true,
+            pending: BTreeSet::default(),
+            phantom: PhantomData,
+            end: None,
         };
         // wraap our result in a stream that supports queries and results
         let query_stream = ShoalQueryStream {
@@ -488,7 +521,7 @@ impl<S: QuerySupport> ShoalResponse<S> {
     }
 
     /// Get the index for this response
-    fn get_index(&self) -> usize {
+    pub fn get_index(&self) -> usize {
         // get a refernce to our archived response
         let archived = unsafe { &*self.archived };
         // get the index for this response
@@ -579,6 +612,7 @@ where
                                     response.is_end_of_stream()
                                 };
                                 // build our shoal response
+                                println!("S6: RETURN -> {}", response.get_index());
                                 return Ok((end, Some(response)));
                             }
                             ClientMsg::End(_) => return Ok((true, None)),
@@ -596,6 +630,7 @@ where
                     let response = ShoalResponse::<S>::new(response);
                     // get the index for this message
                     let index = response.get_index();
+                    println!("S5: WFR -> {index}");
                     // if this is the next row then return it
                     if self.next_index == index {
                         // increment the index of our next response
@@ -768,6 +803,137 @@ where
     //}
 }
 
+/// The reponses from our queries in a stream
+pub struct ShoalUnorderedResultStream<S: QuerySupport> {
+    /// Our query/response channel id
+    pub id: Uuid,
+    /// The transmission side of the response stream channel
+    response_tx: Option<AsyncSender<ClientMsg>>,
+    /// the receive side of the response stream channel
+    response_rx: Option<AsyncReceiver<ClientMsg>>,
+    /// A concurrent map of what channel to send streaming results too
+    channel_map: Arc<HashMap<Uuid, AsyncSender<ClientMsg>>>,
+    /// The channel to add unused response streams too
+    channel_queue_tx: AsyncSender<(AsyncSender<ClientMsg>, AsyncReceiver<ClientMsg>)>,
+    /// The next message to be returned
+    next_index: usize,
+    /// Whether this result stream is tied to an unbounded query stream
+    pub unbounded_queries: bool,
+    /// The response indexes that we have received but have not yet reached
+    pending: BTreeSet<usize>,
+    /// The final message if one was set
+    end: Option<usize>,
+    /// The database kind we are streaming response for
+    phantom: PhantomData<S>,
+}
+
+impl<S: QuerySupport> ShoalUnorderedResultStream<S>
+where
+    <S::ResponseKinds as Archive>::Archived:
+        rkyv::Deserialize<S::ResponseKinds, Strategy<Pool, rkyv::rancor::Error>>,
+{
+    async fn wait_for_next_response(&mut self) -> Result<(bool, Option<ShoalResponse<S>>), Errors>
+    where
+        for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived:
+            rkyv::bytecheck::CheckBytes<
+                Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'a>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            >,
+    {
+        // get our response channel if one exists or
+        let response_rx = match self.response_rx.as_mut() {
+            Some(response_rx) => response_rx,
+            None => return Err(Errors::StreamAlreadyTerminated),
+        };
+        // keep looping until we have a message to return
+        loop {
+            // wait for the next message to return
+            match response_rx.recv().await? {
+                ClientMsg::Response(archived) => {
+                    // wrap our response so we don't have to keep repaying access costs
+                    let response = ShoalResponse::<S>::new(archived);
+                    // get the index for this message
+                    let index = response.get_index();
+                    // if this is our next index then increment next as far as we can
+                    if self.next_index == index {
+                        // increment our next index since we are returning the next item
+                        self.next_index += 1;
+                        // this is our next index so increment our index as far as possible
+                        while let Some(first_index) = self.pending.first() {
+                            // if this is also our next index then pop pending
+                            if self.next_index == *first_index {
+                                // pop pending
+                                self.pending.pop_first();
+                                // increment our next index
+                                self.next_index += 1;
+                            } else {
+                                // we are still waiting on our next index
+                                break;
+                            }
+                        }
+                    } else {
+                        // add this index to our pending set
+                        self.pending.insert(index);
+                    }
+                    // get if this is the last response
+                    let is_end = Some(self.next_index) == self.end;
+                    // return this response
+                    return Ok((is_end, Some(response)));
+                }
+                ClientMsg::End(end_index) => {
+                    // check if the last return message was the end
+                    if self.next_index == end_index {
+                        // the last returned message was the end
+                        return Ok((true, None));
+                    }
+                    // update our end index
+                    self.end = Some(end_index)
+                }
+            }
+        }
+    }
+
+    /// Get the next available response to our query
+    pub async fn next(&mut self) -> Result<Option<ShoalResponse<S>>, Errors>
+    where
+        for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived:
+            rkyv::bytecheck::CheckBytes<
+                Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'a>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            >,
+    {
+        // try to get our receive channels
+        if self.response_rx.is_some() {
+            // wait for the next response
+            let (end, resp) = self.wait_for_next_response().await?;
+            // if this is the final response then return our channels
+            if end {
+                // remove this stream id from our channel map
+                self.channel_map.pin().remove(&self.id);
+                // take the ends of our channel
+                if let (Some(tx), Some(rx)) = (self.response_tx.take(), self.response_rx.take()) {
+                    self.channel_queue_tx.send((tx, rx)).await?;
+                }
+            }
+            // return our accessable response
+            Ok(resp)
+        } else {
+            // this stream has already ended
+            Ok(None)
+        }
+    }
+}
+
 /// A Stream in shoal where you can add queries and get back results in order
 ///
 /// This is different then a `ShoalResultStream` as you can continue to add queries
@@ -784,7 +950,7 @@ pub struct ShoalQueryStream<Q: QuerySupport> {
     /// The data we are sending queries for
     data_kind: PhantomData<Q>,
     /// The base index to set in queries
-    base_index: usize,
+    pub base_index: usize,
 }
 
 impl<Q: QuerySupport> ShoalQueryStream<Q> {
@@ -827,6 +993,11 @@ impl<Q: QuerySupport> ShoalQueryStream<Q> {
         let mut conn = self.pool.get().await.unwrap();
         // build our vectored byte slices to send
         let mut bufs = &mut [IoSlice::new(&len), IoSlice::new(&archived)][..];
+        println!(
+            "s0: SENDING! {}..{}",
+            self.base_index,
+            self.base_index + queries.queries.len()
+        );
         // keep sending our data until all of this archive has been sent
         while !bufs.is_empty() {
             // send this data back to our client
@@ -845,7 +1016,7 @@ impl<Q: QuerySupport> ShoalQueryStream<Q> {
     /// Close this query stream
     pub async fn close(self) -> Result<(), Errors> {
         self.response_tx
-            .send(ClientMsg::End(self.queries_sent))
+            .send(ClientMsg::End(self.base_index))
             .await?;
         Ok(())
     }
