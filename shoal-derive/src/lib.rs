@@ -460,7 +460,7 @@ fn add_db_trait2(
         quote! {
             #query_ident::#variant_ident(query) => {
                 // handle these queries
-                match self.#field_ident.handle(meta, query).await {
+                match self.#field_ident.handle(meta, query, timer).await {
                     Some((client, query_id, response)) => {
                         // wrap our response with the right table kind
                         let wrapped = #response_ident::#variant_ident(response);
@@ -640,6 +640,7 @@ fn add_db_trait2(
                 &mut self,
                 meta: QueryMetadata,
                 typed_query: <Self::ClientType as QuerySupport>::QueryKinds,
+                timer: tokio::time::Instant,
             ) -> Option<(
                 uuid::Uuid,
                 uuid::Uuid,

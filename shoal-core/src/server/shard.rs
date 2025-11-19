@@ -21,6 +21,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::{cell::RefCell, hash::BuildHasherDefault};
 use std::{net::SocketAddr, time::Duration};
+use tokio::time::Instant;
 use tracing::instrument;
 use uuid::Uuid;
 use xxhash_rust::xxh3::Xxh3;
@@ -159,6 +160,7 @@ pub struct Shard<S: ShoalDatabase> {
     memory_usage: Arc<RefCell<usize>>,
     /// The most recently used tables/partitions on this shard
     lru: Arc<RefCell<LruCache<(S::TableNames, u64), usize, BuildHasherDefault<Xxh3>>>>,
+    timer_map: HashMap<usize, Instant>,
 }
 
 impl<S: ShoalDatabase> Shard<S> {
@@ -229,6 +231,7 @@ impl<S: ShoalDatabase> Shard<S> {
             tasks: Vec::with_capacity(100),
             memory_usage,
             lru,
+            timer_map: HashMap::with_capacity(100000),
         };
         Ok(shard)
     }
@@ -312,12 +315,24 @@ impl<S: ShoalDatabase> Shard<S> {
                 Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
             >,
     {
+        // get a timer for this query
         let index = meta.index;
+        let timer = *self.timer_map.entry(meta.index).or_insert(Instant::now());
+        println!(
+            "S3.1: Adding timer for {} at {:?}",
+            meta.index,
+            timer.elapsed()
+        );
         // try to handle this query
-        if let Some((addr, query_id, response)) = self.tables.handle(meta, query).await {
-            println!("S4:{}: REPLY -> {index}", self.info.name);
+        if let Some((addr, query_id, response)) = self.tables.handle(meta, query, timer).await {
+            println!(
+                "S4:{}: PRE REPLY -> {index} $ {:?}",
+                self.info.name,
+                timer.elapsed()
+            );
             // send this response back to the client
             self.reply(addr, query_id, response).await?;
+            println!("S4: POST REPLY -> {index} $ {:?}", timer.elapsed());
         }
         Ok(())
     }

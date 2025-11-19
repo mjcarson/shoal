@@ -1,5 +1,6 @@
 //! A shoal example on TMDB data
 
+use core_affinity::{get_core_ids, set_for_current, CoreId};
 use shoal::bencher::{BenchWorker, Bencher};
 use shoal_core::client::{
     Shoal, ShoalQueryStream, ShoalResponse, ShoalResultStream, ShoalUnorderedResultStream,
@@ -1023,7 +1024,7 @@ impl MovieController {
             // create a new bencher
             let mut bencher = Bencher::new(".benchmark", 10000);
             // spawn 5 workers
-            self.spawn(1, &bencher).await;
+            self.spawn(4, &bencher).await;
             // upload our tmdb data
             //self.upload(&path).await;
             ////// emit that workers should shutdown once all movie info has been streamed to shoal
@@ -1057,7 +1058,6 @@ impl MovieController {
     }
 }
 
-#[tokio::main]
 async fn read_csv() {
     // start ou controller
     let mut controller = MovieController::new("127.0.0.1:12000").await;
@@ -1074,8 +1074,39 @@ fn main() {
     let pool = ShoalPool::<Tmdb>::start().unwrap();
     // sleep for 5s
     std::thread::sleep(std::time::Duration::from_secs(5));
+    // Reserve specific cores for tokio (e.g., cores 28-32)
+    // Make sure these don't overlap with Shoal's cores (which uses 1-N)
+    let tokio_cores: Vec<CoreId> = vec![
+        CoreId { id: 24 },
+        CoreId { id: 25 },
+        CoreId { id: 26 },
+        CoreId { id: 27 },
+        CoreId { id: 28 },
+        CoreId { id: 29 },
+        CoreId { id: 30 },
+        CoreId { id: 31 },
+    ];
+    // build a runtime that is pinned to specific cores
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(8)
+        .thread_name("tokio-worker")
+        .enable_all()
+        .on_thread_start(move || {
+            static COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+            let idx = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let core = tokio_cores[idx % tokio_cores.len()];
+
+            if !set_for_current(core) {
+                eprintln!("Failed to set affinity for tokio worker {}", idx);
+            } else {
+                println!("Tokio worker {} pinned to core {}", idx, core.id);
+            }
+        })
+        .build()
+        .unwrap();
     // read and insert our csv
-    read_csv();
+    runtime.block_on(read_csv());
     // wait for our db to exit
     pool.exit().unwrap();
 }

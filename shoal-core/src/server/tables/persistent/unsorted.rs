@@ -294,6 +294,7 @@ where
         &mut self,
         meta: QueryMetadata,
         query: UnsortedQuery<R>,
+        timer: tokio::time::Instant,
     ) -> Option<(Uuid, Uuid, Response<R>)>
     where
         for<'a> <<R as ShoalUnsortedTable>::Update as Archive>::Archived: CheckBytes<
@@ -313,9 +314,10 @@ where
             Strategy<rkyv::de::Pool, rkyv::rancor::Error>,
         >,
     {
-        println!("S2: HANDLE -> {}", meta.index);
+        let index = meta.index;
+        println!("S2: HANDLE -> {} $ {:?}", meta.index, timer.elapsed());
         // execute the correct query type
-        match query {
+        let resp = match query {
             // insert a row into this partition
             UnsortedQuery::Insert { row, .. } => self.insert(meta, row).await,
             // get a row from this partition
@@ -324,7 +326,9 @@ where
             UnsortedQuery::Delete { key } => self.delete(meta, key).await,
             // update a row in this partition
             UnsortedQuery::Update(update) => self.update(meta, update).await,
-        }
+        };
+        println!("S2.9: FIN HANDLE -> {} $ {:?}", index, timer.elapsed());
+        resp
         //match handled {
         //    HandledKinds::Success {
         //        client_id,

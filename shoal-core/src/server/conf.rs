@@ -17,6 +17,9 @@ pub use crate::server::tables::storage::fs::conf::FileSystemTableConf;
 pub struct Resources {
     /// Configure the number of cores to use, default to all
     pub cores: Option<usize>,
+    /// Any cores to exlude from use
+    #[serde(default)]
+    pub exclude_cores: Vec<usize>,
     /// The max amount of memory to use
     pub memory: Byte,
 }
@@ -27,7 +30,9 @@ impl Resources {
         // get all online cpus
         let online = CpuSet::online()?
             // never run on cpu 0 as that is the coordinator cpu
-            .filter(|location| location.cpu != 0);
+            .filter(|location| location.cpu != 0)
+            // don't run on any excluded cores
+            .filter(|location| !self.exclude_cores.contains(&location.core));
         // if the user specified a limted number of cores then force that
         if let Some(cores) = self.cores {
             // limit our cores to just number specfied

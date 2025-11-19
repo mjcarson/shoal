@@ -188,6 +188,7 @@ pub trait ShoalDatabase: 'static + Sized {
         &mut self,
         meta: QueryMetadata,
         typed_query: <Self::ClientType as QuerySupport>::QueryKinds,
+        timer: tokio::time::Instant,
     ) -> Option<(
         Uuid,
         Uuid,
