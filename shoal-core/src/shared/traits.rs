@@ -247,6 +247,7 @@ pub trait ShoalDatabase: 'static + Sized {
         &mut self,
         loaded: LoadedPartitionKinds<Self>,
         shard_local_tx: &AsyncSender<ShardMsg<Self>>,
+        timer_map: &HashMap<usize, tokio::time::Instant>,
     ) -> Result<(), ServerError>;
 
     /// Shutdown this table and flush any data to disk if needed

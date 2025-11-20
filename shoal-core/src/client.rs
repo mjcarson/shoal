@@ -127,7 +127,7 @@ impl<S: QuerySupport> Shoal<S> {
         // build our connection pool
         let pool = bb8::Pool::builder()
             .min_idle(10)
-            .max_size(25)
+            .max_size(50)
             .connection_timeout(std::time::Duration::from_secs(5))
             .idle_timeout(Some(std::time::Duration::from_secs(300)))
             .max_lifetime(Some(std::time::Duration::from_secs(1800)))

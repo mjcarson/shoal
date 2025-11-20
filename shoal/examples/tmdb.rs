@@ -1024,9 +1024,9 @@ impl MovieController {
             // create a new bencher
             let mut bencher = Bencher::new(".benchmark", 10000);
             // spawn 5 workers
-            self.spawn(4, &bencher).await;
+            self.spawn(2, &bencher).await;
             // upload our tmdb data
-            //self.upload(&path).await;
+            self.upload(&path).await;
             ////// emit that workers should shutdown once all movie info has been streamed to shoal
             //self.movies_tx.send(MovieMsg::Shutdown).await.unwrap();
             /////// swap our task with with a default one
@@ -1039,7 +1039,7 @@ impl MovieController {
             ////// spawn 5 workers
             //self.spawn(1, &bencher).await;
             // verify our tmdb data
-            self.verify(&path).await;
+            //self.verify(&path).await;
             println!("DONE?");
             // emit that workers should shutdown once all movie info has been streamed to shoal
             self.movies_tx.send(MovieMsg::Shutdown).await.unwrap();
@@ -1065,7 +1065,7 @@ async fn read_csv() {
     std::thread::sleep(std::time::Duration::from_secs(5));
     // start streaming movies to shoal with multiple workers
     controller
-        .start("/home/mcarson/datasets/TMDB_movie_dataset_v11.csv")
+        .start("/home/mcarson/datasets/TMDB_movie_dataset_v11_first_100k.csv")
         .await;
 }
 
@@ -1077,10 +1077,6 @@ fn main() {
     // Reserve specific cores for tokio (e.g., cores 28-32)
     // Make sure these don't overlap with Shoal's cores (which uses 1-N)
     let tokio_cores: Vec<CoreId> = vec![
-        CoreId { id: 24 },
-        CoreId { id: 25 },
-        CoreId { id: 26 },
-        CoreId { id: 27 },
         CoreId { id: 28 },
         CoreId { id: 29 },
         CoreId { id: 30 },
@@ -1088,7 +1084,7 @@ fn main() {
     ];
     // build a runtime that is pinned to specific cores
     let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(8)
+        .worker_threads(4)
         .thread_name("tokio-worker")
         .enable_all()
         .on_thread_start(move || {

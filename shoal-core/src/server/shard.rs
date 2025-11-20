@@ -333,6 +333,8 @@ impl<S: ShoalDatabase> Shard<S> {
             // send this response back to the client
             self.reply(addr, query_id, response).await?;
             println!("S4: POST REPLY -> {index} $ {:?}", timer.elapsed());
+            // remove this from our timer map
+            self.timer_map.remove(&index);
         }
         Ok(())
     }
@@ -425,7 +427,7 @@ impl<S: ShoalDatabase> Shard<S> {
                 // load this partition from disk
                 ShardMsg::Partition(loaded) => {
                     self.tables
-                        .load_partition(loaded, &self.shard_local_tx)
+                        .load_partition(loaded, &self.shard_local_tx, &self.timer_map)
                         .await?
                 }
                 // Mark some partitions as evictable
