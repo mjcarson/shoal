@@ -535,6 +535,7 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         loop {
             // wait for a intent log compaction job
             let job = self.jobs_rx.recv().await?;
+            println!("COMPACTOR_JOB -> {job:?}");
             // handle this job;
             match job.clone() {
                 CompactionJob::IntentLog { path, generation } => {

@@ -69,7 +69,6 @@ impl<T> PendingResponse<T> {
             if is_flushed {
                 // pop this flushed action
                 if let Some((_, meta, data)) = self.pending.pop_front() {
-                    println!("S2.5: POPPING -> {}", meta.index);
                     // build the response for this query
                     let response = Response {
                         id: meta.id,

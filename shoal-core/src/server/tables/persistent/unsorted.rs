@@ -271,16 +271,9 @@ where
             }
         }
         // get the queries that were blocked on this partition
-        let unblocked = self
-            .blocked
+        self.blocked
             .remove(&loaded.partition_id)
-            .map(|unblocked| (unblocked, self.generation));
-        if let Some((unblocked, _)) = &unblocked {
-            for (meta, _) in unblocked {
-                println!("S3: UNBLOCKED: {}", meta.index);
-            }
-        }
-        unblocked
+            .map(|unblocked| (unblocked, self.generation))
     }
 
     /// Cast and handle a serialized query
@@ -294,7 +287,6 @@ where
         &mut self,
         meta: QueryMetadata,
         query: UnsortedQuery<R>,
-        timer: tokio::time::Instant,
     ) -> Option<(Uuid, Uuid, Response<R>)>
     where
         for<'a> <<R as ShoalUnsortedTable>::Update as Archive>::Archived: CheckBytes<
@@ -314,10 +306,8 @@ where
             Strategy<rkyv::de::Pool, rkyv::rancor::Error>,
         >,
     {
-        let index = meta.index;
-        println!("S2: HANDLE -> {} $ {:?}", meta.index, timer.elapsed());
         // execute the correct query type
-        let resp = match query {
+        match query {
             // insert a row into this partition
             UnsortedQuery::Insert { row, .. } => self.insert(meta, row).await,
             // get a row from this partition
@@ -326,32 +316,7 @@ where
             UnsortedQuery::Delete { key } => self.delete(meta, key).await,
             // update a row in this partition
             UnsortedQuery::Update(update) => self.update(meta, update).await,
-        };
-        println!("S2.9: FIN HANDLE -> {} $ {:?}", index, timer.elapsed());
-        resp
-        //match handled {
-        //    HandledKinds::Success {
-        //        client_id,
-        //        query_id,
-        //        response,
-        //    } => Some((client_id, query_id, response)),
-        //    HandledKinds::Pending { action, pos } => {
-        //        // add this action to our pending queue
-        //        self.pending.add(meta, pos, action);
-        //        // return none since we have pending intent commits still
-        //        None
-        //    }
-        //    HandledKinds::NeedsLoad(partition_key) => {
-        //        // if we need to load this then add this query to a map of queries
-        //        // are blocked on patitions being loaded from disk
-        //        // get an entry to our partitions blocked queries
-        //        let entry = self.blocked.entry(partition_key).or_default();
-        //        // add our blocked query for this partitions blocked query list
-        //        entry.push((meta, ));
-        //        // return none since we need a partition to be loaded
-        //        None
-        //    }
-        //}
+        }
     }
 
     /// Insert some data into a partition in this shards table

@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::{cell::RefCell, hash::BuildHasherDefault};
 use std::{net::SocketAddr, time::Duration};
 use tokio::time::Instant;
-use tracing::instrument;
+use tracing::{event, instrument, Level};
 use uuid::Uuid;
 use xxhash_rust::xxh3::Xxh3;
 
@@ -160,7 +160,6 @@ pub struct Shard<S: ShoalDatabase> {
     memory_usage: Arc<RefCell<usize>>,
     /// The most recently used tables/partitions on this shard
     lru: Arc<RefCell<LruCache<(S::TableNames, u64), usize, BuildHasherDefault<Xxh3>>>>,
-    timer_map: HashMap<usize, Instant>,
 }
 
 impl<S: ShoalDatabase> Shard<S> {
@@ -231,7 +230,6 @@ impl<S: ShoalDatabase> Shard<S> {
             tasks: Vec::with_capacity(100),
             memory_usage,
             lru,
-            timer_map: HashMap::with_capacity(100000),
         };
         Ok(shard)
     }
@@ -278,7 +276,6 @@ impl<S: ShoalDatabase> Shard<S> {
     ///
     /// * `addr` - The address to send this reply too
     /// * `response` - The response to send
-    #[allow(clippy::future_not_send)]
     #[instrument(name = "Shard::reply", skip_all, err(Debug))]
     async fn reply(
         &mut self,
@@ -303,7 +300,7 @@ impl<S: ShoalDatabase> Shard<S> {
     /// `meta` - The metadata about the query to handle
     /// `query` - The query to handle
     #[allow(clippy::future_not_send)]
-    #[instrument(name = "Shard::handle_query", skip(self, query))]
+    #[instrument(name = "Shard::handle_query", skip(self, query), fields(index = meta.index, id = meta.id.to_string()))]
     async fn handle_query(
         &mut self,
         meta: QueryMetadata,
@@ -315,26 +312,10 @@ impl<S: ShoalDatabase> Shard<S> {
                 Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
             >,
     {
-        // get a timer for this query
-        let index = meta.index;
-        let timer = *self.timer_map.entry(meta.index).or_insert(Instant::now());
-        println!(
-            "S3.1: Adding timer for {} at {:?}",
-            meta.index,
-            timer.elapsed()
-        );
         // try to handle this query
-        if let Some((addr, query_id, response)) = self.tables.handle(meta, query, timer).await {
-            println!(
-                "S4:{}: PRE REPLY -> {index} $ {:?}",
-                self.info.name,
-                timer.elapsed()
-            );
+        if let Some((addr, query_id, response)) = self.tables.handle(meta, query).await {
             // send this response back to the client
             self.reply(addr, query_id, response).await?;
-            println!("S4: POST REPLY -> {index} $ {:?}", timer.elapsed());
-            // remove this from our timer map
-            self.timer_map.remove(&index);
         }
         Ok(())
     }
@@ -427,7 +408,7 @@ impl<S: ShoalDatabase> Shard<S> {
                 // load this partition from disk
                 ShardMsg::Partition(loaded) => {
                     self.tables
-                        .load_partition(loaded, &self.shard_local_tx, &self.timer_map)
+                        .load_partition(loaded, &self.shard_local_tx)
                         .await?
                 }
                 // Mark some partitions as evictable
@@ -448,14 +429,13 @@ impl<S: ShoalDatabase> Shard<S> {
             }
             // if we have no more messages then flush our current queries to disk
             if self.shard_local_rx.is_empty() {
-                println!("{}: flush now?", self.info.name);
+                println!("FLUSH DUE TO EMPTY? - {}", self.info.name);
                 self.tables.flush().await?;
             }
             // check for any flushed response to handle
             self.handle_flushed().await?;
             // check if we need to evict any data
             if *self.memory_usage.borrow() as u64 > self.conf.resources.memory {
-                println!("EVICT?: {}", self.info.name);
                 // try to evict our least recently used data
                 self.evict_data().await?;
             }

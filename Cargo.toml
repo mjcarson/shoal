@@ -15,3 +15,6 @@ glommio = { version = "0.9" }
 tokio = { version = "1", features = ["full"] }
 kanal = "0.1.0-pre8"
 mimalloc = { version = "0.1.0"}
+
+[build]
+rustflags = ["-Ctarget-cpu=native"]

@@ -141,12 +141,21 @@ impl TraceLevel {
     }
 }
 
+/// The settings for different remote tracing sinks (not stdout)
+#[derive(Serialize, Deserialize, Clone)]
+pub enum RemoteTracing {
+    /// The settings for a GRPC based tracing sink
+    Grpc(String),
+}
+
 /// The tracing settings for Shoal
 #[derive(Serialize, Deserialize, Clone, Default)]
 pub struct Tracing {
-    // The level to log traces at
+    /// The level to log traces at
     #[serde(default)]
     pub level: TraceLevel,
+    /// The settings for sending traces to a grpc sink
+    pub remote: Option<RemoteTracing>,
 }
 
 /// The config for running Shoal

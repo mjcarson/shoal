@@ -114,7 +114,6 @@ impl<D: ShoalDatabase> FsLoader<D> {
     pub async fn start(mut self) -> Result<(), ServerError> {
         // keep handling loader messeges until we get a shutdown command
         loop {
-            println!("LOADER TASKS -> {}", self.tasks.len());
             // wait for a message on our mesh
             let msg = self.loader_rx.recv().await.unwrap();
             // handle this message

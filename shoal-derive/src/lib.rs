@@ -460,7 +460,7 @@ fn add_db_trait2(
         quote! {
             #query_ident::#variant_ident(query) => {
                 // handle these queries
-                match self.#field_ident.handle(meta, query, timer).await {
+                match self.#field_ident.handle(meta, query).await {
                     Some((client, query_id, response)) => {
                         // wrap our response with the right table kind
                         let wrapped = #response_ident::#variant_ident(response);
@@ -547,9 +547,6 @@ fn add_db_trait2(
                     let mark_evict_msg = ShardMsg::MarkEvictable { generation, table, partitions: vec![id] };
                     // convert our unblocked queries into shard messages
                     for (meta, unwrapped) in unblocked {
-                        if let Some(timer) = timer_map.get(&meta.index) {                            
-                            println!("UNBLOCKED -> {} $ {:?}", meta.index, timer.elapsed());
-                        }
                         // wrap our query
                         let query = #query_ident::#variant_ident(unwrapped);
                         // build our shard message
@@ -643,7 +640,6 @@ fn add_db_trait2(
                 &mut self,
                 meta: QueryMetadata,
                 typed_query: <Self::ClientType as QuerySupport>::QueryKinds,
-                timer: tokio::time::Instant,
             ) -> Option<(
                 uuid::Uuid,
                 uuid::Uuid,
@@ -714,7 +710,6 @@ fn add_db_trait2(
                 &mut self,
                 loaded_kinds: shoal_core::server::messages::LoadedPartitionKinds<Self>,
                 shard_local_tx: &AsyncSender<ShardMsg<Self>>,
-                timer_map: &HashMap<usize, tokio::time::Instant>,
             ) -> Result<(), ServerError> {
                 match loaded_kinds.table {
                     #(#load_partition_arms)*

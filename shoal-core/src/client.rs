@@ -612,7 +612,6 @@ where
                                     response.is_end_of_stream()
                                 };
                                 // build our shoal response
-                                println!("S6: RETURN -> {}", response.get_index());
                                 return Ok((end, Some(response)));
                             }
                             ClientMsg::End(_) => return Ok((true, None)),
@@ -630,7 +629,6 @@ where
                     let response = ShoalResponse::<S>::new(response);
                     // get the index for this message
                     let index = response.get_index();
-                    println!("S5: WFR -> {index}");
                     // if this is the next row then return it
                     if self.next_index == index {
                         // increment the index of our next response
@@ -993,11 +991,6 @@ impl<Q: QuerySupport> ShoalQueryStream<Q> {
         let mut conn = self.pool.get().await.unwrap();
         // build our vectored byte slices to send
         let mut bufs = &mut [IoSlice::new(&len), IoSlice::new(&archived)][..];
-        println!(
-            "s0: SENDING! {}..{}",
-            self.base_index,
-            self.base_index + queries.queries.len()
-        );
         // keep sending our data until all of this archive has been sent
         while !bufs.is_empty() {
             // send this data back to our client

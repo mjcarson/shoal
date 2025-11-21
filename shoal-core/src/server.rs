@@ -24,7 +24,6 @@ use rkyv::{
     validation::{archive::ArchiveValidator, shared::SharedValidator, Validator},
 };
 
-use args::Args;
 pub use conf::Conf;
 use coordinator::Coordinator;
 pub use errors::ServerError;
@@ -107,19 +106,13 @@ where
 {
     /// Start this shoal database
     #[instrument(name = "ShoalPool::start", skip_all, err(Debug))]
-    pub fn start() -> Result<Self, ServerError>
+    pub fn start(conf: Conf) -> Result<Self, ServerError>
     where
         for<'a> <<<S as ShoalDatabase>::ClientType as QuerySupport>::QueryKinds as Archive>::Archived:
             CheckBytes<
                 Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
             >,
     {
-        // get our command line args
-        let args = Args::parse();
-        // load our config
-        let conf = Conf::new(&args.conf)?;
-        // setup tracing/telemetry
-        trace::setup(&conf);
         // get the total number of cpus that we have
         let cpus = conf.resources.cpus()?;
         // our mesh should always be one larger then the number of cores
