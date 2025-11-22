@@ -236,6 +236,7 @@ pub trait ShoalDatabase: 'static + Sized {
         flushed: &mut Vec<(
             Uuid,
             Uuid,
+            tracing::Span,
             <Self::ClientType as QuerySupport>::ResponseKinds,
         )>,
     ) -> Result<(), ServerError>;

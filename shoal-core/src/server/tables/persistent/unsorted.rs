@@ -23,6 +23,7 @@ use std::collections::HashMap;
 use std::hash::BuildHasherDefault;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use tracing::Span;
 use tracing::{event, instrument, Level};
 use uuid::Uuid;
 use xxhash_rust::xxh3::Xxh3;
@@ -113,7 +114,7 @@ pub struct PersistentUnsortedTable<R: ShoalUnsortedTable, S: StorageSupport, N: 
     /// The commits that are still pending storage confirmation
     pending: PendingResponse<R>,
     /// The responses for queries that have been flushed to disk
-    flushed: Vec<(Uuid, Uuid, Response<R>)>,
+    flushed: Vec<(Uuid, Uuid, Span, Response<R>)>,
     /// The channel to send loader jobs on
     loader_tx: AsyncSender<LoaderMsg<N>>,
     /// A map of queries blocked on partitions being loaded from disk
@@ -610,7 +611,7 @@ where
     /// * `flushed` - The flushed actions to return
     pub async fn get_flushed(
         &mut self,
-    ) -> Result<&mut Vec<(Uuid, Uuid, Response<R>)>, ServerError> {
+    ) -> Result<&mut Vec<(Uuid, Uuid, Span, Response<R>)>, ServerError> {
         // check if our current intent log should be compacted
         let (flushed_pos, generation) = self.storage.compact_if_needed::<R>(false).await?;
         // update our current generation

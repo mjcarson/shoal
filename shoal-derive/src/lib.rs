@@ -521,7 +521,7 @@ fn add_db_trait2(
             // wrap and add our specific queries
             let wrapped = specific
                 .drain(..)
-                .map(|(client, query_id, resp)| (client, query_id, #response_ident::#variant_ident(resp)));
+                .map(|(client, query_id, span, resp)| (client, query_id, span, #response_ident::#variant_ident(resp)));
             // extend our response list with our wrapped queries
             flushed.extend(wrapped);
         }
@@ -698,6 +698,7 @@ fn add_db_trait2(
                 flushed: &mut Vec<(
                     uuid::Uuid,
                     uuid::Uuid,
+                    shoal_core::tracing::Span,
                     <Self::ClientType as QuerySupport>::ResponseKinds,
                 )>,
             ) -> Result<(), ServerError> {

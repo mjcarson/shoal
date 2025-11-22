@@ -877,12 +877,12 @@ impl MovieController {
     /// Start streaming jobs to our workers
     pub async fn start<P: AsRef<Path>>(&mut self, path: P) {
         // loop over our reads/writes 500 times
-        for i in 0..1 {
+        for i in 0..100 {
             println!("\n\n $$$$ {i} $$$$");
             // create a new bencher
             let mut bencher = Bencher::new(".benchmark", 10000);
             // spawn 5 workers
-            self.spawn(2, &bencher).await;
+            self.spawn(5, &bencher).await;
             // upload our tmdb data
             self.upload(&path).await;
             ////// emit that workers should shutdown once all movie info has been streamed to shoal
@@ -897,7 +897,7 @@ impl MovieController {
             ////// spawn 5 workers
             //self.spawn(1, &bencher).await;
             // verify our tmdb data
-            //self.verify(&path).await;
+            self.verify(&path).await;
             println!("DONE?");
             // emit that workers should shutdown once all movie info has been streamed to shoal
             self.movies_tx.send(MovieMsg::Shutdown).await.unwrap();

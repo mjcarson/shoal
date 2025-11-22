@@ -18,7 +18,7 @@ use rkyv::util::AlignedVec;
 use rkyv::Archive;
 use std::io::IoSlice;
 use std::{marker::PhantomData, time::Duration};
-use tracing::{event, instrument, Level};
+use tracing::{event, instrument, Level, Span};
 use uuid::Uuid;
 
 use super::messages::QueryMetadata;
@@ -319,13 +319,15 @@ async fn client_rx_relay<S: ShoalDatabase>(
 }
 
 async fn client_tx_relay<S: ShoalDatabase>(
-    client_rx: AsyncReceiver<(Uuid, AlignedVec)>,
+    client_rx: AsyncReceiver<(Uuid, Span, AlignedVec)>,
     mut tcp_tx: WriteHalf<TcpStream>,
 ) {
     // loop over messages to send back to our client
     loop {
         // try to get a message from our channel
-        let (query_id, archived) = client_rx.recv().await.unwrap();
+        let (query_id, span, archived) = client_rx.recv().await.unwrap();
+        // enter our span
+        let span_guard = span.enter();
         // get the size of the archive we are sending to the client
         let len = archived.len().to_le_bytes();
         // build our vectored byte slices to send
@@ -343,6 +345,8 @@ async fn client_tx_relay<S: ShoalDatabase>(
                 Err(error) => panic!("Ahhh error?: {error:#?}"),
             }
         }
+        // drop our span since we are done writting
+        drop(span_guard);
     }
 }
 

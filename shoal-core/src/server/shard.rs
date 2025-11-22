@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::{cell::RefCell, hash::BuildHasherDefault};
 use std::{net::SocketAddr, time::Duration};
 use tokio::time::Instant;
-use tracing::{event, instrument, Level};
+use tracing::{event, instrument, Level, Span};
 use uuid::Uuid;
 use xxhash_rust::xxh3::Xxh3;
 
@@ -133,7 +133,7 @@ pub struct Shard<S: ShoalDatabase> {
     /// The full archive map for all tables
     table_map: FullArchiveMap<S::TableNames>,
     /// A map of channels to send responses to our client relays over
-    client_map: HashMap<Uuid, AsyncSender<(Uuid, AlignedVec)>>,
+    client_map: HashMap<Uuid, AsyncSender<(Uuid, Span, AlignedVec)>>,
     /// The glommio channel to send messages on
     local_tx: Senders<MeshMsg<S>>,
     /// The channel to send shard local messages on
@@ -149,7 +149,12 @@ pub struct Shard<S: ShoalDatabase> {
         ),
     >,
     /// The responses whose queries have been flushed to disk
-    flushed: Vec<(Uuid, Uuid, <S::ClientType as QuerySupport>::ResponseKinds)>,
+    flushed: Vec<(
+        Uuid,
+        Uuid,
+        Span,
+        <S::ClientType as QuerySupport>::ResponseKinds,
+    )>,
     /// The latency sensitive task queue
     high_priority: TaskQueueHandle,
     /// The medium priority task queue
@@ -276,18 +281,19 @@ impl<S: ShoalDatabase> Shard<S> {
     ///
     /// * `addr` - The address to send this reply too
     /// * `response` - The response to send
-    #[instrument(name = "Shard::reply", skip_all, err(Debug))]
+    #[instrument(name = "Shard::reply", parent = &span, skip_all, err(Debug))]
     async fn reply(
         &mut self,
         client: Uuid,
         query_id: Uuid,
+        span: Span,
         response: <S::ClientType as QuerySupport>::ResponseKinds,
     ) -> Result<(), ServerError> {
         // archive our response
         let archived = rkyv::to_bytes::<_>(&response)?;
         // get this clients channel to send replies over
         match self.client_map.get(&client) {
-            Some(client_tx) => client_tx.send((query_id, archived)).await.unwrap(),
+            Some(client_tx) => client_tx.send((query_id, span, archived)).await.unwrap(),
             None => panic!("{} Missing client channel? {client}", self.info.name),
         }
         Ok(())
@@ -300,7 +306,12 @@ impl<S: ShoalDatabase> Shard<S> {
     /// `meta` - The metadata about the query to handle
     /// `query` - The query to handle
     #[allow(clippy::future_not_send)]
-    #[instrument(name = "Shard::handle_query", skip(self, query), fields(index = meta.index, id = meta.id.to_string()))]
+    #[instrument(
+        name = "Shard::handle_query",
+        parent = &meta.span,
+        skip(self, query),
+        fields(index = meta.index, id = meta.id.to_string())
+    )]
     async fn handle_query(
         &mut self,
         meta: QueryMetadata,
@@ -312,22 +323,25 @@ impl<S: ShoalDatabase> Shard<S> {
                 Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
             >,
     {
+        // copy our span for it we reply
+        let span = meta.span.clone();
         // try to handle this query
         if let Some((addr, query_id, response)) = self.tables.handle(meta, query).await {
             // send this response back to the client
-            self.reply(addr, query_id, response).await?;
+            self.reply(addr, query_id, span, response).await?;
         }
         Ok(())
     }
 
     /// Get all flushed messages and send their response back
+    #[instrument(name = "Shard::handle_flushed", skip(self))]
     async fn handle_flushed(&mut self) -> Result<(), ServerError> {
         // get all flushed query responses
         self.tables.handle_flushed(&mut self.flushed).await?;
         // pop all of our flushed responses
-        while let Some((client, query_id, response)) = self.flushed.pop() {
+        while let Some((client, query_id, span, response)) = self.flushed.pop() {
             // send our responses
-            self.reply(client, query_id, response).await?;
+            self.reply(client, query_id, span, response).await?;
         }
         Ok(())
     }
@@ -429,7 +443,6 @@ impl<S: ShoalDatabase> Shard<S> {
             }
             // if we have no more messages then flush our current queries to disk
             if self.shard_local_rx.is_empty() {
-                println!("FLUSH DUE TO EMPTY? - {}", self.info.name);
                 self.tables.flush().await?;
             }
             // check for any flushed response to handle

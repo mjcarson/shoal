@@ -1,11 +1,10 @@
 //! The different messages that can be sent in shoal
 
-use std::marker::PhantomData;
-
-use bytes::{Bytes, BytesMut};
+use bytes::BytesMut;
 use glommio::io::ReadResult;
 use kanal::AsyncSender;
 use rkyv::util::AlignedVec;
+use tracing::Span;
 use uuid::Uuid;
 
 use super::shard::ShardInfo;
@@ -18,7 +17,7 @@ pub enum Msg<S: ShoalDatabase> {
     /// A new client has connected
     NewClient {
         id: Uuid,
-        client_tx: AsyncSender<(Uuid, AlignedVec)>,
+        client_tx: AsyncSender<(Uuid, Span, AlignedVec)>,
     },
     /// A message from a client
     Client {
@@ -42,6 +41,8 @@ pub struct QueryMetadata {
     pub index: usize,
     /// Whether this is the last query in a query bundle
     pub end: bool,
+    /// The span context for this query
+    pub span: Span,
 }
 
 impl QueryMetadata {
@@ -59,6 +60,7 @@ impl QueryMetadata {
             id,
             index,
             end,
+            span: Span::current(),
         }
     }
 }
@@ -79,7 +81,7 @@ pub enum MeshMsg<D: ShoalDatabase> {
         /// This clients id
         client: Uuid,
         /// The channel to send responses for this client on
-        client_tx: AsyncSender<(Uuid, AlignedVec)>,
+        client_tx: AsyncSender<(Uuid, Span, AlignedVec)>,
     },
     /// Tell this shard to shutdown
     Shutdown,
@@ -104,7 +106,7 @@ pub enum ShardMsg<D: ShoalDatabase> {
     /// A New client connected to shoal
     NewClient {
         client: Uuid,
-        client_tx: AsyncSender<(Uuid, AlignedVec)>,
+        client_tx: AsyncSender<(Uuid, Span, AlignedVec)>,
     },
     /// A still archived query to execute
     Query {

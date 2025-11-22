@@ -345,7 +345,8 @@ impl<R: ShoalSortedTable + 'static, S: StorageSupport> PersistentSortedTable<R, 
         // check if our current intent log should be compacted
         let (flushed_pos, generation) = self.storage.compact_if_needed::<R>(false).await?;
         // get all of the responses whose data has been flushed to disk
-        self.pending.get(flushed_pos, &mut self.flushed);
+        // TODO actually do this
+        //self.pending.get(flushed_pos, &mut self.flushed);
         // return a ref to our flushed responses
         Ok(&mut self.flushed)
     }
