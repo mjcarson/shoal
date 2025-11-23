@@ -882,7 +882,7 @@ impl MovieController {
             // create a new bencher
             let mut bencher = Bencher::new(".benchmark", 10000);
             // spawn 5 workers
-            self.spawn(5, &bencher).await;
+            self.spawn(1, &bencher).await;
             // upload our tmdb data
             self.upload(&path).await;
             ////// emit that workers should shutdown once all movie info has been streamed to shoal

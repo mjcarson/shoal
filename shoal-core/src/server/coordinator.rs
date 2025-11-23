@@ -28,6 +28,7 @@ use super::{
     shard::ShardContact,
 };
 use super::{Conf, ServerError};
+use crate::server::messages::ShardMsg;
 use crate::shared::traits::{RkyvSupport, ShoalDatabase, ShoalQuerySupport};
 use crate::shared::{queries::Queries, traits::QuerySupport};
 
@@ -39,14 +40,48 @@ pub struct Coordinator<S: ShoalDatabase> {
     mesh_tx: Senders<MeshMsg<S>>,
     /// The glommio channel to receive messages on
     mesh_rx: Receivers<MeshMsg<S>>,
-    /// The kanal channel to listen for coordinator local messages on
-    kanal_rx: AsyncReceiver<Msg<S>>,
+    /// The channel to send shard local messages on
+    shard_local_tx: AsyncSender<ShardMsg<S>>,
+    ///// The kanal channel to listen for coordinator local messages on
+    //kanal_rx: AsyncReceiver<Msg<S>>,
     /// The tasks we have spawned
     tasks: Vec<Task<()>>,
     /// The token ring info for shoal
     ring: Ring,
     /// The tables we are coordinating
     table_kind: PhantomData<S>,
+}
+
+impl<S: ShoalDatabase> Coordinator<S> {
+    /// Create a new coordinator
+    pub async fn new(
+        conf: &Conf,
+        mesh: MeshBuilder<MeshMsg<S>, Full>,
+        shard_local_tx: AsyncSender<ShardMsg<S>>,
+    ) -> Result<Self, ServerError> {
+        // join our mesh for the coordinator and the client acceptor
+        let (mesh_tx, mesh_rx) = mesh.join().await?;
+        // build our coordinator
+        let coordinator: Coordinator<S> = Coordinator {
+            conf: conf.clone(),
+            mesh_tx,
+            mesh_rx,
+            shard_local_tx,
+            tasks: Vec::new(),
+            ring: Ring::default(),
+            table_kind: PhantomData,
+        };
+        Ok(coordinator)
+    }
+
+    pub async fn start2(mut self) {
+        // spawn our mesh listeners
+        self.spawn_mesh_listeners(&kanal_tx).await;
+        // spawn our client litener
+        self.spawn_client_listener(&kanal_tx)?;
+        // start handling messages
+        self.start_handling().await;
+    }
 }
 
 impl<S: ShoalDatabase> Coordinator<S>
@@ -75,6 +110,8 @@ where
     ) -> Result<(), ServerError> {
         // join our mesh for the coordinator and the client acceptor
         let (mesh_tx, mesh_rx) = mesh.join().await?;
+        // build a channel for forwarding messages from our client and mesh listens to our coordinator
+
         // build our coordinator
         let mut coordinator: Coordinator<S> = Coordinator {
             conf,

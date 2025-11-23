@@ -31,7 +31,7 @@ pub enum Msg<S: ShoalDatabase> {
 }
 
 /// The metadata about a query from a client
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct QueryMetadata {
     /// The id of the client this query came from
     pub client: Uuid,
@@ -66,7 +66,10 @@ impl QueryMetadata {
 }
 
 /// The messages that can be sent over of node local mesh
-pub enum MeshMsg<D: ShoalDatabase> {
+pub enum MeshMsg<D: ShoalDatabase>
+where
+    <D::ClientType as QuerySupport>::QueryKinds: Clone,
+{
     /// Join this nodes token ring
     Join(ShardInfo),
     /// A query to execute
@@ -103,10 +106,19 @@ pub struct LoadedPartitionKinds<D: ShoalDatabase> {
 
 /// The messages that can be sent between workers in a shard
 pub enum ShardMsg<D: ShoalDatabase> {
+    /// Join a shoal cluster
+    Join(ShardInfo),
     /// A New client connected to shoal
     NewClient {
         client: Uuid,
         client_tx: AsyncSender<(Uuid, Span, AlignedVec)>,
+    },
+    /// A message from a client
+    Client {
+        /// This peers id
+        peer: Uuid,
+        /// The raw data for our request
+        data: BytesMut,
     },
     /// A still archived query to execute
     Query {
@@ -125,4 +137,20 @@ pub enum ShardMsg<D: ShoalDatabase> {
     },
     /// Tell this shard to shutdown
     Shutdown,
+}
+
+impl<D: ShoalDatabase> From<MeshMsg<D>> for ShardMsg<D> {
+    /// Convert a mesh message into a shard local message
+    ///
+    /// # Arguments
+    ///
+    /// * `mesh_msg` - The mesh message to convert
+    fn from(mesh_msg: MeshMsg<D>) -> Self {
+        match mesh_msg {
+            MeshMsg::Join(info) => ShardMsg::Join(info),
+            MeshMsg::Query { meta, query } => ShardMsg::Query { meta, query },
+            MeshMsg::NewClient { client, client_tx } => ShardMsg::NewClient { client, client_tx },
+            MeshMsg::Shutdown => ShardMsg::Shutdown,
+        }
+    }
 }

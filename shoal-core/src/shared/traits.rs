@@ -108,7 +108,7 @@ pub trait ShoalResponseSupport: std::fmt::Debug + RkyvSupport + Sized + Send {
     fn get_query_id(archived: &<Self as Archive>::Archived) -> Uuid;
 }
 
-pub trait QuerySupport: 'static {
+pub trait QuerySupport: 'static + Sized {
     /// The different tables or types of queries we will handle
     type QueryKinds: ShoalQuerySupport;
 
@@ -117,14 +117,14 @@ pub trait QuerySupport: 'static {
 }
 
 pub trait TableNameSupport:
-    std::fmt::Display + std::fmt::Debug + PartialEq + Eq + Ord + std::hash::Hash + Clone + Copy
+    std::fmt::Display + std::fmt::Debug + PartialEq + Eq + Ord + std::hash::Hash + Clone + Copy + Send
 {
 }
 
 /// The core trait that all databases in shoal must support
 pub trait ShoalDatabase: 'static + Sized {
     /// This databases external client type
-    type ClientType: QuerySupport;
+    type ClientType: QuerySupport + Sized;
 
     /// The different tables in this database
     type TableNames: TableNameSupport;
