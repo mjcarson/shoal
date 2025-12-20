@@ -1,15 +1,13 @@
 //! A shoal example on TMDB data
 
-use core_affinity::{get_core_ids, set_for_current, CoreId};
+use core_affinity::{set_for_current, CoreId};
 use shoal::bencher::{BenchWorker, Bencher};
-use shoal_core::client::{
-    Shoal, ShoalQueryStream, ShoalResponse, ShoalResultStream, ShoalUnorderedResultStream,
-};
-use shoal_core::server::messages::{QueryMetadata, ShardMsg};
+use shoal_core::client::{Shoal, ShoalResponse, ShoalUnorderedResultStream};
+use shoal_core::server::messages::QueryMetadata;
 use shoal_core::server::ring::Ring;
 use shoal_core::server::{Conf, ServerError};
 use shoal_core::shared::queries::{Queries, UnsortedGet, UnsortedQuery, UnsortedUpdate};
-use shoal_core::shared::responses::{ArchivedResponseAction, Response};
+use shoal_core::shared::responses::Response;
 use shoal_core::shared::traits::ShoalDatabase;
 use shoal_core::shared::traits::{
     PartitionKeySupport, QuerySupport, RkyvSupport, ShoalQuerySupport, ShoalResponseSupport,
@@ -27,12 +25,10 @@ use gxhash::GxHasher;
 use kanal::{AsyncReceiver, AsyncSender};
 use mimalloc::MiMalloc;
 use rkyv::{Archive, Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::hash::Hasher;
-use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::fs::File;
 use tokio::net::ToSocketAddrs;
 use tokio::task::JoinSet;

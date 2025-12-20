@@ -2,7 +2,6 @@
 //! single row
 
 use deepsize2::DeepSizeOf;
-use rkyv::Archive;
 
 use super::{PartitionKeySupport, RkyvSupport};
 use crate::shared::queries::UnsortedUpdate;

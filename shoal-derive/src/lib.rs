@@ -544,13 +544,13 @@ fn add_db_trait2(
                     // build a mark evictable message for this partition so we don't mark this as
                     // evictable until we have completed all blocked queries to prevent load/reloading
                     // the same partition over and over again
-                    let mark_evict_msg = ShardMsg::MarkEvictable { generation, table, partitions: vec![id] };
+                    let mark_evict_msg = shoal_core::server::messages::ServerMsg::MarkEvictable { generation, table, partitions: vec![id] };
                     // convert our unblocked queries into shard messages
                     for (meta, unwrapped) in unblocked {
                         // wrap our query
                         let query = #query_ident::#variant_ident(unwrapped);
                         // build our shard message
-                        let query_msg = ShardMsg::Query { meta, query};
+                        let query_msg = shoal_core::server::messages::ServerMsg::Query { meta, query};
                         // send this message
                         shard_local_tx.send(query_msg).await.unwrap();
                     }
@@ -595,7 +595,7 @@ fn add_db_trait2(
                 medium_priority: TaskQueueHandle,
                 memory_usage: &std::sync::Arc<std::cell::RefCell<usize>>,
                 lru: &std::sync::Arc<std::cell::RefCell<shoal_core::lru::LruCache<(Self::TableNames, u64), usize, std::hash::BuildHasherDefault<shoal_core::xxhash_rust::xxh3::Xxh3>>>>,
-                shard_local_tx: &AsyncSender<ShardMsg<Self>>,
+                shard_local_tx: &AsyncSender<shoal_core::server::messages::ServerMsg<Self>>,
             ) -> Result<Self, ServerError> {
                 let db = Tmdb {
                     #(#new_arms)*
@@ -611,7 +611,7 @@ fn add_db_trait2(
                     Loaders,
                     (AsyncSender<LoaderMsg<Self::TableNames>>, AsyncReceiver<LoaderMsg<Self::TableNames>>),
                 >,
-                shard_local_tx: &AsyncSender<ShardMsg<Self>>,
+                shard_local_tx: &AsyncSender<shoal_core::server::messages::ServerMsg<Self>>,
             ) -> Result<(), ServerError> {
                 // create a list to keep track of our spawned loaders
                 let mut spawned = Vec::with_capacity(1);
@@ -710,7 +710,7 @@ fn add_db_trait2(
             async fn load_partition(
                 &mut self,
                 loaded_kinds: shoal_core::server::messages::LoadedPartitionKinds<Self>,
-                shard_local_tx: &AsyncSender<ShardMsg<Self>>,
+                shard_local_tx: &AsyncSender<shoal_core::server::messages::ServerMsg<Self>>,
             ) -> Result<(), ServerError> {
                 match loaded_kinds.table {
                     #(#load_partition_arms)*
@@ -911,7 +911,7 @@ pub fn derive_shoal_db(stream: TokenStream) -> TokenStream {
 //            /// Forward our queries to the correct shards
 //            async fn send_to_shard(
 //                ring: &Ring,
-//                mesh_tx: &mut Senders<MeshMsg<Self>>,
+//                mesh_tx: &mut Senders<ServerMsg<Self>>,
 //                addr: SocketAddr,
 //                queries: Queries<Self>,
 //            ) -> Result<(), ServerError> {
@@ -935,7 +935,7 @@ pub fn derive_shoal_db(stream: TokenStream) -> TokenStream {
 //                                mesh_tx
 //                                    .send_to(
 //                                        *id,
-//                                        MeshMsg::Query {
+//                                        ServerMsg::Query {
 //                                            addr,
 //                                            id: queries.id,
 //                                            index,

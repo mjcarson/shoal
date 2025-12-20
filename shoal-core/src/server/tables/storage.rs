@@ -19,7 +19,7 @@ pub mod fs;
 
 pub use fs::FileSystem;
 
-use crate::server::messages::{QueryMetadata, ShardMsg};
+use crate::server::messages::{QueryMetadata, ServerMsg};
 use crate::server::{Conf, ServerError};
 use crate::shared::responses::{Response, ResponseAction};
 use crate::shared::traits::{PartitionKeySupport, RkyvSupport, ShoalDatabase, TableNameSupport};
@@ -233,7 +233,7 @@ pub trait StorageSupport: Sized {
         shard_archive_map: &FullArchiveMap<N>,
         conf: &Conf,
         medium_priority: TaskQueueHandle,
-        shard_local_tx: &AsyncSender<ShardMsg<S>>,
+        shard_local_tx: &AsyncSender<ServerMsg<S>>,
     ) -> Result<Self, ServerError>
     where
         <P as Archive>::Archived: rkyv::Deserialize<P, Strategy<Pool, rkyv::rancor::Error>>,
@@ -309,7 +309,7 @@ pub trait StorageSupport: Sized {
         &self,
         table_map: &FullArchiveMap<D::TableNames>,
         loader_rx: &AsyncReceiver<LoaderMsg<D::TableNames>>,
-        shard_local_tx: &AsyncSender<ShardMsg<D>>,
+        shard_local_tx: &AsyncSender<ServerMsg<D>>,
     ) -> Result<(), ServerError>;
 
     /// Load a partition from disk if it exists

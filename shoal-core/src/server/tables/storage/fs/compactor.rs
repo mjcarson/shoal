@@ -21,7 +21,7 @@ use uuid::Uuid;
 use super::conf::FileSystemTableConf;
 use super::map::{ArchiveEntry, ArchiveMap, MapIntent, MapIntentKinds};
 use super::IntentLogReader;
-use crate::server::messages::ShardMsg;
+use crate::server::messages::ServerMsg;
 use crate::server::ServerError;
 use crate::shared::traits::{PartitionKeySupport, RkyvSupport, ShoalDatabase};
 use crate::storage::{CompactionJob, IntentReadSupport, ShouldPrune};
@@ -72,7 +72,7 @@ pub struct FileSystemCompactor<T: IntentReadSupport<R>, R: PartitionKeySupport, 
     /// The channel to listen for paths to intent logs to compact
     jobs_rx: AsyncReceiver<CompactionJob>,
     /// The channel to send shard local messages on
-    shard_local_tx: AsyncSender<ShardMsg<S>>,
+    shard_local_tx: AsyncSender<ServerMsg<S>>,
     /// The path to this tables archive folder
     archive_path: PathBuf,
     /// The row type this table contains
@@ -88,7 +88,7 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         table_name: S::TableNames,
         conf: &FileSystemTableConf,
         jobs_rx: AsyncReceiver<CompactionJob>,
-        shard_local_tx: &AsyncSender<ShardMsg<S>>,
+        shard_local_tx: &AsyncSender<ServerMsg<S>>,
         map: &Arc<ArchiveMap>,
         capacity: usize,
     ) -> Result<Self, ServerError> {
@@ -160,26 +160,14 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         for partition in self.changes.keys() {
             // get this partiitons current archive if it exists
             if let Some(entry) = self.map.to_archive.borrow().get(partition) {
-                // pint our archive map
-                let mut map = self.map.loaded_archives.borrow_mut();
-                // get the handle to this archive
-                let handle = match map.get(&entry.archive) {
-                    Some(archive) => archive,
-                    None => {
-                        // add this archive id onto our path
-                        let path = self.archive_path.join(&entry.archive.to_string());
-                        // get a handle to this archive
-                        let handle = DmaFile::open(&path).await?;
-                        // insert this handle
-                        map.insert(entry.archive, handle);
-                        // get a handle to this archive again
-                        map.get(&entry.archive).unwrap()
-                    }
-                };
+                // get this archive or insert it into our map
+                let handle = self.map.get_archive(&entry.archive).await?;
                 // set options for reading from this file
                 let read = handle.read_at(entry.offset, entry.size).await?;
                 // load this partitions data
                 let archived = <T as RkyvSupport>::access(&read)?;
+                // close this handle now that we are done reading
+                handle.close().await?;
                 // deserialize this partition
                 let deserialized = <T as RkyvSupport>::deserialize(archived)?;
                 // add this deserialized partition to our loaded partition map
@@ -260,7 +248,7 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         partitions: Vec<u64>,
     ) -> Result<(), ServerError> {
         // build our message to mark these these nodes as evictable
-        let msg = ShardMsg::MarkEvictable {
+        let msg = ServerMsg::MarkEvictable {
             generation,
             table: self.table_name,
             partitions,
@@ -550,6 +538,7 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                 }
             }
         }
+        println!("SHUTDOWN!");
         Ok(())
     }
 }

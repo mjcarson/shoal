@@ -30,7 +30,7 @@ use reader::IntentLogReader;
 
 use super::{CompactionJob, IntentReadSupport, StorageSupport};
 use crate::server::conf::TableSettings;
-use crate::server::messages::ShardMsg;
+use crate::server::messages::ServerMsg;
 use crate::server::{Conf, ServerError};
 use crate::shared::traits::{PartitionKeySupport, RkyvSupport, ShoalDatabase, TableNameSupport};
 use crate::storage::{ArchiveMapKinds, FilteredFullArchiveMap, FullArchiveMap, LoaderMsg, Loaders};
@@ -95,7 +95,7 @@ impl FileSystem {
         &mut self,
         table_name: S::TableNames,
         compact_rx: AsyncReceiver<CompactionJob>,
-        shard_local_tx: &AsyncSender<ShardMsg<S>>,
+        shard_local_tx: &AsyncSender<ServerMsg<S>>,
     ) -> Result<(), ServerError>
     where
         <T as Archive>::Archived: rkyv::Deserialize<T, Strategy<Pool, rkyv::rancor::Error>>,
@@ -154,7 +154,7 @@ impl StorageSupport for FileSystem {
         shard_archive_map: &FullArchiveMap<N>,
         conf: &Conf,
         medium_priority: TaskQueueHandle,
-        shard_local_tx: &AsyncSender<ShardMsg<S>>,
+        shard_local_tx: &AsyncSender<ServerMsg<S>>,
     ) -> Result<Self, ServerError>
     where
         <P as Archive>::Archived: rkyv::Deserialize<P, Strategy<Pool, rkyv::rancor::Error>>,
@@ -352,7 +352,7 @@ impl StorageSupport for FileSystem {
         &self,
         table_map: &FullArchiveMap<D::TableNames>,
         loader_rx: &AsyncReceiver<LoaderMsg<D::TableNames>>,
-        shard_local_tx: &AsyncSender<ShardMsg<D>>,
+        shard_local_tx: &AsyncSender<ServerMsg<D>>,
     ) -> Result<(), ServerError> {
         // filter down to just our filesystem archive maps
         let filtered = FilteredFullArchiveMap::<D::TableNames, ArchiveMap>::from(table_map);

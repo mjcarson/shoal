@@ -1,6 +1,5 @@
 //! An unsorted table in Shoal where each partition contains a single row
 
-use bytes::Bytes;
 use glommio::io::ReadResult;
 use glommio::TaskQueueHandle;
 use kanal::{AsyncReceiver, AsyncSender};
@@ -8,8 +7,6 @@ use lru::LruCache;
 use rkyv::bytecheck::CheckBytes;
 use rkyv::de::Pool;
 use rkyv::rancor::Strategy;
-use rkyv::rend::u64_le;
-use rkyv::rend::unaligned::u64_ule;
 use rkyv::ser::allocator::ArenaHandle;
 use rkyv::ser::sharing::Share;
 use rkyv::util::AlignedVec;
@@ -21,21 +18,17 @@ use std::cell::RefCell;
 use std::collections::hash_map;
 use std::collections::HashMap;
 use std::hash::BuildHasherDefault;
-use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing::Span;
 use tracing::{event, instrument, Level};
 use uuid::Uuid;
 use xxhash_rust::xxh3::Xxh3;
 
-use crate::server::messages::{LoadedPartition, QueryMetadata, ShardMsg};
+use crate::server::messages::{LoadedPartition, QueryMetadata, ServerMsg};
 use crate::server::tables::partitions::UnsortedPartition;
 use crate::server::tables::storage::StorageSupport;
 use crate::server::{Conf, ServerError};
-use crate::shared::queries::{
-    ArchivedUnsortedGet, ArchivedUnsortedQuery, ArchivedUnsortedUpdate, UnsortedGet, UnsortedQuery,
-    UnsortedUpdate,
-};
+use crate::shared::queries::{UnsortedGet, UnsortedQuery, UnsortedUpdate};
 use crate::shared::responses::{Response, ResponseAction};
 use crate::shared::traits::{RkyvSupport, ShoalDatabase, ShoalUnsortedTable, TableNameSupport};
 use crate::storage::{
@@ -86,19 +79,6 @@ where
 }
 
 impl<T: ShoalUnsortedTable> RkyvSupport for UnsortedIntents<T> {}
-
-enum HandledKinds<R: ShoalUnsortedTable> {
-    /// The query was successful
-    Success {
-        client_id: Uuid,
-        query_id: Uuid,
-        response: Response<R>,
-    },
-    /// This query was successful but is pending until data is flushed
-    Pending { action: ResponseAction<R>, pos: u64 },
-    /// This query needs a partition loaded to be executed
-    NeedsLoad(u64),
-}
 
 /// A table that stores data both in memory and on disk
 #[derive(Debug)]
@@ -156,7 +136,7 @@ where
         medium_priority: TaskQueueHandle,
         memory_usage: &Arc<RefCell<usize>>,
         lru: &Arc<RefCell<LruCache<(N, u64), usize, BuildHasherDefault<Xxh3>>>>,
-        shard_local_tx: &AsyncSender<ShardMsg<D>>,
+        shard_local_tx: &AsyncSender<ServerMsg<D>>,
     ) -> Result<Self, ServerError>
     where
         <<R as ShoalUnsortedTable>::Update as Archive>::Archived: rkyv::Deserialize<
@@ -222,7 +202,7 @@ where
         &self,
         table_map: &FullArchiveMap<D::TableNames>,
         loader_rx: &AsyncReceiver<LoaderMsg<D::TableNames>>,
-        shard_local_tx: &AsyncSender<ShardMsg<D>>,
+        shard_local_tx: &AsyncSender<ServerMsg<D>>,
     ) -> Result<(), ServerError> {
         // spawn the loader for our storage engine
         self.storage

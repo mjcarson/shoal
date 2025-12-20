@@ -24,7 +24,7 @@ mod unsorted;
 
 use super::queries::ArchivedQueries;
 use super::queries::{Queries, SortedUpdate};
-use crate::server::messages::{LoadedPartitionKinds, QueryMetadata, ShardMsg};
+use crate::server::messages::{LoadedPartitionKinds, ServerMsg, QueryMetadata};
 use crate::server::ring::Ring;
 use crate::server::shard::ShardInfo;
 use crate::server::{Conf, ServerError};
@@ -150,7 +150,7 @@ pub trait ShoalDatabase: 'static + Sized {
         medium_priority: TaskQueueHandle,
         memory_usage: &Arc<RefCell<usize>>,
         lru: &Arc<RefCell<LruCache<(Self::TableNames, u64), usize, BuildHasherDefault<Xxh3>>>>,
-        shard_local_tx: &AsyncSender<ShardMsg<Self>>,
+        shard_local_tx: &AsyncSender<ServerMsg<Self>>,
     ) -> Result<Self, ServerError>;
 
     /// Initialize the different loaders for our storage kinds
@@ -165,7 +165,7 @@ pub trait ShoalDatabase: 'static + Sized {
                 AsyncReceiver<LoaderMsg<Self::TableNames>>,
             ),
         >,
-        shard_local_tx: &AsyncSender<ShardMsg<Self>>,
+        shard_local_tx: &AsyncSender<ServerMsg<Self>>,
     ) -> Result<(), ServerError>;
 
     /// Build a default queries bundle
@@ -246,7 +246,7 @@ pub trait ShoalDatabase: 'static + Sized {
     async fn load_partition(
         &mut self,
         loaded: LoadedPartitionKinds<Self>,
-        shard_local_tx: &AsyncSender<ShardMsg<Self>>,
+        shard_local_tx: &AsyncSender<ServerMsg<Self>>,
     ) -> Result<(), ServerError>;
 
     /// Shutdown this table and flush any data to disk if needed

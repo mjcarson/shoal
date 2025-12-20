@@ -7,7 +7,7 @@ use glommio::{GlommioError, Task, TaskQueueHandle};
 use kanal::{AsyncReceiver, AsyncSender};
 use tracing::instrument;
 
-use crate::server::messages::{LoadedPartition, LoadedPartitionKinds, ShardMsg};
+use crate::server::messages::{LoadedPartition, LoadedPartitionKinds, ServerMsg};
 use crate::server::ServerError;
 use crate::shared::traits::ShoalDatabase;
 use crate::storage::fs::map::ArchiveEntry;
@@ -34,8 +34,8 @@ async fn read_partition<D: ShoalDatabase>(
     partition_id: u64,
     archive: DmaFile,
     entry: ArchiveEntry,
-    shard_local_tx: AsyncSender<ShardMsg<D>>,
-) -> Result<AsyncSender<ShardMsg<D>>, ServerError> {
+    shard_local_tx: AsyncSender<ServerMsg<D>>,
+) -> Result<AsyncSender<ServerMsg<D>>, ServerError> {
     // try to load our parititon from disk
     let data = read_partition_helper(archive, entry).await?;
     // build the partition load result
@@ -43,7 +43,7 @@ async fn read_partition<D: ShoalDatabase>(
     // wrap our loaded partition so we can keep track of the table this is for
     let wrapped = LoadedPartitionKinds { table, loaded };
     // wrap our read result in a shard message
-    let msg = ShardMsg::Partition(wrapped);
+    let msg = ServerMsg::Partition(wrapped);
     // send this partition over our shard local channel
     shard_local_tx.send(msg).await.unwrap();
     // return our channel sender to be reused
@@ -58,11 +58,11 @@ pub struct FsLoader<D: ShoalDatabase> {
     /// A channel to read Load Requests from
     loader_rx: AsyncReceiver<LoaderMsg<D::TableNames>>,
     /// The channel to send shard local messages on
-    shard_local_tx: AsyncSender<ShardMsg<D>>,
+    shard_local_tx: AsyncSender<ServerMsg<D>>,
     /// A set of sender channels to reuse
-    senders: Vec<AsyncSender<ShardMsg<D>>>,
+    senders: Vec<AsyncSender<ServerMsg<D>>>,
     /// A set of loader tasks
-    tasks: FuturesUnordered<Task<Result<AsyncSender<ShardMsg<D>>, ServerError>>>,
+    tasks: FuturesUnordered<Task<Result<AsyncSender<ServerMsg<D>>, ServerError>>>,
 }
 
 impl<D: ShoalDatabase> FsLoader<D> {
@@ -71,7 +71,7 @@ impl<D: ShoalDatabase> FsLoader<D> {
         medium_priority: &TaskQueueHandle,
         table_map: FilteredFullArchiveMap<D::TableNames, ArchiveMap>,
         loader_rx: &AsyncReceiver<LoaderMsg<D::TableNames>>,
-        shard_local_tx: &AsyncSender<ShardMsg<D>>,
+        shard_local_tx: &AsyncSender<ServerMsg<D>>,
     ) -> Self {
         // build a filesystem loader
         FsLoader {

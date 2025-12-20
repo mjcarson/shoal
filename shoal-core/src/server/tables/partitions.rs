@@ -4,7 +4,6 @@ use deepsize2::DeepSizeOf;
 use glommio::io::ReadResult;
 use rkyv::bytecheck::CheckBytes;
 use rkyv::de::Pool;
-use rkyv::option::ArchivedOption;
 use rkyv::rancor::Strategy;
 use rkyv::validation::archive::ArchiveValidator;
 use rkyv::validation::shared::SharedValidator;
@@ -12,10 +11,7 @@ use rkyv::validation::Validator;
 use rkyv::{Archive, Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use crate::shared::queries::{
-    ArchivedUnsortedGet, ArchivedUnsortedUpdate, SortedGet, SortedUpdate, UnsortedGet,
-    UnsortedUpdate,
-};
+use crate::shared::queries::{SortedGet, SortedUpdate, UnsortedGet, UnsortedUpdate};
 use crate::shared::responses::ResponseAction;
 use crate::shared::traits::{RkyvSupport, ShoalSortedTable, ShoalUnsortedTable};
 

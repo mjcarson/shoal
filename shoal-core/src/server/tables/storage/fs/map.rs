@@ -533,7 +533,7 @@ impl ArchiveMap {
     pub async fn close_all(&self) -> Result<(), ServerError> {
         // get all of the keys in our archive map
         // step over each archive and close it
-        for (_, archive) in self.loaded_archives.borrow_mut().drain() {
+        for (_, archive) in self.loaded_archives.take() {
             // close this archive
             if let Err(error) = archive.close().await {
                 panic!("Error: {error:#?}");

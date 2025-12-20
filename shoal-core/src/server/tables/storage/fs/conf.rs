@@ -16,7 +16,7 @@ fn default_path() -> PathBuf {
 
 /// Set default buffer_size for latency files
 fn default_latency_buffer_size() -> usize {
-    Byte::BYTE.multiply(1024).unwrap().try_into().unwrap()
+    Byte::BYTE.multiply(4096).unwrap().try_into().unwrap()
 }
 
 /// Set default write behind for latency files

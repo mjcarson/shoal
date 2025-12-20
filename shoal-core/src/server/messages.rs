@@ -10,26 +10,6 @@ use uuid::Uuid;
 use super::shard::ShardInfo;
 use crate::shared::traits::{QuerySupport, ShoalDatabase};
 
-/// The messages that can be sent in shoal
-pub enum Msg<S: ShoalDatabase> {
-    /// A message from our node local mesh
-    Mesh { shard: usize, msg: MeshMsg<S> },
-    /// A new client has connected
-    NewClient {
-        id: Uuid,
-        client_tx: AsyncSender<(Uuid, Span, AlignedVec)>,
-    },
-    /// A message from a client
-    Client {
-        /// This peers id
-        peer: Uuid,
-        /// The raw data for our request
-        data: BytesMut,
-    },
-    /// Tell Shoal to shutdown
-    Shutdown,
-}
-
 /// The metadata about a query from a client
 #[derive(Debug, Clone)]
 pub struct QueryMetadata {
@@ -66,51 +46,22 @@ impl QueryMetadata {
 }
 
 /// The messages that can be sent over of node local mesh
-pub enum MeshMsg<D: ShoalDatabase>
+///
+/// # Safety
+///
+/// The Partition variant must never be sent across threads. In order to
+/// prevent that only loaders should ever create Partition
+pub enum ServerMsg<D: ShoalDatabase>
 where
     <D::ClientType as QuerySupport>::QueryKinds: Clone,
 {
     /// Join this nodes token ring
     Join(ShardInfo),
-    /// A query to execute
-    Query {
-        /// The metadata about a query
-        meta: QueryMetadata,
-        /// The query to execute
-        query: <D::ClientType as QuerySupport>::QueryKinds,
-    },
     /// Tell this shard about a new client
     NewClient {
         /// This clients id
         client: Uuid,
         /// The channel to send responses for this client on
-        client_tx: AsyncSender<(Uuid, Span, AlignedVec)>,
-    },
-    /// Tell this shard to shutdown
-    Shutdown,
-}
-
-pub struct LoadedPartition {
-    /// The partition that is being read from disk
-    pub partition_id: u64,
-    /// The result for this read
-    pub data: ReadResult,
-}
-
-pub struct LoadedPartitionKinds<D: ShoalDatabase> {
-    /// The table this partition is for
-    pub table: D::TableNames,
-    /// The partition that was loaded from storage
-    pub loaded: LoadedPartition,
-}
-
-/// The messages that can be sent between workers in a shard
-pub enum ShardMsg<D: ShoalDatabase> {
-    /// Join a shoal cluster
-    Join(ShardInfo),
-    /// A New client connected to shoal
-    NewClient {
-        client: Uuid,
         client_tx: AsyncSender<(Uuid, Span, AlignedVec)>,
     },
     /// A message from a client
@@ -120,7 +71,7 @@ pub enum ShardMsg<D: ShoalDatabase> {
         /// The raw data for our request
         data: BytesMut,
     },
-    /// A still archived query to execute
+    /// A query to execute
     Query {
         /// The metadata about a query
         meta: QueryMetadata,
@@ -139,18 +90,68 @@ pub enum ShardMsg<D: ShoalDatabase> {
     Shutdown,
 }
 
-impl<D: ShoalDatabase> From<MeshMsg<D>> for ShardMsg<D> {
-    /// Convert a mesh message into a shard local message
-    ///
-    /// # Arguments
-    ///
-    /// * `mesh_msg` - The mesh message to convert
-    fn from(mesh_msg: MeshMsg<D>) -> Self {
-        match mesh_msg {
-            MeshMsg::Join(info) => ShardMsg::Join(info),
-            MeshMsg::Query { meta, query } => ShardMsg::Query { meta, query },
-            MeshMsg::NewClient { client, client_tx } => ShardMsg::NewClient { client, client_tx },
-            MeshMsg::Shutdown => ShardMsg::Shutdown,
+/// # Safety
+///
+/// Developers cannot send the partition variant across threads.
+unsafe impl<D: ShoalDatabase> Send for ServerMsg<D>
+where
+    D: Send,
+    D::TableNames: Send,
+    <D::ClientType as QuerySupport>::QueryKinds: Send,
+{
+}
+
+impl<D: ShoalDatabase> Clone for ServerMsg<D> {
+    fn clone(&self) -> Self {
+        match self {
+            ServerMsg::Join(info) => ServerMsg::Join(info.clone()),
+            ServerMsg::Client { peer, data } => ServerMsg::Client {
+                peer: peer.clone(),
+                data: data.clone(),
+            },
+            ServerMsg::NewClient { client, client_tx } => ServerMsg::NewClient {
+                client: client.clone(),
+                client_tx: client_tx.clone(),
+            },
+            ServerMsg::Query { meta, query } => ServerMsg::Query {
+                meta: meta.clone(),
+                query: query.clone(),
+            },
+            ServerMsg::Partition(loaded) => ServerMsg::Partition(loaded.clone()),
+            ServerMsg::MarkEvictable {
+                generation,
+                table,
+                partitions,
+            } => ServerMsg::MarkEvictable {
+                generation: *generation,
+                table: table.clone(),
+                partitions: partitions.clone(),
+            },
+            ServerMsg::Shutdown => ServerMsg::Shutdown,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct LoadedPartition {
+    /// The partition that is being read from disk
+    pub partition_id: u64,
+    /// The result for this read
+    pub data: ReadResult,
+}
+
+pub struct LoadedPartitionKinds<D: ShoalDatabase> {
+    /// The table this partition is for
+    pub table: D::TableNames,
+    /// The partition that was loaded from storage
+    pub loaded: LoadedPartition,
+}
+
+impl<D: ShoalDatabase> Clone for LoadedPartitionKinds<D> {
+    fn clone(&self) -> Self {
+        LoadedPartitionKinds {
+            table: self.table.clone(),
+            loaded: self.loaded.clone(),
         }
     }
 }

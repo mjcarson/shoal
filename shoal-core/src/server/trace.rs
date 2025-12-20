@@ -2,9 +2,7 @@
 
 use opentelemetry::trace::TracerProvider;
 use opentelemetry_otlp::WithExportConfig;
-use opentelemetry_sdk::trace::{
-    BatchConfigBuilder, BatchSpanProcessor, BatchSpanProcessorBuilder, SdkTracerProvider,
-};
+use opentelemetry_sdk::trace::{BatchConfigBuilder, BatchSpanProcessor, SdkTracerProvider};
 use opentelemetry_sdk::Resource;
 use tracing::level_filters::LevelFilter;
 use tracing_subscriber::filter::Filtered;
