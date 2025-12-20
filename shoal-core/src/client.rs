@@ -14,9 +14,10 @@ use rkyv::validation::Validator;
 use rkyv::vec::ArchivedVec;
 use rkyv::Archive;
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::IoSlice;
+use std::io::{ErrorKind, IoSlice};
 use std::marker::PhantomData;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -93,6 +94,8 @@ pub struct Shoal<S: QuerySupport> {
     channel_queue_tx: AsyncSender<(AsyncSender<ClientMsg>, AsyncReceiver<ClientMsg>)>,
     /// A channel of channels to send streaming results over
     channel_queue_rx: AsyncReceiver<(AsyncSender<ClientMsg>, AsyncReceiver<ClientMsg>)>,
+    /// Whether this client is shutting down or not
+    is_shutting_down: Arc<AtomicBool>,
     /// The handle to this clients proxy
     proxy_handle: JoinHandle<()>,
     /// The database kind we are querying
@@ -138,9 +141,14 @@ impl<S: QuerySupport> Shoal<S> {
         let (channel_queue_tx, channel_queue_rx) = kanal::bounded_async(8192);
         // create a map for storing what channels to send response streams on
         let channel_map = Arc::new(HashMap::with_capacity(1024));
+        // create a bool to track when this client is shutting down
+        let is_shutting_down = Arc::new(AtomicBool::new(false));
         // create the response proxy for this client
-        let proxy =
-            ShoalTcpProxy::<S::QueryKinds, S::ResponseKinds>::new(proxy_rx, channel_map.clone());
+        let proxy = ShoalTcpProxy::<S::QueryKinds, S::ResponseKinds>::new(
+            proxy_rx,
+            &channel_map,
+            &is_shutting_down,
+        );
         // start our proxy
         let proxy_handle = tokio::spawn(async move { proxy.start().await });
         // build our client
@@ -149,6 +157,7 @@ impl<S: QuerySupport> Shoal<S> {
             channel_map,
             channel_queue_tx,
             channel_queue_rx,
+            is_shutting_down,
             proxy_handle,
             phantom: PhantomData,
         };
@@ -285,17 +294,79 @@ impl<S: QuerySupport> Shoal<S> {
         };
         Ok((query_stream, result_stream))
     }
-
-    //pub async fn close(self) -> Result<(), Errors> {
-    //    // drain our connections
-    //    for _ in 0..self.pool.state().connections
-    //}
 }
 
 impl<S: QuerySupport> Drop for Shoal<S> {
     fn drop(&mut self) {
+        // set a flag that we are shutting down
+        self.is_shutting_down.store(true, Ordering::Relaxed);
         // stop our proxy
         self.proxy_handle.abort();
+    }
+}
+
+struct TcpProxy {
+    /// The reader to read messages from the shoal server from
+    reader: OwnedReadHalf,
+    /// A map of channels to send messages to stream readers on
+    channel_map: Arc<HashMap<Uuid, AsyncSender<ClientMsg>>>,
+    /// Whether shoal or the client is shutting down
+    is_shutting_down: Arc<AtomicBool>,
+}
+
+impl TcpProxy {
+    /// Create a new tcp proxy
+    pub fn new(
+        reader: OwnedReadHalf,
+        channel_map: &Arc<HashMap<Uuid, AsyncSender<ClientMsg>>>,
+        is_shutting_down: &Arc<AtomicBool>,
+    ) -> Self {
+        // Create a new tcp proxy
+        TcpProxy {
+            reader,
+            channel_map: channel_map.clone(),
+            is_shutting_down: is_shutting_down.clone(),
+        }
+    }
+    /// Start relaying messages from this tcp stream
+    pub async fn start(mut self) {
+        // keep reading from our tcp socket
+        loop {
+            // have a buffer for our query_id and for our length
+            let mut preamble: [u8; 24] = [0; 24];
+            // try to read from our tcp socket
+            if let Err(error) = self.reader.read_exact(&mut preamble).await {
+                // if we are shutting down then ignore any EOF errors
+                if self.is_shutting_down.load(Ordering::Relaxed) {
+                    // check if this was an EOF error
+                    if error.kind() == ErrorKind::UnexpectedEof {
+                        break;
+                    }
+                } else {
+                    // we are not shutting down so raise this EOF error
+                    panic!("Error: {error:#?}");
+                }
+            }
+            // convert our uuid from bytes
+            let query_id = Uuid::from_slice(&preamble[..16]).unwrap();
+            // get a fixed size slice for our u64
+            let u64_bytes = preamble[16..24].try_into().unwrap();
+            // parse our message length from our length bytes
+            let len = u64::from_le_bytes(u64_bytes) as usize;
+            // Create an aligned vec to act as a pool of bytes
+            let mut aligned_buff = AlignedVec::<16>::with_capacity(len);
+            // resize our aligned vec
+            aligned_buff.resize(len, 0);
+            self.reader.read_exact(&mut aligned_buff).await.unwrap();
+            // wrap our response in a client message
+            let wrapped = ClientMsg::Response(aligned_buff);
+            // get the channel for this query
+            match self.channel_map.pin_owned().get(&query_id) {
+                // send our response to the right shoal stream
+                Some(tx) => tx.send(wrapped).await.unwrap(),
+                None => panic!("Missing stream channel! -> {query_id} {len}"),
+            }
+        }
     }
 }
 
@@ -306,48 +377,53 @@ impl<S: QuerySupport> Drop for Shoal<S> {
 //}
 //
 //impl<R: ShoalResponseSupport> TcpProxyHelper<R> {
-async fn tcp_proxy_helper(
-    mut reader: OwnedReadHalf,
-    channel_map: Arc<HashMap<Uuid, AsyncSender<ClientMsg>>>,
-)
-//where
-//    for<'a> <R as Archive>::Archived: rkyv::bytecheck::CheckBytes<
-//        Strategy<
-//            rkyv::validation::Validator<
-//                rkyv::validation::archive::ArchiveValidator<'a>,
-//                rkyv::validation::shared::SharedValidator,
-//            >,
-//            rkyv::rancor::Error,
-//        >,
-//    >,
-{
-    // keep reading from our tcp socket
-    loop {
-        // have a buffer for our query_id and for our length
-        let mut preamble: [u8; 24] = [0; 24];
-        // try to read from our tcp socket
-        reader.read_exact(&mut preamble).await.unwrap();
-        // convert our uuid from bytes
-        let query_id = Uuid::from_slice(&preamble[..16]).unwrap();
-        // get a fixed size slice for our u64
-        let u64_bytes = preamble[16..24].try_into().unwrap();
-        // parse our message length from our length bytes
-        let len = u64::from_le_bytes(u64_bytes) as usize;
-        // Create an aligned vec to act as a pool of bytes
-        let mut aligned_buff = AlignedVec::<16>::with_capacity(len);
-        // resize our aligned vec
-        aligned_buff.resize(len, 0);
-        reader.read_exact(&mut aligned_buff).await.unwrap();
-        // wrap our response in a client message
-        let wrapped = ClientMsg::Response(aligned_buff);
-        // get the channel for this query
-        match channel_map.pin_owned().get(&query_id) {
-            // send our response to the right shoal stream
-            Some(tx) => tx.send(wrapped).await.unwrap(),
-            None => panic!("Missing stream channel! -> {query_id} {len}"),
-        }
-    }
-}
+//async fn tcp_proxy_helper(
+//    mut reader: OwnedReadHalf,
+//    channel_map: Arc<HashMap<Uuid, AsyncSender<ClientMsg>>>,
+//)
+////where
+////    for<'a> <R as Archive>::Archived: rkyv::bytecheck::CheckBytes<
+////        Strategy<
+////            rkyv::validation::Validator<
+////                rkyv::validation::archive::ArchiveValidator<'a>,
+////                rkyv::validation::shared::SharedValidator,
+////            >,
+////            rkyv::rancor::Error,
+////        >,
+////    >,
+//{
+//    // keep reading from our tcp socket
+//    loop {
+//        // have a buffer for our query_id and for our length
+//        let mut preamble: [u8; 24] = [0; 24];
+//        // try to read from our tcp socket
+//        if let Err(error) = reader.read_exact(&mut preamble).await {
+//            // check if this was an EOF error
+//            if error.kind() == ErrorKind::UnexpectedEof {
+//                break;
+//            }
+//        }
+//        // convert our uuid from bytes
+//        let query_id = Uuid::from_slice(&preamble[..16]).unwrap();
+//        // get a fixed size slice for our u64
+//        let u64_bytes = preamble[16..24].try_into().unwrap();
+//        // parse our message length from our length bytes
+//        let len = u64::from_le_bytes(u64_bytes) as usize;
+//        // Create an aligned vec to act as a pool of bytes
+//        let mut aligned_buff = AlignedVec::<16>::with_capacity(len);
+//        // resize our aligned vec
+//        aligned_buff.resize(len, 0);
+//        reader.read_exact(&mut aligned_buff).await.unwrap();
+//        // wrap our response in a client message
+//        let wrapped = ClientMsg::Response(aligned_buff);
+//        // get the channel for this query
+//        match channel_map.pin_owned().get(&query_id) {
+//            // send our response to the right shoal stream
+//            Some(tx) => tx.send(wrapped).await.unwrap(),
+//            None => panic!("Missing stream channel! -> {query_id} {len}"),
+//        }
+//    }
+//}
 //}
 
 struct ShoalTcpProxy<S: ShoalQuerySupport, R: ShoalResponseSupport> {
@@ -355,6 +431,8 @@ struct ShoalTcpProxy<S: ShoalQuerySupport, R: ShoalResponseSupport> {
     proxy_rx: AsyncReceiver<OwnedReadHalf>,
     /// A concurrent map of what channel to send streaming results too
     channel_map: Arc<HashMap<Uuid, AsyncSender<ClientMsg>>>,
+    /// Whether this client is shutting down
+    is_shutting_down: Arc<AtomicBool>,
     /// The database we are getting responses from
     phantom_query: PhantomData<S>,
     /// The database we are getting responses from
@@ -371,12 +449,14 @@ impl<S: ShoalQuerySupport, R: ShoalResponseSupport + 'static> ShoalTcpProxy<S, R
     /// * `shutdown` - A flag used to tell the proxy to shutdown
     pub fn new(
         proxy_rx: AsyncReceiver<OwnedReadHalf>,
-        channel_map: Arc<HashMap<Uuid, AsyncSender<ClientMsg>>>,
+        channel_map: &Arc<HashMap<Uuid, AsyncSender<ClientMsg>>>,
+        is_shutting_down: &Arc<AtomicBool>,
     ) -> Self {
         // create our proxy
         ShoalTcpProxy {
             proxy_rx,
-            channel_map,
+            channel_map: channel_map.clone(),
+            is_shutting_down: is_shutting_down.clone(),
             phantom_query: PhantomData,
             phantom_response: PhantomData,
         }
@@ -399,39 +479,11 @@ impl<S: ShoalQuerySupport, R: ShoalResponseSupport + 'static> ShoalTcpProxy<S, R
         loop {
             // wait for a new tcp reader to watch
             let reader = self.proxy_rx.recv().await.unwrap();
-            //// create a tcp proxy helper
-            //let helper = TcpProxyHelper {
-            //    reader,
-            //    channel_map: self.channel_map.clone(),
-            //    phantom: self.phantom_response,
-            //};
+            // build a new tcp proxy
+            let tcp_proxy = TcpProxy::new(reader, &self.channel_map, &self.is_shutting_down);
             // spawn a task to watch this tcp reader for results
-            tokio::task::spawn(tcp_proxy_helper(reader, self.channel_map.clone()));
+            tokio::task::spawn(tcp_proxy.start());
         }
-        //// Wait for new messages from our server and proxy the respones to the right channel
-        //loop {
-        //    // Create an aligned vec to act as a pool of bytes
-        //    let mut aligned_buff = AlignedVec::with_capacity(4096);
-        //    // resize our aligned vec
-        //    aligned_buff.resize(4096, 0);
-        //    // try to read a single datagram from our udp socket
-        //    let (read, _) = self.socket.recv_from(&mut aligned_buff).await.unwrap();
-        //    // shrink our aligned vec to just the data read
-        //    aligned_buff.resize(read, 0);
-        //    // get this responses id
-        //    let id = match R::access(&aligned_buff) {
-        //        Ok(archived) => R::get_query_id(archived),
-        //        Err(error) => panic!("SPEC FAIL -> {error:#?}"),
-        //    };
-        //    // wrap our response in a client message
-        //    let wrapped = ClientMsg::Response(aligned_buff);
-        //    // get the channel for this query
-        //    match self.channel_map.pin_owned().get(&id) {
-        //        // send our response to the right shoal stream
-        //        Some(tx) => tx.send(wrapped).await.unwrap(),
-        //        None => panic!("Missing stream channel! -> {id} {read}"),
-        //    }
-        //}
     }
 }
 

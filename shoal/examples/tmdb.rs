@@ -877,12 +877,12 @@ impl MovieController {
     /// Start streaming jobs to our workers
     pub async fn start<P: AsRef<Path>>(&mut self, path: P) {
         // loop over our reads/writes 500 times
-        for i in 0..100 {
+        for i in 0..1 {
             println!("\n\n $$$$ {i} $$$$");
             // create a new bencher
             let mut bencher = Bencher::new(".benchmark", 10000);
             // spawn 5 workers
-            self.spawn(1, &bencher).await;
+            self.spawn(5, &bencher).await;
             // upload our tmdb data
             self.upload(&path).await;
             ////// emit that workers should shutdown once all movie info has been streamed to shoal
@@ -914,6 +914,14 @@ impl MovieController {
             self.movies_rx.recv().await.unwrap();
         }
     }
+
+    /// Shutdown our controller and its workers
+    async fn close(mut self) {
+        println!("CLOSING {} tasks", self.tasks.len());
+        while let Some(Err(error)) = self.tasks.join_next().await {
+            println!("ERROR: {error:#?}");
+        }
+    }
 }
 
 async fn read_csv() {
@@ -925,6 +933,8 @@ async fn read_csv() {
     controller
         .start("/home/mcarson/datasets/TMDB_movie_dataset_v11_first_100k.csv")
         .await;
+    // shutdown our controller
+    controller.close().await;
 }
 
 fn main() {
