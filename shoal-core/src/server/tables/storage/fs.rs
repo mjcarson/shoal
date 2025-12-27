@@ -59,6 +59,7 @@ pub struct FileSystem {
     map: Arc<ArchiveMap>,
 }
 
+#[cfg_attr(feature = "hotpath", hotpath::measure_all)]
 impl FileSystem {
     /// Get a new stream writer for this shard
     ///
@@ -127,6 +128,7 @@ impl FileSystem {
     }
 }
 
+#[cfg_attr(feature = "hotpath", hotpath::measure_all)]
 impl StorageSupport for FileSystem {
     /// The settings for this storage engine
     type Settings = FileSystemTableConf;
@@ -298,8 +300,12 @@ impl StorageSupport for FileSystem {
 
     /// Flush all currently pending writes to storage
     #[allow(async_fn_in_trait)]
-    async fn flush(&mut self) -> Result<(), ServerError> {
-        self.intent_log.sync().await?;
+    async fn flush(&self) -> Result<(), ServerError> {
+        // skip flushing if we don't have anything to flush
+        if self.intent_log.current_pos() > self.intent_log.current_flushed_pos() {
+            // sync our intent log to disk
+            self.intent_log.sync().await?;
+        }
         Ok(())
     }
 

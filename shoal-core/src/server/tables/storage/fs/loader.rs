@@ -45,7 +45,7 @@ async fn read_partition<D: ShoalDatabase>(
     // wrap our read result in a shard message
     let msg = ServerMsg::Partition(wrapped);
     // send this partition over our shard local channel
-    shard_local_tx.send(msg).await.unwrap();
+    shard_local_tx.send(msg).await?;
     // return our channel sender to be reused
     Ok(shard_local_tx)
 }
@@ -115,7 +115,7 @@ impl<D: ShoalDatabase> FsLoader<D> {
         // keep handling loader messeges until we get a shutdown command
         loop {
             // wait for a message on our mesh
-            let msg = self.loader_rx.recv().await.unwrap();
+            let msg = self.loader_rx.recv().await?;
             // handle this message
             match msg {
                 LoaderMsg::Request {

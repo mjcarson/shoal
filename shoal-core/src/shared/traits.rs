@@ -24,7 +24,7 @@ mod unsorted;
 
 use super::queries::ArchivedQueries;
 use super::queries::{Queries, SortedUpdate};
-use crate::server::messages::{LoadedPartitionKinds, ServerMsg, QueryMetadata};
+use crate::server::messages::{LoadedPartitionKinds, QueryMetadata, ServerMsg};
 use crate::server::ring::Ring;
 use crate::server::shard::ShardInfo;
 use crate::server::{Conf, ServerError};
@@ -222,7 +222,7 @@ pub trait ShoalDatabase: 'static + Sized {
     /// Flush any in flight writes to disk
     #[allow(async_fn_in_trait)]
     #[cfg(feature = "server")]
-    async fn flush(&mut self) -> Result<(), ServerError>;
+    async fn flush(&self) -> Result<(), ServerError>;
 
     /// Get all flushed messages and send their response back
     ///

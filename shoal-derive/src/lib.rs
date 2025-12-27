@@ -683,7 +683,7 @@ fn add_db_trait2(
             }
 
             /// Flush any in flight writes to disk
-            async fn flush(&mut self) -> Result<(), ServerError> {
+            async fn flush(&self) -> Result<(), ServerError> {
                 #(#flush_arms)*
                 Ok(())
             }

@@ -50,7 +50,8 @@ impl QueryMetadata {
 /// # Safety
 ///
 /// The Partition variant must never be sent across threads. In order to
-/// prevent that only loaders should ever create Partition
+/// prevent that only loaders should ever create Partition variant. Loaders
+/// should also refrain from have any channel other then to their local shard.
 pub enum ServerMsg<D: ShoalDatabase>
 where
     <D::ClientType as QuerySupport>::QueryKinds: Clone,
@@ -78,7 +79,7 @@ where
         /// The query to execute
         query: <D::ClientType as QuerySupport>::QueryKinds,
     },
-    /// A partition loaded from disk
+    /// A partition loaded from disk. This can never be sent across threads!
     Partition(LoadedPartitionKinds<D>),
     /// Mark some partitions as evictable
     MarkEvictable {
@@ -88,17 +89,6 @@ where
     },
     /// Tell this shard to shutdown
     Shutdown,
-}
-
-/// # Safety
-///
-/// Developers cannot send the partition variant across threads.
-unsafe impl<D: ShoalDatabase> Send for ServerMsg<D>
-where
-    D: Send,
-    D::TableNames: Send,
-    <D::ClientType as QuerySupport>::QueryKinds: Send,
-{
 }
 
 impl<D: ShoalDatabase> Clone for ServerMsg<D> {
@@ -130,6 +120,17 @@ impl<D: ShoalDatabase> Clone for ServerMsg<D> {
             ServerMsg::Shutdown => ServerMsg::Shutdown,
         }
     }
+}
+
+/// # Safety
+///
+/// The Partition variant should not be sent across threads ever.
+unsafe impl<D: ShoalDatabase> Send for ServerMsg<D>
+where
+    D: Send,
+    D::TableNames: Send,
+    <D::ClientType as QuerySupport>::QueryKinds: Send,
+{
 }
 
 #[derive(Clone)]

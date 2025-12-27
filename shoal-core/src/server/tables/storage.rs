@@ -281,7 +281,7 @@ pub trait StorageSupport: Sized {
 
     /// Flush all currently pending writes to storage
     #[allow(async_fn_in_trait)]
-    async fn flush(&mut self) -> Result<(), ServerError>;
+    async fn flush(&self) -> Result<(), ServerError>;
 
     /// Read an intent log from storage
     ///

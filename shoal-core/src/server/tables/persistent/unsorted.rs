@@ -105,6 +105,7 @@ pub struct PersistentUnsortedTable<R: ShoalUnsortedTable, S: StorageSupport, N: 
     lru: Arc<RefCell<LruCache<(N, u64), usize, BuildHasherDefault<Xxh3>>>>,
 }
 
+#[cfg_attr(feature = "hotpath", hotpath::measure_all)]
 impl<R: ShoalUnsortedTable + 'static, S: StorageSupport, N: TableNameSupport>
     PersistentUnsortedTable<R, S, N>
 where
@@ -580,7 +581,7 @@ where
     }
 
     /// Flush all pending writes to disk
-    pub async fn flush(&mut self) -> Result<(), ServerError> {
+    pub async fn flush(&self) -> Result<(), ServerError> {
         self.storage.flush().await
     }
 

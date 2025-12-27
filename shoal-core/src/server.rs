@@ -58,6 +58,7 @@ where
 {
     /// Start this shoal database
     #[instrument(name = "ShoalPool::start", skip_all, err(Debug))]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub fn start(conf: Conf) -> Result<Self, ServerError>
     where
         for<'a> <<<S as ShoalDatabase>::ClientType as QuerySupport>::QueryKinds as Archive>::Archived:
@@ -90,11 +91,8 @@ where
             if let Err(error) = handle {
                 // log this error
                 event!(Level::ERROR, error = error.to_string());
-            } else {
-                println!("OK EXIT!");
             }
         }
-
         Ok(())
     }
 }

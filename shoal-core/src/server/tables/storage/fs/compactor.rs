@@ -26,6 +26,10 @@ use crate::server::ServerError;
 use crate::shared::traits::{PartitionKeySupport, RkyvSupport, ShoalDatabase};
 use crate::storage::{CompactionJob, IntentReadSupport, ShouldPrune};
 
+/// The minimum size an active archive must be in order to be considered for compaction
+/// This is 100 Mebibytes
+const MIN_ARCHIVE_COMPACTABLE: u64 = 10 << 20;
+
 /// Write a new intent to our maps intent log
 ///
 /// # Arguments
@@ -43,8 +47,8 @@ macro_rules! write_map_intent {
         // write our archived partition map data
         $map_writer.write_all(archived_intent.as_slice()).await?;
         // ensure that during testing/development we always have an entry intent
-        assert!($intent.is_kind(MapIntentKinds::$variant));
-        // unwrap our intent to add the entry to our entry list
+        debug_assert!($intent.is_kind(MapIntentKinds::$variant));
+        // we should only have this variant for the intent since we just wrapped it
         match $intent {
             // save this entry to be added to our map after these writes sync
             MapIntent::$variant(entry) => entry,
@@ -332,7 +336,7 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                     // if this is our active file and its under 100MiB then skip it
                     if *old_id == *self.map.active.borrow() {
                         // if this file is under 100 MiB then skip it
-                        if size < Byte::MEBIBYTE.multiply(100).unwrap() {
+                        if size < MIN_ARCHIVE_COMPACTABLE {
                             // close this archive since its under our minumum active archive
                             // compaction size
                             archive.close().await?;
@@ -523,7 +527,6 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         loop {
             // wait for a intent log compaction job
             let job = self.jobs_rx.recv().await?;
-            println!("COMPACTOR_JOB -> {job:?}");
             // handle this job;
             match job.clone() {
                 CompactionJob::IntentLog { path, generation } => {
@@ -538,7 +541,6 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                 }
             }
         }
-        println!("SHUTDOWN!");
         Ok(())
     }
 }

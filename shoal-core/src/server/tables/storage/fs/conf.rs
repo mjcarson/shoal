@@ -14,9 +14,9 @@ fn default_path() -> PathBuf {
     PathBuf::from("/opt/shoal")
 }
 
-/// Set default buffer_size for latency files
+/// Set default buffer_size for latency files to 512 bytes
 fn default_latency_buffer_size() -> usize {
-    Byte::BYTE.multiply(4096).unwrap().try_into().unwrap()
+    512
 }
 
 /// Set default write behind for latency files
@@ -24,9 +24,9 @@ fn default_latency_write_behind() -> usize {
     128
 }
 
-/// Set default intent log size
+/// Set default intent log size to 100 Mebibytes
 fn default_intent_log_size() -> u64 {
-    Byte::MEBIBYTE.multiply(100).unwrap().as_u64()
+    10 << 20
 }
 
 fn deserialize_byte_size<'de, D>(deserializer: D) -> Result<usize, D::Error>
@@ -86,9 +86,9 @@ impl Default for FileSystemLatencyWriterConf {
     }
 }
 
-/// Set default buffer_size for throughput files
+/// Set default buffer_size for throughput files to 128 Kibibytes
 fn default_throughput_buffer_size() -> usize {
-    Byte::KIBIBYTE.multiply(128).unwrap().try_into().unwrap()
+    128 << 10
 }
 
 /// Set default write behind for throughput files

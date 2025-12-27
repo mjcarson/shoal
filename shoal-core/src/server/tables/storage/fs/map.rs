@@ -286,7 +286,7 @@ impl<N: TableNameSupport> FilteredFullArchiveMap<N, ArchiveMap> {
                     None => panic!("ahhh"),
                 };
                 // get the archive for this partition
-                let archive = table_map.get_archive(&entry.archive).await.unwrap();
+                let archive = table_map.get_archive(&entry.archive).await?;
                 Ok((entry, archive))
             }
             None => panic!("Missing table map?: {table_name}:{partition_id}"),

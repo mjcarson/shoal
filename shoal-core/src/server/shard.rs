@@ -119,9 +119,9 @@ async fn client_acceptor<S: ShoalDatabase>(
 ) -> Result<(), ServerError> {
     loop {
         // try to read a single datagram from our udp socket
-        let stream = tcp_sock.accept().await.unwrap();
+        let stream = tcp_sock.accept().await?;
         // disable nagles algorithm on this socket
-        stream.set_nodelay(true).unwrap();
+        stream.set_nodelay(true)?;
         // generate an id for this peer
         // TODO: detect collisions?
         let client = Uuid::new_v4();
@@ -135,12 +135,7 @@ async fn client_acceptor<S: ShoalDatabase>(
         // build the new client message to broadcast
         let msg = ServerMsg::NewClient { client, client_tx };
         // broadcast this client to all shards on this node
-        comms.broadcast(&msg).await.unwrap();
-        // tell our coordinator we have a new client so it can let our shards know
-        //shard_local_tx
-        //    .send(ShardMsg::NewClient { client, client_tx })
-        //    .await
-        //    .unwrap();
+        comms.broadcast(&msg).await?;
     }
 }
 
@@ -437,8 +432,13 @@ where
     ///
     /// * `addr` - The address
     #[allow(clippy::future_not_send)]
-    #[instrument(name = "Coordinator::handle_client", skip(self, peer, data))]
-    async fn handle_client<'a>(&mut self, peer: Uuid, data: BytesMut)
+    #[instrument(
+        name = "Coordinator::handle_client",
+        skip(self, peer, data),
+        err(Debug)
+    )]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    async fn handle_client<'a>(&mut self, peer: Uuid, data: BytesMut) -> Result<(), ServerError>
     where
         for<'b> <<<S as ShoalDatabase>::ClientType as QuerySupport>::QueryKinds as Archive>::Archived:
             CheckBytes<
@@ -446,11 +446,11 @@ where
             >,
     {
         // load our arhived query from buffer
-        let archived = Queries::access(&data).unwrap();
+        let archived = Queries::access(&data)?;
         // deserialize our queries
-        let queries = <Queries<S::ClientType> as RkyvSupport>::deserialize(archived).unwrap();
+        let queries = <Queries<S::ClientType> as RkyvSupport>::deserialize(archived)?;
         // send each query to the correct shard
-        self.send_to_shard(peer, queries).await.unwrap();
+        self.send_to_shard(peer, queries).await
     }
 
     /// Send a respones back to the client
@@ -460,6 +460,7 @@ where
     /// * `addr` - The address to send this reply too
     /// * `response` - The response to send
     #[instrument(name = "Shard::reply", parent = &span, skip_all, err(Debug))]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     async fn reply(
         &mut self,
         client: Uuid,
@@ -471,7 +472,7 @@ where
         let archived = rkyv::to_bytes::<_>(&response)?;
         // get this clients channel to send replies over
         match self.client_map.get(&client) {
-            Some(client_tx) => client_tx.send((query_id, span, archived)).await.unwrap(),
+            Some(client_tx) => client_tx.send((query_id, span, archived)).await?,
             None => panic!("{} Missing client channel? {client}", self.info.name),
         }
         Ok(())
@@ -490,6 +491,7 @@ where
         skip(self, query),
         fields(index = meta.index, id = meta.id.to_string())
     )]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     async fn handle_query(
         &mut self,
         meta: QueryMetadata,
@@ -513,6 +515,7 @@ where
 
     /// Get all flushed messages and send their response back
     #[instrument(name = "Shard::handle_flushed", skip(self))]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     async fn handle_flushed(&mut self) -> Result<(), ServerError> {
         // get all flushed query responses
         self.tables.handle_flushed(&mut self.flushed).await?;
@@ -525,6 +528,7 @@ where
     }
 
     /// Find partitions to evict
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     async fn evict_data(&mut self) -> Result<(), ServerError> {
         // track how much data we are trying to evict
         // we will always try to evict at least 40% of our cache when we hit memory pressure
@@ -563,6 +567,7 @@ where
     }
 
     #[instrument(name = "Shard::shutdown_tasks", skip(self))]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     async fn shutdown_tasks(&mut self) -> Result<(), ServerError> {
         // cancel all of our tasks
         for task in self.tasks.drain(..) {
@@ -597,7 +602,7 @@ where
         // keep handling messages until we get a shutdown command
         loop {
             // wait for a message on our mesh
-            let msg = self.shard_local_rx.recv().await.unwrap();
+            let msg = self.shard_local_rx.recv().await?;
             // handle this message
             match msg {
                 // Join our ring
@@ -611,7 +616,7 @@ where
                     }
                 }
                 // Handle this client query
-                ServerMsg::Client { peer, data } => self.handle_client(peer, data).await,
+                ServerMsg::Client { peer, data } => self.handle_client(peer, data).await?,
                 // handle this query from the user
                 ServerMsg::Query { meta, query } => self.handle_query(meta, query).await?,
                 // load this partition from disk
@@ -631,7 +636,7 @@ where
                     // signal all of our loaders to shutdown
                     for (_, (loader_tx, _)) in &self.loader_channels {
                         // signal this loader to shutdown
-                        loader_tx.send(LoaderMsg::Shutdown).await.unwrap();
+                        loader_tx.send(LoaderMsg::Shutdown).await?;
                     }
                     break;
                 }
@@ -654,12 +659,11 @@ where
         self.tables.shutdown().await?;
         // shutdown all of our tasks
         self.shutdown_tasks().await?;
-        // for some reason if we don't sleep here the shard hangs on exit
-        glommio::timer::sleep(std::time::Duration::from_secs(3)).await;
         Ok(())
     }
 }
 
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub fn start<S: ShoalDatabase>(
     conf: Conf,
     cpus: CpuSet,
