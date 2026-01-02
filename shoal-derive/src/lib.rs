@@ -36,16 +36,16 @@ fn add_from_shoal(
             impl shoal_core::FromShoal<#db_name> for #name  {
                 type ResponseKinds = <#db_name as shoal_core::shared::traits::QuerySupport>::ResponseKinds;
 
-                fn retrieve(kind: &#response_name) -> Result<&rkyv::option::ArchivedOption<rkyv::vec::ArchivedVec<<Self as Archive>::Archived>>, shoal_core::client::Errors> {
+                fn retrieve(archived: &#response_name) -> Result<&rkyv::option::ArchivedOption<rkyv::vec::ArchivedVec<<Self as Archive>::Archived>>, shoal_core::client::Errors> {
                     // make sure its the right data kind
-                    if let #response_name::#name(action) = kind {
+                    if let #response_name::#name(action) = archived {
                         // make sure its a get action
                        if let shoal_core::shared::responses::ArchivedResponseAction::Get(rows) = &action.data {
                             return Ok(rows);
                         }
                     }
                     Err(shoal_core::client::Errors::WrongType("Wrong Type!".to_owned()))
-                }
+                }                
             }
         }
     );
@@ -185,8 +185,8 @@ pub fn derive_shoal_sorted_table(stream: TokenStream) -> TokenStream {
     // get our db and table name as a ident
     //let table_name = Ident::new(&attrs.name, name.span());
     // build the name of our kinds
-    let query_name = syn::Ident::new(&format!("{}QueryKinds", db_name), name.span());
-    let response_name = syn::Ident::new(&format!("Archived{}ResponseKinds", db_name), name.span());
+    let query_name = syn::Ident::new(&format!("{db_name}QueryKinds"), name.span());
+    let response_name = syn::Ident::new(&format!("Archived{db_name}ResponseKinds"), name.span());
     // extend this type
     add_from_shoal(&mut output, name, &db_name, &response_name);
     add_rkyv_support(&mut output, name);
@@ -729,11 +729,28 @@ fn add_db_trait2(
 }
 
 // Add a client for this database
-fn add_client(stream: &mut proc_macro2::TokenStream, struct_ident: &Ident) {
+fn add_client(stream: &mut proc_macro2::TokenStream, struct_ident: &Ident, variants: &Vec<Ident>) {
     // build our new idents
     let client_ident = format_ident!("{}Client", struct_ident);
     let query_ident = format_ident!("{struct_ident}QueryKinds");
     let response_ident = format_ident!("{struct_ident}ResponseKinds");
+    let archived_response_ident = format_ident!("Archived{struct_ident}ResponseKinds");
+    // build our succeeded response arms
+    let succeeded_arms = variants.iter()
+        .map(|variant_ident| {
+        // build our evict partition arm for this table
+        quote! {
+            #archived_response_ident::#variant_ident(response)=> response.succeeded(opts),
+        }
+    });
+    // build our kind arms
+    let  kind_arms = variants.iter()
+        .map(|variant_ident| {
+        // build our evict partition arm for this table
+        quote! {
+            #archived_response_ident::#variant_ident(response)=> response.kind(),
+        }
+    });
     // add our client struct and query support for the client
     stream.extend(quote! {
         pub struct #client_ident {}
@@ -744,6 +761,32 @@ fn add_client(stream: &mut proc_macro2::TokenStream, struct_ident: &Ident) {
 
             /// The different tables we can get responses from
             type ResponseKinds = #response_ident;
+
+            /// Make sure queries have succeeded based on some critiera
+            ///
+            /// # Arguments
+            ///
+            /// * `opts` - The options to use when validating query responses
+            fn succeeded(
+                archived: &<Self::ResponseKinds as Archive>::Archived,
+                opts: shoal_core::client::QuerySuceededOpts,
+            ) -> Result<(), shoal_core::client::Errors> {
+                match archived {
+                    #(#succeeded_arms)*
+                }
+            }
+
+            /// Get the kind of query this is a response to
+            ///
+            /// # Arguments
+            ///
+            /// * `archived` - The archived query to get the query kind for
+            fn kind(archived: &<Self::ResponseKinds as Archive>::Archived) -> ResponseActionNames {
+                match archived {
+                    #(#kind_arms)*
+                }
+            }
+            
         }
     });
 }
@@ -788,7 +831,7 @@ pub fn derive_shoal_db(stream: TokenStream) -> TokenStream {
                     // add ShoalDatabase support to our root struct
                     add_db_trait2(&mut output, struct_ident, fields, &variants);
                     // add our client
-                    add_client(&mut output, struct_ident);
+                    add_client(&mut output, struct_ident, &variants);
                 }
                 Fields::Unnamed(_) => {
                     return syn::Error::new_spanned(

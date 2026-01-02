@@ -24,10 +24,12 @@ mod unsorted;
 
 use super::queries::ArchivedQueries;
 use super::queries::{Queries, SortedUpdate};
+use crate::client::{Errors, QuerySuceededOpts};
 use crate::server::messages::{LoadedPartitionKinds, QueryMetadata, ServerMsg};
 use crate::server::ring::Ring;
 use crate::server::shard::ShardInfo;
 use crate::server::{Conf, ServerError};
+use crate::shared::responses::ResponseActionNames;
 use crate::storage::{FullArchiveMap, LoaderMsg, Loaders};
 
 pub use unsorted::ShoalUnsortedTable;
@@ -114,6 +116,24 @@ pub trait QuerySupport: 'static + Sized {
 
     /// The different tables we can get responses from
     type ResponseKinds: ShoalResponseSupport;
+
+    /// Make sure queries have succeeded based on some critiera
+    ///
+    /// # Arguments
+    ///
+    /// * `archived` - The archived query to check
+    /// * `opts` - The options to use when validating query responses
+    fn succeeded(
+        archived: &<Self::ResponseKinds as Archive>::Archived,
+        opts: QuerySuceededOpts,
+    ) -> Result<(), Errors>;
+
+    /// Get the kind of query this is a response to
+    ///
+    /// # Arguments
+    ///
+    /// * `archived` - The archived query to get the query kind for
+    fn kind(archived: &<Self::ResponseKinds as Archive>::Archived) -> ResponseActionNames;
 }
 
 pub trait TableNameSupport:

@@ -2,7 +2,23 @@
 use rkyv::{Archive, Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::shared::traits::ShoalSortedTable;
+use crate::{
+    client::{Errors, QuerySuceededOpts},
+    shared::traits::ShoalSortedTable,
+};
+
+/// The different response kind types
+#[derive(Debug, Archive, Serialize, Deserialize)]
+pub enum ResponseActionNames {
+    /// A response to an insert query
+    Insert,
+    /// A response to a get query
+    Get,
+    /// A response to a delete query
+    Delete,
+    /// A response to an update query
+    Update,
+}
 
 /// The different response kinds from a query
 #[derive(Debug, Archive, Serialize, Deserialize)]
@@ -30,7 +46,68 @@ pub struct Response<T> {
     pub end: bool,
 }
 
-impl<T> Response<T> {
+/// Check if a response succeeded or not
+///
+/// # Arguments
+///
+/// * `should_check` - Whether this response should be checked
+/// * `value` - The value to check
+/// * `kind` - The kind of query that is being checked
+macro_rules! check_response {
+    ($should_check:expr, $value:expr, $kind:expr) => {
+        // only check queries that we are requried too
+        if $should_check {
+            // check if this query failed or not
+            if $should_check == $value {
+                return Ok(());
+            }
+            // this query failed so return its kind name
+            $kind
+        } else {
+            return Ok(());
+        }
+    };
+}
+
+impl<T: Archive> ArchivedResponse<T> {
+    /// Check if this query succeeded according to our criteria
+    pub fn succeeded(&self, opts: QuerySuceededOpts) -> Result<(), Errors> {
+        // check if this query failed or not
+        let kind = match &self.data {
+            ArchivedResponseAction::Insert(inserted) => {
+                check_response!(opts.insert, *inserted, ResponseActionNames::Insert)
+            }
+            ArchivedResponseAction::Get(got) => {
+                check_response!(opts.get, got.is_some(), ResponseActionNames::Get)
+            }
+            ArchivedResponseAction::Update(updated) => {
+                check_response!(opts.update, *updated, ResponseActionNames::Update)
+            }
+            ArchivedResponseAction::Delete(deleted) => {
+                check_response!(opts.delete, *deleted, ResponseActionNames::Delete)
+            }
+        };
+        // this query failed and it was required to succeed
+        // build a nice descriptive error for it
+        let error = Errors::QueryDidNotSucceed {
+            id: self.id,
+            index: self.index.to_native() as usize,
+            kind,
+            end: self.end,
+        };
+        Err(error)
+    }
+
+    /// Get the kind of query this is a response to
+    pub fn kind(&self) -> ResponseActionNames {
+        match &self.data {
+            ArchivedResponseAction::Insert(_) => ResponseActionNames::Insert,
+            ArchivedResponseAction::Get(_) => ResponseActionNames::Get,
+            ArchivedResponseAction::Update(_) => ResponseActionNames::Update,
+            ArchivedResponseAction::Delete(_) => ResponseActionNames::Delete,
+        }
+    }
+
     /// Mark this response as the last one
     pub fn end(&mut self) {
         self.end = true;

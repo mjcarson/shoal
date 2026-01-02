@@ -2,12 +2,12 @@
 
 use core_affinity::{set_for_current, CoreId};
 use shoal::bencher::{BenchWorker, Bencher};
-use shoal_core::client::{Shoal, ShoalResponse, ShoalUnorderedResultStream};
+use shoal_core::client::{QuerySuceededOpts, Shoal, ShoalResponse, ShoalUnorderedResultStream};
 use shoal_core::server::messages::QueryMetadata;
 use shoal_core::server::ring::Ring;
 use shoal_core::server::{Conf, ServerError};
 use shoal_core::shared::queries::{Queries, UnsortedGet, UnsortedQuery, UnsortedUpdate};
-use shoal_core::shared::responses::Response;
+use shoal_core::shared::responses::{Response, ResponseActionNames};
 use shoal_core::shared::traits::ShoalDatabase;
 use shoal_core::shared::traits::{
     PartitionKeySupport, QuerySupport, RkyvSupport, ShoalQuerySupport, ShoalResponseSupport,
@@ -28,6 +28,7 @@ use rkyv::{Archive, Deserialize, Serialize};
 use std::collections::HashMap;
 use std::hash::Hasher;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::fs::File;
 use tokio::net::ToSocketAddrs;
@@ -451,6 +452,10 @@ pub struct MovieWorker {
     bencher: BenchWorker,
     /// A map of timers for benchmarking
     timers: HashMap<usize, Instant>,
+    /// Count the number of rows inserted
+    inserted: Arc<AtomicUsize>,
+    /// Count the number of rows retrieved
+    retrieved: Arc<AtomicUsize>,
 }
 
 impl MovieWorker {
@@ -467,6 +472,8 @@ impl MovieWorker {
         movies_tx: &AsyncSender<MovieMsg>,
         movies_rx: &AsyncReceiver<MovieMsg>,
         bencher: BenchWorker,
+        inserted: &Arc<AtomicUsize>,
+        retrieved: &Arc<AtomicUsize>,
     ) -> Self {
         // get a default query object
         let buffer = shoal.query();
@@ -479,10 +486,12 @@ impl MovieWorker {
             buffer,
             bencher,
             timers: HashMap::with_capacity(10000),
+            inserted: inserted.clone(),
+            retrieved: retrieved.clone(),
         }
     }
 
-    fn verify_movie(&mut self, response: ShoalResponse<TmdbClient>, verify: &mut u64) {
+    fn verify_response(&mut self, response: ShoalResponse<TmdbClient>) {
         // get this responses index
         let index = response.get_index();
         // get and add our get timer
@@ -490,10 +499,27 @@ impl MovieWorker {
             // add this timer to our benchmark
             self.bencher.add_timer(timer);
         }
-        //match response
-        if let Ok(Some(_movie)) = response.access::<Movie>() {
-            *verify += 1;
-            //println!("got: {}", movie[0].title);
+        // get the kind of query that we are verifying
+        let kind = response.kind();
+        // check if this query failed or not
+        match response.suceeded(QuerySuceededOpts::default()) {
+            Ok(()) => match kind {
+                ResponseActionNames::Insert => {
+                    self.inserted.fetch_add(1, Ordering::SeqCst);
+                }
+                ResponseActionNames::Get => {
+                    // get the movie info from this query
+                    match response.access::<Movie>().unwrap() {
+                        // increment our movie count
+                        Some(movies) => {
+                            self.retrieved.fetch_add(movies.len(), Ordering::SeqCst);
+                        }
+                        None => println!("Missing movie!"),
+                    }
+                }
+                _ => (),
+            },
+            Err(error) => panic!("Error: {error:#?}"),
         }
     }
 
@@ -504,9 +530,7 @@ impl MovieWorker {
         let (worker_tx, worker_rx) = kanal::unbounded_async();
         // stream any results to our workers message queue
         let handle = tokio::spawn(response_streamer(worker_tx, stream_rx));
-        let mut insert = 0;
-        let mut verify_sent = 0;
-        let mut verified = 0;
+        // track how many requests are currently in flight
         let mut in_flight = 0;
         // keep looping until we have no more movies to send
         'outer: loop {
@@ -516,7 +540,7 @@ impl MovieWorker {
                     Some(WorkerMsg::Response(response)) => {
                         // decrement our in_flight count
                         in_flight -= 1;
-                        self.verify_movie(response, &mut verified)
+                        self.verify_response(response)
                     }
                     // all responses should have been processed so break
                     Some(WorkerMsg::AllResponsesReceived) => break 'outer,
@@ -532,7 +556,7 @@ impl MovieWorker {
                         // decrement our in_flight count
                         in_flight -= 1;
                         // verify this movie
-                        self.verify_movie(response, &mut verified);
+                        self.verify_response(response);
                         // restart our loop from the top
                         continue;
                     }
@@ -544,18 +568,10 @@ impl MovieWorker {
             let job = self.movies_rx.recv().await.unwrap();
             // handle this movie
             match job {
-                MovieMsg::Insert(movie) => {
-                    //// add a timer for this movie
-                    //self.timers.insert(movie.id, Instant::now());
-                    // insert this movie into shoal into our buffer
-                    self.buffer.add_mut(movie);
-                    insert += 1;
-                }
-                MovieMsg::Verify(movie) => {
-                    verify_sent += 1;
-                    // add the query to get this movie to our query buffer
-                    self.buffer.add_mut(MovieGet::new(movie.id));
-                }
+                // insert this movie into shoal into our buffer
+                MovieMsg::Insert(movie) => self.buffer.add_mut(movie),
+                // add the query to get this movie to our query buffer
+                MovieMsg::Verify(movie) => self.buffer.add_mut(MovieGet::new(movie.id)),
                 // all commands have been sent so this worker can shutdown once everything
                 // has been processed
                 MovieMsg::Shutdown => {
@@ -599,7 +615,7 @@ impl MovieWorker {
             // first check for any messages from our response streamer
             match worker_rx.recv().await.unwrap() {
                 // handle this response
-                WorkerMsg::Response(response) => self.verify_movie(response, &mut verified),
+                WorkerMsg::Response(response) => self.verify_response(response),
                 // all responses should have been processed so break
                 WorkerMsg::AllResponsesReceived => break,
             }
@@ -607,7 +623,6 @@ impl MovieWorker {
         // loop and just handle responses since our
         // wait for our response streamer to exit
         handle.await.unwrap();
-        println!("{} -> {insert} & {verified} / {verify_sent}", self.id);
         // return our bench worker
         self.bencher
     }
@@ -622,6 +637,10 @@ pub struct MovieController {
     movies_rx: AsyncReceiver<MovieMsg>,
     /// The tasks for this controllers workers
     tasks: JoinSet<BenchWorker>,
+    /// Count the number of rows inserted
+    inserted: Arc<AtomicUsize>,
+    /// Count the number of rows retrieved
+    retrieved: Arc<AtomicUsize>,
 }
 
 impl MovieController {
@@ -637,6 +656,8 @@ impl MovieController {
             movies_tx,
             movies_rx,
             tasks: JoinSet::default(),
+            inserted: Arc::new(AtomicUsize::new(0)),
+            retrieved: Arc::new(AtomicUsize::new(0)),
         }
     }
 }
@@ -647,8 +668,6 @@ impl MovieController {
         for i in 0..count {
             // get a new bench worker
             let bench_worker = bencher.worker(10000);
-            //// make a shoal query/result stream
-            //let (query_stream, result_stream) = self.shoal.stream().await.unwrap();
             // create a new worker
             let worker = MovieWorker::new(
                 i,
@@ -656,6 +675,8 @@ impl MovieController {
                 &self.movies_tx,
                 &self.movies_rx,
                 bench_worker,
+                &self.inserted,
+                &self.retrieved,
             )
             .await;
             // spawn this worker
@@ -736,6 +757,9 @@ impl MovieController {
             bencher.finish(false);
             // pop the last shutdown message
             self.movies_rx.recv().await.unwrap();
+            // print how many movies were inserted/retrieved
+            println!("Inserted: {}", self.inserted.load(Ordering::Relaxed));
+            println!("Retrieved: {}", self.retrieved.load(Ordering::Relaxed));
         }
     }
 

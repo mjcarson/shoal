@@ -29,6 +29,7 @@ pub mod errors;
 mod messages;
 
 use super::shared::queries::Queries;
+use crate::shared::responses::{ArchivedResponseAction, ResponseActionNames};
 use crate::shared::traits::{QuerySupport, RkyvSupport, ShoalQuerySupport, ShoalResponseSupport};
 pub use errors::Errors;
 use messages::ClientMsg;
@@ -502,6 +503,33 @@ pub trait FromShoal<S: QuerySupport>: Sized + Archive {
     ) -> Result<&ArchivedOption<ArchivedVec<<Self as Archive>::Archived>>, Errors>;
 }
 
+/// The options for determining if a query suceeded or not
+///
+/// This will default to requiring every kind of query to succeed
+#[derive(Debug, Archive, Clone, Copy)]
+pub struct QuerySuceededOpts {
+    /// Whether to check if inserts actually inserted data
+    pub insert: bool,
+    /// Whether to check if updates actually inserted data
+    pub update: bool,
+    /// Whether to check if gets actually goted data
+    pub get: bool,
+    /// Whether to check if deletes actually deleted data
+    pub delete: bool,
+}
+
+impl Default for QuerySuceededOpts {
+    /// Default to requiring all queries to have actaully inserted data
+    fn default() -> Self {
+        QuerySuceededOpts {
+            insert: true,
+            update: true,
+            get: true,
+            delete: true,
+        }
+    }
+}
+
 /// A accessable or deserializable ShoalResponse
 pub struct ShoalResponse<S: QuerySupport> {
     /// The underlying buffer containing our serialized data
@@ -519,7 +547,7 @@ impl<S: QuerySupport> std::fmt::Debug for ShoalResponse<S> {
 }
 
 // SAFETY: AlignedVec is Send, and our pointer points into our own buffer
-// which we own and control. As long as we never expose &mut access to buffer,
+// which we own and control. As long as we never expose &mut access to _buff,
 // this is safe to send across threads.
 unsafe impl<S: QuerySupport> Send for ShoalResponse<S>
 where
@@ -539,10 +567,7 @@ where
 }
 
 impl<S: QuerySupport> ShoalResponse<S> {
-    pub(super) fn new(
-        buff: AlignedVec,
-        //archived: &<S::ResponseKinds as Archive>::Archived,
-    ) -> Self
+    pub(super) fn new(buff: AlignedVec) -> Self
     where
         for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived: CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
@@ -580,7 +605,7 @@ impl<S: QuerySupport> ShoalResponse<S> {
         S::ResponseKinds::get_index_archived(archived)
     }
 
-    /// Get access to our archive
+    /// Get an Archived version of this response from the DB
     pub fn access<T: FromShoal<S>>(
         &self,
     ) -> Result<Option<&ArchivedVec<<T as Archive>::Archived>>, Errors> {
@@ -591,6 +616,22 @@ impl<S: QuerySupport> ShoalResponse<S> {
             ArchivedOption::Some(accessed) => Ok(Some(accessed)),
             ArchivedOption::None => Ok(None),
         }
+    }
+
+    /// Check if this query succeeded
+    pub fn suceeded(&self, opts: QuerySuceededOpts) -> Result<(), Errors> {
+        // get a reference to our archived data
+        let archived = unsafe { &*self.archived };
+        // check if this query succeeded
+        <S as QuerySupport>::succeeded(archived, opts)
+    }
+
+    /// Get the kind of query this is a response to
+    pub fn kind(&self) -> ResponseActionNames {
+        // get a reference to our archived data
+        let archived = unsafe { &*self.archived };
+        // check if this query succeeded
+        <S as QuerySupport>::kind(archived)
     }
 }
 

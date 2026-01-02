@@ -1,10 +1,21 @@
 //! The errors that can be returned from the Shoal client.
 
+use uuid::Uuid;
+
+use crate::shared::responses::ResponseActionNames;
+
 /// The errors that can be returned from the Shoal client
 #[derive(Debug)]
 pub enum Errors {
     /// Attempt to cast a shoal response to the wrong type
     WrongType(String),
+    /// A query did not suceed
+    QueryDidNotSucceed {
+        id: Uuid,
+        index: usize,
+        kind: ResponseActionNames,
+        end: bool,
+    },
     /// An IO error occured
     IO(std::io::Error),
     /// An rkyv error
