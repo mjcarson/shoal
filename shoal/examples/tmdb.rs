@@ -6,17 +6,19 @@ use shoal_core::client::{QuerySuceededOpts, Shoal, ShoalResponse, ShoalUnordered
 use shoal_core::server::messages::QueryMetadata;
 use shoal_core::server::ring::Ring;
 use shoal_core::server::{Conf, ServerError};
-use shoal_core::shared::queries::{Queries, UnsortedGet, UnsortedQuery, UnsortedUpdate};
+use shoal_core::shared::queries::{
+    Queries, SortedQuery, SortedUpdate, UnsortedGet, UnsortedQuery, UnsortedUpdate,
+};
 use shoal_core::shared::responses::{Response, ResponseActionNames};
-use shoal_core::shared::traits::ShoalDatabase;
 use shoal_core::shared::traits::{
     PartitionKeySupport, QuerySupport, RkyvSupport, ShoalQuerySupport, ShoalResponseSupport,
     ShoalUnsortedTable,
 };
+use shoal_core::shared::traits::{ShoalDatabase, ShoalSortedTable};
 use shoal_core::storage::{FileSystem, FullArchiveMap, LoaderMsg, Loaders};
-use shoal_core::tables::PersistentUnsortedTable;
+use shoal_core::tables::{PersistentSortedTable, PersistentUnsortedTable};
 use shoal_core::ShoalPool;
-use shoal_derive::{ShoalDB, ShoalUnsortedTable};
+use shoal_derive::{ShoalDB, ShoalSortedTable, ShoalUnsortedTable};
 
 use deepsize2::DeepSizeOf;
 use futures::stream::StreamExt;
@@ -315,11 +317,117 @@ impl From<MovieUpdate> for TmdbQueryKinds {
     }
 }
 
+#[derive(
+    Debug,
+    Archive,
+    Serialize,
+    Deserialize,
+    Clone,
+    ShoalSortedTable,
+    serde::Deserialize,
+    serde::Serialize,
+    PartialEq,
+    DeepSizeOf,
+)]
+#[rkyv(derive(Debug))]
+#[shoal_table(db = "Tmdb")]
+pub struct MovieByKeyword {
+    /// The keyword for this movie
+    pub keyword: String,
+    /// The name of this movie
+    pub title: String,
+}
+
+impl PartitionKeySupport for MovieByKeyword {
+    /// The partition key type for this data
+    type PartitionKey = String;
+
+    /// The name of this table
+    fn name() -> &'static str {
+        "MovieByKeywords"
+    }
+
+    /// Calculate the partition key for this row
+    fn get_partition_key(&self) -> u64 {
+        Self::get_partition_key_from_values(&self.keyword)
+    }
+
+    /// Calculate the partition key for this row
+    fn get_partition_key_from_values(values: &Self::PartitionKey) -> u64 {
+        // create a new hasher
+        let mut hasher = GxHasher::default();
+        // hash the first key
+        hasher.write(values.as_bytes());
+        // get our hash
+        hasher.finish()
+    }
+
+    /// Get the partition key for this row from an archived value
+    fn get_partition_key_from_archived_insert(intent: &<Self as Archive>::Archived) -> u64 {
+        // create a new hasher
+        let mut hasher = GxHasher::default();
+        // hash the first key
+        hasher.write(intent.keyword.as_bytes());
+        // get our hash
+        hasher.finish()
+    }
+}
+
+impl ShoalSortedTable for MovieByKeyword {
+    /// The updates that can be applied to this table
+    type Update = String;
+
+    /// The sort type for this data
+    type Sort = String;
+
+    /// Build the sort tuple for this row
+    fn get_sort(&self) -> &Self::Sort {
+        &self.title
+    }
+
+    /// Any filters to apply when listing/crawling rows
+    type Filters = String;
+
+    /// Determine if a row should be filtered
+    ///
+    /// # Arguments
+    ///
+    /// * `filters` - The filters to apply
+    /// * `row` - The row to filter
+    fn is_filtered(filter: &Self::Filters, row: &Self) -> bool {
+        &row.title == filter
+    }
+
+    /// Determine if a row should be filtered against an archived row
+    ///
+    /// # Arguments
+    ///
+    /// * `filters` - The filters to apply
+    /// * `row` - The row to filter
+    fn is_filtered_archived(
+        filter: &Self::Filters,
+        row: &<Self as rkyv::Archive>::Archived,
+    ) -> bool {
+        &row.title == filter
+    }
+
+    /// Apply an update to a single row
+    ///
+    /// # Arguments
+    ///
+    /// * `update` - The update to apply to a specific row
+    fn update(&mut self, update: &SortedUpdate<Self>) {
+        ()
+    }
+}
+
 /// The different tables we can query
 #[derive(Debug, Archive, Serialize, Deserialize, Clone)]
 pub enum TmdbQueryKinds {
     /// A query for the key/value table
     Movie(UnsortedQuery<Movie>),
+    /// A query for the movie by keyword table
+    MovieByKeyword(SortedQuery<MovieByKeyword>),
 }
 
 impl RkyvSupport for TmdbQueryKinds {}
@@ -336,6 +444,7 @@ impl ShoalQuerySupport for TmdbQueryKinds {
         // get our response query id
         match archive {
             ArchivedTmdbResponseKinds::Movie(resp) => Ok(&resp.id),
+            ArchivedTmdbResponseKinds::MovieByKeyword(resp) => Ok(&resp.id),
         }
     }
 
@@ -355,6 +464,10 @@ impl ShoalQuerySupport for TmdbQueryKinds {
                 // get our shards info
                 query.find_shard(ring, found);
             }
+            TmdbQueryKinds::MovieByKeyword(query) => {
+                // get our shards info
+                query.find_shard(ring, found);
+            }
         };
     }
 }
@@ -363,6 +476,7 @@ impl ShoalQuerySupport for TmdbQueryKinds {
 #[derive(Debug, Archive, Serialize, Deserialize)]
 pub enum TmdbResponseKinds {
     Movie(Response<Movie>),
+    MovieByKeyword(Response<MovieByKeyword>),
 }
 
 impl RkyvSupport for TmdbResponseKinds {}
@@ -374,6 +488,7 @@ impl ShoalResponseSupport for TmdbResponseKinds {
         match archived {
             // TODO fix this usize conversion
             ArchivedTmdbResponseKinds::Movie(resp) => resp.index.to_native() as usize,
+            ArchivedTmdbResponseKinds::MovieByKeyword(resp) => resp.index.to_native() as usize,
         }
     }
 
@@ -382,6 +497,7 @@ impl ShoalResponseSupport for TmdbResponseKinds {
         // check if this is the end of the stream
         match archived {
             ArchivedTmdbResponseKinds::Movie(resp) => resp.end,
+            ArchivedTmdbResponseKinds::MovieByKeyword(resp) => resp.end,
         }
     }
 
@@ -390,6 +506,7 @@ impl ShoalResponseSupport for TmdbResponseKinds {
         // get our response query id
         match archived {
             ArchivedTmdbResponseKinds::Movie(resp) => resp.id.to_owned(),
+            ArchivedTmdbResponseKinds::MovieByKeyword(resp) => resp.id.to_owned(),
         }
     }
 }
@@ -400,6 +517,8 @@ impl ShoalResponseSupport for TmdbResponseKinds {
 pub struct Tmdb {
     /// A basic key value table
     pub movie: PersistentUnsortedTable<Movie, FileSystem, TmdbTableNames>,
+    /// A sorted table of movies by keywords
+    pub movie_by_keywords: PersistentSortedTable<MovieByKeyword, FileSystem, TmdbTableNames>,
 }
 
 pub enum MovieMsg {

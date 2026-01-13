@@ -323,6 +323,7 @@ where
         // extract our row from our intent
         let row = match intent {
             UnsortedIntents::Insert(row) => row,
+            // SAFETY we just wrapped this in an insert intent before
             _ => unsafe { std::hint::unreachable_unchecked() },
         };
         // build a new partition for this row
@@ -369,6 +370,7 @@ where
         let mut data = Vec::new();
         // try to get the partition for this key
         match self.partitions.get(&get.partition_key) {
+            // this partition is loaded into memory
             Some(partition) => {
                 // get this partitions data
                 let action = if partition.get(&get, &mut data) {
@@ -402,7 +404,7 @@ where
                 // if we aren't going to load data then return that this partition doesn't exist
                 if will_load {
                     // if we need to load this then add this query to a map of queries
-                    // are blocked on patitions being loaded from disk
+                    // that are blocked on partitions being loaded from disk
                     // get an entry to our partitions blocked queries
                     let entry = self.blocked.entry(get.partition_key).or_default();
                     // add our blocked query for this partitions blocked query list

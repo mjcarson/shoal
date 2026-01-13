@@ -212,9 +212,11 @@ pub struct SortedPartition<T: ShoalSortedTable> {
     /// This partitions key
     key: u64,
     /// The data in this partition
-    rows: BTreeMap<T::Sort, T>,
+    pub rows: BTreeMap<T::Sort, T>,
     /// The size of this partition
     size: usize,
+    /// Whether this partition might have data on disk
+    pub check_disk: bool,
 }
 
 impl<T: ShoalSortedTable> SortedPartition<T> {
@@ -228,6 +230,7 @@ impl<T: ShoalSortedTable> SortedPartition<T> {
             key,
             rows: BTreeMap::default(),
             size: 0,
+            check_disk: true,
         }
     }
 

@@ -6,11 +6,12 @@ use uuid::Uuid;
 
 use crate::server::ring::Ring;
 use crate::server::shard::ShardInfo;
-use crate::shared::traits::ShoalSortedTable;
+use crate::shared::queries::UnsortedGet;
+use crate::shared::traits::{RkyvSupport, ShoalSortedTable};
 
 /// The different types of queries for a single datatype
 #[derive(Debug, Archive, Serialize, Deserialize, Clone)]
-pub enum SortedQuery<T: ShoalSortedTable + std::fmt::Debug> {
+pub enum SortedQuery<T: ShoalSortedTable + std::fmt::Debug + RkyvSupport> {
     /// Insert a row into shoal
     Insert { key: u64, row: T },
     /// Get some data from shoal
@@ -73,6 +74,22 @@ pub struct SortedGet<R: ShoalSortedTable> {
     pub filters: Option<R::Filters>,
     /// The number of rows to get at most
     pub limit: Option<usize>,
+}
+
+impl<R: ShoalSortedTable> SortedGet<R> {
+    /// Create a single partition get from another get
+    ///
+    /// # Arguments
+    ///
+    /// * `partition_key` - The key of the partition that needs to be loaded from disk
+    pub fn to_blocked(&self, partition_key: u64) -> Self {
+        SortedGet {
+            partition_keys: vec![partition_key],
+            sort_keys: self.sort_keys.clone(),
+            filters: self.filters.clone(),
+            limit: self.limit,
+        }
+    }
 }
 
 /// An update query for a single row in Shoal

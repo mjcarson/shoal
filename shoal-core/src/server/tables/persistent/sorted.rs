@@ -2,6 +2,8 @@
 
 use glommio::io::ReadResult;
 use glommio::TaskQueueHandle;
+use kanal::{AsyncReceiver, AsyncSender};
+use lru::LruCache;
 use rkyv::bytecheck::CheckBytes;
 use rkyv::de::Pool;
 use rkyv::rancor::Strategy;
@@ -10,21 +12,27 @@ use rkyv::validation::shared::SharedValidator;
 use rkyv::validation::Validator;
 use rkyv::{Archive, Deserialize, Serialize};
 use std::cell::RefCell;
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::hash::BuildHasherDefault;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tracing::instrument;
+use tracing::{event, instrument, Level, Span};
 use uuid::Uuid;
+use xxhash_rust::xxh3::Xxh3;
 
-use crate::server::messages::QueryMetadata;
+use crate::server::messages::{QueryMetadata, ServerMsg};
 use crate::server::tables::partitions::SortedPartition;
 use crate::server::Conf;
 use crate::server::ServerError;
-use crate::shared::queries::SortedUpdate;
 use crate::shared::queries::{SortedGet, SortedQuery};
+use crate::shared::queries::{SortedUpdate, UnsortedGet};
 use crate::shared::responses::{Response, ResponseAction};
-use crate::shared::traits::{RkyvSupport, ShoalSortedTable, TableNameSupport};
-use crate::storage::{IntentReadSupport, PendingResponse, ShouldPrune, StorageSupport};
+use crate::shared::traits::{RkyvSupport, ShoalDatabase, ShoalSortedTable, TableNameSupport};
+use crate::storage::{
+    FullArchiveMap, IntentReadSupport, LoaderMsg, Loaders, PendingResponse, ShouldPrune,
+    StorageSupport,
+};
 use crate::tables::partitions::MaybeLoaded;
 
 /// The different types of entries in a shoal intent log
@@ -76,63 +84,143 @@ impl<T: ShoalSortedTable> RkyvSupport for SortedIntents<T> {}
 
 /// A table that stores data both in memory and on disk
 #[derive(Debug)]
-pub struct PersistentSortedTable<R: ShoalSortedTable, S: StorageSupport> {
+pub struct PersistentSortedTable<R: ShoalSortedTable, S: StorageSupport, N: TableNameSupport>
+where
+    <<R as ShoalSortedTable>::Sort as Archive>::Archived: Ord,
+{
+    /// The name of this table
+    table_name: N,
     /// The rows in this table
-    pub partitions: HashMap<u64, SortedPartition<R>>,
+    pub partitions: HashMap<u64, MaybeLoaded<SortedPartition<R>>>,
     /// The storage engine backing this table
     storage: S,
+    /// The current generation of flushed data
+    generation: u64,
     /// The commits that are still pending storage confirmation
     pending: PendingResponse<R>,
-    /// The total size of all data on this shard
-    memory_usage: usize,
+    /// The response data for queries that needed partitions to be loaded from disk
+    pending_data: HashMap<(Uuid, usize), (Vec<R>, Vec<u64>)>,
     /// The responses for queries that have been flushed to disk
-    flushed: Vec<(Uuid, Uuid, Response<R>)>,
+    flushed: Vec<(Uuid, Uuid, Span, Response<R>)>,
+    /// The channel to send loader jobs on
+    loader_tx: AsyncSender<LoaderMsg<N>>,
+    /// A map of queries blocked on partitions being loaded from disk
+    blocked: HashMap<u64, Vec<(QueryMetadata, SortedQuery<R>)>>,
+    /// The total size of all data on this shard
+    memory_usage: Arc<RefCell<usize>>,
+    /// The most recently used tables/partitions on this shard
+    lru: Arc<RefCell<LruCache<(N, u64), usize, BuildHasherDefault<Xxh3>>>>,
 }
 
-impl<R: ShoalSortedTable + 'static, S: StorageSupport> PersistentSortedTable<R, S> {
+impl<R: ShoalSortedTable + 'static, S: StorageSupport, N: TableNameSupport>
+    PersistentSortedTable<R, S, N>
+where
+    <<R as ShoalSortedTable>::Sort as Archive>::Archived: Ord,
+    for<'a> <<R as ShoalSortedTable>::Sort as Archive>::Archived: rkyv::bytecheck::CheckBytes<
+        Strategy<
+            rkyv::validation::Validator<
+                rkyv::validation::archive::ArchiveValidator<'a>,
+                rkyv::validation::shared::SharedValidator,
+            >,
+            rkyv::rancor::Error,
+        >,
+    >,
+    for<'a> <R as Archive>::Archived: rkyv::bytecheck::CheckBytes<
+        Strategy<
+            rkyv::validation::Validator<
+                rkyv::validation::archive::ArchiveValidator<'a>,
+                rkyv::validation::shared::SharedValidator,
+            >,
+            rkyv::rancor::Error,
+        >,
+    >,
+    <<R as ShoalSortedTable>::Update as Archive>::Archived:
+        rkyv::Deserialize<<R as ShoalSortedTable>::Update, Strategy<Pool, rkyv::rancor::Error>>,
+    <<R as ShoalSortedTable>::Sort as Archive>::Archived:
+        rkyv::Deserialize<<R as ShoalSortedTable>::Sort, Strategy<Pool, rkyv::rancor::Error>>,
+    <R as Archive>::Archived: rkyv::Deserialize<R, Strategy<Pool, rkyv::rancor::Error>>,
+    for<'a> <<R as ShoalSortedTable>::Sort as Archive>::Archived: rkyv::bytecheck::CheckBytes<
+        Strategy<
+            rkyv::validation::Validator<
+                rkyv::validation::archive::ArchiveValidator<'a>,
+                rkyv::validation::shared::SharedValidator,
+            >,
+            rkyv::rancor::Error,
+        >,
+    >,
+    for<'a> <R as Archive>::Archived: rkyv::bytecheck::CheckBytes<
+        Strategy<
+            rkyv::validation::Validator<
+                rkyv::validation::archive::ArchiveValidator<'a>,
+                rkyv::validation::shared::SharedValidator,
+            >,
+            rkyv::rancor::Error,
+        >,
+    >,
+    for<'a> <<SortedPartition<R> as IntentReadSupport<R>>::Intent as Archive>::Archived:
+        CheckBytes<Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>>,
+{
     /// Create a persistent shoal table
     ///
     /// # Arguments
     ///
     /// * `shard_name` - The id of the shard that owns this table
     /// * `conf` - The Shoal config
-    #[instrument(name = "PersistentTable::new", skip(_conf), err(Debug))]
-    pub async fn new<N: TableNameSupport>(
+    #[instrument(name = "PersistentTable::new", skip(conf), err(Debug))]
+    pub async fn new<D: ShoalDatabase>(
         shard_name: &str,
-        _conf: &Conf,
+        table_name: N,
+        shard_table_name: D::TableNames,
+        shard_archive_map: &FullArchiveMap<N>,
+        loader_channels: &mut HashMap<
+            Loaders,
+            (AsyncSender<LoaderMsg<N>>, AsyncReceiver<LoaderMsg<N>>),
+        >,
+        conf: &Conf,
         medium_priority: TaskQueueHandle,
-    ) -> Result<Self, ServerError>
-    where
-        <<R as ShoalSortedTable>::Sort as Archive>::Archived: Ord,
-        <<R as ShoalSortedTable>::Update as Archive>::Archived:
-            rkyv::Deserialize<<R as ShoalSortedTable>::Update, Strategy<Pool, rkyv::rancor::Error>>,
-        <<R as ShoalSortedTable>::Sort as Archive>::Archived:
-            rkyv::Deserialize<<R as ShoalSortedTable>::Sort, Strategy<Pool, rkyv::rancor::Error>>,
-        <R as Archive>::Archived: rkyv::Deserialize<R, Strategy<Pool, rkyv::rancor::Error>>,
-        for<'a> <<R as ShoalSortedTable>::Sort as Archive>::Archived: rkyv::bytecheck::CheckBytes<
-            Strategy<
-                rkyv::validation::Validator<
-                    rkyv::validation::archive::ArchiveValidator<'a>,
-                    rkyv::validation::shared::SharedValidator,
-                >,
-                rkyv::rancor::Error,
-            >,
-        >,
-        for<'a> <R as Archive>::Archived: rkyv::bytecheck::CheckBytes<
-            Strategy<
-                rkyv::validation::Validator<
-                    rkyv::validation::archive::ArchiveValidator<'a>,
-                    rkyv::validation::shared::SharedValidator,
-                >,
-                rkyv::rancor::Error,
-            >,
-        >,
-        for<'a> <<SortedPartition<R> as IntentReadSupport<R>>::Intent as Archive>::Archived:
-            CheckBytes<
-                Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
-            >,
-    {
-        panic!("ahh");
+        memory_usage: &Arc<RefCell<usize>>,
+        lru: &Arc<RefCell<LruCache<(N, u64), usize, BuildHasherDefault<Xxh3>>>>,
+        shard_local_tx: &AsyncSender<ServerMsg<D>>,
+    ) -> Result<Self, ServerError> {
+        // make sure we have a loader channel for filesystems
+        let (loader_tx, _) = loader_channels
+            .entry(S::loader_kind())
+            .or_insert_with(|| kanal::unbounded_async());
+        // build our table
+        let mut table = Self {
+            table_name,
+            partitions: HashMap::with_capacity(1000),
+            storage: S::new::<SortedPartition<R>, R, N, D>(
+                shard_name,
+                table_name,
+                shard_table_name,
+                shard_archive_map,
+                conf,
+                medium_priority,
+                shard_local_tx,
+            )
+            .await?,
+            generation: 0,
+            pending: PendingResponse::<R>::with_capacity(100),
+            pending_data: HashMap::with_capacity(500),
+            flushed: Vec::with_capacity(1000),
+            loader_tx: loader_tx.clone(),
+            blocked: HashMap::with_capacity(1000),
+            memory_usage: memory_usage.clone(),
+            lru: lru.clone(),
+        };
+        // load our intent log
+        S::read_intents::<SortedPartition<R>, R>(
+            shard_name,
+            conf,
+            table.generation,
+            &mut table.partitions,
+            &mut table.memory_usage,
+        )
+        .await?;
+        // compact our intent log
+        table.storage.compact_if_needed::<R>(true).await?;
+        Ok(table)
         //// build our table
         //let mut table = Self {
         //    partitions: HashMap::default(),
@@ -181,11 +269,6 @@ impl<R: ShoalSortedTable + 'static, S: StorageSupport> PersistentSortedTable<R, 
     async fn insert(&mut self, meta: QueryMetadata, row: R) -> Option<(Uuid, Response<R>)> {
         // get our partition key
         let key = row.get_partition_key();
-        // get our partition
-        let partition = self
-            .partitions
-            .entry(key)
-            .or_insert_with(|| SortedPartition::new(key));
         // wrap our row in an insert intent
         let intent = SortedIntents::Insert(row);
         // persist this new row to storage
@@ -193,14 +276,43 @@ impl<R: ShoalSortedTable + 'static, S: StorageSupport> PersistentSortedTable<R, 
         // extract our row from our intent
         let row = match intent {
             SortedIntents::Insert(row) => row,
-            _ => panic!("TODO NOT HAVE THIS POINTLESS MATCH!"),
+            // SAFETY we just wrapped this in an insert intent before
+            _ => unsafe { std::hint::unreachable_unchecked() },
         };
-        // insert this row into this partition
-        let (size_diff, action) = partition.insert(row);
+        // get our current partition or start with an empty one
+        let entry = self
+            .partitions
+            .entry(key)
+            .or_insert_with(|| MaybeLoaded::Loaded {
+                partition: SortedPartition::new(key),
+                generation: self.generation,
+            });
+        // check if we need to convert this to a loaded partition or not
+        let (size_diff, action) = match entry {
+            MaybeLoaded::Loaded { partition, .. } => partition.insert(row),
+            MaybeLoaded::Accessible(read) => {
+                // convert this read to a accessible partition
+                let accessable = SortedPartition::<R>::access(&read).unwrap();
+                // deserialize our accessible partition
+                let mut partition = SortedPartition::<R>::deserialize(accessable).unwrap();
+                // insert this new row into our loaded partition
+                let (size_diff, action) = partition.insert(row);
+                // replace our loaded partition
+                *entry = MaybeLoaded::Loaded {
+                    partition,
+                    generation: self.generation,
+                };
+                (size_diff, action)
+            }
+        };
         // add this action to our pending queue
         self.pending.add(meta, pos, action);
+        // do a saturating add on our memory usage
+        let new_size = self.memory_usage.borrow().saturating_add_signed(size_diff);
         // adjust our total shards memory usage
-        self.memory_usage = self.memory_usage.saturating_add_signed(size_diff);
+        *self.memory_usage.borrow_mut() = new_size;
+        // remove this partition from our lru cache as its no longer evictable
+        self.lru.borrow_mut().pop(&(self.table_name, key));
         // An insert never returns anything immediately
         None
     }
@@ -217,32 +329,136 @@ impl<R: ShoalSortedTable + 'static, S: StorageSupport> PersistentSortedTable<R, 
         meta: QueryMetadata,
         get: &SortedGet<R>,
     ) -> Option<(Uuid, Response<R>)> {
-        // build a vec for the data we found
-        let mut data = Vec::new();
-        // build the sort key
-        for key in &get.partition_keys {
-            // get the partition for this key
-            if let Some(partition) = self.partitions.get(key) {
-                // get rows from this partition
-                partition.get(get, &mut data);
+        // get any dat from previously executed/blocked queries
+        let (mut data, mut blocked) = match self.pending_data.remove(&(meta.id, meta.index)) {
+            // use our existing data/blocked queries
+            Some((data, blocked)) => (data, blocked),
+            // this query has never been executed before so instance sane defaults
+            None => (Vec::with_capacity(get.partition_keys.len()), Vec::default()),
+        };
+        // check each of the specified partition keys
+        for partition_key in &get.partition_keys {
+            // try to get the partition for this key
+            match self.partitions.get(partition_key) {
+                // this partition may be loaded into memory
+                Some(partition) => {
+                    // if this partition is accessible then we don't need to check disk
+                    match partition {
+                        MaybeLoaded::Loaded { partition, .. } => {
+                            // load this partitions data from disk if needed
+                            if partition.check_disk {
+                                // try to load this partition from disk if it exists
+                                let will_load = self
+                                    .storage
+                                    .load_partition(
+                                        self.table_name,
+                                        *partition_key,
+                                        &self.loader_tx,
+                                    )
+                                    .await
+                                    .unwrap();
+                                // if this query was blocked then add it to our blocked list
+                                if will_load {
+                                    // if we need to load this then add this query to a map of queries
+                                    // that are blocked on partitions being loaded from disk
+                                    // get an entry to our partitions blocked queries
+                                    let entry = self.blocked.entry(*partition_key).or_default();
+                                    // build a query for just this blocked partition
+                                    let blocked_get = get.to_blocked(*partition_key);
+                                    // add our blocked query and its metadata for this partitions blocked query list
+                                    entry.push((meta.clone(), SortedQuery::Get(blocked_get)));
+                                    // add this partition to our blocked partition list
+                                    blocked.push(*partition_key);
+                                }
+                            } else {
+                                // get the rows from our partition
+                                for (_, row) in &partition.rows {
+                                    // check if we are supposed to filter our rows
+                                    if let Some(filters) = &get.filters {
+                                        // check if this row should be returned
+                                        if !R::is_filtered(filters, row) {
+                                            // skip this row as it doesn't match our filters
+                                            continue;
+                                        }
+                                    }
+                                    // add this row to our response
+                                    data.push(row.clone());
+                                }
+                            }
+                        }
+                        MaybeLoaded::Accessible(read) => {
+                            // This partition is accessible so it must have come from disk
+                            // we don't need to check it just access it
+                            let partition = SortedPartition::<R>::access(&read).unwrap();
+                            // get the rows from our partition
+                            for (_, row) in partition.rows.iter() {
+                                // check if we are supposed to filter our rows
+                                if let Some(filters) = &get.filters {
+                                    // check if this row should be returned
+                                    if !R::is_filtered_archived(filters, row) {
+                                        // skip this row as it doesn't match our filters
+                                        continue;
+                                    }
+                                }
+                                // convert this to a loaded row
+                                let loaded_row = R::deserialize(row).unwrap();
+                                // add this row to our response
+                                data.push(loaded_row);
+                            }
+                        }
+                    }
+                }
+                // this partition is not loaded into memory
+                // check if this partition exist and load it if it does
+                None => {
+                    // try to load this partition from disk if it exists
+                    let will_load = self
+                        .storage
+                        .load_partition(self.table_name, *partition_key, &self.loader_tx)
+                        .await
+                        .unwrap();
+                    // if this query was blocked then add it to our blocket list
+                    if will_load {
+                        // if we need to load this then add this query to a map of queries
+                        // that are blocked on partitions being loaded from disk
+                        // get an entry to our partitions blocked queries
+                        let entry = self.blocked.entry(*partition_key).or_default();
+                        // build a query for just this blocked partition
+                        let blocked_get = get.to_blocked(*partition_key);
+                        // add our blocked query and its metadata for this partitions
+                        // blocked query list
+                        entry.push((meta.clone(), SortedQuery::Get(blocked_get)));
+                        // add this partition to our blocked partition list
+                        blocked.push(*partition_key);
+                    }
+                }
             }
         }
-        // add this data to our response
-        let action = if data.is_empty() {
-            // this query did not find data
-            ResponseAction::Get(None)
+        // if we have any blocked queries then add this to our pending data map
+        if !blocked.is_empty() {
+            // get an entry to this queries pending data
+            self.pending_data
+                .insert((meta.id, meta.index), (data, blocked));
+            // we have blocked queries so return None
+            None
         } else {
-            // this query found data
-            ResponseAction::Get(Some(data))
-        };
-        // cast this action to a response
-        let response = Response {
-            id: meta.id,
-            index: meta.index,
-            data: action,
-            end: meta.end,
-        };
-        Some((meta.client, response))
+            // add this data to our response
+            let action = if data.is_empty() {
+                // this query did not find data
+                ResponseAction::Get(None)
+            } else {
+                // this query found data
+                ResponseAction::Get(Some(data))
+            };
+            // cast this action to a response
+            let response = Response {
+                id: meta.id,
+                index: meta.index,
+                data: action,
+                end: meta.end,
+            };
+            Some((meta.client, response))
+        }
     }
 
     /// Delete a row from this table
@@ -259,34 +475,116 @@ impl<R: ShoalSortedTable + 'static, S: StorageSupport> PersistentSortedTable<R, 
         key: u64,
         sort: R::Sort,
     ) -> Option<(Uuid, Response<R>)> {
-        // get this rows partition
-        if let Some(partition) = self.partitions.get_mut(&key) {
-            // try remove the target row from this partition
-            if let Some((size_diff, _)) = partition.remove(&sort) {
-                // wrap our row in an delete intent
-                let intent = SortedIntents::<R>::delete(key, sort);
-                // wite this delete to our intent log
-                let pos = self.storage.commit(&intent).await.unwrap();
-                // build the pending action to store
-                let action = ResponseAction::Delete(true);
-                // add this action to our pending queue
-                self.pending.add(meta, pos, action);
-                // adjust this shards total memory usage
-                self.memory_usage = self.memory_usage.saturating_sub(size_diff);
-                // wait for this delete to get flushed to disk
-                return None;
-            }
-        }
-        // we didn't find any data to delete
-        let action = ResponseAction::Delete(false);
-        // cast this action to a response
-        let response = Response {
-            id: meta.id,
-            index: meta.index,
-            data: action,
-            end: meta.end,
-        };
-        Some((meta.client, response))
+        unimplemented!("DELETE NEEDS TOMBSTONES OR SOMETHING SIMILAR!");
+        //// get the partition we are deleting data from
+        //match self.partitions.entry(key) {
+        //    // we have some of this partition loaded
+        //    Entry::Occupied(mut entry) => {
+        //        // get a mutable ref to this partitions data
+        //        let value = entry.get_mut();
+        //        // handle loaded or accessible partitions
+        //        match value {
+        //            MaybeLoaded::Loaded { partition, .. } => {
+        //                // try to remove the target row
+        //                match partition.remove(&sort) {
+        //                    Some(diff) => panic!("GOT DIFF"),
+        //                    // we don't have this partition loaded so just write
+        //                    // a
+        //                    None =>
+        //                }
+        //            }
+        //            MaybeLoaded::Accessible(read) => panic!("read"),
+        //        }
+        //    }
+        //    Entry::Vacant(vacant) => panic!("Vacant"),
+        //};
+        ////Some(MaybeLoaded::Loaded { partition, .. }) => partition.remove(&sort),
+        ////{
+        ////    // try remove the target row from this partition
+        ////    if let Some((size_diff, _)) = partition.remove(&sort) {
+        ////        // wrap our row in an delete intent
+        ////        let intent = SortedIntents::<R>::delete(key, sort);
+        ////        // wite this delete to our intent log
+        ////        let pos = self.storage.commit(&intent).await.unwrap();
+        ////        // build the pending action to store
+        ////        let action = ResponseAction::Delete(true);
+        ////        // add this action to our pending queue
+        ////        self.pending.add(meta, pos, action);
+        ////        // do a saturating add on our memory usage
+        ////        let new_size = self.memory_usage.borrow().saturating_sub(size_diff);
+        ////        // adjust our total shards memory usage
+        ////        *self.memory_usage.borrow_mut() = new_size;
+        ////        // remove this partition from our lru cache as its no longer evictable
+        ////        self.lru.borrow_mut().pop(&(self.table_name, key));
+        ////        // wait for this delete to get flushed to disk
+        ////        return None;
+        ////    }
+        ////}
+        ////Some(MaybeLoaded::Accessible(read)) => {
+        ////    // convert this read to a accessible partition
+        ////    let accessable = SortedPartition::<R>::access(&read).unwrap();
+        ////    // deserialize our accessible partition
+        ////    let mut partition = SortedPartition::<R>::deserialize(accessable).unwrap();
+        ////    // try to remove this data from this partition
+        ////    let diff = partition.remove(&sort);
+        ////    // insert
+        ////    //// try remove the target row from this partition
+        ////    //if let Some((size_diff, _)) = partition.remove(&sort) {
+        ////    //    // wrap our row in an delete intent
+        ////    //    let intent = SortedIntents::<R>::delete(key, sort);
+        ////    //    // wite this delete to our intent log
+        ////    //    let pos = self.storage.commit(&intent).await.unwrap();
+        ////    //    // build the pending action to store
+        ////    //    let action = ResponseAction::Delete(true);
+        ////    //    // add this action to our pending queue
+        ////    //    self.pending.add(meta, pos, action);
+        ////    //    // adjust this shards total memory usage
+        ////    //    self.memory_usage = self.memory_usage.saturating_sub(size_diff);
+        ////    //    // wait for this delete to get flushed to disk
+        ////    //    return None;
+        ////    //}
+        ////}
+        ////None => {
+        ////    //// we didn't find any data to delete
+        ////    //let action = ResponseAction::Delete(false);
+        ////    //// cast this action to a response
+        ////    //let response = Response {
+        ////    //    id: meta.id,
+        ////    //    index: meta.index,
+        ////    //    data: action,
+        ////    //    end: meta.end,
+        ////    //};
+        ////    //Some((meta.client, response))
+        ////}
+        ////}
+        //// get this rows partition
+        //if let Some(partition) = self.partitions.get_mut(&key) {
+        //    // try remove the target row from this partition
+        //    if let Some((size_diff, _)) = partition.remove(&sort) {
+        //        // wrap our row in an delete intent
+        //        let intent = SortedIntents::<R>::delete(key, sort);
+        //        // wite this delete to our intent log
+        //        let pos = self.storage.commit(&intent).await.unwrap();
+        //        // build the pending action to store
+        //        let action = ResponseAction::Delete(true);
+        //        // add this action to our pending queue
+        //        self.pending.add(meta, pos, action);
+        //        // adjust this shards total memory usage
+        //        self.memory_usage = self.memory_usage.saturating_sub(size_diff);
+        //        // wait for this delete to get flushed to disk
+        //        return None;
+        //    }
+        //}
+        //// we didn't find any data to delete
+        //let action = ResponseAction::Delete(false);
+        //// cast this action to a response
+        //let response = Response {
+        //    id: meta.id,
+        //    index: meta.index,
+        //    data: action,
+        //    end: meta.end,
+        //};
+        //Some((meta.client, response))
     }
 
     /// Update a row in this table
@@ -301,32 +599,84 @@ impl<R: ShoalSortedTable + 'static, S: StorageSupport> PersistentSortedTable<R, 
         meta: QueryMetadata,
         update: SortedUpdate<R>,
     ) -> Option<(Uuid, Response<R>)> {
-        // get this rows partition
-        if let Some(partition) = self.partitions.get_mut(&update.partition_key) {
-            if partition.update(&update) {
-                // wrap our update in an intent
-                let intent = SortedIntents::update(update);
-                // write this update to storage
-                let pos = self.storage.commit(&intent).await.unwrap();
-                // we didn't find any data to update
-                let action = ResponseAction::Update(false);
-                // add this action to our pending queue
-                self.pending.add(meta, pos, action);
-                // TODO: adjust this shards memory usage?
-                // wait for this delete to get flushed to disk
-                return None;
+        unimplemented!("Need update support")
+        //// get this rows partition
+        //if let Some(partition) = self.partitions.get_mut(&update.partition_key) {
+        //    if partition.update(&update) {
+        //        // wrap our update in an intent
+        //        let intent = SortedIntents::update(update);
+        //        // write this update to storage
+        //        let pos = self.storage.commit(&intent).await.unwrap();
+        //        // we didn't find any data to update
+        //        let action = ResponseAction::Update(false);
+        //        // add this action to our pending queue
+        //        self.pending.add(meta, pos, action);
+        //        // TODO: adjust this shards memory usage?
+        //        // wait for this delete to get flushed to disk
+        //        return None;
+        //    }
+        //}
+        //// we didn't find any data to update
+        //let action = ResponseAction::Update(false);
+        //// cast this action to a response
+        //let response = Response {
+        //    id: meta.id,
+        //    index: meta.index,
+        //    data: action,
+        //    end: meta.end,
+        //};
+        //Some((meta.client, response))
+    }
+
+    /// Mark partitions as evictable if they are no longer in the intent log
+    #[instrument(name = "PersistentSortedTable::mark_evictable", skip(self, partitions), fields(partition_count = partitions.len()))]
+    pub fn mark_evictable(&mut self, generation: u64, partitions: Vec<u64>) {
+        let mut marked = 0;
+        // check each partition that we find might be evictable now
+        for partition in partitions {
+            // try to get this partition
+            if let Some(maybe_loaded) = self.partitions.get(&partition) {
+                // check if this partition is now evictable
+                if maybe_loaded.is_evictable(generation) {
+                    // get this partitions size
+                    let size = maybe_loaded.size();
+                    // insert this partition into our lru cache
+                    self.lru
+                        .borrow_mut()
+                        .put((self.table_name, partition), size);
+                    marked += size;
+                }
             }
         }
-        // we didn't find any data to update
-        let action = ResponseAction::Update(false);
-        // cast this action to a response
-        let response = Response {
-            id: meta.id,
-            index: meta.index,
-            data: action,
-            end: meta.end,
-        };
-        Some((meta.client, response))
+        event!(Level::INFO, marked);
+    }
+
+    /// Evict partitions from memory
+    #[instrument(name = "PersistentSortedTable::evict", skip_all, fields(victim_count = victims.len()))]
+    pub fn evict(&mut self, victims: Vec<u64>) {
+        // get our current memory usage
+        let pre = *self.memory_usage.borrow();
+        // step over and remove all of our victim partitions
+        for victim in victims {
+            // remove this partition if it exists
+            if let Some(partition) = self.partitions.remove(&victim) {
+                // get our new memory usage amount with this partition removed
+                let decreased = self.memory_usage.borrow().saturating_sub(partition.size());
+                // update our memory usage
+                *self.memory_usage.borrow_mut() = decreased;
+            }
+        }
+        // get our post eviction memory usage
+        let post = *self.memory_usage.borrow();
+        // log the change in memory usage
+        event!(
+            Level::INFO,
+            pre,
+            post,
+            diff = pre - post,
+            partitions = self.partitions.len(),
+            evictable = self.lru.borrow().len(),
+        );
     }
 
     /// Flush all pending writes to disk
@@ -341,12 +691,13 @@ impl<R: ShoalSortedTable + 'static, S: StorageSupport> PersistentSortedTable<R, 
     /// * `flushed` - The flushed actions to return
     pub async fn get_flushed(
         &mut self,
-    ) -> Result<&mut Vec<(Uuid, Uuid, Response<R>)>, ServerError> {
+    ) -> Result<&mut Vec<(Uuid, Uuid, Span, Response<R>)>, ServerError> {
         // check if our current intent log should be compacted
         let (flushed_pos, generation) = self.storage.compact_if_needed::<R>(false).await?;
+        // update our current generation
+        self.generation = generation;
         // get all of the responses whose data has been flushed to disk
-        // TODO actually do this
-        //self.pending.get(flushed_pos, &mut self.flushed);
+        self.pending.get(flushed_pos, &mut self.flushed);
         // return a ref to our flushed responses
         Ok(&mut self.flushed)
     }

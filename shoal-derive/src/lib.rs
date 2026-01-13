@@ -184,11 +184,12 @@ pub fn derive_shoal_sorted_table(stream: TokenStream) -> TokenStream {
     let db_name = Ident::new(&attrs.db, name.span());
     // get our db and table name as a ident
     //let table_name = Ident::new(&attrs.name, name.span());
+    let client_name = syn::Ident::new(&format!("{}Client", db_name), name.span());
     // build the name of our kinds
     let query_name = syn::Ident::new(&format!("{db_name}QueryKinds"), name.span());
     let response_name = syn::Ident::new(&format!("Archived{db_name}ResponseKinds"), name.span());
     // extend this type
-    add_from_shoal(&mut output, name, &db_name, &response_name);
+    add_from_shoal(&mut output, name, &client_name, &response_name);
     add_rkyv_support(&mut output, name);
     add_from_for_sorted_query(&mut output, name, &query_name);
     //add_shoal_table(&mut output, name);
