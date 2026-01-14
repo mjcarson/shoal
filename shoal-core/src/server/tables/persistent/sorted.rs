@@ -12,6 +12,7 @@ use rkyv::validation::shared::SharedValidator;
 use rkyv::validation::Validator;
 use rkyv::{Archive, Deserialize, Serialize};
 use std::cell::RefCell;
+use std::collections::hash_map;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::hash::BuildHasherDefault;
@@ -21,7 +22,7 @@ use tracing::{event, instrument, Level, Span};
 use uuid::Uuid;
 use xxhash_rust::xxh3::Xxh3;
 
-use crate::server::messages::{QueryMetadata, ServerMsg};
+use crate::server::messages::{LoadedPartition, QueryMetadata, ServerMsg};
 use crate::server::tables::partitions::SortedPartition;
 use crate::server::Conf;
 use crate::server::ServerError;
@@ -33,7 +34,7 @@ use crate::storage::{
     FullArchiveMap, IntentReadSupport, LoaderMsg, Loaders, PendingResponse, ShouldPrune,
     StorageSupport,
 };
-use crate::tables::partitions::MaybeLoaded;
+use crate::tables::partitions::{MaybeLoaded, PartitionSupport};
 
 /// The different types of entries in a shoal intent log
 #[derive(Debug, Archive, Serialize, Deserialize)]
@@ -234,6 +235,85 @@ where
         //Ok(table)
     }
 
+    /// Get the storage engine kind
+    pub fn loader_kind(&self) -> Loaders {
+        S::loader_kind()
+    }
+
+    /// Spawn the loader for this storage engine type
+    pub async fn spawn_loader<D: ShoalDatabase>(
+        &self,
+        table_map: &FullArchiveMap<D::TableNames>,
+        loader_rx: &AsyncReceiver<LoaderMsg<D::TableNames>>,
+        shard_local_tx: &AsyncSender<ServerMsg<D>>,
+    ) -> Result<(), ServerError> {
+        // spawn the loader for our storage engine
+        self.storage
+            .spawn_loader(&table_map, loader_rx, shard_local_tx)
+            .await
+    }
+
+    /// Load this partition from disk if needed
+    pub async fn load_partition(
+        &mut self,
+        loaded: LoadedPartition,
+    ) -> Option<(Vec<(QueryMetadata, SortedQuery<R>)>, u64)> {
+        // overlay any existing loaded partition data on this newly loaded partition
+        match self.partitions.entry(loaded.partition_id) {
+            hash_map::Entry::Occupied(mut entry) => {
+                // if this partition is loaded then insert its current rows ontop of this loaded data
+                if let MaybeLoaded::Loaded { partition, .. } = entry.get_mut() {
+                    // get the current size of this partition
+                    let old_size = partition.size();
+                    // access our loaded partitions data
+                    let accessed = SortedPartition::<R>::access(&loaded.data).unwrap();
+                    // deserialize this partition
+                    let mut new = SortedPartition::<R>::deserialize(&accessed).unwrap();
+                    // swap our loaded partition with our existing one so we can repaly it ontop
+                    std::mem::swap(&mut new, partition);
+                    // replay any rows from our current partition onto our loaded one
+                    partition.rows.extend(new.rows.into_iter());
+                    // calculate the difference in our partition size
+                    let diff = partition.size() as isize - old_size as isize;
+                    // increment or decrement our memory usage
+                    if diff.is_positive() {
+                        // our partition got larger so increase our memory usage
+                        *self.memory_usage.borrow_mut() += diff as usize;
+                    } else {
+                        // our partition got smaller so decrease our memory usage
+                        let new_mem_usage =
+                            self.memory_usage.borrow().saturating_sub(diff as usize);
+                        // updat our memory usage
+                        *self.memory_usage.borrow_mut() = new_mem_usage;
+                    }
+                    // remove this partition from our cache until any blocked queries have completed
+                    self.lru
+                        .borrow_mut()
+                        .pop(&(self.table_name, loaded.partition_id));
+                }
+            }
+            // this partition does not have any already loaded data
+            hash_map::Entry::Vacant(entry) => {
+                // get the size of our dat
+                let size = loaded.data.len();
+                // wrap our raw data so that we can access it only when needed
+                let wrapped = MaybeLoaded::Accessible(loaded.data);
+                // insert our newly loaded and wrapped data
+                entry.insert(wrapped);
+                // increment our memory usage
+                *self.memory_usage.borrow_mut() += size;
+                // remove this partition from our cache until any blocked queries have completed
+                self.lru
+                    .borrow_mut()
+                    .pop(&(self.table_name, loaded.partition_id));
+            }
+        }
+        // get the queries that were blocked on this partition
+        self.blocked
+            .remove(&loaded.partition_id)
+            .map(|unblocked| (unblocked, self.generation))
+    }
+
     /// Cast and handle a serialized query
     ///
     /// # Arguments
@@ -245,7 +325,7 @@ where
         &mut self,
         meta: QueryMetadata,
         query: SortedQuery<R>,
-    ) -> Option<(Uuid, Response<R>)> {
+    ) -> Option<(Uuid, Uuid, Response<R>)> {
         // execute the correct query type
         match query {
             // insert a row into this partition
@@ -266,7 +346,7 @@ where
     /// * `meta` - The metadata about this insert query
     /// * `row` - The row to insert
     #[instrument(name = "PersistentTable::insert", skip_all)]
-    async fn insert(&mut self, meta: QueryMetadata, row: R) -> Option<(Uuid, Response<R>)> {
+    async fn insert(&mut self, meta: QueryMetadata, row: R) -> Option<(Uuid, Uuid, Response<R>)> {
         // get our partition key
         let key = row.get_partition_key();
         // wrap our row in an insert intent
@@ -328,7 +408,7 @@ where
         &mut self,
         meta: QueryMetadata,
         get: &SortedGet<R>,
-    ) -> Option<(Uuid, Response<R>)> {
+    ) -> Option<(Uuid, Uuid, Response<R>)> {
         // get any dat from previously executed/blocked queries
         let (mut data, mut blocked) = match self.pending_data.remove(&(meta.id, meta.index)) {
             // use our existing data/blocked queries
@@ -457,7 +537,7 @@ where
                 data: action,
                 end: meta.end,
             };
-            Some((meta.client, response))
+            Some((meta.client, meta.id, response))
         }
     }
 
@@ -474,7 +554,7 @@ where
         meta: QueryMetadata,
         key: u64,
         sort: R::Sort,
-    ) -> Option<(Uuid, Response<R>)> {
+    ) -> Option<(Uuid, Uuid, Response<R>)> {
         unimplemented!("DELETE NEEDS TOMBSTONES OR SOMETHING SIMILAR!");
         //// get the partition we are deleting data from
         //match self.partitions.entry(key) {
@@ -598,7 +678,7 @@ where
         &mut self,
         meta: QueryMetadata,
         update: SortedUpdate<R>,
-    ) -> Option<(Uuid, Response<R>)> {
+    ) -> Option<(Uuid, Uuid, Response<R>)> {
         unimplemented!("Need update support")
         //// get this rows partition
         //if let Some(partition) = self.partitions.get_mut(&update.partition_key) {
@@ -680,7 +760,7 @@ where
     }
 
     /// Flush all pending writes to disk
-    pub async fn flush(&mut self) -> Result<(), ServerError> {
+    pub async fn flush(&self) -> Result<(), ServerError> {
         self.storage.flush().await
     }
 

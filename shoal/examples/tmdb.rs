@@ -344,7 +344,7 @@ impl PartitionKeySupport for MovieByKeyword {
 
     /// The name of this table
     fn name() -> &'static str {
-        "MovieByKeywords"
+        "MovieByKeyword"
     }
 
     /// Calculate the partition key for this row
@@ -518,7 +518,7 @@ pub struct Tmdb {
     /// A basic key value table
     pub movie: PersistentUnsortedTable<Movie, FileSystem, TmdbTableNames>,
     /// A sorted table of movies by keywords
-    pub movie_by_keywords: PersistentSortedTable<MovieByKeyword, FileSystem, TmdbTableNames>,
+    pub movie_by_keyword: PersistentSortedTable<MovieByKeyword, FileSystem, TmdbTableNames>,
 }
 
 pub enum MovieMsg {
