@@ -1,168 +1,15 @@
 extern crate proc_macro;
 
-use darling::FromAttributes;
+use darling::{FromAttributes, FromField};
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{Data, DataStruct, Fields, FieldsNamed, Ident};
 
-/// The arguments for a FromShoal derive
-#[derive(Debug, darling::FromAttributes)]
-#[darling(attributes(shoal_table))]
-struct ShoalTable {
-    ///// The name of this table
-    //pub name: String,
-    /// The name of the database this table is in
-    pub db: String,
-}
+mod tables;
+mod traits;
+mod utils;
 
-/// Extend a token stream with a FromShoal implementation
-///
-/// # Arguments
-///
-/// * `stream` - The stream to extend
-/// * `name` - The name of the type we are extending
-/// * `db_name` - The name of the database
-/// * `response_name` - The name of the response type
-fn add_from_shoal(
-    stream: &mut proc_macro2::TokenStream,
-    name: &Ident,
-    db_name: &Ident,
-    response_name: &Ident,
-) {
-    // extend our token stream
-    stream.extend(
-        quote! {
-            #[automatically_derived]
-            impl shoal_core::FromShoal<#db_name> for #name  {
-                type ResponseKinds = <#db_name as shoal_core::shared::traits::QuerySupport>::ResponseKinds;
-
-                fn retrieve(archived: &#response_name) -> Result<&rkyv::option::ArchivedOption<rkyv::vec::ArchivedVec<<Self as Archive>::Archived>>, shoal_core::client::Errors> {
-                    // make sure its the right data kind
-                    if let #response_name::#name(action) = archived {
-                        // make sure its a get action
-                       if let shoal_core::shared::responses::ArchivedResponseAction::Get(rows) = &action.data {
-                            return Ok(rows);
-                        }
-                    }
-                    Err(shoal_core::client::Errors::WrongType("Wrong Type!".to_owned()))
-                }                
-            }
-        }
-    );
-}
-
-/// Extend a token stream with a RkyvSupport impl
-///
-/// # Arguments
-///
-/// * `stream` - The stream to extend
-/// * `name` - The name of the type we are extending
-fn add_rkyv_support(stream: &mut proc_macro2::TokenStream, name: &Ident) {
-    // extend our token stream
-    stream.extend(quote! {
-        #[automatically_derived]
-        impl shoal_core::shared::traits::RkyvSupport for #name {}
-    });
-}
-
-/// Extend a token stream with a From<#name> for *SortedQueryKinds implementation
-///
-/// # Arguments
-///
-/// * `stream` - The stream to extend
-/// * `name` - The name of the type we are extending
-/// * `query_name` - The name of the query type
-fn add_from_for_sorted_query(
-    stream: &mut proc_macro2::TokenStream,
-    name: &Ident,
-    query_name: &Ident,
-) {
-    // extend our token stream
-    stream.extend(quote! {
-        #[automatically_derived]
-        impl From<#name> for #query_name {
-            fn from(row: #name) -> #query_name {
-                // get our rows partition key
-                let key = #name::get_partition_key(&row);
-                // build our query kind
-                #query_name::#name(shoal_core::shared::queries::SortedQuery::Insert { key, row })
-            }
-        }
-    });
-}
-
-/// Extend a token stream with a From<#name> for *UnsortedQueryKinds implementation
-///
-/// # Arguments
-///
-/// * `stream` - The stream to extend
-/// * `name` - The name of the type we are extending
-/// * `query_name` - The name of the query type
-fn add_from_for_unsorted_query(
-    stream: &mut proc_macro2::TokenStream,
-    name: &Ident,
-    query_name: &Ident,
-) {
-    // extend our token stream
-    stream.extend(quote! {
-        #[automatically_derived]
-        impl From<#name> for #query_name {
-            fn from(row: #name) -> #query_name {
-                // get our rows partition key
-                let key = #name::get_partition_key(&row);
-                // build our query kind
-                #query_name::#name(shoal_core::shared::queries::UnsortedQuery::Insert { key, row })
-            }
-        }
-    });
-}
-
-///// Extend a token stream with a FromShoal implementation
-/////
-///// # Arguments
-/////
-///// * `stream` - The stream to extend
-///// * `name` - The name of the type we are extending
-///// * `table_name` - The name of the table
-///// * `response_name` - The name of the response type
-//fn add_shoal_table(stream: &mut proc_macro2::TokenStream, name: &Ident) {
-//    // extend our token stream
-//    stream.extend(quote! {
-//        #[automatically_derived]
-//        impl ShoalTable for #name {
-//            /// The sort type for this data
-//            type Sort = String;
-//
-//            /// Build the sort tuple for this row
-//            fn get_sort(&self) -> &Self::Sort {
-//                &self.key
-//            }
-//
-//            /// Calculate the partition key for this row
-//            fn partition_key(sort: &Self::Sort) -> u64 {
-//                // create a new hasher
-//                let mut hasher = GxHasher::default();
-//                // hash the first key
-//                hasher.write(sort.as_bytes());
-//                // get our hash
-//                hasher.finish()
-//            }
-//
-//            /// Any filters to apply when listing/crawling rows
-//            type Filters = String;
-//
-//            /// Determine if a row should be filtered
-//            ///
-//            /// # Arguments
-//            ///
-//            /// * `filters` - The filters to apply
-//            /// * `row` - The row to filter
-//            fn is_filtered(filter: &Self::Filters, row: &Self) -> bool {
-//                &row.value == filter
-//            }
-//        }
-//    });
-//}
+use tables::{ShoalField, ShoalTable};
 
 /// Derive the basic traits and functions for a type to be a table in shoal
 #[proc_macro_derive(ShoalSortedTable, attributes(shoal_table))]
@@ -189,25 +36,53 @@ pub fn derive_shoal_sorted_table(stream: TokenStream) -> TokenStream {
     let query_name = syn::Ident::new(&format!("{db_name}QueryKinds"), name.span());
     let response_name = syn::Ident::new(&format!("Archived{db_name}ResponseKinds"), name.span());
     // extend this type
-    add_from_shoal(&mut output, name, &client_name, &response_name);
-    add_rkyv_support(&mut output, name);
-    add_from_for_sorted_query(&mut output, name, &query_name);
+    traits::add_from_shoal(&mut output, name, &client_name, &response_name);
+    traits::add_rkyv_support(&mut output, name);
+    traits::add_from_for_sorted_query(&mut output, name, &query_name);
     //add_shoal_table(&mut output, name);
     // convert and return our stream
     output.into()
 }
 
 /// Derive the basic traits and functions for a type to be a table in shoal
-#[proc_macro_derive(ShoalUnsortedTable, attributes(shoal_table))]
+#[proc_macro_derive(ShoalUnsortedTable, attributes(shoal_table, shoal))]
 pub fn derive_shoal_unsorted_table(stream: TokenStream) -> TokenStream {
     // parse our target struct
     let ast = syn::parse_macro_input!(stream as syn::DeriveInput);
     // get the name of our struct
     let name = &ast.ident;
     // we only support structs right now
-    match &ast.data {
-        Data::Struct(DataStruct { .. }) => (),
+    let data_struct = match &ast.data {
+        Data::Struct(data_struct) => data_struct,
         _ => unimplemented!("Only structs are currently supported"),
+    };
+
+    // get our fields
+    let fields = match &data_struct.fields {
+        Fields::Named(fields) => &fields.named,
+        _ => panic!("ShoalTable requires named fields"),
+    };
+    // instance vecs to store our partition and sort keys
+    let mut partition_fields = Vec::default();
+    // step over all fields and find our partition and sort keys
+    for field in fields {
+        // parse our field attributes
+        let field_attrs = ShoalField::from_field(field)
+            .expect("Failed to parse field attributes");
+        if let Some(ident) = field_attrs.ident.clone() {
+            // check if this is a partition or a sort key
+            match (field_attrs.partition, field_attrs.sort) {
+                (true, false) => partition_fields.push((ident.clone(), field_attrs.ty.clone())),
+                (false, true) => panic!("Unsorted tables do not support sort keys!: {ident}"),
+                //(false, true) => sort_fields.push((ident, field_attrs.ty.clone())),
+                (false, false) => (),
+                (true, true) => panic!("Fields cannot be both partition and sort keys!: {ident}"),
+            }
+        }
+    }
+    // make sure at least one partition key was set
+    if partition_fields.is_empty() {
+        panic!("Unsorted tables require at least one partition key to be set!");
     }
     // start with an empty stream
     let mut output = quote! {};
@@ -221,9 +96,10 @@ pub fn derive_shoal_unsorted_table(stream: TokenStream) -> TokenStream {
     let query_name = syn::Ident::new(&format!("{}QueryKinds", db_name), name.span());
     let response_name = syn::Ident::new(&format!("Archived{}ResponseKinds", db_name), name.span());
     // extend this type
-    add_from_shoal(&mut output, name, &client_name, &response_name);
-    add_rkyv_support(&mut output, name);
-    add_from_for_unsorted_query(&mut output, name, &query_name);
+    traits::add_from_shoal(&mut output, name, &client_name, &response_name);
+    traits::add_rkyv_support(&mut output, name);
+    traits::add_from_for_unsorted_query(&mut output, name, &query_name);
+    traits::add_partition_key_support(&mut output, name, &partition_fields);
     //add_shoal_table(&mut output, name);
     // convert and return our stream
     output.into()

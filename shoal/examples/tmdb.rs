@@ -28,7 +28,7 @@ use kanal::{AsyncReceiver, AsyncSender};
 use mimalloc::MiMalloc;
 use rkyv::{Archive, Deserialize, Serialize};
 use std::collections::HashMap;
-use std::hash::Hasher;
+use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -57,6 +57,7 @@ static GLOBAL: MiMalloc = MiMalloc;
 #[shoal_table(db = "Tmdb")]
 pub struct Movie {
     /// The id for this movie
+    #[shoal(partition)]
     pub id: u64,
     /// The name of this move
     pub title: String,
@@ -106,40 +107,40 @@ pub struct Movie {
     pub keywords: Vec<String>,
 }
 
-impl PartitionKeySupport for Movie {
-    /// The partition key type for this data
-    type PartitionKey = u64;
-
-    /// The name of this table
-    fn name() -> &'static str {
-        "Movies"
-    }
-
-    /// Calculate the partition key for this row
-    fn get_partition_key(&self) -> u64 {
-        Self::get_partition_key_from_values(&self.id)
-    }
-
-    /// Calculate the partition key for this row
-    fn get_partition_key_from_values(values: &Self::PartitionKey) -> u64 {
-        // create a new hasher
-        let mut hasher = GxHasher::default();
-        // hash the first key
-        hasher.write_u64(*values);
-        // get our hash
-        hasher.finish()
-    }
-
-    /// Get the partition key for this row from an archived value
-    fn get_partition_key_from_archived_insert(intent: &<Self as Archive>::Archived) -> u64 {
-        // create a new hasher
-        let mut hasher = GxHasher::default();
-        // hash the first key
-        hasher.write_u64(intent.id.to_native());
-        // get our hash
-        hasher.finish()
-    }
-}
+//impl PartitionKeySupport for Movie {
+//    /// The partition key type for this data
+//    type PartitionKey = u64;
+//
+//    /// The name of this table
+//    fn name() -> &'static str {
+//        "Movies"
+//    }
+//
+//    /// Calculate the partition key for this row
+//    fn get_partition_key(&self) -> u64 {
+//        Self::get_partition_key_from_values(&self.id)
+//    }
+//
+//    /// Calculate the partition key for this row
+//    fn get_partition_key_from_values(values: &Self::PartitionKey) -> u64 {
+//        // create a new hasher
+//        let mut hasher = GxHasher::default();
+//        // hash the first key
+//        hasher.write_u64(*values);
+//        // get our hash
+//        hasher.finish()
+//    }
+//
+//    /// Get the partition key for this row from an archived value
+//    fn get_partition_key_from_archived_insert(intent: &<Self as Archive>::Archived) -> u64 {
+//        // create a new hasher
+//        let mut hasher = GxHasher::default();
+//        // hash the first key
+//        hasher.write_u64(intent.id.to_native());
+//        // get our hash
+//        hasher.finish()
+//    }
+//}
 
 impl ShoalUnsortedTable for Movie {
     /// The updates that can be applied to this table
