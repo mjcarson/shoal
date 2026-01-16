@@ -22,6 +22,9 @@ pub(super) struct ShoalField {
     /// Whether this field can be used to filter what rows are returned from shoal or not
     #[darling(default)]
     pub filter: bool,
+    /// Whether this field can be updated
+    #[darling(default)]
+    pub update: bool,
 }
 
 /// The arguments for a FromShoal derive

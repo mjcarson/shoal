@@ -60,6 +60,7 @@ pub struct Movie {
     #[shoal(partition)]
     pub id: u64,
     /// The name of this move
+    #[shoal(filter)]
     pub title: String,
     /// The vote average
     pub vote_average: f64,
@@ -88,6 +89,7 @@ pub struct Movie {
     /// The original title for this movie
     pub original_title: String,
     /// The overview for this movie
+    #[shoal(update)]
     pub overview: String,
     /// The popularity of this movie
     pub popularity: f64,
@@ -142,89 +144,52 @@ pub struct Movie {
 //    }
 //}
 
-impl ShoalUnsortedTable for Movie {
-    /// The updates that can be applied to this table
-    type Update = String;
+// ShoalUnsortedTable is now automatically derived via #[derive(ShoalUnsortedTable)]
+// with #[shoal(filter)] on title and #[shoal(update)] on overview
 
-    /// Any filters to apply when listing/crawling rows
-    type Filters = String;
+//#[derive(Debug, Archive, Serialize)]
+//#[rkyv(derive(Debug))]
+//pub struct MovieGet {
+//    /// The id of the movie to get
+//    pub id: u64,
+//    /// Any filters to apply to rows
+//    pub filters: Option<String>,
+//    /// The number of rows to get at most
+//    pub limit: Option<usize>,
+//}
 
-    /// Determine if a row should be filtered
-    ///
-    /// # Arguments
-    ///
-    /// * `filters` - The filters to apply
-    /// * `row` - The row to filter
-    fn is_filtered(filter: &Self::Filters, row: &Self) -> bool {
-        &row.title == filter
-    }
-
-    /// Determine if a row should be filtered against an archived row
-    ///
-    /// # Arguments
-    ///
-    /// * `filters` - The filters to apply
-    /// * `row` - The row to filter
-    fn is_filtered_archived(
-        filter: &Self::Filters,
-        row: &<Self as rkyv::Archive>::Archived,
-    ) -> bool {
-        &row.title == filter
-    }
-
-    /// Apply an update to a single row
-    ///
-    /// # Arguments
-    ///
-    /// * `update` - The update to apply to a specific row
-    fn update(&mut self, update: &UnsortedUpdate<Self>) {
-        self.overview = update.update.clone();
-    }
-}
-
-#[derive(Debug, Archive, Serialize)]
-#[rkyv(derive(Debug))]
-pub struct MovieGet {
-    /// The id of the movie to get
-    pub id: u64,
-    /// Any filters to apply to rows
-    pub filters: Option<String>,
-    /// The number of rows to get at most
-    pub limit: Option<usize>,
-}
-
-impl MovieGet {
-    /// Create a new get query for a [`MovieRow`]
-    ///
-    /// # Arguments
-    ///
-    /// * `key` - The partition key string
-    pub fn new(id: u64) -> Self {
-        MovieGet {
-            id,
-            filters: None,
-            limit: None,
-        }
-    }
-
-    /// Set a filter for getting rows
-    ///
-    /// # Arguments
-    ///
-    /// * `filter` - The value to filter on
-    pub fn filter<T: Into<String>>(mut self, filter: T) -> Self {
-        // set our filter
-        self.filters = Some(filter.into());
-        self
-    }
-}
+//impl MovieGet {
+//    ///// Create a new get query for a [`MovieRow`]
+//    /////
+//    ///// # Arguments
+//    /////
+//    ///// * `key` - The partition key string
+//    //pub fn new(id: u64) -> Self {
+//    //    MovieGet {
+//    //        id,
+//    //        filters: None,
+//    //        limit: None,
+//    //    }
+//    //}
+//
+//    /// Set a filter for getting rows
+//    ///
+//    /// # Arguments
+//    ///
+//    /// * `filter` - The value to filter on
+//    pub fn filter<T: Into<String>>(mut self, filter: T) -> Self {
+//        // set our filter
+//        self.filters = Some(filter.into());
+//        self
+//    }
+//}
 
 impl From<MovieGet> for TmdbQueryKinds {
     /// Build our a `QueryKind` for getting `MovieRows`
     fn from(specific: MovieGet) -> Self {
         // build our partition key
         let partition_key =
-            <Movie as PartitionKeySupport>::get_partition_key_from_values(&specific.id);
+            <Movie as PartitionKeySupport>::get_partition_key_from_values(&specific.partition_key);
         // build the general query
         let general = UnsortedGet {
             partition_key,
@@ -236,27 +201,27 @@ impl From<MovieGet> for TmdbQueryKinds {
     }
 }
 
-/// Delete a key value row
-#[derive(Debug, Archive, Serialize)]
-#[rkyv(derive(Debug))]
-pub struct MovieDelete {
-    /// Tkey key to the partition to delete a row from
-    pub partition_key: u64,
-}
+///// Delete a key value row
+//#[derive(Debug, Archive, Serialize)]
+//#[rkyv(derive(Debug))]
+//pub struct MovieDelete {
+//    /// Tkey key to the partition to delete a row from
+//    pub partition_key: u64,
+//}
 
-impl MovieDelete {
-    /// Create a new key value delete
-    ///
-    /// # Arguments
-    ///
-    /// * `key` - The key for determining the parititon
-    pub fn new(key: u64) -> Self {
-        // calculate our partition key
-        let partition_key = Movie::get_partition_key_from_values(&key);
-        // build a key value delete object
-        MovieDelete { partition_key }
-    }
-}
+//impl MovieDelete {
+//    /// Create a new key value delete
+//    ///
+//    /// # Arguments
+//    ///
+//    /// * `key` - The key for determining the parititon
+//    pub fn new(key: u64) -> Self {
+//        // calculate our partition key
+//        let partition_key = Movie::get_partition_key_from_values(&key);
+//        // build a key value delete object
+//        MovieDelete { partition_key }
+//    }
+//}
 
 impl From<MovieDelete> for TmdbQueryKinds {
     /// Build our `QueryKind` for getting `MovieDelete`
@@ -273,31 +238,31 @@ impl From<MovieDelete> for TmdbQueryKinds {
     }
 }
 
-/// An update to apply to a row in this table
-pub struct MovieUpdate {
-    /// The partition key to update data in
-    partition_key: u64,
-    /// The data to update
-    data: String,
-}
-
-impl MovieUpdate {
-    /// Create an update for a specific row
-    ///
-    /// # Arguments
-    ///
-    /// * `key` - The key to the partition to upate data in
-    /// * `data` - The new data to set
-    pub fn new<D: Into<String>>(key: u64, data: D) -> Self {
-        // calculate our partition key
-        let partition_key = Movie::get_partition_key_from_values(&key);
-        // build a new upidate object
-        MovieUpdate {
-            partition_key,
-            data: data.into(),
-        }
-    }
-}
+///// An update to apply to a row in this table
+//pub struct MovieUpdate {
+//    /// The partition key to update data in
+//    partition_key: u64,
+//    /// The data to update
+//    data: String,
+//}
+//
+//impl MovieUpdate {
+//    /// Create an update for a specific row
+//    ///
+//    /// # Arguments
+//    ///
+//    /// * `key` - The key to the partition to upate data in
+//    /// * `data` - The new data to set
+//    pub fn new<D: Into<String>>(key: u64, data: D) -> Self {
+//        // calculate our partition key
+//        let partition_key = Movie::get_partition_key_from_values(&key);
+//        // build a new upidate object
+//        MovieUpdate {
+//            partition_key,
+//            data: data.into(),
+//        }
+//    }
+//}
 
 impl From<MovieUpdate> for TmdbQueryKinds {
     /// Build our `QueryKind` for getting `MovieUpdate`
@@ -309,7 +274,7 @@ impl From<MovieUpdate> for TmdbQueryKinds {
         // cast this update to a generalized update
         let general = UnsortedUpdate {
             partition_key: specific.partition_key,
-            update: specific.data,
+            update: specific,
         };
         // wrap our general update in a query
         let query = UnsortedQuery::Update(general);

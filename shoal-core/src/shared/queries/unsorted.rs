@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::server::ring::Ring;
 use crate::server::shard::ShardInfo;
-use crate::shared::traits::{RkyvSupport, ShoalUnsortedTable};
+use crate::shared::traits::{RkyvSupport, ShoalTableSupport, ShoalUnsortedTable};
 
 /// The different types of queries for a single datatype
 #[derive(Debug, Archive, Serialize, Deserialize, Clone)]
@@ -40,7 +40,7 @@ impl<T: ShoalUnsortedTable + std::fmt::Debug> UnsortedQuery<T> {
 }
 
 impl<T: ShoalUnsortedTable> RkyvSupport for UnsortedQuery<T> where
-    for<'a> <T as ShoalUnsortedTable>::Filters: rkyv::Serialize<
+    for<'a> <T as ShoalTableSupport>::Filters: rkyv::Serialize<
         Strategy<rkyv::ser::Serializer<AlignedVec, ArenaHandle<'a>, Share>, rkyv::rancor::Error>,
     >
 {

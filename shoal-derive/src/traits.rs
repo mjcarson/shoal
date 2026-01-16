@@ -238,6 +238,354 @@ pub(super) fn add_from_for_unsorted_query(
     });
 }
 
+/// Extend a token stream with a Filter struct definition
+///
+/// # Arguments
+///
+/// * `stream` - The stream to extend
+/// * `name` - The name of the type we are extending
+/// * `filter_fields` - The fields to include in the filter struct (ident, type)
+pub(super) fn add_filter_struct(
+    stream: &mut proc_macro2::TokenStream,
+    name: &Ident,
+    filter_fields: &[(syn::Ident, syn::Type)],
+) {
+    // Build the filter struct name
+    let filter_name = format_ident!("{}Filter", name);
+
+    // If no filter fields, create an empty struct
+    if filter_fields.is_empty() {
+        stream.extend(quote! {
+            #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Default)]
+            #[rkyv(derive(Debug))]
+            pub struct #filter_name;
+        });
+        return;
+    }
+
+    // Build the fields for the filter struct (all optional)
+    let fields = filter_fields.iter().map(|(ident, ty)| {
+        quote! {
+            pub #ident: Option<#ty>
+        }
+    });
+
+    // Generate the filter struct
+    stream.extend(quote! {
+        #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Default)]
+        #[rkyv(derive(Debug))]
+        pub struct #filter_name {
+            #(#fields),*
+        }
+    });
+}
+
+/// Extend a token stream with an Get struct definition
+///
+/// # Arguments
+///
+/// * `stream` - The stream to extend
+/// * `name` - The name of the type we are extending
+/// * `update_fields` - The fields to include in the update struct (ident, type)
+pub(super) fn add_get_struct(
+    stream: &mut proc_macro2::TokenStream,
+    name: &Ident,
+    partition_fields: &[(syn::Ident, syn::Type)],
+) {
+    // build our struct names
+    let get_name = format_ident!("{}Get", name);
+    let filter_name = format_ident!("{}Filter", name);
+    // build the partition key type
+    let partition_key_type = if partition_fields.len() == 1 {
+        // we have a single partition field so we can just use that type
+        let (_, ty) = &partition_fields[0];
+        quote! { #ty }
+    } else {
+        // we have multiple partition fields so well need to wrap it in a tuple
+        let types: Vec<_> = partition_fields.iter().map(|(_, ty)| ty).collect();
+        quote! { (#(#types),*) }
+    };
+    // build the partition key type
+    let partition_args: Vec<_> = partition_fields.iter()
+            .map(|(ident, ty)| quote! { #ident: #ty } )
+            .collect();
+    // build the partition args to tuple init
+    let partition_init = if partition_fields.len() == 1 {
+        // we have a single partition key arg so just use type instead of a tuple
+        let (ident, _) = &partition_fields[0];
+        quote! { #ident }
+    } else {
+        // we have multiple partition key fields so get all of their idents
+        let idents = partition_fields.iter().map(|(ident, _)| { quote! { #ident } });
+        // wrap them in a tuple
+        quote!{ (#(#idents,)*)  }
+    };
+    // generate our get struct for this type and its methods
+    stream.extend(quote! {
+        #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+        #[rkyv(derive(Debug))]
+        pub struct #get_name {
+            /// The partition key of the partition to get
+            pub partition_key: #partition_key_type,
+            /// Any filters to use when deciding what rows to return
+            pub filters: Option<#filter_name>,
+            /// The number of rows to return
+            pub limit: Option<usize>,
+        }
+
+        #[automatically_derived]
+        impl shoal_core::shared::traits::RkyvSupport for #get_name {}
+
+        #[automatically_derived]
+        impl #get_name {
+            /// Create a new get query for this type
+            pub fn new(#(#partition_args),*) -> Self {
+                #get_name {
+                    partition_key: #partition_init,
+                    filters: None,
+                    limit: None,
+                }
+            }
+
+                /// Set a filter for getting rows
+                ///
+                /// # Arguments
+                ///
+                /// * `filter` - The filters to set
+                pub fn filters(mut self, filters: #filter_name) -> Self {
+                    // set our filters
+                    self.filters = Some(filters);
+                    self
+                }
+            
+        }
+    });
+    
+}
+
+/// Extend a token stream with an Update struct definition
+///
+/// # Arguments
+///
+/// * `stream` - The stream to extend
+/// * `name` - The name of the type we are extending
+/// * `update_fields` - The fields to include in the update struct (ident, type)
+pub(super) fn add_update_struct(
+    stream: &mut proc_macro2::TokenStream,
+    name: &Ident,
+    partition_fields: &[(syn::Ident, syn::Type)],
+    update_fields: &[(syn::Ident, syn::Type)],
+) {
+    // build the update struct name
+    let update_name = format_ident!("{}Update", name);
+    // build the partition key type
+    let partition_key_type = if partition_fields.len() == 1 {
+        // we have a single partition field so we can just use that type
+        let (_, ty) = &partition_fields[0];
+        quote! { #ty }
+    } else {
+        // we have multiple partition fields so well need to wrap it in a tuple
+        let types: Vec<_> = partition_fields.iter().map(|(_, ty)| ty).collect();
+        quote! { (#(#types),*) }
+    };
+    // if no update fields, create an empty struct
+    if update_fields.is_empty() {
+        stream.extend(quote! {
+            #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Default)]
+            #[rkyv(derive(Debug))]
+            pub struct #update_name;
+
+            impl shoal_core::shared::traits::RkyvSupport for #update_name {}
+        });
+        return;
+    }
+    // build the fields for the update struct (all optional)
+    let fields = update_fields.iter().map(|(ident, ty)| {
+        // build the doc string for this field
+        let doc_string = format!("The updated value to set for {ident}");
+        quote! {
+            #[doc = #doc_string]
+            pub #ident: Option<#ty>
+        }
+    });
+    // generate the update struct
+    stream.extend(quote! {
+        #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+        #[rkyv(derive(Debug))]
+        pub struct #update_name {
+            /// The partition key to update data in
+            pub partition_key: #partition_key_type,
+            #(#fields),*
+        }
+
+        #[automatically_derived]
+        impl shoal_core::shared::traits::RkyvSupport for #update_name {}
+    });
+}
+
+/// Extend a token stream with an Delete struct definition
+///
+/// # Arguments
+///
+/// * `stream` - The stream to extend
+/// * `name` - The name of the type we are extending
+pub(super) fn add_delete_struct(
+    stream: &mut proc_macro2::TokenStream,
+    name: &Ident,
+    partition_fields: &[(syn::Ident, syn::Type)],
+) {
+    // build the update struct name
+    let delete_name = format_ident!("{}Delete", name);
+    // build the partition key type
+    let partition_key_type = if partition_fields.len() == 1 {
+        // we have a single partition field so we can just use that type
+        let (_, ty) = &partition_fields[0];
+        quote! { #ty }
+    } else {
+        // we have multiple partition fields so well need to wrap it in a tuple
+        let types: Vec<_> = partition_fields.iter().map(|(_, ty)| ty).collect();
+        quote! { (#(#types),*) }
+    };
+    // build the partition key type
+    let partition_args: Vec<_> = partition_fields.iter()
+            .map(|(ident, ty)| quote! { #ident: #ty } )
+            .collect();
+    // build the partition args to tuple init
+    let partition_init = if partition_fields.len() == 1 {
+        // we have a single partition key arg so just use type instead of a tuple
+        let (ident, _) = &partition_fields[0];
+        quote! { #ident }
+    } else {
+        // we have multiple partition key fields so get all of their idents
+        let idents = partition_fields.iter().map(|(ident, _)| { quote! { #ident } });
+        // wrap them in a tuple
+        quote!{ (#(#idents,)*)  }
+    };
+    // generate the delete struct
+    stream.extend(quote! {
+        #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+        #[rkyv(derive(Debug))]
+        pub struct #delete_name{
+            /// The key to the partition to delete
+            pub partition_key: #partition_key_type,
+        }
+
+        #[automatically_derived]
+        impl shoal_core::shared::traits::RkyvSupport for #delete_name {}
+
+        #[automatically_derived]
+        impl #delete_name {
+            /// Create a new get query for this type
+            pub fn new(#(#partition_args),*) -> Self {
+                #delete_name {
+                    partition_key: #partition_init,
+                }
+            }
+        }
+    });
+}
+
+
+/// Extend a token stream with a ShoalTableSupport implementation
+///
+/// # Arguments
+///
+/// * `stream` - The stream to extend
+/// * `name` - The name of the type we are extending
+/// * `filter_fields` - The fields used for filtering (ident, type)
+/// * `update_fields` - The fields used for updates (ident, type)
+pub(super) fn add_shoal_table_support(
+    stream: &mut proc_macro2::TokenStream,
+    name: &Ident,
+    filter_fields: &[(syn::Ident, syn::Type)],
+    update_fields: &[(syn::Ident, syn::Type)],
+) {
+    // build the struct names
+    let filter_name = format_ident!("{}Filter", name);
+    let update_name = format_ident!("{}Update", name);
+    // build the is_filtered checks for regular rows
+    let filter_checks: Vec<_> = filter_fields
+        .iter()
+        .map(|(ident, _)| {
+            quote! {
+                if let Some(ref filter_val) = filter.#ident {
+                    if &row.#ident != filter_val {
+                        return false;
+                    }
+                }
+            }
+        })
+        .collect();
+    // build the is_filtered checks for archived rows
+    let filter_archived_checks: Vec<_> = filter_fields
+        .iter()
+        .map(|(ident, _)| {
+            quote! {
+                if let Some(ref filter_val) = filter.#ident {
+                    if &row.#ident != filter_val {
+                        return false;
+                    }
+                }
+            }
+        })
+        .collect();
+    // generate the ShoalTableSupport implementation
+    stream.extend(quote! {
+        #[automatically_derived]
+        impl shoal_core::shared::traits::ShoalTableSupport for #name {
+            type Update = #update_name;
+            type Filters = #filter_name;
+
+            fn is_filtered(filter: &Self::Filters, row: &Self) -> bool {
+                #(#filter_checks)*
+                true
+            }
+
+            fn is_filtered_archived(
+                filter: &Self::Filters,
+                row: &<Self as rkyv::Archive>::Archived,
+            ) -> bool {
+                #(#filter_archived_checks)*
+                true
+            }
+        }
+    });
+}
+
+/// Extend a token stream with an update method for ShoalUnsortedTable
+///
+/// # Arguments
+///
+/// * `stream` - The stream to extend
+/// * `name` - The name of the type we are extending
+/// * `update_fields` - The fields used for updates (ident, type)
+pub(super) fn add_unsorted_table_impl(
+    stream: &mut proc_macro2::TokenStream,
+    name: &Ident,
+    update_fields: &[(syn::Ident, syn::Type)],
+) {
+    // build the update assignments
+    let update_assignments: Vec<_> = update_fields
+        .iter()
+        .map(|(ident, _)| {
+            quote! {
+                if let Some(ref new_val) = update.update.#ident {
+                    self.#ident = new_val.clone();
+                }
+            }
+        })
+        .collect();
+    // generate the ShoalUnsortedTable implementation
+    stream.extend(quote! {
+        #[automatically_derived]
+        impl shoal_core::shared::traits::ShoalUnsortedTable for #name {
+            fn update(&mut self, update: &shoal_core::shared::queries::UnsortedUpdate<Self>) {
+                #(#update_assignments)*
+            }
+        }
+    });
+}
+
 ///// Extend a token stream with a FromShoal implementation
 /////
 ///// # Arguments

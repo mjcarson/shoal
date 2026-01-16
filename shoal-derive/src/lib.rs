@@ -62,9 +62,11 @@ pub fn derive_shoal_unsorted_table(stream: TokenStream) -> TokenStream {
         Fields::Named(fields) => &fields.named,
         _ => panic!("ShoalTable requires named fields"),
     };
-    // instance vecs to store our partition and sort keys
+    // instance vecs to store our partition, filter, and update keys
     let mut partition_fields = Vec::default();
-    // step over all fields and find our partition and sort keys
+    let mut filter_fields = Vec::default();
+    let mut update_fields = Vec::default();
+    // step over all fields and find our partition, filter, and update keys
     for field in fields {
         // parse our field attributes
         let field_attrs = ShoalField::from_field(field)
@@ -74,9 +76,16 @@ pub fn derive_shoal_unsorted_table(stream: TokenStream) -> TokenStream {
             match (field_attrs.partition, field_attrs.sort) {
                 (true, false) => partition_fields.push((ident.clone(), field_attrs.ty.clone())),
                 (false, true) => panic!("Unsorted tables do not support sort keys!: {ident}"),
-                //(false, true) => sort_fields.push((ident, field_attrs.ty.clone())),
                 (false, false) => (),
                 (true, true) => panic!("Fields cannot be both partition and sort keys!: {ident}"),
+            }
+            // check if this field is a filter field
+            if field_attrs.filter {
+                filter_fields.push((ident.clone(), field_attrs.ty.clone()));
+            }
+            // check if this field is an update field
+            if field_attrs.update {
+                update_fields.push((ident.clone(), field_attrs.ty.clone()));
             }
         }
     }
@@ -100,7 +109,15 @@ pub fn derive_shoal_unsorted_table(stream: TokenStream) -> TokenStream {
     traits::add_rkyv_support(&mut output, name);
     traits::add_from_for_unsorted_query(&mut output, name, &query_name);
     traits::add_partition_key_support(&mut output, name, &partition_fields);
-    //add_shoal_table(&mut output, name);
+    // generate the Filter and Update structs
+    traits::add_filter_struct(&mut output, name, &filter_fields);
+    traits::add_get_struct(&mut output, name, &partition_fields);
+    traits::add_update_struct(&mut output, name, &partition_fields, &update_fields);
+    traits::add_delete_struct(&mut output, name, &partition_fields);
+    // generate the ShoalTableSupport implementation
+    traits::add_shoal_table_support(&mut output, name, &filter_fields, &update_fields);
+    // generate the ShoalUnsortedTable implementation
+    traits::add_unsorted_table_impl(&mut output, name, &update_fields);
     // convert and return our stream
     output.into()
 }
