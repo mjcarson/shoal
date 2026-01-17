@@ -305,6 +305,9 @@ pub trait ShoalTableSupport:
     /// The updates that can be applied to this table
     type Update: RkyvSupport + std::fmt::Debug + Clone;
 
+    /// The server facing updates that can be applied to this table (just the updates no keys)
+    type UpdateData: RkyvSupport + std::fmt::Debug + Clone;
+
     /// Any filters to apply when listing/crawling rows
     type Filters: rkyv::Archive + std::fmt::Debug + Clone;
 

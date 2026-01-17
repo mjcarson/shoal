@@ -49,7 +49,7 @@ pub enum UnsortedIntents<T: ShoalUnsortedTable + RkyvSupport> {
 
 impl<T: ShoalUnsortedTable> UnsortedIntents<T>
 where
-    for<'a> <<T as ShoalTableSupport>::Update as Archive>::Archived:
+    for<'a> <<T as ShoalTableSupport>::UpdateData as Archive>::Archived:
         CheckBytes<Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>>,
 {
     /// build an insert intent
@@ -142,8 +142,8 @@ where
         shard_local_tx: &AsyncSender<ServerMsg<D>>,
     ) -> Result<Self, ServerError>
     where
-        <<R as ShoalTableSupport>::Update as Archive>::Archived: rkyv::Deserialize<
-            <R as ShoalTableSupport>::Update,
+        <<R as ShoalTableSupport>::UpdateData as Archive>::Archived: rkyv::Deserialize<
+            <R as ShoalTableSupport>::UpdateData,
             Strategy<Pool, rkyv::rancor::Error>,
         >,
         <R as Archive>::Archived: rkyv::Deserialize<R, Strategy<Pool, rkyv::rancor::Error>>,
@@ -151,7 +151,7 @@ where
             CheckBytes<
                 Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
             >,
-        for<'a> <<R as ShoalTableSupport>::Update as Archive>::Archived: CheckBytes<
+        for<'a> <<R as ShoalTableSupport>::UpdateData as Archive>::Archived: CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
         >,
     {
@@ -273,7 +273,7 @@ where
         query: UnsortedQuery<R>,
     ) -> Option<(Uuid, Uuid, Response<R>)>
     where
-        for<'a> <<R as ShoalTableSupport>::Update as Archive>::Archived: CheckBytes<
+        for<'a> <<R as ShoalTableSupport>::UpdateData as Archive>::Archived: CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
         >,
         for<'a> <R as ShoalTableSupport>::Filters: rkyv::Serialize<
@@ -285,8 +285,8 @@ where
         for<'a> <<R as ShoalTableSupport>::Filters as Archive>::Archived: CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
         >,
-        <<R as ShoalTableSupport>::Update as Archive>::Archived: rkyv::Deserialize<
-            <R as ShoalTableSupport>::Update,
+        <<R as ShoalTableSupport>::UpdateData as Archive>::Archived: rkyv::Deserialize<
+            <R as ShoalTableSupport>::UpdateData,
             Strategy<rkyv::de::Pool, rkyv::rancor::Error>,
         >,
     {
@@ -312,7 +312,7 @@ where
     #[instrument(name = "PersistentTable::insert", skip_all)]
     async fn insert(&mut self, meta: QueryMetadata, row: R) -> Option<(Uuid, Uuid, Response<R>)>
     where
-        for<'a> <<R as ShoalTableSupport>::Update as Archive>::Archived: CheckBytes<
+        for<'a> <<R as ShoalTableSupport>::UpdateData as Archive>::Archived: CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
         >,
     {
@@ -438,7 +438,7 @@ where
     #[instrument(name = "PersistentTable::delete", skip_all)]
     async fn delete(&mut self, meta: QueryMetadata, key: u64) -> Option<(Uuid, Uuid, Response<R>)>
     where
-        for<'a> <<R as ShoalTableSupport>::Update as Archive>::Archived: CheckBytes<
+        for<'a> <<R as ShoalTableSupport>::UpdateData as Archive>::Archived: CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
         >,
     {
@@ -487,7 +487,7 @@ where
         update: UnsortedUpdate<R>,
     ) -> Option<(Uuid, Uuid, Response<R>)>
     where
-        for<'a> <<R as ShoalTableSupport>::Update as Archive>::Archived: CheckBytes<
+        for<'a> <<R as ShoalTableSupport>::UpdateData as Archive>::Archived: CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
         >,
     {
@@ -618,11 +618,11 @@ where
 impl<T: ShoalUnsortedTable + RkyvSupport> IntentReadSupport<T> for UnsortedPartition<T>
 where
     <T as Archive>::Archived: rkyv::Deserialize<T, Strategy<Pool, rkyv::rancor::Error>>,
-    <T::Update as Archive>::Archived:
-        rkyv::Deserialize<T::Update, Strategy<Pool, rkyv::rancor::Error>>,
+    <T::UpdateData as Archive>::Archived:
+        rkyv::Deserialize<T::UpdateData, Strategy<Pool, rkyv::rancor::Error>>,
     for<'a> <T as Archive>::Archived:
         CheckBytes<Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>>,
-    for<'a> <<T as ShoalTableSupport>::Update as Archive>::Archived:
+    for<'a> <<T as ShoalTableSupport>::UpdateData as Archive>::Archived:
         CheckBytes<Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>>,
 {
     /// The intent type to use

@@ -86,7 +86,7 @@ pub struct UnsortedUpdate<T: ShoalUnsortedTable + RkyvSupport> {
     /// The key to the partition to update data in
     pub partition_key: u64,
     /// The updates to apply
-    pub update: T::Update,
+    pub update: T::UpdateData,
 }
 
 impl<T: ShoalUnsortedTable> RkyvSupport for UnsortedUpdate<T> {}

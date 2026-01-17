@@ -1,6 +1,8 @@
 //! The different derive traits for shoal tables
 
 use darling::FromField;
+use quote::{format_ident, quote};
+use syn::Ident;
 
 pub mod sorted;
 pub mod unsorted;
@@ -33,4 +35,77 @@ pub(super) struct ShoalField {
 pub(super) struct ShoalTable {
     /// The name of the database this table is in
     pub db: String,
+}
+
+/// Extend a token stream with a ShoalTableSupport implementation
+///
+/// # Arguments
+///
+/// * `stream` - The stream to extend
+/// * `name` - The name of the type we are extending
+/// * `filter_fields` - The fields used for filtering (ident, type)
+/// * `update_fields` - The fields used for updates (ident, type)
+pub(super) fn add(
+    stream: &mut proc_macro2::TokenStream,
+    name: &Ident,
+    filter_fields: &[(syn::Ident, syn::Type)],
+    update_fields: &[(syn::Ident, syn::Type)],
+) {
+    // build the struct names
+    let filter_name = format_ident!("{}Filter", name);
+    let update_name = format_ident!("{}Update", name);
+    let update_data_name = format_ident!("{}UpdateData", name);
+    // build the is_filtered checks for regular rows
+    let filter_checks: Vec<_> = filter_fields
+        .iter()
+        .map(|(ident, _)| {
+            quote! {
+                if let Some(ref filter_val) = filter.#ident {
+                    if &row.#ident != filter_val {
+                        return false;
+                    }
+                }
+            }
+        })
+        .collect();
+    // build the is_filtered checks for archived rows
+    let filter_archived_checks: Vec<_> = filter_fields
+        .iter()
+        .map(|(ident, _)| {
+            quote! {
+                if let Some(ref filter_val) = filter.#ident {
+                    if &row.#ident != filter_val {
+                        return false;
+                    }
+                }
+            }
+        })
+        .collect();
+    // generate the ShoalTableSupport implementation
+    stream.extend(quote! {
+        #[automatically_derived]
+        impl shoal_core::shared::traits::ShoalTableSupport for #name {
+            /// The updates that can be applied to this table
+            type Update = #update_name;
+
+            /// The server facing updates that can be applied to this table (just the updates no keys)
+            type UpdateData = #update_data_name;
+
+            /// Any filters to apply when listing/crawling rows
+            type Filters = #filter_name;
+
+            fn is_filtered(filter: &Self::Filters, row: &Self) -> bool {
+                #(#filter_checks)*
+                true
+            }
+
+            fn is_filtered_archived(
+                filter: &Self::Filters,
+                row: &<Self as rkyv::Archive>::Archived,
+            ) -> bool {
+                #(#filter_archived_checks)*
+                true
+            }
+        }
+    });
 }

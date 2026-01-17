@@ -264,6 +264,14 @@ impl From<MovieDelete> for TmdbQueryKinds {
 //    }
 //}
 
+//impl From<MovieUpdate> for MovieUpdateData {
+//    fn from(value: MovieUpdate) -> Self {
+//        MovieUpdateData {
+//            overview: value.overview,
+//        }
+//    }
+//}
+
 impl From<MovieUpdate> for TmdbQueryKinds {
     /// Build our `QueryKind` for getting `MovieUpdate`
     ///
@@ -274,7 +282,7 @@ impl From<MovieUpdate> for TmdbQueryKinds {
         // cast this update to a generalized update
         let general = UnsortedUpdate {
             partition_key: specific.partition_key,
-            update: specific,
+            update: MovieUpdateData::from(specific),
         };
         // wrap our general update in a query
         let query = UnsortedQuery::Update(general);

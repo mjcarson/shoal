@@ -8,8 +8,11 @@ use crate::shared::queries::SortedUpdate;
 pub trait ShoalSortedTable:
     std::fmt::Debug + Clone + RkyvSupport + PartitionKeySupport + Sized + DeepSizeOf
 {
-    /// The updates that can be applied to this table
+    /// The user facing updates that can be applied to this table
     type Update: RkyvSupport + std::fmt::Debug + Clone;
+
+    ///// The server facing updates that can be applied to this table (just the updates no keys)
+    //type UpdateData: RkyvSupport + std::fmt::Debug + Clone;
 
     /// The sort type for this data
     type Sort: Ord + RkyvSupport + std::fmt::Debug + From<Self::Sort> + Clone + DeepSizeOf;
