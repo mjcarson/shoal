@@ -54,9 +54,8 @@ pub fn add(stream: &mut proc_macro2::TokenStream, db_name: &Ident, fields: &Fiel
             unsorted::add(stream, &table_name, &query_kinds);
         // check if this is a sorted table
         } else if utils::is_sorted_table(table_type) {
-            //// Generate SortedQuery-based From impls
-            //add_from_sorted_get_for_query_kinds(&mut output, &table_name, &query_name);
-            //// etc.
+            // this is an sorted table so implement the conversions for sorted tables
+            sorted::add(stream, &table_name, &query_kinds);
         }
     }
 }

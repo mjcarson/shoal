@@ -13,19 +13,60 @@ mod utils;
 use tables::{ShoalField, ShoalTable};
 
 /// Derive the basic traits and functions for a type to be a table in shoal
-#[proc_macro_derive(ShoalSortedTable, attributes(shoal_table))]
+#[proc_macro_derive(ShoalSortedTable, attributes(shoal_table, shoal))]
 pub fn derive_shoal_sorted_table(stream: TokenStream) -> TokenStream {
     // parse our target struct
     let ast = syn::parse_macro_input!(stream as syn::DeriveInput);
     // get the name of our struct
     let name = &ast.ident;
     // we only support structs right now
-    match &ast.data {
-        Data::Struct(DataStruct { .. }) => (),
+    let data_struct = match &ast.data {
+        Data::Struct(data_struct) => data_struct,
         _ => unimplemented!("Only structs are currently supported"),
+    };
+    // get our fields
+    let fields = match &data_struct.fields {
+        Fields::Named(fields) => &fields.named,
+        _ => panic!("ShoalTable requires named fields"),
+    };
+    // instance vecs to store our partition, filter, and update keys
+    let mut partition_fields = Vec::default();
+    let mut sort_fields = Vec::default();
+    let mut filter_fields = Vec::default();
+    let mut update_fields = Vec::default();
+    // step over all fields and find our partition, filter, and update keys
+    for field in fields {
+        // parse our field attributes
+        let field_attrs = ShoalField::from_field(field).expect("Failed to parse field attributes");
+        if let Some(ident) = field_attrs.ident.clone() {
+            // check if this is a partition or a sort key
+            match (field_attrs.partition, field_attrs.sort) {
+                (true, false) => partition_fields.push((ident.clone(), field_attrs.ty.clone())),
+                (false, true) => sort_fields.push((ident.clone(), field_attrs.ty.clone())),
+                (false, false) => (),
+                (true, true) => panic!("Fields cannot be both partition and sort keys!: {ident}"),
+            }
+            // check if this field is a filter field
+            if field_attrs.filter {
+                filter_fields.push((ident.clone(), field_attrs.ty.clone()));
+            }
+            // check if this field is an update field
+            if field_attrs.update {
+                update_fields.push((ident.clone(), field_attrs.ty.clone()));
+            }
+        }
+    }
+    // make sure at least one partition key was set
+    if partition_fields.is_empty() {
+        panic!("Sorted tables require at least one partition key to be set!");
+    }
+    // Must have at least one sort field
+    if sort_fields.is_empty() {
+        panic!("Sorted tables require at least one sort key to be set!");
     }
     // start with an empty stream
     let mut output = quote! {};
+    // get the attributes for our sorted table
     let attrs =
         ShoalTable::from_attributes(&ast.attrs).expect("Failed to parse ShoalTable attributes");
     // get our db and table name as a ident
@@ -37,10 +78,26 @@ pub fn derive_shoal_sorted_table(stream: TokenStream) -> TokenStream {
     let query_name = syn::Ident::new(&format!("{db_name}QueryKinds"), name.span());
     let response_name = syn::Ident::new(&format!("Archived{db_name}ResponseKinds"), name.span());
     // extend this type
+    // generate the core traits for this type
     traits::from_shoal::add(&mut output, name, &client_name, &response_name);
     traits::rkyv::add(&mut output, name);
-    traits::from_query::add_sorted(&mut output, name, &query_name);
-    //add_shoal_table(&mut output, name);
+    traits::partition_key::add(&mut output, name, &partition_fields);
+    //traits::from_query::add_sorted(&mut output, name, &query_name);
+    // generate the Filter and Update structs
+    structs::filter::add(&mut output, name, &filter_fields);
+    structs::get::add_sorted(&mut output, name, &partition_fields, &sort_fields);
+    structs::update::add_sorted(
+        &mut output,
+        name,
+        &partition_fields,
+        &sort_fields,
+        &update_fields,
+    );
+    structs::delete::add_sorted(&mut output, name, &partition_fields, &sort_fields);
+    // generate the ShoalTableSupport implementation
+    tables::add(&mut output, name, &filter_fields, &update_fields);
+    // generate the ShoalUnsortedTable implementation
+    tables::sorted::add(&mut output, name, &sort_fields, &update_fields);
     // convert and return our stream
     output.into()
 }
@@ -57,7 +114,6 @@ pub fn derive_shoal_unsorted_table(stream: TokenStream) -> TokenStream {
         Data::Struct(data_struct) => data_struct,
         _ => unimplemented!("Only structs are currently supported"),
     };
-
     // get our fields
     let fields = match &data_struct.fields {
         Fields::Named(fields) => &fields.named,
@@ -95,6 +151,7 @@ pub fn derive_shoal_unsorted_table(stream: TokenStream) -> TokenStream {
     }
     // start with an empty stream
     let mut output = quote! {};
+    // get the attributes for our unsorted table
     let attrs =
         ShoalTable::from_attributes(&ast.attrs).expect("Failed to parse ShoalTable attributes");
     // get our db and table name as a ident
@@ -104,15 +161,15 @@ pub fn derive_shoal_unsorted_table(stream: TokenStream) -> TokenStream {
     // build the name of our kinds
     let query_name = syn::Ident::new(&format!("{}QueryKinds", db_name), name.span());
     let response_name = syn::Ident::new(&format!("Archived{}ResponseKinds", db_name), name.span());
-    // extend this type
+    // generate the core traits for this type
     traits::from_shoal::add(&mut output, name, &client_name, &response_name);
     traits::rkyv::add(&mut output, name);
     traits::partition_key::add(&mut output, name, &partition_fields);
     // generate the Filter and Update structs
     structs::filter::add(&mut output, name, &filter_fields);
-    structs::get::add(&mut output, name, &partition_fields);
-    structs::update::add(&mut output, name, &partition_fields, &update_fields);
-    structs::delete::add(&mut output, name, &partition_fields);
+    structs::get::add_unsorted(&mut output, name, &partition_fields);
+    structs::update::add_unsorted(&mut output, name, &partition_fields, &update_fields);
+    structs::delete::add_unsorted(&mut output, name, &partition_fields);
     // generate the ShoalTableSupport implementation
     tables::add(&mut output, name, &filter_fields, &update_fields);
     // generate the ShoalUnsortedTable implementation

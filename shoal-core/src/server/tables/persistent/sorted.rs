@@ -29,7 +29,9 @@ use crate::server::ServerError;
 use crate::shared::queries::{SortedGet, SortedQuery};
 use crate::shared::queries::{SortedUpdate, UnsortedGet};
 use crate::shared::responses::{Response, ResponseAction};
-use crate::shared::traits::{RkyvSupport, ShoalDatabase, ShoalSortedTable, TableNameSupport};
+use crate::shared::traits::{
+    RkyvSupport, ShoalDatabase, ShoalSortedTable, ShoalTableSupport, TableNameSupport,
+};
 use crate::storage::{
     FullArchiveMap, IntentReadSupport, LoaderMsg, Loaders, PendingResponse, ShouldPrune,
     StorageSupport,
@@ -135,8 +137,10 @@ where
             rkyv::rancor::Error,
         >,
     >,
-    <<R as ShoalSortedTable>::Update as Archive>::Archived:
-        rkyv::Deserialize<<R as ShoalSortedTable>::Update, Strategy<Pool, rkyv::rancor::Error>>,
+    <<R as ShoalTableSupport>::UpdateData as Archive>::Archived: rkyv::Deserialize<
+        <R as ShoalTableSupport>::UpdateData,
+        Strategy<Pool, rkyv::rancor::Error>,
+    >,
     <<R as ShoalSortedTable>::Sort as Archive>::Archived:
         rkyv::Deserialize<<R as ShoalSortedTable>::Sort, Strategy<Pool, rkyv::rancor::Error>>,
     <R as Archive>::Archived: rkyv::Deserialize<R, Strategy<Pool, rkyv::rancor::Error>>,
@@ -794,8 +798,8 @@ impl<T: ShoalSortedTable + RkyvSupport> IntentReadSupport<T> for SortedPartition
 where
     <T as Archive>::Archived: rkyv::Deserialize<T, Strategy<Pool, rkyv::rancor::Error>>,
     <T::Sort as Archive>::Archived: rkyv::Deserialize<T::Sort, Strategy<Pool, rkyv::rancor::Error>>,
-    <T::Update as Archive>::Archived:
-        rkyv::Deserialize<T::Update, Strategy<Pool, rkyv::rancor::Error>>,
+    <T::UpdateData as Archive>::Archived:
+        rkyv::Deserialize<T::UpdateData, Strategy<Pool, rkyv::rancor::Error>>,
     <<T as ShoalSortedTable>::Sort as Archive>::Archived: Ord,
 {
     /// The intent type to use

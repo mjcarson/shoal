@@ -241,7 +241,7 @@ impl<T: ShoalSortedTable> SortedPartition<T> {
     /// * `row` - The row to insert
     pub fn insert(&mut self, row: T) -> (isize, ResponseAction<T>) {
         // get this rows sort key
-        let sort_key = row.get_sort().clone();
+        let sort_key = row.get_sort();
         // calculate the size of our new row
         let row_size = row.deep_size_of();
         // add this row

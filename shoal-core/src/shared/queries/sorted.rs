@@ -100,5 +100,5 @@ pub struct SortedUpdate<T: ShoalSortedTable> {
     /// The sort key to apply updates too
     pub sort_key: T::Sort,
     /// The updates to apply
-    pub update: T::Update,
+    pub update: T::UpdateData,
 }

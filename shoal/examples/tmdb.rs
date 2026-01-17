@@ -307,93 +307,95 @@ pub struct Movie {
 #[shoal_table(db = "Tmdb")]
 pub struct MovieByKeyword {
     /// The keyword for this movie
+    #[shoal(partition)]
     pub keyword: String,
     /// The name of this movie
+    #[shoal(sort)]
     pub title: String,
 }
 
-impl PartitionKeySupport for MovieByKeyword {
-    /// The partition key type for this data
-    type PartitionKey = String;
-
-    /// The name of this table
-    fn name() -> &'static str {
-        "MovieByKeyword"
-    }
-
-    /// Calculate the partition key for this row
-    fn get_partition_key(&self) -> u64 {
-        Self::get_partition_key_from_values(&self.keyword)
-    }
-
-    /// Calculate the partition key for this row
-    fn get_partition_key_from_values(values: &Self::PartitionKey) -> u64 {
-        // create a new hasher
-        let mut hasher = GxHasher::default();
-        // hash the first key
-        hasher.write(values.as_bytes());
-        // get our hash
-        hasher.finish()
-    }
-
-    /// Get the partition key for this row from an archived value
-    fn get_partition_key_from_archived_insert(intent: &<Self as Archive>::Archived) -> u64 {
-        // create a new hasher
-        let mut hasher = GxHasher::default();
-        // hash the first key
-        hasher.write(intent.keyword.as_bytes());
-        // get our hash
-        hasher.finish()
-    }
-}
-
-impl ShoalSortedTable for MovieByKeyword {
-    /// The updates that can be applied to this table
-    type Update = String;
-
-    /// The sort type for this data
-    type Sort = String;
-
-    /// Build the sort tuple for this row
-    fn get_sort(&self) -> &Self::Sort {
-        &self.title
-    }
-
-    /// Any filters to apply when listing/crawling rows
-    type Filters = String;
-
-    /// Determine if a row should be filtered
-    ///
-    /// # Arguments
-    ///
-    /// * `filters` - The filters to apply
-    /// * `row` - The row to filter
-    fn is_filtered(filter: &Self::Filters, row: &Self) -> bool {
-        &row.title == filter
-    }
-
-    /// Determine if a row should be filtered against an archived row
-    ///
-    /// # Arguments
-    ///
-    /// * `filters` - The filters to apply
-    /// * `row` - The row to filter
-    fn is_filtered_archived(
-        filter: &Self::Filters,
-        row: &<Self as rkyv::Archive>::Archived,
-    ) -> bool {
-        &row.title == filter
-    }
-
-    /// Apply an update to a single row
-    ///
-    /// # Arguments
-    ///
-    /// * `update` - The update to apply to a specific row
-    fn update(&mut self, update: &SortedUpdate<Self>) {
-        ()
-    }
-}
+//impl PartitionKeySupport for MovieByKeyword {
+//    /// The partition key type for this data
+//    type PartitionKey = String;
+//
+//    /// The name of this table
+//    fn name() -> &'static str {
+//        "MovieByKeyword"
+//    }
+//
+//    /// Calculate the partition key for this row
+//    fn get_partition_key(&self) -> u64 {
+//        Self::get_partition_key_from_values(&self.keyword)
+//    }
+//
+//    /// Calculate the partition key for this row
+//    fn get_partition_key_from_values(values: &Self::PartitionKey) -> u64 {
+//        // create a new hasher
+//        let mut hasher = GxHasher::default();
+//        // hash the first key
+//        hasher.write(values.as_bytes());
+//        // get our hash
+//        hasher.finish()
+//    }
+//
+//    /// Get the partition key for this row from an archived value
+//    fn get_partition_key_from_archived_insert(intent: &<Self as Archive>::Archived) -> u64 {
+//        // create a new hasher
+//        let mut hasher = GxHasher::default();
+//        // hash the first key
+//        hasher.write(intent.keyword.as_bytes());
+//        // get our hash
+//        hasher.finish()
+//    }
+//}
+//
+//impl ShoalSortedTable for MovieByKeyword {
+//    /// The updates that can be applied to this table
+//    type Update = String;
+//
+//    /// The sort type for this data
+//    type Sort = String;
+//
+//    /// Build the sort tuple for this row
+//    fn get_sort(&self) -> &Self::Sort {
+//        &self.title
+//    }
+//
+//    /// Any filters to apply when listing/crawling rows
+//    type Filters = String;
+//
+//    /// Determine if a row should be filtered
+//    ///
+//    /// # Arguments
+//    ///
+//    /// * `filters` - The filters to apply
+//    /// * `row` - The row to filter
+//    fn is_filtered(filter: &Self::Filters, row: &Self) -> bool {
+//        &row.title == filter
+//    }
+//
+//    /// Determine if a row should be filtered against an archived row
+//    ///
+//    /// # Arguments
+//    ///
+//    /// * `filters` - The filters to apply
+//    /// * `row` - The row to filter
+//    fn is_filtered_archived(
+//        filter: &Self::Filters,
+//        row: &<Self as rkyv::Archive>::Archived,
+//    ) -> bool {
+//        &row.title == filter
+//    }
+//
+//    /// Apply an update to a single row
+//    ///
+//    /// # Arguments
+//    ///
+//    /// * `update` - The update to apply to a specific row
+//    fn update(&mut self, update: &SortedUpdate<Self>) {
+//        ()
+//    }
+//}
 
 /// The different tables we can query
 #[derive(Debug, Archive, Serialize, Deserialize, Clone)]
