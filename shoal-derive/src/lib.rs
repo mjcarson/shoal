@@ -107,7 +107,6 @@ pub fn derive_shoal_unsorted_table(stream: TokenStream) -> TokenStream {
     // extend this type
     traits::from_shoal::add(&mut output, name, &client_name, &response_name);
     traits::rkyv::add(&mut output, name);
-    traits::from_query::add_unsorted(&mut output, name, &query_name);
     traits::partition_key::add(&mut output, name, &partition_fields);
     // generate the Filter and Update structs
     structs::filter::add(&mut output, name, &filter_fields);
@@ -153,7 +152,7 @@ pub fn derive_shoal_db(stream: TokenStream) -> TokenStream {
                     }
                     // get our field names converted to pascal case
                     let variants = utils::get_variant_names(fields);
-                    // build the table names for this db
+                    // build the table names for this db and add the TableNameSupport trait
                     traits::table_name::add(&mut output, &enum_ident, &variants);
                     // add display support to this enum
                     traits::display::add(&mut output, &enum_ident, &variants);
@@ -161,6 +160,8 @@ pub fn derive_shoal_db(stream: TokenStream) -> TokenStream {
                     traits::db::add(&mut output, struct_ident, fields, &variants);
                     // add our client
                     structs::client::add(&mut output, struct_ident, &variants);
+                    // add our query conversion traits
+                    traits::from_query::add(&mut output, struct_ident, fields);
                 }
                 Fields::Unnamed(_) => {
                     return syn::Error::new_spanned(

@@ -68,3 +68,25 @@ pub fn get_variant_names(fields: &FieldsNamed) -> Vec<Ident> {
         })
         .collect()
 }
+
+/// Determine if a field type is an unsorted table
+pub fn is_unsorted_table(ty: &syn::Type) -> bool {
+    if let syn::Type::Path(type_path) = ty {
+        if let Some(segment) = type_path.path.segments.first() {
+            let type_name = segment.ident.to_string();
+            return type_name.contains("Unsorted");
+        }
+    }
+    false
+}
+
+/// Determine if a field type is a sorted table
+pub fn is_sorted_table(ty: &syn::Type) -> bool {
+    if let syn::Type::Path(type_path) = ty {
+        if let Some(segment) = type_path.path.segments.first() {
+            let type_name = segment.ident.to_string();
+            return type_name.contains("Sorted");
+        }
+    }
+    false
+}

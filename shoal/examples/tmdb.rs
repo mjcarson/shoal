@@ -184,22 +184,22 @@ pub struct Movie {
 //    }
 //}
 
-impl From<MovieGet> for TmdbQueryKinds {
-    /// Build our a `QueryKind` for getting `MovieRows`
-    fn from(specific: MovieGet) -> Self {
-        // build our partition key
-        let partition_key =
-            <Movie as PartitionKeySupport>::get_partition_key_from_values(&specific.partition_key);
-        // build the general query
-        let general = UnsortedGet {
-            partition_key,
-            filters: specific.filters,
-            limit: specific.limit,
-        };
-        // build our query kind
-        Self::Movie(UnsortedQuery::Get(general))
-    }
-}
+//impl From<MovieGet> for TmdbQueryKinds {
+//    /// Build our a `QueryKind` for getting `MovieRows`
+//    fn from(specific: MovieGet) -> Self {
+//        // build our partition key
+//        let partition_key =
+//            <Movie as PartitionKeySupport>::get_partition_key_from_values(&specific.partition_key);
+//        // build the general query
+//        let general = UnsortedGet {
+//            partition_key,
+//            filters: specific.filters,
+//            limit: specific.limit,
+//        };
+//        // build our query kind
+//        Self::Movie(UnsortedQuery::Get(general))
+//    }
+//}
 
 ///// Delete a key value row
 //#[derive(Debug, Archive, Serialize)]
@@ -223,20 +223,20 @@ impl From<MovieGet> for TmdbQueryKinds {
 //    }
 //}
 
-impl From<MovieDelete> for TmdbQueryKinds {
-    /// Build our `QueryKind` for getting `MovieDelete`
-    ///
-    /// # Arguments
-    ///
-    /// * `delete` - The delete query
-    fn from(delete: MovieDelete) -> Self {
-        // build our delete query
-        let query = UnsortedQuery::Delete {
-            key: delete.partition_key,
-        };
-        TmdbQueryKinds::Movie(query)
-    }
-}
+//impl From<MovieDelete> for TmdbQueryKinds {
+//    /// Build our `QueryKind` for getting `MovieDelete`
+//    ///
+//    /// # Arguments
+//    ///
+//    /// * `delete` - The delete query
+//    fn from(delete: MovieDelete) -> Self {
+//        // build our delete query
+//        let query = UnsortedQuery::Delete {
+//            key: delete.partition_key,
+//        };
+//        TmdbQueryKinds::Movie(query)
+//    }
+//}
 
 ///// An update to apply to a row in this table
 //pub struct MovieUpdate {
@@ -272,24 +272,24 @@ impl From<MovieDelete> for TmdbQueryKinds {
 //    }
 //}
 
-impl From<MovieUpdate> for TmdbQueryKinds {
-    /// Build our `QueryKind` for getting `MovieUpdate`
-    ///
-    /// # Arguments
-    ///
-    /// * `specific` - The update query to this table/data type
-    fn from(specific: MovieUpdate) -> Self {
-        // cast this update to a generalized update
-        let general = UnsortedUpdate {
-            partition_key: specific.partition_key,
-            update: MovieUpdateData::from(specific),
-        };
-        // wrap our general update in a query
-        let query = UnsortedQuery::Update(general);
-        // wrap our general update in a table specific query
-        TmdbQueryKinds::Movie(query)
-    }
-}
+//impl From<MovieUpdate> for TmdbQueryKinds {
+//    /// Build our `QueryKind` for getting `MovieUpdate`
+//    ///
+//    /// # Arguments
+//    ///
+//    /// * `specific` - The update query to this table/data type
+//    fn from(specific: MovieUpdate) -> Self {
+//        // cast this update to a generalized update
+//        let general = UnsortedUpdate {
+//            partition_key: specific.partition_key,
+//            update: MovieUpdateData::from(specific),
+//        };
+//        // wrap our general update in a query
+//        let query = UnsortedQuery::Update(general);
+//        // wrap our general update in a table specific query
+//        TmdbQueryKinds::Movie(query)
+//    }
+//}
 
 #[derive(
     Debug,
@@ -487,7 +487,6 @@ impl ShoalResponseSupport for TmdbResponseKinds {
 
 /// The tables we are adding to to shoal
 #[derive(ShoalDB)]
-//#[shoal_db(name = "Basic")]
 pub struct Tmdb {
     /// A basic key value table
     pub movie: PersistentUnsortedTable<Movie, FileSystem, TmdbTableNames>,
