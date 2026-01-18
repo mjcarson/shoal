@@ -4,4 +4,5 @@ pub mod client;
 pub mod delete;
 pub mod filter;
 pub mod get;
+pub mod query_kinds;
 pub mod update;

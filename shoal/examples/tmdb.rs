@@ -38,6 +38,19 @@ use tokio::task::JoinSet;
 use tokio::time::Instant;
 use uuid::Uuid;
 
+/// Deserialize a comma-space separated string into a Vec<String>
+fn deserialize_comma_separated<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s: String = serde::Deserialize::deserialize(deserializer)?;
+    if s.is_empty() {
+        Ok(Vec::new())
+    } else {
+        Ok(s.split(", ").map(|s| s.to_string()).collect())
+    }
+}
+
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
@@ -98,14 +111,19 @@ pub struct Movie {
     /// The tagline for this movie
     pub tagline: String,
     /// The genres for this movie
+    #[serde(deserialize_with = "deserialize_comma_separated")]
     pub genres: Vec<String>,
     /// The production companies for this movie
+    #[serde(deserialize_with = "deserialize_comma_separated")]
     pub production_companies: Vec<String>,
     /// The countries this movie was produced in
+    #[serde(deserialize_with = "deserialize_comma_separated")]
     pub production_countries: Vec<String>,
     /// The languages spoken in this movie
+    #[serde(deserialize_with = "deserialize_comma_separated")]
     pub spoken_languages: Vec<String>,
     /// The keywords for this movie
+    #[serde(deserialize_with = "deserialize_comma_separated")]
     pub keywords: Vec<String>,
 }
 
@@ -397,95 +415,95 @@ pub struct MovieByKeyword {
 //    }
 //}
 
-/// The different tables we can query
-#[derive(Debug, Archive, Serialize, Deserialize, Clone)]
-pub enum TmdbQueryKinds {
-    /// A query for the key/value table
-    Movie(UnsortedQuery<Movie>),
-    /// A query for the movie by keyword table
-    MovieByKeyword(SortedQuery<MovieByKeyword>),
-}
-
-impl RkyvSupport for TmdbQueryKinds {}
-
-impl ShoalQuerySupport for TmdbQueryKinds {
-    /// Deserialize our response types
-    ///
-    /// # Arguments
-    ///
-    /// * `buff` - The buffer to deserialize into a response
-    fn response_query_id(buff: &[u8]) -> Result<&Uuid, rkyv::rancor::Error> {
-        // try to cast this query
-        let archive = TmdbResponseKinds::access(buff)?;
-        // get our response query id
-        match archive {
-            ArchivedTmdbResponseKinds::Movie(resp) => Ok(&resp.id),
-            ArchivedTmdbResponseKinds::MovieByKeyword(resp) => Ok(&resp.id),
-        }
-    }
-
-    /// find the shard for this query
-    ///
-    /// # Arguments
-    ///
-    /// * `ring` - The shard ring to check against
-    /// * `found` - The shards we found for this query
-    fn find_shard<'a>(
-        &self,
-        ring: &'a Ring,
-        found: &mut Vec<&'a shoal_core::server::shard::ShardInfo>,
-    ) {
-        match &self {
-            TmdbQueryKinds::Movie(query) => {
-                // get our shards info
-                query.find_shard(ring, found);
-            }
-            TmdbQueryKinds::MovieByKeyword(query) => {
-                // get our shards info
-                query.find_shard(ring, found);
-            }
-        };
-    }
-}
-
-/// The different tables we can get responses from
-#[derive(Debug, Archive, Serialize, Deserialize)]
-pub enum TmdbResponseKinds {
-    Movie(Response<Movie>),
-    MovieByKeyword(Response<MovieByKeyword>),
-}
-
-impl RkyvSupport for TmdbResponseKinds {}
-
-impl ShoalResponseSupport for TmdbResponseKinds {
-    /// Get the index of a single [`Self::ResponseKinds`]
-    fn get_index_archived(archived: &<Self as Archive>::Archived) -> usize {
-        // get our response index
-        match archived {
-            // TODO fix this usize conversion
-            ArchivedTmdbResponseKinds::Movie(resp) => resp.index.to_native() as usize,
-            ArchivedTmdbResponseKinds::MovieByKeyword(resp) => resp.index.to_native() as usize,
-        }
-    }
-
-    /// Get whether this is the last response in a response stream
-    fn is_end_of_stream(archived: &<Self as Archive>::Archived) -> bool {
-        // check if this is the end of the stream
-        match archived {
-            ArchivedTmdbResponseKinds::Movie(resp) => resp.end,
-            ArchivedTmdbResponseKinds::MovieByKeyword(resp) => resp.end,
-        }
-    }
-
-    /// Get the query id from the response
-    fn get_query_id(archived: &<Self as Archive>::Archived) -> Uuid {
-        // get our response query id
-        match archived {
-            ArchivedTmdbResponseKinds::Movie(resp) => resp.id.to_owned(),
-            ArchivedTmdbResponseKinds::MovieByKeyword(resp) => resp.id.to_owned(),
-        }
-    }
-}
+///// The different tables we can query
+//#[derive(Debug, Archive, Serialize, Deserialize, Clone)]
+//pub enum TmdbQueryKinds {
+//    /// A query for the key/value table
+//    Movie(UnsortedQuery<Movie>),
+//    /// A query for the movie by keyword table
+//    MovieByKeyword(SortedQuery<MovieByKeyword>),
+//}
+//
+//impl RkyvSupport for TmdbQueryKinds {}
+//
+//impl ShoalQuerySupport for TmdbQueryKinds {
+//    /// Deserialize our response types
+//    ///
+//    /// # Arguments
+//    ///
+//    /// * `buff` - The buffer to deserialize into a response
+//    fn response_query_id(buff: &[u8]) -> Result<&Uuid, rkyv::rancor::Error> {
+//        // try to cast this query
+//        let archive = TmdbResponseKinds::access(buff)?;
+//        // get our response query id
+//        match archive {
+//            ArchivedTmdbResponseKinds::Movie(resp) => Ok(&resp.id),
+//            ArchivedTmdbResponseKinds::MovieByKeyword(resp) => Ok(&resp.id),
+//        }
+//    }
+//
+//    /// find the shard for this query
+//    ///
+//    /// # Arguments
+//    ///
+//    /// * `ring` - The shard ring to check against
+//    /// * `found` - The shards we found for this query
+//    fn find_shard<'a>(
+//        &self,
+//        ring: &'a Ring,
+//        found: &mut Vec<&'a shoal_core::server::shard::ShardInfo>,
+//    ) {
+//        match &self {
+//            TmdbQueryKinds::Movie(query) => {
+//                // get our shards info
+//                query.find_shard(ring, found);
+//            }
+//            TmdbQueryKinds::MovieByKeyword(query) => {
+//                // get our shards info
+//                query.find_shard(ring, found);
+//            }
+//        };
+//    }
+//}
+//
+///// The different tables we can get responses from
+//#[derive(Debug, Archive, Serialize, Deserialize)]
+//pub enum TmdbResponseKinds {
+//    Movie(Response<Movie>),
+//    MovieByKeyword(Response<MovieByKeyword>),
+//}
+//
+//impl RkyvSupport for TmdbResponseKinds {}
+//
+//impl ShoalResponseSupport for TmdbResponseKinds {
+//    /// Get the index of a single [`Self::ResponseKinds`]
+//    fn get_index_archived(archived: &<Self as Archive>::Archived) -> usize {
+//        // get our response index
+//        match archived {
+//            // TODO fix this usize conversion
+//            ArchivedTmdbResponseKinds::Movie(resp) => resp.index.to_native() as usize,
+//            ArchivedTmdbResponseKinds::MovieByKeyword(resp) => resp.index.to_native() as usize,
+//        }
+//    }
+//
+//    /// Get whether this is the last response in a response stream
+//    fn is_end_of_stream(archived: &<Self as Archive>::Archived) -> bool {
+//        // check if this is the end of the stream
+//        match archived {
+//            ArchivedTmdbResponseKinds::Movie(resp) => resp.end,
+//            ArchivedTmdbResponseKinds::MovieByKeyword(resp) => resp.end,
+//        }
+//    }
+//
+//    /// Get the query id from the response
+//    fn get_query_id(archived: &<Self as Archive>::Archived) -> Uuid {
+//        // get our response query id
+//        match archived {
+//            ArchivedTmdbResponseKinds::Movie(resp) => resp.id.to_owned(),
+//            ArchivedTmdbResponseKinds::MovieByKeyword(resp) => resp.id.to_owned(),
+//        }
+//    }
+//}
 
 /// The tables we are adding to to shoal
 #[derive(ShoalDB)]
@@ -663,7 +681,20 @@ impl MovieWorker {
             // handle this movie
             match job {
                 // insert this movie into shoal into our buffer
-                MovieMsg::Insert(movie) => self.buffer.add_mut(movie),
+                MovieMsg::Insert(movie) => {
+                    // add the keyword inserts to our query buffer
+                    for keyword in &movie.keywords {
+                        // build the movie by keyword row to inserts
+                        let by_keyword = MovieByKeyword {
+                            title: movie.title.clone(),
+                            keyword: keyword.clone(),
+                        };
+                        // add this insert to our buffer
+                        self.buffer.add_mut(by_keyword);
+                    }
+                    // add the full movie to our query buffer
+                    self.buffer.add_mut(movie)
+                }
                 // add the query to get this movie to our query buffer
                 MovieMsg::Verify(movie) => self.buffer.add_mut(MovieGet::new(movie.id)),
                 // all commands have been sent so this worker can shutdown once everything

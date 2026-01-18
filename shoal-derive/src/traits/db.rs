@@ -151,6 +151,7 @@ pub fn add(
     });
     // build our ShoalDatabase impl
     stream.extend(quote! {
+        #[automatically_derived]
         impl ShoalDatabase for #struct_ident {
             /// This databases external client type
             type ClientType = #client_ident;

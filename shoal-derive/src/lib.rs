@@ -217,6 +217,8 @@ pub fn derive_shoal_db(stream: TokenStream) -> TokenStream {
                     traits::db::add(&mut output, struct_ident, fields, &variants);
                     // add our client
                     structs::client::add(&mut output, struct_ident, &variants);
+                    // add our query kinds and response kinds enums with trait impls
+                    structs::query_kinds::add(&mut output, struct_ident, fields);
                     // add our query conversion traits
                     traits::from_query::add(&mut output, struct_ident, fields);
                 }

@@ -90,3 +90,30 @@ pub fn is_sorted_table(ty: &syn::Type) -> bool {
     }
     false
 }
+
+/// Extract the first generic argument from a type like `PersistentUnsortedTable<Movie, ...>`
+/// Returns the inner type (e.g., `Movie`)
+pub fn extract_inner_table_type(ty: &syn::Type) -> Option<&syn::Type> {
+    if let syn::Type::Path(type_path) = ty {
+        if let Some(segment) = type_path.path.segments.first() {
+            if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
+                if let Some(syn::GenericArgument::Type(inner_type)) = args.args.first() {
+                    return Some(inner_type);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Extract the inner type as an Ident from a type like `PersistentUnsortedTable<Movie, ...>`
+pub fn extract_inner_table_ident(ty: &syn::Type) -> Option<Ident> {
+    if let Some(inner_type) = extract_inner_table_type(ty) {
+        if let syn::Type::Path(type_path) = inner_type {
+            if let Some(segment) = type_path.path.segments.last() {
+                return Some(segment.ident.clone());
+            }
+        }
+    }
+    None
+}

@@ -21,6 +21,7 @@ pub fn add(stream: &mut proc_macro2::TokenStream, enum_ident: &Ident, variants: 
         });
     // add our FromStr impl to our token stream
     stream.extend(quote! {
+        #[automatically_derived]
         impl std::fmt::Display for #enum_ident {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 match self {

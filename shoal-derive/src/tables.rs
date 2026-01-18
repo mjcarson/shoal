@@ -109,3 +109,33 @@ pub(super) fn add(
         }
     });
 }
+
+/// The different types of tables
+pub enum TableKinds {
+    /// Treats each partition as a single value (key/value store)
+    Unsorted,
+    /// Partition in this table can contain many sorted rows
+    Sorted,
+}
+
+impl TableKinds {
+    /// Get the kind of table from a type
+    pub fn new(ty: &syn::Type) -> Self {
+        // we only can get table kinds from path like types
+        if let syn::Type::Path(type_path) = ty {
+            // get the first segemnt from this types path
+            if let Some(segment) = type_path.path.segments.first() {
+                // convert this type to a string so we can compare it
+                let type_name = segment.ident.to_string();
+                // check if this our type name contains our kinds
+                match (type_name.contains("Unsorted"), type_name.contains("Sorted")) {
+                    (true, false) => return Self::Unsorted,
+                    (false, true) => return Self::Sorted,
+                    (true, true) => panic!("Ambiguous table kind detected: {type_name}"),
+                    (false, false) => panic!("Failed to detect table kind: {type_name}"),
+                }
+            }
+        }
+        panic!("Invalid type checked when detect table kind: {ty:?}")
+    }
+}
