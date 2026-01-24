@@ -8,7 +8,7 @@ use crate::{
 };
 
 /// The different response kind types
-#[derive(Debug, Archive, Serialize, Deserialize)]
+#[derive(Debug, Archive, Serialize, Deserialize, Eq, PartialEq, Ord, PartialOrd)]
 pub enum ResponseActionNames {
     /// A response to an insert query
     Insert,

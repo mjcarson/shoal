@@ -226,17 +226,6 @@ where
         // compact our intent log
         table.storage.compact_if_needed::<R>(true).await?;
         Ok(table)
-        //// build our table
-        //let mut table = Self {
-        //    partitions: HashMap::default(),
-        //    storage: S::new::<SortedPartition<R>, R, N>(shard_name, conf, medium_priority).await?,
-        //    pending: PendingResponse::<R>::with_capacity(100),
-        //    memory_usage: 0,
-        //    flushed: Vec::with_capacity(1000),
-        //};
-        //// load our intent log
-        //S::read_intents::<SortedPartition<R>, R>(shard_name, conf, &mut table.partitions).await?;
-        //Ok(table)
     }
 
     /// Get the storage engine kind
@@ -545,12 +534,18 @@ where
         }
     }
 
-    /// Delete a row from this table
+    /// Delete a row from this table (fire-and-forget implementation)
+    ///
+    /// This implementation always writes the delete intent to the intent log,
+    /// regardless of whether the partition is loaded in memory. If the partition
+    /// is loaded, the row is also removed from memory. If not loaded, the delete
+    /// will be applied during the next compaction cycle. Deletes don't promote
+    /// partitions in the LRU cache as they don't require the data to be loaded
     ///
     /// # Arguments
     ///
     /// * `meta` - The metadata about this delete query
-    /// * `key` - The key to the partition to dlete data from
+    /// * `key` - The key to the partition to delete data from
     /// * `sort` - The sort key to delete
     #[instrument(name = "PersistentTable::delete", skip_all)]
     async fn delete(
@@ -559,116 +554,51 @@ where
         key: u64,
         sort: R::Sort,
     ) -> Option<(Uuid, Uuid, Response<R>)> {
-        unimplemented!("DELETE NEEDS TOMBSTONES OR SOMETHING SIMILAR!");
-        //// get the partition we are deleting data from
-        //match self.partitions.entry(key) {
-        //    // we have some of this partition loaded
-        //    Entry::Occupied(mut entry) => {
-        //        // get a mutable ref to this partitions data
-        //        let value = entry.get_mut();
-        //        // handle loaded or accessible partitions
-        //        match value {
-        //            MaybeLoaded::Loaded { partition, .. } => {
-        //                // try to remove the target row
-        //                match partition.remove(&sort) {
-        //                    Some(diff) => panic!("GOT DIFF"),
-        //                    // we don't have this partition loaded so just write
-        //                    // a
-        //                    None =>
-        //                }
-        //            }
-        //            MaybeLoaded::Accessible(read) => panic!("read"),
-        //        }
-        //    }
-        //    Entry::Vacant(vacant) => panic!("Vacant"),
-        //};
-        ////Some(MaybeLoaded::Loaded { partition, .. }) => partition.remove(&sort),
-        ////{
-        ////    // try remove the target row from this partition
-        ////    if let Some((size_diff, _)) = partition.remove(&sort) {
-        ////        // wrap our row in an delete intent
-        ////        let intent = SortedIntents::<R>::delete(key, sort);
-        ////        // wite this delete to our intent log
-        ////        let pos = self.storage.commit(&intent).await.unwrap();
-        ////        // build the pending action to store
-        ////        let action = ResponseAction::Delete(true);
-        ////        // add this action to our pending queue
-        ////        self.pending.add(meta, pos, action);
-        ////        // do a saturating add on our memory usage
-        ////        let new_size = self.memory_usage.borrow().saturating_sub(size_diff);
-        ////        // adjust our total shards memory usage
-        ////        *self.memory_usage.borrow_mut() = new_size;
-        ////        // remove this partition from our lru cache as its no longer evictable
-        ////        self.lru.borrow_mut().pop(&(self.table_name, key));
-        ////        // wait for this delete to get flushed to disk
-        ////        return None;
-        ////    }
-        ////}
-        ////Some(MaybeLoaded::Accessible(read)) => {
-        ////    // convert this read to a accessible partition
-        ////    let accessable = SortedPartition::<R>::access(&read).unwrap();
-        ////    // deserialize our accessible partition
-        ////    let mut partition = SortedPartition::<R>::deserialize(accessable).unwrap();
-        ////    // try to remove this data from this partition
-        ////    let diff = partition.remove(&sort);
-        ////    // insert
-        ////    //// try remove the target row from this partition
-        ////    //if let Some((size_diff, _)) = partition.remove(&sort) {
-        ////    //    // wrap our row in an delete intent
-        ////    //    let intent = SortedIntents::<R>::delete(key, sort);
-        ////    //    // wite this delete to our intent log
-        ////    //    let pos = self.storage.commit(&intent).await.unwrap();
-        ////    //    // build the pending action to store
-        ////    //    let action = ResponseAction::Delete(true);
-        ////    //    // add this action to our pending queue
-        ////    //    self.pending.add(meta, pos, action);
-        ////    //    // adjust this shards total memory usage
-        ////    //    self.memory_usage = self.memory_usage.saturating_sub(size_diff);
-        ////    //    // wait for this delete to get flushed to disk
-        ////    //    return None;
-        ////    //}
-        ////}
-        ////None => {
-        ////    //// we didn't find any data to delete
-        ////    //let action = ResponseAction::Delete(false);
-        ////    //// cast this action to a response
-        ////    //let response = Response {
-        ////    //    id: meta.id,
-        ////    //    index: meta.index,
-        ////    //    data: action,
-        ////    //    end: meta.end,
-        ////    //};
-        ////    //Some((meta.client, response))
-        ////}
-        ////}
-        //// get this rows partition
-        //if let Some(partition) = self.partitions.get_mut(&key) {
-        //    // try remove the target row from this partition
-        //    if let Some((size_diff, _)) = partition.remove(&sort) {
-        //        // wrap our row in an delete intent
-        //        let intent = SortedIntents::<R>::delete(key, sort);
-        //        // wite this delete to our intent log
-        //        let pos = self.storage.commit(&intent).await.unwrap();
-        //        // build the pending action to store
-        //        let action = ResponseAction::Delete(true);
-        //        // add this action to our pending queue
-        //        self.pending.add(meta, pos, action);
-        //        // adjust this shards total memory usage
-        //        self.memory_usage = self.memory_usage.saturating_sub(size_diff);
-        //        // wait for this delete to get flushed to disk
-        //        return None;
-        //    }
-        //}
-        //// we didn't find any data to delete
-        //let action = ResponseAction::Delete(false);
-        //// cast this action to a response
-        //let response = Response {
-        //    id: meta.id,
-        //    index: meta.index,
-        //    data: action,
-        //    end: meta.end,
-        //};
-        //Some((meta.client, response))
+        // Always write the delete intent to the intent log first.
+        // This ensures the delete is durable even if the partition isn't loaded.
+        // Compaction will apply this intent when processing the partition.
+        let intent = SortedIntents::<R>::delete(key, sort.clone());
+        let pos = self.storage.commit(&intent).await.unwrap();
+        // Try to remove from memory if the partition is loaded
+        if let Some(maybe_loaded) = self.partitions.get_mut(&key) {
+            match maybe_loaded {
+                MaybeLoaded::Loaded { partition, .. } => {
+                    // Partition is fully deserialized - try to remove the row
+                    if let Some((size_diff, _)) = partition.remove(&sort) {
+                        // Row was found and removed - update memory usage
+                        let new_size = self.memory_usage.borrow().saturating_sub(size_diff);
+                        *self.memory_usage.borrow_mut() = new_size;
+                    }
+                }
+                MaybeLoaded::Accessible(read) => {
+                    // Partition is loaded but not deserialized - deserialize it first
+                    let accessible = SortedPartition::<R>::access(&read).unwrap();
+                    let mut partition = SortedPartition::<R>::deserialize(accessible).unwrap();
+
+                    // Try to remove the row
+                    if let Some((size_diff, _)) = partition.remove(&sort) {
+                        // Row was found and removed - update memory usage
+                        let new_size = self.memory_usage.borrow().saturating_sub(size_diff);
+                        *self.memory_usage.borrow_mut() = new_size;
+                    }
+
+                    // Convert to Loaded state since we've deserialized it
+                    *maybe_loaded = MaybeLoaded::Loaded {
+                        partition,
+                        generation: self.generation,
+                    };
+                }
+            }
+        }
+        // If partition isn't loaded, that's fine - the intent is in the log
+        // and will be applied during compaction when the partition is loaded from disk
+
+        // Build the pending response - always report success since the intent was written
+        let action = ResponseAction::Delete(true);
+        self.pending.add(meta, pos, action);
+
+        // Return None to wait for flush confirmation
+        None
     }
 
     /// Update a row in this table

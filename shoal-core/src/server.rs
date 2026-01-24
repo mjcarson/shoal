@@ -13,7 +13,7 @@ use tracing::{event, instrument, Level};
 
 mod args;
 mod comms;
-mod conf;
+pub mod conf;
 pub mod errors;
 pub mod messages;
 pub mod ring;

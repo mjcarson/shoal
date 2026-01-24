@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use tracing::instrument;
 
 use crate::server::ServerError;
+use crate::utils;
 
 /// Set default path for latency files
 fn default_path() -> PathBuf {
@@ -29,32 +30,6 @@ fn default_intent_log_size() -> u64 {
     10 << 20
 }
 
-fn deserialize_byte_size<'de, D>(deserializer: D) -> Result<usize, D::Error>
-where
-    D: serde::de::Deserializer<'de>,
-{
-    // deserialize our size as bytes
-    let byte_size: Byte = serde::de::Deserialize::deserialize(deserializer)?;
-    // convert our size to a usize
-    byte_size
-        .as_u64()
-        .try_into()
-        .map_err(serde::de::Error::custom)
-}
-
-fn deserialize_byte_size_u64<'de, D>(deserializer: D) -> Result<u64, D::Error>
-where
-    D: serde::de::Deserializer<'de>,
-{
-    // deserialize our size as bytes
-    let byte_size: Byte = serde::de::Deserialize::deserialize(deserializer)?;
-    // convert our size to a usize
-    byte_size
-        .as_u64()
-        .try_into()
-        .map_err(serde::de::Error::custom)
-}
-
 /// The settings to use for a specific writer
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct FileSystemLatencyWriterConf {
@@ -63,14 +38,14 @@ pub struct FileSystemLatencyWriterConf {
     pub path: PathBuf,
     /// The buffer size to use when writting data
     #[serde(default = "default_latency_buffer_size")]
-    #[serde(deserialize_with = "deserialize_byte_size")]
+    #[serde(deserialize_with = "utils::deserialize_byte_size")]
     pub buffer_size: usize,
     /// The number of write behind buffers to use
     #[serde(default = "default_latency_write_behind")]
     pub write_behind: usize,
     /// The size of the intent log for this table
     #[serde(default = "default_intent_log_size")]
-    #[serde(deserialize_with = "deserialize_byte_size_u64")]
+    #[serde(deserialize_with = "utils::deserialize_byte_size_u64")]
     pub intent_log_size: u64,
 }
 
@@ -83,6 +58,37 @@ impl Default for FileSystemLatencyWriterConf {
             write_behind: default_latency_write_behind(),
             intent_log_size: default_intent_log_size(),
         }
+    }
+}
+
+impl FileSystemLatencyWriterConf {
+    /// Create a new FileSystemLatencyWriterConf with default values
+    pub fn builder() -> Self {
+        Self::default()
+    }
+
+    /// Set the path to write to
+    pub fn path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.path = path.into();
+        self
+    }
+
+    /// Set the buffer size for writing data
+    pub fn buffer_size(mut self, buffer_size: usize) -> Self {
+        self.buffer_size = buffer_size;
+        self
+    }
+
+    /// Set the number of write behind buffers
+    pub fn write_behind(mut self, write_behind: usize) -> Self {
+        self.write_behind = write_behind;
+        self
+    }
+
+    /// Set the intent log size
+    pub fn intent_log_size(mut self, intent_log_size: u64) -> Self {
+        self.intent_log_size = intent_log_size;
+        self
     }
 }
 
@@ -104,9 +110,11 @@ pub struct FileSystemThroughputWriterConf {
     pub path: PathBuf,
     /// The buffer size to use when writting data
     #[serde(default = "default_throughput_buffer_size")]
+    #[serde(deserialize_with = "utils::deserialize_byte_size")]
     pub buffer_size: usize,
     /// The number of write behind buffers to use
     #[serde(default = "default_throughput_write_behind")]
+    #[serde(deserialize_with = "utils::deserialize_byte_size")]
     pub write_behind: usize,
 }
 
@@ -118,6 +126,31 @@ impl Default for FileSystemThroughputWriterConf {
             buffer_size: default_throughput_buffer_size(),
             write_behind: default_throughput_write_behind(),
         }
+    }
+}
+
+impl FileSystemThroughputWriterConf {
+    /// Create a new FileSystemThroughputWriterConf with default values
+    pub fn builder() -> Self {
+        Self::default()
+    }
+
+    /// Set the path to write to
+    pub fn path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.path = path.into();
+        self
+    }
+
+    /// Set the buffer size for writing data
+    pub fn buffer_size(mut self, buffer_size: usize) -> Self {
+        self.buffer_size = buffer_size;
+        self
+    }
+
+    /// Set the number of write behind buffers
+    pub fn write_behind(mut self, write_behind: usize) -> Self {
+        self.write_behind = write_behind;
+        self
     }
 }
 
@@ -149,6 +182,26 @@ pub struct FileSystemTableConf {
 }
 
 impl FileSystemTableConf {
+    /// Create a new FileSystemTableConf with default values
+    pub fn builder() -> Self {
+        Self::default()
+    }
+
+    /// Set the latency sensitive writer configuration
+    pub fn latency_sensitive(mut self, latency_sensitive: FileSystemLatencyWriterConf) -> Self {
+        self.latency_sensitive = latency_sensitive;
+        self
+    }
+
+    /// Set the throughput sensitive writer configuration
+    pub fn throughput_sensitive(
+        mut self,
+        throughput_sensitive: FileSystemThroughputWriterConf,
+    ) -> Self {
+        self.throughput_sensitive = throughput_sensitive;
+        self
+    }
+
     /// Get the path to this shards intent log
     ///
     /// # Arguments

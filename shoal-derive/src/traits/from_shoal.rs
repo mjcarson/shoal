@@ -24,7 +24,7 @@ pub fn add(
             impl shoal_core::FromShoal<#db_name> for #name  {
                 type ResponseKinds = <#db_name as shoal_core::shared::traits::QuerySupport>::ResponseKinds;
 
-                fn retrieve(archived: &#response_name) -> Result<&rkyv::option::ArchivedOption<rkyv::vec::ArchivedVec<<Self as Archive>::Archived>>, shoal_core::client::Errors> {
+                fn retrieve(archived: &#response_name) -> Result<&rkyv::option::ArchivedOption<rkyv::vec::ArchivedVec<<Self as rkyv::Archive>::Archived>>, shoal_core::client::Errors> {
                     // make sure its the right data kind
                     if let #response_name::#name(action) = archived {
                         // make sure its a get action

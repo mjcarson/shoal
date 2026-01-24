@@ -648,7 +648,7 @@ where
             // check for any flushed response to handle
             self.handle_flushed().await?;
             // check if we need to evict any data
-            if *self.memory_usage.borrow() as u64 > self.conf.resources.memory {
+            if *self.memory_usage.borrow() > self.conf.resources.memory {
                 // try to evict our least recently used data
                 self.evict_data().await?;
             }

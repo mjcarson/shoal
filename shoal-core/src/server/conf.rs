@@ -1,16 +1,15 @@
 //! The config for a Shoal database
 
-use std::collections::HashMap;
-
 use byte_unit::Byte;
 use config::{Config, ConfigError};
 use glommio::CpuSet;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use tracing::level_filters::LevelFilter;
 
+use super::tables::storage::fs::conf::FileSystemTableConf;
 use super::ServerError;
-// The table specific configs
-pub use crate::server::tables::storage::fs::conf::FileSystemTableConf;
+use crate::utils::{self, IntoStorageSize};
 
 /// The resource settings to use
 #[derive(Serialize, Deserialize, Default, Clone)]
@@ -20,11 +19,35 @@ pub struct Resources {
     /// Any cores to exlude from use
     #[serde(default)]
     pub exclude_cores: Vec<usize>,
-    /// The max amount of memory to use
-    pub memory: Byte,
+    /// The max amount of memory to use in bytes
+    #[serde(deserialize_with = "utils::deserialize_byte_size")]
+    pub memory: usize,
 }
 
 impl Resources {
+    /// Create a new Resources with default values
+    pub fn builder() -> Self {
+        Self::default()
+    }
+
+    /// Set the number of cores to use
+    pub fn cores(mut self, cores: usize) -> Self {
+        self.cores = Some(cores);
+        self
+    }
+
+    /// Set the cores to exclude from use
+    pub fn exclude_cores(mut self, exclude_cores: Vec<usize>) -> Self {
+        self.exclude_cores = exclude_cores;
+        self
+    }
+
+    /// Set the maximum amount of memory to use
+    pub fn memory<M: IntoStorageSize>(mut self, memory: M) -> Result<Self, ServerError> {
+        self.memory = memory.into_bytes()?;
+        Ok(self)
+    }
+
     /// Get the cpuset to run shoal on
     pub fn cpus(&self) -> Result<CpuSet, ServerError> {
         // get all online cpus
@@ -76,6 +99,23 @@ impl Default for Networking {
 }
 
 impl Networking {
+    /// Create a new Networking with default values
+    pub fn builder() -> Self {
+        Self::default()
+    }
+
+    /// Set the interface to bind to
+    pub fn interface(mut self, interface: impl Into<String>) -> Self {
+        self.interface = interface.into();
+        self
+    }
+
+    /// Set the port to bind to
+    pub fn port(mut self, port: usize) -> Self {
+        self.port = port;
+        self
+    }
+
     /// Build the address to bind too
     pub fn to_addr(&self) -> String {
         println!("listening on {}:{}", self.interface, self.port);
@@ -89,6 +129,19 @@ pub struct DefaultStorageSettings {
     /// The settings for the filesystem storage engine
     #[serde(default)]
     pub filesystem: FileSystemTableConf,
+}
+
+impl DefaultStorageSettings {
+    /// Create a new DefaultStorageSettings with default values
+    pub fn builder() -> Self {
+        Self::default()
+    }
+
+    /// Set the filesystem storage settings
+    pub fn filesystem(mut self, filesystem: FileSystemTableConf) -> Self {
+        self.filesystem = filesystem;
+        self
+    }
 }
 
 /// The different storage engines in Shoal
@@ -107,6 +160,31 @@ pub struct Storage {
     /// The table specific settings to use
     #[serde(default)]
     pub tables: HashMap<String, TableSettings>,
+}
+
+impl Storage {
+    /// Create a new Storage with default values
+    pub fn builder() -> Self {
+        Self::default()
+    }
+
+    /// Set the default storage settings
+    pub fn default_settings(mut self, default: DefaultStorageSettings) -> Self {
+        self.default = default;
+        self
+    }
+
+    /// Add table-specific settings
+    pub fn table(mut self, name: impl Into<String>, settings: TableSettings) -> Self {
+        self.tables.insert(name.into(), settings);
+        self
+    }
+
+    /// Set all table-specific settings
+    pub fn tables(mut self, tables: HashMap<String, TableSettings>) -> Self {
+        self.tables = tables;
+        self
+    }
 }
 
 /// The different levels to log tracing info at
@@ -158,6 +236,31 @@ pub struct Tracing {
     pub remote: Option<RemoteTracing>,
 }
 
+impl Tracing {
+    /// Create a new Tracing with default values
+    pub fn builder() -> Self {
+        Self::default()
+    }
+
+    /// Set the trace level
+    pub fn level(mut self, level: TraceLevel) -> Self {
+        self.level = level;
+        self
+    }
+
+    /// Set the remote tracing sink
+    pub fn remote(mut self, remote: RemoteTracing) -> Self {
+        self.remote = Some(remote);
+        self
+    }
+
+    /// Set a GRPC remote tracing sink
+    pub fn grpc(mut self, endpoint: impl Into<String>) -> Self {
+        self.remote = Some(RemoteTracing::Grpc(endpoint.into()));
+        self
+    }
+}
+
 /// The config for running Shoal
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Conf {
@@ -175,9 +278,25 @@ pub struct Conf {
     pub storage: Storage,
 }
 
+impl Default for Conf {
+    fn default() -> Self {
+        Conf {
+            resources: Resources::default(),
+            networking: Networking::default(),
+            tracing: Tracing::default(),
+            storage: Storage::default(),
+        }
+    }
+}
+
 impl Conf {
+    /// Create a new Conf with default values
+    pub fn builder() -> Self {
+        Self::default()
+    }
+
     /// Build a config from our environment and a config file
-    pub fn new(path: &str) -> Result<Self, ConfigError> {
+    pub fn from_file(path: &str) -> Result<Self, ConfigError> {
         // build our config sources
         let conf = Config::builder()
             // start with the settings in our config file
@@ -186,5 +305,35 @@ impl Conf {
             .add_source(config::Environment::with_prefix("shoal"))
             .build()?;
         conf.try_deserialize()
+    }
+
+    /// Build a config from our environment and a config file
+    #[deprecated(since = "0.2.0", note = "Use `Conf::from_file` instead")]
+    pub fn new(path: &str) -> Result<Self, ConfigError> {
+        Self::from_file(path)
+    }
+
+    /// Set the resource settings
+    pub fn resources(mut self, resources: Resources) -> Self {
+        self.resources = resources;
+        self
+    }
+
+    /// Set the networking settings
+    pub fn networking(mut self, networking: Networking) -> Self {
+        self.networking = networking;
+        self
+    }
+
+    /// Set the tracing settings
+    pub fn tracing(mut self, tracing: Tracing) -> Self {
+        self.tracing = tracing;
+        self
+    }
+
+    /// Set the storage settings
+    pub fn storage(mut self, storage: Storage) -> Self {
+        self.storage = storage;
+        self
     }
 }

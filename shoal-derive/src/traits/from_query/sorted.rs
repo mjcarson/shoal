@@ -16,6 +16,8 @@ fn add_insert(stream: &mut proc_macro2::TokenStream, table_name: &Ident, query_n
         #[automatically_derived]
         impl From<#table_name> for #query_name {
             fn from(row: #table_name) -> #query_name {
+                // import partition key support so we can use the get_partition_key method
+                use shoal_core::shared::traits::PartitionKeySupport;
                 // get our rows partition key
                 let key = #table_name::get_partition_key(&row);
                 // build our query kind
@@ -44,7 +46,7 @@ fn add_get(stream: &mut proc_macro2::TokenStream, table_name: &Ident, query_kind
                   // build the partition keys by hashing each key
                   let partition_keys: Vec<u64> = specific.partition_keys
                       .iter()
-                      .map(|key| <#table_name as PartitionKeySupport>::get_partition_key_from_values(key))
+                      .map(|key| <#table_name as shoal_core::shared::traits::PartitionKeySupport>::get_partition_key_from_values(key))
                       .collect();
                   // build the general query
                   let general = shoal_core::shared::queries::SortedGet {
@@ -77,7 +79,7 @@ fn add_update(stream: &mut proc_macro2::TokenStream, table_name: &Ident, query_k
             /// Build a `QueryKind` for updating a row
             fn from(specific: #update_name) -> Self {
                 // hash the partition key to get the u64 key
-                let partition_key = <#table_name as PartitionKeySupport>::get_partition_key_from_values(&specific.partition_key);
+                let partition_key = <#table_name as shoal_core::shared::traits::PartitionKeySupport>::get_partition_key_from_values(&specific.partition_key);
                 // extract sort key and update data without cloning
                 let (sort_key, update) = specific.into_update_parts();
                 // cast this update to a generalized update
@@ -112,7 +114,7 @@ fn add_delete(stream: &mut proc_macro2::TokenStream, table_name: &Ident, query_k
             /// Build a `QueryKind` for deleting a row
             fn from(delete: #delete_name) -> Self {
                 // hash the partition key to get the u64 key
-                let key = <#table_name as PartitionKeySupport>::get_partition_key_from_values(&delete.partition_key);
+                let key = <#table_name as shoal_core::shared::traits::PartitionKeySupport>::get_partition_key_from_values(&delete.partition_key);
                 let query = shoal_core::shared::queries::SortedQuery::Delete {
                     key,
                     sort_key: delete.sort_key,

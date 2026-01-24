@@ -28,6 +28,29 @@ pub fn add(
             #field_ident: <#field_type>::new(shard_name, #table_names_ident::#variant, #table_names_ident::#variant, shard_archive_map, loader_channels, conf, medium_priority, memory_usage, lru, shard_local_tx).await?,
         }
     });
+    // build our spawn loader kind arms
+    let spawn_loader_arms = fields.named.iter().map(|field| {
+        // get our field ident and type
+        let field_ident = field.ident.as_ref().unwrap();
+        // build our spawn loader arm for this field
+        quote! {
+            // get the storage engine this table needs
+            let needed = self.#field_ident.loader_kind();
+            // only spawn this loader if it has not yet been spawned
+            if !spawned.contains(&needed) {
+                // get the correct load rx channel
+                let (_, loader_rx) = loader_channels
+                    .entry(needed.clone())
+                    .or_insert_with(|| kanal::unbounded_async());
+                // spawn this loader
+                self.#field_ident
+                    .spawn_loader(table_map, loader_rx, shard_local_tx)
+                    .await?;
+                // add our newly spawned loader to our spawned loader set
+                spawned.push(needed);
+            }
+        }
+    });
     // build our handle query arms
     let handle_arms = fields.named.iter().map(|field| {
         // get our field ident and type
@@ -152,7 +175,7 @@ pub fn add(
     // build our ShoalDatabase impl
     stream.extend(quote! {
         #[automatically_derived]
-        impl ShoalDatabase for #struct_ident {
+        impl shoal_core::shared::traits::ShoalDatabase for #struct_ident {
             /// This databases external client type
             type ClientType = #client_ident;
 
@@ -167,18 +190,18 @@ pub fn add(
             /// * `conf` - A shoal config
             async fn new(
                 shard_name: &str,
-                shard_archive_map: &FullArchiveMap<Self::TableNames>,
-                loader_channels: &mut HashMap<
-                    Loaders,
-                    (AsyncSender<LoaderMsg<Self::TableNames>>, AsyncReceiver<LoaderMsg<Self::TableNames>>),
+                shard_archive_map: &shoal_core::storage::FullArchiveMap<Self::TableNames>,
+                loader_channels: &mut std::collections::HashMap<
+                    shoal_core::storage::Loaders,
+                    (kanal::AsyncSender<shoal_core::storage::LoaderMsg<Self::TableNames>>, kanal::AsyncReceiver<shoal_core::storage::LoaderMsg<Self::TableNames>>),
                 >,
-                conf: &Conf,
-                medium_priority: TaskQueueHandle,
+                conf: &shoal_core::server::Conf,
+                medium_priority: glommio::TaskQueueHandle,
                 memory_usage: &std::sync::Arc<std::cell::RefCell<usize>>,
                 lru: &std::sync::Arc<std::cell::RefCell<shoal_core::lru::LruCache<(Self::TableNames, u64), usize, std::hash::BuildHasherDefault<shoal_core::xxhash_rust::xxh3::Xxh3>>>>,
-                shard_local_tx: &AsyncSender<shoal_core::server::messages::ServerMsg<Self>>,
-            ) -> Result<Self, ServerError> {
-                let db = Tmdb {
+                shard_local_tx: &kanal::AsyncSender<shoal_core::server::messages::ServerMsg<Self>>,
+            ) -> Result<Self, shoal_core::server::ServerError> {
+                let db = #struct_ident {
                     #(#new_arms)*
                 };
                 Ok(db)
@@ -187,44 +210,29 @@ pub fn add(
             /// Initialize the different loaders for our storage kinds
             async fn init_storage_loaders(
                 &self,
-                table_map: &FullArchiveMap<Self::TableNames>,
-                loader_channels: &mut HashMap<
-                    Loaders,
-                    (AsyncSender<LoaderMsg<Self::TableNames>>, AsyncReceiver<LoaderMsg<Self::TableNames>>),
+                table_map: &shoal_core::storage::FullArchiveMap<Self::TableNames>,
+                loader_channels: &mut std::collections::HashMap<
+                    shoal_core::storage::Loaders,
+                    (kanal::AsyncSender<shoal_core::storage::LoaderMsg<Self::TableNames>>, kanal::AsyncReceiver<shoal_core::storage::LoaderMsg<Self::TableNames>>),
                 >,
-                shard_local_tx: &AsyncSender<shoal_core::server::messages::ServerMsg<Self>>,
-            ) -> Result<(), ServerError> {
+                shard_local_tx: &kanal::AsyncSender<shoal_core::server::messages::ServerMsg<Self>>,
+            ) -> Result<(), shoal_core::server::ServerError> {
                 // create a list to keep track of our spawned loaders
                 let mut spawned = Vec::with_capacity(1);
-                // get the storage engine this table needs
-                let needed = self.movie.loader_kind();
-                // only spawn this loader if it has not yet been spawned
-                if !spawned.contains(&needed) {
-                    // get this tables loader kind
-                    let loader_kind = self.movie.loader_kind();
-                    // get the correct load rx channel
-                    let (_, loader_rx) = loader_channels
-                        .entry(loader_kind)
-                        .or_insert_with(|| kanal::unbounded_async());
-                    // spawn this loader
-                    self.movie
-                        .spawn_loader(table_map, loader_rx, shard_local_tx)
-                        .await?;
-                    // add our newly spawned loader to our spawned loader set
-                    spawned.push(needed);
-                }
+                // spawn this loader if needed
+                #(#spawn_loader_arms)*
                 Ok(())
             }
 
             /// Handle messages for different table types
             async fn handle(
                 &mut self,
-                meta: QueryMetadata,
-                typed_query: <Self::ClientType as QuerySupport>::QueryKinds,
+                meta: shoal_core::server::messages::QueryMetadata,
+                typed_query: <Self::ClientType as shoal_core::shared::traits::QuerySupport>::QueryKinds,
             ) -> Option<(
                 uuid::Uuid,
                 uuid::Uuid,
-                <Self::ClientType as QuerySupport>::ResponseKinds,
+                <Self::ClientType as shoal_core::shared::traits::QuerySupport>::ResponseKinds,
             )> {
                 // match on the right query and execute it
                 match typed_query {
@@ -264,7 +272,7 @@ pub fn add(
             }
 
             /// Flush any in flight writes to disk
-            async fn flush(&self) -> Result<(), ServerError> {
+            async fn flush(&self) -> Result<(), shoal_core::server::ServerError> {
                 #(#flush_arms)*
                 Ok(())
             }
@@ -280,9 +288,9 @@ pub fn add(
                     uuid::Uuid,
                     uuid::Uuid,
                     shoal_core::tracing::Span,
-                    <Self::ClientType as QuerySupport>::ResponseKinds,
+                    <Self::ClientType as shoal_core::shared::traits::QuerySupport>::ResponseKinds,
                 )>,
-            ) -> Result<(), ServerError> {
+            ) -> Result<(), shoal_core::server::ServerError> {
                 #(#handle_flushed_arms)*
                 Ok(())
             }
@@ -291,8 +299,8 @@ pub fn add(
             async fn load_partition(
                 &mut self,
                 loaded_kinds: shoal_core::server::messages::LoadedPartitionKinds<Self>,
-                shard_local_tx: &AsyncSender<shoal_core::server::messages::ServerMsg<Self>>,
-            ) -> Result<(), ServerError> {
+                shard_local_tx: &kanal::AsyncSender<shoal_core::server::messages::ServerMsg<Self>>,
+            ) -> Result<(), shoal_core::server::ServerError> {
                 match loaded_kinds.table {
                     #(#load_partition_arms)*
                 };
@@ -301,7 +309,7 @@ pub fn add(
             
 
             /// Shutdown this table and flush any data to disk if needed
-            async fn shutdown(&mut self) -> Result<(), ServerError> {
+            async fn shutdown(&mut self) -> Result<(), shoal_core::server::ServerError> {
                 #(#shutdown_arms)*
                 Ok(())
             }

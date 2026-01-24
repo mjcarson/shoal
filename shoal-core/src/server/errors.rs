@@ -42,6 +42,8 @@ pub enum ServerError {
     KanalSend(kanal::SendError),
     /// An error receiving a message over a kanal channel
     KanalRecv(kanal::ReceiveError),
+    /// An error parsing a byte unit from a string
+    ByteUnitParse(byte_unit::ParseError),
 }
 
 // convert all of our external error types to our error type
@@ -145,6 +147,17 @@ impl From<kanal::ReceiveError> for ServerError {
     /// * `error` - The error to convert
     fn from(error: kanal::ReceiveError) -> Self {
         ServerError::KanalRecv(error)
+    }
+}
+
+impl From<byte_unit::ParseError> for ServerError {
+    /// Conver this error to our error type
+    ///
+    /// # Arguments
+    ///
+    /// * `error` - The error to convert
+    fn from(error: byte_unit::ParseError) -> Self {
+        ServerError::ByteUnitParse(error)
     }
 }
 

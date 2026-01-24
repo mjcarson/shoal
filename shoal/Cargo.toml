@@ -16,7 +16,7 @@ hotpath = ["hotpath/hotpath"]
 
 
 [dependencies]
-shoal-core = { version = "0.1.0", path = "../shoal-core", features = ["hotpath"] }
+shoal-core = { version = "0.1.0", path = "../shoal-core" }
 shoal-derive = { version = "0.1.0", path = "../shoal-derive" }
 rkyv = { workspace = true }
 gxhash = { workspace = true }
@@ -35,3 +35,5 @@ futures = "0.3"
 kanal = "0.1.0-pre8"
 deepsize2 = "0.1"
 core_affinity = "0.8"
+tempfile = "3"
+byte-unit = "5.1"
