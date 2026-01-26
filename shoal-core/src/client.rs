@@ -30,7 +30,9 @@ mod messages;
 
 use super::shared::queries::Queries;
 use crate::shared::responses::{ArchivedResponseAction, ResponseActionNames};
-use crate::shared::traits::{QuerySupport, RkyvSupport, ShoalQuerySupport, ShoalResponseSupport};
+use crate::shared::traits::{
+    ExistsQuery, QuerySupport, RkyvSupport, ShoalQuerySupport, ShoalResponseSupport,
+};
 pub use errors::Errors;
 use messages::ClientMsg;
 
@@ -327,6 +329,63 @@ impl<S: QuerySupport> Shoal<S> {
         Ok(response)
     }
 
+    /// Check if data exists in the database
+    ///
+    /// This method sends an exists query and returns a boolean indicating
+    /// whether any matching data was found. Missing data is not an error.
+    ///
+    /// # Arguments
+    ///
+    /// * `query` - An exists query (e.g., `TableNameExists::new(...)`)
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(true)` - Data matching the query exists
+    /// * `Ok(false)` - No matching data exists
+    /// * `Err(Errors)` - An error occurred while executing the query
+    pub async fn exists<Q: ExistsQuery + Into<S::QueryKinds>>(
+        &self,
+        query: Q,
+    ) -> Result<bool, Errors>
+    where
+        <S::ResponseKinds as Archive>::Archived:
+            rkyv::Deserialize<S::ResponseKinds, Strategy<Pool, rkyv::rancor::Error>>,
+        for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived:
+            rkyv::bytecheck::CheckBytes<
+                Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'a>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            >,
+    {
+        // build a query bundle with our single query
+        let queries = self.query().add(query);
+        // send our query
+        let mut stream = self.send(queries).await?;
+        // wait for our single response
+        let response = stream
+            .next()
+            .await?
+            .ok_or(Errors::StreamAlreadyTerminated)?;
+        // extract the exists result
+        match response.get_exists() {
+            Some(exists) => Ok(exists),
+            // we somehow got the wrong response kind
+            None => {
+                // build the error to return
+                let error = Errors::UnexpectedResponseKind {
+                    expected: ResponseActionNames::Exists,
+                    actual: response.kind(),
+                };
+                // return this error
+                Err(error)
+            }
+        }
+    }
+
     /// Create a new stream to send and receive results on
     pub fn stream(&self) -> Result<(ShoalQueryStream<S>, ShoalResultStream<S>), Errors> {
         // generate a random ID to override all of the ids used in our queries
@@ -610,6 +669,8 @@ pub struct QuerySuceededOpts {
     pub get: bool,
     /// Whether to check if deletes actually deleted data
     pub delete: bool,
+    /// Whether to check if exists actually found data
+    pub exists: bool,
 }
 
 impl Default for QuerySuceededOpts {
@@ -620,6 +681,7 @@ impl Default for QuerySuceededOpts {
             update: true,
             get: true,
             delete: true,
+            exists: true,
         }
     }
 }
@@ -726,6 +788,16 @@ impl<S: QuerySupport> ShoalResponse<S> {
         let archived = unsafe { &*self.archived };
         // check if this query succeeded
         <S as QuerySupport>::kind(archived)
+    }
+
+    /// Get the exists result if this is an Exists response
+    ///
+    /// Returns `Some(bool)` if this is an Exists response, `None` otherwise
+    pub fn get_exists(&self) -> Option<bool> {
+        // get a reference to our archived data
+        let archived = unsafe { &*self.archived };
+        // get the exists result
+        <S as QuerySupport>::get_exists(archived)
     }
 }
 

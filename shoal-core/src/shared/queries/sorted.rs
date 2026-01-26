@@ -6,7 +6,6 @@ use uuid::Uuid;
 
 use crate::server::ring::Ring;
 use crate::server::shard::ShardInfo;
-use crate::shared::queries::UnsortedGet;
 use crate::shared::traits::{RkyvSupport, ShoalSortedTable};
 
 /// The different types of queries for a single datatype
@@ -20,6 +19,8 @@ pub enum SortedQuery<T: ShoalSortedTable + std::fmt::Debug + RkyvSupport> {
     Delete { key: u64, sort_key: T::Sort },
     /// Update a row in a shoal
     Update(SortedUpdate<T>),
+    /// Check if data exists in shoal
+    Exists(SortedExists<T>),
 }
 
 impl<T: ShoalSortedTable + std::fmt::Debug> SortedQuery<T> {
@@ -32,6 +33,11 @@ impl<T: ShoalSortedTable + std::fmt::Debug> SortedQuery<T> {
             }
             SortedQuery::Get(get) => {
                 for key in &get.partition_keys {
+                    tmp.push(ring.find_shard(*key))
+                }
+            }
+            SortedQuery::Exists(exists) => {
+                for key in &exists.partition_keys {
                     tmp.push(ring.find_shard(*key))
                 }
             }
@@ -88,6 +94,32 @@ impl<R: ShoalSortedTable> SortedGet<R> {
             sort_keys: self.sort_keys.clone(),
             filters: self.filters.clone(),
             limit: self.limit,
+        }
+    }
+}
+
+/// An exists query to check if data exists
+#[derive(Debug, Archive, Serialize, Deserialize, Clone)]
+pub struct SortedExists<R: ShoalSortedTable> {
+    /// The partition keys to check for data in
+    pub partition_keys: Vec<u64>,
+    /// The sort keys to check for data with
+    pub sort_keys: Vec<R::Sort>,
+    /// Any filters to apply to rows
+    pub filters: Option<R::Filters>,
+}
+
+impl<R: ShoalSortedTable> SortedExists<R> {
+    /// Create a single partition exists from another exists
+    ///
+    /// # Arguments
+    ///
+    /// * `partition_key` - The key of the partition that needs to be loaded from disk
+    pub fn to_blocked(&self, partition_key: u64) -> Self {
+        SortedExists {
+            partition_keys: vec![partition_key],
+            sort_keys: self.sort_keys.clone(),
+            filters: self.filters.clone(),
         }
     }
 }

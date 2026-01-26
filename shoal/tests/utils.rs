@@ -17,6 +17,7 @@ use shoal_core::storage::fs::conf::{
 };
 use shoal_core::ShoalPool;
 use std::sync::atomic::{AtomicU16, Ordering};
+use std::time::Duration;
 use tempfile::TempDir;
 
 /// Error type for tests
@@ -103,7 +104,7 @@ where
     // Start the server
     let pool = ShoalPool::<T>::start(conf)?;
     // wait for our server to start
-    std::thread::sleep(std::time::Duration::from_secs(2));
+    tokio::time::sleep(Duration::from_secs(2)).await;
     // setup a client
     let client = Shoal::<T::ClientType>::new(&addr).await?;
     Ok((client, pool))

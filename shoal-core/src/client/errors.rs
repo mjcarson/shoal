@@ -9,6 +9,13 @@ use crate::shared::responses::ResponseActionNames;
 pub enum Errors {
     /// Attempt to cast a shoal response to the wrong type
     WrongType(String),
+    // The shoal client got an unexpected response kind
+    UnexpectedResponseKind {
+        /// The response kind that was expected
+        expected: ResponseActionNames,
+        /// The response kind that was actually encountered
+        actual: ResponseActionNames,
+    },
     /// A query did not suceed
     QueryDidNotSucceed {
         id: Uuid,

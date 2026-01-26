@@ -102,6 +102,8 @@ pub fn add_sorted(
     partition_fields: &[(syn::Ident, syn::Type)],
     sort_fields: &[(syn::Ident, syn::Type)],
 ) {
+    // also add the exists struct
+    add_sorted_exists(stream, name, partition_fields, sort_fields);
     // build our struct names
     let get_name = format_ident!("{}Get", name);
     let filter_name = format_ident!("{}Filter", name);
@@ -171,6 +173,92 @@ pub fn add_sorted(
             }
 
             /// Set a filter for getting rows
+            pub fn filters(mut self, filters: #filter_name) -> Self {
+                self.filters = Some(filters);
+                self
+            }
+        }
+    });
+}
+
+/// Extend a token stream with a sorted Exists struct definition
+///
+/// # Arguments
+///
+/// * `stream` - The stream to extend
+/// * `name` - The name of the type we are extending
+/// * `partition_fields` - The partition key fields
+/// * `sort_fields` - The sort key fields
+fn add_sorted_exists(
+    stream: &mut proc_macro2::TokenStream,
+    name: &Ident,
+    partition_fields: &[(syn::Ident, syn::Type)],
+    sort_fields: &[(syn::Ident, syn::Type)],
+) {
+    // build our struct names
+    let exists_name = format_ident!("{}Exists", name);
+    let filter_name = format_ident!("{}Filter", name);
+    // Build the partition key type
+    let partition_key_type = if partition_fields.len() == 1 {
+        let (_, ty) = &partition_fields[0];
+        quote! { #ty }
+    } else {
+        let types: Vec<_> = partition_fields.iter().map(|(_, ty)| ty).collect();
+        quote! { (#(#types),*) }
+    };
+    // Build the sort key type
+    let sort_key_type = if sort_fields.len() == 1 {
+        let (_, ty) = &sort_fields[0];
+        quote! { #ty }
+    } else {
+        let types: Vec<_> = sort_fields.iter().map(|(_, ty)| ty).collect();
+        quote! { (#(#types),*) }
+    };
+    // generate our exists struct for this type and its methods
+    stream.extend(quote! {
+        #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+        #[rkyv(derive(Debug))]
+        pub struct #exists_name {
+            /// The partition keys to check for data in
+            pub partition_keys: Vec<#partition_key_type>,
+            /// The sort keys to check for data with
+            pub sort_keys: Vec<#sort_key_type>,
+            /// Any filters to use when deciding what rows to check
+            pub filters: Option<#filter_name>,
+        }
+
+        #[automatically_derived]
+        impl shoal_core::shared::traits::RkyvSupport for #exists_name {}
+
+        #[automatically_derived]
+        impl shoal_core::shared::traits::ExistsQuery for #exists_name {}
+
+        #[automatically_derived]
+        impl #exists_name {
+            /// Create a new exists query for this type
+            ///
+            /// # Arguments
+            ///
+            /// * `partition_keys` - The partitions to check for data in
+            pub fn new(partition_keys: Vec<#partition_key_type>) -> Self {
+                #exists_name {
+                    partition_keys,
+                    sort_keys: Vec::default(),
+                    filters: None,
+                }
+            }
+
+            /// Set the sort keys to restrict data checked to
+            ///
+            /// # Arguments
+            ///
+            /// * `sort_keys` - The sort keys to restrict data checked to
+            pub fn sort_keys(mut self, sort_keys: Vec<#sort_key_type>) -> Self {
+                self.sort_keys = sort_keys;
+                self
+            }
+
+            /// Set a filter for checking rows
             pub fn filters(mut self, filters: #filter_name) -> Self {
                 self.filters = Some(filters);
                 self

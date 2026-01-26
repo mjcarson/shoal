@@ -36,6 +36,12 @@ use crate::storage::{FullArchiveMap, LoaderMsg, Loaders};
 pub use sorted::ShoalSortedTable;
 pub use unsorted::ShoalUnsortedTable;
 
+/// Marker trait for Exists queries
+///
+/// This trait is used to constrain the `exists` method on the Shoal client
+/// to only accept Exists queries at compile time, preventing incorrect usage.
+pub trait ExistsQuery {}
+
 impl RkyvSupport for String {}
 
 pub trait RkyvSupport: Archive
@@ -136,6 +142,18 @@ pub trait QuerySupport: 'static + Sized {
     ///
     /// * `archived` - The archived query to get the query kind for
     fn kind(archived: &<Self::ResponseKinds as Archive>::Archived) -> ResponseActionNames;
+
+    /// Get the exists result from an Exists response
+    ///
+    /// # Arguments
+    ///
+    /// * `archived` - The archived response to get the exists result from
+    ///
+    /// # Returns
+    ///
+    /// * `Some(bool)` - If this is an Exists response
+    /// * `None` - If this is not an Exists response
+    fn get_exists(archived: &<Self::ResponseKinds as Archive>::Archived) -> Option<bool>;
 }
 
 pub trait TableNameSupport:

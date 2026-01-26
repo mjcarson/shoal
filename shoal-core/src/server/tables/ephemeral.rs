@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use super::partitions::SortedPartition;
 use crate::server::Conf;
-use crate::shared::queries::{SortedGet, SortedQuery, SortedUpdate};
+use crate::shared::queries::{SortedExists, SortedGet, SortedQuery, SortedUpdate};
 use crate::shared::responses::{Response, ResponseAction};
 use crate::shared::traits::ShoalSortedTable;
 
@@ -62,6 +62,8 @@ impl<T: ShoalSortedTable> EphemeralTable<T> {
             SortedQuery::Delete { key, sort_key } => self.delete(key, &sort_key).await,
             // Update a row in a target partition
             SortedQuery::Update(update) => self.update(update).await,
+            // Check if data exists in a partition
+            SortedQuery::Exists(exists) => self.exists(&exists).await,
         };
         // build the response for this query
         Response {
@@ -156,5 +158,32 @@ impl<T: ShoalSortedTable> EphemeralTable<T> {
             None => false,
         };
         ResponseAction::Update(updated)
+    }
+
+    /// Check if data exists in some partitions
+    ///
+    /// # Arguments
+    ///
+    /// * `exists` - The exists parameters to use
+    async fn exists(&mut self, exists: &SortedExists<T>) -> ResponseAction<T> {
+        // check each of the specified partition keys
+        for key in &exists.partition_keys {
+            // get the partition for this key
+            if let Some(partition) = self.partitions.get(key) {
+                // check rows in this partition
+                for (_, row) in &partition.rows {
+                    // check if we are supposed to filter our rows
+                    if let Some(filters) = &exists.filters {
+                        if !T::is_filtered(filters, row) {
+                            continue;
+                        }
+                    }
+                    // found a matching row - data exists
+                    return ResponseAction::Exists(true);
+                }
+            }
+        }
+        // no data found in any partition
+        ResponseAction::Exists(false)
     }
 }

@@ -26,7 +26,7 @@ use crate::server::messages::{LoadedPartition, QueryMetadata, ServerMsg};
 use crate::server::tables::partitions::SortedPartition;
 use crate::server::Conf;
 use crate::server::ServerError;
-use crate::shared::queries::{SortedGet, SortedQuery};
+use crate::shared::queries::{SortedExists, SortedGet, SortedQuery};
 use crate::shared::queries::{SortedUpdate, UnsortedGet};
 use crate::shared::responses::{Response, ResponseAction};
 use crate::shared::traits::{
@@ -41,7 +41,7 @@ use crate::tables::partitions::{MaybeLoaded, PartitionSupport};
 /// The different types of entries in a shoal intent log
 #[derive(Debug, Archive, Serialize, Deserialize)]
 #[repr(u8)]
-pub enum SortedIntents<T: ShoalSortedTable> {
+pub enum SortedIntents<T: ShoalSortedTable + RkyvSupport> {
     Insert(T),
     Delete {
         partition_key: u64,
@@ -119,24 +119,6 @@ impl<R: ShoalSortedTable + 'static, S: StorageSupport, N: TableNameSupport>
     PersistentSortedTable<R, S, N>
 where
     <<R as ShoalSortedTable>::Sort as Archive>::Archived: Ord,
-    for<'a> <<R as ShoalSortedTable>::Sort as Archive>::Archived: rkyv::bytecheck::CheckBytes<
-        Strategy<
-            rkyv::validation::Validator<
-                rkyv::validation::archive::ArchiveValidator<'a>,
-                rkyv::validation::shared::SharedValidator,
-            >,
-            rkyv::rancor::Error,
-        >,
-    >,
-    for<'a> <R as Archive>::Archived: rkyv::bytecheck::CheckBytes<
-        Strategy<
-            rkyv::validation::Validator<
-                rkyv::validation::archive::ArchiveValidator<'a>,
-                rkyv::validation::shared::SharedValidator,
-            >,
-            rkyv::rancor::Error,
-        >,
-    >,
     <<R as ShoalTableSupport>::UpdateData as Archive>::Archived: rkyv::Deserialize<
         <R as ShoalTableSupport>::UpdateData,
         Strategy<Pool, rkyv::rancor::Error>,
@@ -162,7 +144,7 @@ where
             rkyv::rancor::Error,
         >,
     >,
-    for<'a> <<SortedPartition<R> as IntentReadSupport<R>>::Intent as Archive>::Archived:
+    for<'a> <<R as ShoalTableSupport>::UpdateData as Archive>::Archived:
         CheckBytes<Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>>,
 {
     /// Create a persistent shoal table
@@ -329,6 +311,8 @@ where
             SortedQuery::Delete { key, sort_key } => self.delete(meta, key, sort_key).await,
             // update a row in this partition
             SortedQuery::Update(update) => self.update(meta, update).await,
+            // check if data exists in this partition
+            SortedQuery::Exists(exists) => self.exists(meta, &exists).await,
         }
     }
 
@@ -535,13 +519,131 @@ where
         }
     }
 
-    /// Delete a row from this table (fire-and-forget implementation)
+    /// Check if data exists in some partitions
     ///
-    /// This implementation always writes the delete intent to the intent log,
-    /// regardless of whether the partition is loaded in memory. If the partition
-    /// is loaded, the row is also removed from memory. If not loaded, the delete
-    /// will be applied during the next compaction cycle. Deletes don't promote
-    /// partitions in the LRU cache as they don't require the data to be loaded
+    /// # Arguments
+    ///
+    /// * `meta` - The metadata about this exists query
+    /// * `exists` - The exists parameters to use
+    #[instrument(name = "PersistentTable::exists", skip_all)]
+    async fn exists(
+        &mut self,
+        meta: QueryMetadata,
+        exists_query: &SortedExists<R>,
+    ) -> Option<(Uuid, Uuid, Response<R>)> {
+        // get any data from previously executed/blocked queries
+        let mut blocked = match self.pending_data.remove(&(meta.id, meta.index)) {
+            // use our existing blocked queries
+            Some((_, blocked)) => blocked,
+            // this query has never been executed before so instance sane defaults
+            None => Vec::default(),
+        };
+        // check each of the specified partition keys
+        for partition_key in &exists_query.partition_keys {
+            // try to get the partition for this key
+            match self.partitions.get(partition_key) {
+                // this partition may be loaded into memory
+                Some(partition) => {
+                    // if this partition is accessible then we don't need to check disk
+                    match partition {
+                        MaybeLoaded::Loaded { partition, .. } => {
+                            // load this partitions data from disk if needed
+                            if partition.check_disk {
+                                // try to load this partition from disk if it exists
+                                let will_load = self
+                                    .storage
+                                    .load_partition(
+                                        self.table_name,
+                                        *partition_key,
+                                        &self.loader_tx,
+                                    )
+                                    .await
+                                    .unwrap();
+                                // if this query was blocked then add it to our blocked list
+                                if will_load {
+                                    let entry = self.blocked.entry(*partition_key).or_default();
+                                    let blocked_exists = exists_query.to_blocked(*partition_key);
+                                    entry.push((meta.clone(), SortedQuery::Exists(blocked_exists)));
+                                    blocked.push(*partition_key);
+                                    continue;
+                                }
+                            }
+                            // check the rows from our partition
+                            for (_, row) in &partition.rows {
+                                // check if we are supposed to filter our rows
+                                if let Some(filters) = &exists_query.filters {
+                                    if !R::is_filtered(filters, row) {
+                                        continue;
+                                    }
+                                }
+                                // found a matching row - data exists
+                                let response = Response {
+                                    id: meta.id,
+                                    index: meta.index,
+                                    data: ResponseAction::Exists(true),
+                                    end: meta.end,
+                                };
+                                return Some((meta.client, meta.id, response));
+                            }
+                        }
+                        MaybeLoaded::Accessible(read) => {
+                            let partition = SortedPartition::<R>::access(&read).unwrap();
+                            for (_, row) in partition.rows.iter() {
+                                if let Some(filters) = &exists_query.filters {
+                                    if !R::is_filtered_archived(filters, row) {
+                                        continue;
+                                    }
+                                }
+                                // found a matching row - data exists
+                                let response = Response {
+                                    id: meta.id,
+                                    index: meta.index,
+                                    data: ResponseAction::Exists(true),
+                                    end: meta.end,
+                                };
+                                return Some((meta.client, meta.id, response));
+                            }
+                        }
+                    }
+                }
+                // this partition is not loaded into memory
+                None => {
+                    let will_load = self
+                        .storage
+                        .load_partition(self.table_name, *partition_key, &self.loader_tx)
+                        .await
+                        .unwrap();
+                    if will_load {
+                        let entry = self.blocked.entry(*partition_key).or_default();
+                        let blocked_exists = exists_query.to_blocked(*partition_key);
+                        entry.push((meta.clone(), SortedQuery::Exists(blocked_exists)));
+                        blocked.push(*partition_key);
+                    }
+                }
+            }
+        }
+        // if we have any blocked queries then add this to our pending data map
+        if !blocked.is_empty() {
+            self.pending_data
+                .insert((meta.id, meta.index), (Vec::new(), blocked));
+            None
+        } else {
+            // no data found in any partition
+            let response = Response {
+                id: meta.id,
+                index: meta.index,
+                data: ResponseAction::Exists(false),
+                end: meta.end,
+            };
+            Some((meta.client, meta.id, response))
+        }
+    }
+
+    /// Delete a row from this table
+    ///
+    /// Deletes only succeed if the row exists. If the partition is loaded but
+    /// has `check_disk` set to true and the row isn't found, the partition will
+    /// be loaded from disk first. If the row doesn't exist after loading, returns false.
     ///
     /// # Arguments
     ///
@@ -555,58 +657,154 @@ where
         key: u64,
         sort: R::Sort,
     ) -> Option<(Uuid, Uuid, Response<R>)> {
-        // Always write the delete intent to the intent log first.
-        // This ensures the delete is durable even if the partition isn't loaded.
-        // Compaction will apply this intent when processing the partition.
-        let intent = SortedIntents::<R>::delete(key, sort.clone());
-        let pos = self.storage.commit(&intent).await.unwrap();
-        // Try to remove from memory if the partition is loaded
-        if let Some(maybe_loaded) = self.partitions.get_mut(&key) {
-            match maybe_loaded {
-                MaybeLoaded::Loaded { partition, .. } => {
-                    // Partition is fully deserialized - try to remove the row
-                    if let Some((size_diff, _)) = partition.remove(&sort) {
-                        // Row was found and removed - update memory usage
-                        let new_size = self.memory_usage.borrow().saturating_sub(size_diff);
-                        *self.memory_usage.borrow_mut() = new_size;
+        // get the partition we want to delete from
+        match self.partitions.get_mut(&key) {
+            Some(maybe_loaded) => {
+                // check if this partition is fully loaded in memory or not
+                match maybe_loaded {
+                    // the partition is at least partially deserialized and loaded into memory
+                    MaybeLoaded::Loaded { partition, .. } => {
+                        // try to remove the target row
+                        if let Some((size_diff, _)) = partition.remove(&sort) {
+                            // we were able to delete this row so build the delete intent
+                            let intent = SortedIntents::<R>::delete(key, sort);
+                            // commit it to the intent to the intent log
+                            let pos = self.storage.commit(&intent).await.unwrap();
+                            // we were able to delete data
+                            let action = ResponseAction::Delete(true);
+                            // add this to the pending query until its commit is flushed
+                            self.pending.add(meta, pos, action);
+                            // subtract this deleted rows memory usage from our total usage
+                            let new_size = self.memory_usage.borrow().saturating_sub(size_diff);
+                            // update the current memory usage
+                            *self.memory_usage.borrow_mut() = new_size;
+                            // remove from LRU cache since partition was just modified
+                            self.lru.borrow_mut().pop(&(self.table_name, key));
+                            // we can't acknowledge this delete until its intent is flushed
+                            return None;
+                        } else if partition.check_disk {
+                            // we couldn't find the row to delete but it may be on on disk
+                            let will_load = self
+                                .storage
+                                .load_partition(self.table_name, key, &self.loader_tx)
+                                .await
+                                .unwrap();
+                            // check if this partition has any on disk data to load
+                            if will_load {
+                                // this partition has on disk data so block this query
+                                // until its loaded and then retry
+                                let entry = self.blocked.entry(key).or_default();
+                                // add this query to our blocked queries
+                                entry.push((
+                                    meta,
+                                    SortedQuery::Delete {
+                                        key,
+                                        sort_key: sort,
+                                    },
+                                ));
+                                // theres nothing to respond with yet
+                                return None;
+                            }
+                        }
+                        // Tthis row doesn't exist and so can't be deleted
+                        let response = Response {
+                            id: meta.id,
+                            index: meta.index,
+                            data: ResponseAction::Delete(false),
+                            end: meta.end,
+                        };
+                        Some((meta.client, meta.id, response))
+                    }
+                    // this partition is loaded from disk but not deserialized
+                    MaybeLoaded::Accessible(read) => {
+                        // access this partitions data
+                        let accessible = SortedPartition::<R>::access(&read).unwrap();
+                        // deserialize our partition so we can modify it
+                        let mut partition = SortedPartition::<R>::deserialize(accessible).unwrap();
+                        // try to remove the target row
+                        if let Some((size_diff, _)) = partition.remove(&sort) {
+                            // we were able to delete this row so build the delete intent
+                            let intent = SortedIntents::<R>::delete(key, sort);
+                            // commit it to the intent to the intent log
+                            let pos = self.storage.commit(&intent).await.unwrap();
+                            // we were able to delete data
+                            let action = ResponseAction::Delete(true);
+                            // add this to the pending query until its commit is flushed
+                            self.pending.add(meta, pos, action);
+                            // subtract this deleted rows memory usage from our total usage
+                            let new_size = self.memory_usage.borrow().saturating_sub(size_diff);
+                            // update the current memory usage
+                            *self.memory_usage.borrow_mut() = new_size;
+                            // remove from LRU cache since partition was just modified
+                            self.lru.borrow_mut().pop(&(self.table_name, key));
+                            // convert to Loaded state since we've deserialized it
+                            *maybe_loaded = MaybeLoaded::Loaded {
+                                partition,
+                                generation: self.generation,
+                            };
+                            // we can't acknowledge this delete until its intent is flushed
+                            None
+                        } else {
+                            // row wasn't found but we deserialized this partition so keep it
+                            *maybe_loaded = MaybeLoaded::Loaded {
+                                partition,
+                                generation: self.generation,
+                            };
+                            // build the failed delete response
+                            let response = Response {
+                                id: meta.id,
+                                index: meta.index,
+                                data: ResponseAction::Delete(false),
+                                end: meta.end,
+                            };
+                            Some((meta.client, meta.id, response))
+                        }
                     }
                 }
-                MaybeLoaded::Accessible(read) => {
-                    // Partition is loaded but not deserialized - deserialize it first
-                    let accessible = SortedPartition::<R>::access(&read).unwrap();
-                    let mut partition = SortedPartition::<R>::deserialize(accessible).unwrap();
-
-                    // Try to remove the row
-                    if let Some((size_diff, _)) = partition.remove(&sort) {
-                        // Row was found and removed - update memory usage
-                        let new_size = self.memory_usage.borrow().saturating_sub(size_diff);
-                        *self.memory_usage.borrow_mut() = new_size;
-                    }
-
-                    // Convert to Loaded state since we've deserialized it
-                    *maybe_loaded = MaybeLoaded::Loaded {
-                        partition,
-                        generation: self.generation,
+            }
+            None => {
+                // we don't have this partition loaded so try to load it
+                let will_load = self
+                    .storage
+                    .load_partition(self.table_name, key, &self.loader_tx)
+                    .await
+                    .unwrap();
+                // this partition exists and is being loaded
+                if will_load {
+                    // get an entry to this partitions blocked queries
+                    let entry = self.blocked.entry(key).or_default();
+                    // add this to our blocked queries
+                    entry.push((
+                        meta,
+                        SortedQuery::Delete {
+                            key,
+                            sort_key: sort,
+                        },
+                    ));
+                    None
+                } else {
+                    // build the failed delete response
+                    let response = Response {
+                        id: meta.id,
+                        index: meta.index,
+                        data: ResponseAction::Delete(false),
+                        end: meta.end,
                     };
+                    Some((meta.client, meta.id, response))
                 }
             }
         }
-        // If partition isn't loaded, that's fine - the intent is in the log
-        // and will be applied during compaction when the partition is loaded from disk
-
-        // Build the pending response - always report success since the intent was written
-        let action = ResponseAction::Delete(true);
-        self.pending.add(meta, pos, action);
-
-        // Return None to wait for flush confirmation
-        None
     }
 
     /// Update a row in this table
     ///
+    /// Updates only succeed if the row exists. If the partition is loaded but
+    /// has `check_disk` set to true and the row isn't found, the partition will
+    /// be loaded from disk first. If the row doesn't exist after loading, returns false.
+    ///
     /// # Arguments
     ///
-    /// * `meta` - The metadata about this insert query
+    /// * `meta` - The metadata about this update query
     /// * `update` - The update to apply to a row in this table
     #[instrument(name = "PersistentTable::update", skip_all)]
     async fn update(
@@ -614,33 +812,132 @@ where
         meta: QueryMetadata,
         update: SortedUpdate<R>,
     ) -> Option<(Uuid, Uuid, Response<R>)> {
-        unimplemented!("Need update support")
-        //// get this rows partition
-        //if let Some(partition) = self.partitions.get_mut(&update.partition_key) {
-        //    if partition.update(&update) {
-        //        // wrap our update in an intent
-        //        let intent = SortedIntents::update(update);
-        //        // write this update to storage
-        //        let pos = self.storage.commit(&intent).await.unwrap();
-        //        // we didn't find any data to update
-        //        let action = ResponseAction::Update(false);
-        //        // add this action to our pending queue
-        //        self.pending.add(meta, pos, action);
-        //        // TODO: adjust this shards memory usage?
-        //        // wait for this delete to get flushed to disk
-        //        return None;
-        //    }
-        //}
-        //// we didn't find any data to update
-        //let action = ResponseAction::Update(false);
-        //// cast this action to a response
-        //let response = Response {
-        //    id: meta.id,
-        //    index: meta.index,
-        //    data: action,
-        //    end: meta.end,
-        //};
-        //Some((meta.client, response))
+        // get the partition we want to update
+        match self.partitions.get_mut(&update.partition_key) {
+            Some(maybe_loaded) => {
+                // check if this partition is fully loaded in memory or not
+                match maybe_loaded {
+                    // the partition is at least partialy deserialzied and loaded into memory
+                    MaybeLoaded::Loaded { partition, .. } => {
+                        // update the target row if its loaded
+                        if partition.update(&update) {
+                            // we were able to update this partition so get its key
+                            let key = update.partition_key;
+                            // wrap our update in an update intent
+                            let intent = SortedIntents::<R>::update(update);
+                            // commit this intent to storage
+                            let pos = self.storage.commit(&intent).await.unwrap();
+                            // we were able to update data
+                            let action = ResponseAction::Update(true);
+                            // add this to our pending queries until its commit is flushed
+                            self.pending.add(meta, pos, action);
+                            // remove this partition from our lru cache as its no longer evictable
+                            self.lru.borrow_mut().pop(&(self.table_name, key));
+                            // TODO: track row size changes when update affects size
+                            return None;
+                        } else if partition.check_disk {
+                            // we don't have this partition loaded so try to load it from disk
+                            let will_load = self
+                                .storage
+                                .load_partition(
+                                    self.table_name,
+                                    update.partition_key,
+                                    &self.loader_tx,
+                                )
+                                .await
+                                .unwrap();
+                            // if we are going to load it from disk add this query to our blocked queries
+                            if will_load {
+                                // get an entry to this partitions blocked queries
+                                let entry = self.blocked.entry(update.partition_key).or_default();
+                                // add this to our blocked queries
+                                entry.push((meta, SortedQuery::Update(update)));
+                                // wait for this partition to get loaded
+                                return None;
+                            }
+                        }
+                        // this partition doesn't exist in disk or in memory
+                        let response = Response {
+                            id: meta.id,
+                            index: meta.index,
+                            data: ResponseAction::Update(false),
+                            end: meta.end,
+                        };
+                        Some((meta.client, meta.id, response))
+                    }
+                    // this partition is loaded from disk but not deserialized
+                    MaybeLoaded::Accessible(read) => {
+                        // access this partitions data
+                        let accessible = SortedPartition::<R>::access(&read).unwrap();
+                        // deserialize our partition so we can update it
+                        let mut partition = SortedPartition::<R>::deserialize(accessible).unwrap();
+                        // try to update this partitions data
+                        if partition.update(&update) {
+                            // we were able to update this partition so get its key
+                            let key = update.partition_key;
+                            // wrap our update in an update intent
+                            let intent = SortedIntents::<R>::update(update);
+                            // commit this intent to storage
+                            let pos = self.storage.commit(&intent).await.unwrap();
+                            // we were able to update data
+                            let action = ResponseAction::Update(true);
+                            // add this to our pending queries until its commit is flushed
+                            self.pending.add(meta, pos, action);
+                            // remove this partition from our lru cache as its no longer evictable
+                            self.lru.borrow_mut().pop(&(self.table_name, key));
+                            // TODO: track row size changes when update affects size
+                            // convert to Loaded state since we've deserialized it
+                            *maybe_loaded = MaybeLoaded::Loaded {
+                                partition,
+                                generation: self.generation,
+                            };
+                            None
+                        } else {
+                            // this row wasn't found but we deserialized this row so keep it
+                            // to avoid future deserialization costs
+                            *maybe_loaded = MaybeLoaded::Loaded {
+                                partition,
+                                generation: self.generation,
+                            };
+                            // build the failed update response
+                            let response = Response {
+                                id: meta.id,
+                                index: meta.index,
+                                data: ResponseAction::Update(false),
+                                end: meta.end,
+                            };
+                            Some((meta.client, meta.id, response))
+                        }
+                    }
+                }
+            }
+            None => {
+                // we don't have this partition loaded so try to load it
+                let will_load = self
+                    .storage
+                    .load_partition(self.table_name, update.partition_key, &self.loader_tx)
+                    .await
+                    .unwrap();
+                // this partition exists and is being loaded
+                if will_load {
+                    // get an entry to this partitions blocked queries
+                    let entry = self.blocked.entry(update.partition_key).or_default();
+                    // add this to our blocked queries
+                    entry.push((meta, SortedQuery::Update(update)));
+                    None
+                } else {
+                    // Partition doesn't exist - update fails
+                    let response = Response {
+                        id: meta.id,
+                        index: meta.index,
+                        data: ResponseAction::Update(false),
+                        end: meta.end,
+                    };
+                    // wait for this partition to get loaded
+                    Some((meta.client, meta.id, response))
+                }
+            }
+        }
     }
 
     /// Mark partitions as evictable if they are no longer in the intent log
@@ -732,6 +1029,12 @@ where
     <T::UpdateData as Archive>::Archived:
         rkyv::Deserialize<T::UpdateData, Strategy<Pool, rkyv::rancor::Error>>,
     <<T as ShoalSortedTable>::Sort as Archive>::Archived: Ord,
+    for<'a> <<T as ShoalTableSupport>::UpdateData as Archive>::Archived:
+        CheckBytes<Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>>,
+    for<'a> <<T as ShoalSortedTable>::Sort as Archive>::Archived:
+        CheckBytes<Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>>,
+    for<'a> <T as Archive>::Archived:
+        CheckBytes<Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>>,
 {
     /// The intent type to use
     type Intent = SortedIntents<T>;
@@ -742,23 +1045,51 @@ where
         partitions: &mut HashMap<u64, MaybeLoaded<Self>>,
         memory_usage: &mut Arc<RefCell<usize>>,
     ) -> Result<(), ServerError> {
-        // try to deserialize this row from our intent log
-        let intent = unsafe { rkyv::access_unchecked::<ArchivedSortedIntents<T>>(&read[..]) };
+        // access our data
+        let intent = SortedIntents::<T>::access(read)?;
         // add this intent to our btreemap
         match intent {
             ArchivedSortedIntents::Insert(archived) => {
                 // deserialize this row
                 let row: T = RkyvSupport::deserialize(archived)?;
                 // get the partition key for this row
-                let key = row.get_partition_key();
-                // get this rows partition
-                todo!("USE A REAL GENEATION VALUE NOT 0");
-                //let entry = partitions
-                //    .entry(key)
-                //    .or_insert_with(|| MaybeLoaded::Loaded { SortedPartition::new(key), 0 });
-                // insert this row
-                // TODO support this
-                //entry.insert(row);
+                let partition_key = row.get_partition_key();
+                // apply this intent to the target partition
+                let entry =
+                    partitions
+                        .entry(partition_key)
+                        .or_insert_with(|| MaybeLoaded::Loaded {
+                            partition: SortedPartition::new(partition_key),
+                            generation,
+                        });
+                match entry {
+                    MaybeLoaded::Loaded {
+                        partition,
+                        generation: partition_gen,
+                    } => {
+                        // update this loaded partitions generation
+                        *partition_gen = generation;
+                        // insert this new row
+                        let (diff, _) = partition.insert(row);
+                        // return the change in memory usage
+                        //diff
+                    }
+                    MaybeLoaded::Accessible(read) => {
+                        // access this partitions data
+                        let accessible = SortedPartition::<T>::access(&read).unwrap();
+                        // deserialize our partition so we can insert this row
+                        let mut partition = SortedPartition::<T>::deserialize(accessible).unwrap();
+                        //  insert this new row
+                        let (diff, _) = partition.insert(row);
+                        // update this partition entry
+                        *entry = MaybeLoaded::Loaded {
+                            partition,
+                            generation,
+                        };
+                        // return the change in memory usage
+                        //diff
+                    }
+                }
             }
             ArchivedSortedIntents::Delete {
                 partition_key,
@@ -766,6 +1097,7 @@ where
             } => {
                 // convert our partition key to its native endianess
                 let partition_key = partition_key.to_native();
+                // check if this partition exists
                 // get the partition to delete a row from
                 if let Some(partition) = partitions.get_mut(&partition_key) {
                     // deserialize this rows sort key

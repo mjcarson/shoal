@@ -18,6 +18,8 @@ pub enum ResponseActionNames {
     Delete,
     /// A response to an update query
     Update,
+    /// A response to an exists query
+    Exists,
 }
 
 /// The different response kinds from a query
@@ -31,6 +33,8 @@ pub enum ResponseAction<T> {
     Delete(bool),
     /// The response from an update
     Update(bool),
+    /// The response from an exists query - true if data exists
+    Exists(bool),
 }
 
 /// A response from a query
@@ -86,6 +90,9 @@ impl<T: Archive> ArchivedResponse<T> {
             ArchivedResponseAction::Delete(deleted) => {
                 check_response!(opts.delete, *deleted, ResponseActionNames::Delete)
             }
+            ArchivedResponseAction::Exists(exists) => {
+                check_response!(opts.exists, *exists, ResponseActionNames::Exists)
+            }
         };
         // this query failed and it was required to succeed
         // build a nice descriptive error for it
@@ -105,12 +112,23 @@ impl<T: Archive> ArchivedResponse<T> {
             ArchivedResponseAction::Get(_) => ResponseActionNames::Get,
             ArchivedResponseAction::Update(_) => ResponseActionNames::Update,
             ArchivedResponseAction::Delete(_) => ResponseActionNames::Delete,
+            ArchivedResponseAction::Exists(_) => ResponseActionNames::Exists,
         }
     }
 
     /// Mark this response as the last one
     pub fn end(&mut self) {
         self.end = true;
+    }
+
+    /// Get the exists result if this is an Exists response
+    ///
+    /// Returns `Some(bool)` if this is an Exists response, `None` otherwise
+    pub fn get_exists(&self) -> Option<bool> {
+        match &self.data {
+            ArchivedResponseAction::Exists(exists) => Some(*exists),
+            _ => None,
+        }
     }
 }
 

@@ -183,6 +183,7 @@ impl StorageSupport for FileSystem {
         // add our shard name
         intent_path.push(format!("{shard_name}-active"));
         // build the writer for this shards intent log
+        println!("WRITING INTENTS TO {}", intent_path.display());
         let intent_log = Self::new_writer(&intent_path, &table_conf).await?;
         // build the channel to our compactor
         let (intent_tx, intent_rx) = kanal::unbounded_async();
@@ -333,8 +334,10 @@ impl StorageSupport for FileSystem {
         intent_path.push(format!("{shard_name}-active"));
         // create an intent log reader
         let mut reader = IntentLogReader::new(&intent_path).await?;
+        println!("READING INTENTS FROM {}", intent_path.display());
         // iterate over the entries in this intent log
         while let Some(read) = reader.next_buff().await? {
+            println!("READ BUFF!");
             // load this partitions data
             if <P as IntentReadSupport<R>>::load(&read, generation, partitions, memory_usage)
                 .is_err()

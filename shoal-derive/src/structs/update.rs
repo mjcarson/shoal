@@ -146,32 +146,6 @@ pub fn add_sorted(
         let types: Vec<_> = sort_fields.iter().map(|(_, ty)| ty).collect();
         quote! { (#(#types),*) }
     };
-    //// if no update fields, create an empty struct
-    //if update_fields.is_empty() {
-    //    stream.extend(quote! {
-    //        #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Default)]
-    //        #[rkyv(derive(Debug))]
-    //        pub struct #update_name;
-
-    //        impl shoal_core::shared::traits::RkyvSupport for #update_name {}
-
-    //        /// The server facing updates that can be applied to this table (just the updates no keys)
-    //        #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
-    //        #[rkyv(derive(Debug))]
-    //        pub struct #update_data_name;
-
-    //        #[automatically_derived]
-    //        impl shoal_core::shared::traits::RkyvSupport for #update_data_name {}
-
-    //        #[automatically_derived]
-    //        impl From<#update_name> for #update_data_name {
-    //            fn from(update: #update_name) -> Self {
-    //                #update_data_name {}
-    //            }
-    //        }
-    //    });
-    //    return;
-    //}
     // build the fields for the update struct (all optional)
     let fields = update_fields.iter().map(|(ident, ty)| {
         // build the doc string for this field
@@ -185,7 +159,7 @@ pub fn add_sorted(
     let data_fields = fields.clone();
     // build the fields for our conversion from an Update to an UpdateData struct
     let from_fields = update_fields.iter().map(|(ident, _)| {
-        quote! { #ident: update.#ident }
+        quote! { #ident: self.#ident }
     });
     // generate the update struct
     stream.extend(quote! {

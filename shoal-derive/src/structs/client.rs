@@ -24,6 +24,12 @@ pub fn add(stream: &mut proc_macro2::TokenStream, struct_ident: &Ident, variants
             #archived_response_ident::#variant_ident(response)=> response.kind(),
         }
     });
+    // build our get_exists arms
+    let get_exists_arms = variants.iter().map(|variant_ident| {
+        quote! {
+            #archived_response_ident::#variant_ident(response)=> response.get_exists(),
+        }
+    });
     // add our client struct and query support for the client
     stream.extend(quote! {
         pub struct #client_ident {}
@@ -57,6 +63,17 @@ pub fn add(stream: &mut proc_macro2::TokenStream, struct_ident: &Ident, variants
             fn kind(archived: &<Self::ResponseKinds as rkyv::Archive>::Archived) -> shoal_core::shared::responses::ResponseActionNames {
                 match archived {
                     #(#kind_arms)*
+                }
+            }
+
+            /// Get the exists result from an Exists response
+            ///
+            /// # Arguments
+            ///
+            /// * `archived` - The archived response to get the exists result from
+            fn get_exists(archived: &<Self::ResponseKinds as rkyv::Archive>::Archived) -> Option<bool> {
+                match archived {
+                    #(#get_exists_arms)*
                 }
             }
 
