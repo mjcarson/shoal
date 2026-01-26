@@ -54,7 +54,10 @@ impl IntoStorageSize for usize {
 impl IntoStorageSize for u64 {
     /// Convert this value into a byte size
     fn into_bytes(self) -> Result<usize, ServerError> {
-        Ok(self as usize)
+        // convert our raw value into a usize
+        let converted = usize::try_from(self)?;
+        // convert our mebibytes into bytes
+        Ok(converted << 20)
     }
 }
 

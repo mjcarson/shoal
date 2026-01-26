@@ -442,21 +442,22 @@ where
                                     entry.push((meta.clone(), SortedQuery::Get(blocked_get)));
                                     // add this partition to our blocked partition list
                                     blocked.push(*partition_key);
+                                    // continue to the next partition key
+                                    continue;
                                 }
-                            } else {
-                                // get the rows from our partition
-                                for (_, row) in &partition.rows {
-                                    // check if we are supposed to filter our rows
-                                    if let Some(filters) = &get.filters {
-                                        // check if this row should be returned
-                                        if !R::is_filtered(filters, row) {
-                                            // skip this row as it doesn't match our filters
-                                            continue;
-                                        }
+                            }
+                            // get the rows from our partition
+                            for (_, row) in &partition.rows {
+                                // check if we are supposed to filter our rows
+                                if let Some(filters) = &get.filters {
+                                    // check if this row should be returned
+                                    if !R::is_filtered(filters, row) {
+                                        // skip this row as it doesn't match our filters
+                                        continue;
                                     }
-                                    // add this row to our response
-                                    data.push(row.clone());
                                 }
+                                // add this row to our response
+                                data.push(row.clone());
                             }
                         }
                         MaybeLoaded::Accessible(read) => {

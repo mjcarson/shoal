@@ -77,9 +77,11 @@ fn add_update(stream: &mut proc_macro2::TokenStream, table_name: &Ident, query_k
         impl From<#update_name> for #query_kinds {
             /// Build a `QueryKind` for updating a row
             fn from(specific: #update_name) -> Self {
+                // hash the partition key to get the u64 key
+                let partition_key = <#table_name as shoal_core::shared::traits::PartitionKeySupport>::get_partition_key_from_values(&specific.partition_key);
                 // cast this update to a generalized update
                 let general = shoal_core::shared::queries::UnsortedUpdate {
-                    partition_key: specific.partition_key,
+                    partition_key,
                     update: #update_data_name::from(specific),
                 };
                 // wrap our general update in a query
@@ -107,9 +109,9 @@ fn add_delete(stream: &mut proc_macro2::TokenStream, table_name: &Ident, query_k
         impl From<#delete_name> for #query_kinds {
             /// Build a `QueryKind` for deleting a row
             fn from(delete: #delete_name) -> Self {
-                let query = shoal_core::shared::queries::UnsortedQuery::Delete {
-                    key: delete.partition_key,
-                };
+                // hash the partition key to get the u64 key
+                let key = <#table_name as shoal_core::shared::traits::PartitionKeySupport>::get_partition_key_from_values(&delete.partition_key);
+                let query = shoal_core::shared::queries::UnsortedQuery::Delete { key };
                 #query_kinds::#table_name(query)
             }
         }

@@ -16,6 +16,8 @@ pub enum Errors {
         kind: ResponseActionNames,
         end: bool,
     },
+    /// Multiple errors in bulk
+    BulkErrors(Box<Vec<Errors>>),
     /// An IO error occured
     IO(std::io::Error),
     /// An rkyv error
@@ -69,5 +71,16 @@ impl From<kanal::ReceiveError> for Errors {
     /// * `error` - The error to convert
     fn from(error: kanal::ReceiveError) -> Self {
         Errors::KanalReceive(error)
+    }
+}
+
+impl From<Vec<Errors>> for Errors {
+    /// Convert this error to our error type
+    ///
+    /// # Arguments
+    ///
+    /// * `error` - The error to convert
+    fn from(error: Vec<Errors>) -> Self {
+        Errors::BulkErrors(Box::new(error))
     }
 }

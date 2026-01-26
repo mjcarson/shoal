@@ -2,6 +2,7 @@
 
 use glommio::GlommioError;
 use glommio::{BuilderErrorKind, ExecutorErrorKind, ReactorErrorKind};
+use std::num::TryFromIntError;
 use std::os::fd::RawFd;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -44,6 +45,8 @@ pub enum ServerError {
     KanalRecv(kanal::ReceiveError),
     /// An error parsing a byte unit from a string
     ByteUnitParse(byte_unit::ParseError),
+    /// An error converting an integer
+    TryFromInt(TryFromIntError),
 }
 
 // convert all of our external error types to our error type
@@ -158,6 +161,17 @@ impl From<byte_unit::ParseError> for ServerError {
     /// * `error` - The error to convert
     fn from(error: byte_unit::ParseError) -> Self {
         ServerError::ByteUnitParse(error)
+    }
+}
+
+impl From<TryFromIntError> for ServerError {
+    /// Conver this error to our error type
+    ///
+    /// # Arguments
+    ///
+    /// * `error` - The error to convert
+    fn from(error: TryFromIntError) -> Self {
+        ServerError::TryFromInt(error)
     }
 }
 

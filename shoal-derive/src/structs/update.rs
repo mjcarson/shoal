@@ -29,12 +29,16 @@ pub fn add_unsorted(
         let types: Vec<_> = partition_fields.iter().map(|(_, ty)| ty).collect();
         quote! { (#(#types),*) }
     };
-    // if no update fields, create an empty struct
+    // if no update fields, create a struct with just the partition key
     if update_fields.is_empty() {
         stream.extend(quote! {
-            #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Default)]
+            /// The updates that can be applied to this table
+            #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
             #[rkyv(derive(Debug))]
-            pub struct #update_name;
+            pub struct #update_name {
+                /// The partition key to update data in
+                pub partition_key: #partition_key_type,
+            }
 
             impl shoal_core::shared::traits::RkyvSupport for #update_name {}
 
@@ -48,8 +52,8 @@ pub fn add_unsorted(
 
             #[automatically_derived]
             impl From<#update_name> for #update_data_name {
-                fn from(update: #update_name) -> Self {
-                    #update_data_name {}
+                fn from(_update: #update_name) -> Self {
+                    #update_data_name
                 }
             }
         });

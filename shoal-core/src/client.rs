@@ -233,6 +233,100 @@ impl<S: QuerySupport> Shoal<S> {
         Ok(result_stream)
     }
 
+    /// Execute a query and wait for all responses.
+    ///
+    /// If any errors occur then all valid responses are lost. This will
+    /// collect all errors into an Errors::BulkError.
+    ///
+    /// # Arguments
+    ///
+    /// * `queries` - The queries to execute
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - All queries succeeded
+    /// * `Err(Vec<Errors>)` - One or more queries failed, with all failures collected
+    pub async fn exec(&self, queries: Queries<S>) -> Result<Vec<ShoalResponse<S>>, Errors>
+    where
+        <S::ResponseKinds as Archive>::Archived:
+            rkyv::Deserialize<S::ResponseKinds, Strategy<Pool, rkyv::rancor::Error>>,
+        for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived:
+            rkyv::bytecheck::CheckBytes<
+                Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'a>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            >,
+    {
+        // get the number of queries
+        let query_count = queries.len();
+        // send our queries
+        let mut stream = self.send(queries).await.map_err(|e| vec![e])?;
+        // collect all responses and failures
+        let mut responses = Vec::with_capacity(query_count);
+        let mut failures = Vec::new();
+        // process all responses
+        while let Some(response) = stream.next().await.map_err(|e| vec![e])? {
+            // check if this response succeeded or failed
+            match response.suceeded(QuerySuceededOpts::default()) {
+                Ok(()) => responses.push(response),
+                Err(error) => failures.push(error),
+            }
+        }
+        // return any failures or success
+        if failures.is_empty() {
+            Ok(responses)
+        } else {
+            Err(Errors::from(failures))
+        }
+    }
+
+    /// Send a single query and wait for the response.
+    ///
+    /// # Arguments
+    ///
+    /// * `query` - The query to execute
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(ShoalResponse)` - The query succeeded
+    /// * `Err(Errors)` - The query failed
+    pub async fn send_one<Q: Into<S::QueryKinds>>(
+        &self,
+        query: Q,
+    ) -> Result<ShoalResponse<S>, Errors>
+    where
+        <S::ResponseKinds as Archive>::Archived:
+            rkyv::Deserialize<S::ResponseKinds, Strategy<Pool, rkyv::rancor::Error>>,
+        for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived:
+            rkyv::bytecheck::CheckBytes<
+                Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'a>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            >,
+    {
+        // build a query bundle with our single query
+        let queries = self.query().add(query);
+        // send our query
+        let mut stream = self.send(queries).await?;
+        // wait for our single response
+        let response = stream
+            .next()
+            .await?
+            .ok_or(Errors::StreamAlreadyTerminated)?;
+        // check if this query succeeded
+        response.suceeded(QuerySuceededOpts::default())?;
+        // return our response
+        Ok(response)
+    }
+
     /// Create a new stream to send and receive results on
     pub fn stream(&self) -> Result<(ShoalQueryStream<S>, ShoalResultStream<S>), Errors> {
         // generate a random ID to override all of the ids used in our queries

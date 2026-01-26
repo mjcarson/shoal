@@ -25,11 +25,6 @@ pub struct Resources {
 }
 
 impl Resources {
-    /// Create a new Resources with default values
-    pub fn builder() -> Self {
-        Self::default()
-    }
-
     /// Set the number of cores to use
     pub fn cores(mut self, cores: usize) -> Self {
         self.cores = Some(cores);
@@ -73,7 +68,7 @@ fn default_interface() -> String {
 }
 
 /// Help serde default interface we should bind to
-fn default_port() -> usize {
+fn default_port() -> u16 {
     12000
 }
 
@@ -85,7 +80,7 @@ pub struct Networking {
     pub interface: String,
     /// The port to bind too
     #[serde(default = "default_port")]
-    pub port: usize,
+    pub port: u16,
 }
 
 impl Default for Networking {
@@ -99,11 +94,6 @@ impl Default for Networking {
 }
 
 impl Networking {
-    /// Create a new Networking with default values
-    pub fn builder() -> Self {
-        Self::default()
-    }
-
     /// Set the interface to bind to
     pub fn interface(mut self, interface: impl Into<String>) -> Self {
         self.interface = interface.into();
@@ -111,7 +101,7 @@ impl Networking {
     }
 
     /// Set the port to bind to
-    pub fn port(mut self, port: usize) -> Self {
+    pub fn port(mut self, port: u16) -> Self {
         self.port = port;
         self
     }
@@ -132,11 +122,6 @@ pub struct DefaultStorageSettings {
 }
 
 impl DefaultStorageSettings {
-    /// Create a new DefaultStorageSettings with default values
-    pub fn builder() -> Self {
-        Self::default()
-    }
-
     /// Set the filesystem storage settings
     pub fn filesystem(mut self, filesystem: FileSystemTableConf) -> Self {
         self.filesystem = filesystem;
@@ -163,11 +148,6 @@ pub struct Storage {
 }
 
 impl Storage {
-    /// Create a new Storage with default values
-    pub fn builder() -> Self {
-        Self::default()
-    }
-
     /// Set the default storage settings
     pub fn default_settings(mut self, default: DefaultStorageSettings) -> Self {
         self.default = default;
@@ -237,11 +217,6 @@ pub struct Tracing {
 }
 
 impl Tracing {
-    /// Create a new Tracing with default values
-    pub fn builder() -> Self {
-        Self::default()
-    }
-
     /// Set the trace level
     pub fn level(mut self, level: TraceLevel) -> Self {
         self.level = level;
@@ -290,11 +265,6 @@ impl Default for Conf {
 }
 
 impl Conf {
-    /// Create a new Conf with default values
-    pub fn builder() -> Self {
-        Self::default()
-    }
-
     /// Build a config from our environment and a config file
     pub fn from_file(path: &str) -> Result<Self, ConfigError> {
         // build our config sources
