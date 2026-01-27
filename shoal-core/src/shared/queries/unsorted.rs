@@ -23,6 +23,8 @@ pub enum UnsortedQuery<T: ShoalUnsortedTable + std::fmt::Debug + RkyvSupport> {
     Delete { key: u64 },
     /// Update a row in a shoal
     Update(UnsortedUpdate<T>),
+    /// Check if data exists in shoal
+    Exists(UnsortedExists<T>),
 }
 
 impl<T: ShoalUnsortedTable + std::fmt::Debug> UnsortedQuery<T> {
@@ -35,6 +37,7 @@ impl<T: ShoalUnsortedTable + std::fmt::Debug> UnsortedQuery<T> {
             }
             UnsortedQuery::Get(get) => tmp.push(ring.find_shard(get.partition_key)),
             UnsortedQuery::Update(update) => tmp.push(ring.find_shard(update.partition_key)),
+            UnsortedQuery::Exists(exists) => tmp.push(ring.find_shard(exists.partition_key)),
         }
     }
 }
@@ -78,6 +81,29 @@ pub struct UnsortedGet<R: ShoalUnsortedTable> {
     pub filters: Option<R::Filters>,
     /// The number of rows to get at most
     pub limit: Option<usize>,
+}
+
+/// An exists query to check if data exists
+#[derive(Debug, Archive, Serialize, Deserialize, Clone)]
+pub struct UnsortedExists<R: ShoalUnsortedTable> {
+    /// The partition keys to check for data in
+    pub partition_key: u64,
+    /// Any filters to apply to rows
+    pub filters: Option<R::Filters>,
+}
+
+impl<R: ShoalUnsortedTable> UnsortedExists<R> {
+    /// Create a single partition exists from another exists
+    ///
+    /// # Arguments
+    ///
+    /// * `partition_key` - The key of the partition that needs to be loaded from disk
+    pub fn to_blocked(&self, partition_key: u64) -> Self {
+        UnsortedExists {
+            partition_key,
+            filters: self.filters.clone(),
+        }
+    }
 }
 
 /// An update query for a single row in Shoal

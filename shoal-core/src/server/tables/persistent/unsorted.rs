@@ -28,7 +28,7 @@ use crate::server::messages::{LoadedPartition, QueryMetadata, ServerMsg};
 use crate::server::tables::partitions::UnsortedPartition;
 use crate::server::tables::storage::StorageSupport;
 use crate::server::{Conf, ServerError};
-use crate::shared::queries::{UnsortedGet, UnsortedQuery, UnsortedUpdate};
+use crate::shared::queries::{UnsortedExists, UnsortedGet, UnsortedQuery, UnsortedUpdate};
 use crate::shared::responses::{Response, ResponseAction};
 use crate::shared::traits::{
     RkyvSupport, ShoalDatabase, ShoalTableSupport, ShoalUnsortedTable, TableNameSupport,
@@ -300,6 +300,8 @@ where
             UnsortedQuery::Delete { key } => self.delete(meta, key).await,
             // update a row in this partition
             UnsortedQuery::Update(update) => self.update(meta, update).await,
+            // check if data exists in this partition
+            UnsortedQuery::Exists(exists) => self.exists(meta, &exists).await,
         }
     }
 
@@ -422,6 +424,92 @@ where
                         end: meta.end,
                     };
                     // the requested partition doesn't exist
+                    Some((meta.client, meta.id, response))
+                }
+            }
+        }
+    }
+
+    /// Check if data exists in this partition
+    ///
+    /// # Arguments
+    ///
+    /// * `meta` - The metadata about this exists query
+    /// * `exists_query` - The exists parameters to use
+    #[instrument(name = "PersistentTable::exists", skip_all)]
+    async fn exists(
+        &mut self,
+        meta: QueryMetadata,
+        exists_query: &UnsortedExists<R>,
+    ) -> Option<(Uuid, Uuid, Response<R>)> {
+        // try to get the partition for this key
+        match self.partitions.get(&exists_query.partition_key) {
+            // this partition is loaded into memory
+            Some(partition) => {
+                // check if this partition is deserialized or accessible
+                let exists = match partition {
+                    // this partition is deserialized
+                    MaybeLoaded::Loaded { partition, .. } => {
+                        // check if we have filters to apply
+                        if let Some(filters) = &exists_query.filters {
+                            // return true if this partition matches our filter
+                            R::is_filtered(filters, &partition.row)
+                        } else {
+                            // no filters, data exists
+                            true
+                        }
+                    }
+                    MaybeLoaded::Accessible(read) => {
+                        // access our data
+                        let access = UnsortedPartition::<R>::access(read).unwrap();
+                        // check if we have filters to apply
+                        if let Some(filters) = &exists_query.filters {
+                            // return true if this partition matches our filter
+                            R::is_filtered_archived(filters, &access.row)
+                        } else {
+                            // no filters, data exists
+                            true
+                        }
+                    }
+                };
+                // mark this partition as recently used in our lru cache
+                self.lru
+                    .borrow_mut()
+                    .promote(&(self.table_name, exists_query.partition_key));
+                // build the response
+                let response = Response {
+                    id: meta.id,
+                    index: meta.index,
+                    data: ResponseAction::Exists(exists),
+                    end: meta.end,
+                };
+                Some((meta.client, meta.id, response))
+            }
+            // this partition isn't loaded so lets try and load it from disk
+            None => {
+                // try to load this partition from disk if it exists
+                let will_load = self
+                    .storage
+                    .load_partition(self.table_name, exists_query.partition_key, &self.loader_tx)
+                    .await
+                    .unwrap();
+                // if we aren't going to load data then return that this partition doesn't exist
+                if will_load {
+                    // if we need to load this then add this query to a map of queries
+                    // that are blocked on partitions being loaded from disk
+                    let entry = self.blocked.entry(exists_query.partition_key).or_default();
+                    // add our blocked query for this partitions blocked query list
+                    entry.push((meta, UnsortedQuery::Exists(exists_query.clone())));
+                    // return None since we don't yet have a response for this query
+                    None
+                } else {
+                    // the partition doesn't exist so data doesn't exist
+                    let response = Response {
+                        id: meta.id,
+                        index: meta.index,
+                        data: ResponseAction::Exists(false),
+                        end: meta.end,
+                    };
                     Some((meta.client, meta.id, response))
                 }
             }

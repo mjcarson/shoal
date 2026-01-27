@@ -1,10 +1,10 @@
-//! Integration tests for persistent sorted tables in Shoal
+//! Integration tests for persistent unsorted tables in Shoal
 
 use deepsize2::DeepSizeOf;
 use rkyv::{Archive, Deserialize, Serialize};
 use shoal_core::shared::traits::RkyvSupport;
+use shoal_core::storage::FileSystem;
 use shoal_core::tables::PersistentUnsortedTable;
-use shoal_core::{client::QuerySuceededOpts, storage::FileSystem};
 use shoal_derive::{ShoalDB, ShoalUnsortedTable};
 use tempfile::TempDir;
 
@@ -23,6 +23,7 @@ pub struct TestRecord {
     #[shoal(partition)]
     pub partition_key: String,
     /// Some data payload
+    #[shoal(update)]
     pub data: String,
 }
 
@@ -70,36 +71,92 @@ async fn insert() -> Result<(), TestError> {
     let (client, pool) = utils::start::<TestDb>(&temp_dir).await?;
     // build a test partition to insert
     let test_data = TestRecord::new("partition_key", "woot");
-    // build a query to insert some rows into this shoal db
-    let insert_query = client.query().add(test_data.clone());
     // send this query
-    let mut insert_stream = client.send(insert_query).await?;
-    // get the response for this insert stream
-    let insert_response = insert_stream
-        .next()
-        .await?
-        .expect("Failed to get response for insert query");
-    // check if this response succeeded
-    insert_response.suceeded(QuerySuceededOpts::default())?;
-    // make sure this data was inserted
-    let get_query = client
-        .query()
-        .add(TestRecordGet::new(test_data.partition_key.clone()));
+    client.send_one(test_data.clone()).await?;
     // send this query
-    let mut result_stream = client.send(get_query).await?;
-    // get the first item
-    let response = result_stream
-        .next()
-        .await?
-        .expect("Failed to get response for get query");
-    // check if this response succeeded
-    response.suceeded(QuerySuceededOpts::default())?;
+    let response = client
+        .send_one(TestRecordGet::new(test_data.partition_key.clone()))
+        .await?;
     // access our response
     let access = response.access::<TestRecord>()?.unwrap().first().unwrap();
     // deserialize our test record
     let record = TestRecord::deserialize(access).unwrap();
     // make sure this record matches
     assert_eq!(test_data, record);
+    // Shutdown server
+    pool.exit()?;
+    Ok(())
+}
+
+/// Test deleting rows from shoal
+#[tokio::test]
+async fn delete() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    // start a shoal server and build a client
+    let (client, pool) = utils::start::<TestDb>(&temp_dir).await?;
+    // build a test partition to insert
+    let test_data = TestRecord::new("partition_key", "woot");
+    // send this query
+    client.send_one(test_data.clone()).await?;
+    // send this query
+    let response = client
+        .send_one(TestRecordGet::new(test_data.partition_key.clone()))
+        .await?;
+    // access our response
+    let access = response.access::<TestRecord>()?.unwrap().first().unwrap();
+    // deserialize our test record
+    let record = TestRecord::deserialize(access).unwrap();
+    // make sure this record matches
+    assert_eq!(test_data, record);
+    // now delete this record and make sure it was deleted
+    client
+        .send_one(TestRecordDelete::new("partition_key".into()))
+        .await?;
+    // check if this row still exists in shoal
+    let exists = client
+        .exists(TestRecordExists::new(test_data.partition_key.clone()))
+        .await?;
+    // make sure this row no longer exists
+    assert!(!exists);
+    // Shutdown server
+    pool.exit()?;
+    Ok(())
+}
+
+/// Test updating rows in shoal
+#[tokio::test]
+async fn update() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    // start a shoal server and build a client
+    let (client, pool) = utils::start::<TestDb>(&temp_dir).await?;
+    // build a test partition to insert
+    let test_data = TestRecord::new("partition_key", "original");
+    // send this query
+    client.send_one(test_data.clone()).await?;
+    // verify the record was inserted
+    let response = client
+        .send_one(TestRecordGet::new(test_data.partition_key.clone()))
+        .await?;
+    let access = response.access::<TestRecord>()?.unwrap().first().unwrap();
+    let record = TestRecord::deserialize(access).unwrap();
+    assert_eq!(test_data, record);
+    // now update this record
+    client
+        .send_one(TestRecordUpdate {
+            partition_key: "partition_key".into(),
+            data: Some("updated".into()),
+        })
+        .await?;
+    // verify the record was updated
+    let response = client
+        .send_one(TestRecordGet::new(test_data.partition_key.clone()))
+        .await?;
+    let access = response.access::<TestRecord>()?.unwrap().first().unwrap();
+    let record = TestRecord::deserialize(access).unwrap();
+    assert_eq!(record.data, "updated");
+    assert_eq!(record.partition_key, "partition_key");
     // Shutdown server
     pool.exit()?;
     Ok(())

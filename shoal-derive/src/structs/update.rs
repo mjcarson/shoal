@@ -158,7 +158,7 @@ pub fn add_sorted(
     // clone our fields for our data struct as well
     let data_fields = fields.clone();
     // build the fields for our conversion from an Update to an UpdateData struct
-    let from_fields = update_fields.iter().map(|(ident, _)| {
+    let update_parts_fields = update_fields.iter().map(|(ident, _)| {
         quote! { #ident: self.#ident }
     });
     // generate the update struct
@@ -194,7 +194,7 @@ pub fn add_sorted(
                 (
                     self.sort_key,
                     #update_data_name {
-                        #(#from_fields),*
+                        #(#update_parts_fields),*
                     }
                 )
             }

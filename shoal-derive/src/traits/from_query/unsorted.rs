@@ -118,6 +118,37 @@ fn add_delete(stream: &mut proc_macro2::TokenStream, table_name: &Ident, query_k
     });
 }
 
+/// Extend a token stream with an implementation for converting an exists into a query kind
+///
+/// # Arguments
+///
+/// * `stream` - The stream to extend
+/// * `table_name` - The name of the table
+/// * `query_name` - The name of the query kinds enum
+fn add_exists(stream: &mut proc_macro2::TokenStream, table_name: &Ident, query_kinds: &Ident) {
+    // build the name for our exists query
+    let exists_name = format_ident!("{}Exists", table_name);
+    // extend our token stream with an impl to turn an exists query into a query kind
+    stream.extend(quote! {
+        #[automatically_derived]
+        impl From<#exists_name> for #query_kinds {
+            /// Build a `QueryKind` for checking if rows exist
+            fn from(specific: #exists_name) -> Self {
+                // build the partition key by hashing the key
+                let partition_key =
+                    <#table_name as shoal_core::shared::traits::PartitionKeySupport>::get_partition_key_from_values(&specific.partition_key);
+                // build the general query
+                let general = shoal_core::shared::queries::UnsortedExists {
+                    partition_key,
+                    filters: specific.filters,
+                };
+                // build our query kind
+                Self::#table_name(shoal_core::shared::queries::UnsortedQuery::Exists(general))
+            }
+        }
+    });
+}
+
 /// Extend a token stream with a From<#name> for *UnsortedQueryKinds implementation
 ///
 /// # Arguments
@@ -131,4 +162,5 @@ pub fn add(stream: &mut proc_macro2::TokenStream, table_name: &Ident, query_kind
     add_get(stream, table_name, query_kinds);
     add_update(stream, table_name, query_kinds);
     add_delete(stream, table_name, query_kinds);
+    add_exists(stream, table_name, query_kinds);
 }
