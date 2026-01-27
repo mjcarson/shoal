@@ -6,7 +6,7 @@ use shoal_core::client::{QuerySuceededOpts, Shoal, ShoalResponse, ShoalUnordered
 use shoal_core::server::Conf;
 use shoal_core::shared::queries::Queries;
 use shoal_core::shared::responses::ResponseActionNames;
-use shoal_core::shared::traits::{PartitionKeySupport, QuerySupport};
+use shoal_core::shared::traits::QuerySupport;
 use shoal_core::storage::FileSystem;
 use shoal_core::tables::{PersistentSortedTable, PersistentUnsortedTable};
 use shoal_core::ShoalPool;
@@ -18,7 +18,7 @@ use kanal::{AsyncReceiver, AsyncSender};
 use mimalloc::MiMalloc;
 use rkyv::{Archive, Deserialize, Serialize};
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
+use std::hash::Hash;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -547,7 +547,7 @@ async fn read_csv() {
 #[hotpath::main]
 fn main() {
     // load our config
-    let conf = Conf::new("shoal.yml").expect("Failed to load config");
+    let conf = Conf::from_file("shoal.yml").expect("Failed to load config");
     // setup tracing/telemetry
     let provider = shoal_core::server::trace::setup(&conf);
     // start Shoal

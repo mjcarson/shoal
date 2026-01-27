@@ -337,7 +337,6 @@ impl StorageSupport for FileSystem {
         println!("READING INTENTS FROM {}", intent_path.display());
         // iterate over the entries in this intent log
         while let Some(read) = reader.next_buff().await? {
-            println!("READ BUFF!");
             // load this partitions data
             if <P as IntentReadSupport<R>>::load(&read, generation, partitions, memory_usage)
                 .is_err()

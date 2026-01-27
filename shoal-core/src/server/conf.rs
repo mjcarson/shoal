@@ -277,12 +277,6 @@ impl Conf {
         conf.try_deserialize()
     }
 
-    /// Build a config from our environment and a config file
-    #[deprecated(since = "0.2.0", note = "Use `Conf::from_file` instead")]
-    pub fn new(path: &str) -> Result<Self, ConfigError> {
-        Self::from_file(path)
-    }
-
     /// Set the resource settings
     pub fn resources(mut self, resources: Resources) -> Self {
         self.resources = resources;
