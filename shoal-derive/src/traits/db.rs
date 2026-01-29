@@ -198,7 +198,7 @@ pub fn add(
                 conf: &shoal_core::server::Conf,
                 medium_priority: glommio::TaskQueueHandle,
                 memory_usage: &std::sync::Arc<std::cell::RefCell<usize>>,
-                lru: &std::sync::Arc<std::cell::RefCell<shoal_core::lru::LruCache<(Self::TableNames, u64), usize, std::hash::BuildHasherDefault<shoal_core::xxhash_rust::xxh3::Xxh3>>>>,
+                lru: &std::sync::Arc<std::cell::RefCell<shoal_core::lru::LruCache<(Self::TableNames, u64), usize, std::hash::BuildHasherDefault<shoal_core::gxhash::GxHasher>>>>,
                 shard_local_tx: &kanal::AsyncSender<shoal_core::server::messages::ServerMsg<Self>>,
             ) -> Result<Self, shoal_core::server::ServerError> {
                 let db = #struct_ident {

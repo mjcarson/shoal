@@ -11,6 +11,7 @@ use glommio::{
     CpuSet, Latency, LocalExecutorPoolBuilder, PoolPlacement, PoolThreadHandles, Shares, Task,
     TaskQueueHandle,
 };
+use gxhash::GxHasher;
 use kanal::{AsyncReceiver, AsyncSender};
 use lru::LruCache;
 use rkyv::{
@@ -29,7 +30,6 @@ use std::{cell::RefCell, hash::BuildHasherDefault};
 use std::{collections::HashMap, io::IoSlice};
 use tracing::{event, instrument, Level, Span};
 use uuid::Uuid;
-use xxhash_rust::xxh3::Xxh3;
 
 use super::messages::{QueryMetadata, ServerMsg};
 use super::ring::Ring;
@@ -248,7 +248,7 @@ pub(super) struct Shard<S: ShoalDatabase> {
     /// The total size of all data on this shard
     memory_usage: Arc<RefCell<usize>>,
     /// The most recently used tables/partitions on this shard
-    lru: Arc<RefCell<LruCache<(S::TableNames, u64), usize, BuildHasherDefault<Xxh3>>>>,
+    lru: Arc<RefCell<LruCache<(S::TableNames, u64), usize, BuildHasherDefault<GxHasher>>>>,
 }
 
 impl<S: ShoalDatabase> Shard<S>
@@ -292,7 +292,7 @@ where
         // start with an initial memory usage of 0
         let memory_usage = Arc::new(RefCell::new(0));
         // setup an xxh3 hasher for our lru cache
-        let lru_hasher = BuildHasherDefault::<Xxh3>::default();
+        let lru_hasher = BuildHasherDefault::<GxHasher>::default();
         // build our lru cache
         let lru = Arc::new(RefCell::new(LruCache::unbounded_with_hasher(lru_hasher)));
         // get our own mesh id

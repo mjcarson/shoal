@@ -2,6 +2,7 @@
 
 use glommio::io::ReadResult;
 use glommio::TaskQueueHandle;
+use gxhash::GxHasher;
 use kanal::{AsyncReceiver, AsyncSender};
 use lru::LruCache;
 use rkyv::bytecheck::CheckBytes;
@@ -20,7 +21,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing::{event, instrument, Level, Span};
 use uuid::Uuid;
-use xxhash_rust::xxh3::Xxh3;
 
 use crate::server::messages::{LoadedPartition, QueryMetadata, ServerMsg};
 use crate::server::tables::partitions::SortedPartition;
@@ -112,7 +112,7 @@ where
     /// The total size of all data on this shard
     memory_usage: Arc<RefCell<usize>>,
     /// The most recently used tables/partitions on this shard
-    lru: Arc<RefCell<LruCache<(N, u64), usize, BuildHasherDefault<Xxh3>>>>,
+    lru: Arc<RefCell<LruCache<(N, u64), usize, BuildHasherDefault<GxHasher>>>>,
 }
 
 impl<R: ShoalSortedTable + 'static, S: StorageSupport, N: TableNameSupport>
@@ -166,7 +166,7 @@ where
         conf: &Conf,
         medium_priority: TaskQueueHandle,
         memory_usage: &Arc<RefCell<usize>>,
-        lru: &Arc<RefCell<LruCache<(N, u64), usize, BuildHasherDefault<Xxh3>>>>,
+        lru: &Arc<RefCell<LruCache<(N, u64), usize, BuildHasherDefault<GxHasher>>>>,
         shard_local_tx: &AsyncSender<ServerMsg<D>>,
     ) -> Result<Self, ServerError> {
         // make sure we have a loader channel for filesystems

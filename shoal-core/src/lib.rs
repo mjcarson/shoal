@@ -13,4 +13,3 @@ pub use server::tables;
 pub use server::tables::storage;
 pub use server::ShoalPool;
 pub use tracing;
-pub use xxhash_rust;

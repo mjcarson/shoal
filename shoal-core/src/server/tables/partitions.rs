@@ -121,25 +121,7 @@ where
             MaybeLoaded::Loaded { partition, .. } => partition.get(params, found),
             MaybeLoaded::Accessible(read) => {
                 // access our data
-                let access = match UnsortedPartition::<R>::access(read) {
-                    Ok(access) => access,
-                    Err(error) => {
-                        // build a hasher to verify this map
-                        let mut hasher = xxhash_rust::xxh3::Xxh3::new();
-                        // hash our map
-                        hasher.update(&read[..]);
-                        // get theh hash for our
-                        let partition_hash = hasher.digest();
-                        panic!(
-                            "ML - get {} -> {:?} ? {} : {:?} .. {:?}",
-                            params.partition_key,
-                            error,
-                            partition_hash,
-                            &read[..16],
-                            &read[read.len() - 16..]
-                        )
-                    }
-                };
+                let access = UnsortedPartition::<R>::access(read).unwrap();
                 // skip any rows that don't match our filter
                 if let Some(filter) = &params.filters {
                     // check if this row should be filtered out

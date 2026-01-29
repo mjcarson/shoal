@@ -51,7 +51,7 @@ impl TestRecord {
 #[derive(ShoalDB)]
 pub struct TestDb {
     /// The sorted test table
-    pub test_record: PersistentSortedTable<TestRecord, FileSystem, TestDbTableNames>,
+    pub test_records: PersistentSortedTable<TestRecord, FileSystem, TestDbTableNames>,
 }
 
 /// Test setting up and tearing down a db
@@ -170,4 +170,10 @@ async fn update() -> Result<(), TestError> {
     // Shutdown server
     pool.exit()?;
     Ok(())
+}
+
+#[tokio::test]
+pub async fn into_query() {
+    // start with an example query
+    let query = "select * from test_records";
 }

@@ -2,6 +2,7 @@
 
 use glommio::io::ReadResult;
 use glommio::TaskQueueHandle;
+use gxhash::GxHasher;
 use kanal::{AsyncReceiver, AsyncSender};
 use lru::LruCache;
 use rkyv::bytecheck::CheckBytes;
@@ -22,7 +23,6 @@ use std::sync::Arc;
 use tracing::Span;
 use tracing::{event, instrument, Level};
 use uuid::Uuid;
-use xxhash_rust::xxh3::Xxh3;
 
 use crate::server::messages::{LoadedPartition, QueryMetadata, ServerMsg};
 use crate::server::tables::partitions::UnsortedPartition;
@@ -104,7 +104,7 @@ pub struct PersistentUnsortedTable<R: ShoalUnsortedTable, S: StorageSupport, N: 
     /// The total size of all data on this shard
     memory_usage: Arc<RefCell<usize>>,
     /// The most recently used tables/partitions on this shard
-    lru: Arc<RefCell<LruCache<(N, u64), usize, BuildHasherDefault<Xxh3>>>>,
+    lru: Arc<RefCell<LruCache<(N, u64), usize, BuildHasherDefault<GxHasher>>>>,
 }
 
 #[cfg_attr(feature = "hotpath", hotpath::measure_all)]
@@ -138,7 +138,7 @@ where
         conf: &Conf,
         medium_priority: TaskQueueHandle,
         memory_usage: &Arc<RefCell<usize>>,
-        lru: &Arc<RefCell<LruCache<(N, u64), usize, BuildHasherDefault<Xxh3>>>>,
+        lru: &Arc<RefCell<LruCache<(N, u64), usize, BuildHasherDefault<GxHasher>>>>,
         shard_local_tx: &AsyncSender<ServerMsg<D>>,
     ) -> Result<Self, ServerError>
     where

@@ -5,11 +5,12 @@ members = [
     "shoal",
     "shoal-core",
     "shoal-derive",
+    "shoalctl",
 ]
 
 [workspace.dependencies]
 rkyv = { version = "0.8.10", features = ["uuid-1"] }
-gxhash = "2.2"
+gxhash = { version = "3", features = ["deterministic"] }
 uuid = { version = "1", features = ["v4"] }
 glommio = { path = "../mcarson-glommio/glommio", version = "0.9"}
 tokio = { version = "1", features = ["full"] }

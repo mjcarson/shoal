@@ -2,6 +2,7 @@
 
 use deepsize2::DeepSizeOf;
 use glommio::TaskQueueHandle;
+use gxhash::GxHasher;
 use kanal::{AsyncReceiver, AsyncSender};
 use lru::LruCache;
 use rkyv::de::Pool;
@@ -17,7 +18,6 @@ use std::hash::BuildHasherDefault;
 use std::sync::Arc;
 use tracing::instrument;
 use uuid::Uuid;
-use xxhash_rust::xxh3::Xxh3;
 
 mod sorted;
 mod storable;
@@ -189,7 +189,7 @@ pub trait ShoalDatabase: 'static + Sized {
         conf: &Conf,
         medium_priority: TaskQueueHandle,
         memory_usage: &Arc<RefCell<usize>>,
-        lru: &Arc<RefCell<LruCache<(Self::TableNames, u64), usize, BuildHasherDefault<Xxh3>>>>,
+        lru: &Arc<RefCell<LruCache<(Self::TableNames, u64), usize, BuildHasherDefault<GxHasher>>>>,
         shard_local_tx: &AsyncSender<ServerMsg<Self>>,
     ) -> Result<Self, ServerError>;
 

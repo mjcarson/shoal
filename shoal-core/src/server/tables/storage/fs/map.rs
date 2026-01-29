@@ -3,16 +3,17 @@
 use futures::AsyncWriteExt;
 use glommio::io::{DmaFile, DmaStreamWriter, DmaStreamWriterBuilder, OpenOptions};
 use glommio::GlommioError;
+use gxhash::GxHasher;
 use rkyv::rancor::Error;
 use rkyv::{Archive, Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::collections::{BTreeMap, HashSet};
+use std::hash::Hasher;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::instrument;
 use uuid::Uuid;
-use xxhash_rust::xxh3::Xxh3;
 
 use crate::server::errors::ShoalError;
 use crate::server::ServerError;
@@ -152,11 +153,11 @@ impl SerializedMap {
             // get our maps xxh3 hash
             let expected = u64::from_le_bytes(read[..8].try_into()?);
             // build a hasher to verify this map
-            let mut hasher = Xxh3::new();
+            let mut hasher = GxHasher::default();
             // hash our map
-            hasher.update(&read[8..]);
+            hasher.write(&read[8..]);
             // get theh hash for our
-            let found = hasher.digest();
+            let found = hasher.finish();
             // if our hashes don't match then panic
             if expected != found {
                 // build a shoal map corruption error
@@ -193,11 +194,11 @@ impl SerializedMap {
         // serialized this data
         let archived = rkyv::to_bytes::<Error>(&serializable)?;
         // hash our map
-        let mut hasher = Xxh3::new();
+        let mut hasher = GxHasher::default();
         // hash our archive map
-        hasher.update(&archived);
+        hasher.write(&archived);
         // get our maps archive
-        let map_hash = hasher.digest();
+        let map_hash = hasher.finish();
         // open a file to store our new map at temporarily
         let temp_map = OpenOptions::new()
             .create_new(true)
