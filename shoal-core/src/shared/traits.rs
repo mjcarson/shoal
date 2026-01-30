@@ -25,7 +25,7 @@ mod unsorted;
 
 use super::queries::ArchivedQueries;
 use super::queries::Queries;
-use crate::client::{Errors, QuerySuceededOpts};
+use crate::client::{Errors, QuerySuceededOpts, ShqlParseError};
 use crate::server::messages::{LoadedPartitionKinds, QueryMetadata, ServerMsg};
 use crate::server::ring::Ring;
 use crate::server::shard::ShardInfo;
@@ -148,12 +148,29 @@ pub trait QuerySupport: 'static + Sized {
     /// # Arguments
     ///
     /// * `archived` - The archived response to get the exists result from
-    ///
-    /// # Returns
-    ///
-    /// * `Some(bool)` - If this is an Exists response
-    /// * `None` - If this is not an Exists response
     fn get_exists(archived: &<Self::ResponseKinds as Archive>::Archived) -> Option<bool>;
+
+    /// Parse a SHQL (Shoal Query Language) string into a query
+    ///
+    /// SHQL supports SQL-like SELECT queries for reading data from tables.
+    /// Currently only GET queries are supported.
+    ///
+    /// # Syntax
+    ///
+    /// ```text
+    /// SELECT * FROM <table_name> WHERE <partition_key> = '<value>';
+    /// ```
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// QuerySupport::parse(SELECT * FROM MoviesByKeyword WHERE keyword = 'Scifi')?;
+    /// ```
+    ///
+    /// # Arguments
+    ///
+    /// * `query` - The SHQL query string to parse
+    fn parse(query: &str) -> Result<Self::QueryKinds, ShqlParseError>;
 }
 
 pub trait TableNameSupport:

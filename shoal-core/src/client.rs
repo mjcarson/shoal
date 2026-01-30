@@ -33,7 +33,7 @@ use crate::shared::responses::{ArchivedResponseAction, ResponseActionNames};
 use crate::shared::traits::{
     ExistsQuery, QuerySupport, RkyvSupport, ShoalQuerySupport, ShoalResponseSupport,
 };
-pub use errors::Errors;
+pub use errors::{Errors, ShqlParseError};
 use messages::ClientMsg;
 
 // Connection manager for bb8

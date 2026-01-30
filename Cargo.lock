@@ -3391,6 +3391,7 @@ dependencies = [
  "tracing-opentelemetry",
  "tracing-subscriber",
  "uuid",
+ "winnow",
 ]
 
 [[package]]

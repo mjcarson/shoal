@@ -35,6 +35,54 @@ pub enum Errors {
     KanalReceive(kanal::ReceiveError),
     /// A stream has already ended
     StreamAlreadyTerminated,
+    /// An error parsing a SHQL query string
+    ShqlParse(ShqlParseError),
+}
+
+/// An error that occurred while parsing a SHQL query string
+#[derive(Debug, Clone)]
+pub struct ShqlParseError {
+    /// The error message describing what went wrong
+    pub message: String,
+    /// The position in the input where the error occurred
+    pub position: usize,
+    /// The input string that was being parsed
+    pub input: String,
+}
+
+impl ShqlParseError {
+    /// Create a new SHQL parse error
+    ///
+    /// # Arguments
+    ///
+    /// * `message` - The error message
+    /// * `position` - The position in the input where the error occurred
+    /// * `input` - The input string being parsed
+    pub fn new(message: impl Into<String>, position: usize, input: impl Into<String>) -> Self {
+        ShqlParseError {
+            message: message.into(),
+            position,
+            input: input.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for ShqlParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "SHQL parse error at position {}: {}",
+            self.position, self.message
+        )
+    }
+}
+
+impl std::error::Error for ShqlParseError {}
+
+impl From<ShqlParseError> for Errors {
+    fn from(error: ShqlParseError) -> Self {
+        Errors::ShqlParse(error)
+    }
 }
 
 impl From<std::io::Error> for Errors {
