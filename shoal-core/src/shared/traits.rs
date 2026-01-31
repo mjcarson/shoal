@@ -30,6 +30,7 @@ use crate::server::messages::{LoadedPartitionKinds, QueryMetadata, ServerMsg};
 use crate::server::ring::Ring;
 use crate::server::shard::ShardInfo;
 use crate::server::{Conf, ServerError};
+use crate::shared::queries::parser::{FieldRole, TypeValidator};
 use crate::shared::responses::ResponseActionNames;
 use crate::storage::{FullArchiveMap, LoaderMsg, Loaders};
 
@@ -164,7 +165,7 @@ pub trait QuerySupport: 'static + Sized {
     /// # Examples
     ///
     /// ```
-    /// QuerySupport::parse(SELECT * FROM MoviesByKeyword WHERE keyword = 'Scifi')?;
+    /// QuerySupport::parse("SELECT * FROM MoviesByKeyword WHERE keyword = 'Scifi' LIMIT 3")?;
     /// ```
     ///
     /// # Arguments
@@ -333,9 +334,27 @@ pub trait PartitionKeySupport: std::fmt::Debug + Clone + RkyvSupport + Sized {
     fn get_partition_key_from_archived_insert(intent: &<Self as Archive>::Archived) -> u64;
 }
 
+/// Schema information for a table
+pub trait TableSchemaSupport {
+    /// Get the type validator for a given field name
+    fn get_field_validator(field_name: &str) -> Option<TypeValidator>;
+
+    /// Get the role of a field (partition, sort, or filter)
+    fn get_field_role(field_name: &str) -> Option<FieldRole>;
+
+    /// Get all valid field names
+    fn field_names() -> Vec<&'static str>;
+}
+
 /// The core traits that all tables require
 pub trait ShoalTableSupport:
-    std::fmt::Debug + Clone + RkyvSupport + PartitionKeySupport + Sized + DeepSizeOf
+    std::fmt::Debug
+    + Clone
+    + RkyvSupport
+    + PartitionKeySupport
+    + Sized
+    + DeepSizeOf
+    + TableSchemaSupport
 {
     /// The updates that can be applied to this table
     type Update: RkyvSupport + std::fmt::Debug + Clone;

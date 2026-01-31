@@ -3384,6 +3384,7 @@ dependencies = [
  "rkyv 0.8.12",
  "rkyv-with",
  "serde",
+ "serde_json",
  "serde_yaml",
  "tokio",
  "tonic 0.8.3",

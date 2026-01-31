@@ -30,6 +30,7 @@ pub fn derive_shoal_sorted_table(stream: TokenStream) -> TokenStream {
         _ => panic!("ShoalTable requires named fields"),
     };
     // instance vecs to store our partition, filter, and update keys
+    let mut all_fields = Vec::default();
     let mut partition_fields = Vec::default();
     let mut sort_fields = Vec::default();
     let mut filter_fields = Vec::default();
@@ -39,6 +40,8 @@ pub fn derive_shoal_sorted_table(stream: TokenStream) -> TokenStream {
         // parse our field attributes
         let field_attrs = ShoalField::from_field(field).expect("Failed to parse field attributes");
         if let Some(ident) = field_attrs.ident.clone() {
+            // collect all fields for schema support
+            all_fields.push((ident.clone(), field_attrs.ty.clone()));
             // check if this is a partition or a sort key
             match (field_attrs.partition, field_attrs.sort) {
                 (true, false) => partition_fields.push((ident.clone(), field_attrs.ty.clone())),
@@ -82,6 +85,14 @@ pub fn derive_shoal_sorted_table(stream: TokenStream) -> TokenStream {
     traits::from_shoal::add(&mut output, name, &client_name, &response_name);
     traits::rkyv::add(&mut output, name);
     traits::partition_key::add(&mut output, name, &partition_fields);
+    traits::table_schema::add(
+        &mut output,
+        name,
+        &all_fields,
+        &partition_fields,
+        &sort_fields,
+        &filter_fields,
+    );
     //traits::from_query::add_sorted(&mut output, name, &query_name);
     // generate the Filter and Update structs
     structs::filter::add(&mut output, name, &filter_fields);
@@ -120,6 +131,7 @@ pub fn derive_shoal_unsorted_table(stream: TokenStream) -> TokenStream {
         _ => panic!("ShoalTable requires named fields"),
     };
     // instance vecs to store our partition, filter, and update keys
+    let mut all_fields = Vec::default();
     let mut partition_fields = Vec::default();
     let mut filter_fields = Vec::default();
     let mut update_fields = Vec::default();
@@ -128,6 +140,8 @@ pub fn derive_shoal_unsorted_table(stream: TokenStream) -> TokenStream {
         // parse our field attributes
         let field_attrs = ShoalField::from_field(field).expect("Failed to parse field attributes");
         if let Some(ident) = field_attrs.ident.clone() {
+            // collect all fields for schema support
+            all_fields.push((ident.clone(), field_attrs.ty.clone()));
             // check if this is a partition or a sort key
             match (field_attrs.partition, field_attrs.sort) {
                 (true, false) => partition_fields.push((ident.clone(), field_attrs.ty.clone())),
@@ -165,6 +179,14 @@ pub fn derive_shoal_unsorted_table(stream: TokenStream) -> TokenStream {
     traits::from_shoal::add(&mut output, name, &client_name, &response_name);
     traits::rkyv::add(&mut output, name);
     traits::partition_key::add(&mut output, name, &partition_fields);
+    traits::table_schema::add(
+        &mut output,
+        name,
+        &all_fields,
+        &partition_fields,
+        &[],  // unsorted tables have no sort fields
+        &filter_fields,
+    );
     // generate the Filter and Update structs
     structs::filter::add(&mut output, name, &filter_fields);
     structs::get::add_unsorted(&mut output, name, &partition_fields);
@@ -216,7 +238,7 @@ pub fn derive_shoal_db(stream: TokenStream) -> TokenStream {
                     // add ShoalDatabase support to our root struct
                     traits::db::add(&mut output, struct_ident, fields, &variants);
                     // add our client
-                    structs::client::add(&mut output, struct_ident, &variants);
+                    structs::client::add(&mut output, struct_ident, fields);
                     // add our query kinds and response kinds enums with trait impls
                     structs::query_kinds::add(&mut output, struct_ident, fields);
                     // add our query conversion traits

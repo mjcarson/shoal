@@ -44,36 +44,72 @@ pub enum Errors {
 pub struct ShqlParseError {
     /// The error message describing what went wrong
     pub message: String,
-    /// The position in the input where the error occurred
-    pub position: usize,
+    /// The start position in the input where the error occurred
+    pub start: usize,
+    /// The end position in the input where the error occurred
+    pub end: usize,
     /// The input string that was being parsed
     pub input: String,
 }
 
 impl ShqlParseError {
-    /// Create a new SHQL parse error
+    /// Create a new SHQL parse error with a position range
     ///
     /// # Arguments
     ///
     /// * `message` - The error message
-    /// * `position` - The position in the input where the error occurred
+    /// * `start` - The start position in the input where the error occurred
+    /// * `end` - The end position in the input where the error occurred
     /// * `input` - The input string being parsed
-    pub fn new(message: impl Into<String>, position: usize, input: impl Into<String>) -> Self {
+    pub fn new(
+        message: impl Into<String>,
+        start: usize,
+        end: usize,
+        input: impl Into<String>,
+    ) -> Self {
         ShqlParseError {
             message: message.into(),
-            position,
+            start,
+            end,
             input: input.into(),
+        }
+    }
+
+    /// Create a new SHQL parse error with a single position (end defaults to end of input)
+    pub fn at_position(
+        message: impl Into<String>,
+        position: usize,
+        input: impl Into<String>,
+    ) -> Self {
+        let input_str = input.into();
+        let end = input_str.len();
+        ShqlParseError {
+            message: message.into(),
+            start: position,
+            end,
+            input: input_str,
         }
     }
 }
 
 impl std::fmt::Display for ShqlParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "SHQL parse error at position {}: {}",
-            self.position, self.message
-        )
+        if self.start == self.end {
+            write!(
+                f,
+                "SHQL parse error at position {}: {}",
+                self.start, self.message
+            )
+        } else {
+            write!(
+                f,
+                "SHQL parse error at positions {}-{}: {}\n  {}",
+                self.start,
+                self.end,
+                self.message,
+                &self.input[self.start..self.end]
+            )
+        }
     }
 }
 

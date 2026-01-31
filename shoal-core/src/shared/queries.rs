@@ -4,8 +4,11 @@ use rkyv::{Archive, Deserialize, Serialize};
 use tracing::instrument;
 use uuid::Uuid;
 
+pub mod parser;
 mod sorted;
 mod unsorted;
+
+use crate::client::ShqlParseError;
 
 use super::traits::{QuerySupport, RkyvSupport};
 
@@ -62,6 +65,23 @@ impl<S: QuerySupport> Queries<S> {
     {
         self.queries.extend(queries.into_iter().map(Into::into));
         self
+    }
+
+    /// Add a query by parsing a query string
+    ///
+    /// This only works for select queries and is only recommended to be
+    /// used if build the get queries directly is not possible.
+    ///
+    /// # Arguments
+    ///
+    /// * `query` - The query to string to parse and add
+    #[must_use]
+    pub fn parse(mut self, query: &str) -> Result<Self, ShqlParseError> {
+        // try to parse this query string
+        let parsed = S::parse(query)?;
+        // add our parsed query
+        self.queries.push(parsed);
+        Ok(self)
     }
 
     /// Load our queries

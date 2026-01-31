@@ -520,6 +520,22 @@ impl MovieController {
             println!("Inserted: {}", self.inserted.load(Ordering::Relaxed));
             println!("Retrieved: {}", self.retrieved.load(Ordering::Relaxed));
         }
+        // query this db manually
+        let query = self
+            .shoal
+            .query()
+            .parse("select * from MovieByKeyword where keyword = 'alien'")
+            .unwrap();
+        // try to execute this query
+        let mut response = self.shoal.send(query).await.unwrap();
+        // keep getting rows in response
+        while let Some(row) = response.next().await.unwrap() {
+            // access this rows data
+            match row.access::<MovieByKeyword>().unwrap() {
+                Some(row) => println!("row: {row:#?}"),
+                None => println!("missing row?"),
+            }
+        }
     }
 
     /// Shutdown our controller and its workers

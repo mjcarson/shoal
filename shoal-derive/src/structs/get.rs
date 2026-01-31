@@ -179,6 +179,16 @@ pub fn add_sorted(
                 self.filters = Some(filters);
                 self
             }
+
+            /// Set the max number of rows to retrieve
+            ///
+            /// # Arguments
+            ///
+            /// * `limit` - The max number of rows to return
+            pub fn limit(mut self, limit: usize) -> Self {
+                self.limit = Some(limit);
+                self
+            }
         }
     });
 }

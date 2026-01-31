@@ -9,6 +9,8 @@ pub use client::FromShoal;
 pub use gxhash;
 pub use lru;
 pub use rkyv;
+pub use serde;
+pub use serde_json;
 pub use server::tables;
 pub use server::tables::storage;
 pub use server::ShoalPool;
