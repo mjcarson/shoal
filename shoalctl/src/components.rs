@@ -3,12 +3,10 @@
 //! This module contains reusable UI components that can be rendered
 //! to the terminal frame.
 
-mod query_input;
+mod help_overlay;
 mod status_bar;
-mod tab_content;
-mod tabs;
+mod tab;
 
-pub use query_input::QueryInput;
+pub use help_overlay::HelpOverlay;
 pub use status_bar::StatusBar;
-pub use tab_content::TabContent;
-pub use tabs::Tabs;
+pub use tab::{Tab, TabContent, TabQueryBar, TabSelector, TabState};

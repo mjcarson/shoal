@@ -5,12 +5,13 @@
 
 use ratatui::{
     Frame,
-    layout::{Alignment, Rect},
+    layout::Rect,
     style::{Color, Style},
     widgets::{Block, Borders, Paragraph},
 };
+use shoal::traits::QuerySupport;
 
-use crate::app::Tab;
+use super::Tab;
 
 /// The content area component
 ///
@@ -29,26 +30,34 @@ impl TabContent {
 
     /// Render the content area to the frame
     ///
-    /// Displays the label of the currently selected tab centered
-    /// in a bordered box.
+    /// Displays the content of the currently selected tab.
+    /// Shows a placeholder message if no tab is selected or content is empty.
     ///
     /// # Arguments
     ///
     /// * `frame` - The frame to render to
     /// * `area` - The area to render the content in
     /// * `selected` - The currently selected tab, or None if no tabs exist
-    pub fn render(&self, frame: &mut Frame, area: Rect, selected: Option<&Tab>) {
-        // get the label to display, or a placeholder if no tab is selected
-        let label = selected.map(|t| t.label.as_str()).unwrap_or("No tab selected");
-        // build a paragraph with the selected tab's label
-        let content = Paragraph::new(label)
+    pub fn render<Q: QuerySupport + Send + Sync>(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        selected: Option<&Tab<Q>>,
+    ) {
+        // get the content to display
+        let text = match selected {
+            Some(tab) if !tab.content.is_empty() => tab.content.as_str(),
+            Some(_) => "Enter a query and press Enter to see results",
+            None => "No tab selected",
+        };
+        // build a paragraph with the tab's content
+        let content = Paragraph::new(text)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title("Content")
+                    .title("Results")
                     .border_style(Style::default().fg(Color::Cyan)),
             )
-            .alignment(Alignment::Center)
             .style(Style::default().fg(Color::White));
         // render the content widget
         frame.render_widget(content, area);

@@ -3,11 +3,33 @@
 //! This module contains the core application struct that manages tabs,
 //! handles user input, and coordinates rendering of all components.
 
-use crossterm::event::{Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind};
-use ratatui::Frame;
+use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, MouseButton, MouseEventKind};
+use futures::StreamExt;
+use kanal::{AsyncReceiver, AsyncSender};
+use ratatui::{DefaultTerminal, Frame};
+use shoal::client::{Errors, Shoal, ShoalResponse};
+use shoal::traits::QuerySupport;
+use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::components::{QueryInput, StatusBar, TabContent, Tabs};
+use crate::AppEvent;
+use crate::components::{HelpOverlay, StatusBar, TabContent, TabQueryBar, TabSelector, TabState};
+
+/// A request to execute a query
+pub struct QueryRequest<S: QuerySupport> {
+    /// The tab ID to send results to
+    pub tab_id: Uuid,
+    /// The parsed query to execute
+    pub query: S::QueryKinds,
+}
+
+/// The result of a query execution
+pub enum QueryResult<S: QuerySupport> {
+    /// A response from a query
+    Response(ShoalResponse<S>),
+    /// Query failed with an error
+    Error(Errors),
+}
 
 /// The current mode of the application
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,98 +40,106 @@ pub enum Mode {
     Insert,
 }
 
-/// A single tab in the application
-#[derive(Debug, Clone)]
-pub struct Tab {
-    /// The unique identifier for this tab
-    pub id: Uuid,
-    /// The display label for this tab
-    pub label: String,
-}
-
-impl Tab {
-    /// Create a new tab with a generated UUID and the given label
-    ///
-    /// # Arguments
-    ///
-    /// * `label` - The display label for this tab
-    ///
-    /// # Returns
-    ///
-    /// A new Tab instance with a unique UUID
-    pub fn new(label: String) -> Self {
-        Self {
-            id: Uuid::new_v4(),
-            label,
+/// Background task that forwards terminal events to the central event channel
+async fn terminal_event_forwarder<S: QuerySupport>(event_tx: AsyncSender<AppEvent<S>>) {
+    let mut event_stream = EventStream::new();
+    while let Some(event_result) = event_stream.next().await {
+        match event_result {
+            Ok(event) => {
+                if event_tx.send(AppEvent::Terminal(event)).await.is_err() {
+                    // Channel closed, stop forwarding
+                    break;
+                }
+            }
+            Err(_) => {
+                // Terminal event error, continue trying
+                continue;
+            }
         }
     }
 }
 
-/// The main application state
-pub struct App {
+/// The main application state, generic over the database client type
+pub struct App<Q: QuerySupport + Send + Sync> {
+    /// A client to shoal
+    shoal: Arc<Shoal<Q>>,
+    /// A channel to send App events over
+    app_tx: AsyncSender<AppEvent<Q>>,
+    /// A channel to receive App events over
+    app_rx: AsyncReceiver<AppEvent<Q>>,
     /// The current mode of the application
     pub mode: Mode,
-    /// The list of all tabs
-    pub tabs: Vec<Tab>,
-    /// The index of the currently selected tab
-    pub selected_index: usize,
-    /// Whether the application should quit on the next loop iteration
-    pub should_quit: bool,
-    /// The current query text in the input box
-    pub query: String,
-    /// The cursor position within the query text
-    pub query_cursor: usize,
+    /// The state for all tabs
+    pub tabs: TabState<Q>,
+    /// The area of the query input for click detection
+    query_area: Option<ratatui::layout::Rect>,
+    /// Whether the query input box is focused
+    pub query_focused: bool,
     /// Counter for generating tab labels
     tab_counter: usize,
     /// The tabs component for rendering the tab bar
-    tabs_component: Tabs,
+    tabs_component: TabSelector,
     /// The content component for rendering the tab content area
     content_component: TabContent,
     /// The status bar component for rendering the mode indicator
     status_bar: StatusBar,
     /// The query input component for entering queries
-    query_input: QueryInput,
+    query_input: TabQueryBar,
+    /// The help overlay component for displaying shortcuts
+    help_overlay: HelpOverlay,
+    /// Whether shortcut mode is active (triggered by spacebar)
+    shortcut_mode_active: bool,
+    /// Whether the user has asked shoalctl to exit
+    should_quit: bool,
 }
 
-impl App {
+impl<Q: QuerySupport + Sync + Send> App<Q>
+where
+    for<'a> <<Q as QuerySupport>::ResponseKinds as rkyv::Archive>::Archived:
+        rkyv::bytecheck::CheckBytes<
+                rkyv::rancor::Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'a>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            >,
+    <<Q as QuerySupport>::ResponseKinds as rkyv::Archive>::Archived: rkyv::Deserialize<
+            <Q as QuerySupport>::ResponseKinds,
+            rkyv::rancor::Strategy<rkyv::de::Pool, rkyv::rancor::Error>,
+        >,
+    <<Q as QuerySupport>::ResponseKinds as rkyv::Archive>::Archived: std::marker::Send,
+{
     /// Create a new application instance
     ///
     /// Initializes the app with the default tabs and all components
     /// in their default state. Starts in Normal mode.
     ///
-    /// # Returns
+    /// # Arguments
     ///
-    /// A new App instance ready to run
-    pub fn new() -> Self {
-        // create the initial tabs
-        let tabs = vec![
-            Tab::new("one".to_string()),
-            Tab::new("two".to_string()),
-            Tab::new("woot".to_string()),
-        ];
-
+    /// * `query_tx` - Channel to send query requests to the background executor
+    pub fn new(shoal: Arc<Shoal<Q>>) -> Self {
+        // create the channel for app events we need to handle
+        let (app_tx, app_rx) = kanal::unbounded_async::<AppEvent<Q>>();
+        // create our app
         Self {
+            shoal,
+            app_tx,
+            app_rx,
             mode: Mode::Normal,
-            tabs,
-            selected_index: 0,
-            should_quit: false,
-            query: String::new(),
-            query_cursor: 0,
-            tab_counter: 3,
-            tabs_component: Tabs::new(),
+            tabs: TabState::default(),
+            query_area: None,
+            query_focused: true,
+            tab_counter: 1,
+            tabs_component: TabSelector::new(),
             content_component: TabContent::new(),
             status_bar: StatusBar::new(),
-            query_input: QueryInput::new(),
+            query_input: TabQueryBar::new(),
+            help_overlay: HelpOverlay::new(),
+            shortcut_mode_active: false,
+            should_quit: false,
         }
-    }
-
-    /// Get the currently selected tab
-    ///
-    /// # Returns
-    ///
-    /// A reference to the currently selected tab, or None if no tabs exist
-    pub fn selected_tab(&self) -> Option<&Tab> {
-        self.tabs.get(self.selected_index)
     }
 
     /// Handle an incoming terminal event
@@ -119,11 +149,11 @@ impl App {
     /// # Arguments
     ///
     /// * `event` - The terminal event to process
-    pub fn handle_event(&mut self, event: Event) {
+    pub async fn handle_event(&mut self, event: Event) {
         match event {
             // handle key press events
             Event::Key(key) if key.kind == KeyEventKind::Press => {
-                self.handle_key(key.code);
+                self.handle_key(key.code).await;
             }
             // handle mouse click events (work in any mode)
             Event::Mouse(mouse) => {
@@ -139,135 +169,164 @@ impl App {
 
     /// Handle a key press event
     ///
-    /// Key behavior depends on the current mode. Mode switching keys
-    /// work in any mode, but shortcuts only work in Normal mode.
+    /// When the query box is focused, all typing goes to the query.
+    /// When unfocused, key behavior depends on the current mode.
+    /// Escape always switches from Insert to Normal mode or exits shortcut mode.
     ///
     /// # Arguments
     ///
     /// * `code` - The key code that was pressed
-    fn handle_key(&mut self, code: KeyCode) {
-        match self.mode {
-            Mode::Normal => self.handle_normal_mode_key(code),
-            Mode::Insert => self.handle_insert_mode_key(code),
+    async fn handle_key(&mut self, code: KeyCode) {
+        // if the escape key was hit then revert to normal mode or minimize the help window
+        if code == KeyCode::Esc {
+            // check if we need to minimize the shortcut help window
+            if self.shortcut_mode_active {
+                // minimize the shortcut help window
+                self.shortcut_mode_active = false;
+                // we only exit one thing at a time
+                return;
+            }
+            // check if we need to revert back to normal mode
+            if self.mode == Mode::Insert {
+                // revert back to normal mode
+                self.mode = Mode::Normal;
+                // we only exit one thing at a time
+                return;
+            }
+        }
+        // ff shortcut mode is active, handle shortcut keys
+        if self.shortcut_mode_active {
+            // try to process this shortcut
+            self.handle_shortcut_mode_key(code);
+            // if were in shortcut mode we don't also want to type or do other things
+            return;
+        }
+        // If the query box is focused, handle input for the query
+        if self.query_focused {
+            self.tabs
+                .handle_query_input(code, &self.shoal, &mut self.app_tx)
+                .await;
+        } else {
+            // Query not focused, use mode-based handling
+            match self.mode {
+                Mode::Normal => self.handle_normal_mode_key(code),
+                Mode::Insert => self.handle_insert_mode_key(code),
+            }
         }
     }
 
-    /// Handle a key press in Normal mode
+    /// Handle a key press in Normal mode (when query is not focused)
     ///
     /// # Arguments
     ///
     /// * `code` - The key code that was pressed
     fn handle_normal_mode_key(&mut self, code: KeyCode) {
         match code {
+            // activate shortcut mode
+            KeyCode::Char(' ') => self.shortcut_mode_active = true,
             // switch to insert mode
             KeyCode::Char('i') => self.mode = Mode::Insert,
             // quit the application
             KeyCode::Char('q') => self.should_quit = true,
-            // move to the next tab
-            KeyCode::Tab => self.next_tab(),
-            // move to the previous tab
-            KeyCode::BackTab => self.prev_tab(),
+            //// move to the next tab
+            //KeyCode::Tab => self.next_tab(),
+            //// move to the previous tab
+            //KeyCode::BackTab => self.prev_tab(),
             // add a new tab
-            KeyCode::Char('+') | KeyCode::Char('=') | KeyCode::Char('n') => self.add_tab(),
+            KeyCode::Char('+') | KeyCode::Char('=') | KeyCode::Char('n') => self.tabs.add_tab(),
             // close the current tab
-            KeyCode::Char('-') => self.close_current_tab(),
-            // query input: type characters
-            KeyCode::Char(c) => self.insert_char(c),
-            // query input: delete character before cursor
-            KeyCode::Backspace => self.delete_char_before(),
-            // query input: delete character at cursor
-            KeyCode::Delete => self.delete_char_at(),
-            // query input: move cursor left
-            KeyCode::Left => self.move_cursor_left(),
-            // query input: move cursor right
-            KeyCode::Right => self.move_cursor_right(),
-            // query input: move cursor to start
-            KeyCode::Home => self.query_cursor = 0,
-            // query input: move cursor to end
-            KeyCode::End => self.query_cursor = self.query.len(),
-            // submit query with Enter
-            KeyCode::Enter => self.submit_query(),
+            KeyCode::Char('-') => {
+                // close our currently active tab
+                if self.tabs.close_active_tab() {
+                    // we have no more tabs so exit
+                    self.should_quit = true;
+                }
+            }
             // ignore all other keys
             _ => {}
         }
     }
 
-    /// Handle a key press in Insert mode
+    /// Handle a key press in shortcut mode
+    ///
+    /// Shortcut mode is activated by pressing spacebar in normal mode.
+    /// Available shortcuts:
+    /// - q: Focus the query box
+    /// - w: Clear the query box
+    /// - t: Create a new tab
+    /// - p: Close the current tab
+    ///
+    /// # Arguments
+    ///
+    /// * `code` - The key code that was pressed
+    fn handle_shortcut_mode_key(&mut self, code: KeyCode) {
+        // Always exit shortcut mode after handling a key
+        self.shortcut_mode_active = false;
+
+        match code {
+            // focus the query box
+            KeyCode::Char('q') => self.query_focused = true,
+            // clear the query box
+            KeyCode::Char('w') => self.tabs.clear_query(),
+            // create a new tab
+            //KeyCode::Char('t') => self.add_tab(),
+            // close the current tab
+            KeyCode::Char('p') => {
+                // close our currently active tab
+                if self.tabs.close_active_tab() {
+                    // we have no more tabs so exit
+                    self.should_quit = true;
+                }
+            }
+            // any other key just exits shortcut mode (already done above)
+            _ => {}
+        }
+    }
+
+    /// Handle a key press in Insert mode (when query is not focused)
+    ///
+    /// In Insert mode without query focus, this will be used for editing
+    /// table rows in the future.
     ///
     /// # Arguments
     ///
     /// * `code` - The key code that was pressed
     fn handle_insert_mode_key(&mut self, code: KeyCode) {
         match code {
-            // switch back to normal mode
-            KeyCode::Esc => self.mode = Mode::Normal,
-            // query input: type characters
-            KeyCode::Char(c) => self.insert_char(c),
-            // query input: delete character before cursor
-            KeyCode::Backspace => self.delete_char_before(),
-            // query input: delete character at cursor
-            KeyCode::Delete => self.delete_char_at(),
-            // query input: move cursor left
-            KeyCode::Left => self.move_cursor_left(),
-            // query input: move cursor right
-            KeyCode::Right => self.move_cursor_right(),
-            // query input: move cursor to start
-            KeyCode::Home => self.query_cursor = 0,
-            // query input: move cursor to end
-            KeyCode::End => self.query_cursor = self.query.len(),
-            // submit query with Enter
-            KeyCode::Enter => self.submit_query(),
-            // ignore all other keys
+            // TODO: Handle insert mode for editing rows
+            // For now, just handle tab switching
+            //KeyCode::Tab => self.next_tab(),
+            //KeyCode::BackTab => self.prev_tab(),
+            // ignore all other keys for now
             _ => {}
         }
     }
 
-    /// Insert a character at the current cursor position
-    fn insert_char(&mut self, c: char) {
-        self.query.insert(self.query_cursor, c);
-        self.query_cursor += 1;
-    }
-
-    /// Delete the character before the cursor (backspace)
-    fn delete_char_before(&mut self) {
-        if self.query_cursor > 0 {
-            self.query_cursor -= 1;
-            self.query.remove(self.query_cursor);
-        }
-    }
-
-    /// Delete the character at the cursor (delete)
-    fn delete_char_at(&mut self) {
-        if self.query_cursor < self.query.len() {
-            self.query.remove(self.query_cursor);
-        }
-    }
-
-    /// Move the cursor left
-    fn move_cursor_left(&mut self) {
-        if self.query_cursor > 0 {
-            self.query_cursor -= 1;
-        }
-    }
-
-    /// Move the cursor right
-    fn move_cursor_right(&mut self) {
-        if self.query_cursor < self.query.len() {
-            self.query_cursor += 1;
-        }
-    }
-
-    /// Submit the current query
-    fn submit_query(&mut self) {
-        // TODO: Actually submit the query to the server
-        // For now, just clear the input
-        self.query.clear();
-        self.query_cursor = 0;
+    /// Handle a single query result
+    ///
+    /// Called by the main event loop when a query result is received.
+    pub fn handle_result(&mut self, tab_id: Uuid, result: QueryResult<Q>) {
+        //match result {
+        //    QueryResult::Response(response) => {
+        //        if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
+        //            // Format the response and append to content
+        //            let row_str = format!("{:?}", response);
+        //            // update our content
+        //            tab.content = row_str;
+        //        }
+        //    }
+        //    QueryResult::Error(error) => {
+        //        if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
+        //            tab.content = format!("Error: {:#?}", error);
+        //        }
+        //    }
+        //}
     }
 
     /// Handle a mouse click event
     ///
-    /// Checks if the click is on a tab or the add button and handles accordingly.
+    /// Checks if the click is on a tab, the add button, or the query box.
+    /// Clicking on the query box focuses it, clicking elsewhere unfocuses it.
     /// Mouse clicks work in any mode.
     ///
     /// # Arguments
@@ -275,66 +334,29 @@ impl App {
     /// * `x` - The column position of the click
     /// * `y` - The row position of the click
     fn handle_click(&mut self, x: u16, y: u16) {
-        // check if the click was on the add button
-        if self.tabs_component.is_add_button_clicked(x, y) {
-            self.add_tab();
-            return;
-        }
-        // check if the click was on a tab
-        if let Some(index) = self.tabs_component.tab_index_at_position(x, y) {
-            if index < self.tabs.len() {
-                self.selected_index = index;
+        // Check if the click was on the query input area
+        if let Some(query_area) = self.query_area {
+            if x >= query_area.x
+                && x < query_area.x + query_area.width
+                && y >= query_area.y
+                && y < query_area.y + query_area.height
+            {
+                self.query_focused = true;
+                return;
             }
         }
-    }
+        // Click was outside the query box, unfocus it
+        self.query_focused = false;
 
-    /// Add a new tab to the application
-    fn add_tab(&mut self) {
-        // increment counter and generate a label for the new tab
-        self.tab_counter += 1;
-        let label = format!("tab {}", self.tab_counter);
-        let tab = Tab::new(label);
-        self.tabs.push(tab);
-        // select the newly created tab
-        self.selected_index = self.tabs.len() - 1;
-    }
-
-    /// Close the currently selected tab
-    fn close_current_tab(&mut self) {
-        // don't close if there's only one tab
-        if self.tabs.len() <= 1 {
-            return;
+        //// check if the click was on the add button
+        //if self.tabs_component.is_add_button_clicked(x, y) {
+        //    self.add_tab();
+        //    return;
+        //}
+        // check if the click was on a tab
+        if let Some(new) = self.tabs_component.tab_index_at_position(x, y) {
+            self.tabs.set_active(new);
         }
-        // remove the current tab
-        self.tabs.remove(self.selected_index);
-        // adjust the selected index if needed
-        if self.selected_index >= self.tabs.len() {
-            self.selected_index = self.tabs.len() - 1;
-        }
-    }
-
-    /// Move to the next tab in the tab order
-    ///
-    /// Wraps around from the last tab to the first.
-    fn next_tab(&mut self) {
-        if self.tabs.is_empty() {
-            return;
-        }
-        self.selected_index = (self.selected_index + 1) % self.tabs.len();
-    }
-
-    /// Move to the previous tab in the tab order
-    ///
-    /// Wraps around from the first tab to the last.
-    fn prev_tab(&mut self) {
-        if self.tabs.is_empty() {
-            return;
-        }
-        self.selected_index = if self.selected_index == 0 {
-            self.tabs.len() - 1
-        } else {
-            self.selected_index - 1
-        };
     }
 
     /// Render the application to the terminal
@@ -350,23 +372,59 @@ impl App {
 
         // split the frame into four vertical chunks: tabs, content, query input, and status bar
         let chunks = Layout::vertical([
-            Constraint::Length(3),  // tabs
-            Constraint::Min(0),     // content
-            Constraint::Length(3),  // query input
-            Constraint::Length(2),  // status bar
+            Constraint::Length(3), // tabs
+            Constraint::Min(0),    // content
+            Constraint::Length(3), // query input
+            Constraint::Length(2), // status bar
         ])
         .split(frame.area());
-
+        // Store the query area for click detection
+        self.query_area = Some(chunks[2]);
         // render the tab bar in the top chunk
-        self.tabs_component
-            .render(frame, chunks[0], &self.tabs, self.selected_index);
+        self.tabs_component.render(frame, chunks[0], &self.tabs);
+        // get our currently active tab
+        let active_tab = self.tabs.get_active();
         // render the content area in the middle chunk
-        self.content_component
-            .render(frame, chunks[1], self.selected_tab());
-        // render the query input (always focused since it accepts input in both modes)
+        self.content_component.render(frame, chunks[1], active_tab);
+        // render the query input (focused state determines border color)
         self.query_input
-            .render(frame, chunks[2], &self.query, self.query_cursor, true);
+            .render(frame, chunks[2], active_tab, self.query_focused);
         // render the status bar in the bottom chunk
         self.status_bar.render(frame, chunks[3], self.mode);
+
+        // render the help overlay if shortcut mode is active
+        if self.shortcut_mode_active {
+            self.help_overlay.render(frame, frame.area());
+        }
+    }
+
+    /// Start handling events and updating our tui
+    pub async fn start(&mut self, terminal: &mut DefaultTerminal) -> std::io::Result<()> {
+        // Spawn the terminal event forwarder (sends terminal events to event channel)
+        tokio::spawn(terminal_event_forwarder(self.app_tx.clone()));
+        // draw an initial frame until we get an event to handle
+        terminal.draw(|frame| self.render(frame))?;
+        // keep handling events until we get an exit event
+        while !self.should_quit {
+            match self.app_rx.recv().await {
+                Ok(event) => {
+                    match event {
+                        AppEvent::Terminal(terminal_event) => {
+                            self.handle_event(terminal_event).await;
+                        }
+                        AppEvent::QueryResult { tab_id, result } => {
+                            self.handle_result(tab_id, result);
+                        }
+                    }
+                    // Redraw after handling any event
+                    terminal.draw(|frame| self.render(frame))?;
+                }
+                Err(_) => {
+                    // Channel closed, exit
+                    break;
+                }
+            }
+        }
+        Ok(())
     }
 }

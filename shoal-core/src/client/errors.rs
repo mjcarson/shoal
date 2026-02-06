@@ -37,6 +37,19 @@ pub enum Errors {
     StreamAlreadyTerminated,
     /// An error parsing a SHQL query string
     ShqlParse(ShqlParseError),
+    /// A shoalctl error
+    Shoalctl(String),
+}
+
+impl Errors {
+    /// Create a new shoalctl error
+    ///
+    /// # Arguments
+    ///
+    /// * `msg` - The message to set
+    pub fn shoalctl<M: Into<String>>(msg: M) -> Self {
+        Errors::Shoalctl(msg.into())
+    }
 }
 
 /// An error that occurred while parsing a SHQL query string

@@ -67,7 +67,10 @@ impl<S: ShoalDatabase> Comms<S> {
         shard: usize,
     ) -> (AsyncSender<ServerMsg<S>>, AsyncReceiver<ServerMsg<S>>) {
         // get this shards channel
-        self.shards.get(shard).unwrap().clone()
+        match self.shards.get(shard) {
+            Some((tx, rx)) => (tx.clone(), rx.clone()),
+            None => panic!("Missing channels for {shard}!"),
+        }
     }
 
     /// Broadcast a message to all shards

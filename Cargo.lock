@@ -3412,8 +3412,15 @@ version = "0.1.0"
 dependencies = [
  "color-eyre",
  "crossterm",
+ "deepsize2",
  "futures",
+ "glommio",
+ "kanal",
  "ratatui",
+ "rkyv 0.8.12",
+ "serde",
+ "shoal",
+ "shoal-core",
  "tokio",
  "uuid",
 ]

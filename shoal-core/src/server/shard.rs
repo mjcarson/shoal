@@ -679,7 +679,7 @@ where
 {
     // build our comms object for this nodes shards
     // we will have one shard per core
-    let comms = Comms::<S>::with_capacity(16);
+    let comms = Comms::<S>::with_capacity(cpus.len());
     // An atomic bool used to signal that shards should exit
     let should_shutdown = Arc::new(AtomicBool::new(false));
     // setup our executor

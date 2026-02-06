@@ -599,7 +599,12 @@ fn main() {
         .unwrap();
     // read and insert our csv
     runtime.block_on(read_csv());
-    // wait for our db to exit
+    // wait for input before exiting
+    let mut input_text = String::new();
+    std::io::stdin()
+        .read_line(&mut input_text) // `read_line` returns a `Result` which needs handling
+        .expect("Failed to read line"); // Handle potential errors
+                                        // wait for our db to exit
     pool.exit().unwrap();
     // shutdown our tracer
     shoal_core::server::trace::shutdown(provider);
