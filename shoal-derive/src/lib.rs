@@ -93,6 +93,7 @@ pub fn derive_shoal_sorted_table(stream: TokenStream) -> TokenStream {
         &sort_fields,
         &filter_fields,
     );
+    traits::table_row_format::add(&mut output, name, &all_fields);
     //traits::from_query::add_sorted(&mut output, name, &query_name);
     // generate the Filter and Update structs
     structs::filter::add(&mut output, name, &filter_fields);
@@ -187,6 +188,7 @@ pub fn derive_shoal_unsorted_table(stream: TokenStream) -> TokenStream {
         &[],  // unsorted tables have no sort fields
         &filter_fields,
     );
+    traits::table_row_format::add(&mut output, name, &all_fields);
     // generate the Filter and Update structs
     structs::filter::add(&mut output, name, &filter_fields);
     structs::get::add_unsorted(&mut output, name, &partition_fields);

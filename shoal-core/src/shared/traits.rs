@@ -126,6 +126,9 @@ pub trait QuerySupport: 'static + Sized {
     /// The different tables we can get responses from
     type ResponseKinds: ShoalResponseSupport;
 
+    /// The different tables in this database
+    type TableNames: TableNameSupport;
+
     /// Make sure queries have succeeded based on some critiera
     ///
     /// # Arguments
@@ -172,6 +175,30 @@ pub trait QuerySupport: 'static + Sized {
     ///
     /// * `query` - The SHQL query string to parse
     fn parse(query: &str) -> Result<Self::QueryKinds, ShqlParseError>;
+
+    /// Get the table name from a query
+    ///
+    /// # Arguments
+    ///
+    /// * `query` - The query to get the table name for
+    fn query_table_name(query: &Self::QueryKinds) -> Self::TableNames;
+
+    /// Get the table name from an archived response
+    ///
+    /// # Arguments
+    ///
+    /// * `archived` - The archived response to get the table name for
+    fn response_table_name(
+        archived: &<Self::ResponseKinds as Archive>::Archived,
+    ) -> Self::TableNames;
+
+    /// Format an archived response into column headers and row values
+    ///
+    /// Returns `Some((headers, rows))` for Get responses with data,
+    /// `None` for non-Get responses or empty results.
+    fn format_response(
+        archived: &<Self::ResponseKinds as Archive>::Archived,
+    ) -> Option<(Vec<&'static str>, Vec<Vec<String>>)>;
 }
 
 pub trait TableNameSupport:
@@ -344,6 +371,18 @@ pub trait TableSchemaSupport {
 
     /// Get all valid field names
     fn field_names() -> Vec<&'static str>;
+}
+
+/// Support for formatting table rows as displayable strings
+///
+/// This trait is implemented for archived table types to enable
+/// formatting query results as ASCII tables.
+pub trait TableRowFormat {
+    /// Get the column headers for this table
+    fn headers() -> Vec<&'static str>;
+
+    /// Convert this row's field values to strings for display
+    fn row_values(&self) -> Vec<String>;
 }
 
 /// The core traits that all tables require

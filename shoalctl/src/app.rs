@@ -15,12 +15,68 @@ use uuid::Uuid;
 use crate::AppEvent;
 use crate::components::{HelpOverlay, StatusBar, TabContent, TabQueryBar, TabSelector, TabState};
 
-/// A request to execute a query
-pub struct QueryRequest<S: QuerySupport> {
-    /// The tab ID to send results to
-    pub tab_id: Uuid,
-    /// The parsed query to execute
-    pub query: S::QueryKinds,
+/// Format column headers and row data as an ASCII table
+///
+/// Produces output like:
+/// ```text
+/// +----+----------+---------+
+/// | #  | Keyword  | Title   |
+/// +----+----------+---------+
+/// | 1  | alien    | Dune    |
+/// +----+----------+---------+
+/// | 2  | alien    | Zeta    |
+/// +----+----------+---------+
+/// ```
+fn format_ascii_table(headers: &[&str], rows: &[Vec<String>]) -> String {
+    // calculate column widths: first column is the row number
+    let row_count_width = if rows.is_empty() {
+        1
+    } else {
+        rows.len().to_string().len()
+    };
+    let num_col_width = std::cmp::max(1, row_count_width);
+    // calculate the width for each data column
+    let col_widths: Vec<usize> = headers
+        .iter()
+        .enumerate()
+        .map(|(i, header)| {
+            let max_data = rows.iter().map(|row| row[i].len()).max().unwrap_or(0);
+            std::cmp::max(header.len(), max_data)
+        })
+        .collect();
+    // build the separator line
+    let mut separator = String::from("+");
+    separator.push_str(&format!("-{}-+", "-".repeat(num_col_width)));
+    for width in &col_widths {
+        separator.push_str(&format!("-{}-+", "-".repeat(*width)));
+    }
+    // build the header row
+    let mut header_row = String::from("|");
+    header_row.push_str(&format!(" {:<width$} |", "#", width = num_col_width));
+    for (i, header) in headers.iter().enumerate() {
+        header_row.push_str(&format!(" {:<width$} |", header, width = col_widths[i]));
+    }
+    // build the output
+    let mut output = String::new();
+    output.push_str(&separator);
+    output.push('\n');
+    output.push_str(&header_row);
+    output.push('\n');
+    output.push_str(&separator);
+    output.push('\n');
+    // add each data row
+    for (row_idx, row) in rows.iter().enumerate() {
+        let mut row_str = String::from("|");
+        row_str.push_str(&format!(" {:<width$} |", row_idx + 1, width = num_col_width));
+        for (col_idx, value) in row.iter().enumerate() {
+            row_str.push_str(&format!(" {:<width$} |", value, width = col_widths[col_idx]));
+        }
+        output.push_str(&row_str);
+        output.push('\n');
+        output.push_str(&separator);
+        output.push('\n');
+    }
+    output
 }
 
 /// The result of a query execution
@@ -59,24 +115,22 @@ async fn terminal_event_forwarder<S: QuerySupport>(event_tx: AsyncSender<AppEven
     }
 }
 
-/// The main application state, generic over the database client type
-pub struct App<Q: QuerySupport + Send + Sync> {
+/// The main application state, generic over the client type
+pub struct App<S: QuerySupport + Send + Sync> {
     /// A client to shoal
-    shoal: Arc<Shoal<Q>>,
+    shoal: Arc<Shoal<S>>,
     /// A channel to send App events over
-    app_tx: AsyncSender<AppEvent<Q>>,
+    app_tx: AsyncSender<AppEvent<S>>,
     /// A channel to receive App events over
-    app_rx: AsyncReceiver<AppEvent<Q>>,
+    app_rx: AsyncReceiver<AppEvent<S>>,
     /// The current mode of the application
     pub mode: Mode,
     /// The state for all tabs
-    pub tabs: TabState<Q>,
+    pub tabs: TabState<S>,
     /// The area of the query input for click detection
     query_area: Option<ratatui::layout::Rect>,
     /// Whether the query input box is focused
     pub query_focused: bool,
-    /// Counter for generating tab labels
-    tab_counter: usize,
     /// The tabs component for rendering the tab bar
     tabs_component: TabSelector,
     /// The content component for rendering the tab content area
@@ -93,9 +147,12 @@ pub struct App<Q: QuerySupport + Send + Sync> {
     should_quit: bool,
 }
 
-impl<Q: QuerySupport + Sync + Send> App<Q>
+impl<S: QuerySupport + Sync + Send> App<S>
 where
-    for<'a> <<Q as QuerySupport>::ResponseKinds as rkyv::Archive>::Archived:
+    S::TableNames: Send,
+    S::QueryKinds: Send,
+    S::ResponseKinds: Send,
+    for<'a> <<S as QuerySupport>::ResponseKinds as rkyv::Archive>::Archived:
         rkyv::bytecheck::CheckBytes<
                 rkyv::rancor::Strategy<
                     rkyv::validation::Validator<
@@ -105,11 +162,11 @@ where
                     rkyv::rancor::Error,
                 >,
             >,
-    <<Q as QuerySupport>::ResponseKinds as rkyv::Archive>::Archived: rkyv::Deserialize<
-            <Q as QuerySupport>::ResponseKinds,
+    <S::ResponseKinds as rkyv::Archive>::Archived: rkyv::Deserialize<
+            S::ResponseKinds,
             rkyv::rancor::Strategy<rkyv::de::Pool, rkyv::rancor::Error>,
         >,
-    <<Q as QuerySupport>::ResponseKinds as rkyv::Archive>::Archived: std::marker::Send,
+    <S::ResponseKinds as rkyv::Archive>::Archived: std::marker::Send,
 {
     /// Create a new application instance
     ///
@@ -119,9 +176,9 @@ where
     /// # Arguments
     ///
     /// * `query_tx` - Channel to send query requests to the background executor
-    pub fn new(shoal: Arc<Shoal<Q>>) -> Self {
+    pub fn new(shoal: Arc<Shoal<S>>) -> Self {
         // create the channel for app events we need to handle
-        let (app_tx, app_rx) = kanal::unbounded_async::<AppEvent<Q>>();
+        let (app_tx, app_rx) = kanal::unbounded_async::<AppEvent<S>>();
         // create our app
         Self {
             shoal,
@@ -131,7 +188,6 @@ where
             tabs: TabState::default(),
             query_area: None,
             query_focused: true,
-            tab_counter: 1,
             tabs_component: TabSelector::new(),
             content_component: TabContent::new(),
             status_bar: StatusBar::new(),
@@ -156,12 +212,16 @@ where
                 self.handle_key(key.code).await;
             }
             // handle mouse click events (work in any mode)
-            Event::Mouse(mouse) => {
-                // only respond to left mouse button down events
-                if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+            Event::Mouse(mouse) => match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
                     self.handle_click(mouse.column, mouse.row);
                 }
-            }
+                MouseEventKind::ScrollUp => self.tabs.scroll(-3, 0),
+                MouseEventKind::ScrollDown => self.tabs.scroll(3, 0),
+                MouseEventKind::ScrollLeft => self.tabs.scroll(0, -3),
+                MouseEventKind::ScrollRight => self.tabs.scroll(0, 3),
+                _ => {}
+            },
             // ignore all other events
             _ => {}
         }
@@ -232,6 +292,11 @@ where
             //KeyCode::Tab => self.next_tab(),
             //// move to the previous tab
             //KeyCode::BackTab => self.prev_tab(),
+            // scroll content
+            KeyCode::Char('j') | KeyCode::Down => self.tabs.scroll(1, 0),
+            KeyCode::Char('k') | KeyCode::Up => self.tabs.scroll(-1, 0),
+            KeyCode::Char('h') | KeyCode::Left => self.tabs.scroll(0, -1),
+            KeyCode::Char('l') | KeyCode::Right => self.tabs.scroll(0, 1),
             // add a new tab
             KeyCode::Char('+') | KeyCode::Char('=') | KeyCode::Char('n') => self.tabs.add_tab(),
             // close the current tab
@@ -305,22 +370,22 @@ where
     /// Handle a single query result
     ///
     /// Called by the main event loop when a query result is received.
-    pub fn handle_result(&mut self, tab_id: Uuid, result: QueryResult<Q>) {
-        //match result {
-        //    QueryResult::Response(response) => {
-        //        if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
-        //            // Format the response and append to content
-        //            let row_str = format!("{:?}", response);
-        //            // update our content
-        //            tab.content = row_str;
-        //        }
-        //    }
-        //    QueryResult::Error(error) => {
-        //        if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
-        //            tab.content = format!("Error: {:#?}", error);
-        //        }
-        //    }
-        //}
+    pub fn handle_result(&mut self, tab_id: Uuid, table_name: S::TableNames, result: QueryResult<S>) {
+        // Find the tab with matching tab_id
+        if let Some(tab) = self.tabs.tabs.iter_mut().find(|t| t.id == tab_id) {
+            match result {
+                QueryResult::Response(response) => {
+                    tab.content = match response.format_response() {
+                        Some((headers, rows)) => format_ascii_table(&headers, &rows),
+                        None => format!("[{}] {:?}", table_name, response),
+                    };
+                    tab.error = None;
+                }
+                QueryResult::Error(error) => {
+                    tab.error = Some(format!("Error: {:#?}", error));
+                }
+            }
+        }
     }
 
     /// Handle a mouse click event
@@ -348,11 +413,11 @@ where
         // Click was outside the query box, unfocus it
         self.query_focused = false;
 
-        //// check if the click was on the add button
-        //if self.tabs_component.is_add_button_clicked(x, y) {
-        //    self.add_tab();
-        //    return;
-        //}
+        // check if the click was on the add button
+        if self.tabs_component.is_add_button_clicked(x, y) {
+            self.tabs.add_tab();
+            return;
+        }
         // check if the click was on a tab
         if let Some(new) = self.tabs_component.tab_index_at_position(x, y) {
             self.tabs.set_active(new);
@@ -380,6 +445,9 @@ where
         .split(frame.area());
         // Store the query area for click detection
         self.query_area = Some(chunks[2]);
+        // store the content viewport size for scroll clamping (subtract 2 for borders)
+        self.tabs.viewport_height = chunks[1].height.saturating_sub(2);
+        self.tabs.viewport_width = chunks[1].width.saturating_sub(2);
         // render the tab bar in the top chunk
         self.tabs_component.render(frame, chunks[0], &self.tabs);
         // get our currently active tab
@@ -401,7 +469,7 @@ where
     /// Start handling events and updating our tui
     pub async fn start(&mut self, terminal: &mut DefaultTerminal) -> std::io::Result<()> {
         // Spawn the terminal event forwarder (sends terminal events to event channel)
-        tokio::spawn(terminal_event_forwarder(self.app_tx.clone()));
+        tokio::spawn(terminal_event_forwarder::<S>(self.app_tx.clone()));
         // draw an initial frame until we get an event to handle
         terminal.draw(|frame| self.render(frame))?;
         // keep handling events until we get an exit event
@@ -412,8 +480,8 @@ where
                         AppEvent::Terminal(terminal_event) => {
                             self.handle_event(terminal_event).await;
                         }
-                        AppEvent::QueryResult { tab_id, result } => {
-                            self.handle_result(tab_id, result);
+                        AppEvent::QueryResult { tab_id, table_name, result } => {
+                            self.handle_result(tab_id, table_name, result);
                         }
                     }
                     // Redraw after handling any event

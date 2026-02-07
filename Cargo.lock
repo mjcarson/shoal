@@ -3422,6 +3422,7 @@ dependencies = [
  "shoal",
  "shoal-core",
  "tokio",
+ "unicode-width 0.2.2",
  "uuid",
 ]
 

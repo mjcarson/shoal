@@ -799,6 +799,17 @@ impl<S: QuerySupport> ShoalResponse<S> {
         // get the exists result
         <S as QuerySupport>::get_exists(archived)
     }
+
+    /// Format this response as column headers and row values
+    ///
+    /// Returns `Some((headers, rows))` for Get responses with data,
+    /// `None` for non-Get responses or empty results.
+    pub fn format_response(&self) -> Option<(Vec<&'static str>, Vec<Vec<String>>)> {
+        // get a reference to our archived data
+        let archived = unsafe { &*self.archived };
+        // format the response
+        <S as QuerySupport>::format_response(archived)
+    }
 }
 
 /// The reponses from our queries in a stream

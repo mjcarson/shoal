@@ -67,6 +67,47 @@ pub fn add(stream: &mut proc_macro2::TokenStream, struct_ident: &Ident, fields: 
             #archived_response_ident::#variant_ident(response)=> response.get_exists(),
         }
     });
+    // build our table names ident
+    let table_names_ident = format_ident!("{}TableNames", struct_ident);
+    // build our query_table_name arms
+    let query_table_name_arms = tables.iter().map(|table| {
+        let variant_ident = &table.variant_ident;
+        quote! {
+            #query_ident::#variant_ident(_) => #table_names_ident::#variant_ident,
+        }
+    });
+    // build our response_table_name arms
+    let response_table_name_arms = tables.iter().map(|table| {
+        let variant_ident = &table.variant_ident;
+        quote! {
+            #archived_response_ident::#variant_ident(_) => #table_names_ident::#variant_ident,
+        }
+    });
+    // build our format_response arms
+    let format_response_arms = tables.iter().map(|table| {
+        let variant_ident = &table.variant_ident;
+        let inner_type = &table.inner_type;
+        let archived_inner = format_ident!("Archived{}", inner_type);
+        quote! {
+            #archived_response_ident::#variant_ident(response) => {
+                match &response.data {
+                    shoal_core::shared::responses::ArchivedResponseAction::Get(opt) => {
+                        match opt {
+                            rkyv::option::ArchivedOption::Some(rows) => {
+                                let headers = <#archived_inner as shoal_core::shared::traits::TableRowFormat>::headers();
+                                let values: Vec<Vec<String>> = rows.iter().map(|row| {
+                                    <#archived_inner as shoal_core::shared::traits::TableRowFormat>::row_values(row)
+                                }).collect();
+                                Some((headers, values))
+                            }
+                            rkyv::option::ArchivedOption::None => None,
+                        }
+                    }
+                    _ => None,
+                }
+            }
+        }
+    });
     // build our parse arms for each table
     let parse_arms = tables.iter().map(|table| {
         let variant_ident = &table.variant_ident;
@@ -263,6 +304,9 @@ pub fn add(stream: &mut proc_macro2::TokenStream, struct_ident: &Ident, fields: 
             /// The different tables we can get responses from
             type ResponseKinds = #response_ident;
 
+            /// The different tables in this database
+            type TableNames = #table_names_ident;
+
             /// Make sure queries have succeeded based on some critiera
             ///
             /// # Arguments
@@ -316,6 +360,31 @@ pub fn add(stream: &mut proc_macro2::TokenStream, struct_ident: &Ident, fields: 
                         query.len(),
                         query,
                     )),
+                }
+            }
+
+            /// Get the table name from a query
+            fn query_table_name(query: &Self::QueryKinds) -> Self::TableNames {
+                match query {
+                    #(#query_table_name_arms)*
+                }
+            }
+
+            /// Get the table name from an archived response
+            fn response_table_name(
+                archived: &<Self::ResponseKinds as rkyv::Archive>::Archived,
+            ) -> Self::TableNames {
+                match archived {
+                    #(#response_table_name_arms)*
+                }
+            }
+
+            /// Format an archived response into column headers and row values
+            fn format_response(
+                archived: &<Self::ResponseKinds as rkyv::Archive>::Archived,
+            ) -> Option<(Vec<&'static str>, Vec<Vec<String>>)> {
+                match archived {
+                    #(#format_response_arms)*
                 }
             }
         }

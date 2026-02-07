@@ -130,6 +130,6 @@ pub struct Tmdb {
 async fn main() -> color_eyre::Result<()> {
     // Create your Shoal client with your database type
     let shoal = Arc::new(Shoal::<TmdbClient>::new("127.0.0.1:12000").await.unwrap());
-    // Run shoalctl
+    // Run shoalctl with the client type
     shoalctl::run(shoal).await
 }

@@ -11,7 +11,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
 };
 use rkyv::Archive;
-use shoal::client::{Errors, Shoal};
+use shoal::client::Shoal;
 use shoal::traits::QuerySupport;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -23,10 +23,12 @@ use crate::{AppEvent, app::QueryResult};
 pub async fn run<S: QuerySupport>(
     shoal: Arc<Shoal<S>>,
     tab_id: Uuid,
+    table_name: S::TableNames,
     query: S::QueryKinds,
     app_tx: AsyncSender<AppEvent<S>>,
 ) where
-    S: QuerySupport + Send + Sync,
+    S: QuerySupport + Send + Sync + 'static,
+    S::TableNames: Send,
     S::QueryKinds: Send,
     S::ResponseKinds: Send,
     <S::ResponseKinds as Archive>::Archived: Send
@@ -51,7 +53,7 @@ pub async fn run<S: QuerySupport>(
     };
     // send this query result to the app to be rendered
     app_tx
-        .send(AppEvent::QueryResult { tab_id, result })
+        .send(AppEvent::QueryResult { tab_id, table_name, result })
         .await
         .unwrap();
 }
@@ -81,11 +83,11 @@ impl TabQueryBar {
     /// * `query` - The current query text
     /// * `cursor_position` - The current cursor position in the query
     /// * `focused` - Whether the input is currently focused
-    pub fn render<Q: QuerySupport + Send + Sync>(
+    pub fn render<S: QuerySupport + Send + Sync>(
         &self,
         frame: &mut Frame,
         area: Rect,
-        tab: Option<&Tab<Q>>,
+        tab: Option<&Tab<S>>,
         focused: bool,
     ) {
         // only render our query if we have a tab

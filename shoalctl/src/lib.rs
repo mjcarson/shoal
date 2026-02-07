@@ -23,7 +23,7 @@ pub mod components;
 
 use std::sync::Arc;
 
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream};
+use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event};
 use crossterm::execute;
 use ratatui::DefaultTerminal;
 use rkyv::Archive;
@@ -32,7 +32,7 @@ use shoal::traits::QuerySupport;
 use std::io::stdout;
 use uuid::Uuid;
 
-use app::{App, QueryRequest, QueryResult};
+use app::{App, QueryResult};
 
 /// Events that can be received by the main event loop
 pub enum AppEvent<S: QuerySupport> {
@@ -41,6 +41,7 @@ pub enum AppEvent<S: QuerySupport> {
     /// A query result from the background executor
     QueryResult {
         tab_id: Uuid,
+        table_name: S::TableNames,
         result: QueryResult<S>,
     },
 }
@@ -62,6 +63,7 @@ pub enum AppEvent<S: QuerySupport> {
 async fn run_app<S>(terminal: &mut DefaultTerminal, shoal: Arc<Shoal<S>>) -> std::io::Result<()>
 where
     S: QuerySupport + Send + Sync + 'static,
+    S::TableNames: Send,
     S::QueryKinds: Send,
     S::ResponseKinds: Send,
     <S::ResponseKinds as Archive>::Archived: Send
@@ -102,6 +104,7 @@ where
 pub async fn run<S>(shoal: Arc<Shoal<S>>) -> color_eyre::Result<()>
 where
     S: QuerySupport + Send + Sync + 'static,
+    S::TableNames: Send,
     S::QueryKinds: Send,
     S::ResponseKinds: Send,
     <S::ResponseKinds as Archive>::Archived: Send

@@ -12,8 +12,9 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
 };
+use unicode_width::UnicodeWidthStr;
 use shoal::{
-    client::{Errors, Shoal},
+    client::Shoal,
     traits::QuerySupport,
 };
 use std::marker::PhantomData;
@@ -30,7 +31,7 @@ pub use query_bar::TabQueryBar;
 
 /// A single tab in the application
 #[derive(Debug, Clone)]
-pub struct Tab<Q: QuerySupport> {
+pub struct Tab<S: QuerySupport> {
     /// The unique identifier for this tab
     pub id: Uuid,
     /// The display label for this tab
@@ -43,13 +44,18 @@ pub struct Tab<Q: QuerySupport> {
     pub query: String,
     /// The cursor position within the query text
     pub query_cursor: usize,
+    /// Vertical scroll offset for the content area
+    pub scroll_y: u16,
+    /// Horizontal scroll offset for the content area
+    pub scroll_x: u16,
     /// The type of queries this Tab can handle
-    phantom: PhantomData<Q>,
+    phantom: PhantomData<S>,
 }
 
-impl<Q: QuerySupport + Sync + Send> Tab<Q>
+impl<S: QuerySupport + Sync + Send> Tab<S>
 where
-    for<'a> <<Q as QuerySupport>::ResponseKinds as rkyv::Archive>::Archived:
+    S::TableNames: Send,
+    for<'a> <<S as QuerySupport>::ResponseKinds as rkyv::Archive>::Archived:
         rkyv::bytecheck::CheckBytes<
                 rkyv::rancor::Strategy<
                     rkyv::validation::Validator<
@@ -59,11 +65,11 @@ where
                     rkyv::rancor::Error,
                 >,
             >,
-    <<Q as QuerySupport>::ResponseKinds as rkyv::Archive>::Archived: rkyv::Deserialize<
-            <Q as QuerySupport>::ResponseKinds,
+    <S::ResponseKinds as rkyv::Archive>::Archived: rkyv::Deserialize<
+            S::ResponseKinds,
             rkyv::rancor::Strategy<rkyv::de::Pool, rkyv::rancor::Error>,
         >,
-    <<Q as QuerySupport>::ResponseKinds as rkyv::Archive>::Archived: std::marker::Send,
+    <S::ResponseKinds as rkyv::Archive>::Archived: std::marker::Send,
 {
     /// Create a new tab with a generated UUID and the given label
     ///
@@ -78,6 +84,8 @@ where
             error: None,
             query: String::new(),
             query_cursor: 0,
+            scroll_y: 0,
+            scroll_x: 0,
             phantom: PhantomData,
         }
     }
@@ -120,15 +128,27 @@ where
     /// Try to submit the current query
     pub async fn submit_query(
         &mut self,
-        shoal: &Arc<Shoal<Q>>,
-        app_tx: &mut AsyncSender<AppEvent<Q>>,
-    ) -> Result<(), Errors> {
+        shoal: &Arc<Shoal<S>>,
+        app_tx: &mut AsyncSender<AppEvent<S>>,
+    ) where
+        S: 'static,
+        S::QueryKinds: Send,
+        S::ResponseKinds: Send,
+    {
         // Don't submit empty queries
         if self.query.trim().is_empty() {
-            return Ok(());
+            return;
         }
         // try to parse our query
-        let query = Q::parse(&self.query)?;
+        let query = match S::parse(&self.query) {
+            Ok(q) => q,
+            Err(e) => {
+                self.error = Some(format!("Parse error: {}", e));
+                return;
+            }
+        };
+        // Get the table name from the query
+        let table_name = S::query_table_name(&query);
         // Get the current tab ID
         let tab = self.id;
         // clone our shoal client
@@ -136,10 +156,9 @@ where
         // clone our event sender channel
         let app_tx = app_tx.clone();
         // start a task to execute this query
-        tokio::task::spawn(async move { query_bar::run(shoal, tab, query, app_tx).await })
+        tokio::task::spawn(async move { query_bar::run::<S>(shoal, tab, table_name, query, app_tx).await })
             .await
             .unwrap();
-        Ok(())
     }
 }
 
@@ -229,11 +248,11 @@ impl TabSelector {
     /// * `area` - The area to render the tabs in
     /// * `tabs` - The list of tabs to render
     /// * `selected_index` - The index of the currently selected tab
-    pub fn render<Q: QuerySupport + Send + Sync>(
+    pub fn render<S: QuerySupport + Send + Sync>(
         &mut self,
         frame: &mut Frame,
         area: Rect,
-        tabs: &TabState<Q>,
+        tabs: &TabState<S>,
     ) {
         // store the area for click detection
         self.area = area;
@@ -248,7 +267,7 @@ impl TabSelector {
         for (index, tab) in tabs.tabs.iter().enumerate() {
             // add padding around the label
             let label = format!(" {} ", tab.label);
-            let label_len = label.len() as u16;
+            let label_len = label.width() as u16;
             // track this tab's position
             self.tab_positions.push((x, x + label_len, index));
             // style based on selection
@@ -288,18 +307,23 @@ impl TabSelector {
 }
 
 /// The current state of tabs
-pub struct TabState<Q: QuerySupport + Send + Sync> {
+pub struct TabState<S: QuerySupport + Send + Sync> {
     /// All open tabs in shoalctl
-    pub tabs: Vec<Tab<Q>>,
+    pub tabs: Vec<Tab<S>>,
     /// The currently active tab
     pub active: usize,
+    /// The visible height of the content viewport (set during render)
+    pub viewport_height: u16,
+    /// The visible width of the content viewport (set during render)
+    pub viewport_width: u16,
     /// The type of queries this Tab can handle
-    phantom: PhantomData<Q>,
+    phantom: PhantomData<S>,
 }
 
-impl<Q: QuerySupport + Send + Sync> Default for TabState<Q>
+impl<S: QuerySupport + Send + Sync> Default for TabState<S>
 where
-    for<'a> <<Q as QuerySupport>::ResponseKinds as rkyv::Archive>::Archived:
+    S::TableNames: Send,
+    for<'a> <<S as QuerySupport>::ResponseKinds as rkyv::Archive>::Archived:
         rkyv::bytecheck::CheckBytes<
                 rkyv::rancor::Strategy<
                     rkyv::validation::Validator<
@@ -309,11 +333,11 @@ where
                     rkyv::rancor::Error,
                 >,
             >,
-    <<Q as QuerySupport>::ResponseKinds as rkyv::Archive>::Archived: rkyv::Deserialize<
-            <Q as QuerySupport>::ResponseKinds,
+    <S::ResponseKinds as rkyv::Archive>::Archived: rkyv::Deserialize<
+            S::ResponseKinds,
             rkyv::rancor::Strategy<rkyv::de::Pool, rkyv::rancor::Error>,
         >,
-    <<Q as QuerySupport>::ResponseKinds as rkyv::Archive>::Archived: std::marker::Send,
+    <S::ResponseKinds as rkyv::Archive>::Archived: std::marker::Send,
 {
     /// Create a default initial tab state
     fn default() -> Self {
@@ -321,14 +345,17 @@ where
         TabState {
             tabs: vec![Tab::new("¯\\_(ツ)_/¯")],
             active: 0,
+            viewport_height: 0,
+            viewport_width: 0,
             phantom: PhantomData,
         }
     }
 }
 
-impl<Q: QuerySupport + Sync + Send> TabState<Q>
+impl<S: QuerySupport + Sync + Send> TabState<S>
 where
-    for<'a> <<Q as QuerySupport>::ResponseKinds as rkyv::Archive>::Archived:
+    S::TableNames: Send,
+    for<'a> <<S as QuerySupport>::ResponseKinds as rkyv::Archive>::Archived:
         rkyv::bytecheck::CheckBytes<
                 rkyv::rancor::Strategy<
                     rkyv::validation::Validator<
@@ -338,19 +365,19 @@ where
                     rkyv::rancor::Error,
                 >,
             >,
-    <<Q as QuerySupport>::ResponseKinds as rkyv::Archive>::Archived: rkyv::Deserialize<
-            <Q as QuerySupport>::ResponseKinds,
+    <S::ResponseKinds as rkyv::Archive>::Archived: rkyv::Deserialize<
+            S::ResponseKinds,
             rkyv::rancor::Strategy<rkyv::de::Pool, rkyv::rancor::Error>,
         >,
-    <<Q as QuerySupport>::ResponseKinds as rkyv::Archive>::Archived: std::marker::Send,
+    <S::ResponseKinds as rkyv::Archive>::Archived: std::marker::Send,
 {
     /// Get the currently selected tab
-    pub fn get_active(&self) -> Option<&Tab<Q>> {
+    pub fn get_active(&self) -> Option<&Tab<S>> {
         self.tabs.get(self.active)
     }
 
     /// Get the currently selected tab
-    pub fn get_active_mut(&mut self) -> Option<&mut Tab<Q>> {
+    pub fn get_active_mut(&mut self) -> Option<&mut Tab<S>> {
         self.tabs.get_mut(self.active)
     }
 
@@ -429,9 +456,13 @@ where
     pub async fn handle_query_input(
         &mut self,
         code: KeyCode,
-        shoal: &Arc<Shoal<Q>>,
-        app_tx: &mut AsyncSender<AppEvent<Q>>,
-    ) {
+        shoal: &Arc<Shoal<S>>,
+        app_tx: &mut AsyncSender<AppEvent<S>>,
+    ) where
+        S: 'static,
+        S::QueryKinds: Send,
+        S::ResponseKinds: Send,
+    {
         // get the currently active tab
         if let Some(active_tab) = self.get_active_mut() {
             match code {
@@ -450,9 +481,34 @@ where
                 // Move cursor to end
                 KeyCode::End => active_tab.query_cursor = active_tab.query.len(),
                 // Submit query with Enter
-                KeyCode::Enter => active_tab.submit_query(shoal, app_tx).await.unwrap(),
+                KeyCode::Enter => active_tab.submit_query(shoal, app_tx).await,
                 _ => {}
             }
+        }
+    }
+
+    /// Scroll the active tab's content, clamped to content bounds
+    pub fn scroll(&mut self, dy: i16, dx: i16) {
+        let vh = self.viewport_height;
+        let vw = self.viewport_width;
+        if let Some(tab) = self.get_active_mut() {
+            if tab.content.is_empty() {
+                return;
+            }
+            // compute content dimensions
+            let line_count = tab.content.lines().count() as u16;
+            let max_line_width = tab
+                .content
+                .lines()
+                .map(|l| l.width() as u16)
+                .max()
+                .unwrap_or(0);
+            // max scroll is content size minus viewport, floored at 0
+            let max_y = line_count.saturating_sub(vh);
+            let max_x = max_line_width.saturating_sub(vw);
+            // apply delta and clamp
+            tab.scroll_y = tab.scroll_y.saturating_add_signed(dy).min(max_y);
+            tab.scroll_x = tab.scroll_x.saturating_add_signed(dx).min(max_x);
         }
     }
 
