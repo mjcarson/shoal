@@ -248,6 +248,8 @@ where
                     std::mem::swap(&mut new, partition);
                     // replay any rows from our current partition onto our loaded one
                     partition.rows.extend(new.rows.into_iter());
+                    // mark this partition as no longer needing to check disk since we just loaded it
+                    partition.check_disk = false;
                     // calculate the difference in our partition size
                     let diff = partition.size() as isize - old_size as isize;
                     // increment or decrement our memory usage
