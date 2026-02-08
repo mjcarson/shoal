@@ -42,10 +42,9 @@ pub fn add(stream: &mut proc_macro2::TokenStream, db_name: &Ident, fields: &Fiel
             Some(table_name) => table_name,
             None => panic!("Shoal DB structs must be named fields: {:?}", table.ty),
         };
-        // convert our table name from snake case to pascal case
-        let table_name_str = utils::snake_to_pascal_case(&table_name_snake.to_string());
-        // cast this pascal case table name to an ident
-        let table_name = format_ident!("{table_name_str}");
+        // get the inner type name from the generic parameter
+        let table_name = utils::extract_inner_table_ident(&table.ty)
+            .expect("Failed to extract inner table ident");
         // get this tables type
         let table_type = &table.ty;
         // check if this is an unsorted table

@@ -26,8 +26,8 @@ fn extract_table_info(fields: &FieldsNamed) -> Vec<TableInfo> {
             let inner_type = utils::extract_inner_table_ident(field_type)
                 .expect("Failed to extract inner table ident");
             let kind = TableKinds::new(field_type);
-            let variant_name = utils::snake_to_pascal_case(&field_ident.to_string());
-            let variant_ident = format_ident!("{}", variant_name);
+            let variant_ident = utils::extract_inner_table_ident(field_type)
+                .expect("Failed to extract inner table ident for variant");
             TableInfo {
                 variant_ident,
                 inner_type,

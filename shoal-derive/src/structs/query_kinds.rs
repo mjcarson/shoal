@@ -34,9 +34,8 @@ fn extract_table_info(fields: &FieldsNamed) -> Vec<TableInfo> {
             };
             // deteremine what kind of table this field is using
             let kind = TableKinds::new(field_type);
-            // Convert field name to PascalCase for the variant
-            let variant_name = utils::snake_to_pascal_case(&field_ident.to_string());
-            let variant_ident = format_ident!("{}", variant_name);
+            // Use the inner type name as the variant name
+            let variant_ident = inner_type.clone();
             // build our table info object
             TableInfo {
                 variant_ident,

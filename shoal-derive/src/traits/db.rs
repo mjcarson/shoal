@@ -55,10 +55,9 @@ pub fn add(
     let handle_arms = fields.named.iter().map(|field| {
         // get our field ident and type
         let field_ident = field.ident.as_ref().unwrap();
-        // convert this field name to pascal case
-        let variant_str = utils::snake_to_pascal_case(&field_ident.to_string());
-        // convert our variant name to an ident
-        let variant_ident = format_ident!("{variant_str}");
+        // get the variant name from the inner type
+        let variant_ident = utils::extract_inner_table_ident(&field.ty)
+            .expect("Failed to extract inner table ident");
         // build our handle query arm for this field
         quote! {
             #query_ident::#variant_ident(query) => {
@@ -113,11 +112,10 @@ pub fn add(
     let handle_flushed_arms = fields.named.iter().map(|field| {
         // get our field ident and type
         let field_ident = field.ident.as_ref().unwrap();
-        // convert this field name to pascal case
-        let variant_str = utils::snake_to_pascal_case(&field_ident.to_string());
-        // convert our variant name to an ident
-        let variant_ident = format_ident!("{variant_str}");
-        // build our handle flushed  arm for this field
+        // get the variant name from the inner type
+        let variant_ident = utils::extract_inner_table_ident(&field.ty)
+            .expect("Failed to extract inner table ident");
+        // build our handle flushed arm for this field
         quote! {
             // get all flushed queries in their specific format
             let specific = self.#field_ident.get_flushed().await?;

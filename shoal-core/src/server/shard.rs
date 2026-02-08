@@ -22,7 +22,7 @@ use rkyv::{
     Archive, DeserializeUnsized,
 };
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,
 };
 use std::time::Duration;
@@ -188,12 +188,9 @@ impl ShardInfo {
     /// * `id` - This shards id
     #[must_use]
     pub fn new(id: usize) -> Self {
-        // our ids are not 0 indexed so convert them to be 0 indexed
-        let fixed = id - 1;
-        // build our shard info
         Self {
-            name: format!("Shard-{fixed}"),
-            contact: ShardContact::Local(fixed),
+            name: format!("Shard-{id}"),
+            contact: ShardContact::Local(id),
         }
     }
 
@@ -265,11 +262,13 @@ where
     ///
     /// * `addr` - The address to bind our udp socket too
     #[instrument(name = "Shard::new", skip_all, err(Debug))]
-    pub async fn new(conf: &Conf, comms: Comms<S>) -> Result<Self, ServerError> {
+    pub async fn new(conf: &Conf, comms: Comms<S>, shard_counter: &AtomicUsize) -> Result<Self, ServerError> {
         // get a handle to our current executor
         let executor = glommio::executor();
+        // assign a shard ID from our counter (always starts at 0 per pool)
+        let shard_id = shard_counter.fetch_add(1, Ordering::Relaxed);
         // build our shard info
-        let info = ShardInfo::new(executor.id());
+        let info = ShardInfo::new(shard_id);
         // create names for our high and low priority task queues
         let high_name = format!("HighPriority:{}", info.name);
         let medium_name = format!("MediumPriority:{}", info.name);
@@ -682,14 +681,16 @@ where
     let comms = Comms::<S>::with_capacity(cpus.len());
     // An atomic bool used to signal that shards should exit
     let should_shutdown = Arc::new(AtomicBool::new(false));
+    // A counter to assign shard IDs starting from zero, independent of executor IDs
+    let shard_counter = Arc::new(AtomicUsize::new(0));
     // setup our executor
     let executor_builder =
         LocalExecutorPoolBuilder::new(PoolPlacement::MaxSpread(cpus.len(), Some(cpus)));
     // build and spawn our shards on all of remaining available cores
-    let shards = executor_builder.on_all_shards(enclose!((comms, should_shutdown) move || {
+    let shards = executor_builder.on_all_shards(enclose!((comms, should_shutdown, shard_counter) move || {
         async move {
             // build an empty shard
-            let shard: Shard<S> = Shard::new(&conf, comms).await?;
+            let shard: Shard<S> = Shard::new(&conf, comms, &shard_counter).await?;
             // start this shard
             shard.start(should_shutdown.clone()).await
         }

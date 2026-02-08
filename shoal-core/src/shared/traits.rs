@@ -165,12 +165,6 @@ pub trait QuerySupport: 'static + Sized {
     /// SELECT * FROM <table_name> WHERE <partition_key> = '<value>';
     /// ```
     ///
-    /// # Examples
-    ///
-    /// ```
-    /// QuerySupport::parse("SELECT * FROM MoviesByKeyword WHERE keyword = 'Scifi' LIMIT 3")?;
-    /// ```
-    ///
     /// # Arguments
     ///
     /// * `query` - The SHQL query string to parse

@@ -56,15 +56,13 @@ pub fn snake_to_pascal_case(snake_case: &str) -> String {
 ///
 /// * `fields` - The named fields to get the pascal case variants for
 pub fn get_variant_names(fields: &FieldsNamed) -> Vec<Ident> {
-    // Extract field names and convert to PascalCase for enum variants
+    // Extract the inner type name from each field's generic parameter
     fields
         .named
         .iter()
-        .filter_map(|field| field.ident.as_ref())
-        .map(|field_name| {
-            // Convert snake_case to PascalCase
-            let variant_name = snake_to_pascal_case(&field_name.to_string());
-            format_ident!("{}", variant_name)
+        .map(|field| {
+            extract_inner_table_ident(&field.ty)
+                .expect("Failed to extract inner table type for variant name")
         })
         .collect()
 }
