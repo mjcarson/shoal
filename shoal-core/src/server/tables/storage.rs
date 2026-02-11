@@ -123,7 +123,15 @@ pub trait IntentReadSupport<T: RkyvSupport>: Sized + RkyvSupport + PartitionSupp
     /// The intent type to use
     type Intent: RkyvSupport;
 
-    /// Load a partition from a read and insert it into our map
+    /// Load an intent logs partition from disk if its needed to replay this intent log
+    async fn scan<S: StorageSupport>(
+        read: &ReadResult,
+        storage: &S,
+        partitions: &mut HashMap<u64, MaybeLoaded<Self>>,
+        memory_usage: &mut Arc<RefCell<usize>>,
+    ) -> Result<(), ServerError>;
+
+    /// Load a intent from a read and insert it into our map
     fn load(
         read: &ReadResult,
         generation: u64,
@@ -293,7 +301,8 @@ pub trait StorageSupport: Sized {
     /// * `memory_usage` - The memory usage for this node
     #[allow(async_fn_in_trait)]
     async fn read_intents<T: IntentReadSupport<R> + PartitionSupport, R: PartitionKeySupport>(
-        shard_name: &str,
+        &self,
+        //shard_name: &str,
         conf: &Conf,
         generation: u64,
         partitions: &mut HashMap<u64, MaybeLoaded<T>>,
@@ -323,6 +332,14 @@ pub trait StorageSupport: Sized {
         partition_id: u64,
         loader_tx: &AsyncSender<LoaderMsg<N>>,
     ) -> Result<bool, ServerError>;
+
+    /// Load a partition from disk if it exists directly
+    ///
+    /// This doesn't use the loader channel and instead returns the Partition data.
+    async fn load_partition_direct(
+        &self,
+        partition_id: u64,
+    ) -> Result<Option<ReadResult>, ServerError>;
 
     /// Shutdown this storage engine
     #[allow(async_fn_in_trait)]

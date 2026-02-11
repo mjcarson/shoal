@@ -3,7 +3,7 @@
 use conf::FileSystemTableConf;
 use futures::stream::FuturesUnordered;
 use futures::{AsyncWriteExt, StreamExt};
-use glommio::io::{DmaStreamWriter, DmaStreamWriterBuilder, OpenOptions};
+use glommio::io::{DmaStreamWriter, DmaStreamWriterBuilder, OpenOptions, ReadResult};
 use glommio::{Task, TaskQueueHandle};
 use kanal::{AsyncReceiver, AsyncSender};
 use rkyv::bytecheck::CheckBytes;
@@ -319,7 +319,8 @@ impl StorageSupport for FileSystem {
     /// * `path` - The path to the intent log to read in
     #[allow(async_fn_in_trait)]
     async fn read_intents<P: IntentReadSupport<R> + PartitionSupport, R: PartitionKeySupport>(
-        shard_name: &str,
+        &self,
+        //shard_name: &str,
         conf: &Conf,
         generation: u64,
         partitions: &mut HashMap<u64, MaybeLoaded<P>>,
@@ -331,12 +332,24 @@ impl StorageSupport for FileSystem {
         let mut intent_path = table_conf.get_intent_path(R::name());
         // add our shard name
         // TODO load all of this shards intent files
-        intent_path.push(format!("{shard_name}-active"));
+        intent_path.push(format!("{}-active", self.shard_name));
         // create an intent log reader
         let mut reader = IntentLogReader::new(&intent_path).await?;
         println!("READING INTENTS FROM {}", intent_path.display());
-        // iterate over the entries in this intent log
+        // instance a vec to store our intent reads during the delete scan
+        let mut reads = Vec::with_capacity(1000);
+        // iterate over the entries in this intent log and look for any delete intent logs
+        // whose partitions we need to load
         while let Some(read) = reader.next_buff().await? {
+            // load any partitions needed to properly handle deletes
+            <P as IntentReadSupport<R>>::scan(&read, self, partitions, memory_usage)
+                .await
+                .unwrap();
+            // add this read to our read list
+            reads.push(read);
+        }
+        // Now step over our intents and actually apply them to our partition data
+        for read in reads {
             // load this partitions data
             if <P as IntentReadSupport<R>>::load(&read, generation, partitions, memory_usage)
                 .is_err()
@@ -404,6 +417,27 @@ impl StorageSupport for FileSystem {
                 Ok(true)
             }
             None => Ok(false),
+        }
+    }
+
+    /// Load a partition from disk if it exists directly
+    ///
+    /// This doesn't use the loader channel and instead returns the Partition data.
+    async fn load_partition_direct(
+        &self,
+        partition_id: u64,
+    ) -> Result<Option<ReadResult>, ServerError> {
+        // check if this partition is in our archive map
+        match self.map.find_partition(partition_id) {
+            // this partition exists
+            Some(entry) => {
+                // get this archives dma file
+                let handle = self.map.get_archive(&entry.archive).await?;
+                // read this partitions data from disk
+                let read = loader::read_partition_helper(handle, entry).await?;
+                Ok(Some(read))
+            }
+            None => Ok(None),
         }
     }
 

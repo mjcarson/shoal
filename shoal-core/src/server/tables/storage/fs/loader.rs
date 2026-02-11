@@ -16,7 +16,7 @@ use crate::storage::{FilteredFullArchiveMap, LoaderMsg};
 
 /// Help read a partition from disk
 #[instrument(name = "loader::read_partition_helper", skip_all, err(Debug))]
-async fn read_partition_helper(
+pub async fn read_partition_helper(
     archive: DmaFile,
     entry: ArchiveEntry,
 ) -> Result<ReadResult, GlommioError<()>> {

@@ -13,9 +13,9 @@ use rkyv::validation::shared::SharedValidator;
 use rkyv::validation::Validator;
 use rkyv::{Archive, Deserialize, Serialize};
 use std::cell::RefCell;
-use std::collections::hash_map;
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::collections::{hash_map, HashSet};
 use std::hash::BuildHasherDefault;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -197,14 +197,17 @@ where
             lru: lru.clone(),
         };
         // load our intent log
-        S::read_intents::<SortedPartition<R>, R>(
-            shard_name,
-            conf,
-            table.generation,
-            &mut table.partitions,
-            &mut table.memory_usage,
-        )
-        .await?;
+        table
+            .storage
+            .read_intents(
+                //S::read_intents::<SortedPartition<R>, R>(
+                //    shard_name,
+                conf,
+                table.generation,
+                &mut table.partitions,
+                &mut table.memory_usage,
+            )
+            .await?;
         // compact our intent log
         table.storage.compact_if_needed::<R>(true).await?;
         Ok(table)
@@ -533,6 +536,7 @@ where
         meta: QueryMetadata,
         exists_query: &SortedExists<R>,
     ) -> Option<(Uuid, Uuid, Response<R>)> {
+        println!("## Exists {exists_query:?}");
         // get any data from previously executed/blocked queries
         let mut blocked = match self.pending_data.remove(&(meta.id, meta.index)) {
             // use our existing blocked queries
@@ -585,6 +589,8 @@ where
                                     data: ResponseAction::Exists(true),
                                     end: meta.end,
                                 };
+                                println!("%% partition_lo -> {partition:#?}");
+                                println!("@@ exists {exists_query:?} -> true");
                                 return Some((meta.client, meta.id, response));
                             }
                         }
@@ -603,6 +609,7 @@ where
                                     data: ResponseAction::Exists(true),
                                     end: meta.end,
                                 };
+                                println!("@@ exists {exists_query:?} -> true");
                                 return Some((meta.client, meta.id, response));
                             }
                         }
@@ -637,6 +644,7 @@ where
                 data: ResponseAction::Exists(false),
                 end: meta.end,
             };
+            println!("@@ exists {exists_query:?} -> false");
             Some((meta.client, meta.id, response))
         }
     }
@@ -659,15 +667,19 @@ where
         key: u64,
         sort: R::Sort,
     ) -> Option<(Uuid, Uuid, Response<R>)> {
+        println!("~~ DELETING {key:?} / {sort:?}");
         // get the partition we want to delete from
         match self.partitions.get_mut(&key) {
             Some(maybe_loaded) => {
+                println!("DEL SOM?");
                 // check if this partition is fully loaded in memory or not
                 match maybe_loaded {
                     // the partition is at least partially deserialized and loaded into memory
                     MaybeLoaded::Loaded { partition, .. } => {
+                        println!("DEL MAYBE_LOADED?");
                         // try to remove the target row
                         if let Some((size_diff, _)) = partition.remove(&sort) {
+                            println!("DEL MAYBE_LOADED SOME? -> {partition:#?}");
                             // we were able to delete this row so build the delete intent
                             let intent = SortedIntents::<R>::delete(key, sort);
                             // commit it to the intent to the intent log
@@ -685,6 +697,7 @@ where
                             // we can't acknowledge this delete until its intent is flushed
                             return None;
                         } else if partition.check_disk {
+                            println!("DEL MAYBE_LOADED CHECK_DISK?");
                             // we couldn't find the row to delete but it may be on on disk
                             let will_load = self
                                 .storage
@@ -708,6 +721,7 @@ where
                                 return None;
                             }
                         }
+                        println!("~~ DELETING POST_LO: {partition:#?}");
                         // Tthis row doesn't exist and so can't be deleted
                         let response = Response {
                             id: meta.id,
@@ -719,10 +733,14 @@ where
                     }
                     // this partition is loaded from disk but not deserialized
                     MaybeLoaded::Accessible(read) => {
+                        println!("~~ DELETING {key:?} / {sort:?} - ACCESIBLE");
                         // access this partitions data
                         let accessible = SortedPartition::<R>::access(&read).unwrap();
                         // deserialize our partition so we can modify it
                         let mut partition = SortedPartition::<R>::deserialize(accessible).unwrap();
+                        // since this partition is accessible it must have been the full partition from disk
+                        // so we don't need to check disk again
+                        partition.check_disk = false;
                         // try to remove the target row
                         if let Some((size_diff, _)) = partition.remove(&sort) {
                             // we were able to delete this row so build the delete intent
@@ -739,12 +757,14 @@ where
                             *self.memory_usage.borrow_mut() = new_size;
                             // remove from LRU cache since partition was just modified
                             self.lru.borrow_mut().pop(&(self.table_name, key));
+                            println!("^^ partition -> {partition:#?}");
                             // convert to Loaded state since we've deserialized it
                             *maybe_loaded = MaybeLoaded::Loaded {
                                 partition,
                                 generation: self.generation,
                             };
                             // we can't acknowledge this delete until its intent is flushed
+                            println!("~~ DELETING {key:?}  - NEED FLUSH!");
                             None
                         } else {
                             // row wasn't found but we deserialized this partition so keep it
@@ -759,6 +779,7 @@ where
                                 data: ResponseAction::Delete(false),
                                 end: meta.end,
                             };
+                            println!("~~ DELETING {key:?} / {sort:?} - NOTHING TO DO");
                             Some((meta.client, meta.id, response))
                         }
                     }
@@ -785,6 +806,7 @@ where
                     ));
                     None
                 } else {
+                    println!("~~ DELETING EMPTY?");
                     // build the failed delete response
                     let response = Response {
                         id: meta.id,
@@ -1041,6 +1063,43 @@ where
     /// The intent type to use
     type Intent = SortedIntents<T>;
 
+    /// Load an intent logs partition from disk if its needed to replay this intent log
+    async fn scan<S: StorageSupport>(
+        read: &ReadResult,
+        storage: &S,
+        partitions: &mut HashMap<u64, MaybeLoaded<Self>>,
+        memory_usage: &mut Arc<RefCell<usize>>,
+    ) -> Result<(), ServerError> {
+        // access our data
+        let intent = SortedIntents::<T>::access(read)?;
+        // build a set of partitions to load from disk
+        let mut to_load = HashSet::with_capacity(1000);
+        // we only need to load partitions for delete intents
+        match intent {
+            ArchivedSortedIntents::Insert(_) => (),
+            // add this partition to our set of partitions to load
+            ArchivedSortedIntents::Delete { partition_key, .. } => {
+                to_load.insert(partition_key.to_native());
+            }
+            ArchivedSortedIntents::Update(update) => {
+                to_load.insert(update.partition_key.to_native());
+            }
+        }
+        // load all of our partitions
+        for partition_key in to_load {
+            // get this partitions data
+            if let Some(partition_read) = storage.load_partition_direct(partition_key).await? {
+                // update the memory usage for this partition
+                *memory_usage.borrow_mut() += partition_read.len();
+                // wrap this partition as being accessible
+                let wrapped = MaybeLoaded::Accessible(partition_read);
+                // load this partition
+                partitions.insert(partition_key, wrapped);
+            }
+        }
+        Ok(())
+    }
+
     fn load(
         read: &ReadResult,
         generation: u64,
@@ -1049,8 +1108,9 @@ where
     ) -> Result<(), ServerError> {
         // access our data
         let intent = SortedIntents::<T>::access(read)?;
+        println!("pre_load -> {partitions:#?}");
         // add this intent to our btreemap
-        match intent {
+        let diff = match intent {
             ArchivedSortedIntents::Insert(archived) => {
                 // deserialize this row
                 let row: T = RkyvSupport::deserialize(archived)?;
@@ -1074,13 +1134,15 @@ where
                         // insert this new row
                         let (diff, _) = partition.insert(row);
                         // return the change in memory usage
-                        //diff
+                        diff
                     }
                     MaybeLoaded::Accessible(read) => {
                         // access this partitions data
                         let accessible = SortedPartition::<T>::access(&read).unwrap();
                         // deserialize our partition so we can insert this row
                         let mut partition = SortedPartition::<T>::deserialize(accessible).unwrap();
+                        // partitions that come from reads never have to go back to disk
+                        partition.check_disk = false;
                         //  insert this new row
                         let (diff, _) = partition.insert(row);
                         // update this partition entry
@@ -1089,7 +1151,7 @@ where
                             generation,
                         };
                         // return the change in memory usage
-                        //diff
+                        diff
                     }
                 }
             }
@@ -1101,12 +1163,49 @@ where
                 let partition_key = partition_key.to_native();
                 // check if this partition exists
                 // get the partition to delete a row from
-                if let Some(partition) = partitions.get_mut(&partition_key) {
+                if let Some(maybe_loaded) = partitions.get_mut(&partition_key) {
                     // deserialize this rows sort key
                     let sort_key = rkyv::deserialize::<T::Sort, rkyv::rancor::Error>(sort_key)?;
-                    // TODO this
-                    // remove the sort key from this partition
-                    //partition.remove(&sort_key);
+                    match maybe_loaded {
+                        MaybeLoaded::Loaded {
+                            partition,
+                            generation: partition_gen,
+                        } => {
+                            // update this loaded partitions generation
+                            *partition_gen = generation;
+                            // delete this row
+                            let diff = partition
+                                .remove(&sort_key)
+                                .map(|(diff, _)| diff)
+                                .unwrap_or_default();
+                            // return the change in memory usage
+                            diff.cast_signed()
+                        }
+                        MaybeLoaded::Accessible(read) => {
+                            // access this partitions data
+                            let accessible = SortedPartition::<T>::access(&read).unwrap();
+                            // deserialize our partition so we can insert this row
+                            let mut partition =
+                                SortedPartition::<T>::deserialize(accessible).unwrap();
+                            // partitions that come from reads never have to go back to disk
+                            partition.check_disk = false;
+                            // delete this row
+                            let diff = partition
+                                .remove(&sort_key)
+                                .map(|(diff, _)| diff)
+                                .unwrap_or_default();
+                            // update this partition entry
+                            *maybe_loaded = MaybeLoaded::Loaded {
+                                partition,
+                                generation,
+                            };
+                            // return the change in memory usage
+                            diff.cast_signed()
+                        }
+                    }
+                } else {
+                    // this partition never existed so no change in size
+                    0
                 }
             }
             ArchivedSortedIntents::Update(archived) => {
@@ -1120,8 +1219,14 @@ where
                     //    panic!("Missing row update?");
                     //}
                 }
+                0
             }
-        }
+        };
+        // do a saturating add on our memory usage
+        let new_size = memory_usage.borrow().saturating_add_signed(diff);
+        // adjust our memory usage correctly
+        *memory_usage.borrow_mut() = new_size;
+        println!("post_load -> {partitions:#?}");
         Ok(())
     }
 

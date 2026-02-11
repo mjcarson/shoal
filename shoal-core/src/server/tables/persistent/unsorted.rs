@@ -16,8 +16,8 @@ use rkyv::validation::shared::SharedValidator;
 use rkyv::validation::Validator;
 use rkyv::{Archive, Deserialize, Serialize};
 use std::cell::RefCell;
-use std::collections::hash_map;
 use std::collections::HashMap;
+use std::collections::{hash_map, HashSet};
 use std::hash::BuildHasherDefault;
 use std::sync::Arc;
 use tracing::Span;
@@ -182,14 +182,17 @@ where
             lru: lru.clone(),
         };
         // load our intent log
-        S::read_intents::<UnsortedPartition<R>, R>(
-            shard_name,
-            conf,
-            table.generation,
-            &mut table.partitions,
-            &mut table.memory_usage,
-        )
-        .await?;
+        table
+            .storage
+            .read_intents(
+                //S::read_intents::<UnsortedPartition<R>, R>(
+                //    shard_name,
+                conf,
+                table.generation,
+                &mut table.partitions,
+                &mut table.memory_usage,
+            )
+            .await?;
         // compact our intent log
         table.storage.compact_if_needed::<R>(true).await?;
         Ok(table)
@@ -716,6 +719,43 @@ where
     /// The intent type to use
     type Intent = UnsortedIntents<T>;
 
+    /// Load an intent logs partition from disk if its needed to replay this intent log
+    async fn scan<S: StorageSupport>(
+        read: &ReadResult,
+        storage: &S,
+        partitions: &mut HashMap<u64, MaybeLoaded<Self>>,
+        memory_usage: &mut Arc<RefCell<usize>>,
+    ) -> Result<(), ServerError> {
+        // access our data
+        let intent = UnsortedIntents::<T>::access(read)?;
+        // build a set of partitions to load from disk
+        let mut to_load = HashSet::with_capacity(1000);
+        // we only need to load partitions for delete intents
+        match intent {
+            ArchivedUnsortedIntents::Insert(_) => (),
+            // add this partition to our set of partitions to load
+            ArchivedUnsortedIntents::Delete { partition_key, .. } => {
+                to_load.insert(partition_key.to_native());
+            }
+            ArchivedUnsortedIntents::Update(update) => {
+                to_load.insert(update.partition_key.to_native());
+            }
+        }
+        // load all of our partitions
+        for partition_key in to_load {
+            // get this partitions data
+            if let Some(partition_read) = storage.load_partition_direct(partition_key).await? {
+                // update the memory usage for this partition
+                *memory_usage.borrow_mut() += partition_read.len();
+                // wrap this partition as being accessible
+                let wrapped = MaybeLoaded::Accessible(partition_read);
+                // load this partition
+                partitions.insert(partition_key, wrapped);
+            }
+        }
+        Ok(())
+    }
+
     fn load(
         read: &ReadResult,
         generation: u64,
@@ -789,8 +829,8 @@ where
                         // adjust our total memory usage based on our newly updated row
                         *memory_usage.borrow_mut() = new_size;
                     }
-                    // TODO handling a row missing
-                    None => panic!("Missing row?"),
+                    // TODO handling a partition missing
+                    None => panic!("Missing partition?"),
                 }
             }
         }
