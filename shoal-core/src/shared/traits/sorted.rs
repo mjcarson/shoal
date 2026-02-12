@@ -1,6 +1,7 @@
 //! The traits for a sorted table where each partition contains many rows in a sorted order
 
 use deepsize2::DeepSizeOf;
+use std::hash::Hash;
 
 use super::{PartitionKeySupport, RkyvSupport, ShoalTableSupport};
 use crate::shared::queries::SortedUpdate;
@@ -15,7 +16,7 @@ pub trait ShoalSortedTable:
     ////type UpdateData: RkyvSupport + std::fmt::Debug + Clone;
 
     /// The sort type for this data
-    type Sort: Ord + RkyvSupport + std::fmt::Debug + From<Self::Sort> + Clone + DeepSizeOf;
+    type Sort: Ord + Hash + RkyvSupport + std::fmt::Debug + From<Self::Sort> + Clone + DeepSizeOf;
 
     /// Build the sort tuple for this row
     fn get_sort(&self) -> Self::Sort;

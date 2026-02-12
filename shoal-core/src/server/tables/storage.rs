@@ -123,15 +123,14 @@ pub trait IntentReadSupport<T: RkyvSupport>: Sized + RkyvSupport + PartitionSupp
     /// The intent type to use
     type Intent: RkyvSupport;
 
-    /// Load an intent logs partition from disk if its needed to replay this intent log
-    async fn scan<S: StorageSupport>(
-        read: &ReadResult,
-        storage: &S,
-        partitions: &mut HashMap<u64, MaybeLoaded<Self>>,
-        memory_usage: &mut Arc<RefCell<usize>>,
-    ) -> Result<(), ServerError>;
-
     /// Load a intent from a read and insert it into our map
+    ///
+    /// # Arguments
+    ///
+    /// * `read` - The archived intent to load
+    /// * `generation` - The generation to load these intents as
+    /// * `partitions` - The map to load our intents into
+    /// * `memory_usage` - The total memory usage of of this shard
     fn load(
         read: &ReadResult,
         generation: u64,
@@ -302,7 +301,6 @@ pub trait StorageSupport: Sized {
     #[allow(async_fn_in_trait)]
     async fn read_intents<T: IntentReadSupport<R> + PartitionSupport, R: PartitionKeySupport>(
         &self,
-        //shard_name: &str,
         conf: &Conf,
         generation: u64,
         partitions: &mut HashMap<u64, MaybeLoaded<T>>,

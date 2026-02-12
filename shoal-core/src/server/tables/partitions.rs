@@ -2,12 +2,14 @@
 
 use deepsize2::DeepSizeOf;
 use glommio::io::ReadResult;
+use gxhash::GxHashSet;
 use rkyv::bytecheck::CheckBytes;
 use rkyv::de::Pool;
 use rkyv::rancor::Strategy;
 use rkyv::validation::archive::ArchiveValidator;
 use rkyv::validation::shared::SharedValidator;
 use rkyv::validation::Validator;
+use rkyv::with::Skip;
 use rkyv::{Archive, Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -22,6 +24,7 @@ pub trait PartitionSupport: DeepSizeOf {
     }
 }
 
+/// A partition that may be fully loaded into memory or accesible as an archive
 #[derive(Debug)]
 pub enum MaybeLoaded<P: PartitionSupport> {
     /// A fully loaded partition
@@ -46,6 +49,15 @@ impl<P: PartitionSupport> MaybeLoaded<P> {
             Self::Accessible(_) => true,
         }
     }
+}
+
+/// A row that may exist or may be a tombstone of a deleted row
+#[derive(Debug, Archive, Serialize, Deserialize, DeepSizeOf)]
+pub enum MaybeRow<R> {
+    /// A row that still exists
+    Row(R),
+    /// The tombstone of a deleted row
+    Tombstone,
 }
 
 #[derive(Debug, Archive, Serialize, Deserialize, DeepSizeOf)]
@@ -194,7 +206,7 @@ pub struct SortedPartition<T: ShoalSortedTable> {
     /// This partitions key
     key: u64,
     /// The data in this partition
-    pub rows: BTreeMap<T::Sort, T>,
+    pub rows: BTreeMap<T::Sort, MaybeRow<T>>,
     /// The size of this partition
     size: usize,
     /// Whether this partition might have data on disk

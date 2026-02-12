@@ -320,7 +320,6 @@ impl StorageSupport for FileSystem {
     #[allow(async_fn_in_trait)]
     async fn read_intents<P: IntentReadSupport<R> + PartitionSupport, R: PartitionKeySupport>(
         &self,
-        //shard_name: &str,
         conf: &Conf,
         generation: u64,
         partitions: &mut HashMap<u64, MaybeLoaded<P>>,
@@ -336,20 +335,8 @@ impl StorageSupport for FileSystem {
         // create an intent log reader
         let mut reader = IntentLogReader::new(&intent_path).await?;
         println!("READING INTENTS FROM {}", intent_path.display());
-        // instance a vec to store our intent reads during the delete scan
-        let mut reads = Vec::with_capacity(1000);
-        // iterate over the entries in this intent log and look for any delete intent logs
-        // whose partitions we need to load
+        // load all of the intents into memory
         while let Some(read) = reader.next_buff().await? {
-            // load any partitions needed to properly handle deletes
-            <P as IntentReadSupport<R>>::scan(&read, self, partitions, memory_usage)
-                .await
-                .unwrap();
-            // add this read to our read list
-            reads.push(read);
-        }
-        // Now step over our intents and actually apply them to our partition data
-        for read in reads {
             // load this partitions data
             if <P as IntentReadSupport<R>>::load(&read, generation, partitions, memory_usage)
                 .is_err()
