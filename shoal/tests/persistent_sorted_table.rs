@@ -255,25 +255,25 @@ async fn delete_survives_restart() -> Result<(), TestError> {
     pool.exit()?;
     // wait for threads to fully clean up and port to be released
     tokio::time::sleep(Duration::from_secs(3)).await;
-    //// restart this server 3 times to make sure intent logs get flushed
-    //for _ in 0..3 {
-    //    // start a shoal server and build a client
-    //    let (client, pool) = utils::start::<TestDb>(&temp_dir).await?;
-    //    // send this query
-    //    let response = client
-    //        .send_one(TestRecordGet::new(vec![test_data.partition_key.clone()]))
-    //        .await?;
-    //    // access our response
-    //    let access = response.access::<TestRecord>()?.unwrap().first().unwrap();
-    //    // deserialize our test record
-    //    let record = TestRecord::deserialize(access).unwrap();
-    //    // make sure this record matches
-    //    assert_eq!(test_data, record);
-    //    // Shutdown server for the first time
-    //    pool.exit()?;
-    //    // wait for threads to fully clean up and port to be released
-    //    tokio::time::sleep(Duration::from_secs(3)).await;
-    //}
+    // restart this server 3 times to make sure intent logs get flushed
+    for _ in 0..3 {
+        // start a shoal server and build a client
+        let (client, pool) = utils::start::<TestDb>(&temp_dir).await?;
+        // send this query
+        let response = client
+            .send_one(TestRecordGet::new(vec![test_data.partition_key.clone()]))
+            .await?;
+        // access our response
+        let access = response.access::<TestRecord>()?.unwrap().first().unwrap();
+        // deserialize our test record
+        let record = TestRecord::deserialize(access).unwrap();
+        // make sure this record matches
+        assert_eq!(test_data, record);
+        // Shutdown server for the first time
+        pool.exit()?;
+        // wait for threads to fully clean up and port to be released
+        tokio::time::sleep(Duration::from_secs(3)).await;
+    }
     // start a shoal server for the last time and build a client
     let (client, pool) = utils::start::<TestDb>(&temp_dir).await?;
     // now delete this record and make sure it was deleted

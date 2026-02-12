@@ -470,6 +470,8 @@ where
                             }
                         }
                     }
+                    // remove this partition from our blocked queries
+                    blocked.retain(|key| key != partition_key);
                 }
                 // this partition is not loaded into memory
                 // check if this partition exist and load it if it does
@@ -536,7 +538,6 @@ where
         meta: QueryMetadata,
         exists_query: &SortedExists<R>,
     ) -> Option<(Uuid, Uuid, Response<R>)> {
-        println!("## Exists {exists_query:?}");
         // get any data from previously executed/blocked queries
         let mut blocked = match self.pending_data.remove(&(meta.id, meta.index)) {
             // use our existing blocked queries
@@ -544,12 +545,14 @@ where
             // this query has never been executed before so instance sane defaults
             None => Vec::default(),
         };
+        println!("## Exists {exists_query:?} -> {blocked:?}");
         // check each of the specified partition keys
         for partition_key in &exists_query.partition_keys {
             // try to get the partition for this key
             match self.partitions.get(partition_key) {
                 // this partition may be loaded into memory
                 Some(partition) => {
+                    println!("SOME -> {partition:?}");
                     // if this partition is accessible then we don't need to check disk
                     match partition {
                         MaybeLoaded::Loaded { partition, .. } => {
@@ -614,6 +617,8 @@ where
                             }
                         }
                     }
+                    // remove this partition from our blocked queries
+                    blocked.retain(|key| key != partition_key);
                 }
                 // this partition is not loaded into memory
                 None => {
@@ -633,6 +638,7 @@ where
         }
         // if we have any blocked queries then add this to our pending data map
         if !blocked.is_empty() {
+            println!("## Still have blocked! -> {blocked:?}");
             self.pending_data
                 .insert((meta.id, meta.index), (Vec::new(), blocked));
             None
@@ -1157,8 +1163,7 @@ where
                         // access this partitions data
                         let accessible = SortedPartition::<T>::access(&read).unwrap();
                         // deserialize our partition so we can tombstone this row
-                        let mut partition =
-                            SortedPartition::<T>::deserialize(accessible).unwrap();
+                        let mut partition = SortedPartition::<T>::deserialize(accessible).unwrap();
                         // partitions that come from reads never have to go back to disk
                         partition.check_disk = false;
                         // insert a tombstone unconditionally so it overlays disk data later
