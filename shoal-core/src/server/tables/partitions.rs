@@ -238,16 +238,17 @@ impl<T: ShoalSortedTable> SortedPartition<T> {
         let sort_key = row.get_sort();
         // calculate the size of our new row
         let row_size = row.deep_size_of();
-        // add this row
-        let diff = match self.rows.insert(sort_key, row) {
+        // add this row wrapped in MaybeRow::Row
+        let diff = match self.rows.insert(sort_key, MaybeRow::Row(row)) {
             // we replaced an existing row so find the delta in size
-            Some(replaced) => {
+            Some(MaybeRow::Row(replaced)) => {
                 // calculate our old rows size
                 let old_size = replaced.deep_size_of();
                 // calculate the diff in sizes
                 row_size.cast_signed() - old_size.cast_signed()
             }
-            None => row_size.cast_signed(),
+            // replacing a tombstone or inserting new
+            Some(MaybeRow::Tombstone) | None => row_size.cast_signed(),
         };
         // adjust this partitions size correctly
         self.size = self.size.saturating_add_signed(diff);
@@ -262,8 +263,8 @@ impl<T: ShoalSortedTable> SortedPartition<T> {
     /// * `params` - The parameters to use to get the rows
     /// * `found` - The vector to push the data to return
     pub fn get(&self, params: &SortedGet<T>, found: &mut Vec<T>) {
-        // get rows from this partition
-        for row in self.rows.values() {
+        // get live rows from this partition (tombstones are skipped)
+        for row in self.live_row_values() {
             // skip any rows that don't match our filter
             if let Some(filter) = &params.filters {
                 // check if this row should be filtered out
@@ -289,16 +290,49 @@ impl<T: ShoalSortedTable> SortedPartition<T> {
     /// # Arguments
     ///
     /// * `sort` - The sort key of the row to delete
+    /// Remove a row from this partition by replacing it with a tombstone
+    ///
+    /// Only inserts a tombstone if the row currently exists as a Row variant.
+    /// Returns None if the row doesn't exist or is already a tombstone.
+    ///
+    /// # Arguments
+    ///
+    /// * `sort` - The sort key of the row to delete
     pub fn remove(&mut self, sort: &T::Sort) -> Option<(usize, T)> {
-        match self.rows.remove(sort) {
-            Some(removed) => {
+        // only tombstone if the row actually exists
+        if !matches!(self.rows.get(sort), Some(MaybeRow::Row(_))) {
+            return None;
+        }
+        // replace the row with a tombstone
+        match self.rows.insert(sort.clone(), MaybeRow::Tombstone) {
+            Some(MaybeRow::Row(removed)) => {
                 // calculate the size of the row we removed
                 let row_size = removed.deep_size_of();
-                // decrement our paritions size with this estimate
+                // decrement our partitions size with this estimate
                 self.size = self.size.saturating_sub(row_size);
                 Some((row_size, removed))
             }
-            None => None,
+            // SAFETY: we checked above that the row exists as Row
+            _ => unreachable!(),
+        }
+    }
+
+    /// Insert a tombstone for a sort key unconditionally
+    ///
+    /// Used during intent replay where we need tombstones to overlay
+    /// partition data that may be loaded from disk later.
+    ///
+    /// # Arguments
+    ///
+    /// * `sort` - The sort key to tombstone
+    pub fn tombstone(&mut self, sort: &T::Sort) -> isize {
+        match self.rows.insert(sort.clone(), MaybeRow::Tombstone) {
+            Some(MaybeRow::Row(removed)) => {
+                let row_size = removed.deep_size_of();
+                self.size = self.size.saturating_sub(row_size);
+                -(row_size as isize)
+            }
+            Some(MaybeRow::Tombstone) | None => 0,
         }
     }
 
@@ -306,21 +340,66 @@ impl<T: ShoalSortedTable> SortedPartition<T> {
     pub fn update(&mut self, update: &SortedUpdate<T>) -> bool {
         // get the row to update
         match self.rows.get_mut(&update.sort_key) {
-            // we foudn the target row so apply our update
-            Some(row) => {
+            // we found the target row so apply our update
+            Some(MaybeRow::Row(row)) => {
                 // TODO update row size
                 // update our row
                 row.update(&update);
                 true
             }
-            None => false,
+            // tombstones and missing rows can't be updated
+            Some(MaybeRow::Tombstone) | None => false,
         }
+    }
+
+    /// Iterate over only the live rows in this partition, skipping tombstones
+    pub fn live_rows(&self) -> impl Iterator<Item = (&T::Sort, &T)> {
+        self.rows.iter().filter_map(|(k, v)| match v {
+            MaybeRow::Row(row) => Some((k, row)),
+            MaybeRow::Tombstone => None,
+        })
+    }
+
+    /// Iterate over only the live row values in this partition, skipping tombstones
+    pub fn live_row_values(&self) -> impl Iterator<Item = &T> {
+        self.rows.values().filter_map(|v| match v {
+            MaybeRow::Row(row) => Some(row),
+            MaybeRow::Tombstone => None,
+        })
     }
 
     /// Check if this partition is empty
     pub fn is_empty(&self) -> bool {
         // check if our rows is empty
         self.rows.is_empty()
+    }
+}
+
+impl<T: ShoalSortedTable> ArchivedSortedPartition<T>
+where
+    <<T as ShoalSortedTable>::Sort as Archive>::Archived: Ord,
+{
+    /// Iterate over only the live rows in this archived partition, skipping tombstones
+    pub fn live_rows(
+        &self,
+    ) -> impl Iterator<
+        Item = (
+            &<<T as ShoalSortedTable>::Sort as Archive>::Archived,
+            &<T as Archive>::Archived,
+        ),
+    > {
+        self.rows.iter().filter_map(|(k, v)| match v {
+            ArchivedMaybeRow::Row(row) => Some((k, row)),
+            ArchivedMaybeRow::Tombstone => None,
+        })
+    }
+
+    /// Iterate over only the live row values in this archived partition, skipping tombstones
+    pub fn live_row_values(&self) -> impl Iterator<Item = &<T as Archive>::Archived> {
+        self.rows.values().filter_map(|v| match v {
+            ArchivedMaybeRow::Row(row) => Some(row),
+            ArchivedMaybeRow::Tombstone => None,
+        })
     }
 }
 

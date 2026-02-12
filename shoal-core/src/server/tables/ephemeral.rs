@@ -171,7 +171,7 @@ impl<T: ShoalSortedTable> EphemeralTable<T> {
             // get the partition for this key
             if let Some(partition) = self.partitions.get(key) {
                 // check rows in this partition
-                for (_, row) in &partition.rows {
+                for row in partition.live_row_values() {
                     // check if we are supposed to filter our rows
                     if let Some(filters) = &exists.filters {
                         if !T::is_filtered(filters, row) {

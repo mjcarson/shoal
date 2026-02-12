@@ -435,8 +435,8 @@ where
                                     continue;
                                 }
                             }
-                            // get the rows from our partition
-                            for (_, row) in &partition.rows {
+                            // get the live rows from our partition (tombstones are skipped)
+                            for row in partition.live_row_values() {
                                 // check if we are supposed to filter our rows
                                 if let Some(filters) = &get.filters {
                                     // check if this row should be returned
@@ -453,8 +453,8 @@ where
                             // This partition is accessible so it must have come from disk
                             // we don't need to check it just access it
                             let partition = SortedPartition::<R>::access(&read).unwrap();
-                            // get the rows from our partition
-                            for (_, row) in partition.rows.iter() {
+                            // get the live rows from our partition (tombstones are skipped)
+                            for row in partition.live_row_values() {
                                 // check if we are supposed to filter our rows
                                 if let Some(filters) = &get.filters {
                                     // check if this row should be returned
@@ -575,7 +575,7 @@ where
                                 }
                             }
                             // check the rows from our partition
-                            for (_, row) in &partition.rows {
+                            for row in partition.live_row_values() {
                                 // check if we are supposed to filter our rows
                                 if let Some(filters) = &exists_query.filters {
                                     if !R::is_filtered(filters, row) {
@@ -596,7 +596,7 @@ where
                         }
                         MaybeLoaded::Accessible(read) => {
                             let partition = SortedPartition::<R>::access(&read).unwrap();
-                            for (_, row) in partition.rows.iter() {
+                            for row in partition.live_row_values() {
                                 if let Some(filters) = &exists_query.filters {
                                     if !R::is_filtered_archived(filters, row) {
                                         continue;
@@ -1132,51 +1132,45 @@ where
             } => {
                 // convert our partition key to its native endianess
                 let partition_key = partition_key.to_native();
-                // check if this partition exists
-                // get the partition to delete a row from
-                if let Some(maybe_loaded) = partitions.get_mut(&partition_key) {
-                    // deserialize this rows sort key
-                    let sort_key = rkyv::deserialize::<T::Sort, rkyv::rancor::Error>(sort_key)?;
-                    match maybe_loaded {
-                        MaybeLoaded::Loaded {
-                            partition,
-                            generation: partition_gen,
-                        } => {
-                            // update this loaded partitions generation
-                            *partition_gen = generation;
-                            // delete this row
-                            let diff = partition
-                                .remove(&sort_key)
-                                .map(|(diff, _)| diff)
-                                .unwrap_or_default();
-                            // return the change in memory usage
-                            diff.cast_signed()
-                        }
-                        MaybeLoaded::Accessible(read) => {
-                            // access this partitions data
-                            let accessible = SortedPartition::<T>::access(&read).unwrap();
-                            // deserialize our partition so we can insert this row
-                            let mut partition =
-                                SortedPartition::<T>::deserialize(accessible).unwrap();
-                            // partitions that come from reads never have to go back to disk
-                            partition.check_disk = false;
-                            // delete this row
-                            let diff = partition
-                                .remove(&sort_key)
-                                .map(|(diff, _)| diff)
-                                .unwrap_or_default();
-                            // update this partition entry
-                            *maybe_loaded = MaybeLoaded::Loaded {
-                                partition,
-                                generation,
-                            };
-                            // return the change in memory usage
-                            diff.cast_signed()
-                        }
+                // deserialize this rows sort key
+                let sort_key = rkyv::deserialize::<T::Sort, rkyv::rancor::Error>(sort_key)?;
+                // get or create the partition so the tombstone is preserved
+                // even if the archive data hasn't been loaded yet
+                let entry =
+                    partitions
+                        .entry(partition_key)
+                        .or_insert_with(|| MaybeLoaded::Loaded {
+                            partition: SortedPartition::new(partition_key),
+                            generation,
+                        });
+                match entry {
+                    MaybeLoaded::Loaded {
+                        partition,
+                        generation: partition_gen,
+                    } => {
+                        // update this loaded partitions generation
+                        *partition_gen = generation;
+                        // insert a tombstone unconditionally so it overlays disk data later
+                        partition.tombstone(&sort_key)
                     }
-                } else {
-                    // this partition never existed so no change in size
-                    0
+                    MaybeLoaded::Accessible(read) => {
+                        // access this partitions data
+                        let accessible = SortedPartition::<T>::access(&read).unwrap();
+                        // deserialize our partition so we can tombstone this row
+                        let mut partition =
+                            SortedPartition::<T>::deserialize(accessible).unwrap();
+                        // partitions that come from reads never have to go back to disk
+                        partition.check_disk = false;
+                        // insert a tombstone unconditionally so it overlays disk data later
+                        let diff = partition.tombstone(&sort_key);
+                        // update this partition entry
+                        *entry = MaybeLoaded::Loaded {
+                            partition,
+                            generation,
+                        };
+                        // return the change in memory usage
+                        diff
+                    }
                 }
             }
             ArchivedSortedIntents::Update(archived) => {
@@ -1220,7 +1214,9 @@ where
                     entry.insert(row);
                 }
                 SortedIntents::Delete { sort_key, .. } => {
-                    entry.remove(&sort_key);
+                    // truly remove during compaction - no tombstone needed since
+                    // the new archive won't contain the deleted row
+                    entry.rows.remove(&sort_key);
                 }
                 SortedIntents::Update(update) => {
                     entry.update(&update);
