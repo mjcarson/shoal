@@ -200,8 +200,6 @@ where
         table
             .storage
             .read_intents(
-                //S::read_intents::<SortedPartition<R>, R>(
-                //    shard_name,
                 conf,
                 table.generation,
                 &mut table.partitions,
@@ -850,7 +848,7 @@ where
                     // the partition is at least partialy deserialzied and loaded into memory
                     MaybeLoaded::Loaded { partition, .. } => {
                         // update the target row if its loaded
-                        if partition.update(&update) {
+                        if let Some(diff) = partition.update(&update) {
                             // we were able to update this partition so get its key
                             let key = update.partition_key;
                             // wrap our update in an update intent
@@ -863,7 +861,10 @@ where
                             self.pending.add(meta, pos, action);
                             // remove this partition from our lru cache as its no longer evictable
                             self.lru.borrow_mut().pop(&(self.table_name, key));
-                            // TODO: track row size changes when update affects size
+                            // do a saturating add on our memory usage
+                            let new_size = self.memory_usage.borrow().saturating_add_signed(diff);
+                            // adjust our total shards memory usage
+                            *self.memory_usage.borrow_mut() = new_size;
                             return None;
                         } else if partition.check_disk {
                             // we don't have this partition loaded so try to load it from disk
@@ -902,7 +903,7 @@ where
                         // deserialize our partition so we can update it
                         let mut partition = SortedPartition::<R>::deserialize(accessible).unwrap();
                         // try to update this partitions data
-                        if partition.update(&update) {
+                        if let Some(diff) = partition.update(&update) {
                             // we were able to update this partition so get its key
                             let key = update.partition_key;
                             // wrap our update in an update intent
@@ -915,7 +916,10 @@ where
                             self.pending.add(meta, pos, action);
                             // remove this partition from our lru cache as its no longer evictable
                             self.lru.borrow_mut().pop(&(self.table_name, key));
-                            // TODO: track row size changes when update affects size
+                            // do a saturating add on our memory usage
+                            let new_size = self.memory_usage.borrow().saturating_add_signed(diff);
+                            // adjust our total shards memory usage
+                            *self.memory_usage.borrow_mut() = new_size;
                             // convert to Loaded state since we've deserialized it
                             *maybe_loaded = MaybeLoaded::Loaded {
                                 partition,
@@ -1069,6 +1073,48 @@ where
     /// The intent type to use
     type Intent = SortedIntents<T>;
 
+    /// Load an intent logs partition from disk if its needed to replay this intent log
+    ///
+    /// # Arguments
+    ///
+    /// * `read` - The intent to scan for partitions to load
+    /// * `storage` - The storage engine to load data from
+    /// * `partitions` - The partition map to load our partitions into
+    /// * `memory_usage` - The current memory usage for this shard
+    async fn scan<S: StorageSupport>(
+        read: &ReadResult,
+        storage: &S,
+        partitions: &mut HashMap<u64, MaybeLoaded<Self>>,
+        memory_usage: &mut Arc<RefCell<usize>>,
+    ) -> Result<(), ServerError> {
+        // access our data
+        let intent = SortedIntents::<T>::access(read)?;
+        // build a set of partitions to load from disk
+        let mut to_load = HashSet::with_capacity(1000);
+        // we only need to load partitions for delete intents
+        match intent {
+            // we don't need to load inserts or deletes to replay its intent
+            ArchivedSortedIntents::Insert(_) | ArchivedSortedIntents::Delete { .. } => (),
+            // we need the data loaded in order to update it
+            ArchivedSortedIntents::Update(update) => {
+                to_load.insert(update.partition_key.to_native());
+            }
+        }
+        // load all of our partitions
+        for partition_key in to_load {
+            // get this partitions data
+            if let Some(partition_read) = storage.load_partition_direct(partition_key).await? {
+                // update the memory usage for this partition
+                *memory_usage.borrow_mut() += partition_read.len();
+                // wrap this partition as being accessible
+                let wrapped = MaybeLoaded::Accessible(partition_read);
+                // load this partition
+                partitions.insert(partition_key, wrapped);
+            }
+        }
+        Ok(())
+    }
+
     /// Load a intent from a read and insert it into our map
     ///
     /// # Arguments
@@ -1077,7 +1123,7 @@ where
     /// * `generation` - The generation to load these intents as
     /// * `partitions` - The map to load our intents into
     /// * `memory_usage` - The total memory usage of of this shard
-    fn load(
+    fn replay(
         read: &ReadResult,
         generation: u64,
         partitions: &mut HashMap<u64, MaybeLoaded<Self>>,
@@ -1182,14 +1228,40 @@ where
                 // deserialize this row's update
                 let update = rkyv::deserialize::<SortedUpdate<T>, rkyv::rancor::Error>(archived)?;
                 // try to get the partition containing our target row
-                if let Some(partition) = partitions.get_mut(&update.partition_key) {
-                    // TODO this
-                    //// find our target row
-                    //if !partition.update(&update) {
-                    //    panic!("Missing row update?");
-                    //}
+                let entry =
+                    partitions
+                        .entry(update.partition_key)
+                        .or_insert_with(|| MaybeLoaded::Loaded {
+                            partition: SortedPartition::new(update.partition_key),
+                            generation,
+                        });
+                match entry {
+                    MaybeLoaded::Loaded {
+                        partition,
+                        generation: partition_gen,
+                    } => {
+                        // update this loaded partitions generation
+                        *partition_gen = generation;
+                        // apply the update to the target row
+                        partition.update(&update).unwrap_or(0)
+                    }
+                    MaybeLoaded::Accessible(read) => {
+                        // access this partitions data
+                        let accessible = SortedPartition::<T>::access(&read).unwrap();
+                        // deserialize our partition so we can update this row
+                        let mut partition = SortedPartition::<T>::deserialize(accessible).unwrap();
+                        // partitions that come from reads never have to go back to disk
+                        partition.check_disk = false;
+                        // apply the update to the target row
+                        let diff = partition.update(&update).unwrap_or(0);
+                        // update this partition entry
+                        *entry = MaybeLoaded::Loaded {
+                            partition,
+                            generation,
+                        };
+                        diff
+                    }
                 }
-                0
             }
         };
         // do a saturating add on our memory usage

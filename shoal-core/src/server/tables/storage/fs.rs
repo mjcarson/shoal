@@ -332,13 +332,24 @@ impl StorageSupport for FileSystem {
         // add our shard name
         // TODO load all of this shards intent files
         intent_path.push(format!("{}-active", self.shard_name));
+        // instance a vec to store our intent reads during the delete scan
+        let mut reads = Vec::with_capacity(1000);
         // create an intent log reader
         let mut reader = IntentLogReader::new(&intent_path).await?;
-        println!("READING INTENTS FROM {}", intent_path.display());
-        // load all of the intents into memory
+        // iterate over the entries in this intent log and look for any delete intent logs
+        // whose partitions we need to load
         while let Some(read) = reader.next_buff().await? {
+            // load any partitions needed to properly handle updates
+            <P as IntentReadSupport<R>>::scan(&read, self, partitions, memory_usage)
+                .await
+                .unwrap();
+            // add this read to our read list
+            reads.push(read);
+        }
+        // Now step over our intents and actually apply them to our partition data
+        for read in reads {
             // load this partitions data
-            if <P as IntentReadSupport<R>>::load(&read, generation, partitions, memory_usage)
+            if <P as IntentReadSupport<R>>::replay(&read, generation, partitions, memory_usage)
                 .is_err()
             {
                 panic!("Skipping intent data that was not fully committed");

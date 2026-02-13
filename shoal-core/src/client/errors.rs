@@ -41,6 +41,16 @@ pub enum Errors {
     Shoalctl(String),
 }
 
+impl std::fmt::Display for Errors {
+    // Allow this error to be displayed
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Just use the debug output for now
+        write!(f, "{self:?}")
+    }
+}
+
+impl std::error::Error for Errors {}
+
 impl Errors {
     /// Create a new shoalctl error
     ///

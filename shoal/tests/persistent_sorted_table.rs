@@ -1,13 +1,12 @@
 //! Integration tests for persistent sorted tables in Shoal
 
-use std::time::Duration;
-
 use deepsize2::DeepSizeOf;
 use rkyv::{Archive, Deserialize, Serialize};
 use shoal_core::shared::traits::RkyvSupport;
 use shoal_core::storage::FileSystem;
 use shoal_core::tables::PersistentSortedTable;
 use shoal_derive::{ShoalDB, ShoalSortedTable};
+use std::time::Duration;
 use tempfile::TempDir;
 
 mod utils;
@@ -208,7 +207,7 @@ async fn delete_after_restart() -> Result<(), TestError> {
     // Shutdown server for the first time
     pool.exit()?;
     // wait for threads to fully clean up and port to be released
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
     // start a shoal server for the last time and build a client
     let (client, pool) = utils::start::<TestDb>(&temp_dir).await?;
     // now delete this record and make sure it was deleted
@@ -230,7 +229,6 @@ async fn delete_after_restart() -> Result<(), TestError> {
 }
 
 /// Test deleting rows from shoal
-#[ignore]
 #[tokio::test]
 async fn delete_survives_restart() -> Result<(), TestError> {
     // get a new temp dir for this test
@@ -254,7 +252,7 @@ async fn delete_survives_restart() -> Result<(), TestError> {
     // Shutdown server for the first time
     pool.exit()?;
     // wait for threads to fully clean up and port to be released
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
     // restart this server 3 times to make sure intent logs get flushed
     for _ in 0..3 {
         // start a shoal server and build a client
@@ -272,7 +270,7 @@ async fn delete_survives_restart() -> Result<(), TestError> {
         // Shutdown server for the first time
         pool.exit()?;
         // wait for threads to fully clean up and port to be released
-        tokio::time::sleep(Duration::from_secs(3)).await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
     }
     // start a shoal server for the last time and build a client
     let (client, pool) = utils::start::<TestDb>(&temp_dir).await?;
@@ -334,8 +332,66 @@ async fn update() -> Result<(), TestError> {
     Ok(())
 }
 
+/// Test update rows from shoal after a restart
 #[tokio::test]
-pub async fn into_query() {
-    // start with an example query
-    let query = "select * from test_records";
+async fn update_intent_replay() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    // start a shoal server and build a client
+    let (client, pool) = utils::start::<TestDb>(&temp_dir).await?;
+    // build a test partition to insert
+    let test_data = TestRecord::new("partition_key", "sort_key", "woot");
+    // send this query
+    client.send_one(test_data.clone()).await?;
+    // send this query
+    let response = client
+        .send_one(TestRecordGet::new(vec![test_data.partition_key.clone()]))
+        .await?;
+    // access our response
+    let access = response.access::<TestRecord>()?.unwrap().first().unwrap();
+    // deserialize our test record
+    let record = TestRecord::deserialize(access).unwrap();
+    // make sure this record matches
+    assert_eq!(test_data, record);
+    // Shutdown server for the first time
+    pool.exit()?;
+    // wait for threads to fully clean up and port to be released
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    // start a shoal server for the last time and build a client
+    let (client, pool) = utils::start::<TestDb>(&temp_dir).await?;
+    // now update this record
+    client
+        .send_one(TestRecordUpdate {
+            partition_key: "partition_key".into(),
+            sort_key: "sort_key".into(),
+            data: Some("updated".into()),
+        })
+        .await?;
+    // verify the record was updated
+    let response = client
+        .send_one(TestRecordGet::new(vec![test_data.partition_key.clone()]))
+        .await?;
+    let access = response.access::<TestRecord>()?.unwrap().first().unwrap();
+    let record = TestRecord::deserialize(access).unwrap();
+    assert_eq!(record.data, "updated");
+    assert_eq!(record.partition_key, "partition_key");
+    assert_eq!(record.sort_key, "sort_key");
+    // Shutdown server
+    pool.exit()?;
+    // wait for threads to fully clean up and port to be released
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    // start a shoal server for the last time and build a client
+    let (client, pool) = utils::start::<TestDb>(&temp_dir).await?;
+    // verify the record was updated
+    let response = client
+        .send_one(TestRecordGet::new(vec![test_data.partition_key.clone()]))
+        .await?;
+    let access = response.access::<TestRecord>()?.unwrap().first().unwrap();
+    let record = TestRecord::deserialize(access).unwrap();
+    assert_eq!(record.data, "updated");
+    assert_eq!(record.partition_key, "partition_key");
+    assert_eq!(record.sort_key, "sort_key");
+    // Shutdown server
+    pool.exit()?;
+    Ok(())
 }

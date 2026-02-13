@@ -185,8 +185,6 @@ where
         table
             .storage
             .read_intents(
-                //S::read_intents::<UnsortedPartition<R>, R>(
-                //    shard_name,
                 conf,
                 table.generation,
                 &mut table.partitions,
@@ -544,8 +542,10 @@ where
                 let action = ResponseAction::Delete(true);
                 // add this action to our pending queue
                 self.pending.add(meta, pos, action);
+                // calculate the new memory usage
+                let new_size = self.memory_usage.borrow().saturating_sub(old.size());
                 // adjust this shards total memory usage
-                *self.memory_usage.borrow_mut() = old.size();
+                *self.memory_usage.borrow_mut() = new_size;
                 // remove this partition from our lru cache as its no longer evictable
                 self.lru.borrow_mut().pop(&(self.table_name, key));
                 // wait for this delete to get flushed to disk
@@ -585,6 +585,8 @@ where
         // get this rows partition
         match self.partitions.get_mut(&update.partition_key) {
             Some(partition) => {
+                // get our old partition size
+                let old_size = partition.size();
                 // update this paritions data
                 if let Some(loaded) = partition.update(&update) {
                     // replace our accessible partition with our loaded one
@@ -603,6 +605,12 @@ where
                 let action = ResponseAction::Update(true);
                 // add this action to our pending queue
                 self.pending.add(meta, pos, action);
+                // get the difference in size
+                let diff = partition.size().cast_signed() - old_size.cast_signed();
+                // do a saturating add on our memory usage
+                let new_size = self.memory_usage.borrow().saturating_add_signed(diff);
+                // adjust our total shards memory usage
+                *self.memory_usage.borrow_mut() = new_size;
                 // remove this partition from our lru cache as its no longer evictable
                 self.lru.borrow_mut().pop(&(self.table_name, key));
                 // wait for this delete to get flushed to disk
@@ -719,6 +727,48 @@ where
     /// The intent type to use
     type Intent = UnsortedIntents<T>;
 
+    /// Load an intent logs partition from disk if its needed to replay this intent log
+    ///
+    /// # Arguments
+    ///
+    /// * `read` - The intent to scan for partitions to load
+    /// * `storage` - The storage engine to load data from
+    /// * `partitions` - The partition map to load our partitions into
+    /// * `memory_usage` - The current memory usage for this shard
+    async fn scan<S: StorageSupport>(
+        read: &ReadResult,
+        storage: &S,
+        partitions: &mut HashMap<u64, MaybeLoaded<Self>>,
+        memory_usage: &mut Arc<RefCell<usize>>,
+    ) -> Result<(), ServerError> {
+        // access our data
+        let intent = UnsortedIntents::<T>::access(read)?;
+        // build a set of partitions to load from disk
+        let mut to_load = HashSet::with_capacity(1000);
+        // we only need to load partitions for delete intents
+        match intent {
+            // we don't need to load inserts or deletes to replay its intent
+            ArchivedUnsortedIntents::Insert(_) | ArchivedUnsortedIntents::Delete { .. } => (),
+            // we need the data loaded in order to update it
+            ArchivedUnsortedIntents::Update(update) => {
+                to_load.insert(update.partition_key.to_native());
+            }
+        }
+        // load all of our partitions
+        for partition_key in to_load {
+            // get this partitions data
+            if let Some(partition_read) = storage.load_partition_direct(partition_key).await? {
+                // update the memory usage for this partition
+                *memory_usage.borrow_mut() += partition_read.len();
+                // wrap this partition as being accessible
+                let wrapped = MaybeLoaded::Accessible(partition_read);
+                // load this partition
+                partitions.insert(partition_key, wrapped);
+            }
+        }
+        Ok(())
+    }
+
     /// Load a intent from a read and insert it into our map
     ///
     /// # Arguments
@@ -727,7 +777,7 @@ where
     /// * `generation` - The generation to load these intents as
     /// * `partitions` - The map to load our intents into
     /// * `memory_usage` - The total memory usage of of this shard
-    fn load(
+    fn replay(
         read: &ReadResult,
         generation: u64,
         partitions: &mut HashMap<u64, MaybeLoaded<Self>>,

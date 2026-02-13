@@ -5,14 +5,41 @@
 //!
 //! # Example
 //!
-//! ```ignore
+//! ```no_run
 //! use std::sync::Arc;
-//! use shoal_core::client::Shoal;
+//! use deepsize2::DeepSizeOf;
+//! use rkyv::{Archive, Deserialize, Serialize};
+//! use shoal::{ShoalDB, ShoalSortedTable, PersistentSortedTable, FileSystem, Shoal};
+//!
+//! /// A simple sorted table for testing
+//! #[derive(
+//!     Debug, Archive, Serialize, Deserialize, Clone, ShoalSortedTable, PartialEq, Eq, DeepSizeOf,
+//! )]
+//! #[rkyv(derive(Debug))]
+//! #[shoal_table(db = "TestDb")]
+//! pub struct TestRecord {
+//!     /// The partition key - groups related records
+//!     #[shoal(partition)]
+//!     pub partition_key: String,
+//!     /// The sort key - orders records within a partition (must be String for RkyvSupport)
+//!     #[shoal(sort)]
+//!     pub sort_key: String,
+//!     /// Some data payload
+//!     #[shoal(update)]
+//!     pub data: String,
+//! }
+//!
+//! /// The test database schema
+//! #[derive(ShoalDB)]
+//! pub struct TestDb {
+//!     /// The sorted test table
+//!     pub test_records: PersistentSortedTable<TestRecord, FileSystem, TestDbTableNames>,
+//! }
 //!
 //! #[tokio::main]
 //! async fn main() -> color_eyre::Result<()> {
 //!     // Create your Shoal client with your database type
-//!     let shoal = Arc::new(Shoal::<MyDbClient>::new("127.0.0.1:12000").await?);
+//!     let shoal = Arc::new(Shoal::<TestDbClient>::new("127.0.0.1:12000").await?);
 //!     // Run shoalctl
 //!     shoalctl::run(shoal).await
 //! }

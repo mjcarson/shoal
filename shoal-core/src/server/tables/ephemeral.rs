@@ -154,7 +154,13 @@ impl<T: ShoalSortedTable> EphemeralTable<T> {
     async fn update(&mut self, update: SortedUpdate<T>) -> ResponseAction<T> {
         // get this rows partition
         let updated = match self.partitions.get_mut(&update.partition_key) {
-            Some(partition) => partition.update(&update),
+            Some(partition) => match partition.update(&update) {
+                Some(diff) => {
+                    self.memory_usage = self.memory_usage.saturating_add_signed(diff);
+                    true
+                }
+                None => false,
+            },
             None => false,
         };
         ResponseAction::Update(updated)

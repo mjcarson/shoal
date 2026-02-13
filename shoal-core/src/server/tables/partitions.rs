@@ -337,18 +337,27 @@ impl<T: ShoalSortedTable> SortedPartition<T> {
     }
 
     /// Update a row in this partition
-    pub fn update(&mut self, update: &SortedUpdate<T>) -> bool {
+    ///
+    /// Returns `Some(diff)` with the change in memory usage if the row was
+    /// found and updated, or `None` if the row does not exist.
+    pub fn update(&mut self, update: &SortedUpdate<T>) -> Option<isize> {
         // get the row to update
         match self.rows.get_mut(&update.sort_key) {
             // we found the target row so apply our update
             Some(MaybeRow::Row(row)) => {
-                // TODO update row size
+                // measure old size
+                let old_size = row.deep_size_of();
                 // update our row
                 row.update(&update);
-                true
+                // measure new size and compute diff
+                let new_size = row.deep_size_of();
+                let diff = new_size.cast_signed() - old_size.cast_signed();
+                // adjust this partitions size correctly
+                self.size = self.size.saturating_add_signed(diff);
+                Some(diff)
             }
             // tombstones and missing rows can't be updated
-            Some(MaybeRow::Tombstone) | None => false,
+            Some(MaybeRow::Tombstone) | None => None,
         }
     }
 

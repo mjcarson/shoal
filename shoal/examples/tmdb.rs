@@ -2,15 +2,14 @@
 
 use core_affinity::{set_for_current, CoreId};
 use shoal::bencher::{BenchWorker, Bencher};
-use shoal_core::client::{QuerySuceededOpts, Shoal, ShoalResponse, ShoalUnorderedResultStream};
-use shoal_core::server::Conf;
-use shoal_core::shared::queries::Queries;
-use shoal_core::shared::responses::ResponseActionNames;
-use shoal_core::shared::traits::QuerySupport;
-use shoal_core::storage::FileSystem;
-use shoal_core::tables::{PersistentSortedTable, PersistentUnsortedTable};
-use shoal_core::ShoalPool;
-use shoal_derive::{ShoalDB, ShoalSortedTable, ShoalUnsortedTable};
+use shoal::client::{QuerySuceededOpts, ShoalUnorderedResultStream};
+use shoal::shared::queries::Queries;
+use shoal::shared::responses::ResponseActionNames;
+use shoal::shared::traits::QuerySupport;
+use shoal::{
+    Conf, FileSystem, PersistentSortedTable, PersistentUnsortedTable, Shoal, ShoalDB, ShoalPool,
+    ShoalResponse, ShoalSortedTable, ShoalUnsortedTable,
+};
 
 use deepsize2::DeepSizeOf;
 use futures::stream::StreamExt;
