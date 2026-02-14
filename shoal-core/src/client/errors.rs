@@ -35,6 +35,12 @@ pub enum Errors {
     KanalReceive(kanal::ReceiveError),
     /// A stream has already ended
     StreamAlreadyTerminated,
+    /// Failed to get a connection from the pool
+    ConnectionPool(String),
+    /// Failed to resolve a DNS address
+    DnsResolution(String),
+    /// A wire protocol error
+    ProtocolError(String),
     /// An error parsing a SHQL query string
     ShqlParse(ShqlParseError),
     /// A shoalctl error

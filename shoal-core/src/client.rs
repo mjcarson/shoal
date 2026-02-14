@@ -29,7 +29,7 @@ pub mod errors;
 mod messages;
 
 use super::shared::queries::Queries;
-use crate::shared::responses::{ArchivedResponseAction, ResponseActionNames};
+use crate::shared::responses::ResponseActionNames;
 use crate::shared::traits::{
     ExistsQuery, QuerySupport, RkyvSupport, ShoalQuerySupport, ShoalResponseSupport,
 };
@@ -67,7 +67,9 @@ impl ManageConnection for ShoalConnectionManager {
         // split our stream into read and write halves
         let (tcp_rx, tcp_tx) = stream.into_split();
         // send the read half to our tcp proxy
-        self.proxy_tx.send(tcp_rx).await.unwrap();
+        self.proxy_tx.send(tcp_rx).await.map_err(|e| {
+            std::io::Error::new(ErrorKind::Other, format!("failed to send to proxy: {e}"))
+        })?;
         Ok(tcp_tx)
     }
 
@@ -125,7 +127,11 @@ impl<S: QuerySupport> Shoal<S> {
             >,
     {
         // convert our address into a socker addr
-        let addr = tokio::net::lookup_host(addr).await.unwrap().next().unwrap();
+        let addr = tokio::net::lookup_host(addr)
+            .await
+            .map_err(|e| Errors::DnsResolution(format!("failed to resolve host: {e}")))?
+            .next()
+            .ok_or_else(|| Errors::DnsResolution("no addresses found for host".into()))?;
         // create a channel for our connection pool and our tcp proxy
         let (proxy_tx, proxy_rx) = kanal::unbounded_async();
         // Create a new shoal connection manager
@@ -139,7 +145,7 @@ impl<S: QuerySupport> Shoal<S> {
             .max_lifetime(Some(std::time::Duration::from_secs(1800)))
             .build(manager)
             .await
-            .unwrap();
+            .map_err(|e| Errors::ConnectionPool(format!("failed to build connection pool: {e}")))?;
         // build a channel for sending and recieving response streams on
         let (channel_queue_tx, channel_queue_rx) = kanal::bounded_async(8192);
         // create a map for storing what channels to send response streams on
@@ -208,16 +214,24 @@ impl<S: QuerySupport> Shoal<S> {
         // start tracking this response
         let (response_tx, response_rx) = self.track_response(&mut queries.id)?;
         // get a connection from our connection pool and send our query
-        let mut conn = self.pool.get().await.unwrap();
+        let mut conn = self.pool.get().await.map_err(|e| {
+            Errors::ConnectionPool(format!("failed to get connection from pool: {e}"))
+        })?;
         // build our vectored byte slices to send
         let mut bufs = &mut [IoSlice::new(&len), IoSlice::new(&archived)][..];
         // keep sending our data until all of this archive has been sent
         while !bufs.is_empty() {
             // send this data back to our client
-            match conn.write_vectored(bufs).await {
-                Ok(0) => panic!("No bytes were written?"),
-                Ok(n) => IoSlice::advance_slices(&mut bufs, n),
-                Err(error) => panic!("Ahhh error?: {error:#?}"),
+            match conn.write_vectored(bufs).await? {
+                // if n is zero then no bytes were written
+                n if n == 0 => {
+                    return Err(Errors::IO(std::io::Error::new(
+                        ErrorKind::WriteZero,
+                        "no bytes were written",
+                    )));
+                }
+                // consume the data thats already been sent
+                n => IoSlice::advance_slices(&mut bufs, n),
             }
         }
         // build a new shoal result stream
@@ -483,42 +497,45 @@ impl TcpProxy {
         }
     }
     /// Start relaying messages from this tcp stream
-    pub async fn start(mut self) {
+    pub async fn start(mut self) -> Result<(), Errors> {
         // keep reading from our tcp socket
         loop {
             // have a buffer for our query_id and for our length
             let mut preamble: [u8; 24] = [0; 24];
             // try to read from our tcp socket
             if let Err(error) = self.reader.read_exact(&mut preamble).await {
-                // if we are shutting down then ignore any EOF errors
-                if self.is_shutting_down.load(Ordering::Relaxed) {
-                    // check if this was an EOF error
-                    if error.kind() == ErrorKind::UnexpectedEof {
-                        break;
-                    }
-                } else {
-                    // we are not shutting down so raise this EOF error
-                    panic!("Error: {error:#?}");
+                // if we are shutting down then ignore EOF errors
+                if self.is_shutting_down.load(Ordering::Relaxed)
+                    && error.kind() == ErrorKind::UnexpectedEof
+                {
+                    return Ok(());
                 }
+                return Err(Errors::IO(error));
             }
             // convert our uuid from bytes
-            let query_id = Uuid::from_slice(&preamble[..16]).unwrap();
-            // get a fixed size slice for our u64
-            let u64_bytes = preamble[16..24].try_into().unwrap();
+            let query_id = Uuid::from_slice(&preamble[..16])
+                .map_err(|e| Errors::ProtocolError(format!("invalid query UUID: {e}")))?;
             // parse our message length from our length bytes
+            let u64_bytes: [u8; 8] = preamble[16..24]
+                .try_into()
+                .map_err(|e| Errors::ProtocolError(format!("invalid message length: {e}")))?;
             let len = u64::from_le_bytes(u64_bytes) as usize;
             // Create an aligned vec to act as a pool of bytes
             let mut aligned_buff = AlignedVec::<16>::with_capacity(len);
             // resize our aligned vec
             aligned_buff.resize(len, 0);
-            self.reader.read_exact(&mut aligned_buff).await.unwrap();
+            self.reader.read_exact(&mut aligned_buff).await?;
             // wrap our response in a client message
             let wrapped = ClientMsg::Response(aligned_buff);
             // get the channel for this query
             match self.channel_map.pin_owned().get(&query_id) {
                 // send our response to the right shoal stream
-                Some(tx) => tx.send(wrapped).await.unwrap(),
-                None => panic!("Missing stream channel! -> {query_id} {len}"),
+                Some(tx) => tx.send(wrapped).await?,
+                None => {
+                    return Err(Errors::ProtocolError(format!(
+                        "missing stream channel for query {query_id} (len={len})"
+                    )));
+                }
             }
         }
     }
@@ -632,7 +649,10 @@ impl<S: ShoalQuerySupport, R: ShoalResponseSupport + 'static> ShoalTcpProxy<S, R
         // Wait for new tcp readers to read from
         loop {
             // wait for a new tcp reader to watch
-            let reader = self.proxy_rx.recv().await.unwrap();
+            let reader = match self.proxy_rx.recv().await {
+                Ok(reader) => reader,
+                Err(_) => return,
+            };
             // build a new tcp proxy
             let tcp_proxy = TcpProxy::new(reader, &self.channel_map, &self.is_shutting_down);
             // spawn a task to watch this tcp reader for results
@@ -723,21 +743,21 @@ where
 }
 
 impl<S: QuerySupport> ShoalResponse<S> {
-    pub(super) fn new(buff: AlignedVec) -> Self
+    pub(super) fn new(buff: AlignedVec) -> Result<Self, Errors>
     where
         for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived: CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
         >,
     {
         // access our response
-        let archived = S::ResponseKinds::access(&buff).unwrap();
+        let archived = S::ResponseKinds::access(&buff)?;
         // This is safe as we own our backing aligned vec
         let const_archived = archived as *const _;
-        ShoalResponse {
+        Ok(ShoalResponse {
             _buff: buff,
             archived: const_archived,
             phantom: PhantomData,
-        }
+        })
     }
 
     /// Get the inner aligned vec
@@ -872,7 +892,7 @@ where
                             // get this responses message
                             ClientMsg::Response(response) => {
                                 // wrap our response so we don't have to keep repaying access costs
-                                let response = ShoalResponse::<S>::new(response);
+                                let response = ShoalResponse::<S>::new(response)?;
                                 // only bother to check our server sent end of stream if our queries are bounded
                                 let end = if self.unbounded_queries {
                                     // we have unbounded queries so set end to false
@@ -896,7 +916,7 @@ where
                 // get this responses message
                 ClientMsg::Response(response) => {
                     // wrap our response so we don't have to keep repaying access costs
-                    let response = ShoalResponse::<S>::new(response);
+                    let response = ShoalResponse::<S>::new(response)?;
                     // get the index for this message
                     let index = response.get_index();
                     // if this is the next row then return it
@@ -1124,7 +1144,7 @@ where
             match response_rx.recv().await? {
                 ClientMsg::Response(archived) => {
                     // wrap our response so we don't have to keep repaying access costs
-                    let response = ShoalResponse::<S>::new(archived);
+                    let response = ShoalResponse::<S>::new(archived)?;
                     // get the index for this message
                     let index = response.get_index();
                     // if this is our next index then increment next as far as we can
@@ -1258,16 +1278,24 @@ impl<Q: QuerySupport> ShoalQueryStream<Q> {
         // get the size of the archive we are sending to the client
         let len = archived.len().to_le_bytes();
         // get a connection from our connection pool and send our query
-        let mut conn = self.pool.get().await.unwrap();
+        let mut conn = self.pool.get().await.map_err(|e| {
+            Errors::ConnectionPool(format!("failed to get connection from pool: {e}"))
+        })?;
         // build our vectored byte slices to send
         let mut bufs = &mut [IoSlice::new(&len), IoSlice::new(&archived)][..];
         // keep sending our data until all of this archive has been sent
         while !bufs.is_empty() {
             // send this data back to our client
-            match conn.write_vectored(bufs).await {
-                Ok(0) => panic!("No bytes were written?"),
-                Ok(n) => IoSlice::advance_slices(&mut bufs, n),
-                Err(error) => panic!("Ahhh error?: {error:#?}"),
+            match conn.write_vectored(bufs).await? {
+                // if n is zero then no bytes were written
+                n if n == 0 => {
+                    return Err(Errors::IO(std::io::Error::new(
+                        ErrorKind::WriteZero,
+                        "no bytes were written",
+                    )));
+                }
+                // consume the data thats already been sent
+                n => IoSlice::advance_slices(&mut bufs, n),
             }
         }
         // increment the number of queries sent and our base index
