@@ -343,6 +343,7 @@ pub trait StorageSupport: Sized {
     /// Load a partition from disk if it exists directly
     ///
     /// This doesn't use the loader channel and instead returns the Partition data.
+    #[allow(async_fn_in_trait)]
     async fn load_partition_direct(
         &self,
         partition_id: u64,

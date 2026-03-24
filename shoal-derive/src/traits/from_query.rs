@@ -1,6 +1,5 @@
 //! Generate the from query trait implementation for a type
 
-use quote::format_ident;
 use syn::{FieldsNamed, Ident};
 
 use crate::utils;
@@ -36,12 +35,6 @@ pub fn add(stream: &mut proc_macro2::TokenStream, db_name: &Ident, fields: &Fiel
     let query_kinds = syn::Ident::new(&format!("{db_name}QueryKinds"), db_name.span());
     // check each table in this db
     for table in &fields.named {
-        // raise an error on any fields without idents
-        let table_name_snake = match &table.ident {
-            // convert our table name to pascal case
-            Some(table_name) => table_name,
-            None => panic!("Shoal DB structs must be named fields: {:?}", table.ty),
-        };
         // get the inner type name from the generic parameter
         let table_name = utils::extract_inner_table_ident(&table.ty)
             .expect("Failed to extract inner table ident");

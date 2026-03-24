@@ -810,7 +810,6 @@ where
                     ));
                     None
                 } else {
-                    println!("~~ DELETING EMPTY?");
                     // build the failed delete response
                     let response = Response {
                         id: meta.id,
@@ -1131,7 +1130,7 @@ where
     ) -> Result<(), ServerError> {
         // access our data
         let intent = SortedIntents::<T>::access(read)?;
-        println!("pre_load -> {partitions:#?}");
+        //println!("pre_load -> {partitions:#?}");
         // add this intent to our btreemap
         let diff = match intent {
             ArchivedSortedIntents::Insert(archived) => {
@@ -1268,7 +1267,7 @@ where
         let new_size = memory_usage.borrow().saturating_add_signed(diff);
         // adjust our memory usage correctly
         *memory_usage.borrow_mut() = new_size;
-        println!("post_load -> {partitions:#?}");
+        //println!("post_load -> {partitions:#?}");
         Ok(())
     }
 
