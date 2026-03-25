@@ -182,4 +182,10 @@ pub enum ShoalError {
     NonBinaryMessage,
     /// The map hash was not valid
     MapCorruption { found: u64, expected: u64 },
+    /// An intent log or map file was shorter than expected (truncated on disk)
+    TruncatedIntentLog,
+    /// A partition was not found in the archive map (corrupt or missing map entry)
+    PartitionNotFound { partition_id: u64 },
+    /// A table was not found in the archive map (corrupt or missing map)
+    TableMapMissing,
 }

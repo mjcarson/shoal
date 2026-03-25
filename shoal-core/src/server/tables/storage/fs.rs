@@ -341,18 +341,18 @@ impl StorageSupport for FileSystem {
         while let Some(read) = reader.next_buff().await? {
             // load any partitions needed to properly handle updates
             <P as IntentReadSupport<R>>::scan(&read, self, partitions, memory_usage)
-                .await
-                .unwrap();
+                .await?;
             // add this read to our read list
             reads.push(read);
         }
         // Now step over our intents and actually apply them to our partition data
         for read in reads {
             // load this partitions data
-            if <P as IntentReadSupport<R>>::replay(&read, generation, partitions, memory_usage)
-                .is_err()
+            if let Err(err) =
+                <P as IntentReadSupport<R>>::replay(&read, generation, partitions, memory_usage)
             {
-                panic!("Skipping intent data that was not fully committed");
+                tracing::warn!("Skipping intent entry that was not fully committed: {err:#?}");
+                continue;
             }
         }
         // close our reader

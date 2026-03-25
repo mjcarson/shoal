@@ -4,6 +4,7 @@ use glommio::io::{DmaFile, OpenOptions, ReadResult};
 use std::path::PathBuf;
 use tracing::instrument;
 
+use crate::server::errors::ShoalError;
 use crate::server::ServerError;
 
 /// Reads an intent log from disk
@@ -45,6 +46,9 @@ impl IntentLogReader {
             // try to read the size of the next entry in this intent log
             let size_read = self.file.read_at(self.position, 8).await?;
             // check if we read any data
+            if size_read.len() < 8 {
+                return Err(ServerError::Shoal(ShoalError::TruncatedIntentLog));
+            }
             let size = usize::from_le_bytes(size_read[..8].try_into()?);
             // if our size is bigger then our remaining data then its the end of the
             // log and we are reading padded data

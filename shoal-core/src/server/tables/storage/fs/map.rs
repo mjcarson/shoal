@@ -103,7 +103,7 @@ impl SerializedMap {
         // read all of the intent from this intent log
         while let Some(read) = reader.next_buff().await? {
             // try to deserialize this archive entry from our intent log
-            let archived = unsafe { rkyv::access_unchecked::<ArchivedMapIntent>(&read[..]) };
+            let archived = rkyv::access::<ArchivedMapIntent, rkyv::rancor::Error>(&read[..])?;
             // deserialize this entry
             let intent = rkyv::deserialize::<MapIntent, rkyv::rancor::Error>(archived)?;
             // add this map intent to our map
@@ -151,6 +151,9 @@ impl SerializedMap {
             // close our file
             file.close().await?;
             // get our maps xxh3 hash
+            if read.len() < 8 {
+                return Err(ServerError::Shoal(ShoalError::TruncatedIntentLog));
+            }
             let expected = u64::from_le_bytes(read[..8].try_into()?);
             // build a hasher to verify this map
             let mut hasher = GxHasher::default();
@@ -166,7 +169,7 @@ impl SerializedMap {
                 return Err(ServerError::Shoal(shoal_err));
             }
             // try to deserialize this archive map
-            let archived = unsafe { rkyv::access_unchecked::<ArchivedSerializedMap>(&read[8..]) };
+            let archived = rkyv::access::<ArchivedSerializedMap, rkyv::rancor::Error>(&read[8..])?;
             // deserialize this map
             let mut map = rkyv::deserialize::<SerializedMap, rkyv::rancor::Error>(archived)?;
             // load our intent log
@@ -284,13 +287,17 @@ impl<N: TableNameSupport> FilteredFullArchiveMap<N, ArchiveMap> {
                 // get the location of this partitions data in the archives
                 let entry = match table_map.find_partition(partition_id) {
                     Some(entry) => entry,
-                    None => panic!("ahhh"),
+                    None => {
+                        return Err(ServerError::Shoal(ShoalError::PartitionNotFound {
+                            partition_id,
+                        }))
+                    }
                 };
                 // get the archive for this partition
                 let archive = table_map.get_archive(&entry.archive).await?;
                 Ok((entry, archive))
             }
-            None => panic!("Missing table map?: {table_name}:{partition_id}"),
+            None => return Err(ServerError::Shoal(ShoalError::TableMapMissing)),
         }
     }
 }
@@ -536,9 +543,7 @@ impl ArchiveMap {
         // step over each archive and close it
         for (_, archive) in self.loaded_archives.take() {
             // close this archive
-            if let Err(error) = archive.close().await {
-                panic!("Error: {error:#?}");
-            }
+            archive.close().await?;
         }
         Ok(())
     }
