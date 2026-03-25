@@ -220,6 +220,12 @@ impl SerializedMap {
         writer.close().await?;
         // rename our temp path to our current one
         glommio::io::rename(&map.temp_map_path, &map.map_path).await?;
+        // fsync the parent directory to ensure the rename is durable
+        if let Some(parent) = map.map_path.parent() {
+            let dir = glommio::io::Directory::open(parent).await?;
+            dir.sync().await?;
+            dir.close().await?;
+        }
         Ok(())
     }
 }

@@ -153,7 +153,7 @@ where
     ///
     /// * `shard_name` - The id of the shard that owns this table
     /// * `conf` - The Shoal config
-    #[instrument(name = "PersistentTable::new", skip(conf), err(Debug))]
+    #[instrument(name = "PersistentTable::new", skip_all, fields(shard_name, table_name = ?table_name), err(Debug))]
     pub async fn new<D: ShoalDatabase>(
         shard_name: &str,
         table_name: N,

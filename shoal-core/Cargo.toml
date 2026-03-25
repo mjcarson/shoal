@@ -47,3 +47,6 @@ tonic = { version = "0.8.2", features = ["tls-roots"] }
 opentelemetry-semantic-conventions = { version = "0.10.0" }
 opentelemetry-proto = { version = "0.1.0"}
 winnow = "0.7"
+
+[dev-dependencies]
+tempfile = "3"

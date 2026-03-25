@@ -3,7 +3,9 @@
 use byte_unit::Byte;
 use futures::AsyncWriteExt;
 use glommio::io::{DmaFile, DmaStreamWriter, OpenOptions};
+use gxhash::GxHasher;
 use kanal::{AsyncReceiver, AsyncSender};
+use std::hash::Hasher;
 use rkyv::bytecheck::CheckBytes;
 use rkyv::de::Pool;
 use rkyv::rancor::{Error, Strategy};
@@ -42,8 +44,14 @@ macro_rules! write_map_intent {
         let archived_intent = rkyv::to_bytes::<Error>(&$intent)?;
         // get the size of the data to write
         let size = archived_intent.len();
+        // compute a checksum over our serialized data
+        let mut hasher = GxHasher::default();
+        hasher.write(archived_intent.as_slice());
+        let checksum = hasher.finish();
         // write the size of our archived entry data
         $map_writer.write_all(&size.to_le_bytes()).await?;
+        // write our checksum
+        $map_writer.write_all(&checksum.to_le_bytes()).await?;
         // write our archived partition map data
         $map_writer.write_all(archived_intent.as_slice()).await?;
         // ensure that during testing/development we always have an entry intent
@@ -385,8 +393,14 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                     let archived_intent = rkyv::to_bytes::<Error>(&intent)?;
                     // get the size of the data to write
                     let size = archived_intent.len();
+                    // compute checksum
+                    let mut hasher = GxHasher::default();
+                    hasher.write(archived_intent.as_slice());
+                    let checksum = hasher.finish();
                     // write the size of our archived entry data
                     self.map_writer.write_all(&size.to_le_bytes()).await?;
+                    // write our checksum
+                    self.map_writer.write_all(&checksum.to_le_bytes()).await?;
                     // write our archived partition map data
                     self.map_writer
                         .write_all(archived_intent.as_slice())
@@ -408,8 +422,14 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                     let archived_intent = rkyv::to_bytes::<Error>(&intent)?;
                     // get the size of the data to write
                     let size = archived_intent.len();
+                    // compute checksum
+                    let mut hasher = GxHasher::default();
+                    hasher.write(archived_intent.as_slice());
+                    let checksum = hasher.finish();
                     // write the size of our archived entry data
                     self.map_writer.write_all(&size.to_le_bytes()).await?;
+                    // write our checksum
+                    self.map_writer.write_all(&checksum.to_le_bytes()).await?;
                     // write our archived partition map data
                     self.map_writer
                         .write_all(archived_intent.as_slice())
@@ -485,8 +505,14 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             let archived_intent = rkyv::to_bytes::<Error>(&intent)?;
             // get the size of the data to write
             let size = archived_intent.len();
+            // compute checksum
+            let mut hasher = GxHasher::default();
+            hasher.write(archived_intent.as_slice());
+            let checksum = hasher.finish();
             // write the size of our archived entry data
             self.map_writer.write_all(&size.to_le_bytes()).await?;
+            // write our checksum
+            self.map_writer.write_all(&checksum.to_le_bytes()).await?;
             // write our archived partition map data
             self.map_writer
                 .write_all(archived_intent.as_slice())

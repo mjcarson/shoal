@@ -5,6 +5,7 @@ use futures::stream::FuturesUnordered;
 use futures::{AsyncWriteExt, StreamExt};
 use glommio::io::{DmaStreamWriter, DmaStreamWriterBuilder, OpenOptions, ReadResult};
 use glommio::{Task, TaskQueueHandle};
+use gxhash::GxHasher;
 use kanal::{AsyncReceiver, AsyncSender};
 use rkyv::bytecheck::CheckBytes;
 use rkyv::de::Pool;
@@ -15,14 +16,18 @@ use rkyv::validation::Validator;
 use rkyv::Archive;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::hash::Hasher;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tracing::{event, instrument, Level};
 
 mod compactor;
 pub mod conf;
 mod loader;
-mod map;
-mod reader;
+pub(crate) mod map;
+pub(crate) mod reader;
+#[cfg(test)]
+mod tests;
 
 use compactor::FileSystemCompactor;
 pub use map::ArchiveMap;
@@ -126,6 +131,78 @@ impl FileSystem {
         self.tasks.push(compactor_handle);
         Ok(())
     }
+
+    /// Replay a single intent log file into partitions
+    ///
+    /// # Arguments
+    ///
+    /// * `intent_path` - The path to the intent log file to replay
+    /// * `generation` - The generation to replay these intents as
+    /// * `partitions` - The map of partitions to load intents into
+    /// * `memory_usage` - The memory usage for this shard
+    async fn replay_intent_log<
+        P: IntentReadSupport<R> + PartitionSupport,
+        R: PartitionKeySupport,
+    >(
+        &self,
+        intent_path: &PathBuf,
+        generation: u64,
+        partitions: &mut HashMap<u64, MaybeLoaded<P>>,
+        memory_usage: &mut Arc<RefCell<usize>>,
+    ) -> Result<(), ServerError> {
+        // instance a vec to store our intent reads during the scan phase
+        let mut reads = Vec::with_capacity(1000);
+        // create an intent log reader
+        let mut reader = IntentLogReader::new(intent_path).await?;
+        // iterate over entries and scan for partitions we need to load
+        while let Some(read) = reader.next_buff().await? {
+            // load any partitions needed to properly handle updates/deletes
+            <P as IntentReadSupport<R>>::scan(&read, self, partitions, memory_usage).await?;
+            // add this read to our read list
+            reads.push(read);
+        }
+        // now replay all intents and apply them to partition data
+        for read in reads {
+            if let Err(err) =
+                <P as IntentReadSupport<R>>::replay(&read, generation, partitions, memory_usage)
+            {
+                tracing::warn!("Skipping intent entry that was not fully committed: {err:#?}");
+                continue;
+            }
+        }
+        // close our reader
+        reader.close().await?;
+        Ok(())
+    }
+
+    /// Find inactive intent log files for this shard, sorted by generation ascending
+    ///
+    /// # Arguments
+    ///
+    /// * `intent_dir` - The intent log directory to scan
+    /// * `shard_name` - The name of the shard to find inactive logs for
+    pub fn find_inactive_intent_logs(
+        intent_dir: &PathBuf,
+        shard_name: &str,
+    ) -> Vec<(u64, PathBuf)> {
+        let prefix = format!("{shard_name}-inactive-");
+        let mut inactive_logs: Vec<(u64, PathBuf)> = Vec::new();
+        // use std::fs::read_dir since this only runs during startup recovery
+        if let Ok(entries) = std::fs::read_dir(intent_dir) {
+            for entry in entries.flatten() {
+                let file_name = entry.file_name();
+                let name = file_name.to_string_lossy();
+                if let Some(gen_str) = name.strip_prefix(&prefix) {
+                    if let Ok(gen) = gen_str.parse::<u64>() {
+                        inactive_logs.push((gen, entry.path()));
+                    }
+                }
+            }
+        }
+        // sort by generation ascending so we replay in order
+        inactive_logs.sort_by_key(|(gen, _)| *gen);
+        inactive_logs
+    }
 }
 
 #[cfg_attr(feature = "hotpath", hotpath::measure_all)]
@@ -183,7 +260,6 @@ impl StorageSupport for FileSystem {
         // add our shard name
         intent_path.push(format!("{shard_name}-active"));
         // build the writer for this shards intent log
-        println!("WRITING INTENTS TO {}", intent_path.display());
         let intent_log = Self::new_writer(&intent_path, &table_conf).await?;
         // build the channel to our compactor
         let (intent_tx, intent_rx) = kanal::unbounded_async();
@@ -237,8 +313,14 @@ impl StorageSupport for FileSystem {
         let archived = RkyvSupport::serialize(data);
         // get the size of the data to write
         let size = archived.len();
+        // compute a checksum over our serialized data
+        let mut hasher = GxHasher::default();
+        hasher.write(archived.as_slice());
+        let checksum = hasher.finish();
         // write our size
         self.intent_log.write_all(&size.to_le_bytes()).await?;
+        // write our checksum
+        self.intent_log.write_all(&checksum.to_le_bytes()).await?;
         // write our data
         self.intent_log.write_all(archived.as_slice()).await?;
         // get the current position of the stream writer
@@ -276,6 +358,11 @@ impl StorageSupport for FileSystem {
             new_path.push(name);
             // rename our old intent log
             glommio::io::rename(&self.intent_path, &new_path).await?;
+            // fsync the parent directory to ensure the rename is durable
+            let intent_dir = self.table_conf.get_intent_path(R::name());
+            let dir = glommio::io::Directory::open(&intent_dir).await?;
+            dir.sync().await?;
+            dir.close().await?;
             // create an intent log compaction job
             self.intent_tx
                 .send(CompactionJob::IntentLog {
@@ -312,12 +399,20 @@ impl StorageSupport for FileSystem {
 
     /// Read an intent log from storage
     ///
+    /// Replays any inactive intent logs (from prior compaction cycles that
+    /// did not complete) in generation order, then replays the active log.
+    ///
     /// # Arguments
     ///
-    /// * `shard_name` - The name of the shard to read intents for
     /// * `conf` - A Shoal config
-    /// * `path` - The path to the intent log to read in
+    /// * `generation` - The generation to replay these intents as
+    /// * `partitions` - The map of partitions to load intents into
+    /// * `memory_usage` - The memory usage for this shard
     #[allow(async_fn_in_trait)]
+    #[instrument(
+        name = "FileSystem::read_intents",
+        skip(self, conf, partitions, memory_usage)
+    )]
     async fn read_intents<P: IntentReadSupport<R> + PartitionSupport, R: PartitionKeySupport>(
         &self,
         conf: &Conf,
@@ -327,36 +422,24 @@ impl StorageSupport for FileSystem {
     ) -> Result<(), ServerError> {
         // get this tables settings
         let table_conf = Self::get_settings::<R>(conf)?;
-        // get our intent log path for this table
-        let mut intent_path = table_conf.get_intent_path(R::name());
-        // add our shard name
-        // TODO load all of this shards intent files
-        intent_path.push(format!("{}-active", self.shard_name));
-        // instance a vec to store our intent reads during the delete scan
-        let mut reads = Vec::with_capacity(1000);
-        // create an intent log reader
-        let mut reader = IntentLogReader::new(&intent_path).await?;
-        // iterate over the entries in this intent log and look for any delete intent logs
-        // whose partitions we need to load
-        while let Some(read) = reader.next_buff().await? {
-            // load any partitions needed to properly handle updates
-            <P as IntentReadSupport<R>>::scan(&read, self, partitions, memory_usage)
+        // get our intent log directory for this table
+        let intent_dir = table_conf.get_intent_path(R::name());
+        // find and replay any inactive intent logs from interrupted compactions
+        let inactive_logs = Self::find_inactive_intent_logs(&intent_dir, &self.shard_name);
+        for (gen, inactive_path) in &inactive_logs {
+            // log that we are recovering an intent log
+            event!(Level::INFO, msg = "Recovering", gen);
+            self.replay_intent_log::<P, R>(inactive_path, generation, partitions, memory_usage)
                 .await?;
-            // add this read to our read list
-            reads.push(read);
+            // delete this inactive log now that its intents have been replayed
+            glommio::io::remove(inactive_path).await?;
+            // log that we have finished recovering an intent log
+            event!(Level::INFO, msg = "Replayed and removed", gen);
         }
-        // Now step over our intents and actually apply them to our partition data
-        for read in reads {
-            // load this partitions data
-            if let Err(err) =
-                <P as IntentReadSupport<R>>::replay(&read, generation, partitions, memory_usage)
-            {
-                tracing::warn!("Skipping intent entry that was not fully committed: {err:#?}");
-                continue;
-            }
-        }
-        // close our reader
-        reader.close().await?;
+        // now replay the active intent log
+        let active_path = intent_dir.join(format!("{}-active", self.shard_name));
+        self.replay_intent_log::<P, R>(&active_path, generation, partitions, memory_usage)
+            .await?;
         Ok(())
     }
 
