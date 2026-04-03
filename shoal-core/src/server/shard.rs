@@ -202,7 +202,7 @@ impl ShardInfo {
     }
 }
 
-pub(super) struct Shard<S: ShoalDatabase> {
+pub(super) struct Shard<D: ShoalDatabase> {
     /// This shards info
     info: ShardInfo,
     /// The config for shoal
@@ -210,23 +210,23 @@ pub(super) struct Shard<S: ShoalDatabase> {
     /// The token ring info for shoal
     ring: Ring,
     /// Handles communications across shoal shards/nodes
-    comms: Comms<S>,
+    comms: Comms<D>,
     /// The tables we are responsible for on this shard
-    pub tables: S,
+    pub tables: D,
     /// The full archive map for all tables
-    table_map: FullArchiveMap<S::TableNames>,
+    table_map: FullArchiveMap<D::TableNames>,
     /// A map of channels to send responses to our client relays over
     client_map: HashMap<Uuid, AsyncSender<(Uuid, Span, AlignedVec)>>,
     /// The channel to send shard local messages on
-    shard_local_tx: AsyncSender<ServerMsg<S>>,
+    shard_local_tx: AsyncSender<ServerMsg<D>>,
     /// The channel to Receive shard local messages on
-    shard_local_rx: AsyncReceiver<ServerMsg<S>>,
+    shard_local_rx: AsyncReceiver<ServerMsg<D>>,
     /// A map of storage systems and their loader channel
     loader_channels: HashMap<
         Loaders,
         (
-            AsyncSender<LoaderMsg<S::TableNames>>,
-            AsyncReceiver<LoaderMsg<S::TableNames>>,
+            AsyncSender<LoaderMsg<D::TableNames>>,
+            AsyncReceiver<LoaderMsg<D::TableNames>>,
         ),
     >,
     /// The responses whose queries have been flushed to disk
@@ -234,7 +234,7 @@ pub(super) struct Shard<S: ShoalDatabase> {
         Uuid,
         Uuid,
         Span,
-        <S::ClientType as QuerySupport>::ResponseKinds,
+        <D::ClientType as QuerySupport>::ResponseKinds,
     )>,
     /// The latency sensitive task queue
     high_priority: TaskQueueHandle,
@@ -245,14 +245,14 @@ pub(super) struct Shard<S: ShoalDatabase> {
     /// The total size of all data on this shard
     memory_usage: Arc<RefCell<usize>>,
     /// The most recently used tables/partitions on this shard
-    lru: Arc<RefCell<LruCache<(S::TableNames, u64), usize, BuildHasherDefault<GxHasher>>>>,
+    lru: Arc<RefCell<LruCache<(D::TableNames, u64), usize, BuildHasherDefault<GxHasher>>>>,
 }
 
-impl<S: ShoalDatabase> Shard<S>
+impl<D: ShoalDatabase> Shard<D>
 where
-    [<<<S as ShoalDatabase>::ClientType as QuerySupport>::QueryKinds as Archive>::Archived]:
+    [<<<D as ShoalDatabase>::ClientType as QuerySupport>::QueryKinds as Archive>::Archived]:
         DeserializeUnsized<
-            [<<S as ShoalDatabase>::ClientType as QuerySupport>::QueryKinds],
+            [<<D as ShoalDatabase>::ClientType as QuerySupport>::QueryKinds],
             Strategy<rkyv::de::Pool, rkyv::rancor::Error>,
         >,
 {
@@ -262,7 +262,11 @@ where
     ///
     /// * `addr` - The address to bind our udp socket too
     #[instrument(name = "Shard::new", skip_all, err(Debug))]
-    pub async fn new(conf: &Conf, comms: Comms<S>, shard_counter: &AtomicUsize) -> Result<Self, ServerError> {
+    pub async fn new(
+        conf: &Conf,
+        comms: Comms<D>,
+        shard_counter: &AtomicUsize,
+    ) -> Result<Self, ServerError> {
         // get a handle to our current executor
         let executor = glommio::executor();
         // assign a shard ID from our counter (always starts at 0 per pool)
@@ -299,7 +303,7 @@ where
         // get the channels for this shards channel on this node
         let (shard_local_tx, shard_local_rx) = comms.get_shards_channels(our_mesh_id);
         // build our shards tables
-        let tables = S::new(
+        let tables = D::new(
             &info.name,
             &table_map,
             &mut loader_channels,
@@ -396,7 +400,7 @@ where
     async fn send_to_shard(
         &mut self,
         client: Uuid,
-        queries: Queries<S::ClientType>,
+        queries: Queries<D::ClientType>,
     ) -> Result<(), ServerError> {
         // initialize a vec to store the shards we find
         let mut found = Vec::with_capacity(3);
@@ -439,7 +443,7 @@ where
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     async fn handle_client<'a>(&mut self, peer: Uuid, data: BytesMut) -> Result<(), ServerError>
     where
-        for<'b> <<<S as ShoalDatabase>::ClientType as QuerySupport>::QueryKinds as Archive>::Archived:
+        for<'b> <<<D as ShoalDatabase>::ClientType as QuerySupport>::QueryKinds as Archive>::Archived:
             CheckBytes<
                 Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
             >,
@@ -447,7 +451,7 @@ where
         // load our arhived query from buffer
         let archived = Queries::access(&data)?;
         // deserialize our queries
-        let queries = <Queries<S::ClientType> as RkyvSupport>::deserialize(archived)?;
+        let queries = <Queries<D::ClientType> as RkyvSupport>::deserialize(archived)?;
         // send each query to the correct shard
         self.send_to_shard(peer, queries).await
     }
@@ -465,7 +469,7 @@ where
         client: Uuid,
         query_id: Uuid,
         span: Span,
-        response: <S::ClientType as QuerySupport>::ResponseKinds,
+        response: <D::ClientType as QuerySupport>::ResponseKinds,
     ) -> Result<(), ServerError> {
         // archive our response
         let archived = rkyv::to_bytes::<_>(&response)?;
@@ -494,10 +498,10 @@ where
     async fn handle_query(
         &mut self,
         meta: QueryMetadata,
-        query: <S::ClientType as QuerySupport>::QueryKinds,
+        query: <D::ClientType as QuerySupport>::QueryKinds,
     ) -> Result<(), ServerError>
     where
-        for<'a> <<<S as ShoalDatabase>::ClientType as QuerySupport>::QueryKinds as Archive>::Archived:
+        for<'a> <<<D as ShoalDatabase>::ClientType as QuerySupport>::QueryKinds as Archive>::Archived:
             CheckBytes<
                 Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
             >,
@@ -591,7 +595,7 @@ where
     #[allow(clippy::future_not_send)]
     pub async fn start<'a>(mut self, should_shutdown: Arc<AtomicBool>) -> Result<(), ServerError>
     where
-        for<'b> <<<S as ShoalDatabase>::ClientType as QuerySupport>::QueryKinds as Archive>::Archived:
+        for<'b> <<<D as ShoalDatabase>::ClientType as QuerySupport>::QueryKinds as Archive>::Archived:
             CheckBytes<
                 Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
             >,
@@ -687,13 +691,15 @@ where
     let executor_builder =
         LocalExecutorPoolBuilder::new(PoolPlacement::MaxSpread(cpus.len(), Some(cpus)));
     // build and spawn our shards on all of remaining available cores
-    let shards = executor_builder.on_all_shards(enclose!((comms, should_shutdown, shard_counter) move || {
-        async move {
-            // build an empty shard
-            let shard: Shard<S> = Shard::new(&conf, comms, &shard_counter).await?;
-            // start this shard
-            shard.start(should_shutdown.clone()).await
-        }
-    }))?;
+    let shards = executor_builder.on_all_shards(
+        enclose!((comms, should_shutdown, shard_counter) move || {
+            async move {
+                // build an empty shard
+                let shard: Shard<S> = Shard::new(&conf, comms, &shard_counter).await?;
+                // start this shard
+                shard.start(should_shutdown.clone()).await
+            }
+        }),
+    )?;
     Ok((shards, should_shutdown))
 }

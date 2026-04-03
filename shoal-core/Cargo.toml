@@ -36,6 +36,9 @@ bb8 = "0.8"
 async-trait = "0.1"
 hotpath = { workspace = true }
 
+# new IO?
+lio = "0.4.1"
+
 # tracing dependencies
 opentelemetry = "0.28"
 opentelemetry_sdk = "0.28"

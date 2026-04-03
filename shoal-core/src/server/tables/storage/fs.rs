@@ -26,12 +26,14 @@ pub mod conf;
 mod loader;
 pub(crate) mod map;
 pub(crate) mod reader;
+mod stream;
 #[cfg(test)]
 mod tests;
 
 use compactor::FileSystemCompactor;
 pub use map::ArchiveMap;
 use reader::IntentLogReader;
+use stream::StreamWriter;
 
 use super::{CompactionJob, IntentReadSupport, StorageSupport};
 use crate::server::conf::TableSettings;
@@ -43,13 +45,15 @@ use crate::tables::partitions::{MaybeLoaded, PartitionSupport};
 use loader::FsLoader;
 
 /// Store shoal data in an existing filesytem for persistence
-pub struct FileSystem {
+pub struct FileSystem<D: ShoalDatabase> {
     /// The name of the shard we are storing data for
     shard_name: String,
     /// The path to our current intent log
     intent_path: PathBuf,
     /// The intent log to write too
     intent_log: DmaStreamWriter,
+    /// The intent log to write to
+    intent_log2: StreamWriter<D>,
     /// The current intent log generation
     pub generation: u64,
     /// The medium priority task queue
@@ -65,7 +69,7 @@ pub struct FileSystem {
 }
 
 #[cfg_attr(feature = "hotpath", hotpath::measure_all)]
-impl FileSystem {
+impl<D: ShoalDatabase> FileSystem<D> {
     /// Get a new stream writer for this shard
     ///
     /// # Arguments
@@ -89,6 +93,27 @@ impl FileSystem {
             .with_buffer_size(table_conf.latency_sensitive.buffer_size)
             .with_write_behind(table_conf.latency_sensitive.write_behind)
             .build();
+        Ok(writer)
+    }
+
+    /// Get a new stream writer for this shard
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - This shards name
+    /// * `table_conf` - The config for this table's storage engine
+    async fn new_writer2(
+        intent_path: &PathBuf,
+        shard_local_tx: &AsyncSender<ServerMsg<D>>,
+        table_conf: &FileSystemTableConf,
+    ) -> Result<StreamWriter<D>, ServerError> {
+        // build a new stream writer
+        // TODO error handling
+        let writer = StreamWriter::builder(intent_path, shard_local_tx.clone())
+            .buffer_size(table_conf.latency_sensitive.buffer_size)
+            .write_behind(table_conf.latency_sensitive.write_behind)
+            .build()
+            .await;
         Ok(writer)
     }
 
@@ -206,7 +231,7 @@ impl FileSystem {
 }
 
 #[cfg_attr(feature = "hotpath", hotpath::measure_all)]
-impl StorageSupport for FileSystem {
+impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
     /// The settings for this storage engine
     type Settings = FileSystemTableConf;
 
@@ -261,6 +286,7 @@ impl StorageSupport for FileSystem {
         intent_path.push(format!("{shard_name}-active"));
         // build the writer for this shards intent log
         let intent_log = Self::new_writer(&intent_path, &table_conf).await?;
+        let intent_log2 = Self::new_writer2(&intent_path, shard_local_tx, &table_conf).await?;
         // build the channel to our compactor
         let (intent_tx, intent_rx) = kanal::unbounded_async();
         // get this shards shared archive map
@@ -274,6 +300,7 @@ impl StorageSupport for FileSystem {
             shard_name: shard_name.to_owned(),
             intent_path,
             intent_log,
+            intent_log2,
             generation: 0,
             medium_priority,
             table_conf,
@@ -450,14 +477,14 @@ impl StorageSupport for FileSystem {
     }
 
     /// Spawn a loader for this storage type if not yet spawned
-    async fn spawn_loader<D: ShoalDatabase>(
+    async fn spawn_loader<S: ShoalDatabase>(
         &self,
-        table_map: &FullArchiveMap<D::TableNames>,
-        loader_rx: &AsyncReceiver<LoaderMsg<D::TableNames>>,
-        shard_local_tx: &AsyncSender<ServerMsg<D>>,
+        table_map: &FullArchiveMap<S::TableNames>,
+        loader_rx: &AsyncReceiver<LoaderMsg<S::TableNames>>,
+        shard_local_tx: &AsyncSender<ServerMsg<S>>,
     ) -> Result<(), ServerError> {
         // filter down to just our filesystem archive maps
-        let filtered = FilteredFullArchiveMap::<D::TableNames, ArchiveMap>::from(table_map);
+        let filtered = FilteredFullArchiveMap::<S::TableNames, ArchiveMap>::from(table_map);
         // build a new filesystem loader
         let loader =
             FsLoader::new(&self.medium_priority, filtered, &loader_rx, shard_local_tx).await;
