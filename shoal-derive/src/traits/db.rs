@@ -99,6 +99,19 @@ pub fn add(
             #table_names_ident::#variant_ident=> self.#field_ident.evict(victims),
         }
     });
+    // build our mark flushed arms
+    let mark_flushed_arms = fields
+        .named
+        .iter()
+        .zip(variants)
+        .map(|(field, variant_ident)| {
+        // get our field ident and type
+        let field_ident = field.ident.as_ref().unwrap();
+        // build our mark flushed arm for this table
+        quote! {
+            #table_names_ident::#variant_ident => self.#field_ident.mark_flushed(flushed_pos),
+        }
+    });
     // build our flush arms
     let flush_arms = fields.named.iter().map(|field| {
         // get our field ident and type
@@ -269,8 +282,20 @@ pub fn add(
                 }    
             }
 
+            /// Inform a table that some of its data has been flushed to storage
+            ///
+            /// # Arguments
+            ///
+            /// * `table` - The name of the table that we are marking a new flushed offset watermark
+            /// * `flushed_pos` - The new offset for flushed data
+            fn mark_flushed(&mut self, table: Self::TableNames, flushed_pos: u64) {
+                match table {
+                    #(#mark_flushed_arms)*
+                }
+            }
+
             /// Flush any in flight writes to disk
-            async fn flush(&self) -> Result<(), shoal_core::server::ServerError> {
+            async fn flush(&mut self) -> Result<(), shoal_core::server::ServerError> {
                 #(#flush_arms)*
                 Ok(())
             }
@@ -307,7 +332,7 @@ pub fn add(
             
 
             /// Shutdown this table and flush any data to disk if needed
-            async fn shutdown(&mut self) -> Result<(), shoal_core::server::ServerError> {
+            async fn shutdown(mut self) -> Result<(), shoal_core::server::ServerError> {
                 #(#shutdown_arms)*
                 Ok(())
             }

@@ -301,7 +301,16 @@ pub trait ShoalDatabase: 'static + Sized {
     /// Flush any in flight writes to disk
     #[allow(async_fn_in_trait)]
     #[cfg(feature = "server")]
-    async fn flush(&self) -> Result<(), ServerError>;
+    async fn flush(&mut self) -> Result<(), ServerError>;
+
+    /// Inform a table that some of its data has been flushed to storage
+    ///
+    /// # Arguments
+    ///
+    /// * `table` - The name of the table that we are marking a new flushed offset watermark
+    /// * `flushed_pos` - The new offset for flushed data
+    #[cfg(feature = "server")]
+    fn mark_flushed(&mut self, table: Self::TableNames, flushed_pos: u64);
 
     /// Get all flushed messages and send their response back
     ///
@@ -331,7 +340,7 @@ pub trait ShoalDatabase: 'static + Sized {
     /// Shutdown this table and flush any data to disk if needed
     #[allow(async_fn_in_trait)]
     #[cfg(feature = "server")]
-    async fn shutdown(&mut self) -> Result<(), ServerError>;
+    async fn shutdown(self) -> Result<(), ServerError>;
 }
 
 pub trait PartitionKeySupport: std::fmt::Debug + Clone + RkyvSupport + Sized {

@@ -1029,6 +1029,15 @@ where
         self.storage.flush().await
     }
 
+    /// Inform this table that some of its data has been flushed to storage
+    ///
+    /// # Arguments
+    ///
+    /// * `flushed_pos` - The new offset for flushed data
+    pub fn mark_flushed(&mut self, flushed_pos: u64) {
+        self.storage.mark_flushed(flushed_pos);
+    }
+
     /// Get all flushed response actions
     ///
     /// # Arguments

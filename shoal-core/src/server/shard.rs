@@ -202,6 +202,20 @@ impl ShardInfo {
     }
 }
 
+#[instrument(name = "Shard::shutdown_tasks", skip_all)]
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
+async fn shutdown_tasks(tasks: Vec<Task<Result<(), ServerError>>>) -> Result<(), ServerError> {
+    // cancel all of our tasks
+    for task in tasks {
+        // cancel this task
+        if let Some(Err(error)) = task.cancel().await {
+            // log this tasks error if it had one
+            event!(Level::ERROR, error = format!("{error:#?}"));
+        }
+    }
+    Ok(())
+}
+
 pub(super) struct Shard<D: ShoalDatabase> {
     /// This shards info
     info: ShardInfo,
@@ -517,7 +531,9 @@ where
     }
 
     /// Inform a table that some of its data has been flushed to storage
-    async fn mark_flushed(&mut self, table: D::TableNames, flushed_pos: u64) {}
+    fn mark_flushed(&mut self, table: D::TableNames, flushed_pos: u64) {
+        self.tables.mark_flushed(table, flushed_pos);
+    }
 
     /// Get all flushed messages and send their response back
     #[instrument(name = "Shard::handle_flushed", skip(self))]
@@ -572,20 +588,6 @@ where
         Ok(())
     }
 
-    #[instrument(name = "Shard::shutdown_tasks", skip(self))]
-    #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    async fn shutdown_tasks(&mut self) -> Result<(), ServerError> {
-        // cancel all of our tasks
-        for task in self.tasks.drain(..) {
-            // cancel this task
-            if let Some(Err(error)) = task.cancel().await {
-                // log this tasks error if it had one
-                event!(Level::ERROR, error = format!("{error:#?}"));
-            }
-        }
-        Ok(())
-    }
-
     /// Start handling queries from users
     ///
     /// # Arguments
@@ -632,9 +634,7 @@ where
                         .await?
                 }
                 // Inform a table that some of its data has been flushed to storage
-                ServerMsg::DataFlushed { table, flushed } => {
-                    self.mark_flushed(table, flushed).await?
-                }
+                ServerMsg::DataFlushed { table, flushed } => self.mark_flushed(table, flushed),
                 // Mark some partitions as evictable
                 ServerMsg::MarkEvictable {
                     generation,
@@ -665,10 +665,10 @@ where
         }
         // check for any flushed response to handle
         self.handle_flushed().await?;
-        // shudown
+        // shudown our tables
         self.tables.shutdown().await?;
         // shutdown all of our tasks
-        self.shutdown_tasks().await?;
+        shutdown_tasks(self.tasks).await?;
         Ok(())
     }
 }

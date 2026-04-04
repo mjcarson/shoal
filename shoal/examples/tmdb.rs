@@ -142,9 +142,9 @@ pub struct MovieByKeyword {
 #[derive(ShoalDB)]
 pub struct Tmdb {
     /// A basic key value table
-    pub movie: PersistentUnsortedTable<Movie, FileSystem, TmdbTableNames>,
+    pub movie: PersistentUnsortedTable<Movie, FileSystem<Self>, TmdbTableNames>,
     /// A sorted table of movies by keywords
-    pub movie_by_keyword: PersistentSortedTable<MovieByKeyword, FileSystem, TmdbTableNames>,
+    pub movie_by_keyword: PersistentSortedTable<MovieByKeyword, FileSystem<Tmdb>, TmdbTableNames>,
 }
 
 pub enum MovieMsg {
