@@ -516,6 +516,9 @@ where
         Ok(())
     }
 
+    /// Inform a table that some of its data has been flushed to storage
+    async fn mark_flushed(&mut self, table: D::TableNames, flushed_pos: u64) {}
+
     /// Get all flushed messages and send their response back
     #[instrument(name = "Shard::handle_flushed", skip(self))]
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
@@ -627,6 +630,10 @@ where
                     self.tables
                         .load_partition(loaded, &self.shard_local_tx)
                         .await?
+                }
+                // Inform a table that some of its data has been flushed to storage
+                ServerMsg::DataFlushed { table, flushed } => {
+                    self.mark_flushed(table, flushed).await?
                 }
                 // Mark some partitions as evictable
                 ServerMsg::MarkEvictable {

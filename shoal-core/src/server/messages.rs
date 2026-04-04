@@ -81,6 +81,8 @@ where
     },
     /// A partition loaded from disk. This can never be sent across threads!
     Partition(LoadedPartitionKinds<D>),
+    /// Some data has been flushed to storage
+    DataFlushed { table: D::TableNames, flushed: u64 },
     /// Mark some partitions as evictable
     MarkEvictable {
         generation: u64,
@@ -108,13 +110,17 @@ impl<D: ShoalDatabase> Clone for ServerMsg<D> {
                 query: query.clone(),
             },
             ServerMsg::Partition(loaded) => ServerMsg::Partition(loaded.clone()),
+            ServerMsg::DataFlushed { table, flushed } => ServerMsg::DataFlushed {
+                table: *table,
+                flushed: *flushed,
+            },
             ServerMsg::MarkEvictable {
                 generation,
                 table,
                 partitions,
             } => ServerMsg::MarkEvictable {
                 generation: *generation,
-                table: table.clone(),
+                table: *table,
                 partitions: partitions.clone(),
             },
             ServerMsg::Shutdown => ServerMsg::Shutdown,

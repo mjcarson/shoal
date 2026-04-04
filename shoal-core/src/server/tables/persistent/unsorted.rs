@@ -131,10 +131,10 @@ where
         fields(shard_name, table_name, memory_usage),
         err(Debug)
     )]
-    pub async fn new<D: ShoalDatabase>(
+    pub async fn new(
         shard_name: &str,
         table_name: N,
-        shard_table_name: D::TableNames,
+        shard_table_name: <S::Database as ShoalDatabase>::TableNames,
         shard_archive_map: &FullArchiveMap<N>,
         loader_channels: &mut HashMap<
             Loaders,
@@ -144,7 +144,7 @@ where
         medium_priority: TaskQueueHandle,
         memory_usage: &Arc<RefCell<usize>>,
         lru: &Arc<RefCell<LruCache<(N, u64), usize, BuildHasherDefault<GxHasher>>>>,
-        shard_local_tx: &AsyncSender<ServerMsg<D>>,
+        shard_local_tx: &AsyncSender<ServerMsg<S::Database>>,
     ) -> Result<Self, ServerError>
     where
         <<R as ShoalTableSupport>::UpdateData as Archive>::Archived: rkyv::Deserialize<
@@ -168,7 +168,7 @@ where
         let mut table = Self {
             table_name,
             partitions: HashMap::with_capacity(1000),
-            storage: S::new::<UnsortedPartition<R>, R, N, D>(
+            storage: S::new::<UnsortedPartition<R>, R, N>(
                 shard_name,
                 table_name,
                 shard_table_name,
@@ -207,11 +207,11 @@ where
     }
 
     /// Spawn the loader for this storage engine type
-    pub async fn spawn_loader<D: ShoalDatabase>(
+    pub async fn spawn_loader(
         &self,
-        table_map: &FullArchiveMap<D::TableNames>,
-        loader_rx: &AsyncReceiver<LoaderMsg<D::TableNames>>,
-        shard_local_tx: &AsyncSender<ServerMsg<D>>,
+        table_map: &FullArchiveMap<<S::Database as ShoalDatabase>::TableNames>,
+        loader_rx: &AsyncReceiver<LoaderMsg<<S::Database as ShoalDatabase>::TableNames>>,
+        shard_local_tx: &AsyncSender<ServerMsg<S::Database>>,
     ) -> Result<(), ServerError> {
         // spawn the loader for our storage engine
         self.storage
@@ -689,7 +689,7 @@ where
     }
 
     /// Flush all pending writes to disk
-    pub async fn flush(&self) -> Result<(), ServerError> {
+    pub async fn flush(&mut self) -> Result<(), ServerError> {
         self.storage.flush().await
     }
 
@@ -713,7 +713,7 @@ where
 
     /// Shutdown this table
     #[instrument(name = "PersistentTable::shutdown", skip_all)]
-    pub async fn shutdown(&mut self) -> Result<(), ServerError> {
+    pub async fn shutdown(self) -> Result<(), ServerError> {
         // shutdown our storage engine
         self.storage.shutdown().await
     }

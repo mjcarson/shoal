@@ -17,6 +17,7 @@ use rkyv::Archive;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::hash::Hasher;
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{event, instrument, Level};
@@ -50,8 +51,8 @@ pub struct FileSystem<D: ShoalDatabase> {
     shard_name: String,
     /// The path to our current intent log
     intent_path: PathBuf,
-    /// The intent log to write too
-    intent_log: DmaStreamWriter,
+    ///// The intent log to write too
+    //intent_log: DmaStreamWriter,
     /// The intent log to write to
     intent_log2: StreamWriter<D>,
     /// The current intent log generation
@@ -70,63 +71,41 @@ pub struct FileSystem<D: ShoalDatabase> {
 
 #[cfg_attr(feature = "hotpath", hotpath::measure_all)]
 impl<D: ShoalDatabase> FileSystem<D> {
-    /// Get a new stream writer for this shard
-    ///
-    /// # Arguments
-    ///
-    /// * `name` - This shards name
-    /// * `table_conf` - The config for this table's storage engine
-    async fn new_writer(
-        intent_path: &PathBuf,
-        table_conf: &FileSystemTableConf,
-    ) -> Result<DmaStreamWriter, ServerError> {
-        // open this file
-        // don't open with append or new writes will overwrite old ones
-        let file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .dma_open(&intent_path)
-            .await?;
-        // wrap our file in a stream writer
-        let writer = DmaStreamWriterBuilder::new(file)
-            .with_buffer_size(table_conf.latency_sensitive.buffer_size)
-            .with_write_behind(table_conf.latency_sensitive.write_behind)
-            .build();
-        Ok(writer)
-    }
-
-    /// Get a new stream writer for this shard
-    ///
-    /// # Arguments
-    ///
-    /// * `name` - This shards name
-    /// * `table_conf` - The config for this table's storage engine
-    async fn new_writer2(
-        intent_path: &PathBuf,
-        shard_local_tx: &AsyncSender<ServerMsg<D>>,
-        table_conf: &FileSystemTableConf,
-    ) -> Result<StreamWriter<D>, ServerError> {
-        // build a new stream writer
-        // TODO error handling
-        let writer = StreamWriter::builder(intent_path, shard_local_tx.clone())
-            .buffer_size(table_conf.latency_sensitive.buffer_size)
-            .write_behind(table_conf.latency_sensitive.write_behind)
-            .build()
-            .await;
-        Ok(writer)
-    }
+    ///// Get a new stream writer for this shard
+    /////
+    ///// # Arguments
+    /////
+    ///// * `name` - This shards name
+    ///// * `table_conf` - The config for this table's storage engine
+    //async fn new_writer(
+    //    intent_path: &PathBuf,
+    //    table_conf: &FileSystemTableConf,
+    //) -> Result<DmaStreamWriter, ServerError> {
+    //    // open this file
+    //    // don't open with append or new writes will overwrite old ones
+    //    let file = OpenOptions::new()
+    //        .create(true)
+    //        .read(true)
+    //        .write(true)
+    //        .dma_open(&intent_path)
+    //        .await?;
+    //    // wrap our file in a stream writer
+    //    let writer = DmaStreamWriterBuilder::new(file)
+    //        .with_buffer_size(table_conf.latency_sensitive.buffer_size)
+    //        .with_write_behind(table_conf.latency_sensitive.write_behind)
+    //        .build();
+    //    Ok(writer)
+    //}
 
     /// Spawn a compactor on this shard
     async fn spawn_intent_compactor<
         T: IntentReadSupport<R> + 'static,
         R: PartitionKeySupport + 'static,
-        S: ShoalDatabase,
     >(
         &mut self,
-        table_name: S::TableNames,
+        table_name: D::TableNames,
         compact_rx: AsyncReceiver<CompactionJob>,
-        shard_local_tx: &AsyncSender<ServerMsg<S>>,
+        shard_local_tx: &AsyncSender<ServerMsg<D>>,
     ) -> Result<(), ServerError>
     where
         <T as Archive>::Archived: rkyv::Deserialize<T, Strategy<Pool, rkyv::rancor::Error>>,
@@ -138,7 +117,7 @@ impl<D: ShoalDatabase> FileSystem<D> {
         >,
     {
         // build a compactor
-        let compactor = FileSystemCompactor::<T, R, S>::with_capacity(
+        let compactor = FileSystemCompactor::<T, R, D>::with_capacity(
             table_name,
             &self.table_conf,
             compact_rx,
@@ -238,6 +217,9 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
     /// The archive map this storage engine uses
     type ArchiveMap = ArchiveMap;
 
+    /// The database type this storage engine is associated with
+    type Database = D;
+
     /// Create a new instance of this storage engine
     ///
     /// # Arguments
@@ -250,15 +232,14 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
         P: IntentReadSupport<R> + 'static,
         R: PartitionKeySupport + 'static,
         N: TableNameSupport,
-        S: ShoalDatabase,
     >(
         shard_name: &str,
         table_name: N,
-        shard_table_name: S::TableNames,
+        shard_table_name: D::TableNames,
         shard_archive_map: &FullArchiveMap<N>,
         conf: &Conf,
         medium_priority: TaskQueueHandle,
-        shard_local_tx: &AsyncSender<ServerMsg<S>>,
+        shard_local_tx: &AsyncSender<ServerMsg<D>>,
     ) -> Result<Self, ServerError>
     where
         <P as Archive>::Archived: rkyv::Deserialize<P, Strategy<Pool, rkyv::rancor::Error>>,
@@ -285,8 +266,12 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
         // add our shard name
         intent_path.push(format!("{shard_name}-active"));
         // build the writer for this shards intent log
-        let intent_log = Self::new_writer(&intent_path, &table_conf).await?;
-        let intent_log2 = Self::new_writer2(&intent_path, shard_local_tx, &table_conf).await?;
+        let intent_log2 =
+            StreamWriter::builder(shard_table_name, &intent_path, shard_local_tx.clone())
+                .buffer_size(table_conf.latency_sensitive.buffer_size)
+                .write_behind(table_conf.latency_sensitive.write_behind)
+                .build()
+                .await?;
         // build the channel to our compactor
         let (intent_tx, intent_rx) = kanal::unbounded_async();
         // get this shards shared archive map
@@ -299,7 +284,6 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
         let mut fs = FileSystem {
             shard_name: shard_name.to_owned(),
             intent_path,
-            intent_log,
             intent_log2,
             generation: 0,
             medium_priority,
@@ -309,7 +293,7 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
             map,
         };
         // spawn our intent compactor
-        fs.spawn_intent_compactor::<P, R, S>(shard_table_name, intent_rx, shard_local_tx)
+        fs.spawn_intent_compactor::<P, R>(shard_table_name, intent_rx, shard_local_tx)
             .await?;
         Ok(fs)
     }
@@ -344,15 +328,23 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
         let mut hasher = GxHasher::default();
         hasher.write(archived.as_slice());
         let checksum = hasher.finish();
+        // get our archived data as a slice
+        let archived_slice = archived.as_slice();
+        // get the total size of data were about to write
+        // 16 bytes for size + checksum and then the size of our data
+        let total_size = 16 + archived_slice.len();
+        // get a buffer to write this commit data too
+        let mut buff = self.intent_log2.prep(total_size).await;
         // write our size
-        self.intent_log.write_all(&size.to_le_bytes()).await?;
+        buff.write_all(&size.to_le_bytes())?;
         // write our checksum
-        self.intent_log.write_all(&checksum.to_le_bytes()).await?;
+        buff.write_all(&checksum.to_le_bytes())?;
         // write our data
-        self.intent_log.write_all(archived.as_slice()).await?;
-        // get the current position of the stream writer
-        let current = self.intent_log.current_pos();
-        Ok(current)
+        buff.write_all(archived.as_slice())?;
+        // tell our writer that we have consumed some data
+        self.intent_log2.consume(total_size).await;
+        // TODO this should use channels to mark how much was consumed
+        Ok(0)
     }
 
     /// Set our intent log to be compact if its needed
@@ -370,26 +362,15 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
         // get the latency sensistive max intent log size
         let max_size = self.table_conf.latency_sensitive.intent_log_size;
         // check if this intent log is over 50MiB or if compaction is being forced
-        if force || self.intent_log.current_pos() > max_size {
-            // flush this intent log
-            self.flush().await?;
-            // get the current flushed position
-            let flushed_pos = self.intent_log.current_flushed_pos();
-            // close our intent log
-            self.intent_log.close().await?;
+        if force || self.intent_log2.get_unflushed_pos() > max_size {
             // get our base intent path
             let mut new_path = self.table_conf.get_intent_path(R::name());
             // build the file name to rename our current intent log too
             let name = format!("{}-inactive-{}", self.shard_name, self.generation);
             // build the path to this shards new intent log
             new_path.push(name);
-            // rename our old intent log
-            glommio::io::rename(&self.intent_path, &new_path).await?;
-            // fsync the parent directory to ensure the rename is durable
-            let intent_dir = self.table_conf.get_intent_path(R::name());
-            let dir = glommio::io::Directory::open(&intent_dir).await?;
-            dir.sync().await?;
-            dir.close().await?;
+            // refresh this writer to a write to a new file
+            let flushed_pos = self.intent_log2.refresh(&new_path).await?;
             // create an intent log compaction job
             self.intent_tx
                 .send(CompactionJob::IntentLog {
@@ -397,10 +378,6 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
                     generation: self.generation,
                 })
                 .await?;
-            // get a new writer
-            let new_writer = Self::new_writer(&self.intent_path, &self.table_conf).await?;
-            // set our new writer
-            self.intent_log = new_writer;
             // increment our writer generation
             self.generation += 1;
             // create an archive compaction job
@@ -408,19 +385,26 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
             Ok((flushed_pos, self.generation))
         } else {
             // get the current position of flushed data
-            let flushed_pos = self.intent_log.current_flushed_pos();
+            let flushed_pos = self.intent_log2.get_flushed_pos();
             Ok((flushed_pos, self.generation))
         }
     }
 
+    /// Update the watermark for how much data has been flushed to disk
+    ///
+    /// # Arguments
+    ///
+    /// * `flushed_pos` - The new flushed offset to set
+    fn mark_flushed(&mut self, flushed_pos: u64) {
+        // update our flushed watermark
+        self.intent_log2.set_flushed(flushed_pos);
+    }
+
     /// Flush all currently pending writes to storage
     #[allow(async_fn_in_trait)]
-    async fn flush(&self) -> Result<(), ServerError> {
-        // skip flushing if we don't have anything to flush
-        if self.intent_log.current_pos() > self.intent_log.current_flushed_pos() {
-            // sync our intent log to disk
-            self.intent_log.sync().await?;
-        }
+    async fn flush(&mut self) -> Result<(), ServerError> {
+        // sync our intent log to disk
+        self.intent_log2.sync().await?;
         Ok(())
     }
 
@@ -477,14 +461,14 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
     }
 
     /// Spawn a loader for this storage type if not yet spawned
-    async fn spawn_loader<S: ShoalDatabase>(
+    async fn spawn_loader(
         &self,
-        table_map: &FullArchiveMap<S::TableNames>,
-        loader_rx: &AsyncReceiver<LoaderMsg<S::TableNames>>,
-        shard_local_tx: &AsyncSender<ServerMsg<S>>,
+        table_map: &FullArchiveMap<D::TableNames>,
+        loader_rx: &AsyncReceiver<LoaderMsg<D::TableNames>>,
+        shard_local_tx: &AsyncSender<ServerMsg<D>>,
     ) -> Result<(), ServerError> {
         // filter down to just our filesystem archive maps
-        let filtered = FilteredFullArchiveMap::<S::TableNames, ArchiveMap>::from(table_map);
+        let filtered = FilteredFullArchiveMap::<D::TableNames, ArchiveMap>::from(table_map);
         // build a new filesystem loader
         let loader =
             FsLoader::new(&self.medium_priority, filtered, &loader_rx, shard_local_tx).await;
@@ -551,7 +535,7 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
 
     /// Shutdown this storage engine
     #[allow(async_fn_in_trait)]
-    async fn shutdown(&mut self) -> Result<(), ServerError> {
+    async fn shutdown(mut self) -> Result<(), ServerError> {
         // flush any remaining intent log writes to disk
         self.flush().await?;
         // signal our intent log compactor to shutdown
@@ -562,7 +546,7 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
             task?;
         }
         // close any glommio files
-        self.intent_log.close().await?;
+        self.intent_log2.close().await?;
         // close our archive map
         self.map.close_all().await?;
         Ok(())

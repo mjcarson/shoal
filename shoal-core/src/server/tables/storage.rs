@@ -229,6 +229,9 @@ pub trait StorageSupport: Sized {
     /// The archive map this storage engine uses
     type ArchiveMap;
 
+    /// The database type this storage engine is associated with
+    type Database: ShoalDatabase;
+
     /// Create a new instance of this storage engine
     ///
     /// # Arguments
@@ -241,15 +244,14 @@ pub trait StorageSupport: Sized {
         P: IntentReadSupport<R> + 'static,
         R: PartitionKeySupport + 'static,
         N: TableNameSupport,
-        S: ShoalDatabase,
     >(
         shard_name: &str,
         table_name: N,
-        shard_table_name: S::TableNames,
+        shard_table_name: <Self::Database as ShoalDatabase>::TableNames,
         shard_archive_map: &FullArchiveMap<N>,
         conf: &Conf,
         medium_priority: TaskQueueHandle,
-        shard_local_tx: &AsyncSender<ServerMsg<S>>,
+        shard_local_tx: &AsyncSender<ServerMsg<Self::Database>>,
     ) -> Result<Self, ServerError>
     where
         <P as Archive>::Archived: rkyv::Deserialize<P, Strategy<Pool, rkyv::rancor::Error>>,
@@ -295,9 +297,12 @@ pub trait StorageSupport: Sized {
         force: bool,
     ) -> Result<(u64, u64), ServerError>;
 
+    /// Update the watermark for how much data has been flushed to disk
+    fn mark_flushed(&mut self, flushed_pos: u64);
+
     /// Flush all currently pending writes to storage
     #[allow(async_fn_in_trait)]
-    async fn flush(&self) -> Result<(), ServerError>;
+    async fn flush(&mut self) -> Result<(), ServerError>;
 
     /// Read an intent log from storage
     ///
@@ -321,11 +326,11 @@ pub trait StorageSupport: Sized {
 
     /// Spawn a loader for this storage type if not yet spawned
     #[allow(async_fn_in_trait)]
-    async fn spawn_loader<D: ShoalDatabase>(
+    async fn spawn_loader(
         &self,
-        table_map: &FullArchiveMap<D::TableNames>,
-        loader_rx: &AsyncReceiver<LoaderMsg<D::TableNames>>,
-        shard_local_tx: &AsyncSender<ServerMsg<D>>,
+        table_map: &FullArchiveMap<<Self::Database as ShoalDatabase>::TableNames>,
+        loader_rx: &AsyncReceiver<LoaderMsg<<Self::Database as ShoalDatabase>::TableNames>>,
+        shard_local_tx: &AsyncSender<ServerMsg<Self::Database>>,
     ) -> Result<(), ServerError>;
 
     /// Load a partition from disk if it exists
@@ -351,5 +356,5 @@ pub trait StorageSupport: Sized {
 
     /// Shutdown this storage engine
     #[allow(async_fn_in_trait)]
-    async fn shutdown(&mut self) -> Result<(), ServerError>;
+    async fn shutdown(self) -> Result<(), ServerError>;
 }
