@@ -115,3 +115,55 @@ pub fn extract_inner_table_ident(ty: &syn::Type) -> Option<Ident> {
     }
     None
 }
+
+/// Rewrite table fields to add `<StructName>` to storage types and append `{StructName}TableNames`.
+///
+/// Transforms `PersistentUnsortedTable<Movie, FileSystem>` into
+/// `PersistentUnsortedTable<Movie, FileSystem<Tmdb>, TmdbTableNames>`.
+pub fn rewrite_table_fields(fields: &mut syn::FieldsNamed, struct_ident: &Ident) {
+    let table_names_ident = format_ident!("{}TableNames", struct_ident);
+    for field in fields.named.iter_mut() {
+        let ty = &mut field.ty;
+        if let syn::Type::Path(type_path) = ty {
+            if let Some(segment) = type_path.path.segments.first_mut() {
+                let type_name = segment.ident.to_string();
+                // Only rewrite Persistent table types
+                if !type_name.contains("Persistent") {
+                    continue;
+                }
+                if let syn::PathArguments::AngleBracketed(args) = &mut segment.arguments {
+                    // Add <StructName> generic to the storage type (2nd arg)
+                    if let Some(syn::GenericArgument::Type(storage_ty)) = args.args.iter_mut().nth(1) {
+                        if let syn::Type::Path(storage_path) = storage_ty {
+                            if let Some(storage_seg) = storage_path.path.segments.last_mut() {
+                                // Only add the generic if there isn't one already
+                                if matches!(storage_seg.arguments, syn::PathArguments::None) {
+                                    storage_seg.arguments = syn::PathArguments::AngleBracketed(
+                                        syn::AngleBracketedGenericArguments {
+                                            colon2_token: None,
+                                            lt_token: syn::token::Lt::default(),
+                                            args: {
+                                                let mut punct = syn::punctuated::Punctuated::new();
+                                                punct.push(syn::GenericArgument::Type(
+                                                    syn::parse_quote!(#struct_ident),
+                                                ));
+                                                punct
+                                            },
+                                            gt_token: syn::token::Gt::default(),
+                                        },
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    // Append TableNames as the 3rd generic arg if not already present
+                    if args.args.len() == 2 {
+                        args.args.push(syn::GenericArgument::Type(
+                            syn::parse_quote!(#table_names_ident),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+}

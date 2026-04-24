@@ -5,7 +5,7 @@ use rkyv::{Archive, Deserialize, Serialize};
 use shoal_core::shared::traits::RkyvSupport;
 use shoal_core::storage::FileSystem;
 use shoal_core::tables::PersistentSortedTable;
-use shoal_derive::{ShoalDB, ShoalSortedTable};
+use shoal_derive::{shoal_db, ShoalSortedTable};
 use std::time::Duration;
 use tempfile::TempDir;
 
@@ -49,10 +49,10 @@ impl TestRecord {
 }
 
 /// The test database schema
-#[derive(ShoalDB)]
+#[shoal_db]
 pub struct TestDb {
     /// The sorted test table
-    pub test_records: PersistentSortedTable<TestRecord, FileSystem, TestDbTableNames>,
+    pub test_records: PersistentSortedTable<TestRecord, FileSystem>,
 }
 
 /// Test setting up and tearing down a db

@@ -9,7 +9,7 @@
 //! use std::sync::Arc;
 //! use deepsize2::DeepSizeOf;
 //! use rkyv::{Archive, Deserialize, Serialize};
-//! use shoal::{ShoalDB, ShoalSortedTable, PersistentSortedTable, FileSystem, Shoal};
+//! use shoal::{Shoal, ShoalSortedTable, PersistentSortedTable, FileSystem, Shoal};
 //!
 //! /// A simple sorted table for testing
 //! #[derive(

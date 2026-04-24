@@ -7,7 +7,7 @@ use shoal::shared::queries::Queries;
 use shoal::shared::responses::ResponseActionNames;
 use shoal::shared::traits::QuerySupport;
 use shoal::{
-    Conf, FileSystem, PersistentSortedTable, PersistentUnsortedTable, Shoal, ShoalDB, ShoalPool,
+    shoal_db, Conf, FileSystem, PersistentSortedTable, PersistentUnsortedTable, Shoal, ShoalPool,
     ShoalResponse, ShoalSortedTable, ShoalUnsortedTable,
 };
 
@@ -139,12 +139,12 @@ pub struct MovieByKeyword {
 }
 
 /// The tables we are adding to to shoal
-#[derive(ShoalDB)]
+#[shoal_db]
 pub struct Tmdb {
     /// A basic key value table
-    pub movie: PersistentUnsortedTable<Movie, FileSystem<Self>, TmdbTableNames>,
+    pub movie: PersistentUnsortedTable<Movie, FileSystem>,
     /// A sorted table of movies by keywords
-    pub movie_by_keyword: PersistentSortedTable<MovieByKeyword, FileSystem<Tmdb>, TmdbTableNames>,
+    pub movie_by_keyword: PersistentSortedTable<MovieByKeyword, FileSystem>,
 }
 
 pub enum MovieMsg {
@@ -531,7 +531,7 @@ impl MovieController {
         while let Some(row) = response.next().await.unwrap() {
             // access this rows data
             match row.access::<MovieByKeyword>().unwrap() {
-                Some(row) => println!("row: {row:#?}"),
+                Some(row) => (), //println!("row: {row:#?}"),
                 None => println!("missing row?"),
             }
         }

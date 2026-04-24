@@ -3,7 +3,7 @@ extern crate proc_macro;
 use darling::{FromAttributes, FromField};
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
-use syn::{Data, DataStruct, Fields, Ident};
+use syn::{Data, Fields, Ident};
 
 mod structs;
 mod tables;
@@ -202,79 +202,63 @@ pub fn derive_shoal_unsorted_table(stream: TokenStream) -> TokenStream {
     output.into()
 }
 
-/// Derive the basic traits and functions for a type to be a table in shoal
-#[proc_macro_derive(ShoalDB)]
-pub fn derive_shoal_db(stream: TokenStream) -> TokenStream {
-    // parse our target struct
-    let ast = syn::parse_macro_input!(stream as syn::DeriveInput);
-    // get the name of our struct
-    let struct_ident = &ast.ident;
-    // Parse attributes to get custom enum name
+/// Attribute macro that rewrites table field types and generates all supporting code for a Shoal database.
+///
+/// Transforms simplified field types like `PersistentUnsortedTable<Movie, FileSystem>`
+/// into full types like `PersistentUnsortedTable<Movie, FileSystem<Tmdb>, TmdbTableNames>`,
+/// then generates the TableNames enum, Client struct, QueryKinds/ResponseKinds, and trait impls.
+#[proc_macro_attribute]
+pub fn shoal_db(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    // parse the input as a struct
+    let mut item_struct = syn::parse_macro_input!(item as syn::ItemStruct);
+    let struct_ident = item_struct.ident.clone();
     let enum_ident = format_ident!("{struct_ident}TableNames");
-    // start with an empty stream
-    let mut output = quote! {};
-    // handle each possible type of data structure
-    // for anything other then a struct well return an error
-    match &ast.data {
-        Data::Struct(data_struct) => {
-            // handle the diferrent type of fields
-            // we can only support named fields and will return an error for all others
-            match &data_struct.fields {
-                Fields::Named(fields) => {
-                    // make sure we have some fields in this struct
-                    // if we don't then we have to return an error
-                    if fields.named.is_empty() {
-                        return syn::Error::new_spanned(
-                            &ast,
-                            "Struct must have named fields to generate enum",
-                        )
-                        .to_compile_error()
-                        .into();
-                    }
-                    // get our field names converted to pascal case
-                    let variants = utils::get_variant_names(fields);
-                    // build the table names for this db and add the TableNameSupport trait
-                    traits::table_name::add(&mut output, &enum_ident, &variants);
-                    // add display support to this enum
-                    traits::display::add(&mut output, &enum_ident, &variants);
-                    // add ShoalDatabase support to our root struct
-                    traits::db::add(&mut output, struct_ident, fields, &variants);
-                    // add our client
-                    structs::client::add(&mut output, struct_ident, fields);
-                    // add our query kinds and response kinds enums with trait impls
-                    structs::query_kinds::add(&mut output, struct_ident, fields);
-                    // add our query conversion traits
-                    traits::from_query::add(&mut output, struct_ident, fields);
-                }
-                Fields::Unnamed(_) => {
-                    return syn::Error::new_spanned(
-                        &ast,
-                        "FieldsEnum only supports structs with named fields",
-                    )
-                    .to_compile_error()
-                    .into();
-                }
-                Fields::Unit => {
-                    return syn::Error::new_spanned(
-                        &ast,
-                        "FieldsEnum only supports structs with named fields",
-                    )
-                    .to_compile_error()
-                    .into();
-                }
-            }
+
+    // validate we have named fields
+    let Fields::Named(_) = &item_struct.fields else {
+        return syn::Error::new_spanned(
+            &item_struct,
+            "shoal_db only supports structs with named fields",
+        )
+        .to_compile_error()
+        .into();
+    };
+
+    // rewrite field types: add <StructName> to storage and append TableNames
+    if let Fields::Named(fields) = &mut item_struct.fields {
+        if fields.named.is_empty() {
+            return syn::Error::new_spanned(
+                &item_struct,
+                "Struct must have named fields to generate enum",
+            )
+            .to_compile_error()
+            .into();
         }
-        Data::Enum(_) => {
-            return syn::Error::new_spanned(&ast, "FieldsEnum only supports structs, not enums")
-                .to_compile_error()
-                .into();
-        }
-        Data::Union(_) => {
-            return syn::Error::new_spanned(&ast, "FieldsEnum does not support unions")
-                .to_compile_error()
-                .into();
-        }
+        utils::rewrite_table_fields(fields, &struct_ident);
     }
-    // convert and return our stream
+
+    // emit the rewritten struct definition
+    let mut output = quote! { #item_struct };
+
+    // now borrow the rewritten fields immutably for codegen
+    let fields = match &item_struct.fields {
+        Fields::Named(fields) => fields,
+        _ => unreachable!(),
+    };
+
+    // get our field names converted to pascal case
+    let variants = utils::get_variant_names(fields);
+    // build the table names for this db and add the TableNameSupport trait
+    traits::table_name::add(&mut output, &enum_ident, &variants);
+    // add display support to this enum
+    traits::display::add(&mut output, &enum_ident, &variants);
+    // add ShoalDatabase support to our root struct
+    traits::db::add(&mut output, &struct_ident, fields, &variants);
+    // add our client
+    structs::client::add(&mut output, &struct_ident, fields);
+    // add our query kinds and response kinds enums with trait impls
+    structs::query_kinds::add(&mut output, &struct_ident, fields);
+    // add our query conversion traits
+    traits::from_query::add(&mut output, &struct_ident, fields);
     output.into()
 }

@@ -1,23 +1,15 @@
 //! Utilities to efficiently and performantly streams data to and from  disk
-use futures::AsyncWriteExt;
+use glommio::io::{DmaBuffer, DmaFile, OpenOptions};
+use glommio::task::JoinHandle;
 use kanal::AsyncSender;
 use std::collections::VecDeque;
-use std::io::Write;
 use std::path::PathBuf;
 use std::rc::Rc;
-
-use glommio::io::{DmaBuffer, DmaFile, DmaStreamWriter, DmaStreamWriterBuilder, OpenOptions};
-use glommio::task::JoinHandle;
-use glommio::LocalExecutorBuilder;
+use tracing::instrument;
 
 use crate::server::messages::ServerMsg;
 use crate::server::ServerError;
 use crate::shared::traits::ShoalDatabase;
-use crate::storage::fs::conf::FileSystemTableConf;
-
-const DATA: &[u8] = "Hello, World!".as_bytes();
-const ITERATIONS: usize = 100_000;
-const SYNC: usize = 100;
 
 pub struct StreamWriterBuilder<D: ShoalDatabase> {
     /// The table we are writting data for
@@ -73,6 +65,7 @@ impl<D: ShoalDatabase> StreamWriterBuilder<D> {
     }
 
     /// Build a [`StreamWriter`] from this [`StreamWriterBuilder`]
+    #[instrument(name = "StreamWriterBuilder::build", skip_all)]
     pub async fn build(self) -> Result<StreamWriter<D>, ServerError> {
         // open this file
         // don't open with append or new writes will overwrite old ones
@@ -83,7 +76,7 @@ impl<D: ShoalDatabase> StreamWriterBuilder<D> {
             .dma_open(&self.path)
             .await?;
         // get a buffer to write
-        let buffer = file.alloc_dma_buffer(512);
+        let buffer = file.alloc_dma_buffer(self.buffer_size);
         // build this stream writer
         let writer = StreamWriter {
             table: self.table,
@@ -218,7 +211,7 @@ impl<D: ShoalDatabase> StreamWriter<D> {
             // make this new buffer big enough for our next write or bigger
             let new_size = std::cmp::max(self.default_buffer_size, size);
             // write but not sync our current buffer to disk
-            self.write(new_size).await;
+            self.write(new_size).await.unwrap();
         }
         // get a mutable ref to our buffer
         &mut self.buffer.as_bytes_mut()[self.buff_pos..self.buff_pos + size]
@@ -231,7 +224,7 @@ impl<D: ShoalDatabase> StreamWriter<D> {
         // if we have consumed our entire buffer then write it to disk
         if self.buffer.len() <= self.buff_pos {
             // write but not sync our current buffer to disk
-            self.write(self.default_buffer_size).await;
+            self.write(self.default_buffer_size).await.unwrap();
         }
     }
 
@@ -255,10 +248,21 @@ impl<D: ShoalDatabase> StreamWriter<D> {
         self.file_pos + self.buff_pos as u64
     }
 
-    /// Sync our files data, blocking until durable (for WAL acknowledgment)
+    /// Sync any in flight buffers to disk in a non blocking manner
+    ///
+    /// All writes will not be durably written until the corresponding
+    /// [`ServerMsg::DataFlushed`] is recieved by this shard.
     pub async fn sync(&mut self) -> Result<(), ServerError> {
         if self.buff_pos > 0 {
-            self.write(self.default_buffer_size).await;
+            self.write(self.default_buffer_size).await.unwrap();
+        }
+        Ok(())
+    }
+
+    /// Sync our files data, blocking until durable (for WAL acknowledgment)
+    pub async fn sync_blocking(&mut self) -> Result<(), ServerError> {
+        if self.buff_pos > 0 {
+            self.write(self.default_buffer_size).await.unwrap();
         }
         self.drain_pending_writes().await;
         if let Some(handle) = self.pending_sync.take() {
@@ -268,25 +272,6 @@ impl<D: ShoalDatabase> StreamWriter<D> {
         Ok(())
     }
 
-    ///// Sync our files data in the background (non-blocking)
-    //pub async fn sync_background(&mut self) {
-    //    // only sync if there is data to sync
-    //    if self.buff_pos > 0 {
-    //        self.write(self.default_buffer_size).await;
-    //    }
-    //    self.drain_pending_writes().await;
-    //    if let Some(handle) = self.pending_sync.take() {
-    //        handle.await;
-    //    }
-    //    let file = self.file.clone();
-    //    self.pending_sync = Some(
-    //        glommio::spawn_local(async move {
-    //            file.fdatasync().await.unwrap();
-    //        })
-    //        .detach(),
-    //    );
-    //}
-
     // Rename our current backing file and start writing to a new one
     ///
     /// # Arguments
@@ -295,17 +280,20 @@ impl<D: ShoalDatabase> StreamWriter<D> {
     /// * `generation` - The generation of our old intent log
     pub async fn refresh(&mut self, inactive_path: &PathBuf) -> Result<u64, ServerError> {
         // flush this intent log
-        self.sync().await?;
+        self.sync_blocking().await?;
         // get the current flushed position
         let flushed_pos = self.get_flushed_pos();
         // rename our old intent log
         glommio::io::rename(&self.path, &inactive_path).await?;
-        // pop our path to go to the parent dir
-        let inactive_path_dir = inactive_path.clone();
-        // fsync the parent directory to ensure the rename is durable
-        let dir = glommio::io::Directory::open(&inactive_path_dir).await?;
-        dir.sync().await?;
-        dir.close().await?;
+        // get our parent dir and sync it so this rename is durable
+        if let Some(parent) = inactive_path.parent() {
+            // open our parent dir
+            let dir = glommio::io::Directory::open(parent).await?;
+            // fsync the parent directory to ensure the rename is durable
+            dir.sync().await?;
+            // close our now durably synced parent dir
+            dir.close().await?;
+        }
         // open this file
         // don't open with append or new writes will overwrite old ones
         let file = OpenOptions::new()
@@ -315,11 +303,15 @@ impl<D: ShoalDatabase> StreamWriter<D> {
             .dma_open(&self.path)
             .await?;
         // get a buffer to write
-        self.buffer = file.alloc_dma_buffer(512);
+        self.buffer = file.alloc_dma_buffer(self.default_buffer_size);
         // replace our old file with out new one
         let old_file = std::mem::replace(&mut self.file, Rc::new(file));
         // close our old file
-        old_file.close_rc();
+        old_file.close_rc().await?;
+        // reset our position counters
+        self.file_pos = 0;
+        self.buff_pos = 0;
+        self.flushed_pos = 0;
         Ok(flushed_pos)
     }
 
@@ -330,7 +322,7 @@ impl<D: ShoalDatabase> StreamWriter<D> {
         }
         self.drain_pending_writes().await;
         if self.buff_pos > 0 {
-            self.write(self.default_buffer_size).await;
+            self.write(self.default_buffer_size).await?;
             self.drain_pending_writes().await;
         }
         self.file.close_rc().await?;
