@@ -7,7 +7,7 @@ use shoal::shared::queries::Queries;
 use shoal::shared::responses::ResponseActionNames;
 use shoal::shared::traits::QuerySupport;
 use shoal::{
-    shoal_db, Conf, FileSystem, PersistentSortedTable, PersistentUnsortedTable, Shoal, ShoalPool,
+    Conf, FileSystem, PersistentSortedTable, PersistentUnsortedTable, Shoal, ShoalPool,
     ShoalResponse, ShoalSortedTable, ShoalUnsortedTable,
 };
 
@@ -139,7 +139,7 @@ pub struct MovieByKeyword {
 }
 
 /// The tables we are adding to to shoal
-#[shoal_db]
+#[shoal::db]
 pub struct Tmdb {
     /// A basic key value table
     pub movie: PersistentUnsortedTable<Movie, FileSystem>,
@@ -349,7 +349,7 @@ impl MovieWorker {
                 }
             }
             // if we have 10 movies to insert or get then send them to shoal
-            if self.buffer.len() > 10 {
+            if self.buffer.len() > 100 {
                 // swap our full query buffer with a new one
                 let queries = std::mem::take(&mut self.buffer);
                 // get the current time

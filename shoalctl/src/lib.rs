@@ -9,7 +9,7 @@
 //! use std::sync::Arc;
 //! use deepsize2::DeepSizeOf;
 //! use rkyv::{Archive, Deserialize, Serialize};
-//! use shoal::{Shoal, ShoalSortedTable, PersistentSortedTable, FileSystem, Shoal};
+//! use shoal::{Shoal, ShoalSortedTable, PersistentSortedTable, FileSystem};
 //!
 //! /// A simple sorted table for testing
 //! #[derive(
@@ -30,7 +30,7 @@
 //! }
 //!
 //! /// The test database schema
-//! #[derive(ShoalDB)]
+//! #[shoal::db]
 //! pub struct TestDb {
 //!     /// The sorted test table
 //!     pub test_records: PersistentSortedTable<TestRecord, FileSystem, TestDbTableNames>,

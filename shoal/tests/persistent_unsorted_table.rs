@@ -5,7 +5,7 @@ use rkyv::{Archive, Deserialize, Serialize};
 use shoal_core::shared::traits::RkyvSupport;
 use shoal_core::storage::FileSystem;
 use shoal_core::tables::PersistentUnsortedTable;
-use shoal_derive::{shoal_db, ShoalUnsortedTable};
+use shoal_derive::{db, ShoalUnsortedTable};
 use tempfile::TempDir;
 
 mod utils;
@@ -43,7 +43,7 @@ impl TestRecord {
 }
 
 /// The test database schema
-#[shoal_db]
+#[db]
 pub struct TestDb {
     /// The sorted test table
     pub test_record: PersistentUnsortedTable<TestRecord, FileSystem>,

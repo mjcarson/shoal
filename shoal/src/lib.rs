@@ -10,4 +10,4 @@ pub use shoal_core::tables::{
     self, EphemeralTable, PersistentSortedTable, PersistentUnsortedTable,
 };
 pub use shoal_core::ShoalPool;
-pub use shoal_derive::{shoal_db, ShoalSortedTable, ShoalUnsortedTable};
+pub use shoal_derive::{db, ShoalSortedTable, ShoalUnsortedTable};

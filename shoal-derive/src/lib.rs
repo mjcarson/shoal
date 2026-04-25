@@ -185,7 +185,7 @@ pub fn derive_shoal_unsorted_table(stream: TokenStream) -> TokenStream {
         name,
         &all_fields,
         &partition_fields,
-        &[],  // unsorted tables have no sort fields
+        &[], // unsorted tables have no sort fields
         &filter_fields,
     );
     traits::table_row_format::add(&mut output, name, &all_fields);
@@ -208,7 +208,7 @@ pub fn derive_shoal_unsorted_table(stream: TokenStream) -> TokenStream {
 /// into full types like `PersistentUnsortedTable<Movie, FileSystem<Tmdb>, TmdbTableNames>`,
 /// then generates the TableNames enum, Client struct, QueryKinds/ResponseKinds, and trait impls.
 #[proc_macro_attribute]
-pub fn shoal_db(_attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn db(_attr: TokenStream, item: TokenStream) -> TokenStream {
     // parse the input as a struct
     let mut item_struct = syn::parse_macro_input!(item as syn::ItemStruct);
     let struct_ident = item_struct.ident.clone();

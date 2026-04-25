@@ -636,7 +636,6 @@ where
         }
         // if we have any blocked queries then add this to our pending data map
         if !blocked.is_empty() {
-            println!("## Still have blocked! -> {blocked:?}");
             self.pending_data
                 .insert((meta.id, meta.index), (Vec::new(), blocked));
             None
@@ -648,7 +647,6 @@ where
                 data: ResponseAction::Exists(false),
                 end: meta.end,
             };
-            println!("@@ exists {exists_query:?} -> false");
             Some((meta.client, meta.id, response))
         }
     }
@@ -671,19 +669,15 @@ where
         key: u64,
         sort: R::Sort,
     ) -> Option<(Uuid, Uuid, Response<R>)> {
-        println!("~~ DELETING {key:?} / {sort:?}");
         // get the partition we want to delete from
         match self.partitions.get_mut(&key) {
             Some(maybe_loaded) => {
-                println!("DEL SOM?");
                 // check if this partition is fully loaded in memory or not
                 match maybe_loaded {
                     // the partition is at least partially deserialized and loaded into memory
                     MaybeLoaded::Loaded { partition, .. } => {
-                        println!("DEL MAYBE_LOADED?");
                         // try to remove the target row
                         if let Some((size_diff, _)) = partition.remove(&sort) {
-                            println!("DEL MAYBE_LOADED SOME? -> {partition:#?}");
                             // we were able to delete this row so build the delete intent
                             let intent = SortedIntents::<R>::delete(key, sort);
                             // commit it to the intent to the intent log
@@ -701,7 +695,6 @@ where
                             // we can't acknowledge this delete until its intent is flushed
                             return None;
                         } else if partition.check_disk {
-                            println!("DEL MAYBE_LOADED CHECK_DISK?");
                             // we couldn't find the row to delete but it may be on on disk
                             let will_load = self
                                 .storage
@@ -725,7 +718,6 @@ where
                                 return None;
                             }
                         }
-                        println!("~~ DELETING POST_LO: {partition:#?}");
                         // Tthis row doesn't exist and so can't be deleted
                         let response = Response {
                             id: meta.id,
@@ -737,7 +729,6 @@ where
                     }
                     // this partition is loaded from disk but not deserialized
                     MaybeLoaded::Accessible(read) => {
-                        println!("~~ DELETING {key:?} / {sort:?} - ACCESIBLE");
                         // access this partitions data
                         let accessible = SortedPartition::<R>::access(&read).unwrap();
                         // deserialize our partition so we can modify it
@@ -761,14 +752,12 @@ where
                             *self.memory_usage.borrow_mut() = new_size;
                             // remove from LRU cache since partition was just modified
                             self.lru.borrow_mut().pop(&(self.table_name, key));
-                            println!("^^ partition -> {partition:#?}");
                             // convert to Loaded state since we've deserialized it
                             *maybe_loaded = MaybeLoaded::Loaded {
                                 partition,
                                 generation: self.generation,
                             };
                             // we can't acknowledge this delete until its intent is flushed
-                            println!("~~ DELETING {key:?}  - NEED FLUSH!");
                             None
                         } else {
                             // row wasn't found but we deserialized this partition so keep it
@@ -783,7 +772,6 @@ where
                                 data: ResponseAction::Delete(false),
                                 end: meta.end,
                             };
-                            println!("~~ DELETING {key:?} / {sort:?} - NOTHING TO DO");
                             Some((meta.client, meta.id, response))
                         }
                     }
@@ -1139,7 +1127,6 @@ where
     ) -> Result<(), ServerError> {
         // access our data
         let intent = SortedIntents::<T>::access(read)?;
-        //println!("pre_load -> {partitions:#?}");
         // add this intent to our btreemap
         let diff = match intent {
             ArchivedSortedIntents::Insert(archived) => {
@@ -1276,7 +1263,6 @@ where
         let new_size = memory_usage.borrow().saturating_add_signed(diff);
         // adjust our memory usage correctly
         *memory_usage.borrow_mut() = new_size;
-        //println!("post_load -> {partitions:#?}");
         Ok(())
     }
 
