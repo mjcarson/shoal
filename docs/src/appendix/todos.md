@@ -8,13 +8,12 @@ overlap; where they do, the known-issues entry has the detail.
 
 ## In-code TODOs
 
-Thirteen `TODO` comments and one live `todo!()` outside `target/`.
+Twelve `TODO` comments and one live `todo!()` outside `target/`.
 
 ### Storage
 
 | Location | TODO | What finishing it involves |
 | --- | --- | --- |
-| `.../storage/fs.rs:346` | `this should use channels to mark how much was consumed` | The critical one. `commit` must return the log offset one past the record it wrote so `PendingResponse` can gate acknowledgement on durability. See [Known Issues #1](known-issues.md#1-commit-does-not-report-a-log-position). |
 | `.../fs/compactor.rs:201` | `does anything else need to be done to remove this partition from archive maps?` | Yes. A pruned partition's `ArchiveEntry` must be removed and the removal logged — `MapIntent` needs a new variant. Confirmed data resurrection: [Known Issues #5](known-issues.md#5-pruned-partitions-leak-a-stale-archive-map-entry). |
 | `.../fs/compactor.rs:343` | `make size configurable` | Move `MIN_ARCHIVE_COMPACTABLE` and the hardcoded 50% utilisation threshold into `FileSystemTableConf`. |
 | `.../fs/map.rs:351` | `make issue about SerializedMap not needing to track active` | `SerializedMap` does not persist the active archive id, so every restart mints a new one and orphans the previous active archive until compaction reclaims it. Either persist it or document the churn as intended. |
@@ -117,8 +116,10 @@ there is caught only if rkyv validation happens to reject it, and several call s
 
 `StorageSupport` (`.../storage.rs:225`) and `Loaders` (`:189-193`) are written as extension
 points but have exactly one implementation. Until a second exists, treat the abstraction as
-unproven — a memory-backed engine for tests would be the natural first user, and would also
-make the commented-out storage tests runnable without touching disk.
+unproven — a memory-backed engine for tests would be the natural first user. Note that the
+storage tests deliberately do *not* want this: they run against a real filesystem on purpose,
+because glommio silently disables O_DIRECT on tmpfs and a memory-backed engine would hide
+exactly the alignment and `fdatasync` behaviour they exist to check.
 
 ### Build and packaging
 
@@ -148,10 +149,8 @@ the restart coverage that does exist stops one step short of the failure.
 | Location | Status |
 | --- | --- |
 | `server/cursor.rs`, `server/response.rs` | Not in the module tree; reference removed APIs. |
-| `.../fs/tests.rs` | 429 lines, fully commented out. |
 | `client.rs:544-598`, `:1025-1091` | Large commented-out blocks. |
 | `.../fs.rs:74-98` | The previous intent-log writer, commented out. |
-| `.../fs/stream.rs` `pending_sync` | Only ever `take()`n, never set. |
 | `shoalctl/src/components/tab.rs:430`, `:440` | `next`/`prev`, never called. |
 | `EphemeralTable` | Cannot be used in a `#[db]` database ([Table Types](../tables/table-types.md#ephemeraltable)). |
 | `shoal/examples/basic.rs.bak` | A `.bak` file in the source tree. |

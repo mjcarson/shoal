@@ -47,20 +47,19 @@ persistence layer, on top of which distribution has not yet been built.
 
 ## A note on the current branch
 
-This book was written against the `ZeroCopyResponses` branch, mid-refactor. The commit
-history — "started to add in new writer" → "half way through moving to new intent log
-writer" → "mark flushed might be working?" — describes a rewrite of the intent log writer
-that is genuinely incomplete.
+This book was written against the `ZeroCopyResponses` branch, during a rewrite of the intent
+log writer. That rewrite is now finished: acknowledgement waits for an `fdatasync` covering
+the record, the flush watermark only advances over contiguously completed writes, and every
+write to the log is block aligned. See [Durability model](storage/overview.md#durability-model)
+and [Intent Log](storage/intent-log.md).
 
-The most important consequence: **write acknowledgement is currently broken.**
-`FileSystem::commit` returns a hardcoded `Ok(0)` instead of the log position of the write it
-just performed (`shoal-core/src/server/tables/storage/fs.rs:347`), which makes every write
-appear durable the instant it is issued. This is a placeholder, not a design. See
-[Known Issues](appendix/known-issues.md#1-commit-does-not-report-a-log-position) before
-drawing any conclusions about Shoal's durability guarantees from reading the code.
+Other parts of the branch are still rough. Read [Known Issues](appendix/known-issues.md)
+before drawing conclusions about anything else — the most serious open defect is that
+compaction can resurrect deleted rows
+([#5](appendix/known-issues.md#5-pruned-partitions-leak-a-stale-archive-map-entry)).
 
-The workspace does compile — `cargo check --workspace --all-targets` passes with warnings
-only.
+The workspace compiles — `cargo check --workspace --all-targets` passes with warnings only,
+and `cargo test --workspace` passes with 14 integration tests and 32 unit tests.
 
 ## Crate map
 

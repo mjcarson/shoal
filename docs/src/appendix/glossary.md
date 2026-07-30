@@ -79,9 +79,9 @@ row.
 **Partition key** — A `u64` produced by `gxhash`ing the `#[shoal(partition)]` fields. Because
 it is a hash, **partition keys collide**, and nothing detects it.
 
-**Pending response** — A response held in `PendingResponse` against the intent log position
-where its write will have landed, released once the durability watermark passes it. Currently
-inert ([Known Issues #1](known-issues.md#1-commit-does-not-report-a-log-position)).
+**Pending response** — A response held in `PendingResponse` against the intent log offset one
+past its record, released once the durability watermark passes it. See
+[Durability model](../storage/overview.md#durability-model).
 
 **Ring** — The consistent hash ring mapping partition key to shard. Each shard lays down 1000
 virtual nodes at a fixed stride from its name hash. See
@@ -119,10 +119,17 @@ variant carries a non-`Send` glommio `ReadResult`. The rule that makes this soun
 convention. The most dangerous thing in the codebase to change unknowingly. See
 [Known Issues](known-issues.md#unsafe-send-invariant).
 
-**Watermark / flushed position** — The intent log offset up to which data is confirmed
-written. Advanced by `ServerMsg::DataFlushed`, and used to release pending responses. Note
-"flushed" currently means "submitted to the kernel", not "durable"
-([Known Issues #3](known-issues.md#3-no-fdatasync-on-the-steady-state-write-path)).
+**Watermark** — An intent log offset below which everything satisfies some property. The
+writer tracks two in `FlushState`: `written_pos` (every byte below it has been `write_at`
+completed) and `synced_pos` (every byte below it has been `fdatasync`ed). Both are *contiguous
+low-water marks*, not maxima — io_uring completions arrive out of order, so a maximum would
+cover data still in flight. Pending responses are released against `synced_pos` by default.
+See [Intent Log](../storage/intent-log.md#completion-notification).
+
+**Pad region** — Filler written after a partial flush to round it up to a block boundary so it
+can be written with O_DIRECT. Starts with `PAD_SENTINEL` (`u64::MAX`) so replay skips it rather
+than mistaking it for the end of the log. See
+[Intent Log](../storage/intent-log.md#pad-regions).
 
 ---
 

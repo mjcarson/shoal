@@ -1,4 +1,9 @@
 //! The shared utilities for tests in Shoal
+//!
+//! Each integration test binary pulls this in with `mod utils;` and uses a different
+//! subset of it, and cargo also builds this file as a test target of its own, so
+//! anything here looks dead from somewhere.
+#![allow(dead_code)]
 
 use rkyv::bytecheck::CheckBytes;
 use rkyv::de::Pool;
@@ -47,10 +52,19 @@ fn get_unique_port() -> u16 {
     PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
 }
 
+/// Create a temp dir for a test on a filesystem that supports direct IO
+///
+/// `TempDir::new` uses `/tmp`, which is usually tmpfs. Glommio silently disables
+/// O_DIRECT on tmpfs, so any test using it exercises a buffered write path where
+/// alignment is not enforced and `fdatasync` is meaningless. `CARGO_TARGET_TMPDIR`
+/// lives under `target/`, which is on the same real filesystem as the repo.
+pub fn test_dir() -> TempDir {
+    // build our temp dir under cargo's target dir so we get a real filesystem
+    TempDir::new_in(env!("CARGO_TARGET_TMPDIR")).expect("Failed to create temp dir")
+}
+
 /// Create a default config for tests
 pub fn build_config(temp_dir: &TempDir) -> Conf {
-    //// get a temp dir for this config
-    //let temp_dir = TempDir::new().expect("Failed to create temp dir");
     // get a random port to bind to
     let port = get_unique_port();
     // build a default test conf
@@ -98,6 +112,33 @@ where
 {
     // get a config for this test
     let conf = build_config(&temp_dir);
+    // start a server with it
+    start_with_conf::<T>(conf).await
+}
+
+/// Setup and start a shoal server from an existing config
+///
+/// # Arguments
+///
+/// * `conf` - The config to start this server with
+pub async fn start_with_conf<T: ShoalDatabase>(
+    conf: Conf,
+) -> Result<(Shoal<T::ClientType>, ShoalPool<T>), TestError>
+where
+    // Bounds for ShoalPool impl block
+    <<T::ClientType as QuerySupport>::QueryKinds as Archive>::Archived: Deserialize<
+        <T::ClientType as QuerySupport>::QueryKinds,
+        Strategy<Pool, rkyv::rancor::Error>,
+    >,
+    for<'a> <Queries<T::ClientType> as Archive>::Archived:
+        CheckBytes<Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>>,
+    // Bounds for ShoalPool::start
+    for<'a> <<T::ClientType as QuerySupport>::QueryKinds as Archive>::Archived:
+        CheckBytes<Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>>,
+    // Bounds for Shoal::new
+    for<'a> <<T::ClientType as QuerySupport>::ResponseKinds as Archive>::Archived:
+        CheckBytes<Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>>,
+{
     // build the address our client should connect too
     let addr = format!("127.0.0.1:{}", conf.networking.port);
     println!("TALK TO {addr}");
@@ -108,4 +149,40 @@ where
     // setup a client
     let client = Shoal::<T::ClientType>::new(&addr).await?;
     Ok((client, pool))
+}
+
+/// The env var naming the temp dir a crash test child should use
+pub const CRASH_DIR_VAR: &str = "SHOAL_CRASH_TEST_DIR";
+
+/// The env var naming the port a crash test child should bind
+pub const CRASH_PORT_VAR: &str = "SHOAL_CRASH_TEST_PORT";
+
+/// The line a crash test child prints once its writes have been acknowledged
+pub const CRASH_READY_LINE: &str = "SHOAL_CRASH_TEST_READY";
+
+/// Create a config for a crash test child, reusing a fixed dir and port
+///
+/// # Arguments
+///
+/// * `path` - The storage path to use
+/// * `port` - The port to bind
+pub fn build_crash_config(path: &std::path::Path, port: u16) -> Conf {
+    // build a default test conf pinned to our callers dir and port
+    Conf::default()
+        .resources(
+            Resources::default()
+                .cores(2)
+                .memory("100MiB")
+                .expect("Failed to set memory to 100MiB"),
+        )
+        .networking(Networking::default().port(port))
+        .storage(
+            Storage::default().default_settings(
+                DefaultStorageSettings::default().filesystem(
+                    FileSystemTableConf::default()
+                        .latency_sensitive(FileSystemLatencyWriterConf::default().path(path))
+                        .throughput_sensitive(FileSystemThroughputWriterConf::default().path(path)),
+                ),
+            ),
+        )
 }

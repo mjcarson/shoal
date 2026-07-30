@@ -25,9 +25,33 @@ fn default_latency_write_behind() -> usize {
     128
 }
 
-/// Set default intent log size to 100 Mebibytes
+/// Set default intent log size to 10 Mebibytes
 fn default_intent_log_size() -> u64 {
     10 << 20
+}
+
+/// Set the default durability level for latency files
+fn default_durability() -> Durability {
+    Durability::Fsync
+}
+
+/// How durable a write has to be before its response is released to a client
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Durability {
+    /// Acknowledge a write only once it has been fdatasynced
+    ///
+    /// O_DIRECT skips the page cache but not the drives own volatile write cache,
+    /// so an fdatasync is the only thing that makes a write survive power loss.
+    /// At most one fdatasync is in flight at a time, so concurrent writes group
+    /// commit behind the one already running and the cost per write falls as load
+    /// rises.
+    Fsync,
+    /// Acknowledge a write once the kernel has accepted it
+    ///
+    /// Faster, but a write can be acknowledged and then lost to power loss, since
+    /// it may still be sitting in the drives write cache. Useful for benchmarking
+    /// against [`Durability::Fsync`].
+    Async,
 }
 
 /// The settings to use for a specific writer
@@ -47,6 +71,9 @@ pub struct FileSystemLatencyWriterConf {
     #[serde(default = "default_intent_log_size")]
     #[serde(deserialize_with = "utils::deserialize_byte_size_u64")]
     pub intent_log_size: u64,
+    /// How durable a write must be before its response is released to a client
+    #[serde(default = "default_durability")]
+    pub durability: Durability,
 }
 
 impl Default for FileSystemLatencyWriterConf {
@@ -57,6 +84,7 @@ impl Default for FileSystemLatencyWriterConf {
             buffer_size: default_latency_buffer_size(),
             write_behind: default_latency_write_behind(),
             intent_log_size: default_intent_log_size(),
+            durability: default_durability(),
         }
     }
 }
@@ -88,6 +116,16 @@ impl FileSystemLatencyWriterConf {
     /// Set the intent log size
     pub fn intent_log_size(mut self, intent_log_size: u64) -> Self {
         self.intent_log_size = intent_log_size;
+        self
+    }
+
+    /// Set how durable a write must be before its response is released to a client
+    ///
+    /// # Arguments
+    ///
+    /// * `durability` - The durability level to set
+    pub fn durability(mut self, durability: Durability) -> Self {
+        self.durability = durability;
         self
     }
 }

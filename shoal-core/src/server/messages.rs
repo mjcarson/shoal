@@ -82,7 +82,12 @@ where
     /// A partition loaded from disk. This can never be sent across threads!
     Partition(LoadedPartitionKinds<D>),
     /// Some data has been flushed to storage
-    DataFlushed { table: D::TableNames, flushed: u64 },
+    ///
+    /// This carries no position. The writer tracks its own durable watermark in
+    /// state shared with its detached IO tasks, which is correct the instant an IO
+    /// completes rather than whenever the shard happens to drain its channel. This
+    /// message exists purely to wake the shard up so it runs `handle_flushed`.
+    DataFlushed,
     /// Mark some partitions as evictable
     MarkEvictable {
         generation: u64,
@@ -110,10 +115,7 @@ impl<D: ShoalDatabase> Clone for ServerMsg<D> {
                 query: query.clone(),
             },
             ServerMsg::Partition(loaded) => ServerMsg::Partition(loaded.clone()),
-            ServerMsg::DataFlushed { table, flushed } => ServerMsg::DataFlushed {
-                table: *table,
-                flushed: *flushed,
-            },
+            ServerMsg::DataFlushed => ServerMsg::DataFlushed,
             ServerMsg::MarkEvictable {
                 generation,
                 table,

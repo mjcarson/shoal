@@ -303,15 +303,6 @@ pub trait ShoalDatabase: 'static + Sized {
     #[cfg(feature = "server")]
     async fn flush(&mut self) -> Result<(), ServerError>;
 
-    /// Inform a table that some of its data has been flushed to storage
-    ///
-    /// # Arguments
-    ///
-    /// * `table` - The name of the table that we are marking a new flushed offset watermark
-    /// * `flushed_pos` - The new offset for flushed data
-    #[cfg(feature = "server")]
-    fn mark_flushed(&mut self, table: Self::TableNames, flushed_pos: u64);
-
     /// Get all flushed messages and send their response back
     ///
     /// # Arguments

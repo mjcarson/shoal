@@ -31,11 +31,11 @@ buff.write_all(&size.to_le_bytes())?;
 buff.write_all(&checksum.to_le_bytes())?;
 buff.write_all(archived.as_slice())?;
 self.intent_log2.consume(total_size).await;
-// TODO this should use channels to mark how much was consumed
-Ok(0)
+// return the offset one past this record
+Ok(self.intent_log2.get_unflushed_pos())
 ```
 
-`shoal-core/src/server/tables/storage/fs.rs:322-348`
+`shoal-core/src/server/tables/storage/fs.rs:322-352`
 
 The checksum is not a durability mechanism — it is a *torn-write detector*. Because records
 are packed into DMA buffers and buffers are written whole, a crash can leave a buffer
@@ -144,82 +144,118 @@ task. The writer immediately continues filling a fresh buffer. Up to `max_write_
 writes may be in flight; beyond that, `flush_oldest_write` awaits the oldest handle, which is
 the *only* backpressure anywhere in Shoal.
 
-`trim_to_size(self.buff_pos)` means partial buffers are written at their true length, so the
-file has no padding between flushes — but a buffer flushed early (by `sync`) is written at
-whatever size it had reached, and the next write starts at `file_pos + buff_pos`. The log is
-therefore densely packed regardless of flush timing.
+Every write is block aligned in both offset and length, and no two writes overlap. That is
+what the pad region below buys, and it is required: O_DIRECT rejects a misaligned write, and
+overlapping rewrites of a partly filled tail block would let an out-of-order completion leave
+an older, shorter version of that block on disk.
+
+### Pad regions
+
+A record is whatever size rkyv made it, but a write has to be block aligned. So when a partial
+buffer is flushed, `pad_region` rounds the staged data up to the next boundary and writes a
+sentinel at the start of the gap:
+
+```
+[8B size][8B checksum][payload] [8B PAD_SENTINEL][zeros...] | next block
+```
+
+The sentinel is `u64::MAX`, written where a size header would go. It cannot collide with a
+real record: no log can hold a record claiming to be `u64::MAX` bytes long.
+
+It exists because the reader already treats a **zero** size header as the end of the log —
+that is what unwritten space in a partly filled log looks like. Without a sentinel, padding
+zeros would be indistinguishable from unwritten space and replay would stop at the first flush
+boundary, silently discarding every record after it. On reading the sentinel the reader skips
+to the next block boundary and keeps going (`.../fs/reader.rs`).
+
+If the natural gap is smaller than the 8 bytes a sentinel needs, the pad is extended by a
+whole extra block. Buffers are therefore allocated one block larger than their usable size, so
+there is always room.
+
+**Cost:** one partial block per partial flush. This scales *inversely* with load — the shard
+only flushes a partial buffer when its queue drains (`shard.rs:651-653`), so under load
+buffers fill and pad regions are rare, while at idle every insert rounds up to a block.
 
 ### Completion notification
 
+Writes run as detached tasks, which cannot reach `&mut StreamWriter`, and glommio's
+`JoinHandle` has no non-blocking poll. So completions are reconciled through `FlushState`,
+shared between the writer and its tasks via `Rc<RefCell<_>>`:
+
 ```rust
-async fn write_helper<D: ShoalDatabase>(
-    table: D::TableNames, file: Rc<DmaFile>, buff: DmaBuffer, pos: u64,
-    shard_local_tx: AsyncSender<ServerMsg<D>>,
-) {
-    file.write_at(buff, pos).await.unwrap();
-    let msg = ServerMsg::DataFlushed { table, flushed: pos };
-    shard_local_tx.send(msg).await.unwrap()
+pub fn on_complete(&mut self, end: u64) {
+    if let Some(slot) = self.inflight.iter_mut().find(|(pos, _)| *pos == end) {
+        slot.1 = true;
+    }
+    while matches!(self.inflight.front(), Some((_, true))) {
+        if let Some((pos, _)) = self.inflight.pop_front() {
+            self.written_pos = pos;
+        }
+    }
 }
 ```
 
-`.../fs/stream.rs:100-116`
+`inflight` holds submitted writes in submission order. A completion marks its slot, then the
+watermark advances over however many entries are now complete *contiguously from the front*.
 
-The completed write posts its position back to the shard, which routes it to the right
-table's `mark_flushed` (`shard.rs:534-536`, dispatched by
-`shoal-derive/src/traits/db.rs:103-114`).
+**This must not be a maximum.** `write_behind` defaults to 128 (`.../fs/conf.rs`), and
+io_uring completions are not ordered, so a later buffer landing before an earlier one is the
+normal case rather than a race. Taking the highest completed offset would advance the
+watermark past data still in flight and acknowledge writes that are not on disk.
 
-**`flushed: pos` is the offset the buffer was written *at*, not the offset it ended at.** The
-watermark therefore lags by one buffer, and the responses for everything in that buffer stay
-parked until the *next* buffer completes. See
-[Known Issues](../appendix/known-issues.md#2-flush-watermark-is-the-buffers-start-offset).
+`ServerMsg::DataFlushed` still exists but **carries no position** — it is purely a wakeup. The
+shard blocks on its channel, so without a message `handle_flushed` would never run. Keeping
+the position out of it is deliberate: a message observed after a log rotation would otherwise
+apply a stale offset to a fresh file.
 
-Note also `.unwrap()` on both the write and the send: an IO error on the WAL aborts the
-shard.
+IO errors from a background task are recorded in `FlushState` and surfaced by `check_error`
+on the next `flush` or `compact_if_needed`, rather than `unwrap()`ing inside a detached task.
 
 ### Position tracking
 
 | Field | Meaning |
 | --- | --- |
-| `file_pos` | Bytes handed to background writes so far |
+| `file_pos` | Bytes handed to background writes so far, always block aligned |
 | `buff_pos` | Bytes staged in the current buffer |
-| `flushed_pos` | Watermark of confirmed-written data, set by `set_flushed` |
+| `written_pos` | Contiguous watermark of `write_at`-completed data (in `FlushState`) |
+| `synced_pos` | Contiguous watermark of `fdatasync`-completed data (in `FlushState`) |
 
-`get_unflushed_pos()` returns `file_pos + buff_pos` — everything written or staged
-(`.../fs/stream.rs:250-253`). This is what compaction thresholds compare against
-(`.../fs.rs:365`), so rotation is driven by bytes *accepted*, not bytes durable. That is the
-right choice: it bounds memory and replay time regardless of IO progress.
+`get_unflushed_pos()` returns `file_pos + buff_pos` — everything written or staged. This is
+also what `commit` returns: the offset one past the record it just wrote, including any
+padding already emitted before it.
 
-### sync vs sync_blocking
+Compaction thresholds compare against `get_unflushed_pos()` too, so rotation is driven by
+bytes *accepted*, not bytes durable. That is the right choice: it bounds memory and replay
+time regardless of IO progress.
+
+### Group commit
+
+Every completed write kicks `start_sync`, which fdatasyncs everything below `written_pos`:
 
 ```rust
-pub async fn sync(&mut self) -> Result<(), ServerError> {
-    if self.buff_pos > 0 { self.write(self.default_buffer_size).await.unwrap(); }
-    Ok(())
-}
-
-pub async fn sync_blocking(&mut self) -> Result<(), ServerError> {
-    if self.buff_pos > 0 { self.write(self.default_buffer_size).await.unwrap(); }
-    self.drain_pending_writes().await;
-    if let Some(handle) = self.pending_sync.take() { handle.await; }
-    self.file.fdatasync().await?;
-    Ok(())
-}
+let target = {
+    let mut flush_state = state.borrow_mut();
+    if flush_state.syncing_to.is_some() || flush_state.written_pos <= flush_state.synced_pos {
+        return;
+    }
+    flush_state.syncing_to = Some(flush_state.written_pos);
+    flush_state.written_pos
+};
 ```
 
-`.../fs/stream.rs:255-277`
+At most one fdatasync is in flight. Writes that retire while one is running are covered by the
+next, so the cost per write is `fsync latency / batch size` and batch size grows on its own
+with load. When the running sync finishes and finds more data has landed, it starts another.
 
-`sync` is a misnomer: it issues the partial buffer as another background write and returns.
-It does not wait and it does not `fdatasync`. This is what the shard calls every time it goes
-idle (`shard.rs:656` → `tables.flush()` → `.../fs.rs:410-414`).
+Capturing the target as `written_pos` is what makes this sound while other writes are still in
+flight on the same ring: an fdatasync only has to cover writes that completed before it was
+issued, and every byte below `written_pos` did.
 
-`sync_blocking` is the real one, and it is reached only from `refresh` during log rotation
-(`.../fs/stream.rs:286`). **So on the steady-state write path, Shoal never issues an
-`fdatasync`.** Data is durable only to the extent that the kernel and device have retired the
-DMA writes. See
-[Known Issues](../appendix/known-issues.md#3-no-fdatasync-on-the-steady-state-write-path).
-
-`pending_sync` is a field for a background fsync task that is never populated — it is only
-ever `take()`n (`.../fs/stream.rs:272`, `:323`). Dead scaffolding for the unfinished writer.
+`sync` still just issues the partial buffer as a background write and returns — it is the
+shard's idle flush and is not a durability barrier. `sync_blocking` is the waiting version:
+it writes the tail, drains every in-flight write, waits out any group commit, fdatasyncs, and
+records the result. It is reached from `refresh` during rotation, from `close`, and from
+`FileSystem::shutdown`, so a clean shutdown now fsyncs on the way out.
 
 ### Rotation
 
@@ -250,10 +286,18 @@ pub async fn refresh(&mut self, rename_to: &PathBuf) -> Result<u64, ServerError>
 This sequence is correct: flush and fsync the data, rename, then fsync the *directory* so the
 rename itself survives a crash. Directory fsync is the step most implementations forget.
 
-Note the reset of `flushed_pos` to 0 alongside `file_pos`. Positions are per-file, so any
-`PendingResponse` entry still parked against an old-file position is now compared against a
-new-file watermark. With `commit` returning 0 this is invisible; once `commit` returns real
-positions, rotation will need to release or rebase everything still pending.
+Positions are per-file and restart at 0, so an entry parked against an old-file position can
+never be compared against the new file's watermark. Rotation handles this by construction:
+
+- `refresh` returns the pre-reset `get_unflushed_pos()` — everything ever written to the old
+  file, all of which `sync_blocking` just made durable. Reading the *flushed* watermark here
+  would report a stale value, since the completions that advance it may not have been observed
+  yet.
+- It installs a brand new `FlushState`, so a completion still holding the old one mutates an
+  object nothing reads.
+- `compact_if_needed` reports `rotated: true`, and `get_flushed` responds by calling
+  `PendingResponse::drain_all` rather than comparing positions. Every parked response is
+  durable, so all of them are released at once.
 
 ## Design notes
 
@@ -270,11 +314,13 @@ load, latency stays low because the queue drains.
 
 ## Limitations
 
-- Acknowledgement is disconnected from durability: see
-  [Known Issues](../appendix/known-issues.md#critical--durability) items 1–3.
-- No `fdatasync` outside rotation.
 - The checksum is a non-portable hash; logs are not readable across builds with different
   CPU feature flags.
-- WAL IO errors are `unwrap()`s, not recoverable failures.
-- `pending_sync` is dead scaffolding.
-- Positions reset on rotation with no rebasing of pending responses.
+- A partial flush costs a partial block of write amplification. Worst at idle, negligible
+  under load.
+- `write_at` and the wakeup send still `unwrap()` inside the detached task on some paths;
+  `FlushState` records the write error, but a failed *send* aborts the shard.
+- Rotation releases every pending response at once. That is correct — they are all durable —
+  but it means a rotation can emit an unbounded burst of responses.
+- Nothing bounds `PendingResponse`. Under a slow device it grows with arrival rate times fsync
+  latency. See [Known Issues #15](../appendix/known-issues.md#15-no-backpressure-anywhere).

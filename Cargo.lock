@@ -3340,6 +3340,7 @@ name = "shoal"
 version = "0.1.0"
 dependencies = [
  "byte-unit",
+ "clap",
  "core_affinity",
  "csv-async",
  "deepsize2",

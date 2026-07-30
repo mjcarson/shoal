@@ -24,7 +24,7 @@ different places.
              │                    │                    │
              ▼                    ▼                    ▼
         reply now       ServerMsg::DataFlushed   ServerMsg::Partition
-                          → mark_flushed           → load_partition
+                          → handle_flushed         → load_partition
                           → get_flushed            → replay query
                           → reply                  → (may now answer)
 ```
@@ -242,10 +242,11 @@ pub fn get(&mut self, flushed_pos: u64, flushed: &mut Vec<(Uuid, Uuid, Span, Res
 A `VecDeque` popped from the front works because positions are monotonically increasing, so
 the first unflushed entry ends the scan.
 
-**This mechanism is currently inert**, because `commit` always returns `pos = 0` and
-`flushed_pos >= 0` is always true. Every write is acknowledged on the next `handle_flushed`
-regardless of IO. See
-[Known Issues](../appendix/known-issues.md#1-commit-does-not-report-a-log-position).
+The watermark it is compared against is `synced_pos` — the offset below which everything has
+been fdatasynced — so popping an entry means the record really is on disk. At an intent log
+rotation the queue is drained wholesale instead, since positions restart at 0 in the new file
+and the old ones are all durable by then. See
+[Durability model](../storage/overview.md#durability-model).
 
 ### Updates and deletes
 

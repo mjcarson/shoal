@@ -6,6 +6,7 @@ use std::hash::Hasher;
 use std::path::PathBuf;
 use tracing::instrument;
 
+use super::stream::{PAD_SENTINEL, PAD_SENTINEL_SIZE};
 use crate::server::ServerError;
 
 /// Reads an intent log from disk
@@ -16,6 +17,8 @@ pub struct IntentLogReader {
     pub size: u64,
     /// The current position of our reader
     pub position: u64,
+    /// The direct IO alignment this intent log was written with
+    pub alignment: u64,
 }
 
 impl IntentLogReader {
@@ -26,11 +29,14 @@ impl IntentLogReader {
         let file = OpenOptions::new().read(true).dma_open(&path).await?;
         // get the size of this file
         let size = file.file_size().await?;
+        // get the alignment our pad regions were rounded up too
+        let alignment = file.alignment();
         // create our intent log reader
         let reader = IntentLogReader {
             file,
             size,
             position: 0,
+            alignment,
         };
         Ok(reader)
     }
@@ -44,8 +50,12 @@ impl IntentLogReader {
             // bail out since this shards intent log is empty
             return Ok(None);
         }
-        // Stop at the end of this file
-        if self.position < self.size {
+        // keep reading until we find a record or reach the end of this log
+        loop {
+            // stop at the end of this file
+            if self.position >= self.size {
+                return Ok(None);
+            }
             // try to read the size of the next entry in this intent log
             let size_read = self.file.read_at(self.position, 8).await?;
             // check if we read a complete size header
@@ -53,7 +63,18 @@ impl IntentLogReader {
                 tracing::warn!("Truncated size header at position {} (got {} bytes) - treating as end of intent log", self.position, size_read.len());
                 return Ok(None);
             }
-            let size = usize::from_le_bytes(size_read[..8].try_into()?);
+            let raw_size = u64::from_le_bytes(size_read[..8].try_into()?);
+            // check if this is a pad region written to align a partial flush
+            if raw_size == PAD_SENTINEL {
+                // skip to the next alignment boundary and keep looking for a record
+                self.position = self
+                    .position
+                    .saturating_add(PAD_SENTINEL_SIZE as u64)
+                    .div_ceil(self.alignment)
+                    * self.alignment;
+                continue;
+            }
+            let size = raw_size as usize;
             // if our size plus the checksum is bigger than our remaining data
             // then its the end of the log and we are reading padded data
             if size + 8 > (self.size - self.position) as usize {
@@ -68,7 +89,10 @@ impl IntentLogReader {
             // read the checksum
             let checksum_read = self.file.read_at(self.position, 8).await?;
             if checksum_read.len() < 8 {
-                tracing::warn!("Truncated checksum at position {} - treating as end of intent log", self.position);
+                tracing::warn!(
+                    "Truncated checksum at position {} - treating as end of intent log",
+                    self.position
+                );
                 return Ok(None);
             }
             let expected_checksum = u64::from_le_bytes(checksum_read[..8].try_into()?);
@@ -93,9 +117,7 @@ impl IntentLogReader {
             }
             // increment this readers current position
             self.position += size as u64;
-            Ok(Some(row_read))
-        } else {
-            Ok(None)
+            return Ok(Some(row_read));
         }
     }
 

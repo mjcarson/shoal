@@ -4,92 +4,19 @@ A severity-ranked index of defects found by reading the code on the `ZeroCopyRes
 branch. Each entry names the symptom, the cause, and a `file:line`.
 
 **How these were established.** Everything here comes from reading the source, except item 5,
-which was reproduced against a running server (see below). Nothing here has been fixed —
-this book is documentation, not a patch. Line numbers drift.
+which was reproduced against a running server (see below). Line numbers drift.
+
+**Fixed since this list was written:** the three critical durability defects — `commit`
+returning a hardcoded position, the flush watermark reporting a buffer's start offset, and the
+missing `fdatasync` — have all been fixed, along with the unaligned O_DIRECT writes and the
+rotation hazards they exposed. See [Intent Log](../storage/intent-log.md) for the design that
+replaced them. Everything else below still stands.
+
+Item numbers are kept stable so cross references from the rest of the book keep resolving,
+which is why this list starts at item 4.
 
 **Baseline as of writing:** `cargo check --workspace --all-targets` passes with warnings;
-`cargo test --workspace` passes — 13 integration tests, 0 unit tests.
-
----
-
-## Critical — durability
-
-These three compound. Together they mean **a write acknowledged by Shoal today is not
-guaranteed to be on disk.** All three trace to the intent-log writer rewrite this branch is in
-the middle of.
-
-### 1. `commit` does not report a log position
-
-`shoal-core/src/server/tables/storage/fs.rs:347`
-
-```rust
-self.intent_log2.consume(total_size).await;
-// TODO this should use channels to mark how much was consumed
-Ok(0)
-```
-
-`commit` is supposed to return the intent log offset at which the write will have landed.
-It returns `0`.
-
-That position is what a response is parked against:
-
-```rust
-self.pending.add(meta, pos, action);
-```
-
-`.../persistent/sorted.rs:369`
-
-and what releases it:
-
-```rust
-Some((pending_pos, _, _)) => flushed_pos >= *pending_pos,
-```
-
-`.../server/tables/storage.rs:78`
-
-With `pending_pos == 0`, that test is unconditionally true. Every write is acknowledged on the
-next `handle_flushed` regardless of whether any IO has completed. The entire
-`PendingResponse` mechanism is inert.
-
-**Fix direction:** return `self.intent_log2.get_unflushed_pos()` after `consume`, i.e. the
-offset one past this record.
-
-### 2. Flush watermark is the buffer's start offset
-
-`.../fs/stream.rs:108-115`
-
-```rust
-file.write_at(buff, pos).await.unwrap();
-let msg = ServerMsg::DataFlushed { table, flushed: pos };
-```
-
-`pos` is where the buffer was written *from*, not where it ends. The watermark therefore lags
-by one full buffer: records in the buffer that just completed are not covered by the position
-that completion reports. Once item 1 is fixed, this would leave every write waiting for the
-*next* buffer to complete before being acknowledged.
-
-**Fix direction:** report `pos + buff.len()`.
-
-### 3. No `fdatasync` on the steady-state write path
-
-`.../fs/stream.rs:255-264`
-
-```rust
-pub async fn sync(&mut self) -> Result<(), ServerError> {
-    if self.buff_pos > 0 { self.write(self.default_buffer_size).await.unwrap(); }
-    Ok(())
-}
-```
-
-`StreamWriter::sync` — reached from the shard's idle flush (`shard.rs:656`) — issues another
-background write and returns. It does not wait and does not `fdatasync`.
-
-`sync_blocking` does fsync (`.../fs/stream.rs:267-277`), but is only reached from `refresh`
-during log rotation. So between rotations, Shoal never forces data to stable storage.
-"Flushed" means "submitted to the kernel".
-
-The `pending_sync` field appears to be scaffolding for a background fsync task that was never
-written — it is only ever `take()`n (`.../fs/stream.rs:272`, `:323`).
+`cargo test --workspace` passes — 14 integration tests, 32 unit tests.
 
 ---
 
@@ -349,7 +276,6 @@ then waits forever, since there is no timeout ([item 15](#15-no-backpressure-any
 | Location | Content |
 | --- | --- |
 | `.../persistent/sorted.rs:546`, `:553`, `:593`, `:594`, `:613`, `:639` | Six lines in `exists`, one of which `{:#?}`-prints an entire partition |
-| `.../fs.rs:366-370` | "Compacting ->" on every log rotation |
 | `.../server/conf.rs:111` | "listening on ..." from inside `Networking::to_addr` |
 
 All bypass the tracing level filter. Visible in any test run — see the sample output in
@@ -373,18 +299,18 @@ exclusion never takes effect. `CLAUDE.md` reproduces the typo.
 `shoal-core/src/server.rs:14-22` and are not compiled. They reference APIs that no longer
 exist (`crate::ShoalRow`, `rkyv::AlignedVec`). Dead.
 
-Also: `shoal-core/src/server/tables/storage/fs/tests.rs` is **429 lines of entirely
-commented-out tests** — covering exactly the intent-log truncation, checksum, and map
-corruption behaviour documented in [Recovery](../storage/recovery.md). The module is declared
-`#[cfg(test)] mod tests;` (`.../fs.rs:31-32`) and compiles to nothing. `shoal-core` has zero
-active unit tests.
+~~Also: `.../fs/tests.rs` is 429 lines of entirely commented-out tests.~~ **Fixed.** Those
+tests are live again, rewritten to build their fixtures with plain `std::fs` so the byte
+layout under test is explicit, and joined by `.../fs/stream_tests.rs` covering padding and the
+flush watermark. `shoal-core` has 32 unit tests.
 
 ### 21. Constant and comment mismatches
 
 | Constant | Comment says | Value is |
 | --- | --- | --- |
-| `default_intent_log_size` (`.../fs/conf.rs:28-31`) | 100 MiB | `10 << 20` = 10 MiB |
 | `MIN_ARCHIVE_COMPACTABLE` (`.../fs/compactor.rs:31-33`) | 100 MiB | `10 << 20` = 10 MiB |
+
+(`default_intent_log_size` had the same mismatch and has been corrected to say 10 MiB.)
 
 Also `RemoteTracing::Grpc` exports over HTTP (`trace.rs:36-40`), and
 `FileSystemThroughputWriterConf::write_behind` — a count — is deserialized with
@@ -460,14 +386,13 @@ failure. Any change touching loader construction should be read against this.
 
 ## Suggested triage order
 
-1. **Items 1–3** — durability. Nothing else about persistence can be assessed until
-   acknowledgement means something. They are one coherent piece of work: finish the writer
-   migration.
-2. **Item 5** — confirmed data resurrection, and the fix is well understood.
-3. **Item 4** — silent no-op mutations on unsorted tables.
-4. **Item 6** — one-line fix that restores memory accounting.
-5. **Items 7 and 8** — features that appear to work and do not; either implement or reject at
+1. **Item 5** — confirmed data resurrection, and the fix is well understood. This is now the
+   most serious open defect.
+2. **Item 4** — silent no-op mutations on unsorted tables.
+3. **Item 6** — one-line fix that restores memory accounting.
+4. **Items 7 and 8** — features that appear to work and do not; either implement or reject at
    the API boundary.
-6. **Items 9, 11, 16** — startup and hot-path panics.
-7. **Item 20** — re-enable the commented-out storage tests, which already cover several of
-   the behaviours above.
+5. **Items 9, 11, 16** — startup and hot-path panics.
+6. **Item 14** — empty rotated logs accumulating on disk and being replayed every startup.
+
+The durability work (former items 1–3) is done, and item 20's storage tests are live again.

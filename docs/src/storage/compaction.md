@@ -34,13 +34,21 @@ if force || self.intent_log2.get_unflushed_pos() > max_size {
     self.intent_tx.send(CompactionJob::IntentLog { path: new_path, generation: self.generation }).await?;
     self.generation += 1;
     self.intent_tx.send(CompactionJob::Archives).await?;
-    Ok((flushed_pos, self.generation))
+    Ok(FlushProgress { durable_pos: flushed_pos, generation: self.generation, rotated: true })
 } else {
-    Ok((self.intent_log2.get_flushed_pos(), self.generation))
+    Ok(FlushProgress {
+        durable_pos: self.intent_log2.get_flushed_pos(),
+        generation: self.generation,
+        rotated: false,
+    })
 }
 ```
 
-`.../fs.rs:358-396`
+`.../fs.rs:362-406`
+
+`rotated` is what tells the caller it cannot compare positions across the boundary: the new
+file's offsets restart at 0, so `get_flushed` drains its pending responses wholesale instead
+of testing them. They are all durable — `refresh` fdatasynced the old file before renaming it.
 
 Three things happen atomically from the table's point of view: the active log is renamed and
 fsynced (`refresh`, see [The Intent Log](intent-log.md#rotation)), an intent compaction job is
@@ -51,9 +59,6 @@ rotation bounds log size and replay time regardless of IO progress.
 
 `force = true` is passed once, at table construction (`.../persistent/sorted.rs:210`), so
 every table compacts whatever it just replayed immediately on startup.
-
-> There is a stray debug `println!` in this function (`.../fs.rs:366-370`) that fires on every
-> rotation. See [Known Issues](../appendix/known-issues.md#17-leftover-debug-printlns).
 
 ## Generations
 
@@ -233,8 +238,8 @@ both on disk. A crash before the sync leaves the map pointing at the old copy, w
 intact — the compaction is simply lost and will be redone from the sealed log.
 
 Note `sync()` here is `DmaStreamWriter::sync`, glommio's, which does flush and fsync — unlike
-`StreamWriter::sync` ([The Intent Log](intent-log.md#sync-vs-sync_blocking)). Same name,
-different guarantee.
+`StreamWriter::sync`, which only issues a background write
+([The Intent Log](intent-log.md#group-commit)). Same name, different guarantee.
 
 ### 5. Mark evictable
 

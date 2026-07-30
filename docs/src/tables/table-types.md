@@ -140,7 +140,7 @@ are always fully resident. Its `handle` returns a `Response<T>` directly rather 
 It is exported (`shoal/src/lib.rs`) and documented in the CLAUDE.md table list, but the `#[db]`
 macro's generated `ShoalDatabase` impl calls methods `EphemeralTable` does not have —
 `new(shard_name, table_name, ..., loader_channels, ...)`, `loader_kind`, `spawn_loader`,
-`mark_flushed`, `get_flushed`, `mark_evictable`, `evict`, `load_partition`, `shutdown`
+`get_flushed`, `mark_evictable`, `evict`, `load_partition`, `shutdown`
 (`shoal-derive/src/traits/db.rs:22-185`). Putting an `EphemeralTable` in a `#[db]` struct will
 not compile.
 
@@ -158,7 +158,6 @@ Both persistent tables implement the same informal interface, called by generate
 | `handle` | `ShoalDatabase::handle` | Execute one query |
 | `load_partition` | `ShoalDatabase::load_partition` | Install a faulted-in partition, return unblocked queries |
 | `flush` | `ShoalDatabase::flush` | Push staged intent bytes toward disk |
-| `mark_flushed` | `ServerMsg::DataFlushed` | Advance the durability watermark |
 | `get_flushed` | `ShoalDatabase::handle_flushed` | Compact if needed; release acknowledgeable responses |
 | `mark_evictable` | `ServerMsg::MarkEvictable` | Offer partitions to the LRU |
 | `evict` | Shard memory pressure | Drop partitions |

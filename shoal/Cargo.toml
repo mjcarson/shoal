@@ -29,6 +29,7 @@ mimalloc = { workspace = true }
 hotpath = { workspace = true }
 
 [dev-dependencies]
+clap = { version = "4.2", features = ["derive"] }
 csv-async = { version = "1.3", features = ["tokio", "with_serde"] }
 serde = "1.0.219"
 futures = "0.3"

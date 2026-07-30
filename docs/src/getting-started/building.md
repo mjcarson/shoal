@@ -101,12 +101,15 @@ See [Observability](../operations/observability.md) for what `hotpath` actually 
 
 ## Running the example
 
-The `tmdb` example is both a demo and the benchmark harness. It needs a `shoal.yml` in the
-working directory and a TMDB CSV dataset:
+The `tmdb` example is both a demo and the benchmark harness. It starts a server in-process, so
+it needs a config and a TMDB CSV dataset:
 
 ```bash
-cargo run --example tmdb --release
+cargo run --example tmdb --release -- --limit 20000 --no-wait
 ```
+
+It takes a full CLI — `--help` lists every flag. See [Benchmarking](../operations/benchmarking.md)
+for what the numbers mean and how to get a result worth comparing.
 
 Note that the checked-in `shoal.yml` points storage at `/opt/shoal`, which must exist and be
 writable. It also contains a typo that silently disables core exclusion — see

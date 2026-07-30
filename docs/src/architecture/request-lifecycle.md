@@ -39,7 +39,7 @@ single get from the client's socket to the response, naming every hop.
                             │                                              │           StreamWriter::write
                             │                                              │              ↓ background task
                             │                                              │           ServerMsg::DataFlushed
-                            │                                              │           mark_flushed(pos)
+                            │                                              │           DataFlushed (wakeup)
                             │                                              │           handle_flushed
                             │                                              │           pending.get(flushed)
                             │                                              ▼                     ▼
@@ -192,10 +192,9 @@ None            // an insert never returns anything immediately
 Note the shape: the row is wrapped in an intent, serialized, then *unwrapped again* to avoid
 a clone — hence the `unreachable_unchecked`.
 
-`pos` is meant to be the intent log offset at which this write will have landed. `pending.add`
-files the response against it, to be released once the log has been flushed that far. **`pos`
-is currently always `0`** ([Known Issues](../appendix/known-issues.md#1-commit-does-not-report-a-log-position)),
-which short-circuits this entire mechanism.
+`pos` is the intent log offset one past this record. `pending.add` files the response against
+it, and the response is released once the log has been fdatasynced that far. See
+[Durability model](../storage/overview.md#durability-model).
 
 ## 5. Flushing and releasing responses
 

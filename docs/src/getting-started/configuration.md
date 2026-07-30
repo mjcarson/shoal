@@ -49,6 +49,7 @@ storage:
         buffer_size: 512             # bytes; accepts "4KiB" style strings
         write_behind: 128
         intent_log_size: "10MiB"
+        durability: Fsync            # Fsync (default) or Async
       throughput_sensitive:
         path: "/opt/shoal"
         buffer_size: "128KiB"
@@ -130,11 +131,30 @@ background compactor where per-write latency is irrelevant, so they use large bu
 shallow queue depth.
 
 `intent_log_size` is the rotation threshold — once the active intent log exceeds it,
-compaction is triggered ([Compaction](../storage/compaction.md)).
+compaction is triggered ([Compaction](../storage/compaction.md)). It defaults to 10 MiB.
 
-> The doc comment on `default_intent_log_size` says "100 Mebibytes" but the value is
-> `10 << 20`, which is 10 MiB (`shoal-core/src/server/tables/storage/fs/conf.rs:28-31`).
-> The code is what runs.
+`buffer_size` is a *minimum*. At startup it is rounded up to at least one block of the backing
+device's direct IO alignment, because every write to the intent log has to be block aligned.
+Setting it below the device block size therefore has no effect, and setting it small costs
+write amplification at low load — see [pad regions](../storage/intent-log.md#pad-regions).
+
+#### `durability`
+
+How durable a write has to be before its response is released to the client.
+
+| Value | Acknowledgement means | Trade-off |
+| --- | --- | --- |
+| `Fsync` (default) | The record has been `fdatasync`ed | Survives power loss. Adds a device round trip, amortised by group commit under load. |
+| `Async` | The kernel has accepted the write | Faster. A write can be acknowledged and then lost to power loss, since it may still be in the drive's volatile cache. |
+
+Only one `fdatasync` is in flight at a time, so concurrent writes group commit behind the one
+already running and the per-write cost falls as load rises. An isolated write still pays the
+full round trip.
+
+> The filesystem underneath matters more than this setting. btrfs is copy-on-write and commits
+> a log tree on every `fdatasync`, which makes it a poor host for a write-ahead log; ext4 or
+> XFS on a drive with power-loss protection is substantially faster. btrfs also silently falls
+> back to buffered IO for a misaligned O_DIRECT write where ext4 and XFS return `EINVAL`.
 
 > `FileSystemThroughputWriterConf::write_behind` is a *count*, but is annotated with
 > `deserialize_with = "utils::deserialize_byte_size"`

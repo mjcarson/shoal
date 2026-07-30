@@ -154,32 +154,38 @@ A get for a partition that has never been written costs one hash lookup and no I
 
 ## Durability model
 
-The intended model:
-
-1. A write serializes its intent and appends it to the log, receiving the log position at
-   which it will have landed.
+1. A write serializes its intent and appends it to the log. `commit` returns the log offset
+   one past the record it just wrote (`.../fs.rs:351`).
 2. The response is parked in `PendingResponse` against that position
    (`.../storage.rs:66-69`).
-3. The `StreamWriter` writes buffers out asynchronously; each completion posts
-   `ServerMsg::DataFlushed` with the new watermark.
-4. `PendingResponse::get` releases every response at or below the watermark
-   (`.../storage.rs:72-100`).
+3. The `StreamWriter` writes buffers out asynchronously. Completions land in `FlushState`,
+   shared between the writer and its detached IO tasks, which advances a *contiguous*
+   watermark and then group commits an `fdatasync` behind it.
+4. `PendingResponse::get` releases every response at or below the durable watermark
+   (`.../storage.rs:102-130`).
 
-The client therefore hears "inserted" only after the intent is on disk.
+The client therefore hears "inserted" only after the intent is fdatasynced.
 
-**None of steps 1–4 currently work end to end.** Three defects compound:
+Two properties make step 3 sound, and both matter:
 
-- `commit` returns a hardcoded `Ok(0)`, so every response is parked at position 0 and the
-  `flushed_pos >= pending_pos` test is trivially true.
-- The watermark reported by a completed write is the buffer's *start* offset, not its end.
-- The normal path never issues an `fdatasync`, so "written" means "handed to the kernel".
+- **The watermark is a low-water mark, not a maximum.** With `write_behind` defaulting to 128,
+  io_uring completions routinely arrive out of order. Taking the highest completed offset
+  would advance the watermark past data still in flight, so `FlushState` only advances over
+  writes that have completed contiguously from the front of its queue.
+- **The gate is `synced_pos`, not `written_pos`.** O_DIRECT skips the page cache but not the
+  drive's own volatile write cache. Only an `fdatasync` makes a write survive power loss.
 
-See [Known Issues](../appendix/known-issues.md#critical--durability). Until they are fixed,
-treat acknowledgement as meaning "accepted into memory", not "durable".
+Set `durability: Async` (see [Configuration](../getting-started/configuration.md)) to gate on
+`written_pos` instead and skip the fsync. That is faster and honest about what it gives up: a
+write can be acknowledged and then lost to power loss.
 
-What *is* solid: the archive map's snapshot uses a proper write-temp → sync → rename → fsync
-parent sequence (`.../fs/map.rs:206-228`), and intent log rotation fsyncs before and after the
-rename (`.../fs/stream.rs:284-299`).
+If you want to know what the fsync actually costs on your hardware, measure it rather than
+guessing — [Benchmarking](../operations/benchmarking.md) covers how, and why btrfs is a poor
+host for this write path.
+
+Also solid: the archive map's snapshot uses a proper write-temp → sync → rename → fsync parent
+sequence (`.../fs/map.rs:206-228`), and intent log rotation fsyncs before and after the
+rename.
 
 ## Crash consistency
 
@@ -215,7 +221,13 @@ block another on IO. The cost is that shard count is baked into the layout
 
 ## Limitations
 
-- Durability acknowledgement is broken on this branch (see above).
+- Acknowledgement latency now includes an `fdatasync`. Group commit amortises this under
+  load, but a single isolated write pays a full write plus fsync round trip.
+- The filesystem matters more than it looks. btrfs is copy-on-write and commits a log tree on
+  every `fdatasync`, which makes it a poor choice for a write-ahead log; ext4 or XFS on a
+  drive with power-loss protection is substantially faster. btrfs also silently falls back to
+  buffered IO for a misaligned O_DIRECT write where ext4 and XFS return `EINVAL`, so a bug in
+  the write path's alignment can hide there.
 - One storage engine; `Loaders` has a single variant (`.../storage.rs:189-193`).
 - No checksums on archive data — only on intent log records and the map snapshot. A corrupt
   archive extent is detected only if rkyv validation happens to fail.

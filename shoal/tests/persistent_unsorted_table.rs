@@ -6,7 +6,6 @@ use shoal_core::shared::traits::RkyvSupport;
 use shoal_core::storage::FileSystem;
 use shoal_core::tables::PersistentUnsortedTable;
 use shoal_derive::{db, ShoalUnsortedTable};
-use tempfile::TempDir;
 
 mod utils;
 
@@ -53,7 +52,7 @@ pub struct TestDb {
 #[tokio::test]
 async fn setup() {
     // get a new temp dir for this test
-    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let temp_dir = utils::test_dir();
     // start a shoal server and build a client
     let (_client, pool) = utils::start::<TestDb>(&temp_dir)
         .await
@@ -66,7 +65,7 @@ async fn setup() {
 #[tokio::test]
 async fn insert() -> Result<(), TestError> {
     // get a new temp dir for this test
-    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let temp_dir = utils::test_dir();
     // start a shoal server and build a client
     let (client, pool) = utils::start::<TestDb>(&temp_dir).await?;
     // build a test partition to insert
@@ -92,7 +91,7 @@ async fn insert() -> Result<(), TestError> {
 #[tokio::test]
 async fn delete() -> Result<(), TestError> {
     // get a new temp dir for this test
-    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let temp_dir = utils::test_dir();
     // start a shoal server and build a client
     let (client, pool) = utils::start::<TestDb>(&temp_dir).await?;
     // build a test partition to insert
@@ -128,7 +127,7 @@ async fn delete() -> Result<(), TestError> {
 #[tokio::test]
 async fn update() -> Result<(), TestError> {
     // get a new temp dir for this test
-    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let temp_dir = utils::test_dir();
     // start a shoal server and build a client
     let (client, pool) = utils::start::<TestDb>(&temp_dir).await?;
     // build a test partition to insert

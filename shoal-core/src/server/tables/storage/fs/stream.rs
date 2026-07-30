@@ -2,18 +2,76 @@
 use glommio::io::{DmaBuffer, DmaFile, OpenOptions};
 use glommio::task::JoinHandle;
 use kanal::AsyncSender;
+use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::rc::Rc;
 use tracing::instrument;
 
+use super::conf::Durability;
 use crate::server::messages::ServerMsg;
 use crate::server::ServerError;
 use crate::shared::traits::ShoalDatabase;
 
+/// The sentinel written in place of a size header at the start of a pad region
+///
+/// O_DIRECT requires every write to have a block aligned offset and length, but
+/// records are arbitrarily sized. So when a partial buffer is flushed we pad it up
+/// to the next block boundary. That padding has to be distinguishable from the
+/// zeroed tail of a partly filled log, since [`IntentLogReader`] treats a zero size
+/// header as the end of the log. This sentinel marks "skip to the next block
+/// boundary and keep reading" instead.
+///
+/// [`IntentLogReader`]: super::reader::IntentLogReader
+pub const PAD_SENTINEL: u64 = u64::MAX;
+
+/// The number of bytes our pad sentinel takes up
+pub const PAD_SENTINEL_SIZE: usize = 8;
+
+/// Round a value up to the next multiple of an alignment
+///
+/// # Arguments
+///
+/// * `value` - The value to round up
+/// * `alignment` - The alignment to round up too
+pub fn align_up(value: usize, alignment: usize) -> usize {
+    // round up to the next alignment boundary
+    value.div_ceil(alignment) * alignment
+}
+
+/// Pad a staged buffer up to an aligned length so it can be written with O_DIRECT
+///
+/// Returns the aligned length to write. When any padding is required the pad region
+/// starts with [`PAD_SENTINEL`] so the reader can tell it apart from the zeroed tail
+/// of a partly filled log.
+///
+/// The caller must guarantee `bytes` has at least one alignment block of slack past
+/// `buff_pos`, which [`StreamWriter::usable`] enforces.
+///
+/// # Arguments
+///
+/// * `bytes` - The buffer holding our staged data
+/// * `buff_pos` - The number of bytes of staged data in that buffer
+/// * `alignment` - The direct IO alignment to pad up too
+pub fn pad_region(bytes: &mut [u8], buff_pos: usize, alignment: usize) -> usize {
+    // round the data we have staged up to the next alignment boundary
+    let mut padded = align_up(buff_pos, alignment);
+    // bail early if we happen to already be aligned since there is nothing to pad
+    if padded == buff_pos {
+        return padded;
+    }
+    // make sure our pad region is big enough to hold our sentinel
+    if padded - buff_pos < PAD_SENTINEL_SIZE {
+        padded += alignment;
+    }
+    // zero our pad region since DMA buffers are pooled and may hold stale data
+    bytes[buff_pos..padded].fill(0);
+    // mark this pad region so the reader skips it instead of stopping
+    bytes[buff_pos..buff_pos + PAD_SENTINEL_SIZE].copy_from_slice(&PAD_SENTINEL.to_le_bytes());
+    padded
+}
+
 pub struct StreamWriterBuilder<D: ShoalDatabase> {
-    /// The table we are writting data for
-    pub table: D::TableNames,
     /// The path to write data too
     pub path: PathBuf,
     /// The channel to send write messages over
@@ -22,6 +80,8 @@ pub struct StreamWriterBuilder<D: ShoalDatabase> {
     pub buffer_size: usize,
     /// Maximum number of in-flight write tasks
     pub write_behind: usize,
+    /// How durable a write has to be before it can be acknowledged
+    pub durability: Durability,
 }
 
 impl<D: ShoalDatabase> StreamWriterBuilder<D> {
@@ -31,16 +91,15 @@ impl<D: ShoalDatabase> StreamWriterBuilder<D> {
     ///
     /// * `path` - The path this stream writer should write data too when built
     pub fn new(
-        table: D::TableNames,
         path: impl Into<PathBuf>,
         shard_local_tx: AsyncSender<ServerMsg<D>>,
     ) -> Self {
         StreamWriterBuilder {
-            table,
             path: path.into(),
             shard_local_tx,
             buffer_size: 4096,
             write_behind: 4,
+            durability: Durability::Fsync,
         }
     }
 
@@ -64,6 +123,16 @@ impl<D: ShoalDatabase> StreamWriterBuilder<D> {
         self
     }
 
+    /// Set how durable a write has to be before it can be acknowledged
+    ///
+    /// # Arguments
+    ///
+    /// * `durability` - The durability level to use
+    pub fn durability(mut self, durability: Durability) -> Self {
+        self.durability = durability;
+        self
+    }
+
     /// Build a [`StreamWriter`] from this [`StreamWriterBuilder`]
     #[instrument(name = "StreamWriterBuilder::build", skip_all)]
     pub async fn build(self) -> Result<StreamWriter<D>, ServerError> {
@@ -75,51 +144,238 @@ impl<D: ShoalDatabase> StreamWriterBuilder<D> {
             .write(true)
             .dma_open(&self.path)
             .await?;
-        // get a buffer to write
-        let buffer = file.alloc_dma_buffer(self.buffer_size);
+        // get the direct IO alignment this file requires
+        let alignment = file.alignment() as usize;
+        // clamp our usable buffer size up to at least one aligned block
+        let default_buffer_size = align_up(std::cmp::max(self.buffer_size, alignment), alignment);
+        // get a buffer to write, reserving a block of slack for padding
+        let buffer = file.alloc_dma_buffer(default_buffer_size + alignment);
         // build this stream writer
         let writer = StreamWriter {
-            table: self.table,
             path: self.path,
             file: Rc::new(file),
             shard_local_tx: self.shard_local_tx,
             buffer,
-            default_buffer_size: self.buffer_size,
+            alignment,
+            default_buffer_size,
             file_pos: 0,
             buff_pos: 0,
-            flushed_pos: 0,
+            state: Rc::new(RefCell::new(FlushState::default())),
+            durability: self.durability,
             max_write_behind: self.write_behind,
             pending_writes: VecDeque::with_capacity(self.write_behind),
-            pending_sync: None,
         };
         Ok(writer)
     }
 }
 
+/// The write completion state shared between a [`StreamWriter`] and its detached IO tasks
+///
+/// Buffer writes run as detached tasks that cannot reach `&mut StreamWriter`, and
+/// glommio's [`JoinHandle`] has no non blocking poll, so shared state is the only way
+/// to reconcile completions without blocking the shard on device latency.
+#[derive(Default)]
+pub struct FlushState {
+    /// The submitted but not yet retired writes, in submission order
+    inflight: VecDeque<(u64, bool)>,
+    /// The position that all data below has been write_at completed for
+    written_pos: u64,
+    /// The position that all data below has been fdatasync completed for
+    synced_pos: u64,
+    /// The target position of our single in flight fdatasync if one exists
+    syncing_to: Option<u64>,
+    /// The handle for our in flight fdatasync task
+    sync_handle: Option<JoinHandle<()>>,
+    /// The first IO error observed by any of our background tasks
+    error: Option<ServerError>,
+}
+
+impl FlushState {
+    /// Track that a write has been submitted
+    ///
+    /// # Arguments
+    ///
+    /// * `end` - The position one past the last byte this write covers
+    pub fn on_start(&mut self, end: u64) {
+        // add this write to our in flight queue in submission order
+        self.inflight.push_back((end, false));
+    }
+
+    /// Retire a completed write and advance our contiguous written watermark
+    ///
+    /// io_uring completions are not ordered, so a later write can land before an
+    /// earlier one. Taking the max of what has completed would advance our watermark
+    /// past data that is still in flight, so instead we only advance over writes that
+    /// have completed contiguously from the front of the queue.
+    ///
+    /// # Arguments
+    ///
+    /// * `end` - The position one past the last byte this write covered
+    pub fn on_complete(&mut self, end: u64) {
+        // find this writes slot and mark it as complete
+        if let Some(slot) = self.inflight.iter_mut().find(|(pos, _)| *pos == end) {
+            slot.1 = true;
+        }
+        // pop completed writes from the front so our watermark stays contiguous
+        while matches!(self.inflight.front(), Some((_, true))) {
+            // retire this completed write
+            if let Some((pos, _)) = self.inflight.pop_front() {
+                // advance our watermark, which is monotonic by construction
+                self.written_pos = pos;
+            }
+        }
+    }
+
+    /// Record the first IO error one of our background tasks hit
+    ///
+    /// # Arguments
+    ///
+    /// * `error` - The error to record
+    pub fn record_error(&mut self, error: ServerError) {
+        // only keep the first error since later ones are likely fallout from it
+        if self.error.is_none() {
+            self.error = Some(error);
+        }
+    }
+
+    /// Get the position that all data below has been written to disk for
+    pub fn written_pos(&self) -> u64 {
+        self.written_pos
+    }
+
+    /// Record that all data below a position is now durable
+    ///
+    /// # Arguments
+    ///
+    /// * `synced_pos` - The position to advance our synced watermark too
+    pub fn mark_synced(&mut self, synced_pos: u64) {
+        // our synced watermark only ever moves forwards
+        self.synced_pos = self.synced_pos.max(synced_pos);
+    }
+
+    /// Get the durable watermark for a durability level
+    ///
+    /// # Arguments
+    ///
+    /// * `durability` - The durability level to get a watermark for
+    pub fn durable_pos(&self, durability: Durability) -> u64 {
+        match durability {
+            Durability::Fsync => self.synced_pos,
+            Durability::Async => self.written_pos,
+        }
+    }
+}
+
+/// Start a background fdatasync covering all currently written data
+///
+/// At most one fdatasync is in flight at a time, so every write that retires while
+/// one is running is covered by the next one. That makes the cost per write
+/// `fdatasync latency / batch size`, and batch size grows on its own with load.
+///
+/// Capturing our target as `written_pos` is what makes this sound while other writes
+/// are still in flight on the same ring: an fdatasync only has to cover writes that
+/// completed before it was issued, and every byte below `written_pos` has.
+///
+/// # Arguments
+///
+/// * `file` - The intent log file to sync
+/// * `state` - The flush state shared with our writer
+/// * `shard_local_tx` - The channel to wake our shard up on
+fn start_sync<D: ShoalDatabase>(
+    file: Rc<DmaFile>,
+    state: Rc<RefCell<FlushState>>,
+    shard_local_tx: AsyncSender<ServerMsg<D>>,
+) {
+    // claim the sync slot and capture the position we are syncing up too
+    let target = {
+        // borrow our shared flush state
+        let mut flush_state = state.borrow_mut();
+        // bail if a sync is already in flight or we have nothing new to sync
+        if flush_state.syncing_to.is_some() || flush_state.written_pos <= flush_state.synced_pos {
+            return;
+        }
+        // claim the sync slot for our current written watermark
+        flush_state.syncing_to = Some(flush_state.written_pos);
+        flush_state.written_pos
+    };
+    // get local copies for our background task
+    let sync_file = file.clone();
+    let sync_state = state.clone();
+    let sync_tx = shard_local_tx.clone();
+    // spawn our fdatasync as a background task
+    let handle = glommio::spawn_local(async move {
+        // sync our files data to stable storage
+        let synced = sync_file.fdatasync().await;
+        // update our shared state and check if more data landed while we synced
+        let resync = {
+            // borrow our shared flush state, never holding it across an await
+            let mut flush_state = sync_state.borrow_mut();
+            // record either our new synced watermark or the error we hit
+            match synced {
+                Ok(_) => flush_state.synced_pos = flush_state.synced_pos.max(target),
+                Err(error) => flush_state.record_error(error.into()),
+            }
+            // release the sync slot
+            flush_state.syncing_to = None;
+            flush_state.written_pos > flush_state.synced_pos
+        };
+        // wake our shard so it can release any newly durable responses
+        sync_tx.send(ServerMsg::DataFlushed).await.unwrap();
+        // start another sync if more data landed while we were syncing
+        if resync {
+            start_sync::<D>(sync_file, sync_state, sync_tx);
+        }
+    })
+    .detach();
+    // store our sync handle so shutdown and rotation can await it
+    state.borrow_mut().sync_handle = Some(handle);
+}
+
 /// Helps a StreamWriter write a block of data to disk
+///
+/// # Arguments
+///
+/// * `file` - The intent log file to write too
+/// * `buff` - The buffer to write
+/// * `pos` - The offset to write this buffer at
+/// * `end` - The offset one past the last byte this write covers
+/// * `state` - The flush state shared with our writer
+/// * `durability` - How durable a write has to be before it can be acknowledged
+/// * `shard_local_tx` - The channel to tell our shard this write landed on
 async fn write_helper<D: ShoalDatabase>(
-    table: D::TableNames,
     file: Rc<DmaFile>,
     buff: DmaBuffer,
     pos: u64,
+    end: u64,
+    state: Rc<RefCell<FlushState>>,
+    durability: Durability,
     shard_local_tx: AsyncSender<ServerMsg<D>>,
 ) {
     // write this buffer to disk
-    file.write_at(buff, pos).await.unwrap();
-    // build a server message saying data has been flushed to disk
-    let msg = ServerMsg::DataFlushed {
-        table,
-        flushed: pos,
-    };
-    // tell our shard some data has been written to disk
-    shard_local_tx.send(msg).await.unwrap()
+    let written = file.write_at(buff, pos).await;
+    {
+        // borrow our shared flush state, never holding it across an await
+        let mut flush_state = state.borrow_mut();
+        // either retire this write or record the error it hit
+        match written {
+            Ok(_) => flush_state.on_complete(end),
+            Err(error) => flush_state.record_error(error.into()),
+        }
+    }
+    // if we only acknowledge synced data then let our sync task wake our shard
+    if durability == Durability::Fsync {
+        // fdatasync everything that has landed so far, group committing with any
+        // other writes that retired while a sync was already running
+        start_sync::<D>(file, state, shard_local_tx);
+        return;
+    }
+    // tell our shard some data has been written to disk so it releases responses
+    shard_local_tx.send(ServerMsg::DataFlushed).await.unwrap()
 }
 
 /// A streaming writer that utilizes high queue depth DMA to have efficient
 /// and performant IO.
 pub struct StreamWriter<D: ShoalDatabase> {
-    /// The table we are writting data for
-    pub table: D::TableNames,
     /// The path to write data too
     pub path: PathBuf,
     /// The file we are streaming data too
@@ -128,30 +384,34 @@ pub struct StreamWriter<D: ShoalDatabase> {
     shard_local_tx: AsyncSender<ServerMsg<D>>,
     /// The current buffer we are writting too
     buffer: DmaBuffer,
-    /// The default/minumum size to make our DMA buffer
+    /// The direct IO alignment our backing file requires
+    alignment: usize,
+    /// The default/minumum amount of usable space to make in our DMA buffer
+    ///
+    /// Buffers are allocated one alignment block larger than this so a partial
+    /// flush always has room for its pad region.
     default_buffer_size: usize,
     /// The current position we have written data in our file up too
     file_pos: u64,
     /// The current position we have written data in our buffer up too
     buff_pos: usize,
-    /// The position of data that has been flushed to disk
-    flushed_pos: u64,
+    /// The write completion state shared with our detached IO tasks
+    state: Rc<RefCell<FlushState>>,
+    /// How durable a write has to be before it can be acknowledged
+    durability: Durability,
     /// Maximum number of in-flight write tasks
     max_write_behind: usize,
     /// Handles for in-flight write tasks
     pending_writes: VecDeque<JoinHandle<()>>,
-    /// Handle for background fdatasync task
-    pending_sync: Option<JoinHandle<()>>,
 }
 
 impl<D: ShoalDatabase> StreamWriter<D> {
     /// Create a new stream writer
     pub fn builder(
-        table: D::TableNames,
         path: impl Into<PathBuf>,
         shard_local_tx: AsyncSender<ServerMsg<D>>,
     ) -> StreamWriterBuilder<D> {
-        StreamWriterBuilder::new(table, path, shard_local_tx)
+        StreamWriterBuilder::new(path, shard_local_tx)
     }
 
     /// If at write-behind capacity, await the oldest pending write
@@ -170,30 +430,82 @@ impl<D: ShoalDatabase> StreamWriter<D> {
         }
     }
 
+    /// Get the amount of space in our current buffer that records may use
+    ///
+    /// This is one alignment block short of the buffers real length, since a partial
+    /// flush needs somewhere to put its pad region.
+    fn usable(&self) -> usize {
+        self.buffer.len() - self.alignment
+    }
+
+    /// Allocate a buffer with at least this much usable space
+    ///
+    /// # Arguments
+    ///
+    /// * `usable` - The amount of usable space this buffer needs
+    fn alloc_buffer(&self, usable: usize) -> DmaBuffer {
+        // allocate an aligned buffer with a block of slack for our pad region
+        self.file
+            .alloc_dma_buffer(align_up(usable, self.alignment) + self.alignment)
+    }
+
+    /// Pad our current buffer up to an aligned length so it can be written with O_DIRECT
+    ///
+    /// Returns the aligned length to write.
+    fn pad_buffer(&mut self) -> usize {
+        // get our staged length and alignment before we borrow our buffer mutably
+        let buff_pos = self.buff_pos;
+        let alignment = self.alignment;
+        // pad our staged data up to an aligned length
+        pad_region(self.buffer.as_bytes_mut(), buff_pos, alignment)
+    }
+
     /// Write our current buffer to our WAL via a background task
-    async fn write(&mut self, new_size: usize) -> Result<(), ServerError> {
+    ///
+    /// # Arguments
+    ///
+    /// * `new_usable` - The amount of usable space our next buffer needs
+    async fn write(&mut self, new_usable: usize) -> Result<(), ServerError> {
+        // if we have nothing staged then just make sure our buffer is big enough
+        if self.buff_pos == 0 {
+            // grow our buffer if it can't fit our next write
+            if self.usable() < new_usable {
+                self.buffer = self.alloc_buffer(new_usable);
+            }
+            return Ok(());
+        }
         // back-pressure: if at capacity, await the oldest pending write
         self.flush_oldest_write().await;
+        // pad our staged data up to an aligned length
+        let padded = self.pad_buffer();
         // allocate our next buffer
-        let mut buff = self.file.alloc_dma_buffer(new_size);
+        let mut buff = self.alloc_buffer(new_usable);
         // swap our new buffer with our old one
         std::mem::swap(&mut self.buffer, &mut buff);
-        // trim our buffer down to only the data we wrote data too
-        buff.trim_to_size(self.buff_pos);
-        // get a local copy of our table, file, position, and shard channel
-        let table = self.table;
+        // trim our buffer down to the aligned region we wrote data too
+        buff.trim_to_size(padded);
+        // get a local copy of our file, position, and shard channel
         let file = self.file.clone();
         let pos = self.file_pos;
         let shard_local_tx = self.shard_local_tx.clone();
+        let state = self.state.clone();
+        let durability = self.durability;
+        // get the offset one past the region we are about to write
+        let end = pos + padded as u64;
+        // O_DIRECT requires both our offset and our length to be block aligned
+        debug_assert_eq!(pos as usize % self.alignment, 0, "unaligned write offset");
+        debug_assert_eq!(padded % self.alignment, 0, "unaligned write length");
+        // track this write so our watermark only advances over contiguous completions
+        self.state.borrow_mut().on_start(end);
         // spawn the write as a background task
         let handle = glommio::spawn_local(async move {
             // write this data to disk and tell our shard when its done
-            write_helper(table, file, buff, pos, shard_local_tx).await
+            write_helper::<D>(file, buff, pos, end, state, durability, shard_local_tx).await
         })
         .detach();
         self.pending_writes.push_back(handle);
-        // increment our file position
-        self.file_pos += self.buff_pos as u64;
+        // increment our file position past the region we just wrote
+        self.file_pos = end;
         // reset our buff position
         self.buff_pos = 0;
         Ok(())
@@ -205,13 +517,13 @@ impl<D: ShoalDatabase> StreamWriter<D> {
     ///
     /// * `size` - The size to prep for
     pub async fn prep(&mut self, size: usize) -> &mut [u8] {
-        // if we don't have enough space for our buffer then write our current buffer
-        if self.buffer.len() < size + self.buff_pos {
+        // if we don't have enough usable space then write our current buffer out
+        if self.usable() < size + self.buff_pos {
             // we won't have enough space to write this new data to out buffer so get a new one
             // make this new buffer big enough for our next write or bigger
-            let new_size = std::cmp::max(self.default_buffer_size, size);
+            let new_usable = std::cmp::max(self.default_buffer_size, size);
             // write but not sync our current buffer to disk
-            self.write(new_size).await.unwrap();
+            self.write(new_usable).await.unwrap();
         }
         // get a mutable ref to our buffer
         &mut self.buffer.as_bytes_mut()[self.buff_pos..self.buff_pos + size]
@@ -225,25 +537,31 @@ impl<D: ShoalDatabase> StreamWriter<D> {
     pub async fn consume(&mut self, size: usize) {
         // increment our buffer position by the amount of data consumed
         self.buff_pos += size;
-        // if we have consumed our entire buffer then write it to disk
-        if self.buffer.len() <= self.buff_pos {
+        // if we have consumed all of our usable space then write it to disk
+        if self.usable() <= self.buff_pos {
             // write but not sync our current buffer to disk
             self.write(self.default_buffer_size).await.unwrap();
         }
     }
 
     /// Get the current flushed position for this stream writer
+    ///
+    /// Every byte below this offset has been written to disk. This comes from state
+    /// shared with our detached write tasks rather than from a message, so it is
+    /// correct the instant an IO completes.
     pub fn get_flushed_pos(&mut self) -> u64 {
-        self.flushed_pos
+        self.state.borrow().durable_pos(self.durability)
     }
 
-    /// Update the offset in our writer for how much data has been flushed to disk
+    /// Check if any of our background IO tasks have failed
     ///
-    /// # Arguments
-    ///
-    /// * `flushed_pos` - The new flushed offset to set
-    pub fn set_flushed(&mut self, flushed_pos: u64) {
-        self.flushed_pos = flushed_pos;
+    /// Takes the error, so a caller that swallows it will not see it again.
+    pub fn check_error(&mut self) -> Result<(), ServerError> {
+        // take any error one of our background tasks recorded
+        match self.state.borrow_mut().error.take() {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 
     /// Get the current unflushed position for this stream writer
@@ -263,17 +581,43 @@ impl<D: ShoalDatabase> StreamWriter<D> {
         Ok(())
     }
 
-    /// Sync our files data, blocking until durable (for WAL acknowledgment)
+    /// Sync our files data, blocking until it is durably on disk
+    ///
+    /// Unlike [`StreamWriter::sync`] this waits: it writes our staged tail, drains
+    /// every in flight write, waits out any group commit already running, and then
+    /// issues its own fdatasync. On return everything ever handed to this writer is
+    /// durable.
+    #[instrument(name = "StreamWriter::sync_blocking", skip_all, err(Debug))]
     pub async fn sync_blocking(&mut self) -> Result<(), ServerError> {
+        // write out whatever is still staged in our buffer
         if self.buff_pos > 0 {
-            self.write(self.default_buffer_size).await.unwrap();
+            self.write(self.default_buffer_size).await?;
         }
+        // wait for every in flight write to land
         self.drain_pending_writes().await;
-        if let Some(handle) = self.pending_sync.take() {
+        // wait out any group commit that was already running
+        self.drain_pending_sync().await;
+        // sync our files data to stable storage
+        self.file.fdatasync().await?;
+        // record that everything written so far is now durable
+        {
+            // borrow our shared flush state
+            let mut flush_state = self.state.borrow_mut();
+            let written = flush_state.written_pos();
+            flush_state.mark_synced(written);
+        }
+        // surface any error our background tasks hit along the way
+        self.check_error()
+    }
+
+    /// Await any in flight fdatasync task
+    async fn drain_pending_sync(&mut self) {
+        // take the handle for any group commit currently running
+        let handle = self.state.borrow_mut().sync_handle.take();
+        // wait for it to finish so its result lands in our shared state
+        if let Some(handle) = handle {
             handle.await;
         }
-        self.file.fdatasync().await?;
-        Ok(())
     }
 
     /// Rename our current backing file and start writing to a new one
@@ -281,11 +625,16 @@ impl<D: ShoalDatabase> StreamWriter<D> {
     /// # Arguments
     ///
     /// * `inactive_path` - The path to rename our current backing file to
+    #[instrument(name = "StreamWriter::refresh", skip_all, err(Debug))]
     pub async fn refresh(&mut self, rename_to: &PathBuf) -> Result<u64, ServerError> {
         // flush this intent log
         self.sync_blocking().await?;
-        // get the current flushed position
-        let flushed_pos = self.get_flushed_pos();
+        // get the offset one past everything we ever wrote to this file
+        //
+        // sync_blocking just made all of it durable, so this is the right watermark
+        // to report. reading our flushed watermark here would report a stale value,
+        // since the completions that advance it may not have been observed yet
+        let flushed_pos = self.get_unflushed_pos();
         // rename our old intent log
         glommio::io::rename(&self.path, &rename_to).await?;
         // get our parent dir and sync it so this rename is durable
@@ -305,29 +654,40 @@ impl<D: ShoalDatabase> StreamWriter<D> {
             .write(true)
             .dma_open(&self.path)
             .await?;
-        // get a buffer to write
-        self.buffer = file.alloc_dma_buffer(self.default_buffer_size);
         // replace our old file with out new one
         let old_file = std::mem::replace(&mut self.file, Rc::new(file));
+        // get a buffer to write
+        self.buffer = self.alloc_buffer(self.default_buffer_size);
         // close our old file
         old_file.close_rc().await?;
         // reset our position counters
         self.file_pos = 0;
         self.buff_pos = 0;
-        self.flushed_pos = 0;
+        // install a fresh flush state for our new file
+        //
+        // positions restart at 0 in the new file, so any completion still holding the
+        // old state mutates an object nothing reads rather than corrupting our watermark
+        self.state = Rc::new(RefCell::new(FlushState::default()));
         Ok(flushed_pos)
     }
 
     /// Close this writer
+    ///
+    /// This fdatasyncs before closing, so a clean shutdown leaves the intent log
+    /// durably on disk rather than only in the drives write cache.
+    #[instrument(name = "StreamWriter::close", skip_all, err(Debug))]
     pub async fn close(mut self) -> Result<AsyncSender<ServerMsg<D>>, ServerError> {
-        if let Some(handle) = self.pending_sync.take() {
-            handle.await;
-        }
+        // wait out any group commit that was already running
+        self.drain_pending_sync().await;
+        // wait for every in flight write to land
         self.drain_pending_writes().await;
+        // write out whatever is still staged in our buffer
         if self.buff_pos > 0 {
             self.write(self.default_buffer_size).await?;
             self.drain_pending_writes().await;
         }
+        // sync our files data to stable storage before we let go of it
+        self.file.fdatasync().await?;
         self.file.close_rc().await?;
         Ok(self.shard_local_tx)
     }

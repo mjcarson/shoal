@@ -1,429 +1,349 @@
-// //! Tests for the FileSystem storage engine
-// //!
-// //! These tests verify the corruption mitigation measures work correctly:
-// //! - Intent log reader handles truncated files gracefully
-// //! - Checksums detect corrupted intent log entries
-// //! - SerializedMap checksum detects corruption
-// //! - Inactive intent log discovery works correctly
+//! Tests for the FileSystem storage engine
+//!
+//! These verify the corruption mitigation measures work correctly:
+//! - Intent log reader handles truncated files gracefully
+//! - Checksums detect corrupted intent log entries
+//! - Pad regions are skipped rather than mistaken for the end of a log
+//! - `SerializedMap` checksum detects corruption
+//! - Inactive intent log discovery works correctly
+//!
+//! Fixtures are written with plain `std::fs` rather than a DMA writer so the exact
+//! byte layout under test is explicit, which matters because these tests are all
+//! about how the reader reacts to malformed layouts.
 
-// #[cfg(test)]
-// mod tests {
-//     use futures::AsyncWriteExt;
-//     use glommio::io::{DmaStreamWriterBuilder, OpenOptions};
-//     use glommio::LocalExecutor;
-//     use gxhash::GxHasher;
-//     use std::hash::Hasher;
-//     use tempfile::TempDir;
+use glommio::io::OpenOptions;
+use glommio::LocalExecutor;
+use gxhash::GxHasher;
+use std::hash::Hasher;
+use std::path::{Path, PathBuf};
+use tempfile::TempDir;
 
-//     use crate::server::tables::storage::fs::reader::IntentLogReader;
-//     use crate::server::tables::storage::fs::FileSystem;
+use super::reader::IntentLogReader;
+use super::stream::PAD_SENTINEL;
+use super::find_inactive_intent_logs;
 
-//     /// Helper to write a valid intent log entry (size + checksum + data) to a DmaStreamWriter
-//     async fn write_entry(
-//         writer: &mut glommio::io::DmaStreamWriter,
-//         data: &[u8],
-//     ) -> Result<(), Box<dyn std::error::Error>> {
-//         let size = data.len();
-//         let mut hasher = GxHasher::default();
-//         hasher.write(data);
-//         let checksum = hasher.finish();
-//         writer.write_all(&size.to_le_bytes()).await?;
-//         writer.write_all(&checksum.to_le_bytes()).await?;
-//         writer.write_all(data).await?;
-//         Ok(())
-//     }
+/// Create a temp dir on a filesystem that supports direct IO
+///
+/// `TempDir::new` uses `/tmp`, which is usually tmpfs. Glommio silently disables
+/// O_DIRECT on tmpfs, so these tests would run against a buffered write path.
+fn test_dir() -> TempDir {
+    // build a path under cargo's target dir, which is on a real filesystem
+    let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target/shoal-test-tmp");
+    // make sure our base dir exists
+    std::fs::create_dir_all(&base).expect("Failed to create test tmp dir");
+    TempDir::new_in(&base).expect("Failed to create temp dir")
+}
 
-//     /// Helper to write raw bytes to a DMA file
-//     async fn write_raw(
-//         writer: &mut glommio::io::DmaStreamWriter,
-//         data: &[u8],
-//     ) -> Result<(), Box<dyn std::error::Error>> {
-//         writer.write_all(data).await?;
-//         Ok(())
-//     }
+/// Frame a valid intent log entry of `[8-byte size][8-byte checksum][data]`
+///
+/// # Arguments
+///
+/// * `data` - The record payload to frame
+fn entry(data: &[u8]) -> Vec<u8> {
+    // compute a checksum over our payload
+    let mut hasher = GxHasher::default();
+    hasher.write(data);
+    let checksum = hasher.finish();
+    // build our framed record
+    let mut framed = Vec::with_capacity(16 + data.len());
+    framed.extend_from_slice(&data.len().to_le_bytes());
+    framed.extend_from_slice(&checksum.to_le_bytes());
+    framed.extend_from_slice(data);
+    framed
+}
 
-//     // ========================================================================
-//     // IntentLogReader tests
-//     // ========================================================================
+/// Frame an entry with a deliberately wrong checksum
+///
+/// # Arguments
+///
+/// * `data` - The record payload to frame
+/// * `checksum` - The wrong checksum to write
+fn bad_entry(data: &[u8], checksum: u64) -> Vec<u8> {
+    let mut framed = Vec::with_capacity(16 + data.len());
+    framed.extend_from_slice(&data.len().to_le_bytes());
+    framed.extend_from_slice(&checksum.to_le_bytes());
+    framed.extend_from_slice(data);
+    framed
+}
 
-//     #[test]
-//     fn test_reader_empty_file() {
-//         LocalExecutor::default()
-//             .run(async {
-//                 let temp_dir = TempDir::new().unwrap();
-//                 let path = temp_dir.path().join("empty-log");
-//                 // create an empty file
-//                 let file = OpenOptions::new()
-//                     .create(true)
-//                     .write(true)
-//                     .dma_open(&path)
-//                     .await
-//                     .unwrap();
-//                 file.close().await.unwrap();
-//                 // read it
-//                 let mut reader = IntentLogReader::new(&path.to_path_buf()).await.unwrap();
-//                 let result = reader.next_buff().await.unwrap();
-//                 assert!(result.is_none(), "Empty file should return None");
-//                 reader.close().await.unwrap();
-//             })
-//     }
+/// Read every record an intent log yields
+///
+/// # Arguments
+///
+/// * `path` - The intent log to read
+async fn read_all(path: &Path) -> Vec<Vec<u8>> {
+    // open this log with our reader
+    let mut reader = IntentLogReader::new(&path.to_path_buf())
+        .await
+        .expect("Failed to open log");
+    // read every record it will give us
+    let mut records = Vec::new();
+    while let Some(read) = reader.next_buff().await.expect("Failed to read log") {
+        records.push(read.to_vec());
+    }
+    reader.close().await.expect("Failed to close reader");
+    records
+}
 
-//     #[test]
-//     fn test_reader_valid_entries() {
-//         LocalExecutor::default()
-//             .run(async {
-//                 let temp_dir = TempDir::new().unwrap();
-//                 let path = temp_dir.path().join("valid-log");
-//                 // write 3 valid entries
-//                 let entries: Vec<Vec<u8>> = vec![
-//                     b"hello world".to_vec(),
-//                     b"second entry with more data".to_vec(),
-//                     b"third".to_vec(),
-//                 ];
-//                 let file = OpenOptions::new()
-//                     .create(true)
-//                     .write(true)
-//                     .read(true)
-//                     .dma_open(&path)
-//                     .await
-//                     .unwrap();
-//                 let mut writer = DmaStreamWriterBuilder::new(file).build();
-//                 for entry in &entries {
-//                     write_entry(&mut writer, entry).await.unwrap();
-//                 }
-//                 writer.sync().await.unwrap();
-//                 writer.close().await.unwrap();
-//                 // read them back
-//                 let mut reader = IntentLogReader::new(&path.to_path_buf()).await.unwrap();
-//                 for expected in &entries {
-//                     let read = reader.next_buff().await.unwrap();
-//                     assert!(read.is_some(), "Should have read an entry");
-//                     let read = read.unwrap();
-//                     assert_eq!(
-//                         &read[..expected.len()],
-//                         expected.as_slice(),
-//                         "Entry data should match"
-//                     );
-//                 }
-//                 // should be done
-//                 let read = reader.next_buff().await.unwrap();
-//                 assert!(read.is_none(), "Should be no more entries");
-//                 reader.close().await.unwrap();
-//             })
-//     }
+// ========================================================================
+// IntentLogReader tests
+// ========================================================================
 
-//     #[test]
-//     fn test_reader_truncated_size_header() {
-//         LocalExecutor::default()
-//             .run(async {
-//                 let temp_dir = TempDir::new().unwrap();
-//                 let path = temp_dir.path().join("truncated-size-log");
-//                 // write one valid entry followed by 4 bytes (partial size header)
-//                 let file = OpenOptions::new()
-//                     .create(true)
-//                     .write(true)
-//                     .read(true)
-//                     .dma_open(&path)
-//                     .await
-//                     .unwrap();
-//                 let mut writer = DmaStreamWriterBuilder::new(file).build();
-//                 let data = b"valid entry";
-//                 write_entry(&mut writer, data).await.unwrap();
-//                 // write 4 bytes of garbage (incomplete size header)
-//                 write_raw(&mut writer, &[0xDE, 0xAD, 0xBE, 0xEF]).await.unwrap();
-//                 writer.sync().await.unwrap();
-//                 writer.close().await.unwrap();
-//                 // read back
-//                 let mut reader = IntentLogReader::new(&path.to_path_buf()).await.unwrap();
-//                 // first entry should be valid
-//                 let read = reader.next_buff().await.unwrap();
-//                 assert!(read.is_some(), "First entry should be readable");
-//                 let read = read.unwrap();
-//                 assert_eq!(&read[..data.len()], data.as_slice());
-//                 // second read should return None (truncated size header)
-//                 let read = reader.next_buff().await.unwrap();
-//                 assert!(
-//                     read.is_none(),
-//                     "Truncated size header should return None, not error"
-//                 );
-//                 reader.close().await.unwrap();
-//             })
-//     }
+#[test]
+/// An empty intent log yields no records
+fn reader_empty_file() {
+    LocalExecutor::default().run(async {
+        let temp_dir = test_dir();
+        let path = temp_dir.path().join("empty-log");
+        std::fs::write(&path, []).unwrap();
+        assert!(read_all(&path).await.is_empty());
+    });
+}
 
-//     #[test]
-//     fn test_reader_truncated_data() {
-//         LocalExecutor::default()
-//             .run(async {
-//                 let temp_dir = TempDir::new().unwrap();
-//                 let path = temp_dir.path().join("truncated-data-log");
-//                 // write a size header claiming 1000 bytes but only write 10 bytes of data
-//                 let file = OpenOptions::new()
-//                     .create(true)
-//                     .write(true)
-//                     .read(true)
-//                     .dma_open(&path)
-//                     .await
-//                     .unwrap();
-//                 let mut writer = DmaStreamWriterBuilder::new(file).build();
-//                 let claimed_size: usize = 1000;
-//                 let checksum: u64 = 0; // doesn't matter, size check comes first
-//                 write_raw(&mut writer, &claimed_size.to_le_bytes()).await.unwrap();
-//                 write_raw(&mut writer, &checksum.to_le_bytes()).await.unwrap();
-//                 write_raw(&mut writer, &[0u8; 10]).await.unwrap();
-//                 writer.sync().await.unwrap();
-//                 writer.close().await.unwrap();
-//                 // read back — size (1000) + checksum (8) exceeds file, should return None
-//                 let mut reader = IntentLogReader::new(&path.to_path_buf()).await.unwrap();
-//                 let read = reader.next_buff().await.unwrap();
-//                 assert!(
-//                     read.is_none(),
-//                     "Size exceeding remaining file should return None"
-//                 );
-//                 reader.close().await.unwrap();
-//             })
-//     }
+#[test]
+/// Every valid entry is read back in order
+fn reader_valid_entries() {
+    LocalExecutor::default().run(async {
+        let temp_dir = test_dir();
+        let path = temp_dir.path().join("valid-log");
+        let entries: Vec<Vec<u8>> = vec![
+            b"hello world".to_vec(),
+            b"second entry with more data".to_vec(),
+            b"third".to_vec(),
+        ];
+        // write every entry back to back
+        let mut log = Vec::new();
+        for data in &entries {
+            log.extend_from_slice(&entry(data));
+        }
+        std::fs::write(&path, &log).unwrap();
+        assert_eq!(read_all(&path).await, entries);
+    });
+}
 
-//     #[test]
-//     fn test_reader_size_exceeds_file() {
-//         LocalExecutor::default()
-//             .run(async {
-//                 let temp_dir = TempDir::new().unwrap();
-//                 let path = temp_dir.path().join("oversize-log");
-//                 // write a size header pointing way past EOF
-//                 let file = OpenOptions::new()
-//                     .create(true)
-//                     .write(true)
-//                     .read(true)
-//                     .dma_open(&path)
-//                     .await
-//                     .unwrap();
-//                 let mut writer = DmaStreamWriterBuilder::new(file).build();
-//                 let big_size: usize = 999999;
-//                 write_raw(&mut writer, &big_size.to_le_bytes()).await.unwrap();
-//                 writer.sync().await.unwrap();
-//                 writer.close().await.unwrap();
-//                 // read back
-//                 let mut reader = IntentLogReader::new(&path.to_path_buf()).await.unwrap();
-//                 let read = reader.next_buff().await.unwrap();
-//                 assert!(read.is_none(), "Size past EOF should return None");
-//                 reader.close().await.unwrap();
-//             })
-//     }
+#[test]
+/// A partial size header stops the log rather than erroring
+fn reader_truncated_size_header() {
+    LocalExecutor::default().run(async {
+        let temp_dir = test_dir();
+        let path = temp_dir.path().join("truncated-size-log");
+        let data = b"valid entry";
+        // one good entry followed by 4 bytes of a size header
+        let mut log = entry(data);
+        log.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+        std::fs::write(&path, &log).unwrap();
+        // we should get our one good entry and then stop
+        assert_eq!(read_all(&path).await, vec![data.to_vec()]);
+    });
+}
 
-//     #[test]
-//     fn test_reader_zero_size() {
-//         LocalExecutor::default()
-//             .run(async {
-//                 let temp_dir = TempDir::new().unwrap();
-//                 let path = temp_dir.path().join("zero-size-log");
-//                 // write a size of 0
-//                 let file = OpenOptions::new()
-//                     .create(true)
-//                     .write(true)
-//                     .read(true)
-//                     .dma_open(&path)
-//                     .await
-//                     .unwrap();
-//                 let mut writer = DmaStreamWriterBuilder::new(file).build();
-//                 let zero_size: usize = 0;
-//                 write_raw(&mut writer, &zero_size.to_le_bytes()).await.unwrap();
-//                 writer.sync().await.unwrap();
-//                 writer.close().await.unwrap();
-//                 // read back
-//                 let mut reader = IntentLogReader::new(&path.to_path_buf()).await.unwrap();
-//                 let read = reader.next_buff().await.unwrap();
-//                 assert!(read.is_none(), "Zero size should return None");
-//                 reader.close().await.unwrap();
-//             })
-//     }
+#[test]
+/// An entry claiming more data than the file holds stops the log
+fn reader_truncated_data() {
+    LocalExecutor::default().run(async {
+        let temp_dir = test_dir();
+        let path = temp_dir.path().join("truncated-data-log");
+        // claim 1000 bytes but only write 10
+        let mut log = Vec::new();
+        log.extend_from_slice(&1000usize.to_le_bytes());
+        log.extend_from_slice(&0u64.to_le_bytes());
+        log.extend_from_slice(&[0u8; 10]);
+        std::fs::write(&path, &log).unwrap();
+        assert!(read_all(&path).await.is_empty());
+    });
+}
 
-//     #[test]
-//     fn test_reader_bad_checksum() {
-//         LocalExecutor::default()
-//             .run(async {
-//                 let temp_dir = TempDir::new().unwrap();
-//                 let path = temp_dir.path().join("bad-checksum-log");
-//                 // write one entry with a wrong checksum
-//                 let file = OpenOptions::new()
-//                     .create(true)
-//                     .write(true)
-//                     .read(true)
-//                     .dma_open(&path)
-//                     .await
-//                     .unwrap();
-//                 let mut writer = DmaStreamWriterBuilder::new(file).build();
-//                 let data = b"some data here";
-//                 let size = data.len();
-//                 let bad_checksum: u64 = 0xDEADBEEF;
-//                 write_raw(&mut writer, &size.to_le_bytes()).await.unwrap();
-//                 write_raw(&mut writer, &bad_checksum.to_le_bytes()).await.unwrap();
-//                 write_raw(&mut writer, data).await.unwrap();
-//                 writer.sync().await.unwrap();
-//                 writer.close().await.unwrap();
-//                 // read back — should fail checksum validation
-//                 let mut reader = IntentLogReader::new(&path.to_path_buf()).await.unwrap();
-//                 let read = reader.next_buff().await.unwrap();
-//                 assert!(
-//                     read.is_none(),
-//                     "Bad checksum should return None (treated as end of log)"
-//                 );
-//                 reader.close().await.unwrap();
-//             })
-//     }
+#[test]
+/// A size header pointing past EOF stops the log
+fn reader_size_exceeds_file() {
+    LocalExecutor::default().run(async {
+        let temp_dir = test_dir();
+        let path = temp_dir.path().join("oversize-log");
+        std::fs::write(&path, 999_999usize.to_le_bytes()).unwrap();
+        assert!(read_all(&path).await.is_empty());
+    });
+}
 
-//     #[test]
-//     fn test_reader_good_entry_then_bad_checksum_then_good_entry() {
-//         LocalExecutor::default()
-//             .run(async {
-//                 let temp_dir = TempDir::new().unwrap();
-//                 let path = temp_dir.path().join("mixed-checksum-log");
-//                 let file = OpenOptions::new()
-//                     .create(true)
-//                     .write(true)
-//                     .read(true)
-//                     .dma_open(&path)
-//                     .await
-//                     .unwrap();
-//                 let mut writer = DmaStreamWriterBuilder::new(file).build();
-//                 // write one good entry
-//                 let good_data = b"good entry";
-//                 write_entry(&mut writer, good_data).await.unwrap();
-//                 // write a bad entry (wrong checksum)
-//                 let bad_data = b"bad entry";
-//                 let size = bad_data.len();
-//                 let bad_checksum: u64 = 0xBADBADBAD;
-//                 write_raw(&mut writer, &size.to_le_bytes()).await.unwrap();
-//                 write_raw(&mut writer, &bad_checksum.to_le_bytes()).await.unwrap();
-//                 write_raw(&mut writer, bad_data).await.unwrap();
-//                 // write another good entry after the bad one
-//                 write_entry(&mut writer, b"also good").await.unwrap();
-//                 writer.sync().await.unwrap();
-//                 writer.close().await.unwrap();
-//                 // read back — should only get the first good entry
-//                 let mut reader = IntentLogReader::new(&path.to_path_buf()).await.unwrap();
-//                 let read = reader.next_buff().await.unwrap();
-//                 assert!(read.is_some(), "First good entry should be readable");
-//                 let read = read.unwrap();
-//                 assert_eq!(&read[..good_data.len()], good_data.as_slice());
-//                 // second entry has bad checksum — should stop here
-//                 let read = reader.next_buff().await.unwrap();
-//                 assert!(
-//                     read.is_none(),
-//                     "Bad checksum should stop reading (third entry should not be returned)"
-//                 );
-//                 reader.close().await.unwrap();
-//             })
-//     }
+#[test]
+/// A zero size header means the end of the log
+///
+/// This is what unwritten space in a partly filled log looks like, and it has to
+/// stay distinct from a pad region.
+fn reader_zero_size() {
+    LocalExecutor::default().run(async {
+        let temp_dir = test_dir();
+        let path = temp_dir.path().join("zero-size-log");
+        std::fs::write(&path, 0usize.to_le_bytes()).unwrap();
+        assert!(read_all(&path).await.is_empty());
+    });
+}
 
-//     // ========================================================================
-//     // Inactive intent log discovery tests
-//     // ========================================================================
+#[test]
+/// A pad region is skipped rather than treated as the end of the log
+///
+/// This is the counterpart to `reader_zero_size`. A partial flush is padded up to a
+/// block boundary so it can be written with O_DIRECT, and that padding must not
+/// truncate replay.
+fn reader_pad_sentinel() {
+    LocalExecutor::default().run(async {
+        let temp_dir = test_dir();
+        let path = temp_dir.path().join("pad-sentinel-log");
+        let first = b"before the pad".to_vec();
+        let second = b"after the pad".to_vec();
+        // write one entry, pad out to a 512 byte boundary, then write another
+        let mut log = entry(&first);
+        log.extend_from_slice(&PAD_SENTINEL.to_le_bytes());
+        log.resize(512, 0);
+        log.extend_from_slice(&entry(&second));
+        std::fs::write(&path, &log).unwrap();
+        // both entries should survive the pad region between them
+        assert_eq!(read_all(&path).await, vec![first, second]);
+    });
+}
 
-//     #[test]
-//     fn test_find_inactive_intent_logs_empty_dir() {
-//         let temp_dir = TempDir::new().unwrap();
-//         let result =
-//             FileSystem::find_inactive_intent_logs(&temp_dir.path().to_path_buf(), "shard-1");
-//         assert!(result.is_empty(), "Empty dir should return no inactive logs");
-//     }
+#[test]
+/// Several pad regions in a row are all skipped
+fn reader_consecutive_pad_regions() {
+    LocalExecutor::default().run(async {
+        let temp_dir = test_dir();
+        let path = temp_dir.path().join("multi-pad-log");
+        let record = b"survives many pads".to_vec();
+        // three empty padded flushes followed by a real record
+        let mut log = Vec::new();
+        for _ in 0..3 {
+            let start = log.len();
+            log.extend_from_slice(&PAD_SENTINEL.to_le_bytes());
+            log.resize(start + 512, 0);
+        }
+        log.extend_from_slice(&entry(&record));
+        std::fs::write(&path, &log).unwrap();
+        assert_eq!(read_all(&path).await, vec![record]);
+    });
+}
 
-//     #[test]
-//     fn test_find_inactive_intent_logs_finds_and_sorts() {
-//         let temp_dir = TempDir::new().unwrap();
-//         // create inactive log files in non-sequential order
-//         std::fs::write(temp_dir.path().join("shard-1-inactive-3"), "").unwrap();
-//         std::fs::write(temp_dir.path().join("shard-1-inactive-0"), "").unwrap();
-//         std::fs::write(temp_dir.path().join("shard-1-inactive-7"), "").unwrap();
-//         std::fs::write(temp_dir.path().join("shard-1-inactive-1"), "").unwrap();
-//         // also create some files that should NOT be picked up
-//         std::fs::write(temp_dir.path().join("shard-1-active"), "").unwrap();
-//         std::fs::write(temp_dir.path().join("shard-2-inactive-5"), "").unwrap(); // different shard
-//         std::fs::write(temp_dir.path().join("unrelated-file"), "").unwrap();
+#[test]
+/// A bad checksum stops the log
+fn reader_bad_checksum() {
+    LocalExecutor::default().run(async {
+        let temp_dir = test_dir();
+        let path = temp_dir.path().join("bad-checksum-log");
+        std::fs::write(&path, bad_entry(b"some data here", 0xDEAD_BEEF)).unwrap();
+        assert!(read_all(&path).await.is_empty());
+    });
+}
 
-//         let result =
-//             FileSystem::find_inactive_intent_logs(&temp_dir.path().to_path_buf(), "shard-1");
-//         assert_eq!(result.len(), 4, "Should find exactly 4 inactive logs");
-//         // verify sorted by generation ascending
-//         let gens: Vec<u64> = result.iter().map(|(gen, _)| *gen).collect();
-//         assert_eq!(gens, vec![0, 1, 3, 7], "Should be sorted by generation");
-//     }
+#[test]
+/// A bad checksum discards everything after it, including valid entries
+///
+/// This is deliberate: a corrupt record means we cannot trust that the records
+/// after it are the ones that were actually committed next.
+fn reader_good_then_bad_then_good() {
+    LocalExecutor::default().run(async {
+        let temp_dir = test_dir();
+        let path = temp_dir.path().join("mixed-checksum-log");
+        let good = b"good entry".to_vec();
+        // one good entry, one with a bad checksum, then another good one
+        let mut log = entry(&good);
+        log.extend_from_slice(&bad_entry(b"bad entry", 0x0BAD_BAD_BAD));
+        log.extend_from_slice(&entry(b"also good"));
+        std::fs::write(&path, &log).unwrap();
+        // only the entry before the corruption comes back
+        assert_eq!(read_all(&path).await, vec![good]);
+    });
+}
 
-//     #[test]
-//     fn test_find_inactive_intent_logs_ignores_non_numeric_gen() {
-//         let temp_dir = TempDir::new().unwrap();
-//         // create files with non-numeric generation strings
-//         std::fs::write(temp_dir.path().join("shard-1-inactive-abc"), "").unwrap();
-//         std::fs::write(temp_dir.path().join("shard-1-inactive-"), "").unwrap();
-//         std::fs::write(temp_dir.path().join("shard-1-inactive-2"), "").unwrap();
+// ========================================================================
+// Inactive intent log discovery tests
+// ========================================================================
 
-//         let result =
-//             FileSystem::find_inactive_intent_logs(&temp_dir.path().to_path_buf(), "shard-1");
-//         assert_eq!(result.len(), 1, "Should only find the numeric generation");
-//         assert_eq!(result[0].0, 2);
-//     }
+#[test]
+/// An empty dir holds no inactive logs
+fn find_inactive_intent_logs_empty_dir() {
+    let temp_dir = test_dir();
+    let result = find_inactive_intent_logs(&temp_dir.path().to_path_buf(), "shard-1");
+    assert!(result.is_empty());
+}
 
-//     #[test]
-//     fn test_find_inactive_intent_logs_nonexistent_dir() {
-//         let path = std::path::PathBuf::from("/tmp/nonexistent-shoal-test-dir-12345");
-//         let result = FileSystem::find_inactive_intent_logs(&path, "shard-1");
-//         assert!(
-//             result.is_empty(),
-//             "Non-existent dir should return empty vec, not error"
-//         );
-//     }
+#[test]
+/// Inactive logs are found for the right shard and sorted by generation
+fn find_inactive_intent_logs_finds_and_sorts() {
+    let temp_dir = test_dir();
+    // create inactive log files in non-sequential order
+    for generation in ["3", "0", "7", "1"] {
+        std::fs::write(
+            temp_dir.path().join(format!("shard-1-inactive-{generation}")),
+            "",
+        )
+        .unwrap();
+    }
+    // also create some files that should not be picked up
+    std::fs::write(temp_dir.path().join("shard-1-active"), "").unwrap();
+    std::fs::write(temp_dir.path().join("shard-2-inactive-5"), "").unwrap();
+    std::fs::write(temp_dir.path().join("unrelated-file"), "").unwrap();
+    let result = find_inactive_intent_logs(&temp_dir.path().to_path_buf(), "shard-1");
+    // verify we found exactly our shards logs, sorted by generation ascending
+    let generations: Vec<u64> = result.iter().map(|(generation, _)| *generation).collect();
+    assert_eq!(generations, vec![0, 1, 3, 7]);
+}
 
-//     // ========================================================================
-//     // SerializedMap checksum tests
-//     // ========================================================================
+#[test]
+/// Files with a non numeric generation are ignored
+fn find_inactive_intent_logs_ignores_non_numeric_gen() {
+    let temp_dir = test_dir();
+    for name in ["shard-1-inactive-abc", "shard-1-inactive-", "shard-1-inactive-2"] {
+        std::fs::write(temp_dir.path().join(name), "").unwrap();
+    }
+    let result = find_inactive_intent_logs(&temp_dir.path().to_path_buf(), "shard-1");
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].0, 2);
+}
 
-//     #[test]
-//     fn test_map_corrupt_hash() {
-//         use crate::server::errors::ShoalError;
-//         use crate::server::tables::storage::fs::map::SerializedMap;
+#[test]
+/// A missing dir yields no logs rather than an error
+fn find_inactive_intent_logs_nonexistent_dir() {
+    let path = PathBuf::from("/tmp/nonexistent-shoal-test-dir-12345");
+    let result = find_inactive_intent_logs(&path, "shard-1");
+    assert!(result.is_empty());
+}
 
-//         LocalExecutor::default()
-//             .run(async {
-//                 let temp_dir = TempDir::new().unwrap();
-//                 let map_path = temp_dir.path().join("test-map");
-//                 let intent_path = temp_dir.path().join("test-map-intent");
-//                 // create an empty intent file
-//                 let intent_file = OpenOptions::new()
-//                     .create(true)
-//                     .write(true)
-//                     .dma_open(&intent_path)
-//                     .await
-//                     .unwrap();
-//                 intent_file.close().await.unwrap();
-//                 // write a file with a wrong hash followed by some bytes that could be rkyv data
-//                 // the hash check should fail before rkyv deserialization is attempted
-//                 let bad_hash: u64 = 0xBADBADBAD;
-//                 let fake_payload = b"this is not valid rkyv data but hash check comes first";
-//                 let file = OpenOptions::new()
-//                     .create(true)
-//                     .write(true)
-//                     .read(true)
-//                     .dma_open(&map_path)
-//                     .await
-//                     .unwrap();
-//                 let mut writer = DmaStreamWriterBuilder::new(file).build();
-//                 writer.write_all(&bad_hash.to_le_bytes()).await.unwrap();
-//                 writer.write_all(fake_payload).await.unwrap();
-//                 writer.sync().await.unwrap();
-//                 writer.close().await.unwrap();
-//                 // try to load — should get MapCorruption error
-//                 let result = SerializedMap::new(
-//                     &map_path.to_path_buf(),
-//                     &intent_path.to_path_buf(),
-//                     "test",
-//                 )
-//                 .await;
-//                 match result {
-//                     Err(crate::server::ServerError::Shoal(ShoalError::MapCorruption { .. })) => {
-//                         // expected — the hash doesn't match the payload
-//                     }
-//                     Err(other) => panic!("Expected MapCorruption error, got: {:?}", other),
-//                     Ok(_) => panic!("Expected MapCorruption error, got Ok"),
-//                 }
-//             })
-//     }
-// }
+// ========================================================================
+// SerializedMap checksum tests
+// ========================================================================
+
+#[test]
+/// A corrupt archive map is detected by its checksum before rkyv is trusted
+fn map_corrupt_hash() {
+    use crate::server::errors::ShoalError;
+    use crate::server::tables::storage::fs::map::SerializedMap;
+
+    LocalExecutor::default().run(async {
+        let temp_dir = test_dir();
+        let map_path = temp_dir.path().join("test-map");
+        let intent_path = temp_dir.path().join("test-map-intent");
+        // create an empty intent file
+        let intent_file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .dma_open(&intent_path)
+            .await
+            .unwrap();
+        intent_file.close().await.unwrap();
+        // write a map with a hash that does not match its payload
+        let mut map = Vec::new();
+        map.extend_from_slice(&0x0BAD_BAD_BADu64.to_le_bytes());
+        map.extend_from_slice(b"this is not valid rkyv data but hash check comes first");
+        std::fs::write(&map_path, &map).unwrap();
+        // loading it should fail on the hash rather than on rkyv validation
+        let result = SerializedMap::new(
+            &map_path.to_path_buf(),
+            &intent_path.to_path_buf(),
+            "test",
+        )
+        .await;
+        match result {
+            Err(crate::server::ServerError::Shoal(ShoalError::MapCorruption { .. })) => (),
+            Err(other) => panic!("Expected MapCorruption error, got: {other:?}"),
+            Ok(_) => panic!("Expected MapCorruption error, got Ok"),
+        }
+    });
+}

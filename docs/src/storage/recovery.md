@@ -224,12 +224,13 @@ restart always advances the generation counter.
 | --- | --- |
 | Intent written and its buffer retired by the device | Yes — replayed from the log |
 | Intent staged in the DMA buffer, not yet written | No |
-| Intent written but only in the page cache/device cache | Unknown — no `fdatasync` on this path ([Known Issues](../appendix/known-issues.md#3-no-fdatasync-on-the-steady-state-write-path)) |
+| Intent written but not yet fdatasynced | No — and it was never acknowledged, so no client was told otherwise |
 | Compaction that synced its archive writes | Yes |
 | Compaction that crashed mid-way | No, but the sealed log is replayed instead |
 | A partition pruned by compaction | **No — resurrected**, because the stale map entry is never removed ([Known Issues](../appendix/known-issues.md#5-pruned-partitions-leak-a-stale-archive-map-entry)) |
 | Archive map snapshot | Yes — temp/rename/dir-fsync |
-| Data acknowledged to the client | **Not guaranteed** — acknowledgement does not currently imply a durable write ([Known Issues](../appendix/known-issues.md#1-commit-does-not-report-a-log-position)) |
+| Data acknowledged to the client | Yes — acknowledgement waits for an `fdatasync` covering the record, unless `durability: Async` is set |
+| A pad region between two flushes | Not data, and skipped on replay via `PAD_SENTINEL` |
 
 ## Design notes
 
@@ -255,3 +256,7 @@ it should be loud, and it is not.
 - Whole logs are buffered in memory between the two replay passes.
 - The unsorted replay path panics rather than skipping an unresolvable update.
 - Inactive logs are deleted before the forced compaction that persists their contents.
+- Durability is only as good as the filesystem underneath. btrfs silently falls back to
+  buffered IO for a misaligned O_DIRECT write instead of returning `EINVAL`, so an alignment
+  bug in the write path would not surface there — the write-path tests deliberately run
+  against a real filesystem rather than tmpfs for the same reason.

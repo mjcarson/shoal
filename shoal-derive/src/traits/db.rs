@@ -99,19 +99,6 @@ pub fn add(
             #table_names_ident::#variant_ident=> self.#field_ident.evict(victims),
         }
     });
-    // build our mark flushed arms
-    let mark_flushed_arms = fields
-        .named
-        .iter()
-        .zip(variants)
-        .map(|(field, variant_ident)| {
-        // get our field ident and type
-        let field_ident = field.ident.as_ref().unwrap();
-        // build our mark flushed arm for this table
-        quote! {
-            #table_names_ident::#variant_ident => self.#field_ident.mark_flushed(flushed_pos),
-        }
-    });
     // build our flush arms
     let flush_arms = fields.named.iter().map(|field| {
         // get our field ident and type
@@ -280,18 +267,6 @@ pub fn add(
                 match table_name {
                     #(#evict_arms)*
                 }    
-            }
-
-            /// Inform a table that some of its data has been flushed to storage
-            ///
-            /// # Arguments
-            ///
-            /// * `table` - The name of the table that we are marking a new flushed offset watermark
-            /// * `flushed_pos` - The new offset for flushed data
-            fn mark_flushed(&mut self, table: Self::TableNames, flushed_pos: u64) {
-                match table {
-                    #(#mark_flushed_arms)*
-                }
             }
 
             /// Flush any in flight writes to disk

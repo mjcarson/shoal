@@ -29,6 +29,8 @@ pub(crate) mod map;
 pub(crate) mod reader;
 mod stream;
 #[cfg(test)]
+mod stream_tests;
+#[cfg(test)]
 mod tests;
 
 use compactor::FileSystemCompactor;
@@ -36,7 +38,7 @@ pub use map::ArchiveMap;
 use reader::IntentLogReader;
 use stream::StreamWriter;
 
-use super::{CompactionJob, IntentReadSupport, StorageSupport};
+use super::{CompactionJob, FlushProgress, IntentReadSupport, StorageSupport};
 use crate::server::conf::TableSettings;
 use crate::server::messages::ServerMsg;
 use crate::server::{Conf, ServerError};
@@ -44,6 +46,35 @@ use crate::shared::traits::{PartitionKeySupport, RkyvSupport, ShoalDatabase, Tab
 use crate::storage::{ArchiveMapKinds, FilteredFullArchiveMap, FullArchiveMap, LoaderMsg, Loaders};
 use crate::tables::partitions::{MaybeLoaded, PartitionSupport};
 use loader::FsLoader;
+
+/// Find inactive intent log files for this shard, sorted by generation ascending
+///
+/// # Arguments
+///
+/// * `intent_dir` - The intent log directory to scan
+/// * `shard_name` - The name of the shard to find inactive logs for
+pub fn find_inactive_intent_logs(
+    intent_dir: &PathBuf,
+    shard_name: &str,
+) -> Vec<(u64, PathBuf)> {
+    let prefix = format!("{shard_name}-inactive-");
+    let mut inactive_logs: Vec<(u64, PathBuf)> = Vec::new();
+    // use std::fs::read_dir since this only runs during startup recovery
+    if let Ok(entries) = std::fs::read_dir(intent_dir) {
+        for entry in entries.flatten() {
+            let file_name = entry.file_name();
+            let name = file_name.to_string_lossy();
+            if let Some(gen_str) = name.strip_prefix(&prefix) {
+                if let Ok(gen) = gen_str.parse::<u64>() {
+                    inactive_logs.push((gen, entry.path()));
+                }
+            }
+        }
+    }
+    // sort by generation ascending so we replay in order
+    inactive_logs.sort_by_key(|(gen, _)| *gen);
+    inactive_logs
+}
 
 /// Store shoal data in an existing filesytem for persistence
 pub struct FileSystem<D: ShoalDatabase> {
@@ -178,35 +209,6 @@ impl<D: ShoalDatabase> FileSystem<D> {
         reader.close().await?;
         Ok(())
     }
-
-    /// Find inactive intent log files for this shard, sorted by generation ascending
-    ///
-    /// # Arguments
-    ///
-    /// * `intent_dir` - The intent log directory to scan
-    /// * `shard_name` - The name of the shard to find inactive logs for
-    pub fn find_inactive_intent_logs(
-        intent_dir: &PathBuf,
-        shard_name: &str,
-    ) -> Vec<(u64, PathBuf)> {
-        let prefix = format!("{shard_name}-inactive-");
-        let mut inactive_logs: Vec<(u64, PathBuf)> = Vec::new();
-        // use std::fs::read_dir since this only runs during startup recovery
-        if let Ok(entries) = std::fs::read_dir(intent_dir) {
-            for entry in entries.flatten() {
-                let file_name = entry.file_name();
-                let name = file_name.to_string_lossy();
-                if let Some(gen_str) = name.strip_prefix(&prefix) {
-                    if let Ok(gen) = gen_str.parse::<u64>() {
-                        inactive_logs.push((gen, entry.path()));
-                    }
-                }
-            }
-        }
-        // sort by generation ascending so we replay in order
-        inactive_logs.sort_by_key(|(gen, _)| *gen);
-        inactive_logs
-    }
 }
 
 #[cfg_attr(feature = "hotpath", hotpath::measure_all)]
@@ -267,9 +269,10 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
         intent_path.push(format!("{shard_name}-active"));
         // build the writer for this shards intent log
         let intent_log2 =
-            StreamWriter::builder(shard_table_name, &intent_path, shard_local_tx.clone())
+            StreamWriter::builder(&intent_path, shard_local_tx.clone())
                 .buffer_size(table_conf.latency_sensitive.buffer_size)
                 .write_behind(table_conf.latency_sensitive.write_behind)
+                .durability(table_conf.latency_sensitive.durability)
                 .build()
                 .await?;
         // build the channel to our compactor
@@ -343,13 +346,14 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
         buff.write_all(archived.as_slice())?;
         // tell our writer that we have consumed some data
         self.intent_log2.consume(total_size).await;
-        // TODO this should use channels to mark how much was consumed
-        Ok(0)
+        // return the offset one past this record, which is the position it will be
+        // durable at once our writers watermark reaches it
+        Ok(self.intent_log2.get_unflushed_pos())
     }
 
     /// Set our intent log to be compact if its needed
     ///
-    /// Returns the current flushed position of the writer and the current generation
+    /// Returns how far this tables intent log has been made durable
     ///
     /// # Arguments
     ///
@@ -358,16 +362,13 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
     async fn compact_if_needed<R: PartitionKeySupport>(
         &mut self,
         force: bool,
-    ) -> Result<(u64, u64), ServerError> {
+    ) -> Result<FlushProgress, ServerError> {
+        // surface any error our background write tasks hit
+        self.intent_log2.check_error()?;
         // get the latency sensistive max intent log size
         let max_size = self.table_conf.latency_sensitive.intent_log_size;
-        // check if this intent log is over 50MiB or if compaction is being forced
+        // check if this intent log is too big or if compaction is being forced
         if force || self.intent_log2.get_unflushed_pos() > max_size {
-            println!(
-                "Compacting -> {force} || {} > {max_size} - {:?}",
-                self.intent_log2.get_unflushed_pos(),
-                self.intent_log2.path,
-            );
             // get our base intent path
             let mut new_path = self.table_conf.get_intent_path(R::name());
             // build the file name to rename our current intent log too
@@ -387,27 +388,27 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
             self.generation += 1;
             // create an archive compaction job
             self.intent_tx.send(CompactionJob::Archives).await?;
-            Ok((flushed_pos, self.generation))
+            Ok(FlushProgress {
+                durable_pos: flushed_pos,
+                generation: self.generation,
+                rotated: true,
+            })
         } else {
-            // get the current position of flushed data
+            // get the current position of durable data
             let flushed_pos = self.intent_log2.get_flushed_pos();
-            Ok((flushed_pos, self.generation))
+            Ok(FlushProgress {
+                durable_pos: flushed_pos,
+                generation: self.generation,
+                rotated: false,
+            })
         }
-    }
-
-    /// Update the watermark for how much data has been flushed to disk
-    ///
-    /// # Arguments
-    ///
-    /// * `flushed_pos` - The new flushed offset to set
-    fn mark_flushed(&mut self, flushed_pos: u64) {
-        // update our flushed watermark
-        self.intent_log2.set_flushed(flushed_pos);
     }
 
     /// Flush all currently pending writes to storage
     #[allow(async_fn_in_trait)]
     async fn flush(&mut self) -> Result<(), ServerError> {
+        // surface any error our background write tasks hit
+        self.intent_log2.check_error()?;
         // sync our intent log to disk
         self.intent_log2.sync().await?;
         Ok(())
@@ -441,7 +442,7 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
         // get our intent log directory for this table
         let intent_dir = table_conf.get_intent_path(R::name());
         // find and replay any inactive intent logs from interrupted compactions
-        let inactive_logs = Self::find_inactive_intent_logs(&intent_dir, &self.shard_name);
+        let inactive_logs = find_inactive_intent_logs(&intent_dir, &self.shard_name);
         for (gen, inactive_path) in &inactive_logs {
             // log that we are recovering an intent log
             event!(Level::INFO, msg = "Recovering", gen);
@@ -541,8 +542,11 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
     /// Shutdown this storage engine
     #[allow(async_fn_in_trait)]
     async fn shutdown(mut self) -> Result<(), ServerError> {
-        // flush any remaining intent log writes to disk
-        self.flush().await?;
+        // durably flush any remaining intent log writes to disk
+        //
+        // this has to be the blocking sync, not `flush`, since `flush` only hands
+        // another buffer to the kernel and returns without waiting
+        self.intent_log2.sync_blocking().await?;
         // signal our intent log compactor to shutdown
         self.intent_tx.send(CompactionJob::Shutdown).await?;
         // wait for all of our tasks to complete

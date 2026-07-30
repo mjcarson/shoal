@@ -68,7 +68,37 @@ impl<T> PendingResponse<T> {
         self.pending.push_back((pos, meta, response));
     }
 
+    /// Release every pending response regardless of position
+    ///
+    /// This is only correct at an intent log rotation, where the writer has already
+    /// fdatasynced everything it ever wrote to the old file. Positions restart at 0
+    /// in the new file, so comparing an old position against a new watermark is
+    /// meaningless and the queue has to be drained instead of tested.
+    ///
+    /// # Arguments
+    ///
+    /// * `flushed` - The vec to write our released responses too
+    pub fn drain_all(&mut self, flushed: &mut Vec<(Uuid, Uuid, Span, Response<T>)>) {
+        // every pending response is durable so release all of them
+        for (_, meta, data) in self.pending.drain(..) {
+            // build the response for this query
+            let response = Response {
+                id: meta.id,
+                index: meta.index,
+                data,
+                end: meta.end,
+            };
+            // add this action to our flushed vec
+            flushed.push((meta.client, meta.id, meta.span, response));
+        }
+    }
+
     /// Get all responses that have had their data committed to disk
+    ///
+    /// # Arguments
+    ///
+    /// * `flushed_pos` - The position that all data below is durable at
+    /// * `flushed` - The vec to write our released responses too
     pub fn get(&mut self, flushed_pos: u64, flushed: &mut Vec<(Uuid, Uuid, Span, Response<T>)>) {
         // keep popping response actions until we find one that isn't yet flushed
         // or we have no more response actions to check
@@ -98,6 +128,21 @@ impl<T> PendingResponse<T> {
             }
         }
     }
+}
+
+/// How far a tables intent log has been made durable
+#[derive(Debug, Clone, Copy)]
+pub struct FlushProgress {
+    /// The position that all data below is durably on disk at
+    pub durable_pos: u64,
+    /// The current generation of this tables intent log
+    pub generation: u64,
+    /// Whether this check rotated the intent log
+    ///
+    /// A rotation fdatasyncs everything in the old log and then restarts positions
+    /// at 0, so callers have to release their pending responses rather than compare
+    /// their old positions against a new files watermark.
+    pub rotated: bool,
 }
 
 /// A compaction job
@@ -286,7 +331,7 @@ pub trait StorageSupport: Sized {
 
     /// Set our intent log to be compact if its needed
     ///
-    /// Returns the current flushed position of the writer and the current generation
+    /// Returns how far this tables intent log has been made durable
     ///
     /// # Arguments
     ///
@@ -295,10 +340,7 @@ pub trait StorageSupport: Sized {
     async fn compact_if_needed<T: PartitionKeySupport>(
         &mut self,
         force: bool,
-    ) -> Result<(u64, u64), ServerError>;
-
-    /// Update the watermark for how much data has been flushed to disk
-    fn mark_flushed(&mut self, flushed_pos: u64);
+    ) -> Result<FlushProgress, ServerError>;
 
     /// Flush all currently pending writes to storage
     #[allow(async_fn_in_trait)]
@@ -357,4 +399,85 @@ pub trait StorageSupport: Sized {
     /// Shutdown this storage engine
     #[allow(async_fn_in_trait)]
     async fn shutdown(self) -> Result<(), ServerError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PendingResponse, QueryMetadata};
+    use crate::shared::responses::ResponseAction;
+    use tracing::Span;
+    use uuid::Uuid;
+
+    /// Build a pending response queue holding one entry per position
+    ///
+    /// # Arguments
+    ///
+    /// * `positions` - The durable positions to park entries at
+    fn queue_at(positions: &[u64]) -> PendingResponse<()> {
+        // build a queue big enough to hold every entry
+        let mut pending = PendingResponse::with_capacity(positions.len());
+        // park one insert response at each position
+        for (index, pos) in positions.iter().enumerate() {
+            let meta = QueryMetadata {
+                client: Uuid::new_v4(),
+                id: Uuid::new_v4(),
+                index,
+                end: false,
+                span: Span::none(),
+            };
+            pending.add(meta, *pos, ResponseAction::Insert(true));
+        }
+        pending
+    }
+
+    #[test]
+    /// A response is released exactly when the watermark reaches its position
+    fn releases_at_its_own_position() {
+        let mut pending = queue_at(&[512]);
+        let mut flushed = Vec::new();
+        // one byte short of this entry is not enough to release it
+        pending.get(511, &mut flushed);
+        assert!(flushed.is_empty());
+        // reaching its position exactly releases it
+        pending.get(512, &mut flushed);
+        assert_eq!(flushed.len(), 1);
+    }
+
+    #[test]
+    /// A watermark part way through the queue releases only what it covers
+    fn releases_only_what_is_durable() {
+        let mut pending = queue_at(&[512, 1024, 1536]);
+        let mut flushed = Vec::new();
+        // this watermark covers the first two entries but not the third
+        pending.get(1024, &mut flushed);
+        assert_eq!(flushed.len(), 2);
+        // the third comes out once our watermark reaches it
+        pending.get(1536, &mut flushed);
+        assert_eq!(flushed.len(), 3);
+    }
+
+    #[test]
+    /// Nothing is released while the watermark is still at zero
+    fn nothing_is_released_before_any_io_lands() {
+        let mut pending = queue_at(&[512, 1024]);
+        let mut flushed = Vec::new();
+        // this is the case the old hardcoded `Ok(0)` broke: with every entry parked
+        // at position 0 the watermark test was trivially true and acknowledged
+        // everything before any IO had completed
+        pending.get(0, &mut flushed);
+        assert!(flushed.is_empty());
+    }
+
+    #[test]
+    /// Draining releases every entry regardless of position
+    fn drain_all_releases_everything() {
+        let mut pending = queue_at(&[512, 1024, 1536]);
+        let mut flushed = Vec::new();
+        // rotation makes all of these durable at once
+        pending.drain_all(&mut flushed);
+        assert_eq!(flushed.len(), 3);
+        // draining again yields nothing since the queue is now empty
+        pending.drain_all(&mut flushed);
+        assert_eq!(flushed.len(), 3);
+    }
 }

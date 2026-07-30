@@ -1018,15 +1018,6 @@ where
         self.storage.flush().await
     }
 
-    /// Inform this table that some of its data has been flushed to storage
-    ///
-    /// # Arguments
-    ///
-    /// * `flushed_pos` - The new offset for flushed data
-    pub fn mark_flushed(&mut self, flushed_pos: u64) {
-        self.storage.mark_flushed(flushed_pos);
-    }
-
     /// Get all flushed response actions
     ///
     /// # Arguments
@@ -1036,11 +1027,19 @@ where
         &mut self,
     ) -> Result<&mut Vec<(Uuid, Uuid, Span, Response<R>)>, ServerError> {
         // check if our current intent log should be compacted
-        let (flushed_pos, generation) = self.storage.compact_if_needed::<R>(false).await?;
+        let progress = self.storage.compact_if_needed::<R>(false).await?;
         // update our current generation
-        self.generation = generation;
-        // get all of the responses whose data has been flushed to disk
-        self.pending.get(flushed_pos, &mut self.flushed);
+        self.generation = progress.generation;
+        // release the responses whose data is now durable
+        if progress.rotated {
+            // rotation fdatasynced everything in the old log and restarted our
+            // positions at 0, so every pending response is durable and none of
+            // their positions can be compared against the new files watermark
+            self.pending.drain_all(&mut self.flushed);
+        } else {
+            // get all of the responses whose data has been flushed to disk
+            self.pending.get(progress.durable_pos, &mut self.flushed);
+        }
         // return a ref to our flushed responses
         Ok(&mut self.flushed)
     }

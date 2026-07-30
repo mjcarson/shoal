@@ -39,6 +39,7 @@
 # Operations
 
 - [Observability](operations/observability.md)
+- [Benchmarking](operations/benchmarking.md)
 - [shoalctl](operations/shoalctl.md)
 
 # Appendix
