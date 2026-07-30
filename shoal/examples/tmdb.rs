@@ -563,6 +563,7 @@ async fn read_csv() {
 fn main() {
     // load our config
     let conf = Conf::from_file("shoal.yml").expect("Failed to load config");
+    println!("conf -> {conf:#?}");
     // setup tracing/telemetry
     let provider = shoal_core::server::trace::setup(&conf);
     // start Shoal

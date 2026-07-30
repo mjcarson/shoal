@@ -636,6 +636,7 @@ where
         }
         // if we have any blocked queries then add this to our pending data map
         if !blocked.is_empty() {
+            println!("## Still have blocked! -> {blocked:?}");
             self.pending_data
                 .insert((meta.id, meta.index), (Vec::new(), blocked));
             None

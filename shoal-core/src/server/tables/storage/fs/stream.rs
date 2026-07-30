@@ -218,6 +218,10 @@ impl<D: ShoalDatabase> StreamWriter<D> {
     }
 
     /// Consume some data from our buffer
+    ///
+    /// # Arguments
+    ///
+    /// * `size` - The number of bytes that have been consumed
     pub async fn consume(&mut self, size: usize) {
         // increment our buffer position by the amount of data consumed
         self.buff_pos += size;
@@ -272,21 +276,20 @@ impl<D: ShoalDatabase> StreamWriter<D> {
         Ok(())
     }
 
-    // Rename our current backing file and start writing to a new one
+    /// Rename our current backing file and start writing to a new one
     ///
     /// # Arguments
     ///
-    /// * `shard_name` - The name of the shard that we are writting data for
-    /// * `generation` - The generation of our old intent log
-    pub async fn refresh(&mut self, inactive_path: &PathBuf) -> Result<u64, ServerError> {
+    /// * `inactive_path` - The path to rename our current backing file to
+    pub async fn refresh(&mut self, rename_to: &PathBuf) -> Result<u64, ServerError> {
         // flush this intent log
         self.sync_blocking().await?;
         // get the current flushed position
         let flushed_pos = self.get_flushed_pos();
         // rename our old intent log
-        glommio::io::rename(&self.path, &inactive_path).await?;
+        glommio::io::rename(&self.path, &rename_to).await?;
         // get our parent dir and sync it so this rename is durable
-        if let Some(parent) = inactive_path.parent() {
+        if let Some(parent) = rename_to.parent() {
             // open our parent dir
             let dir = glommio::io::Directory::open(parent).await?;
             // fsync the parent directory to ensure the rename is durable

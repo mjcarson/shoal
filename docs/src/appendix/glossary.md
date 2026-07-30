@@ -1,0 +1,138 @@
+# Glossary
+
+Terms as Shoal uses them. Several differ from their usual meaning in other databases; those
+are called out.
+
+---
+
+**Accessible** — A partition state: raw bytes read from an archive, not yet deserialized.
+Reads and filters run directly against the archived form. See
+[Partitions](../tables/partitions.md#maybeloaded).
+
+**Archive** — A uuid-named file holding many serialized partitions packed back to back.
+Immutable once written; updated partitions are rewritten into the active archive and the old
+copy becomes garbage. `<throughput_sensitive.path>/<table>/archives/<uuid>`.
+
+**Archive map** — The per-shard, per-table index from partition key to `ArchiveEntry`
+(`{archive uuid, offset, size}`). Also the authority on whether a partition exists on disk at
+all. Persisted as a checksummed snapshot plus its own intent log. See
+[Archives and the Archive Map](../storage/archives-and-map.md).
+
+**Active archive** — The one archive currently receiving newly compacted partitions. Rotated
+rather than compacted in place, to avoid invalidating entries written earlier in the same
+compaction pass.
+
+**Blocked query** — A query parked in `blocked: HashMap<u64, Vec<...>>` waiting for a
+partition to be read from disk. Re-injected as a fresh `ServerMsg::Query` when the read
+completes, rather than being resumed as a suspended future. See
+[Query Execution](../tables/query-execution.md).
+
+**check_disk** — A flag on `SortedPartition` meaning "there may be more of this partition in
+an archive". Set on creation, cleared once the full archive copy has been merged in.
+
+**Compaction** — Two distinct operations sharing one background task. *Intent compaction*
+folds a sealed intent log into archives. *Archive compaction* reclaims space from archives
+whose live fraction has dropped below 50%. See [Compaction](../storage/compaction.md).
+
+**Coordinator** — A *role*, not a component. The shard whose TCP listener accepted a client's
+connection routes that client's queries to their owning shards. Any shard can be a
+coordinator; there is no coordinator process, despite CPU 0 being reserved and called "the
+coordinator cpu".
+
+**Ephemeral table** — An in-memory-only table type. Present in the codebase but not usable in
+a `#[db]` database.
+
+**Evictable** — A partition eligible for eviction. `Accessible` partitions always are;
+`Loaded` partitions only once their generation has been compacted. See
+[Memory and Eviction](../tables/memory-and-eviction.md).
+
+**Generation** — A per-table counter incremented on each intent log rotation. Names the epoch
+whose writes are now sealed. A `Loaded` partition records the generation it was last modified
+in; comparing against the flushed generation is what makes eviction safe.
+
+**Intent** — One logged mutation: `Insert`, `Delete`, or `Update`. The unit of the write-ahead
+log. `Insert` carries the whole row; `Update` carries only changed fields, which is why
+replaying one requires the base partition.
+
+**Intent log** — Shoal's write-ahead log, one per shard per table. Records are framed
+`[size][gxhash checksum][rkyv payload]`. The *active* log receives writes; on rotation it
+becomes `-inactive-<generation>` and awaits compaction. Confusingly, the archive map has its
+own separate intent log. See [The Intent Log](../storage/intent-log.md).
+
+**Loaded** — A partition state: fully deserialized in memory, tagged with the generation it
+was last modified in.
+
+**Loader** — `FsLoader`, the per-shard background task that reads partitions from archives and
+posts them back as `ServerMsg::Partition`. Must only ever hold its own shard's channel — see
+*unsafe Send invariant*.
+
+**MaybeLoaded** — The enum wrapping every resident partition: either `Loaded` or `Accessible`.
+The seam where lazy deserialization lives.
+
+**MaybeRow** — Either a `Row` or a `Tombstone`. Sorted partitions store these rather than rows
+directly.
+
+**Partition** — The unit of storage, caching, eviction, and IO, addressed by a `u64` partition
+key. A sorted partition holds a `BTreeMap` of rows; an unsorted partition holds exactly one
+row.
+
+**Partition key** — A `u64` produced by `gxhash`ing the `#[shoal(partition)]` fields. Because
+it is a hash, **partition keys collide**, and nothing detects it.
+
+**Pending response** — A response held in `PendingResponse` against the intent log position
+where its write will have landed, released once the durability watermark passes it. Currently
+inert ([Known Issues #1](known-issues.md#1-commit-does-not-report-a-log-position)).
+
+**Ring** — The consistent hash ring mapping partition key to shard. Each shard lays down 1000
+virtual nodes at a fixed stride from its name hash. See
+[Partitioning](../architecture/partitioning.md).
+
+**Shard** — One glommio executor pinned to one core, owning a slice of every table, its own
+intent logs, archives, and background tasks. Named `Shard-N`, where N comes from a startup
+counter, not the core id. Shard names become filenames, which is why shard count is part of
+the on-disk format.
+
+**SHQL** — Shoal Query Language. A small `SELECT`-only parser: `SELECT * FROM t WHERE f = v
+[AND ...] [LIMIT n]`. Equality only, `AND` only, `WHERE` mandatory, `LIMIT` ignored by the
+server. See [SHQL](../api/shql.md).
+
+**Sort key** — The `#[shoal(sort)]` fields, ordering rows within a sorted partition. Used by
+deletes and updates; **ignored by reads** — there is no point lookup or range scan by sort
+key.
+
+**Sorted table** — `PersistentSortedTable`. Many rows per partition, ordered by sort key.
+
+**StreamWriter** — The DMA-aware append writer behind the intent log. Hands out buffer slices
+via `prep`/`consume` and writes full buffers through detached background tasks.
+
+**Tombstone** — A `MaybeRow::Tombstone` marking a deleted row. Necessary because a delete may
+target a row still sitting in an unread archive, so the deletion must be recorded in a form
+that survives a later merge. Removed for real at compaction.
+
+**Unsorted table** — `PersistentUnsortedTable`. Exactly one row per partition. Note its
+updates and deletes ignore data on disk
+([Known Issues #4](known-issues.md#4-unsorted-updates-and-deletes-never-consult-disk)).
+
+**unsafe Send invariant** — `ServerMsg` asserts `Send` by hand even though its `Partition`
+variant carries a non-`Send` glommio `ReadResult`. The rule that makes this sound — a
+`Partition` message may only be sent on its own shard's channel — is enforced only by
+convention. The most dangerous thing in the codebase to change unknowingly. See
+[Known Issues](known-issues.md#unsafe-send-invariant).
+
+**Watermark / flushed position** — The intent log offset up to which data is confirmed
+written. Advanced by `ServerMsg::DataFlushed`, and used to release pending responses. Note
+"flushed" currently means "submitted to the kernel", not "durable"
+([Known Issues #3](known-issues.md#3-no-fdatasync-on-the-steady-state-write-path)).
+
+---
+
+## Terms that mean something unusual here
+
+| Term | Elsewhere | In Shoal |
+| --- | --- | --- |
+| Coordinator | A distinct node or process | A role any shard plays per connection |
+| Intent log | — | The write-ahead log |
+| Flushed | Durable on stable storage | Handed to the kernel; no `fdatasync` on the normal path |
+| Sorted | Supports ordered scans and range queries | Rows are stored ordered, but no read predicate uses the order |
+| Distributed | Multiple nodes | Multiple shards in one process |
+| `sync` | Force to stable storage | On `StreamWriter`, issues a background write and returns. `sync_blocking` is the real one — but on glommio's `DmaStreamWriter`, `sync` *does* fsync |

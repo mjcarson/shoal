@@ -364,8 +364,9 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
         // check if this intent log is over 50MiB or if compaction is being forced
         if force || self.intent_log2.get_unflushed_pos() > max_size {
             println!(
-                "Compacting -> {force} || {} > {max_size}",
-                self.intent_log2.get_unflushed_pos()
+                "Compacting -> {force} || {} > {max_size} - {:?}",
+                self.intent_log2.get_unflushed_pos(),
+                self.intent_log2.path,
             );
             // get our base intent path
             let mut new_path = self.table_conf.get_intent_path(R::name());

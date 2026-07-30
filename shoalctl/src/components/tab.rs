@@ -12,13 +12,10 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
 };
-use unicode_width::UnicodeWidthStr;
-use shoal::{
-    client::Shoal,
-    traits::QuerySupport,
-};
+use shoal::{client::Shoal, traits::QuerySupport};
 use std::marker::PhantomData;
 use std::sync::Arc;
+use unicode_width::UnicodeWidthStr;
 use uuid::Uuid;
 
 use crate::AppEvent;
@@ -144,6 +141,7 @@ where
             Ok(q) => q,
             Err(e) => {
                 self.error = Some(format!("Parse error: {}", e));
+                panic!("{:#?}", self.error);
                 return;
             }
         };
@@ -156,9 +154,11 @@ where
         // clone our event sender channel
         let app_tx = app_tx.clone();
         // start a task to execute this query
-        tokio::task::spawn(async move { query_bar::run::<S>(shoal, tab, table_name, query, app_tx).await })
-            .await
-            .unwrap();
+        tokio::task::spawn(async move {
+            query_bar::run::<S>(shoal, tab, table_name, query, app_tx).await
+        })
+        .await
+        .unwrap();
     }
 }
 

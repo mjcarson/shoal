@@ -1,0 +1,15 @@
+[book]
+title = "Shoal Internals"
+description = "Developer documentation for the internals of Shoal: design choices, limitations, TODOs, and known bugs."
+authors = ["The Shoal developers"]
+language = "en"
+src = "src"
+
+[build]
+build-dir = "book"
+create-missing = false
+
+[output.html]
+default-theme = "navy"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/mjcarson/shoal"

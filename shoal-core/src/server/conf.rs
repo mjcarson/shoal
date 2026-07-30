@@ -12,7 +12,7 @@ use super::ServerError;
 use crate::utils::{self, IntoStorageSize};
 
 /// The resource settings to use
-#[derive(Serialize, Deserialize, Default, Clone)]
+#[derive(Serialize, Deserialize, Default, Clone, Debug)]
 pub struct Resources {
     /// Configure the number of cores to use, default to all
     pub cores: Option<usize>,
@@ -73,7 +73,7 @@ fn default_port() -> u16 {
 }
 
 /// The networking settings for Shoal
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Networking {
     /// The interface to bind too
     #[serde(default = "default_interface")]
@@ -114,7 +114,7 @@ impl Networking {
 }
 
 /// The settings to apply to each storage engine kinds if no specific table settings set
-#[derive(Serialize, Deserialize, Clone, Default)]
+#[derive(Serialize, Deserialize, Clone, Default, Debug)]
 pub struct DefaultStorageSettings {
     /// The settings for the filesystem storage engine
     #[serde(default)]
@@ -130,14 +130,14 @@ impl DefaultStorageSettings {
 }
 
 /// The different storage engines in Shoal
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum TableSettings {
     /// The filesystem based storage engine config
     FS(FileSystemTableConf),
 }
 
 /// The storage settings for Shoal
-#[derive(Serialize, Deserialize, Clone, Default)]
+#[derive(Serialize, Deserialize, Clone, Default, Debug)]
 pub struct Storage {
     /// The default settings to apply to different storage engines
     #[serde(default)]
@@ -168,7 +168,7 @@ impl Storage {
 }
 
 /// The different levels to log tracing info at
-#[derive(Serialize, Deserialize, Clone, Default)]
+#[derive(Serialize, Deserialize, Clone, Default, Debug)]
 pub enum TraceLevel {
     /// Log everything include high verbosity low priority info
     Trace,
@@ -200,14 +200,14 @@ impl TraceLevel {
 }
 
 /// The settings for different remote tracing sinks (not stdout)
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum RemoteTracing {
     /// The settings for a GRPC based tracing sink
     Grpc(String),
 }
 
 /// The tracing settings for Shoal
-#[derive(Serialize, Deserialize, Clone, Default)]
+#[derive(Serialize, Deserialize, Clone, Default, Debug)]
 pub struct Tracing {
     /// The level to log traces at
     #[serde(default)]
@@ -237,7 +237,7 @@ impl Tracing {
 }
 
 /// The config for running Shoal
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Conf {
     /// The compute settings to use
     #[serde(default)]

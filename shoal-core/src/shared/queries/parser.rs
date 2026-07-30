@@ -269,7 +269,7 @@ fn where_conditions_helper<'a>(
     let field = identifier.parse_next(input)?;
     // skip whitespace
     ws.parse_next(input)?;
-    // right now we only support = signs
+    // right now we only support '=' signs
     "=".parse_next(input)?;
     // skip whitespace
     ws.parse_next(input)?;
@@ -377,10 +377,7 @@ impl ParsedSelect {
         ws.parse_next(&mut parsable)
             .map_err(|e| ShqlParseError::at_position(format!("Parse error: {}", e), 0, query))?;
         // optionally parse a LIMIT clause if present
-        let limit = opt(limit_clause)
-            .parse_next(&mut parsable)
-            .ok()
-            .flatten();
+        let limit = opt(limit_clause).parse_next(&mut parsable).ok().flatten();
         // parse any whitespace after the LIMIT clause (or after WHERE if no LIMIT)
         let _ = ws.parse_next(&mut parsable);
         // optionally parse a semicolon terminator if present
