@@ -17,13 +17,13 @@ pub enum CompactionJob {
 
 `shoal-core/src/server/tables/storage.rs:104-112`
 
-The compactor loop is a `match` on these (`.../fs/compactor.rs:553-569`). Jobs arrive on an
+The compactor loop is a `match` on these (`.../fs/compactor.rs:576-592`). Jobs arrive on an
 unbounded channel from the table's own `compact_if_needed`.
 
 ## Triggering
 
 Checked on every call to `get_flushed`, i.e. once per shard loop iteration
-(`.../persistent/sorted.rs:1039`):
+(`.../persistent/sorted.rs:1126`):
 
 ```rust
 let max_size = self.table_conf.latency_sensitive.intent_log_size;
@@ -44,7 +44,7 @@ if force || self.intent_log2.get_unflushed_pos() > max_size {
 }
 ```
 
-`.../fs.rs:362-406`
+`.../fs.rs:365-409`
 
 `rotated` is what tells the caller it cannot compare positions across the boundary: the new
 file's offsets restart at 0, so `get_flushed` drains its pending responses wholesale instead
@@ -57,7 +57,7 @@ queued for it, and an archive compaction job is queued behind it.
 The threshold compares `get_unflushed_pos()` — bytes *accepted*, not bytes durable — so
 rotation bounds log size and replay time regardless of IO progress.
 
-`force = true` is passed once, at table construction (`.../persistent/sorted.rs:210`), so
+`force = true` is passed once, at table construction (`.../persistent/sorted.rs:218`), so
 every table compacts whatever it just replayed immediately on startup.
 
 ## Generations
@@ -81,12 +81,23 @@ pub fn is_evictable(&self, flushed_generation: u64) -> bool {
 }
 ```
 
-`.../tables/partitions.rs:28-52`
+`.../tables/partitions.rs:29-52`
 
 A `Loaded` partition may only be evicted once its generation has been compacted — otherwise
 its changes exist only in an uncompacted log and dropping it would lose them until recovery.
 An `Accessible` partition is always evictable: it is a read-only view of bytes already on
 disk.
+
+Two rules make that check mean what it says, and both were broken until recently
+([Resolved Issues #5](../appendix/resolved/resurrected-deletes.md)):
+
+- **Every mutation stamps the partition with the open generation.** Unsorted tables replace the
+  whole `MaybeLoaded` and get this for free; sorted partitions are mutated in place, so each
+  path assigns it explicitly (`.../persistent/sorted.rs:371`, `:742`, `:914`).
+- **Only a compacted generation may be compared against.** `MarkEvictable` from the compactor
+  carries the generation of the log it just sealed and compacted; every other sender passes the
+  table's `flushed_generation`, which is advanced only from those messages. Generations start
+  at 1 (`.../fs.rs:294-295`) so 0 can mean "nothing compacted yet".
 
 This is the correct invariant, and it has a consequence:
 [under sustained writes, partitions are never evictable](../tables/memory-and-eviction.md#the-generation-trap).
@@ -96,18 +107,29 @@ This is the correct invariant, and it has a consequence:
 ```rust
 async fn compact_intent(&mut self, path: PathBuf, generation: u64) -> Result<(), ServerError> {
     self.sort_intent_log(&path).await?;
-    if !self.changes.is_empty() {
+    let partitions = if self.changes.is_empty() {
+        // this log had nothing to compact so there is nothing to write
+        Vec::default()
+    } else {
         self.load_partitions_for_intents().await?;
         self.apply_intents().await?;
         let partitions = self.write_partition().await?;
-        self.send_mark_evictables(generation, partitions).await?;
         glommio::io::remove(path).await?;
-    }
+        partitions
+    };
+    // tell our shard this generation is now durable even if it was empty, since
+    // that is what tells our table how far its data has been compacted
+    self.send_mark_evictables(generation, partitions).await?;
     Ok(())
 }
 ```
 
-`.../fs/compactor.rs:279-311`
+`.../fs/compactor.rs:316-338`
+
+The `MarkEvictable` is sent unconditionally, even for a log that compacted to nothing. It is
+not only a list of partitions — it is also how a table learns how far its data has been
+compacted, so skipping it for an empty generation would pin every partition tagged with that
+generation until some later compaction happened to lift the watermark past it.
 
 ```
   Shard-0-inactive-7
@@ -143,13 +165,13 @@ while let Some(read) = reader.next_buff().await? {
 }
 ```
 
-`.../fs/compactor.rs:136-146`
+`.../fs/compactor.rs:139-149`
 
 Grouping by partition turns scattered log records into one merge per partition, and preserves
 per-partition ordering because the log is read in order.
 
 Note `changes` is a field, not a local. It is drained by `apply_intents`
-(`.../fs/compactor.rs:196`) and reused across jobs — deliberate allocation reuse, but it means
+(`.../fs/compactor.rs:201`) and reused across jobs — deliberate allocation reuse, but it means
 an error partway through leaves stale state for the next job.
 
 ### 2. Load current copies
@@ -167,7 +189,7 @@ for partition in self.changes.keys() {
 }
 ```
 
-`.../fs/compactor.rs:171-188`
+`.../fs/compactor.rs:174-193`
 
 Read-modify-write per partition. This is the expensive part of compaction and the reason it
 runs on the medium-priority queue: a rotation touching a thousand partitions performs a
@@ -189,37 +211,53 @@ for intent in intents {
 if entry.is_empty() { ShouldPrune::Yes } else { ShouldPrune::No }
 ```
 
-`.../persistent/sorted.rs:1275-1306`
+`.../persistent/sorted.rs:1370-1401`
 
 **This is where tombstones actually die.** At runtime a delete inserts `MaybeRow::Tombstone`
 so it can shadow data still on disk; at compaction the row is genuinely removed, because the
 rewritten archive simply will not contain it ([Partitions](../tables/partitions.md)).
 
-`ShouldPrune::Yes` drops the partition from `loaded`, so it is not rewritten. But:
+The unsorted version does the same job with one row instead of a map, and seeds from the
+partition's current archive copy so an update whose insert lives in an earlier, already
+compacted log still has something to apply itself to:
+
+```rust
+// start from this partitions current archive copy if it has one, since an
+// update can target a row whose insert was compacted generations ago
+let mut maybe_partition = loaded.remove(&key);
+```
+
+`.../persistent/unsorted.rs`
+
+`ShouldPrune::Yes` drops the partition from `loaded`, so it is not rewritten — and the key is
+recorded so its archive entry can be dropped too:
 
 ```rust
 if let ShouldPrune::Yes = T::apply_intents(&mut self.loaded, partition, intents) {
+    // this partition should be pruned as it is empty
     self.loaded.remove(&partition);
-    // TODO: does anything else need to be done to remove this partition
-    // from archive maps?
+    // this partition is not going to be rewritten, so its old archive entry
+    // has to go too or the map keeps pointing at its pre-delete copy
+    self.removals.push(partition);
 }
 ```
 
-`.../fs/compactor.rs:198-203`
+`.../fs/compactor.rs`
 
-The TODO is correct to worry: the partition is not rewritten, but **its old `ArchiveEntry`
-is never removed from `to_archive`**. The map keeps pointing at the pre-delete copy in the old
-archive. A subsequent read finds that entry, loads the stale partition, and resurrects deleted
-rows. See
-[Known Issues](../appendix/known-issues.md#5-pruned-partitions-leak-a-stale-archive-map-entry).
+Those removals are written to the map intent log as `MapIntent::Remove(key)` in step 4 and
+applied to `to_archive` only after the sync, like every other map change. They also join the
+`to_mark` list, so the tombstone shadowing a pruned partition becomes evictable in the same
+generation its archive entry disappears — the tombstone is needed exactly until then, and no
+longer.
 
-The unsorted variant additionally panics on an update with no preceding insert in the same
-batch (`.../persistent/unsorted.rs:896-901`) — which is exactly what happens when the insert
-lives in an earlier, already-compacted log.
+This used to be a `// TODO: does anything else need to be done to remove this partition from
+archive maps?`, and the answer was yes: the entry stayed in `to_archive`, a subsequent read
+found it, loaded the stale partition, and resurrected deleted rows. See
+[Resolved Issues #5](../appendix/resolved/resurrected-deletes.md).
 
 ### 4. Write out
 
-`write_partition` (`.../fs/compactor.rs:210-254`) serializes each partition into the active
+`write_partition` (`.../fs/compactor.rs:216-276`) serializes each partition into the active
 archive, logs a `MapIntent::Entry`, syncs both writers, and only *then* publishes entries to
 the shared map:
 
@@ -231,7 +269,13 @@ for (id, entry) in self.entries.drain(..) {
 }
 ```
 
-`.../fs/compactor.rs:239-245`
+`.../fs/compactor.rs:255-262`
+
+`loaded` is cleared once its partitions have been written (`.../fs/compactor.rs:254`). It used
+not to be, and because this loop iterates the whole map rather than the current job's changes,
+**every partition the compactor had ever read was re-serialized and re-mapped on every
+compaction** — unbounded write amplification, and a `to_mark` list that grew with the table
+rather than the job.
 
 Ordering matters: the in-memory map is not repointed until the data and the map intent are
 both on disk. A crash before the sync leaves the map pointing at the old copy, which is still
@@ -244,20 +288,22 @@ Note `sync()` here is `DmaStreamWriter::sync`, glommio's, which does flush and f
 ### 5. Mark evictable
 
 `MarkEvictable { generation, table, partitions }` goes back to the shard
-(`.../fs/compactor.rs:257-271`), which routes it to the table's `mark_evictable`. Partitions
-whose generation is now covered are added to the shard LRU as eviction candidates
-([Memory and Eviction](../tables/memory-and-eviction.md)).
+(`.../fs/compactor.rs:279-294`), which routes it to the table's `mark_evictable`. Partitions
+whose generation is now covered are added to the shard LRU as eviction candidates, sorted
+partitions have their now-redundant tombstones swept, and the table advances its record of how
+far its data has been compacted
+([Memory and Eviction](../tables/memory-and-eviction.md#becoming-evictable)).
 
 ### 6. Delete the log
 
 Only reached when `changes` was non-empty. **An intent log that produced no changes is never
-deleted** (`.../fs/compactor.rs:298-309`), so it stays on disk and is replayed on every
+deleted** (`.../fs/compactor.rs:316-338`), so it stays on disk and is replayed on every
 subsequent startup. See
 [Known Issues](../appendix/known-issues.md#14-empty-rotated-intent-logs-are-never-deleted).
 
 ## Archive compaction
 
-`compact_archives` (`.../fs/compactor.rs:315-485`) reclaims space from archives whose live
+`compact_archives` (`.../fs/compactor.rs:342-512`) reclaims space from archives whose live
 fraction has dropped.
 
 ```rust
@@ -342,13 +388,11 @@ per byte rewritten. It is hardcoded (`.../fs/compactor.rs:336`), as is
 
 ## Limitations
 
-- Pruned partitions leak a stale map entry, resurrecting deleted data
-  ([Known Issues](../appendix/known-issues.md#5-pruned-partitions-leak-a-stale-archive-map-entry)).
 - Empty rotated logs are never deleted and are replayed forever.
 - Compaction thresholds are hardcoded.
 - `load_partitions_for_intents` issues one random read per changed partition with no
   batching, sorting by offset, or readahead.
 - No throttling: a large rotation floods the medium-priority queue with reads and writes.
-- `changes`, `loaded`, and `entries` persist across jobs; an error mid-job leaves them dirty.
-- Unsorted compaction panics on an update whose insert was compacted in an earlier generation
-  (`.../persistent/unsorted.rs:900`).
+- `changes`, `entries`, and `removals` are drained per job and `loaded` is cleared after each
+  write, but an error mid-job leaves all four dirty for the next one.
+- An intent whose base row is gone is dropped with a `warn!` and nothing counts it.

@@ -3,7 +3,7 @@
 //! This module provides a clickable tab bar that allows users to switch
 //! between different views in the application.
 
-use crossterm::event::KeyCode;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use kanal::AsyncSender;
 use ratatui::{
     Frame,
@@ -13,6 +13,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
 };
 use shoal::{client::Shoal, traits::QuerySupport};
+use shoal_core::shared::queries::parser;
 use std::marker::PhantomData;
 use std::sync::Arc;
 use unicode_width::UnicodeWidthStr;
@@ -20,11 +21,13 @@ use uuid::Uuid;
 
 use crate::AppEvent;
 
+mod completion;
 mod content;
 mod query_bar;
 
+pub use completion::{CompletionMenu, CompletionState};
 pub use content::TabContent;
-pub use query_bar::TabQueryBar;
+pub use query_bar::{QueryLayout, TabQueryBar, layout_query};
 
 /// A single tab in the application
 #[derive(Debug, Clone)]
@@ -41,6 +44,8 @@ pub struct Tab<S: QuerySupport> {
     pub query: String,
     /// The cursor position within the query text
     pub query_cursor: usize,
+    /// The completions on offer for the query as it currently stands
+    pub completion: CompletionState,
     /// Vertical scroll offset for the content area
     pub scroll_y: u16,
     /// Horizontal scroll offset for the content area
@@ -81,28 +86,54 @@ where
             error: None,
             query: String::new(),
             query_cursor: 0,
+            completion: CompletionState::default(),
             scroll_y: 0,
             scroll_x: 0,
             phantom: PhantomData,
         }
     }
 
+    /// Get the byte offset of the character before the cursor
+    ///
+    /// Table and field names can be any valid rust identifier, so the query is stepped through
+    /// a character at a time rather than a byte at a time.
+    fn prev_boundary(&self) -> Option<usize> {
+        self.query[..self.query_cursor]
+            .char_indices()
+            .next_back()
+            .map(|(index, _)| index)
+    }
+
+    /// Get the byte offset just past the character at the cursor
+    fn next_boundary(&self) -> Option<usize> {
+        self.query[self.query_cursor..]
+            .chars()
+            .next()
+            .map(|c| self.query_cursor + c.len_utf8())
+    }
+
     /// Insert a character at the current cursor position
+    ///
+    /// # Arguments
+    ///
+    /// * `c` - The character to insert
     pub fn insert_char(&mut self, c: char) {
         self.query.insert(self.query_cursor, c);
-        self.query_cursor += 1;
+        self.query_cursor += c.len_utf8();
     }
 
     /// Delete the character before the cursor (backspace)
     pub fn delete_char_before(&mut self) {
-        if self.query_cursor > 0 {
-            self.query_cursor -= 1;
-            self.query.remove(self.query_cursor);
+        // find the character behind the cursor, if there is one
+        if let Some(start) = self.prev_boundary() {
+            self.query.remove(start);
+            self.query_cursor = start;
         }
     }
 
     /// Delete the character at the cursor (delete)
     pub fn delete_char_at(&mut self) {
+        // there is only a character to delete if the cursor isn't at the end
         if self.query_cursor < self.query.len() {
             self.query.remove(self.query_cursor);
         }
@@ -110,16 +141,82 @@ where
 
     /// Move the cursor left
     pub fn move_cursor_left(&mut self) {
-        if self.query_cursor > 0 {
-            self.query_cursor -= 1;
+        // step back to the start of the character behind the cursor
+        if let Some(start) = self.prev_boundary() {
+            self.query_cursor = start;
         }
     }
 
     /// Move the cursor right
     pub fn move_cursor_right(&mut self) {
-        if self.query_cursor < self.query.len() {
-            self.query_cursor += 1;
+        // step forward past the character at the cursor
+        if let Some(end) = self.next_boundary() {
+            self.query_cursor = end;
         }
+    }
+
+    /// Rebuild the completions on offer for the query as it currently stands
+    ///
+    /// # Arguments
+    ///
+    /// * `forced` - Whether the user asked for completions rather than just typing
+    pub fn refresh_completions(&mut self, forced: bool) {
+        // ask the client what could be typed at our cursor
+        let completions = parser::suggest::<S>(&self.query, self.query_cursor);
+        // hand those to the menu, which decides whether they are worth showing
+        self.completion.refresh(completions, forced);
+    }
+
+    /// Handle a key aimed at the completion menu
+    ///
+    /// These are the keys helix binds its own completion menu to. Enter is only taken when the
+    /// menu is open, which leaves it free to submit the query the rest of the time.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The key that was pressed
+    ///
+    /// # Returns
+    ///
+    /// Whether the menu consumed this key
+    pub fn handle_completion_key(&mut self, key: KeyEvent) -> bool {
+        // whether this key was pressed with control held down
+        let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        match key.code {
+            // ask for completions even when there is no word to trigger on
+            KeyCode::Char(' ') if control => self.refresh_completions(true),
+            // move down the menu
+            KeyCode::Tab | KeyCode::Down => self.completion.move_down(),
+            KeyCode::Char('n') if control => self.completion.move_down(),
+            // move up the menu
+            KeyCode::BackTab | KeyCode::Up => self.completion.move_up(),
+            KeyCode::Char('p') if control => self.completion.move_up(),
+            // close the menu
+            KeyCode::Char('c') if control => self.completion.close(),
+            // accept whatever is selected, but only while the menu is open
+            KeyCode::Enter if self.completion.is_open() => self.accept_completion(),
+            // this key isn't ours
+            _ => return false,
+        }
+        true
+    }
+
+    /// Accept the selected completion, splicing it into the query
+    pub fn accept_completion(&mut self) {
+        // there is nothing to accept unless the menu has a selection
+        let Some(text) = self
+            .completion
+            .selected()
+            .map(|suggestion| suggestion.insert_text())
+        else {
+            return;
+        };
+        // replace the word the menu was built for with the completed one
+        let (start, end) = self.completion.word_span();
+        self.query.replace_range(start..end, &text);
+        self.query_cursor = start + text.len();
+        // the word we were completing is gone, so build the menu for whatever comes next
+        self.refresh_completions(false);
     }
 
     /// Try to submit the current query
@@ -140,8 +237,8 @@ where
         let query = match S::parse(&self.query) {
             Ok(q) => q,
             Err(e) => {
+                // show the parse error in the UI and leave the query for the user to fix
                 self.error = Some(format!("Parse error: {}", e));
-                panic!("{:#?}", self.error);
                 return;
             }
         };
@@ -450,12 +547,18 @@ where
 
     /// Handle key input when the query box is focused
     ///
+    /// The completion menu takes the keys helix binds it to — tab, the arrows, and control n
+    /// and p move through it, and enter accepts whatever is selected. Enter only submits the
+    /// query when the menu is closed.
+    ///
     /// # Arguments
     ///
-    /// * `code` - The key code that was pressed
+    /// * `key` - The key that was pressed
+    /// * `shoal` - A client to shoal to submit queries with
+    /// * `app_tx` - The channel to send query results back over
     pub async fn handle_query_input(
         &mut self,
-        code: KeyCode,
+        key: KeyEvent,
         shoal: &Arc<Shoal<S>>,
         app_tx: &mut AsyncSender<AppEvent<S>>,
     ) where
@@ -464,26 +567,64 @@ where
         S::ResponseKinds: Send,
     {
         // get the currently active tab
-        if let Some(active_tab) = self.get_active_mut() {
-            match code {
-                // Type characters
-                KeyCode::Char(c) => active_tab.insert_char(c),
-                // Delete character before cursor
-                KeyCode::Backspace => active_tab.delete_char_before(),
-                // Delete character at cursor
-                KeyCode::Delete => active_tab.delete_char_at(),
-                // Move cursor left
-                KeyCode::Left => active_tab.move_cursor_left(),
-                // Move cursor right
-                KeyCode::Right => active_tab.move_cursor_right(),
-                // Move cursor to start
-                KeyCode::Home => active_tab.query_cursor = 0,
-                // Move cursor to end
-                KeyCode::End => active_tab.query_cursor = active_tab.query.len(),
-                // Submit query with Enter
-                KeyCode::Enter => active_tab.submit_query(shoal, app_tx).await,
-                _ => {}
+        let Some(active_tab) = self.get_active_mut() else {
+            return;
+        };
+        // let the completion menu take the keys it is bound to first
+        if active_tab.handle_completion_key(key) {
+            return;
+        }
+        match key.code {
+            // type characters, which always gives the menu another chance to open
+            KeyCode::Char(c) => {
+                active_tab.insert_char(c);
+                active_tab.completion.undismiss();
+                active_tab.refresh_completions(false);
             }
+            // delete character before cursor
+            KeyCode::Backspace => {
+                active_tab.delete_char_before();
+                active_tab.refresh_completions(false);
+            }
+            // delete character at cursor
+            KeyCode::Delete => {
+                active_tab.delete_char_at();
+                active_tab.refresh_completions(false);
+            }
+            // move cursor left
+            KeyCode::Left => {
+                active_tab.move_cursor_left();
+                active_tab.refresh_completions(false);
+            }
+            // move cursor right
+            KeyCode::Right => {
+                active_tab.move_cursor_right();
+                active_tab.refresh_completions(false);
+            }
+            // move cursor to start
+            KeyCode::Home => {
+                active_tab.query_cursor = 0;
+                active_tab.refresh_completions(false);
+            }
+            // move cursor to end
+            KeyCode::End => {
+                active_tab.query_cursor = active_tab.query.len();
+                active_tab.refresh_completions(false);
+            }
+            // submit this query, since an open menu would have taken this key already
+            KeyCode::Enter => active_tab.submit_query(shoal, app_tx).await,
+            _ => {}
+        }
+    }
+
+    /// Rebuild the completions on offer for the active tab's query
+    ///
+    /// This is what puts the menu up when the query box is focused rather than typed in.
+    pub fn refresh_completions(&mut self) {
+        // get our currently active tab
+        if let Some(active_tab) = self.get_active_mut() {
+            // show whatever could be typed at its cursor
+            active_tab.refresh_completions(false);
         }
     }
 
@@ -520,6 +661,8 @@ where
             active_tab.query.clear();
             // reset our cursor to 0
             active_tab.query_cursor = 0;
+            // there is nothing left to complete
+            active_tab.completion.clear();
         }
     }
 }

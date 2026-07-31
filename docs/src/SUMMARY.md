@@ -45,5 +45,12 @@
 # Appendix
 
 - [Known Issues](appendix/known-issues.md)
+- [Resolved Issues](appendix/resolved-issues.md)
+  - [1-3. Acknowledged writes were not durable](appendix/resolved/durability.md)
+  - [4. Unsorted updates and deletes never consult disk](appendix/resolved/unsorted-disk-consultation.md)
+  - [5. Deleted rows came back](appendix/resolved/resurrected-deletes.md)
+  - [9. Recovery and compaction panicked on orphaned update intents](appendix/resolved/orphaned-update-intents.md)
+  - [20. The storage tests were entirely commented out](appendix/resolved/storage-tests.md)
+  - [24. A bad query could leave the terminal in raw mode](appendix/resolved/shoalctl-panic.md)
 - [TODOs and Unbuilt Work](appendix/todos.md)
 - [Glossary](appendix/glossary.md)

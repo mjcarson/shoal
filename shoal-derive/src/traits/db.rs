@@ -145,6 +145,10 @@ pub fn add(
                     // build a mark evictable message for this partition so we don't mark this as
                     // evictable until we have completed all blocked queries to prevent load/reloading
                     // the same partition over and over again
+                    //
+                    // the generation we get back is the newest one that has been compacted, not the
+                    // one we are writing in, since the queries we are about to release can write to
+                    // this partition and their intents would not be in an archive yet
                     let mark_evict_msg = shoal_core::server::messages::ServerMsg::MarkEvictable { generation, table, partitions: vec![id] };
                     // convert our unblocked queries into shard messages
                     for (meta, unwrapped) in unblocked {

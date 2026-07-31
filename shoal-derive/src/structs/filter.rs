@@ -24,6 +24,26 @@ pub fn add(
             #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Default)]
             #[rkyv(derive(Debug))]
             pub struct #filter_name;
+
+            #[automatically_derived]
+            impl #name {
+                /// Build filters for this table from a set of SHQL where conditions
+                ///
+                /// This table has no filterable fields, so there is never anything to build.
+                ///
+                /// # Arguments
+                ///
+                /// * `conditions` - The where conditions to build filters from
+                /// * `query` - The original query string (for error reporting)
+                pub fn shql_build_filters(
+                    conditions: &[shoal_core::shared::queries::parser::WhereClause],
+                    query: &str,
+                ) -> Result<Option<#filter_name>, shoal_core::client::ShqlParseError> {
+                    // this table has no filterable fields so there is nothing to build
+                    let _ = (conditions, query);
+                    Ok(None)
+                }
+            }
         });
         return;
     }
@@ -35,12 +55,68 @@ pub fn add(
         }
     });
 
+    // Build the per field extraction steps used when building filters from a SHQL query
+    let build_steps = filter_fields.iter().map(|(ident, ty)| {
+        let field_name_str = ident.to_string();
+        quote! {
+            // look for a where condition naming this filter field
+            if let Some(condition) = conditions.iter().find(|cond| cond.field == #field_name_str) {
+                // convert the literal from the query into this field's type
+                let value = shoal_core::serde_json::from_value::<#ty>(condition.value.clone())
+                    .map_err(|error| shoal_core::client::ShqlParseError::new(
+                        format!("Failed to deserialize filter '{}': {}", #field_name_str, error),
+                        condition.value_start,
+                        condition.value_end,
+                        query,
+                    ))?;
+                // set this filter and remember that we have at least one
+                filters.#ident = Some(value);
+                any_set = true;
+            }
+        }
+    });
+
     // Generate the filter struct
     stream.extend(quote! {
         #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Default)]
         #[rkyv(derive(Debug))]
         pub struct #filter_name {
             #(#fields),*
+        }
+
+        #[automatically_derived]
+        impl #name {
+            /// Build filters for this table from a set of SHQL where conditions
+            ///
+            /// Any condition naming a filterable field is converted into the matching field on
+            /// this table's filter struct. Conditions on partition or sort keys are left alone
+            /// since they are handled separately by the generated parse arm.
+            ///
+            /// # Arguments
+            ///
+            /// * `conditions` - The where conditions to build filters from
+            /// * `query` - The original query string (for error reporting)
+            ///
+            /// # Returns
+            ///
+            /// The filters to apply, or None if no condition named a filterable field
+            pub fn shql_build_filters(
+                conditions: &[shoal_core::shared::queries::parser::WhereClause],
+                query: &str,
+            ) -> Result<Option<#filter_name>, shoal_core::client::ShqlParseError> {
+                // start with an empty set of filters
+                let mut filters = #filter_name::default();
+                // track whether any condition actually set a filter
+                let mut any_set = false;
+                // try to pull each filterable field out of our conditions
+                #(#build_steps)*
+                // only return filters if at least one was set
+                if any_set {
+                    Ok(Some(filters))
+                } else {
+                    Ok(None)
+                }
+            }
         }
     });
 }

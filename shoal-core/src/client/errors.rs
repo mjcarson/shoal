@@ -130,13 +130,16 @@ impl std::fmt::Display for ShqlParseError {
                 self.start, self.message
             )
         } else {
+            // slice out the offending span, falling back to the whole input if the span is out
+            // of range or does not land on a character boundary
+            let span = self
+                .input
+                .get(self.start..self.end)
+                .unwrap_or(self.input.as_str());
             write!(
                 f,
                 "SHQL parse error at positions {}-{}: {}\n  {}",
-                self.start,
-                self.end,
-                self.message,
-                &self.input[self.start..self.end]
+                self.start, self.end, self.message, span
             )
         }
     }

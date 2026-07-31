@@ -108,6 +108,27 @@ pub fn add(stream: &mut proc_macro2::TokenStream, struct_ident: &Ident, fields: 
             }
         }
     });
+    // build the name of each table as it must be typed in a query
+    let table_name_strs: Vec<String> = tables
+        .iter()
+        .map(|table| table.inner_type.to_string())
+        .collect();
+    // build our table_fields arms
+    let table_fields_arms = tables.iter().map(|table| {
+        let inner_type = &table.inner_type;
+        let table_name_str = inner_type.to_string();
+        quote! {
+            #table_name_str => Some(<#inner_type as shoal_core::shared::traits::TableSchemaSupport>::fields()),
+        }
+    });
+    // build our table_field_validator arms
+    let table_field_validator_arms = tables.iter().map(|table| {
+        let inner_type = &table.inner_type;
+        let table_name_str = inner_type.to_string();
+        quote! {
+            #table_name_str => <#inner_type as shoal_core::shared::traits::TableSchemaSupport>::get_field_validator(field),
+        }
+    });
     // build our parse arms for each table
     let parse_arms = tables.iter().map(|table| {
         let variant_ident = &table.variant_ident;
@@ -177,6 +198,8 @@ pub fn add(stream: &mut proc_macro2::TokenStream, struct_ident: &Ident, fields: 
                         if let Some(limit) = parsed.limit {
                             get_query.limit = Some(limit);
                         }
+                        // Build any filters named by the where conditions
+                        get_query.filters = <#inner_type>::shql_build_filters(&parsed.conditions, query)?;
                         // Wrap in UnsortedQuery::Get and then in QueryKinds
                         let unsorted_query = shoal_core::shared::queries::UnsortedQuery::Get(
                             shoal_core::shared::queries::UnsortedGet {
@@ -274,6 +297,8 @@ pub fn add(stream: &mut proc_macro2::TokenStream, struct_ident: &Ident, fields: 
                         if let Some(limit) = parsed.limit {
                             get_query.limit = Some(limit);
                         }
+                        // Build any filters named by the where conditions
+                        get_query.filters = <#inner_type>::shql_build_filters(&parsed.conditions, query)?;
                         // Build partition key hashes
                         let partition_key_hashes: Vec<u64> = partition_keys.iter()
                             .map(|pk| <#inner_type as shoal_core::shared::traits::PartitionKeySupport>::get_partition_key_from_values(pk))
@@ -360,6 +385,39 @@ pub fn add(stream: &mut proc_macro2::TokenStream, struct_ident: &Ident, fields: 
                         query.len(),
                         query,
                     )),
+                }
+            }
+
+            /// Get the names of every table in this database
+            fn table_names() -> &'static [&'static str] {
+                &[#(#table_name_strs),*]
+            }
+
+            /// Get the fields for a table and the role each one plays in a query
+            ///
+            /// # Arguments
+            ///
+            /// * `table` - The name of the table to get fields for
+            fn table_fields(table: &str) -> Option<Vec<shoal_core::shared::queries::parser::FieldInfo>> {
+                match table {
+                    #(#table_fields_arms)*
+                    _ => None,
+                }
+            }
+
+            /// Get the type validator for a single field in a table
+            ///
+            /// # Arguments
+            ///
+            /// * `table` - The name of the table this field is in
+            /// * `field` - The name of the field to get a validator for
+            fn table_field_validator(
+                table: &str,
+                field: &str,
+            ) -> Option<shoal_core::shared::queries::parser::TypeValidator> {
+                match table {
+                    #(#table_field_validator_arms)*
+                    _ => None,
                 }
             }
 

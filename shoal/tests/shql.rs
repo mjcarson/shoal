@@ -1,0 +1,492 @@
+//! Tests for binding a parsed SHQL query to a concrete table
+//!
+//! The parser itself is covered by unit tests in `shoal-core`. These tests cover the second
+//! stage, where the generated `QuerySupport::parse` impl matches a parsed query against a real
+//! schema, type checks its literals, and turns its conditions into a get query. None of this
+//! needs a running server, so these are plain synchronous tests.
+
+use deepsize2::DeepSizeOf;
+use rkyv::{Archive, Deserialize, Serialize};
+use shoal_core::shared::queries::parser::{FieldRole, Suggestion, SuggestionKind};
+use shoal_core::shared::queries::{SortedQuery, UnsortedQuery};
+use shoal_core::shared::traits::{PartitionKeySupport, QuerySupport};
+use shoal_core::storage::FileSystem;
+use shoal_core::tables::{PersistentSortedTable, PersistentUnsortedTable};
+use shoal_derive::{db, ShoalSortedTable, ShoalUnsortedTable};
+
+/// An unsorted table with a partition key and two filterable fields
+#[derive(
+    Debug, Archive, Serialize, Deserialize, Clone, ShoalUnsortedTable, PartialEq, Eq, DeepSizeOf,
+)]
+#[rkyv(derive(Debug))]
+#[shoal_table(db = "ShqlDb")]
+pub struct Movie {
+    /// The partition key for this movie
+    #[shoal(partition)]
+    pub id: u64,
+    /// The title of this movie, which can be filtered on
+    #[shoal(filter)]
+    pub title: String,
+    /// Whether this movie has been watched, which can be filtered on
+    #[shoal(filter)]
+    pub watched: bool,
+    /// Some data payload
+    #[shoal(update)]
+    pub data: String,
+}
+
+/// A sorted table with a partition key, a sort key, and a filterable field
+#[derive(
+    Debug, Archive, Serialize, Deserialize, Clone, ShoalSortedTable, PartialEq, Eq, DeepSizeOf,
+)]
+#[rkyv(derive(Debug))]
+#[shoal_table(db = "ShqlDb")]
+pub struct Review {
+    /// The partition key for this review
+    #[shoal(partition)]
+    pub movie: String,
+    /// The sort key ordering reviews within a partition
+    #[shoal(sort)]
+    pub reviewer: String,
+    /// The source of this review, which can be filtered on
+    #[shoal(filter)]
+    pub source: String,
+    /// Some data payload
+    #[shoal(update)]
+    pub data: String,
+}
+
+/// The test database schema
+#[db]
+pub struct ShqlDb {
+    /// The unsorted movie table
+    pub movies: PersistentUnsortedTable<Movie, FileSystem>,
+    /// The sorted review table
+    pub reviews: PersistentSortedTable<Review, FileSystem>,
+}
+
+/// Parse a query and unwrap it, failing the test with the parse error if it did not bind
+///
+/// # Arguments
+///
+/// * `query` - The query to parse
+fn parse(query: &str) -> ShqlDbQueryKinds {
+    match ShqlDbClient::parse(query) {
+        Ok(parsed) => parsed,
+        Err(error) => panic!("Failed to parse '{}': {}", query, error),
+    }
+}
+
+/// Parse a query that is expected to fail and return its error message
+///
+/// # Arguments
+///
+/// * `query` - The query to parse
+fn parse_err(query: &str) -> String {
+    match ShqlDbClient::parse(query) {
+        Ok(_) => panic!("Expected '{}' to fail but it parsed", query),
+        Err(error) => error.message,
+    }
+}
+
+/// Parse a query against the unsorted table and return its get query
+///
+/// # Arguments
+///
+/// * `query` - The query to parse
+fn parse_movie(query: &str) -> shoal_core::shared::queries::UnsortedGet<Movie> {
+    // parse this query and make sure it bound to the movie table
+    match parse(query) {
+        ShqlDbQueryKinds::Movie(UnsortedQuery::Get(get)) => get,
+        other => panic!("Expected a movie get query but got {:?}", other),
+    }
+}
+
+/// Parse a query against the sorted table and return its get query
+///
+/// # Arguments
+///
+/// * `query` - The query to parse
+fn parse_review(query: &str) -> shoal_core::shared::queries::SortedGet<Review> {
+    // parse this query and make sure it bound to the review table
+    match parse(query) {
+        ShqlDbQueryKinds::Review(SortedQuery::Get(get)) => get,
+        other => panic!("Expected a review get query but got {:?}", other),
+    }
+}
+
+#[test]
+/// A query naming a table that is not in the schema is rejected
+fn rejects_an_unknown_table() {
+    // this table does not exist in our schema
+    let message = parse_err("SELECT * FROM Nope WHERE id = 1");
+    assert!(
+        message.contains("Unknown table 'Nope'"),
+        "unexpected message: {}",
+        message
+    );
+}
+
+#[test]
+/// Table names are matched against the row struct name, not the schema field name
+fn matches_the_struct_name_not_the_field_name() {
+    // the schema field is called 'movies' but the struct is called 'Movie'
+    let message = parse_err("SELECT * FROM movies WHERE id = 1");
+    assert!(
+        message.contains("Unknown table 'movies'"),
+        "unexpected message: {}",
+        message
+    );
+    // using the struct name binds correctly
+    parse_movie("SELECT * FROM Movie WHERE id = 1");
+}
+
+#[test]
+/// A condition naming a field the table does not have is rejected
+fn rejects_an_unknown_field() {
+    // 'nope' is not a field on the movie table
+    let message = parse_err("SELECT * FROM Movie WHERE nope = 1");
+    assert!(
+        message.contains("Unknown field 'nope'"),
+        "unexpected message: {}",
+        message
+    );
+}
+
+#[test]
+/// A literal that cannot deserialize into the field's type is rejected
+fn rejects_a_type_mismatch() {
+    // id is a u64 so a string literal cannot be used for it
+    let message = parse_err("SELECT * FROM Movie WHERE id = 'not a number'");
+    assert!(
+        message.contains("Type mismatch for field 'id'"),
+        "unexpected message: {}",
+        message
+    );
+    // and a negative number does not fit a u64 either
+    let negative = parse_err("SELECT * FROM Movie WHERE id = -1");
+    assert!(
+        negative.contains("Type mismatch for field 'id'"),
+        "unexpected message: {}",
+        negative
+    );
+}
+
+#[test]
+/// A query that does not constrain a partition key is rejected
+fn rejects_a_missing_partition_key() {
+    // filtering alone gives the server no partition to look in
+    let message = parse_err("SELECT * FROM Movie WHERE title = 'Alien'");
+    assert!(
+        message.contains("Missing partition key"),
+        "unexpected message: {}",
+        message
+    );
+    // the same holds for the sorted table when only a sort key is given
+    let sorted = parse_err("SELECT * FROM Review WHERE reviewer = 'ann'");
+    assert!(
+        sorted.contains("Missing partition key"),
+        "unexpected message: {}",
+        sorted
+    );
+}
+
+#[test]
+/// The partition key from an unsorted query is hashed the same way a typed query hashes it
+fn binds_an_unsorted_partition_key() {
+    // parse a query constraining the partition key
+    let get = parse_movie("SELECT * FROM Movie WHERE id = 550");
+    // the hash should match what a typed query would have produced
+    assert_eq!(get.partition_key, Movie::get_partition_key_from_values(&550));
+}
+
+#[test]
+/// A sorted query collects every partition condition in the order it was written
+fn binds_sorted_partition_keys() {
+    // parse a query naming two partitions
+    let get = parse_review("SELECT * FROM Review WHERE movie = 'alien' AND movie = 'aliens'");
+    // both partitions should be present, hashed, and in order
+    assert_eq!(
+        get.partition_keys,
+        vec![
+            Review::get_partition_key_from_values(&"alien".to_string()),
+            Review::get_partition_key_from_values(&"aliens".to_string()),
+        ]
+    );
+}
+
+#[test]
+/// Sort key conditions are collected onto the get query
+fn binds_sort_keys() {
+    // parse a query narrowing by sort key
+    let get = parse_review("SELECT * FROM Review WHERE movie = 'alien' AND reviewer = 'ann'");
+    // the sort key should have been picked up
+    assert_eq!(get.sort_keys, vec!["ann".to_string()]);
+}
+
+#[test]
+/// A LIMIT clause reaches the get query
+fn binds_the_limit() {
+    // an unsorted query carries its limit through
+    let unsorted = parse_movie("SELECT * FROM Movie WHERE id = 550 LIMIT 7");
+    assert_eq!(unsorted.limit, Some(7));
+    // and so does a sorted one
+    let sorted = parse_review("SELECT * FROM Review WHERE movie = 'alien' LIMIT 3");
+    assert_eq!(sorted.limit, Some(3));
+    // a query with no limit leaves it unset
+    assert_eq!(parse_movie("SELECT * FROM Movie WHERE id = 550").limit, None);
+}
+
+#[test]
+/// Filter conditions reach the get query on an unsorted table
+fn binds_unsorted_filters() {
+    // parse a query filtering on top of a partition key
+    let get = parse_movie("SELECT * FROM Movie WHERE id = 550 AND title = 'Alien'");
+    // the filter should have been built and set
+    let filters = get.filters.expect("expected filters to be set");
+    assert_eq!(filters.title, Some("Alien".to_string()));
+    // the filter we did not name should be left unset
+    assert_eq!(filters.watched, None);
+}
+
+#[test]
+/// Several filter conditions can be set at once
+fn binds_multiple_filters() {
+    // parse a query filtering on both filterable fields
+    let get = parse_movie("SELECT * FROM Movie WHERE id = 550 AND title = 'Alien' AND watched = true");
+    // both filters should have been picked up
+    let filters = get.filters.expect("expected filters to be set");
+    assert_eq!(filters.title, Some("Alien".to_string()));
+    assert_eq!(filters.watched, Some(true));
+}
+
+#[test]
+/// Filter conditions reach the get query on a sorted table
+fn binds_sorted_filters() {
+    // parse a query filtering a sorted table
+    let get = parse_review("SELECT * FROM Review WHERE movie = 'alien' AND source = 'imdb'");
+    // the filter should have been built and set
+    let filters = get.filters.expect("expected filters to be set");
+    assert_eq!(filters.source, Some("imdb".to_string()));
+}
+
+#[test]
+/// A query with no filter conditions leaves the filters unset
+fn leaves_filters_unset_when_none_are_given() {
+    // an unsorted query constraining only the partition key has no filters
+    assert!(parse_movie("SELECT * FROM Movie WHERE id = 550")
+        .filters
+        .is_none());
+    // and neither does a sorted query constraining only keys
+    assert!(
+        parse_review("SELECT * FROM Review WHERE movie = 'alien' AND reviewer = 'ann'")
+            .filters
+            .is_none()
+    );
+}
+
+#[test]
+/// A filter whose literal has the wrong type is rejected before it reaches the get query
+fn rejects_a_filter_type_mismatch() {
+    // watched is a bool so a number cannot be used for it
+    let message = parse_err("SELECT * FROM Movie WHERE id = 550 AND watched = 5");
+    assert!(
+        message.contains("Type mismatch for field 'watched'"),
+        "unexpected message: {}",
+        message
+    );
+}
+
+#[test]
+/// Keywords stay case insensitive all the way through binding
+fn binds_a_lowercase_query() {
+    // the same query written in lower case binds identically
+    let get = parse_movie("select * from Movie where id = 550 and title = 'Alien' limit 2");
+    assert_eq!(get.partition_key, Movie::get_partition_key_from_values(&550));
+    assert_eq!(get.limit, Some(2));
+    assert_eq!(
+        get.filters.expect("expected filters to be set").title,
+        Some("Alien".to_string())
+    );
+}
+
+/// Suggest completions for a query with the cursor at the end of it
+///
+/// # Arguments
+///
+/// * `query` - The query to suggest completions for
+fn suggest(query: &str) -> Vec<Suggestion> {
+    shoal_core::shared::queries::parser::suggest::<ShqlDbClient>(query, query.len()).items
+}
+
+/// Suggest completions and return just their text, which is usually all a test cares about
+///
+/// # Arguments
+///
+/// * `query` - The query to suggest completions for
+fn suggest_text(query: &str) -> Vec<String> {
+    suggest(query)
+        .into_iter()
+        .map(|suggestion| suggestion.text)
+        .collect()
+}
+
+#[test]
+/// Every table in the schema is offered after FROM
+fn suggests_every_table() {
+    // with nothing typed yet both tables are on offer
+    let tables = suggest_text("SELECT * FROM ");
+    assert_eq!(tables, vec!["Movie", "Review"]);
+    // and they are tables, not keywords
+    assert!(suggest("SELECT * FROM ")
+        .iter()
+        .all(|suggestion| suggestion.kind == SuggestionKind::Table));
+}
+
+#[test]
+/// Table names are fuzzy matched so case and gaps do not matter
+fn fuzzy_matches_table_names() {
+    // a lower case prefix still finds the canonical name
+    assert_eq!(suggest_text("SELECT * FROM mov"), vec!["Movie"]);
+    // and so does a subsequence of it
+    assert_eq!(suggest_text("SELECT * FROM rvw"), vec!["Review"]);
+    // a name that is in neither table matches nothing
+    assert!(suggest_text("SELECT * FROM zzz").is_empty());
+}
+
+#[test]
+/// Keywords are suggested in the case the user is typing them in
+fn suggests_keywords_in_the_typed_case() {
+    // an empty word gets the canonical upper case keyword
+    assert_eq!(suggest_text(""), vec!["SELECT"]);
+    // a lower case word keeps the query lower case
+    assert_eq!(suggest_text("sel"), vec!["select"]);
+    // an upper case word stays upper case
+    assert_eq!(suggest_text("SEL"), vec!["SELECT"]);
+    // and the same holds deeper into a query
+    assert_eq!(suggest_text("select * from Movie wh"), vec!["where"]);
+}
+
+#[test]
+/// Only fields that can be used in a where clause are offered
+fn suggests_only_usable_fields() {
+    // every field with a role is on offer
+    let fields = suggest_text("SELECT * FROM Movie WHERE ");
+    // the partition key comes first, then the filters in schema order
+    assert_eq!(fields, vec!["id", "title", "watched"]);
+    // 'data' is only marked as updatable, so it would be rejected by the parser
+    assert!(
+        !fields.contains(&"data".to_string()),
+        "a field with no role should never be suggested"
+    );
+}
+
+#[test]
+/// Fields are annotated with the role they play and the type they hold
+fn annotates_fields_with_their_role_and_type() {
+    // pull the suggestions for the sorted table, which uses all three roles
+    let fields = suggest("SELECT * FROM Review WHERE ");
+    let details: Vec<(String, String)> = fields
+        .into_iter()
+        .map(|suggestion| (suggestion.text, suggestion.detail))
+        .collect();
+    // the partition key is offered first since a query cannot be built without one
+    assert_eq!(
+        details,
+        vec![
+            ("movie".to_string(), "partition String".to_string()),
+            ("reviewer".to_string(), "sort String".to_string()),
+            ("source".to_string(), "filter String".to_string()),
+        ]
+    );
+}
+
+#[test]
+/// Fields are fuzzy matched the same way tables are
+fn fuzzy_matches_field_names() {
+    assert_eq!(suggest_text("SELECT * FROM Movie WHERE wat"), vec!["watched"]);
+    assert!(suggest_text("SELECT * FROM Movie WHERE zzz").is_empty());
+}
+
+#[test]
+/// A table that is not in the schema has no fields to offer
+fn suggests_no_fields_for_an_unknown_table() {
+    assert!(suggest_text("SELECT * FROM Nope WHERE ").is_empty());
+}
+
+#[test]
+/// A boolean field is the only kind whose values we can offer in full
+fn suggests_values_a_field_accepts() {
+    // a bool field can only ever be true or false
+    assert_eq!(
+        suggest_text("SELECT * FROM Movie WHERE watched = "),
+        vec!["true", "false"]
+    );
+    // a string field gets its opening quote
+    assert_eq!(suggest_text("SELECT * FROM Movie WHERE title = "), vec!["'"]);
+    // and there is nothing useful to offer for a number
+    assert!(suggest_text("SELECT * FROM Movie WHERE id = ").is_empty());
+}
+
+#[test]
+/// A partially typed value is matched against what the field accepts
+fn narrows_values_as_they_are_typed() {
+    assert_eq!(
+        suggest_text("SELECT * FROM Movie WHERE watched = tr"),
+        vec!["true"]
+    );
+}
+
+#[test]
+/// Once a condition is complete the query can be continued, limited, or ended
+fn suggests_how_to_continue_a_query() {
+    assert_eq!(
+        suggest_text("SELECT * FROM Movie WHERE id = 550 "),
+        vec!["AND", "LIMIT", ";"]
+    );
+    // after a limit only the terminator is left
+    assert_eq!(
+        suggest_text("SELECT * FROM Movie WHERE id = 550 LIMIT 10 "),
+        vec![";"]
+    );
+    // and a finished query has nothing left to offer
+    assert!(suggest_text("SELECT * FROM Movie WHERE id = 550;").is_empty());
+}
+
+#[test]
+/// Accepting a suggestion leaves the query ready for the next token
+fn accepted_text_is_spaced_for_the_next_token() {
+    // a table name is followed by another keyword, so it gets a trailing space
+    let table = suggest("SELECT * FROM Mov").remove(0);
+    assert_eq!(table.insert_text(), "Movie ");
+    // an opening quote is followed by the string itself, so it does not
+    let quote = suggest("SELECT * FROM Movie WHERE title = ").remove(0);
+    assert_eq!(quote.insert_text(), "'");
+}
+
+#[test]
+/// Suggestions replace the word under the cursor, not the whole query
+fn replaces_only_the_word_under_the_cursor() {
+    let query = "SELECT * FROM Mov";
+    let completions =
+        shoal_core::shared::queries::parser::suggest::<ShqlDbClient>(query, query.len());
+    assert_eq!(completions.word_start, "SELECT * FROM ".len());
+    assert_eq!(completions.word_end, query.len());
+}
+
+#[test]
+/// Every table can be reached through the schema a client exposes
+fn exposes_the_schema_to_a_client() {
+    // the tables are named by their row struct
+    assert_eq!(ShqlDbClient::table_names(), &["Movie", "Review"]);
+    // every field comes back, including the ones with no role
+    let fields = ShqlDbClient::table_fields("Movie").expect("expected the movie table");
+    let names: Vec<&str> = fields.iter().map(|field| field.name).collect();
+    assert_eq!(names, vec!["id", "title", "watched", "data"]);
+    // and the roles are the ones the table was declared with
+    assert_eq!(fields[0].role, Some(FieldRole::Partition));
+    assert_eq!(fields[1].role, Some(FieldRole::Filter));
+    assert_eq!(fields[3].role, None);
+    // a table that is not in the schema has nothing to expose
+    assert!(ShqlDbClient::table_fields("Nope").is_none());
+}

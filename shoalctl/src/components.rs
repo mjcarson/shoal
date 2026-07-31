@@ -9,4 +9,7 @@ mod tab;
 
 pub use help_overlay::HelpOverlay;
 pub use status_bar::StatusBar;
-pub use tab::{Tab, TabContent, TabQueryBar, TabSelector, TabState};
+pub use tab::{
+    CompletionMenu, CompletionState, QueryLayout, Tab, TabContent, TabQueryBar, TabSelector,
+    TabState, layout_query,
+};

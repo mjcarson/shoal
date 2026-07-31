@@ -77,10 +77,15 @@ pub struct FileSystemCompactor<T: IntentReadSupport<R>, R: PartitionKeySupport, 
     map_writer: DmaStreamWriter,
     /// The changes to apply to the already compacted partitions on disk
     changes: HashMap<u64, Vec<T::Intent>>,
-    /// The partitions in this intent log
+    /// The partitions in the intent log currently being compacted
+    ///
+    /// This is cleared once those partitions have been written, since anything left
+    /// in it would be rewritten by every later job for no reason.
     loaded: HashMap<u64, T>,
     /// The entries to add to our archive map after syncing writes
     entries: Vec<(u64, ArchiveEntry)>,
+    /// The partitions that were pruned and so must be dropped from our archive map
+    removals: Vec<u64>,
     /// The channel to listen for paths to intent logs to compact
     jobs_rx: AsyncReceiver<CompactionJob>,
     /// The channel to send shard local messages on
@@ -117,6 +122,7 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             changes: HashMap::with_capacity(capacity),
             loaded: HashMap::with_capacity(capacity),
             entries: Vec::with_capacity(capacity),
+            removals: Vec::with_capacity(capacity),
             jobs_rx,
             shard_local_tx: shard_local_tx.clone(),
             archive_path: conf.get_archive_path(R::name()),
@@ -198,8 +204,9 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             if let ShouldPrune::Yes = T::apply_intents(&mut self.loaded, partition, intents) {
                 // this partition should be pruned as it is empty
                 self.loaded.remove(&partition);
-                // TODO: does anything else need to be done to remove this partition
-                // from archive maps?
+                // this partition is not going to be rewritten, so its old archive entry
+                // has to go too or the map keeps pointing at its pre-delete copy
+                self.removals.push(partition);
             }
         }
         Ok(())
@@ -235,6 +242,16 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             // as potentially evictable
             to_mark.push(*key);
         }
+        // log the removal of every partition we pruned
+        for key in &self.removals {
+            // write this removal to our map intent log
+            write_map_intent!(self.map_writer, MapIntent::Remove(*key), Remove);
+            // a pruned partitions tombstone can be evicted once this removal lands
+            to_mark.push(*key);
+        }
+        // drop the partitions we just wrote so the next job starts from their archive
+        // copies instead of rewriting every partition this compactor has ever loaded
+        self.loaded.clear();
         // flush our current writers
         self.writer.sync().await?;
         self.map_writer.sync().await?;
@@ -242,6 +259,11 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         for (id, entry) in self.entries.drain(..) {
             // add this entry to our shared map
             self.map.set_partition(id, entry);
+        }
+        // drop the archive entries for the partitions we pruned
+        for id in self.removals.drain(..) {
+            // this partition no longer has data in any archive
+            self.map.remove_partition(id);
         }
         // check how large our map intent log is and if needed compact it
         if self.map_writer.current_flushed_pos() > Byte::MEBIBYTE {
@@ -295,18 +317,23 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         // read and sort this intent log
         self.sort_intent_log(&path).await?;
         // check if we have any compacted partitions to write
-        if !self.changes.is_empty() {
+        let partitions = if self.changes.is_empty() {
+            // this log had nothing to compact so there is nothing to write
+            Vec::default()
+        } else {
             // load any existing partitions from disk
             self.load_partitions_for_intents().await?;
             // apply the new intents to our loaded partitions
             self.apply_intents().await?;
             // write our compacted partitions to disk
             let partitions = self.write_partition().await?;
-            // send a message to our shard with the partitions to mark as evictable
-            self.send_mark_evictables(generation, partitions).await?;
             // delete our no longer needed inactive intent log
             glommio::io::remove(path).await?;
-        }
+            partitions
+        };
+        // tell our shard this generation is now durable even if it was empty, since
+        // that is what tells our table how far its data has been compacted
+        self.send_mark_evictables(generation, partitions).await?;
         Ok(())
     }
 

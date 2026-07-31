@@ -155,18 +155,24 @@ partition.check_disk = false;
 An `Accessible` partition is a complete archive copy, so once deserialized the in-memory copy
 is authoritative.
 
-The unsorted variant is less forgiving. An update whose partition is absent panics outright:
+The unsorted variant used to be less forgiving — an update whose partition was absent panicked
+outright, taking down a shard on the one path where that is least recoverable. It now warns
+and skips the intent, which is reachable whenever an update's base row was compacted into an
+archive in an earlier generation *and* `scan`'s `load_partition_direct` found nothing, for
+instance if the map entry was lost. See
+[Resolved Issues #9](../appendix/resolved/orphaned-update-intents.md).
+
+Unsorted `Delete` intents replay into a tombstone rather than a removal:
 
 ```rust
-None => panic!("Missing partition?"),
+// build the tombstone for this deleted partition, since the pre-delete
+// copy may still be in an archive that has not been compacted yet
+let tombstone = UnsortedPartition::tombstone(partition_key);
 ```
 
-`.../persistent/unsorted.rs:867-868`
-
-Reachable whenever an update's base row was compacted into an archive in an earlier
-generation *and* `scan`'s `load_partition_direct` found nothing — for instance if the map
-entry was lost. See
-[Known Issues](../appendix/known-issues.md#9-recovery-and-compaction-panic-on-orphaned-update-intents).
+Replaying a delete as a plain `partitions.remove` would be wrong for exactly the reason the
+comment gives: between the delete and the compaction that prunes it, the archive still holds
+the row, and a `remove` leaves nothing to shadow it with.
 
 ## Truncation and corruption
 
@@ -227,7 +233,7 @@ restart always advances the generation counter.
 | Intent written but not yet fdatasynced | No — and it was never acknowledged, so no client was told otherwise |
 | Compaction that synced its archive writes | Yes |
 | Compaction that crashed mid-way | No, but the sealed log is replayed instead |
-| A partition pruned by compaction | **No — resurrected**, because the stale map entry is never removed ([Known Issues](../appendix/known-issues.md#5-pruned-partitions-leak-a-stale-archive-map-entry)) |
+| A partition pruned by compaction | Yes — the prune writes a `MapIntent::Remove` and drops the entry from `to_archive` ([Compaction](compaction.md#3-apply)) |
 | Archive map snapshot | Yes — temp/rename/dir-fsync |
 | Data acknowledged to the client | Yes — acknowledgement waits for an `fdatasync` covering the record, unless `durability: Async` is set |
 | A pad region between two flushes | Not data, and skipped on replay via `PAD_SENTINEL` |

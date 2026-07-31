@@ -3,18 +3,20 @@
 Two lists: the `TODO` markers actually present in the source, and the larger pieces that the
 code implies but does not contain.
 
-Defects are catalogued separately in [Known Issues](known-issues.md). Several entries here
-overlap; where they do, the known-issues entry has the detail.
+Open defects are catalogued separately in [Known Issues](known-issues.md), and fixed ones in
+[Resolved Issues](resolved-issues.md). Several entries here overlap; where they do, the issue
+entry has the detail.
 
 ## In-code TODOs
 
-Twelve `TODO` comments and one live `todo!()` outside `target/`.
+Ten `TODO` comments and one live `todo!()` outside `target/`. The two struck-through rows below
+have been done and are kept for their links.
 
 ### Storage
 
 | Location | TODO | What finishing it involves |
 | --- | --- | --- |
-| `.../fs/compactor.rs:201` | `does anything else need to be done to remove this partition from archive maps?` | Yes. A pruned partition's `ArchiveEntry` must be removed and the removal logged — `MapIntent` needs a new variant. Confirmed data resurrection: [Known Issues #5](known-issues.md#5-pruned-partitions-leak-a-stale-archive-map-entry). |
+| ~~`.../fs/compactor.rs:201`~~ | ~~`does anything else need to be done to remove this partition from archive maps?`~~ | **Done.** The answer was yes. `MapIntent::Remove` was added, the prune path logs it and drops the entry from `to_archive` after the sync: [Resolved Issues #5](resolved/resurrected-deletes.md). |
 | `.../fs/compactor.rs:343` | `make size configurable` | Move `MIN_ARCHIVE_COMPACTABLE` and the hardcoded 50% utilisation threshold into `FileSystemTableConf`. |
 | `.../fs/map.rs:351` | `make issue about SerializedMap not needing to track active` | `SerializedMap` does not persist the active archive id, so every restart mints a new one and orphans the previous active archive until compaction reclaims it. Either persist it or document the churn as intended. |
 | `.../fs/loader.rs:128` | `todo!("Add back onto loader channel")` | A live `todo!()`. A load request that fails to spawn should be requeued rather than panicking the loader — which currently strands every query blocked on that partition forever. |
@@ -28,7 +30,7 @@ Twelve `TODO` comments and one live `todo!()` outside `target/`.
 | `shard.rs:60` | `do something with this error` | `client_rx_relay` panics on any non-EOF socket error. Should tear down the one connection. |
 | `shard.rs:126` | `detect collisions?` | Client UUIDs are generated without checking `client_map`; a collision panics at `shard.rs:623`. The client does exactly this check for query ids (`client.rs:192-203`) and could be copied. |
 | `shard.rs:132` | `do this with a task queue?` | Per-client relay tasks run on the executor's default queue, so client IO is unprioritised relative to background writes. |
-| `.../persistent/unsorted.rs:867` | `handling a partition missing` | A startup-path `panic!`. See [Known Issues #9](known-issues.md#9-recovery-and-compaction-panic-on-orphaned-update-intents). |
+| ~~`.../persistent/unsorted.rs:867`~~ | ~~`handling a partition missing`~~ | **Done.** The startup-path `panic!` is a `warn!` and a skipped intent now. See [Resolved Issues #9](resolved/orphaned-update-intents.md). |
 
 ### Client and UI
 
@@ -131,18 +133,19 @@ exactly the alignment and `fdatasync` behaviour they exist to check.
 
 ### Tests
 
-`shoal-core` has **zero** active unit tests. `.../fs/tests.rs` contains 429 lines of tests —
-covering intent-log truncation, checksum mismatches, inactive-log discovery, and map
-corruption — that are **entirely commented out**
-([Known Issues #20](known-issues.md#20-orphaned-source-files)). Re-enabling them is the
-cheapest available coverage win, and several already target behaviours documented in
-[Recovery](../storage/recovery.md).
+`shoal-core` has 87 unit tests: the SHQL grammar, the intent log reader and stream writer, the
+archive map, and partition tombstone bookkeeping. The storage half of those were commented out
+until recently ([Resolved Issues #20](resolved/storage-tests.md)).
 
-The 13 integration tests cover insert, get, exists, delete, and update on both table types
-plus basic restart behaviour. Not covered: eviction, memory pressure, compaction, archive
-compaction, multi-shard routing, streaming, SHQL, concurrency, and crash recovery. As
-[Known Issues #5](known-issues.md#5-pruned-partitions-leak-a-stale-archive-map-entry) shows,
-the restart coverage that does exist stops one step short of the failure.
+The integration tests cover insert, get, exists, delete, and update on both table types, plus
+restart behaviour, crash recovery under `SIGKILL`, mutating a partition that exists only in an
+archive across enough restarts to catch a stale map entry
+([Resolved Issues #4](resolved/unsorted-disk-consultation.md)), and — under a config with a one
+byte memory limit — eviction and memory pressure
+([Resolved Issues #5](resolved/resurrected-deletes.md)).
+
+Not covered: archive compaction, multi-shard routing, streaming, and concurrency. Nothing
+exercises a workload large enough to rotate archives rather than intent logs.
 
 ## Dead code
 
@@ -151,6 +154,6 @@ the restart coverage that does exist stops one step short of the failure.
 | `server/cursor.rs`, `server/response.rs` | Not in the module tree; reference removed APIs. |
 | `client.rs:544-598`, `:1025-1091` | Large commented-out blocks. |
 | `.../fs.rs:74-98` | The previous intent-log writer, commented out. |
-| `shoalctl/src/components/tab.rs:430`, `:440` | `next`/`prev`, never called. |
+| `shoalctl/src/components/tab.rs:527`, `:537` | `next`/`prev`, never called. |
 | `EphemeralTable` | Cannot be used in a `#[db]` database ([Table Types](../tables/table-types.md#ephemeraltable)). |
 | `shoal/examples/basic.rs.bak` | A `.bak` file in the source tree. |

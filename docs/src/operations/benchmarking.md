@@ -113,7 +113,7 @@ constant across every run you intend to compare, or move the client to another m
 
 > **The shipped `shoal.yml` spells it `exluded_cores`, which is silently ignored.** Serde
 > accepts the unknown key and core exclusion never happens. Check your spelling before trusting
-> an isolated run. See [Known Issues #18](../appendix/known-issues.md) and
+> an isolated run. See [Known Issues #18](../appendix/known-issues.md#18-exluded_cores-is-silently-ignored) and
 > [Configuration](../getting-started/configuration.md#the-exluded_cores-typo).
 
 Note also that `Conf::from_file` marks the file `required(false)`, so a typo in `--conf` does

@@ -91,6 +91,34 @@ pub fn build_config(temp_dir: &TempDir) -> Conf {
         )
 }
 
+/// Create a config that keeps a shard under constant memory pressure
+///
+/// Eviction is checked once per shard loop iteration against `resources.memory`, so a
+/// one byte limit makes every iteration evict everything the LRU is holding. That is
+/// the only way to test that a partition is not marked evictable before its changes
+/// have been compacted, since nothing else forces an eviction.
+///
+/// The intent log is shrunk at the same time so generations advance every few writes
+/// instead of every 10 MiB; a partition can then be mutated in one generation and
+/// marked by the compaction of an earlier one.
+///
+/// # Arguments
+///
+/// * `temp_dir` - The temp dir to store this servers data in
+pub fn build_pressured_config(temp_dir: &TempDir) -> Conf {
+    // start from the default test config
+    let mut conf = build_config(temp_dir);
+    // evict on every shard loop iteration
+    conf.resources.memory = 1;
+    // rotate the intent log every 4 KiB so generations advance quickly
+    conf.storage
+        .default
+        .filesystem
+        .latency_sensitive
+        .intent_log_size = 4 << 10;
+    conf
+}
+
 /// Setup and start a default shoal server/config
 pub async fn start<T: ShoalDatabase>(
     temp_dir: &TempDir,

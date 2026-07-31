@@ -75,50 +75,63 @@ there are no partial results to accumulate.
 ```rust
 pub struct UnsortedPartition<R: ShoalUnsortedTable> {
     pub key: u64,
-    pub row: R,
+    pub row: MaybeRow<R>,
     pub size: usize,
 }
 ```
 
 `.../tables/partitions.rs:63-71`
 
+The `MaybeRow` is what lets a deleted partition stay in memory as a tombstone shadowing its
+archive copy ([Partitions](partitions.md#tombstones)).
+
 One row per partition. Inserting to an existing key replaces the row outright
-(`.../persistent/unsorted.rs:349`) — there is no merge and no tombstone, because a delete just
-removes the entry.
+(`.../persistent/unsorted.rs:349`) — there is no merge, since there is nothing to merge with.
 
 Requires a partition key and forbids sort keys; the macro panics on
 `#[shoal(sort)]` (`shoal-derive/src/lib.rs:149`).
 
-### The asymmetry that matters
-
-Sorted and unsorted tables disagree about whether a mutation should consult disk.
+### Both types consult disk on every operation
 
 | Operation | Sorted | Unsorted |
 | --- | --- | --- |
 | `get` | Loads from disk if needed | Loads from disk if needed |
 | `exists` | Loads from disk if needed | Loads from disk if needed |
-| `delete` | Loads from disk if needed | **Memory only** |
-| `update` | Loads from disk if needed | **Memory only** |
+| `delete` | Loads from disk if needed | Loads from disk if needed |
+| `update` | Loads from disk if needed | Loads from disk if needed |
 
-`PersistentUnsortedTable::delete` is the whole story:
+They get there differently, because of what "not resident" can mean for each. A sorted
+partition can be *partially* resident — some rows in memory, more on disk — so it carries a
+`check_disk` flag and a mutation that misses in memory has to check it before answering
+(`.../persistent/sorted.rs:698-720`, `:857-876`). An unsorted partition holds exactly one row,
+so residency is all or nothing: the only case that needs disk is a key missing from
+`self.partitions` entirely.
 
 ```rust
-match self.partitions.remove(&key) {
-    Some(old) => { /* write delete intent, ack */ }
-    None => { /* respond Delete(false) */ }
+None => {
+    // this partition may still be on disk so check there before
+    // telling our client it doesn't exist
+    if self
+        .block_on_load(key, &meta, UnsortedQuery::Delete { key })
+        .await
+    {
+        // wait for this partition to be loaded and this query replayed
+        return None;
+    }
+    /* respond Delete(false) */
 }
 ```
 
-`.../persistent/unsorted.rs:540-570`
+`block_on_load` is shared by all four unsorted operations. It parks the query on `blocked` and
+returns `true`, or returns `false` when the archive map has no entry for the key — which is
+the only case where "the row does not exist" is a truthful answer. It also queues behind an
+existing `blocked` entry rather than requesting a second read of a partition already in
+flight.
 
-No `load_partition`, no `blocked` entry. `update` has the same shape
-(`.../persistent/unsorted.rs:591-637`). So an update or delete against a partition that is on
-disk but not in memory — because it was evicted, or because the process restarted and the
-partition has not been faulted in — silently reports `false` and does nothing.
-
-The sorted implementations handle this correctly, checking disk and parking the query
-(`.../persistent/sorted.rs:698-720`, `:857-876`). See
-[Known Issues](../appendix/known-issues.md#4-unsorted-updates-and-deletes-never-consult-disk).
+This asymmetry used to be a real one: unsorted `delete` and `update` consulted memory only and
+reported `false` for anything evicted or not yet faulted in. See
+[Resolved Issues #4](../appendix/resolved/unsorted-disk-consultation.md)
+for what that cost and what fixing it dragged in with it.
 
 ## EphemeralTable
 

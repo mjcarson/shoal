@@ -2103,6 +2103,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "nucleo-matcher"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf33f538733d1a5a3494b836ba913207f14d9d4a1d3cd67030c5061bdd2cac85"
+dependencies = [
+ "memchr",
+ "unicode-segmentation",
+]
+
+[[package]]
 name = "num-conv"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3378,6 +3388,7 @@ dependencies = [
  "intmap",
  "kanal",
  "lru",
+ "nucleo-matcher",
  "opentelemetry 0.28.0",
  "opentelemetry-otlp",
  "opentelemetry-proto 0.1.0",
@@ -3395,6 +3406,7 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
+ "unicode-ident",
  "uuid",
  "winnow",
 ]

@@ -83,6 +83,7 @@ Movie
 ├── MovieUpdateData   — the server-side update payload (no keys)
 ├── MovieDelete       — a delete query     (structs/delete.rs)
 ├── MovieFilter       — a filter predicate (structs/filter.rs)
+│                       plus Movie::shql_build_filters, for SHQL
 └── impls:
     ├── RkyvSupport
     ├── PartitionKeySupport      — name(), get_partition_key(), ...
@@ -152,6 +153,13 @@ list (`shoal-derive/src/tables.rs:39-60`) so they stay in step.
 Filters are conjunctive equality only: every `Some` field must match. No ranges, no `OR`, no
 negation.
 
+Alongside the struct, `structs/filter.rs` emits an inherent `Movie::shql_build_filters` that
+turns the filter conditions of a parsed SHQL query into a `MovieFilter`, returning `None` when
+the query named no filterable field. The generated `QuerySupport::parse` arms call it to
+populate `MovieGet::filters` ([SHQL](shql.md#stage-2-bind-to-a-table)). It has to be an
+inherent function rather than a `TableSchemaSupport` method because the filter type comes from
+`ShoalTableSupport::Filters`, which `TableSchemaSupport` cannot name.
+
 ### TableSchemaSupport
 
 ```rust
@@ -167,7 +175,7 @@ pub trait TableSchemaSupport {
 Reflection for SHQL: given a field name from a `WHERE` clause, is it a partition key, a sort
 key, or a filter, and does the supplied literal deserialize into its type? Validators are
 built with `make_validator::<T>()`, which closes over `serde_json::from_value::<T>`
-(`shoal-core/src/shared/queries/parser.rs:55-61`). This is why table field types must
+(`shoal-core/src/shared/queries/parser.rs:154-160`). This is why table field types must
 implement `serde::DeserializeOwned` for SHQL to work on them.
 
 ## What `#[db]` generates
@@ -278,8 +286,12 @@ it in build times, in error messages that point into generated code, and in the 
 (`shoal-core/src/server/tables/persistent/sorted.rs:118-149`).
 
 **Generation, not a trait, unifies the table types.** Because the dispatch layer calls methods
-by name rather than through a trait, the two persistent tables are not required to agree — see
-[Table Types](../tables/table-types.md#the-asymmetry-that-matters) for what that has cost.
+by name rather than through a trait, the two persistent tables are not required to agree, and
+nothing catches it when they drift. They agree today on which operations consult disk
+([Table Types](../tables/table-types.md#both-types-consult-disk-on-every-operation)), but only
+because the unsorted side was brought back into line by hand
+([Resolved Issues #4](../appendix/resolved/unsorted-disk-consultation.md));
+a trait would have made the divergence a compile error.
 
 ## Limitations
 

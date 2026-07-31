@@ -16,7 +16,7 @@ pub enum MaybeLoaded<P: PartitionSupport> {
 }
 ```
 
-`shoal-core/src/server/tables/partitions.rs:28-34`
+`shoal-core/src/server/tables/partitions.rs:29-34`
 
 ```
      read from archive              first mutation
@@ -46,7 +46,7 @@ MaybeLoaded::Accessible(read) => {
 }
 ```
 
-`.../persistent/sorted.rs:450-469`
+`.../persistent/sorted.rs:471-489`
 
 Note `is_filtered_archived` — the derive macro generates a filter that operates on
 `<R as Archive>::Archived`, so rows that fail the filter are never deserialized. A selective
@@ -55,7 +55,7 @@ choosing rkyv as the on-disk format.
 
 Deserialization happens lazily, on the first *mutation*: insert, update, and delete all
 convert `Accessible` into `Loaded`, then keep it that way "to avoid future deserialization
-costs" (`.../persistent/sorted.rs:917-923`).
+costs" (`.../persistent/sorted.rs:999-1005`).
 
 The `generation` on `Loaded` records when the partition was last modified, and gates eviction
 ([Compaction](../storage/compaction.md#generations)).
@@ -91,7 +91,7 @@ impl<P: PartitionSupport> MaybeLoaded<P> {
 }
 ```
 
-`.../tables/partitions.rs:20-43`
+`.../tables/partitions.rs:20-45`
 
 `deepsize2` walks the structure including heap allocations, so a `String` field counts its
 buffer. Both concrete partitions override `size()` to return a cached field rather than
@@ -101,16 +101,16 @@ Keeping those cached fields correct is fiddly, and they are not:
 
 - `UnsortedPartition::new` sets `size = row.deep_size_of() + 17` — the row plus a fixed
   overhead, commented as "8 for key, 8 for size, 1 for evictable"
-  (`.../tables/partitions.rs:80-82`).
+  (`.../tables/partitions.rs:88-90`).
 - `UnsortedPartition::update` sets `size = self.deep_size_of()` — the whole partition
-  (`.../tables/partitions.rs:112`).
+  (`.../tables/partitions.rs:120`).
 
 Two different bases for the same field, so an update shifts a partition's accounted size for
 reasons unrelated to the data. See
 [Known Issues](../appendix/known-issues.md#22-size-accounting-inconsistencies).
 
 `SortedPartition` maintains its size incrementally by delta on every mutation
-(`.../tables/partitions.rs:236-257`, `:301-337`, `:343-362`), which avoids re-walking a large
+(`.../tables/partitions.rs:308-330`, `:373-425`, `:466-487`), which avoids re-walking a large
 `BTreeMap` but accumulates drift and undercounts tombstones (see below).
 
 ## Tombstones
@@ -122,7 +122,7 @@ pub enum MaybeRow<R> {
 }
 ```
 
-`.../tables/partitions.rs:55-61`
+`.../tables/partitions.rs:57-63`
 
 A delete in a sorted table does not remove the entry — it replaces it with a tombstone:
 
@@ -140,7 +140,7 @@ pub fn remove(&mut self, sort: &T::Sort) -> Option<(usize, T)> {
 }
 ```
 
-`.../tables/partitions.rs:301-318`
+`.../tables/partitions.rs:373-390`
 
 **Why a tombstone is necessary.** A partition in memory may be only part of the story — the
 rest may still be in an archive that has not been read. If a delete simply removed the row,
@@ -148,12 +148,19 @@ a later `load_partition` would merge the archive copy back in and resurrect it. 
 is the record that says "this row is gone", and it survives the merge:
 
 ```rust
-std::mem::swap(&mut new, partition);              // disk copy becomes the base
-partition.rows.extend(new.rows.into_iter());      // in-memory rows overlay it
-partition.check_disk = false;
+pub fn merge_from_disk(&mut self, disk: Self) {
+    // keep our in memory rows to the side and make the disk copy our base
+    let memory = std::mem::replace(self, disk);
+    // replay our in memory rows ontop of the disk copy
+    self.rows.extend(memory.rows.into_iter());
+    // archives never contain tombstones so only our in memory ones survived
+    self.tombstones = memory.tombstones;
+    // we just merged in the full disk copy so there is nothing left to load
+    self.check_disk = false;
+}
 ```
 
-`.../persistent/sorted.rs:247-253`
+`.../tables/partitions.rs:437-446`
 
 The disk copy is installed as the base and the in-memory rows — tombstones included — are
 extended over it. `BTreeMap::extend` overwrites on key collision, so memory wins. That is the
@@ -164,7 +171,7 @@ There are two entry points, deliberately different:
 | Method | Behaviour | Used by |
 | --- | --- | --- |
 | `remove` | Tombstones **only if** a live row exists; returns `None` otherwise | Live deletes, so a delete of a nonexistent row reports `false` |
-| `tombstone` | Tombstones unconditionally | Intent replay, where the row may be on disk and not yet read (`.../tables/partitions.rs:328-337`) |
+| `tombstone` | Tombstones unconditionally | Intent replay, where the row may be on disk and not yet read (`.../tables/partitions.rs:400-425`) |
 
 Reads skip tombstones through dedicated iterators:
 
@@ -173,7 +180,7 @@ pub fn live_rows(&self) -> impl Iterator<Item = (&T::Sort, &T)> { ... }
 pub fn live_row_values(&self) -> impl Iterator<Item = &T> { ... }
 ```
 
-`.../tables/partitions.rs:365-378`, with archived equivalents at `:387-413`.
+`.../tables/partitions.rs:490-510`, with archived equivalents at `:517-540`.
 
 **Tombstones die at compaction**, where the rewritten archive simply omits the row:
 
@@ -185,17 +192,70 @@ SortedIntents::Delete { sort_key, .. } => {
 }
 ```
 
-`.../persistent/sorted.rs:1288-1292`
+`.../persistent/sorted.rs:1383-1386`
 
 Until then a tombstone occupies a `BTreeMap` slot while contributing nothing to the
 partition's accounted `size` — the row's bytes were subtracted on delete and the tombstone
 adds none back. A delete-heavy partition therefore reports a smaller size than it occupies,
 and eviction under-accounts it.
 
-Unsorted tables have no tombstones. A delete removes the map entry
-(`.../persistent/unsorted.rs:540`) — which, combined with the fact that unsorted deletes never
-consult disk, is why a delete against an on-disk-only partition silently does nothing
-([Table Types](table-types.md#the-asymmetry-that-matters)).
+**Until then, and no longer.** Once the log holding a delete has been compacted, the archive
+behind the partition no longer contains the row and the tombstone has nothing left to shadow.
+That moment is exactly when the compactor reports the partition evictable, so the sweep happens
+there:
+
+```rust
+pub fn drop_tombstones(&mut self) -> usize {
+    // bail out early if we have nothing to sweep
+    if self.tombstones == 0 {
+        return 0;
+    }
+    // only keep rows that still hold data
+    self.rows.retain(|_, row| matches!(row, MaybeRow::Row(_)));
+    // our tombstones are all gone now
+    std::mem::take(&mut self.tombstones)
+}
+```
+
+`.../tables/partitions.rs:454-463`
+
+The count exists so that sweeping does not have to walk every row of every marked partition to
+discover there is nothing to sweep; `mark_evictable` can be handed a thousand keys at a time.
+It is never written to an archive (`#[rkyv(with = Skip)]`), because a partition read back from
+disk has no tombstones by construction.
+
+Dropping one early is the whole of
+[Resolved Issues #5](../appendix/resolved/resurrected-deletes.md): the row it was hiding comes
+straight back on the next read. The generation gate is what makes the sweep safe, and nothing
+else may be substituted for it — not a size threshold, not an age, not LRU pressure.
+
+**Unsorted tables tombstone too**, for the same reason and at a coarser grain. An unsorted
+partition holds one row, so it does not tombstone an entry inside itself — it *becomes* a
+tombstone:
+
+```rust
+pub fn tombstone(key: u64) -> Self {
+    // a tombstone carries no row data so it only costs its fixed overhead
+    UnsortedPartition {
+        key,
+        row: MaybeRow::Tombstone,
+        size: 17,
+    }
+}
+```
+
+A delete installs that in place of the partition rather than removing the key, and every read
+path treats it as absent. Removing the key was the old behaviour, and it was only safe while
+unsorted deletes could not reach a partition that existed on disk — once they could, dropping
+the key left nothing to shadow the archive copy with, and the next read faulted the deleted
+row back in
+([Resolved Issues #4](../appendix/resolved/unsorted-disk-consultation.md)).
+
+The unsorted tombstone's lifetime is bounded by the generation machinery rather than by a
+merge: it is created at the current generation, so it becomes evictable exactly when the log
+holding its `Delete` intent has been compacted — which is the same moment the compactor drops
+the partition's `ArchiveEntry` ([Compaction](../storage/compaction.md#3-apply)). After that
+there is nothing left to shadow and 17 bytes to reclaim.
 
 ## check_disk
 
@@ -205,16 +265,18 @@ pub struct SortedPartition<T: ShoalSortedTable> {
     pub rows: BTreeMap<T::Sort, MaybeRow<T>>,
     size: usize,
     pub check_disk: bool,
+    #[rkyv(with = Skip)]
+    tombstones: usize,
 }
 ```
 
-`.../tables/partitions.rs:204-214`
+`.../tables/partitions.rs:270-287`
 
 `check_disk` answers: *might there be more of this partition on disk?*
 
-It starts `true` for a newly created partition (`.../tables/partitions.rs:222-229`), because a
+It starts `true` for a newly created partition (`.../tables/partitions.rs:294-303`), because a
 partition created by an insert may be shadowing an archive copy. It is set to `false` once the
-full archive copy has been merged in (`.../persistent/sorted.rs:252`) or a partition has been
+full archive copy has been merged in (`.../tables/partitions.rs:445`) or a partition has been
 deserialized from an `Accessible` read (`.../persistent/sorted.rs:739`, `:1164`, `:1210`,
 `:1250`).
 
@@ -230,7 +292,7 @@ MaybeLoaded::Loaded { partition, .. } => {
 }
 ```
 
-`.../persistent/sorted.rs:407-448`
+`.../persistent/sorted.rs:428-470`
 
 Without it, an insert into a partition that also exists on disk would make subsequent reads
 return only the newly inserted rows. `load_partition` on the storage engine is cheap when
@@ -244,10 +306,10 @@ memory, it is complete.
 
 Both partition types implement:
 
-- `PartitionSupport` — sizing (`.../tables/partitions.rs:197-201`, `:420-427`).
-- `RkyvSupport` — `serialize`/`access`/`deserialize` (`.../tables/partitions.rs:195`, `:415`).
+- `PartitionSupport` — sizing (`.../tables/partitions.rs:262-266`, `:546-553`).
+- `RkyvSupport` — `serialize`/`access`/`deserialize` (`.../tables/partitions.rs:257`, `:541`).
 - `IntentReadSupport<T>` — the recovery and compaction hooks: `scan`, `replay`,
-  `apply_intents`, `partition_key_and_intent` (`.../server/tables/storage.rs:122-165`).
+  `apply_intents`, `partition_key_and_intent` (`.../server/tables/storage.rs:167-210`).
 
 `IntentReadSupport` is where each table type defines what its intents mean. It is implemented
 on the *partition* type rather than the table, because compaction works on partitions without
@@ -270,7 +332,9 @@ being easy to get wrong, and it is wrong in the ways noted above.
 
 ## Limitations
 
-- Tombstones occupy memory but are not accounted for in partition size.
+- Tombstones occupy memory but are not accounted for in partition size. Their lifetime is
+  bounded — they are swept when their partition is marked evictable — but a partition that is
+  written to continuously is never marked, so its tombstones are never swept either.
 - `UnsortedPartition` computes its size two different ways.
 - Sorted partition sizes drift, since they are maintained by delta rather than recomputed.
 - `access(...).unwrap()` on `Accessible` partitions in many places

@@ -11,6 +11,8 @@ default = ["server"]
 server = ["glommio"]
 # enable hotpath profiling
 hotpath = ["hotpath/hotpath"]
+# Enables SHQL autocompletion support for clients
+shql-complete = ["dep:nucleo-matcher"]
 
 [dependencies]
 clap = { version = "4.2", features = ["derive"] }
@@ -47,6 +49,8 @@ tonic = { version = "0.8.2", features = ["tls-roots"] }
 opentelemetry-semantic-conventions = { version = "0.10.0" }
 opentelemetry-proto = { version = "0.1.0"}
 winnow = "0.7"
+unicode-ident = "1"
+nucleo-matcher = { version = "0.3", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

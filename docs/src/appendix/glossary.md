@@ -107,11 +107,13 @@ via `prep`/`consume` and writes full buffers through detached background tasks.
 
 **Tombstone** — A `MaybeRow::Tombstone` marking a deleted row. Necessary because a delete may
 target a row still sitting in an unread archive, so the deletion must be recorded in a form
-that survives a later merge. Removed for real at compaction.
+that survives a later merge. Both table types use it: a sorted partition tombstones one entry
+in its `BTreeMap`, an unsorted partition — which has only one row — becomes a tombstone whole.
+Removed for real at compaction, which also drops the partition's `ArchiveEntry` when nothing
+is left of it.
 
-**Unsorted table** — `PersistentUnsortedTable`. Exactly one row per partition. Note its
-updates and deletes ignore data on disk
-([Known Issues #4](known-issues.md#4-unsorted-updates-and-deletes-never-consult-disk)).
+**Unsorted table** — `PersistentUnsortedTable`. Exactly one row per partition, so a partition
+is either fully resident or not resident at all.
 
 **unsafe Send invariant** — `ServerMsg` asserts `Send` by hand even though its `Partition`
 variant carries a non-`Send` glommio `ReadResult`. The rule that makes this sound — a

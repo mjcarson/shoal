@@ -3,11 +3,12 @@
 //! This module contains the core application struct that manages tabs,
 //! handles user input, and coordinates rendering of all components.
 
-use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, MouseButton, MouseEventKind};
+use crossterm::event::{
+    Event, EventStream, KeyCode, KeyEvent, KeyEventKind, MouseButton, MouseEventKind,
+};
 use futures::StreamExt;
 use kanal::{AsyncReceiver, AsyncSender};
 use ratatui::{DefaultTerminal, Frame};
-use ratatui::layout::Direction;
 use ratatui_hypertile::{Hypertile, HypertileAction, PaneId};
 use shoal::client::{Errors, Shoal, ShoalResponse};
 use shoal::traits::QuerySupport;
@@ -16,7 +17,9 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::AppEvent;
-use crate::components::{HelpOverlay, StatusBar, TabContent, TabQueryBar, TabSelector, TabState};
+use crate::components::{
+    CompletionMenu, HelpOverlay, StatusBar, TabContent, TabQueryBar, TabSelector, TabState,
+};
 
 /// Format column headers and row data as an ASCII table
 ///
@@ -103,11 +106,12 @@ pub enum Mode {
 ///
 /// `Content` carries the UUID of the tab whose results are shown in that pane,
 /// making it straightforward to add independent per-pane tabs in the future.
+///
+/// The query bar is deliberately not one of these — it is fixed chrome sized to its query, and
+/// hypertile only splits proportionally.
 enum PaneKind {
     /// A results/content pane tied to a specific tab
     Content(Uuid),
-    /// The query input bar
-    QueryBar,
 }
 
 /// Background task that forwards terminal events to the central event channel
@@ -155,16 +159,16 @@ pub struct App<S: QuerySupport + Send + Sync> {
     query_input: TabQueryBar,
     /// The help overlay component for displaying shortcuts
     help_overlay: HelpOverlay,
+    /// The completion menu component for suggesting query text
+    completion_menu: CompletionMenu,
     /// Whether shortcut mode is active (triggered by spacebar)
     shortcut_mode_active: bool,
     /// Whether the user has asked shoalctl to exit
     should_quit: bool,
-    /// BSP tiling layout manager for the content + query bar area
+    /// BSP tiling layout manager for the content area
     hypertile: Hypertile,
     /// Map from hypertile pane ID to what that pane displays
     panes: HashMap<PaneId, PaneKind>,
-    /// The hypertile pane ID for the query bar
-    query_pane: PaneId,
     /// The hypertile pane ID for the currently focused content pane
     focused_content_pane: PaneId,
 }
@@ -202,18 +206,17 @@ where
         // create the channel for app events we need to handle
         let (app_tx, app_rx) = kanal::unbounded_async::<AppEvent<S>>();
         // create the initial tab state so we can grab the first tab's UUID
-        let tabs = TabState::default();
+        let mut tabs = TabState::default();
         let first_tab_id = tabs.tabs[0].id;
+        // the query box starts focused, so start it off with the completions for an empty query
+        tabs.refresh_completions();
         // initialize hypertile: the default instance starts with a single root pane.
         // Use focused_pane() to get its ID — panes_iter() requires compute_layout() to have run first.
-        let mut hypertile = Hypertile::default();
+        let hypertile = Hypertile::default();
         let content_pane = hypertile.focused_pane().unwrap();
-        // split the initial pane vertically: content on top, query bar on bottom
-        let query_pane = hypertile.split_focused(Direction::Vertical).unwrap();
         // build the pane-kind map
         let mut panes = HashMap::new();
         panes.insert(content_pane, PaneKind::Content(first_tab_id));
-        panes.insert(query_pane, PaneKind::QueryBar);
         // create our app
         Self {
             shoal,
@@ -228,11 +231,11 @@ where
             status_bar: StatusBar::new(),
             query_input: TabQueryBar::new(),
             help_overlay: HelpOverlay::new(),
+            completion_menu: CompletionMenu::new(),
             shortcut_mode_active: false,
             should_quit: false,
             hypertile,
             panes,
-            query_pane,
             focused_content_pane: content_pane,
         }
     }
@@ -262,7 +265,7 @@ where
         match event {
             // handle key press events
             Event::Key(key) if key.kind == KeyEventKind::Press => {
-                self.handle_key(key.code).await;
+                self.handle_key(key).await;
             }
             // handle mouse click events (work in any mode)
             Event::Mouse(mouse) => match mouse.kind {
@@ -284,14 +287,26 @@ where
     ///
     /// When the query box is focused, all typing goes to the query.
     /// When unfocused, key behavior depends on the current mode.
-    /// Escape always switches from Insert to Normal mode or exits shortcut mode.
+    /// Escape always closes the completion menu, switches from Insert to Normal mode, or
+    /// exits shortcut mode.
     ///
     /// # Arguments
     ///
-    /// * `code` - The key code that was pressed
-    async fn handle_key(&mut self, code: KeyCode) {
+    /// * `key` - The key that was pressed
+    async fn handle_key(&mut self, key: KeyEvent) {
+        // pull out the key that was pressed, since most handling only cares about that
+        let code = key.code;
         // if the escape key was hit then revert to normal mode or minimize the help window
         if code == KeyCode::Esc {
+            // check if we need to close the completion menu
+            if let Some(tab) = self.tabs.get_active_mut()
+                && tab.completion.is_open()
+            {
+                // close the completion menu
+                tab.completion.close();
+                // we only exit one thing at a time
+                return;
+            }
             // check if we need to minimize the shortcut help window
             if self.shortcut_mode_active {
                 // minimize the shortcut help window
@@ -317,7 +332,7 @@ where
         // If the query box is focused, handle input for the query
         if self.query_focused {
             self.tabs
-                .handle_query_input(code, &self.shoal, &mut self.app_tx)
+                .handle_query_input(key, &self.shoal, &mut self.app_tx)
                 .await;
         } else {
             // Query not focused, use mode-based handling
@@ -359,32 +374,42 @@ where
                     self.sync_focused_pane_tab();
                 }
             }
-            // resize: grow query bar
-            KeyCode::Char(']') => self.resize_query_pane(0.05),
-            // resize: shrink query bar
-            KeyCode::Char('[') => self.resize_query_pane(-0.05),
+            // resize: grow the focused pane
+            KeyCode::Char(']') => self.resize_focused_pane(0.05),
+            // resize: shrink the focused pane
+            KeyCode::Char('[') => self.resize_focused_pane(-0.05),
             // ignore all other keys
             _ => {}
         }
     }
 
-    /// Resize the query bar pane by the given delta.
+    /// Resize the focused content pane by the given delta.
     ///
-    /// Positive delta grows the query bar; negative shrinks it.
-    /// The query pane is focused in hypertile before applying `ResizeFocused`
-    /// so that the resize acts on the correct pane.
-    fn resize_query_pane(&mut self, delta: f32) {
-        // ensure hypertile focus is on the query pane
-        let currently_focused = self
-            .hypertile
-            .panes_iter()
-            .find(|p| p.is_focused)
-            .map(|p| p.id);
-        if currently_focused != Some(self.query_pane) {
-            self.hypertile.apply_action(HypertileAction::FocusNext);
-        }
+    /// Positive delta grows the pane; negative shrinks it. This does nothing until a second
+    /// content pane exists to take the space from, since the query bar is no longer tiled.
+    ///
+    /// # Arguments
+    ///
+    /// * `delta` - The share of the area to grow the focused pane by
+    fn resize_focused_pane(&mut self, delta: f32) {
         self.hypertile
             .apply_action(HypertileAction::ResizeFocused { delta });
+    }
+
+    /// Focus the query box, bringing up the completions for whatever it already holds
+    fn focus_query(&mut self) {
+        self.query_focused = true;
+        // show what could be typed at the cursor without waiting for a keystroke
+        self.tabs.refresh_completions();
+    }
+
+    /// Unfocus the query box, putting away any completions it was showing
+    fn blur_query(&mut self) {
+        self.query_focused = false;
+        // a menu hanging over an unfocused box has nothing to accept it
+        if let Some(tab) = self.tabs.get_active_mut() {
+            tab.completion.clear();
+        }
     }
 
     /// Handle a key press in shortcut mode
@@ -405,7 +430,7 @@ where
 
         match code {
             // focus the query box
-            KeyCode::Char('q') => self.query_focused = true,
+            KeyCode::Char('q') => self.focus_query(),
             // clear the query box
             KeyCode::Char('w') => self.tabs.clear_query(),
             // create a new tab
@@ -477,12 +502,12 @@ where
                 && y >= query_area.y
                 && y < query_area.y + query_area.height
             {
-                self.query_focused = true;
+                self.focus_query();
                 return;
             }
         }
         // Click was outside the query box, unfocus it
-        self.query_focused = false;
+        self.blur_query();
 
         // check if the click was on the add button
         if self.tabs_component.is_add_button_clicked(x, y) {
@@ -499,8 +524,9 @@ where
 
     /// Render the application to the terminal
     ///
-    /// Draws the tab bar at the top, then uses hypertile to lay out the content
-    /// area and query input, and the status bar at the bottom.
+    /// Draws the tab bar and the query box at the top, then uses hypertile to lay out the
+    /// content panes below them, and the status bar at the bottom. The query box sits above the
+    /// results so completions have somewhere to drop down into.
     ///
     /// # Arguments
     ///
@@ -508,31 +534,37 @@ where
     pub fn render(&mut self, frame: &mut Frame) {
         use ratatui::layout::{Constraint, Layout};
 
-        // Fixed chrome: tab bar + hypertile middle + status bar
+        // the query box is only as tall as its query, so measure it before laying anything out
+        let query_height = TabQueryBar::height(self.tabs.get_active(), frame.area().width);
+        // Fixed chrome: tab bar + query bar + hypertile middle + status bar
         let chunks = Layout::vertical([
-            Constraint::Length(3), // tab bar
-            Constraint::Min(0),    // hypertile-managed area
-            Constraint::Length(2), // status bar
+            Constraint::Length(3),            // tab bar
+            Constraint::Length(query_height), // query bar
+            Constraint::Min(0),               // hypertile-managed area
+            Constraint::Length(2),            // status bar
         ])
         .split(frame.area());
 
         // Render fixed chrome
         self.tabs_component.render(frame, chunks[0], &self.tabs);
-        self.status_bar.render(frame, chunks[2], self.mode);
+        self.status_bar.render(frame, chunks[3], self.mode);
+        // hang on to the query box's area so clicks on it can be spotted
+        self.query_area = Some(chunks[1]);
+        // draw the query box, which hands back where it put the cursor
+        let cursor =
+            self.query_input
+                .render(frame, chunks[1], self.tabs.get_active(), self.query_focused);
 
-        // Compute pane rectangles for the middle section
-        self.hypertile.compute_layout(chunks[1]);
+        // Compute pane rectangles for the content section
+        self.hypertile.compute_layout(chunks[2]);
         let snapshots: Vec<_> = self.hypertile.panes_iter().collect();
 
-        // First pass: update viewport dimensions and query_area from computed rects
+        // First pass: update viewport dimensions from computed rects
         for snap in &snapshots {
             match self.panes.get(&snap.id) {
                 Some(PaneKind::Content(_)) if snap.id == self.focused_content_pane => {
                     self.tabs.viewport_height = snap.rect.height.saturating_sub(2);
                     self.tabs.viewport_width = snap.rect.width.saturating_sub(2);
-                }
-                Some(PaneKind::QueryBar) => {
-                    self.query_area = Some(snap.rect);
                 }
                 _ => {}
             }
@@ -546,13 +578,16 @@ where
                     let tab = self.tabs.tabs.iter().find(|t| t.id == tab_id);
                     self.content_component.render(frame, snap.rect, tab);
                 }
-                Some(PaneKind::QueryBar) => {
-                    let active_tab = self.tabs.get_active();
-                    self.query_input
-                        .render(frame, snap.rect, active_tab, self.query_focused);
-                }
                 None => {}
             }
+        }
+
+        // drop the completion menu under the cursor, but only while the box it belongs to is
+        // focused, since the menu can be open on a query that has not been typed in yet
+        if let (true, Some(cursor), Some(tab)) =
+            (self.query_focused, cursor, self.tabs.get_active())
+        {
+            self.completion_menu.render(frame, cursor, tab);
         }
 
         // render the help overlay if shortcut mode is active

@@ -38,8 +38,8 @@ impl HelpOverlay {
     /// * `area` - The full terminal area (overlay positions itself)
     pub fn render(&self, frame: &mut Frame, area: Rect) {
         // Define the overlay size
-        let overlay_width = 24u16;
-        let overlay_height = 8u16;
+        let overlay_width = 28u16;
+        let overlay_height = 14u16;
 
         // Calculate position in bottom right corner with some padding
         let x = area.width.saturating_sub(overlay_width + 2);
@@ -64,6 +64,37 @@ impl HelpOverlay {
             Line::from(vec![
                 Span::styled("p", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
                 Span::raw(" - close tab"),
+            ]),
+            Line::from(""),
+            Line::from(Span::styled(
+                "completions",
+                Style::default().fg(Color::DarkGray),
+            )),
+            Line::from(vec![
+                Span::styled("tab", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::raw("/"),
+                Span::styled("c-n", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::raw(" - next"),
+            ]),
+            Line::from(vec![
+                Span::styled("s-tab", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::raw("/"),
+                Span::styled("c-p", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::raw(" - prev"),
+            ]),
+            Line::from(vec![
+                Span::styled("enter", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::raw(" - accept"),
+            ]),
+            Line::from(vec![
+                Span::styled("c-space", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::raw(" - show all"),
+            ]),
+            Line::from(vec![
+                Span::styled("esc", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::raw(" then "),
+                Span::styled("enter", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::raw(" - run"),
             ]),
             Line::from(""),
             Line::from(Span::styled(

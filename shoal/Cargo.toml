@@ -29,6 +29,8 @@ mimalloc = { workspace = true }
 hotpath = { workspace = true }
 
 [dev-dependencies]
+# the shql tests cover autocompletion, which clients opt into
+shoal-core = { version = "0.1.0", path = "../shoal-core", features = ["shql-complete"] }
 clap = { version = "4.2", features = ["derive"] }
 csv-async = { version = "1.3", features = ["tokio", "with_serde"] }
 serde = "1.0.219"

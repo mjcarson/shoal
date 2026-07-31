@@ -87,6 +87,9 @@ pub struct FileSystem<D: ShoalDatabase> {
     /// The intent log to write to
     intent_log2: StreamWriter<D>,
     /// The current intent log generation
+    ///
+    /// This starts at 1 rather than 0 so that a generation of 0 can be used to mean
+    /// "no generation has been compacted yet" by anything gating on durability.
     pub generation: u64,
     /// The medium priority task queue
     medium_priority: TaskQueueHandle,
@@ -288,7 +291,8 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
             shard_name: shard_name.to_owned(),
             intent_path,
             intent_log2,
-            generation: 0,
+            // generations start at 1 so 0 can mean "nothing has been compacted yet"
+            generation: 1,
             medium_priority,
             table_conf,
             intent_tx,

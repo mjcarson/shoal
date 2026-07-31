@@ -53,13 +53,20 @@ the record, the flush watermark only advances over contiguously completed writes
 write to the log is block aligned. See [Durability model](storage/overview.md#durability-model)
 and [Intent Log](storage/intent-log.md).
 
+Deleted rows also used to come back, in three separate ways: compaction pruned a partition
+without removing its archive map entry, unsorted deletes never looked at disk in the first
+place, and a partition could be marked evictable while its delete was still in an open intent
+log — dropping the tombstone that was the only thing hiding the archived row. All three are
+fixed ([#4](appendix/resolved/unsorted-disk-consultation.md),
+[#5](appendix/resolved/resurrected-deletes.md)).
+
 Other parts of the branch are still rough. Read [Known Issues](appendix/known-issues.md)
-before drawing conclusions about anything else — the most serious open defect is that
-compaction can resurrect deleted rows
-([#5](appendix/known-issues.md#5-pruned-partitions-leak-a-stale-archive-map-entry)).
+before drawing conclusions about anything else, and
+[Resolved Issues](appendix/resolved-issues.md) before changing anything the fixes above depend
+on.
 
 The workspace compiles — `cargo check --workspace --all-targets` passes with warnings only,
-and `cargo test --workspace` passes with 14 integration tests and 32 unit tests.
+and `cargo test --workspace` passes with 71 integration tests and 94 unit tests.
 
 ## Crate map
 
@@ -88,7 +95,9 @@ If you are new to the codebase, read in this order:
 3. [Storage Overview](storage/overview.md) — the three on-disk structures.
 4. [Derive Macros](api/derive-macros.md) — where all the generated code comes from, since
    roughly half of what runs at query time does not appear in the repo as source.
-5. [Known Issues](appendix/known-issues.md) — before you trust anything.
+5. [Known Issues](appendix/known-issues.md) — before you trust anything, and
+   [Resolved Issues](appendix/resolved-issues.md) before you change anything: each page there
+   ends with the invariants its fix depends on.
 
 The single most informative file in the repository is
 `shoal-derive/src/traits/db.rs`, which generates the `ShoalDatabase` impl that dispatches

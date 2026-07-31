@@ -36,7 +36,7 @@ use crate::shared::traits::{
 use crate::storage::{
     FullArchiveMap, IntentReadSupport, LoaderMsg, Loaders, PendingResponse, ShouldPrune,
 };
-use crate::tables::partitions::MaybeLoaded;
+use crate::tables::partitions::{ArchivedMaybeRow, MaybeLoaded, MaybeRow};
 
 /// The different types of entries in a shoal intent log
 #[derive(Debug, Archive, Serialize, Deserialize)]
@@ -91,8 +91,14 @@ pub struct PersistentUnsortedTable<R: ShoalUnsortedTable, S: StorageSupport, N: 
     pub partitions: HashMap<u64, MaybeLoaded<UnsortedPartition<R>>>,
     /// The storage engine backing this table
     storage: S,
-    /// The current generation of flushed data
+    /// The generation this tables intent log is currently accepting writes in
     generation: u64,
+    /// The newest generation whose intent log has been compacted into an archive
+    ///
+    /// A partition may only be evicted once its own generation is covered by this,
+    /// since anything newer exists only in an intent log that has not been applied
+    /// to an archive yet. Generations start at 1 so 0 means nothing is compacted.
+    flushed_generation: u64,
     /// The commits that are still pending storage confirmation
     pending: PendingResponse<R>,
     /// The responses for queries that have been flushed to disk
@@ -178,7 +184,9 @@ where
                 shard_local_tx,
             )
             .await?,
-            generation: 0,
+            // this matches the generation our storage engine starts in
+            generation: 1,
+            flushed_generation: 0,
             pending: PendingResponse::<R>::with_capacity(100),
             flushed: Vec::with_capacity(1000),
             loader_tx: loader_tx.clone(),
@@ -197,7 +205,10 @@ where
             )
             .await?;
         // compact our intent log
-        table.storage.compact_if_needed::<R>(true).await?;
+        let progress = table.storage.compact_if_needed::<R>(true).await?;
+        // that rotation sealed the generation we just replayed, so our new writes
+        // belong to the generation it opened rather than the one we replayed into
+        table.generation = progress.generation;
         Ok(table)
     }
 
@@ -220,6 +231,12 @@ where
     }
 
     /// Load this partition from disk if needed
+    ///
+    /// The generation returned alongside any unblocked queries is the generation our
+    /// caller will mark this partition evictable at. That has to be the newest
+    /// compacted generation and not the one we are writing in: the queries we are
+    /// about to release can modify this partition, and their intents would land in
+    /// an intent log that has not been compacted yet.
     pub async fn load_partition(
         &mut self,
         loaded: LoadedPartition,
@@ -228,7 +245,10 @@ where
         // as that should be older
         match self.partitions.entry(loaded.partition_id) {
             hash_map::Entry::Occupied(mut entry) => {
-                // if this partition contains already loaded data then we should use that
+                // Only overwrite an accessible partition, since that is just another
+                // copy of the same archive extent. A loaded partition is either newer
+                // than what we read or a tombstone shadowing it, and in both cases
+                // our freshly read data is stale.
                 if let &mut MaybeLoaded::Accessible(_) = entry.get_mut() {
                     // get the size of our dat
                     let size = loaded.data.len();
@@ -263,7 +283,49 @@ where
         // get the queries that were blocked on this partition
         self.blocked
             .remove(&loaded.partition_id)
-            .map(|unblocked| (unblocked, self.generation))
+            .map(|unblocked| (unblocked, self.flushed_generation))
+    }
+
+    /// Block a query on a partition being loaded from disk
+    ///
+    /// Returns true if this query was parked and false if this partition has no
+    /// data on disk to wait for, in which case the caller should answer now.
+    ///
+    /// # Arguments
+    ///
+    /// * `partition_key` - The key of the partition this query needs
+    /// * `meta` - The metadata for the query to park
+    /// * `query` - The query to replay once this partition has been loaded
+    #[instrument(name = "PersistentTable::block_on_load", skip_all)]
+    async fn block_on_load(
+        &mut self,
+        partition_key: u64,
+        meta: &QueryMetadata,
+        query: UnsortedQuery<R>,
+    ) -> bool {
+        // if this partition already has blocked queries then a load is in flight
+        // for it, so queue behind that load rather than requesting it again
+        if let Some(entry) = self.blocked.get_mut(&partition_key) {
+            // park this query behind the load we have already requested
+            entry.push((meta.clone(), query));
+            return true;
+        }
+        // try to load this partition from disk if it exists
+        let will_load = self
+            .storage
+            .load_partition(self.table_name, partition_key, &self.loader_tx)
+            .await
+            .unwrap();
+        // if this partition has no data on disk then there is nothing to wait for
+        if !will_load {
+            return false;
+        }
+        // park this query until its partition has been loaded from disk
+        self.blocked
+            .entry(partition_key)
+            .or_default()
+            .push((meta.clone(), query));
+        true
     }
 
     /// Cast and handle a serialized query
@@ -405,20 +467,13 @@ where
             }
             // this partition isn't loaded so lets try and load it from disk
             None => {
-                // try to load this partition from disk if it exists
-                let will_load = self
-                    .storage
-                    .load_partition(self.table_name, get.partition_key, &self.loader_tx)
+                // get this queries partition key before we hand our query off
+                let partition_key = get.partition_key;
+                // block this query if this partition has data on disk to load
+                if self
+                    .block_on_load(partition_key, &meta, UnsortedQuery::Get(get))
                     .await
-                    .unwrap();
-                // if we aren't going to load data then return that this partition doesn't exist
-                if will_load {
-                    // if we need to load this then add this query to a map of queries
-                    // that are blocked on partitions being loaded from disk
-                    // get an entry to our partitions blocked queries
-                    let entry = self.blocked.entry(get.partition_key).or_default();
-                    // add our blocked query for this partitions blocked query list
-                    entry.push((meta, UnsortedQuery::Get(get)));
+                {
                     // return None since we don't yet have a response for this query
                     None
                 } else {
@@ -455,26 +510,31 @@ where
                 // check if this partition is deserialized or accessible
                 let exists = match partition {
                     // this partition is deserialized
-                    MaybeLoaded::Loaded { partition, .. } => {
-                        // check if we have filters to apply
-                        if let Some(filters) = &exists_query.filters {
+                    MaybeLoaded::Loaded { partition, .. } => match &partition.row {
+                        // this partitions row still exists so check any filters
+                        MaybeRow::Row(row) => match &exists_query.filters {
                             // return true if this partition matches our filter
-                            R::is_filtered(filters, &partition.row)
-                        } else {
+                            Some(filters) => R::is_filtered(filters, row),
                             // no filters, data exists
-                            true
-                        }
-                    }
+                            None => true,
+                        },
+                        // this partitions row has been deleted
+                        MaybeRow::Tombstone => false,
+                    },
                     MaybeLoaded::Accessible(read) => {
                         // access our data
                         let access = UnsortedPartition::<R>::access(read).unwrap();
-                        // check if we have filters to apply
-                        if let Some(filters) = &exists_query.filters {
-                            // return true if this partition matches our filter
-                            R::is_filtered_archived(filters, &access.row)
-                        } else {
-                            // no filters, data exists
-                            true
+                        // check if this archived row still exists
+                        match &access.row {
+                            // this partitions row still exists so check any filters
+                            ArchivedMaybeRow::Row(row) => match &exists_query.filters {
+                                // return true if this partition matches our filter
+                                Some(filters) => R::is_filtered_archived(filters, row),
+                                // no filters, data exists
+                                None => true,
+                            },
+                            // this partitions row has been deleted
+                            ArchivedMaybeRow::Tombstone => false,
                         }
                     }
                 };
@@ -493,19 +553,13 @@ where
             }
             // this partition isn't loaded so lets try and load it from disk
             None => {
-                // try to load this partition from disk if it exists
-                let will_load = self
-                    .storage
-                    .load_partition(self.table_name, exists_query.partition_key, &self.loader_tx)
+                // build the query to replay once this partition has been loaded
+                let blocked = UnsortedQuery::Exists(exists_query.clone());
+                // block this query if this partition has data on disk to load
+                if self
+                    .block_on_load(exists_query.partition_key, &meta, blocked)
                     .await
-                    .unwrap();
-                // if we aren't going to load data then return that this partition doesn't exist
-                if will_load {
-                    // if we need to load this then add this query to a map of queries
-                    // that are blocked on partitions being loaded from disk
-                    let entry = self.blocked.entry(exists_query.partition_key).or_default();
-                    // add our blocked query for this partitions blocked query list
-                    entry.push((meta, UnsortedQuery::Exists(exists_query.clone())));
+                {
                     // return None since we don't yet have a response for this query
                     None
                 } else {
@@ -524,11 +578,14 @@ where
 
     /// Delete a row from this table
     ///
+    /// Deletes only succeed if the row exists. If the partition is not resident
+    /// then it is loaded from disk first and this query is replayed once it
+    /// arrives. If the partition does not exist on disk either, returns false.
+    ///
     /// # Arguments
     ///
     /// * `meta` - The metadata about this delete query
     /// * `key` - The key to the partition to dlete data from
-    /// * `sort` - The sort key to delete
     #[instrument(name = "PersistentTable::delete", skip_all)]
     async fn delete(&mut self, meta: QueryMetadata, key: u64) -> Option<(Uuid, Uuid, Response<R>)>
     where
@@ -536,27 +593,56 @@ where
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
         >,
     {
-        // remove this partition
-        match self.partitions.remove(&key) {
-            Some(old) => {
-                // wrap our row in an insert intent
-                let intent = UnsortedIntents::<R>::delete(key);
-                // wite this delete to our intent log
-                let pos = self.storage.commit(&intent).await.unwrap();
-                // build the pending action to store
-                let action = ResponseAction::Delete(true);
-                // add this action to our pending queue
-                self.pending.add(meta, pos, action);
-                // calculate the new memory usage
-                let new_size = self.memory_usage.borrow().saturating_sub(old.size());
-                // adjust this shards total memory usage
-                *self.memory_usage.borrow_mut() = new_size;
-                // remove this partition from our lru cache as its no longer evictable
-                self.lru.borrow_mut().pop(&(self.table_name, key));
-                // wait for this delete to get flushed to disk
-                None
+        // get the partition we want to delete
+        match self.partitions.get_mut(&key) {
+            Some(partition) => {
+                // a partition that has already been deleted has nothing left to delete
+                if !partition.is_tombstoned() {
+                    // get the size of the partition we are about to delete
+                    let old_size = partition.size();
+                    // wrap our key in a delete intent
+                    let intent = UnsortedIntents::<R>::delete(key);
+                    // wite this delete to our intent log
+                    let pos = self.storage.commit(&intent).await.unwrap();
+                    // replace this partition with a tombstone rather than dropping it,
+                    // since a pre-delete copy may still be sitting in an archive and
+                    // any later read would load it back
+                    *partition = MaybeLoaded::Loaded {
+                        partition: UnsortedPartition::tombstone(key),
+                        generation: self.generation,
+                    };
+                    // get the difference in size between our tombstone and our row
+                    let diff = partition.size().cast_signed() - old_size.cast_signed();
+                    // add this action to our pending queue
+                    self.pending.add(meta, pos, ResponseAction::Delete(true));
+                    // do a saturating add on our memory usage
+                    let new_size = self.memory_usage.borrow().saturating_add_signed(diff);
+                    // adjust this shards total memory usage
+                    *self.memory_usage.borrow_mut() = new_size;
+                    // remove this partition from our lru cache as its no longer evictable
+                    self.lru.borrow_mut().pop(&(self.table_name, key));
+                    // wait for this delete to get flushed to disk
+                    return None;
+                }
+                // this rows already been deleted and so can't be deleted again
+                let response = Response {
+                    id: meta.id,
+                    index: meta.index,
+                    data: ResponseAction::Delete(false),
+                    end: meta.end,
+                };
+                Some((meta.client, meta.id, response))
             }
             None => {
+                // this partition may still be on disk so check there before
+                // telling our client it doesn't exist
+                if self
+                    .block_on_load(key, &meta, UnsortedQuery::Delete { key })
+                    .await
+                {
+                    // wait for this partition to be loaded and this query replayed
+                    return None;
+                }
                 // cast this action to a response
                 let response = Response {
                     id: meta.id,
@@ -571,6 +657,10 @@ where
     }
 
     /// Update a row in this table
+    ///
+    /// Updates only succeed if the row exists. If the partition is not resident
+    /// then it is loaded from disk first and this query is replayed once it
+    /// arrives. If the partition does not exist on disk either, returns false.
     ///
     /// # Arguments
     ///
@@ -590,38 +680,60 @@ where
         // get this rows partition
         match self.partitions.get_mut(&update.partition_key) {
             Some(partition) => {
-                // get our old partition size
-                let old_size = partition.size();
-                // update this paritions data
-                if let Some(loaded) = partition.update(&update) {
-                    // replace our accessible partition with our loaded one
-                    *partition = MaybeLoaded::Loaded {
-                        partition: loaded,
-                        generation: self.generation,
-                    };
+                // a partition whose row has been deleted has nothing to update
+                if !partition.is_tombstoned() {
+                    // get our old partition size
+                    let old_size = partition.size();
+                    // update this paritions data
+                    if let Some(loaded) = partition.update(&update) {
+                        // replace our accessible partition with our loaded one
+                        *partition = MaybeLoaded::Loaded {
+                            partition: loaded,
+                            generation: self.generation,
+                        };
+                    }
+                    // get our partition key so we can remove this from our lru cache later
+                    let key = update.partition_key;
+                    // wrap our row in an delete intent
+                    let intent = UnsortedIntents::<R>::update(update);
+                    // write this update to storage
+                    let pos = self.storage.commit(&intent).await.unwrap();
+                    // we updated some data
+                    let action = ResponseAction::Update(true);
+                    // add this action to our pending queue
+                    self.pending.add(meta, pos, action);
+                    // get the difference in size
+                    let diff = partition.size().cast_signed() - old_size.cast_signed();
+                    // do a saturating add on our memory usage
+                    let new_size = self.memory_usage.borrow().saturating_add_signed(diff);
+                    // adjust our total shards memory usage
+                    *self.memory_usage.borrow_mut() = new_size;
+                    // remove this partition from our lru cache as its no longer evictable
+                    self.lru.borrow_mut().pop(&(self.table_name, key));
+                    // wait for this delete to get flushed to disk
+                    return None;
                 }
-                // get our partition key so we can remove this from our lru cache later
-                let key = update.partition_key;
-                // wrap our row in an delete intent
-                let intent = UnsortedIntents::<R>::update(update);
-                // write this update to storage
-                let pos = self.storage.commit(&intent).await.unwrap();
-                // we updated some data
-                let action = ResponseAction::Update(true);
-                // add this action to our pending queue
-                self.pending.add(meta, pos, action);
-                // get the difference in size
-                let diff = partition.size().cast_signed() - old_size.cast_signed();
-                // do a saturating add on our memory usage
-                let new_size = self.memory_usage.borrow().saturating_add_signed(diff);
-                // adjust our total shards memory usage
-                *self.memory_usage.borrow_mut() = new_size;
-                // remove this partition from our lru cache as its no longer evictable
-                self.lru.borrow_mut().pop(&(self.table_name, key));
-                // wait for this delete to get flushed to disk
-                None
+                // this row has been deleted so theres nothing to update
+                let response = Response {
+                    id: meta.id,
+                    index: meta.index,
+                    data: ResponseAction::Update(false),
+                    end: meta.end,
+                };
+                Some((meta.client, meta.id, response))
             }
             None => {
+                // get this updates partition key before we hand our query off
+                let partition_key = update.partition_key;
+                // this partition may still be on disk so check there before
+                // telling our client it doesn't exist
+                if self
+                    .block_on_load(partition_key, &meta, UnsortedQuery::Update(update))
+                    .await
+                {
+                    // wait for this partition to be loaded and this query replayed
+                    return None;
+                }
                 // we didn't find any data to update
                 let action = ResponseAction::Update(false);
                 // cast this action to a response
@@ -638,9 +750,19 @@ where
     }
 
     /// Mark partitions as evictable if they are no longer in the intent log
+    ///
+    /// The generation we are given names an intent log that has been compacted into
+    /// an archive, so it also tells us how far our own data has been made durable.
+    ///
+    /// # Arguments
+    ///
+    /// * `generation` - The newest generation that has been compacted
+    /// * `partitions` - The partitions to consider marking as evictable
     #[instrument(name = "PersistentTable::mark_evictable", skip(self, partitions), fields(partition_count = partitions.len()))]
     pub fn mark_evictable(&mut self, generation: u64, partitions: Vec<u64>) {
         let mut marked = 0;
+        // track how far our data has been compacted
+        self.flushed_generation = self.flushed_generation.max(generation);
         // check each partition that we find might be evictable now
         for partition in partitions {
             // try to get this partition
@@ -657,7 +779,11 @@ where
                 }
             }
         }
-        event!(Level::INFO, marked);
+        event!(
+            Level::INFO,
+            marked,
+            flushed_generation = self.flushed_generation
+        );
     }
 
     /// Evict partitions from memory
@@ -833,10 +959,29 @@ where
             ArchivedUnsortedIntents::Delete { partition_key } => {
                 // convert our partition key to its native endianess
                 let partition_key = partition_key.to_native();
-                // try to delete this partition
-                if let Some(removed) = partitions.remove(&partition_key) {
-                    // we are removing a loaded partition so adjust our memory usage
-                    *memory_usage.borrow_mut() -= removed.size();
+                // build the tombstone for this deleted partition, since the pre-delete
+                // copy may still be in an archive that has not been compacted yet
+                let tombstone = UnsortedPartition::tombstone(partition_key);
+                // get the size of our tombstone
+                let size = tombstone.size;
+                // wrap our tombstone as a loaded partition
+                let wrapped = MaybeLoaded::Loaded {
+                    partition: tombstone,
+                    generation,
+                };
+                // replace this partition with its tombstone
+                match partitions.insert(partition_key, wrapped) {
+                    // if we had an existing partition then get the difference in size
+                    Some(old) => {
+                        // calculate the change in size
+                        let size_diff = size.cast_signed() - old.size().cast_signed();
+                        // do a saturating add on our memory usage
+                        let new_size = memory_usage.borrow().saturating_add_signed(size_diff);
+                        // adjust our memory usage correctly
+                        *memory_usage.borrow_mut() = new_size;
+                    }
+                    // we did not have an existing partition so just increment our sizes
+                    None => *memory_usage.borrow_mut() += size,
                 }
             }
             ArchivedUnsortedIntents::Update(archived) => {
@@ -863,8 +1008,13 @@ where
                         // adjust our total memory usage based on our newly updated row
                         *memory_usage.borrow_mut() = new_size;
                     }
-                    // TODO handling a partition missing
-                    None => panic!("Missing partition?"),
+                    // This updates base row is neither resident nor on disk, so the
+                    // insert it was built on is gone. Skip it rather than crashing a
+                    // shard that would otherwise start.
+                    None => tracing::warn!(
+                        "Skipping update intent for missing partition {}",
+                        update.partition_key
+                    ),
                 }
             }
         }
@@ -875,14 +1025,17 @@ where
     ///
     /// # Arguments
     ///
-    /// * `intent` - The intent to apply to this partition
+    /// * `loaded` - The partitions loaded from their current archives
+    /// * `key` - The key of the partition to apply intents to
+    /// * `intents` - The intents to apply to this partition
     fn apply_intents(
         loaded: &mut HashMap<u64, Self>,
         key: u64,
         intents: Vec<Self::Intent>,
     ) -> ShouldPrune {
-        // start with no partition
-        let mut maybe_partition = None;
+        // start from this partitions current archive copy if it has one, since an
+        // update can target a row whose insert was compacted generations ago
+        let mut maybe_partition = loaded.remove(&key);
         // apply all of our intents to this partition
         for intent in intents {
             // apply this intent to our partition
@@ -895,21 +1048,30 @@ where
                 UnsortedIntents::Update(update) => {
                     // apply this update if we have a partition
                     match &mut maybe_partition {
-                        Some(partition) => partition.update(&update),
-                        None => panic!("Applying update to no partition?"),
+                        Some(partition) => {
+                            partition.update(&update);
+                        }
+                        // this updates base row is gone, so there is nothing to
+                        // apply it to and nothing we can do but drop it
+                        None => tracing::warn!(
+                            "Skipping update intent for missing partition {}",
+                            key
+                        ),
                     }
                 }
             }
         }
-        // only insert this partition if we ended with one
-        if let Some(partition) = maybe_partition {
-            // insert this partition
-            loaded.insert(key, partition);
-            // we have a partition still so this partition should not be pruned
-            ShouldPrune::No
-        } else {
+        // only insert this partition if we ended with live row data
+        match maybe_partition {
+            // a tombstone is never written to an archive, the partition is pruned instead
+            Some(partition) if !partition.is_tombstoned() => {
+                // insert this partition
+                loaded.insert(key, partition);
+                // we have a partition still so this partition should not be pruned
+                ShouldPrune::No
+            }
             // we do not have a partition so prune it
-            ShouldPrune::Yes
+            _ => ShouldPrune::Yes,
         }
     }
 

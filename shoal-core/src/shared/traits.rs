@@ -30,7 +30,7 @@ use crate::server::messages::{LoadedPartitionKinds, QueryMetadata, ServerMsg};
 use crate::server::ring::Ring;
 use crate::server::shard::ShardInfo;
 use crate::server::{Conf, ServerError};
-use crate::shared::queries::parser::{FieldRole, TypeValidator};
+use crate::shared::queries::parser::{FieldInfo, FieldRole, TypeValidator};
 use crate::shared::responses::ResponseActionNames;
 use crate::storage::{FullArchiveMap, LoaderMsg, Loaders};
 
@@ -169,6 +169,26 @@ pub trait QuerySupport: 'static + Sized {
     ///
     /// * `query` - The SHQL query string to parse
     fn parse(query: &str) -> Result<Self::QueryKinds, ShqlParseError>;
+
+    /// Get the names of every table in this database
+    ///
+    /// These are the names that can follow `FROM` in a query.
+    fn table_names() -> &'static [&'static str];
+
+    /// Get the fields for a table and the role each one plays in a query
+    ///
+    /// # Arguments
+    ///
+    /// * `table` - The name of the table to get fields for
+    fn table_fields(table: &str) -> Option<Vec<FieldInfo>>;
+
+    /// Get the type validator for a single field in a table
+    ///
+    /// # Arguments
+    ///
+    /// * `table` - The name of the table this field is in
+    /// * `field` - The name of the field to get a validator for
+    fn table_field_validator(table: &str, field: &str) -> Option<TypeValidator>;
 
     /// Get the table name from a query
     ///
@@ -365,6 +385,22 @@ pub trait TableSchemaSupport {
 
     /// Get all valid field names
     fn field_names() -> Vec<&'static str>;
+
+    /// Get every field in this table paired with the role it plays in a query
+    ///
+    /// Fields with no role cannot be used in a where clause, so they come back with a role of
+    /// `None` rather than being skipped. Callers that are building a list of usable fields
+    /// should filter those out.
+    fn fields() -> Vec<FieldInfo> {
+        // pair each of our field names with its role
+        Self::field_names()
+            .into_iter()
+            .map(|name| FieldInfo {
+                name,
+                role: Self::get_field_role(name),
+            })
+            .collect()
+    }
 }
 
 /// Support for formatting table rows as displayable strings

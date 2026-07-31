@@ -1,84 +1,29 @@
 # Known Issues
 
-A severity-ranked index of defects found by reading the code on the `ZeroCopyResponses`
-branch. Each entry names the symptom, the cause, and a `file:line`.
+A severity-ranked index of open defects on the `ZeroCopyResponses` branch. Each entry names
+the symptom, the cause, and a `file:line`.
 
-**How these were established.** Everything here comes from reading the source, except item 5,
-which was reproduced against a running server (see below). Line numbers drift.
+**How these were established.** Everything here comes from reading the source unless an entry
+says otherwise. Line numbers drift.
 
-**Fixed since this list was written:** the three critical durability defects — `commit`
-returning a hardcoded position, the flush watermark reporting a buffer's start offset, and the
-missing `fdatasync` — have all been fixed, along with the unaligned O_DIRECT writes and the
-rotation hazards they exposed. See [Intent Log](../storage/intent-log.md) for the design that
-replaced them. Everything else below still stands.
-
-Item numbers are kept stable so cross references from the rest of the book keep resolving,
-which is why this list starts at item 4.
+Defects that have been fixed move to [Resolved Issues](resolved-issues.md), one page each,
+carrying the reasoning and the invariants the fix depends on. Item numbers are shared between
+the two pages and never reused, so a number appears on exactly one of them — which is why this
+list starts at 6. The exceptions are items 9, 20, and 24, which were only partly fixed: the
+open remainder is here and the rest is there.
 
 **Baseline as of writing:** `cargo check --workspace --all-targets` passes with warnings;
-`cargo test --workspace` passes — 14 integration tests, 32 unit tests.
+`cargo test --workspace` passes — 71 integration tests, 87 `shoal-core` unit tests, 6
+doctests. That is up from 14 and 32 with the addition of SHQL coverage
+([SHQL](../api/shql.md#testing)) and the restart and eviction tests added with items 4 and 5.
 
 ---
 
 ## High — data loss and silent failure
 
-### 4. Unsorted updates and deletes never consult disk
-
-`.../persistent/unsorted.rs:540` (delete), `:591` (update)
-
-```rust
-match self.partitions.remove(&key) {
-    Some(old) => { /* write intent, ack true */ }
-    None => { /* respond Delete(false) */ }
-}
-```
-
-Neither calls `storage.load_partition`, unlike `get` (`:409`) and `exists` (`:497`) in the same
-file, and unlike every sorted equivalent (`.../persistent/sorted.rs:698-720`, `:857-876`).
-
-So an update or delete against an unsorted partition that is on disk but not resident — after
-eviction, or after a restart before it has been faulted in — silently reports `false` and does
-nothing. The caller is told the row does not exist when it does.
-
-### 5. Pruned partitions leak a stale archive map entry
-
-`.../fs/compactor.rs:198-203`
-
-```rust
-if let ShouldPrune::Yes = T::apply_intents(&mut self.loaded, partition, intents) {
-    self.loaded.remove(&partition);
-    // TODO: does anything else need to be done to remove this partition
-    // from archive maps?
-}
-```
-
-The in-code TODO is right to worry. When compaction empties a partition it is dropped from
-`loaded` and never rewritten — but its old `ArchiveEntry` stays in `to_archive`, still
-pointing at the pre-delete copy in the old archive. **Deleted data is resurrected.**
-
-**This one is confirmed, not inferred.** Reproduced with a temporary integration test against
-a real server:
-
-| Session | Action | `exists` |
-| --- | --- | --- |
-| 1 | insert row, shut down | — |
-| 2 | restart (insert compacts into an archive), delete row | `false` ✅ |
-| 3 | restart — delete intent replayed from the log | `false` ✅ |
-| 4 | restart — delete intent has been compacted away | **`true` ❌** |
-
-By session 4 the delete intent has been compacted and its log deleted, the tombstone exists
-nowhere, and the map still points at the original archive extent. The row returns.
-
-The existing test named `delete_survives_restart`
-(`shoal/tests/persistent_sorted_table.rs:232`) does not catch this: despite its name it
-deletes and checks `exists` in the *same* session and never restarts afterwards.
-
-**Fix direction:** on `ShouldPrune::Yes`, remove the key from `to_archive` and log a map
-intent recording the removal. `MapIntent` has no variant for this today — it would need one.
-
 ### 6. Negative `isize` cast collapses memory accounting
 
-`.../persistent/sorted.rs:262-263`
+`.../persistent/sorted.rs:275-277`
 
 ```rust
 let new_mem_usage = self.memory_usage.borrow().saturating_sub(diff as usize);
@@ -95,7 +40,7 @@ above the limit — with the true resident set already past it.
 
 ### 7. `limit` is ignored by persistent sorted tables
 
-`.../persistent/sorted.rs:436-448`
+`.../persistent/sorted.rs:457-469`
 
 The get loop is inlined in the table and has no limit check. `SortedPartition::get` implements
 it correctly (`.../tables/partitions.rs:278-284`) but is not the method that runs.
@@ -113,33 +58,18 @@ Consequences: no point lookup by sort key, no range scans, and SHQL `WHERE sort_
 returns the whole partition. Deletes and updates *do* use the sort key, so the field is only
 inert on read paths.
 
-### 9. Recovery and compaction panic on orphaned update intents
+### 9. Orphaned update intents are dropped silently
 
-`.../persistent/unsorted.rs:867-868`
+The panics this item was filed for are
+[fixed](resolved/orphaned-update-intents.md). What is left is the observability half: an intent
+whose base row is genuinely gone is dropped with only a `warn!`
+(`.../persistent/unsorted.rs:1014`, `:1056`), and nothing counts it. There is no metric, no
+error surfaced to an operator, and no way to answer "did this restart lose anything?" other
+than grepping logs.
 
-```rust
-// TODO handling a partition missing
-None => panic!("Missing partition?"),
-```
-
-and
-
-`.../persistent/unsorted.rs:896-901`
-
-```rust
-UnsortedIntents::Update(update) => match &mut maybe_partition {
-    Some(partition) => partition.update(&update),
-    None => panic!("Applying update to no partition?"),
-},
-```
-
-The first fires during startup replay when an update's base partition is not resident and
-`scan`'s `load_partition_direct` found nothing. The second fires during compaction when a log
-contains an update whose insert was compacted in an earlier generation — `apply_intents` for
-unsorted tables starts from `None` rather than from the partition's current archive copy.
-
-Both are crashes on the startup path, which is the worst place for them: a shard that cannot
-start cannot be recovered without deleting data.
+That is the same gap as the mid-log corruption case in
+[Recovery](../storage/recovery.md#truncation-and-corruption), and both want the same thing: a
+counter of intents discarded during recovery, reported once at the end of startup.
 
 ---
 
@@ -197,7 +127,7 @@ Full reasoning in [Partitioning](../architecture/partitioning.md#the-vnodes-do-n
 
 ### 13. Eviction logging can underflow
 
-`.../persistent/sorted.rs:1010`, `.../persistent/unsorted.rs:685`
+`.../persistent/sorted.rs:1106`, `.../persistent/unsorted.rs:811`
 
 ```rust
 event!(Level::INFO, pre, post, diff = pre - post, ...);
@@ -209,20 +139,26 @@ inconsistencies in item 22, this is reachable.
 
 ### 14. Empty rotated intent logs are never deleted
 
-`.../fs/compactor.rs:298-309`
+`.../fs/compactor.rs:316-338`
 
 ```rust
-self.sort_intent_log(&path).await?;
-if !self.changes.is_empty() {
+let partitions = if self.changes.is_empty() {
+    Vec::default()
+} else {
     ...
     glommio::io::remove(path).await?;
-}
+    partitions
+};
 ```
 
-The removal is inside the `if`. A rotated log that produced no changes — an empty log, or one
-whose records all failed to parse — is left on disk forever and replayed on every startup.
-Since startup always forces a rotation (`.../persistent/sorted.rs:210`), a table that is never
-written accumulates one orphan file per restart.
+The removal is inside the branch that had something to compact. A rotated log that produced no
+changes — an empty log, or one whose records all failed to parse — is left on disk forever and
+replayed on every startup. Since startup always forces a rotation
+(`.../persistent/sorted.rs:218`), a table that is never written accumulates one orphan file per
+restart.
+
+The generation is now reported either way (`.../fs/compactor.rs:334-336`), so an empty log no
+longer pins everything tagged with its generation — but the file itself still accumulates.
 
 ### 15. No backpressure anywhere
 
@@ -267,6 +203,50 @@ if let Err(_) = self.spawn_task(table_name, partition_id).await {
 A partition load that fails to spawn panics the loader. Any query blocked on that partition
 then waits forever, since there is no timeout ([item 15](#15-no-backpressure-anywhere)).
 
+### 26. SHQL silently drops duplicate conditions on one field
+
+The parser keeps every condition in written order, but the generated binding arms pick with
+`.find(...)` and discard the rest. Three places do this, and they disagree with each other:
+
+| Query | Result |
+| --- | --- |
+| `WHERE id = 1 AND id = 2` on an **unsorted** table | `id = 1`. The second is dropped. |
+| `WHERE movie = 'a' AND movie = 'b'` on a **sorted** table | *Both*, as two partitions to scan. |
+| `WHERE id = 1 AND title = 'a' AND title = 'b'` (a filter) | `title = 'a'`. The second is dropped. |
+
+Confirmed by running each against a real schema. The user gets results for a query they did not
+write, with no warning.
+
+The unsorted partition pick is `structs/client.rs:156-166`; the filter pick is the
+`.find(...)` inside the generated `shql_build_filters`
+(`shoal-derive/src/structs/filter.rs:60-77`).
+
+**Fix direction:** equality conditions on the same field are contradictory, not refining —
+`id = 1 AND id = 2` can only match nothing. The honest fix is to reject a repeated field in the
+binding arms with a `Duplicate condition on field 'x'` error, which needs a pass over
+`parsed.conditions` before the role dispatch. The sorted multi-partition behavior is genuinely
+useful and should be kept, but it should be the documented meaning of repeating a *partition*
+field, not an accident of using `filter` instead of `find`. Note that `WhereClause` already
+carries byte offsets, so the error can point at the second occurrence.
+
+### 27. SHQL cannot express a string containing a single quote
+
+`string_literal` is `delimited("'", take_till(0.., '\''), "'")`
+(`shoal-core/src/shared/queries/parser.rs:207-211`). There is no escape syntax — not doubling
+(`''`), not backslash.
+
+This is worse than a missing convenience. Any row whose **partition key** is a string
+containing an apostrophe is unreachable from SHQL entirely, because the partition key is the one
+condition every query must supply. `WHERE title = 'it''s'` does not parse, and there is no
+spelling that works.
+
+**Fix direction:** doubling is the SQL-standard form and the smaller change — replace the
+`take_till` with a loop that accumulates until an unescaped quote, treating `''` as a literal
+quote. Backslash escapes would also work but diverge from SQL. Either way the byte offsets
+recorded in `WhereClause` must continue to span the *raw* literal including its quotes, since
+that is what error rendering slices; the decoded value and the source span will no longer be the
+same length.
+
 ---
 
 ## Low — hygiene and documentation drift
@@ -275,7 +255,7 @@ then waits forever, since there is no timeout ([item 15](#15-no-backpressure-any
 
 | Location | Content |
 | --- | --- |
-| `.../persistent/sorted.rs:546`, `:553`, `:593`, `:594`, `:613`, `:639` | Six lines in `exists`, one of which `{:#?}`-prints an entire partition |
+| `.../persistent/sorted.rs:577`, `:584`, `:629`, `:630`, `:649`, `:681` | Six lines in `exists`, one of which `{:#?}`-prints an entire partition |
 | `.../server/conf.rs:111` | "listening on ..." from inside `Networking::to_addr` |
 
 All bypass the tracing level filter. Visible in any test run — see the sample output in
@@ -299,10 +279,8 @@ exclusion never takes effect. `CLAUDE.md` reproduces the typo.
 `shoal-core/src/server.rs:14-22` and are not compiled. They reference APIs that no longer
 exist (`crate::ShoalRow`, `rkyv::AlignedVec`). Dead.
 
-~~Also: `.../fs/tests.rs` is 429 lines of entirely commented-out tests.~~ **Fixed.** Those
-tests are live again, rewritten to build their fixtures with plain `std::fs` so the byte
-layout under test is explicit, and joined by `.../fs/stream_tests.rs` covering padding and the
-flush watermark. `shoal-core` has 32 unit tests.
+The other half of this item — `.../fs/tests.rs` being 429 lines of commented-out tests — is
+[fixed](resolved/storage-tests.md).
 
 ### 21. Constant and comment mismatches
 
@@ -338,14 +316,11 @@ Also `RemoteTracing::Grpc` exports over HTTP (`trace.rs:36-40`), and
 
 ### 24. shoalctl warnings
 
-```rust
-panic!("{:#?}", self.error);
-return;
-```
+`TabState::next` / `prev` are dead code (`shoalctl/src/components/tab.rs:527`, `:537`), and
+`submit_query` `tokio::spawn`s the query only to `.await` the join handle immediately
+(`:254-258`), so the UI blocks for the round trip anyway.
 
-`shoalctl/src/components/tab.rs:144-145` — an unconditional panic where an error should be
-rendered, plus an unreachable `return`. Because a panic bypasses `ratatui::restore()`, it can
-leave the terminal in raw mode. `TabState::next` / `prev` are dead code (`:430`, `:440`).
+The panic that could leave a terminal in raw mode is [fixed](resolved/shoalctl-panic.md).
 
 ### 25. CLAUDE.md drift
 
@@ -355,6 +330,74 @@ leave the terminal in raw mode. `TabState::next` / `prev` are dead code (`:430`,
 | "LRU eviction at 60%" | Eviction triggers when usage exceeds the configured limit exactly; 40% is then freed (`shard.rs:661`, `:557`) |
 | `exluded_cores` | Should be `exclude_cores` |
 | Lists `EphemeralTable` as a usable table type | It does not satisfy the interface `#[db]` generates calls against |
+
+### 28. SHQL "Unknown field" names the field it is listing as valid
+
+A field declared on a table but marked neither `partition`, `sort`, nor `filter` — an
+`#[shoal(update)]`-only field, for instance — has no `FieldRole`, so using it in a `WHERE`
+clause fails. The message it fails with is confusing:
+
+```
+Unknown field 'data'. Valid fields are: ["id", "title", "data"]
+```
+
+`data` appears on both sides. The cause is that `field_names()` is generated from *all* fields
+while the `get_field_role` match arms are generated only for fields that have a role
+(`shoal-derive/src/traits/table_schema.rs`), so the two lists disagree by construction. The
+error is raised at `structs/client.rs:127-137` (unsorted) and `:198-208` (sorted).
+
+**Fix direction:** two different errors are being conflated. Distinguish them — if
+`field_names()` contains the name, say `Field 'data' cannot be used in a WHERE clause because it
+is not a partition key, sort key, or filter`; only say `Unknown field` when it is genuinely
+absent. Better still, generate a `queryable_field_names()` alongside `field_names()` so the
+"valid fields" list is the set that can actually appear in a `WHERE` clause.
+
+### 29. SHQL rejects exponent notation with a misleading error
+
+`float_number` is `(opt(sign), digit1, ".", digit1)`
+(`shoal-core/src/shared/queries/parser.rs:261`), so digits are required on both sides of the
+point and there is no exponent form. `.5` and `5.` fail with a reasonable
+`Expected a value for field 'x'`, but `1e9` does something worse:
+
+```
+SELECT * FROM Movie WHERE id = 1e9
+  =>  Unexpected trailing input: 'e9'
+```
+
+The integer parser matches the leading `1`, the condition completes, and the leftover `e9` is
+reported by the end-of-input check as though the problem were somewhere else entirely. Confirmed
+by running it.
+
+**Fix direction:** low priority, since spelling the number out always works. If it is fixed, add
+an optional exponent to `float_number` rather than special-casing the error — the error is only
+misleading because the grammar accepts a prefix of what the user meant. Note that
+`serde_json::Number::from_f64` already rejects the infinities a large exponent can produce, so
+the overflow path is covered.
+
+### 30. A sorted partition load can be silently thrown away
+
+`.../persistent/sorted.rs:249-291` — `load_partition` merges a freshly read archive extent into
+whatever is resident, and its `Occupied` arm only matches `MaybeLoaded::Loaded`:
+
+```rust
+hash_map::Entry::Occupied(mut entry) => {
+    if let MaybeLoaded::Loaded { partition, .. } = entry.get_mut() {
+        /* merge */
+    }
+}
+```
+
+If the resident entry is `Accessible` — another copy of the same extent — the `if let` does not
+match, the data that was just read from disk is dropped on the floor, and memory usage is not
+adjusted. Any query blocked on that load is still released, so it answers from the copy that
+was already there.
+
+Harmless today, because the two copies hold the same bytes. It is listed because it is a silent
+no-op at the end of an IO path: if the two ever diverge, nothing here would say so.
+
+**Fix direction:** handle the arm explicitly, even if the body is `// the resident copy is the
+same extent, so keep it and drop what we read`. An `else` that says why is worth more than a
+pattern that quietly does not match.
 
 ---
 
@@ -386,13 +429,22 @@ failure. Any change touching loader construction should be read against this.
 
 ## Suggested triage order
 
-1. **Item 5** — confirmed data resurrection, and the fix is well understood. This is now the
-   most serious open defect.
-2. **Item 4** — silent no-op mutations on unsorted tables.
-3. **Item 6** — one-line fix that restores memory accounting.
-4. **Items 7 and 8** — features that appear to work and do not; either implement or reject at
+1. **Item 6** — one-line fix that restores memory accounting. This is now the cheapest real
+   defect left, and eviction is exercised by tests for the first time
+   ([Resolved #5](resolved/resurrected-deletes.md)), so a fix would be checked rather than
+   assumed.
+2. **Items 7 and 8** — features that appear to work and do not; either implement or reject at
    the API boundary.
-5. **Items 9, 11, 16** — startup and hot-path panics.
-6. **Item 14** — empty rotated logs accumulating on disk and being replayed every startup.
+3. **Items 11 and 16** — hot-path panics, and the empty-ring window a client can hit during
+   startup.
+4. **Item 14** — empty rotated logs accumulating on disk and being replayed every startup.
+5. **Items 26 and 27** — SHQL returning results for a query the user did not write, and data
+   that SHQL cannot reach at all. Both are cheap fixes and both are now under test, so a
+   regression would be caught.
+6. **Item 9's remaining half and item 13** — two sides of the same absence: nothing counts what
+   recovery discards, and nothing can observe memory accounting except a log line that panics
+   when it is wrong.
 
-The durability work (former items 1–3) is done, and item 20's storage tests are live again.
+Everything that has been fixed, and why it was fixed the way it was, is in
+[Resolved Issues](resolved-issues.md). The SHQL parser has gained test coverage at both stages
+([SHQL](../api/shql.md#testing)) — items 26–29 were found while writing it.

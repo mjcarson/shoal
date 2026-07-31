@@ -7,6 +7,7 @@ use shoal_core::storage::FileSystem;
 use shoal_core::tables::PersistentSortedTable;
 use shoal_derive::{db, ShoalSortedTable};
 use std::time::Duration;
+use tempfile::TempDir;
 
 mod utils;
 
@@ -288,6 +289,171 @@ async fn delete_survives_restart() -> Result<(), TestError> {
     assert!(!exists);
     // Shutdown server
     pool.exit()?;
+    Ok(())
+}
+
+/// Start a server, do nothing, and shut it back down
+///
+/// Startup replays the intent log into memory and then force compacts it into an
+/// archive, so cycling the server twice after a write leaves that partition on
+/// disk only: the third session has an empty log and nothing resident.
+///
+/// # Arguments
+///
+/// * `temp_dir` - The temp dir this servers data lives in
+async fn cycle_server(temp_dir: &TempDir) -> Result<(), TestError> {
+    // start and immediately stop a server
+    let (_client, pool) = utils::start::<TestDb>(temp_dir).await?;
+    pool.exit()?;
+    // wait for threads to fully clean up and the port to be released
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    Ok(())
+}
+
+/// Insert a row and leave it on disk with nothing resident in memory
+///
+/// # Arguments
+///
+/// * `temp_dir` - The temp dir this servers data lives in
+/// * `row` - The row to insert
+async fn insert_then_evict_to_disk(temp_dir: &TempDir, row: &TestRecord) -> Result<(), TestError> {
+    // start a server and write our row to it
+    let (client, pool) = utils::start::<TestDb>(temp_dir).await?;
+    client.send_one(row.clone()).await?;
+    pool.exit()?;
+    // wait for threads to fully clean up and the port to be released
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    // cycle once more so this rows insert has been compacted into an archive
+    cycle_server(temp_dir).await
+}
+
+/// Test deleting a row whose partition is on disk but not in memory
+#[tokio::test]
+async fn delete_when_not_resident() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = utils::test_dir();
+    // build a test row to insert
+    let test_data = TestRecord::new("partition_key", "sort_key", "woot");
+    // leave this row on disk with nothing resident in memory
+    insert_then_evict_to_disk(&temp_dir, &test_data).await?;
+    // start a shoal server and build a client
+    let (client, pool) = utils::start::<TestDb>(&temp_dir).await?;
+    // delete this record, which has to be found on disk first
+    //
+    // `send_one` fails the query when the server answers Delete(false), so this
+    // is also the assertion that our delete actually deleted something
+    client
+        .send_one(TestRecordDelete::new(
+            "partition_key".into(),
+            "sort_key".into(),
+        ))
+        .await?;
+    // check if this row still exists in shoal
+    let exists = client
+        .exists(TestRecordExists::new(vec![test_data.partition_key.clone()]))
+        .await?;
+    // make sure this row no longer exists
+    assert!(!exists);
+    // Shutdown server
+    pool.exit()?;
+    // wait for threads to fully clean up and the port to be released
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    // restart this server 3 times so our delete is replayed, then compacted, then
+    // forgotten entirely; only a stale archive map entry could bring the row back
+    for _ in 0..3 {
+        // start a shoal server and build a client
+        let (client, pool) = utils::start::<TestDb>(&temp_dir).await?;
+        // check if this row still exists in shoal
+        let exists = client
+            .exists(TestRecordExists::new(vec![test_data.partition_key.clone()]))
+            .await?;
+        // make sure this row no longer exists
+        assert!(!exists);
+        // Shutdown server
+        pool.exit()?;
+        // wait for threads to fully clean up and the port to be released
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    Ok(())
+}
+
+/// Test that a deleted row stays deleted when its tombstone is evicted
+///
+/// The tombstone is the only thing shadowing the pre delete copy in the archive, so
+/// it may not be evicted until the log holding its delete intent has been compacted.
+/// This runs the shard under constant memory pressure so that any partition the
+/// server marks evictable is dropped on the very next loop iteration.
+#[tokio::test]
+async fn delete_survives_eviction() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = utils::test_dir();
+    // build a test row to insert
+    let test_data = TestRecord::new("partition_key", "sort_key", "woot");
+    // leave this row on disk with nothing resident in memory
+    insert_then_evict_to_disk(&temp_dir, &test_data).await?;
+    // start a shoal server that evicts everything it is allowed to evict
+    let (client, pool) =
+        utils::start_with_conf::<TestDb>(utils::build_pressured_config(&temp_dir)).await?;
+    // delete this record, which has to be found on disk first
+    client
+        .send_one(TestRecordDelete::new(
+            "partition_key".into(),
+            "sort_key".into(),
+        ))
+        .await?;
+    // give the shard time to evict anything it thinks is durable
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    // check if this row still exists in shoal
+    let exists = client
+        .exists(TestRecordExists::new(vec![test_data.partition_key.clone()]))
+        .await?;
+    // make sure evicting the tombstone did not resurrect the row
+    assert!(!exists);
+    // Shutdown server
+    pool.exit()?;
+    // wait for threads to fully clean up and the port to be released
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    Ok(())
+}
+
+/// Test that rows written into a resident partition survive eviction
+///
+/// A sorted partition is mutated in place, so its generation has to be refreshed on
+/// every write. If it is not, a partition first loaded generations ago is marked
+/// evictable by a compaction that never saw its newest rows, and those rows vanish
+/// from reads until the log holding them is compacted.
+#[tokio::test]
+async fn writes_survive_eviction() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = utils::test_dir();
+    // start a shoal server that evicts everything it is allowed to evict
+    let (client, pool) =
+        utils::start_with_conf::<TestDb>(utils::build_pressured_config(&temp_dir)).await?;
+    // write enough rows into one partition to rotate its intent log several times
+    for i in 0..200 {
+        // build a row with a unique sort key
+        let row = TestRecord::new(
+            "partition_key".to_owned(),
+            format!("sort-{i:03}"),
+            "woot".to_owned(),
+        );
+        // insert this row
+        client.send_one(row).await?;
+    }
+    // give the shard time to evict anything it thinks is durable
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    // read this partition back
+    let response = client
+        .send_one(TestRecordGet::new(vec!["partition_key".to_owned()]))
+        .await?;
+    // access our response
+    let rows = response.access::<TestRecord>()?.unwrap();
+    // every row we wrote has to still be readable
+    assert_eq!(rows.len(), 200);
+    // Shutdown server
+    pool.exit()?;
+    // wait for threads to fully clean up and the port to be released
+    tokio::time::sleep(Duration::from_secs(1)).await;
     Ok(())
 }
 

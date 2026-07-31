@@ -41,15 +41,21 @@ pub struct ArchiveEntry {
 pub enum MapIntentKinds {
     DeleteArchive,
     Entry,
+    Remove,
 }
 
 /// An intent line for our map intent log
+///
+/// New variants must be appended, since the discriminants of the existing ones
+/// are what already written intent logs are read back with.
 #[derive(Debug, Archive, Deserialize, Serialize)]
 pub enum MapIntent {
     /// An archive has been deleted and is no longer in use
     DeleteArchive(Uuid),
     /// A new entry for partition in an archive
     Entry(ArchiveEntry),
+    /// A partition has been pruned and no longer has data in any archive
+    Remove(u64),
 }
 
 impl MapIntent {
@@ -82,6 +88,7 @@ impl MapIntent {
         match self {
             MapIntent::DeleteArchive(_) => kind == MapIntentKinds::DeleteArchive,
             MapIntent::Entry(_) => kind == MapIntentKinds::Entry,
+            MapIntent::Remove(_) => kind == MapIntentKinds::Remove,
         }
     }
 }
@@ -114,6 +121,10 @@ impl SerializedMap {
                 // add this entry to our map
                 MapIntent::Entry(entry) => {
                     self.to_archive.insert(entry.key, entry);
+                }
+                // this partition was pruned so it no longer has an archive entry
+                MapIntent::Remove(key) => {
+                    self.to_archive.remove(&key);
                 }
             }
         }
@@ -417,9 +428,27 @@ impl ArchiveMap {
     }
 
     /// Update the location for a partition
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The key of the partition to set the location for
+    /// * `entry` - The archive entry for this partitions data
     pub fn set_partition(&self, id: u64, entry: ArchiveEntry) {
         // insert or update this partitions entry
         self.to_archive.borrow_mut().insert(id, entry);
+    }
+
+    /// Drop the location for a partition that no longer has any data
+    ///
+    /// Without this a pruned partition keeps pointing at its pre-delete copy in
+    /// an old archive, and the next read resurrects the deleted data.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The key of the partition to forget
+    pub fn remove_partition(&self, id: u64) {
+        // drop this partitions entry
+        self.to_archive.borrow_mut().remove(&id);
     }
 
     /// Get a handle to an archive if it exists
@@ -552,5 +581,103 @@ impl ArchiveMap {
             archive.close().await?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use glommio::LocalExecutor;
+    use std::hash::Hasher;
+    use std::path::PathBuf;
+    use tempfile::TempDir;
+
+    use super::{ArchiveEntry, GxHasher, HashSet, MapIntent, SerializedMap, Uuid};
+
+    /// Create a temp dir on a filesystem that supports direct IO
+    ///
+    /// `TempDir::new` uses `/tmp`, which is usually tmpfs, and glommio silently
+    /// disables O_DIRECT there.
+    fn test_dir() -> TempDir {
+        // build a path under cargo's target dir, which is on a real filesystem
+        let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target/shoal-test-tmp");
+        // make sure our base dir exists
+        std::fs::create_dir_all(&base).expect("Failed to create test tmp dir");
+        TempDir::new_in(&base).expect("Failed to create temp dir")
+    }
+
+    /// Frame a map intent as `[8-byte size][8-byte checksum][data]`
+    ///
+    /// # Arguments
+    ///
+    /// * `intent` - The map intent to serialize and frame
+    fn framed(intent: &MapIntent) -> Vec<u8> {
+        // serialize this intent
+        let archived = rkyv::to_bytes::<rkyv::rancor::Error>(intent).unwrap();
+        // compute a checksum over our payload
+        let mut hasher = GxHasher::default();
+        hasher.write(archived.as_slice());
+        let checksum = hasher.finish();
+        // build our framed record
+        let mut record = Vec::with_capacity(16 + archived.len());
+        record.extend_from_slice(&archived.len().to_le_bytes());
+        record.extend_from_slice(&checksum.to_le_bytes());
+        record.extend_from_slice(archived.as_slice());
+        record
+    }
+
+    /// Serialize a map snapshot the way `SerializedMap::save` lays it out
+    ///
+    /// # Arguments
+    ///
+    /// * `map` - The map to serialize
+    fn snapshot(map: &SerializedMap) -> Vec<u8> {
+        // serialize this map
+        let archived = rkyv::to_bytes::<rkyv::rancor::Error>(map).unwrap();
+        // hash our map
+        let mut hasher = GxHasher::default();
+        hasher.write(&archived);
+        // write the hash ahead of the payload
+        let mut out = hasher.finish().to_le_bytes().to_vec();
+        out.extend_from_slice(&archived);
+        out
+    }
+
+    #[test]
+    /// A remove intent drops a pruned partitions entry when the map is loaded back
+    fn remove_intent_drops_an_entry() {
+        LocalExecutor::default().run(async {
+            // get a temp dir to build our fixtures in
+            let temp_dir = test_dir();
+            let map_path = temp_dir.path().join("test-map");
+            let intent_path = temp_dir.path().join("test-map-intent");
+            // build the archive entry our snapshot starts with
+            let stale = ArchiveEntry {
+                key: 42,
+                archive: Uuid::new_v4(),
+                offset: 0,
+                size: 128,
+            };
+            // build a snapshot that already knows about that partition
+            let mut snapshot_map = SerializedMap {
+                all_archives: HashSet::default(),
+                to_archive: std::collections::HashMap::default(),
+            };
+            snapshot_map.to_archive.insert(stale.key, stale);
+            // write our snapshot to disk
+            std::fs::write(&map_path, snapshot(&snapshot_map)).unwrap();
+            // log an entry for a second partition and the removal of the first
+            let mut intents = framed(&MapIntent::entry(7, stale.archive, 256, 64));
+            intents.extend_from_slice(&framed(&MapIntent::Remove(stale.key)));
+            std::fs::write(&intent_path, &intents).unwrap();
+            // load this map back with its intent log applied
+            let loaded =
+                SerializedMap::new(&map_path.to_path_buf(), &intent_path.to_path_buf(), "test")
+                    .await
+                    .expect("Failed to load map");
+            // our pruned partition should be gone
+            assert!(!loaded.to_archive.contains_key(&stale.key));
+            // and our logged entry should still be there
+            assert!(loaded.to_archive.contains_key(&7));
+        });
     }
 }

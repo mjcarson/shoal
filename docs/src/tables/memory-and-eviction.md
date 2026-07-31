@@ -24,7 +24,7 @@ let new_size = self.memory_usage.borrow().saturating_add_signed(size_diff);
 *self.memory_usage.borrow_mut() = new_size;
 ```
 
-`.../persistent/sorted.rs:371-373`
+`.../persistent/sorted.rs:392-394`
 
 Read the borrow, compute, then write — rather than `*x.borrow_mut() += d` — to avoid holding
 a mutable borrow across the computation. `saturating_add_signed` prevents underflow when a
@@ -35,8 +35,11 @@ contents are counted ([Partitions](partitions.md#sizes)).
 
 The counter is an estimate and drifts, for reasons documented in
 [Partitions](partitions.md#sizes) and [Known Issues](../appendix/known-issues.md#22-size-accounting-inconsistencies):
-tombstones are uncounted, `UnsortedPartition` uses two different size bases, and sorted
-partitions maintain their size by delta.
+sorted tombstones are uncounted, `UnsortedPartition` uses two different size bases, and sorted
+partitions maintain their size by delta. An unsorted tombstone does account for its 17 bytes,
+since it replaces the whole partition rather than one entry inside it. The sorted undercount is
+at least bounded now: tombstones are swept when their partition is marked evictable, so they
+accumulate for one generation rather than forever.
 
 One path corrupts it outright. In `load_partition`, when a merged partition ends up smaller:
 
@@ -44,7 +47,7 @@ One path corrupts it outright. In `load_partition`, when a merged partition ends
 let new_mem_usage = self.memory_usage.borrow().saturating_sub(diff as usize);
 ```
 
-`.../persistent/sorted.rs:262-263`
+`.../persistent/sorted.rs:275-277`
 
 `diff` is negative here, so `diff as usize` is astronomically large and the result saturates
 to **0**. The shard then believes it is using no memory and stops evicting until the counter
@@ -72,11 +75,11 @@ evictable. Membership changes on three events:
 | Get / exists hit | `lru.promote(...)` — mark recently used |
 | Compaction reports it durable | `lru.put(...)` — now a candidate |
 
-`.../persistent/sorted.rs:375`, `:268`, `.../persistent/unsorted.rs:388-390`, `:653-655`
+`.../persistent/sorted.rs:396`, `:262-264`, `.../persistent/unsorted.rs:423`, `:450-452`
 
-Note `promote` is called on unsorted reads (`.../persistent/unsorted.rs:388`, `:482`) but
+Note `promote` is called on unsorted reads (`.../persistent/unsorted.rs:450-452`, `:542-544`) but
 **not** on sorted reads — `PersistentSortedTable::get` has no `promote` call anywhere in
-`.../persistent/sorted.rs:387-525`. So for sorted tables the "recently used" ordering only
+`.../persistent/sorted.rs:408-563`. So for sorted tables the "recently used" ordering only
 reflects when a partition became evictable, not when it was last read. Frequently read sorted
 partitions are evicted as readily as cold ones.
 
@@ -87,24 +90,54 @@ A partition may only be dropped once its changes are on disk. That is the genera
 ```rust
 pub fn mark_evictable(&mut self, generation: u64, partitions: Vec<u64>) {
     let mut marked = 0;
+    let mut swept = 0;
+    // track how far our data has been compacted
+    self.flushed_generation = self.flushed_generation.max(generation);
     for partition in partitions {
-        if let Some(maybe_loaded) = self.partitions.get(&partition) {
+        if let Some(maybe_loaded) = self.partitions.get_mut(&partition) {
             if maybe_loaded.is_evictable(generation) {
+                if let MaybeLoaded::Loaded { partition, .. } = maybe_loaded {
+                    swept += partition.drop_tombstones();
+                }
                 let size = maybe_loaded.size();
                 self.lru.borrow_mut().put((self.table_name, partition), size);
                 marked += size;
             }
         }
     }
-    event!(Level::INFO, marked);
+    event!(Level::INFO, marked, swept, flushed_generation = self.flushed_generation);
 }
 ```
 
-`.../persistent/sorted.rs:966-986`
+`.../persistent/sorted.rs:1049-1081`
 
 Driven by `ServerMsg::MarkEvictable`, sent by the compactor after it writes and syncs a batch
 of partitions ([Compaction](../storage/compaction.md#5-mark-evictable)), and by the
 `load_partition` path once blocked queries have been queued.
+
+**Which generation is passed matters more than it looks.** The compactor's message carries the
+generation of the log it has just sealed *and compacted*, so `gen <= flushed` genuinely means
+"already in an archive". The load path has no such generation to hand — it is releasing queries
+that are about to write — so both tables track the newest compacted generation separately and
+pass that:
+
+```rust
+/// The newest generation whose intent log has been compacted into an archive
+flushed_generation: u64,
+```
+
+`.../persistent/sorted.rs:100-107`, `.../persistent/unsorted.rs:94-101`
+
+It is advanced only from a compactor message, and counters start at 1 so that 0 can mean
+"nothing has been compacted yet". Passing the *open* generation here instead — which is what
+the load path used to do — makes the check compare a generation against itself, marks a
+partition evictable while its own delete is still in an open log, and resurrects the row it
+deleted ([Resolved Issues #5](../appendix/resolved/resurrected-deletes.md)).
+
+**Marking is also when sorted tombstones die.** A tombstone shadows a row that may still be in
+an archive; once the partition's generation is compacted, the archive behind it no longer holds
+those rows and there is nothing left to shadow. `drop_tombstones` sweeps them at exactly that
+moment, which is the only point where dropping one is safe.
 
 ```
    write ──▶ partition generation = current gen
@@ -181,7 +214,7 @@ pub fn evict(&mut self, victims: Vec<u64>) {
 }
 ```
 
-`.../persistent/sorted.rs:990-1014`
+`.../persistent/sorted.rs:1085-1109`
 
 `partitions.remove` drops the partition. Its data is already in an archive, so a later read
 faults it back in ([Query Execution](query-execution.md#blocking-on-a-disk-read)).
@@ -200,6 +233,13 @@ compacted. If it is written again before then, its generation advances and the c
 Under a sustained write workload where the working set is larger than the memory limit, the
 LRU stays empty, `evict_data` finds nothing, and memory grows past the configured limit
 unchecked.
+
+Sorted tables used to appear to escape this, because their in-place mutations never refreshed
+the partition's generation — the clock never restarted, so partitions became evictable on
+schedule regardless of what was still in the log. That was not an escape, it was the bug behind
+[Resolved Issues #5](../appendix/resolved/resurrected-deletes.md): acknowledged writes
+disappeared from reads until their log was compacted. Now that sorted partitions are pinned as
+correctly as unsorted ones, a sorted write-heavy workload feels this trap the same way.
 
 The escape valve is log rotation, driven by `intent_log_size` (default 10 MiB per table per
 shard). More frequent rotation means more frequent generations, hence more eviction
@@ -235,7 +275,8 @@ and keeps the eviction path synchronous — at the cost of the generation trap.
 - Sorted reads never `promote`, so sorted LRU ordering does not reflect reads.
 - Under sustained writes the limit is unenforceable.
 - The limit is per shard but configured globally.
-- Tombstones and drifting cached sizes make the counter approximate.
+- Tombstones and drifting cached sizes make the counter approximate, though sorted tombstones
+  no longer accumulate past the generation that compacts them.
 - `diff = pre - post` can panic.
 - No metrics beyond two `INFO` events; no way to observe resident bytes, LRU depth, or
   eviction rate other than by reading logs.

@@ -97,8 +97,14 @@ where
     pub partitions: HashMap<u64, MaybeLoaded<SortedPartition<R>>>,
     /// The storage engine backing this table
     storage: S,
-    /// The current generation of flushed data
+    /// The generation this tables intent log is currently accepting writes in
     generation: u64,
+    /// The newest generation whose intent log has been compacted into an archive
+    ///
+    /// A partition may only be evicted once its own generation is covered by this,
+    /// since anything newer exists only in an intent log that has not been applied
+    /// to an archive yet. Generations start at 1 so 0 means nothing is compacted.
+    flushed_generation: u64,
     /// The commits that are still pending storage confirmation
     pending: PendingResponse<R>,
     /// The response data for queries that needed partitions to be loaded from disk
@@ -187,7 +193,9 @@ where
                 shard_local_tx,
             )
             .await?,
-            generation: 0,
+            // this matches the generation our storage engine starts in
+            generation: 1,
+            flushed_generation: 0,
             pending: PendingResponse::<R>::with_capacity(100),
             pending_data: HashMap::with_capacity(500),
             flushed: Vec::with_capacity(1000),
@@ -207,7 +215,10 @@ where
             )
             .await?;
         // compact our intent log
-        table.storage.compact_if_needed::<R>(true).await?;
+        let progress = table.storage.compact_if_needed::<R>(true).await?;
+        // that rotation sealed the generation we just replayed, so our new writes
+        // belong to the generation it opened rather than the one we replayed into
+        table.generation = progress.generation;
         Ok(table)
     }
 
@@ -230,6 +241,12 @@ where
     }
 
     /// Load this partition from disk if needed
+    ///
+    /// The generation returned alongside any unblocked queries is the generation our
+    /// caller will mark this partition evictable at. That has to be the newest
+    /// compacted generation and not the one we are writing in: the queries we are
+    /// about to release can modify this partition, and their intents would land in
+    /// an intent log that has not been compacted yet.
     pub async fn load_partition(
         &mut self,
         loaded: LoadedPartition,
@@ -244,13 +261,9 @@ where
                     // access our loaded partitions data
                     let accessed = SortedPartition::<R>::access(&loaded.data).unwrap();
                     // deserialize this partition
-                    let mut new = SortedPartition::<R>::deserialize(&accessed).unwrap();
-                    // swap our loaded partition with our existing one so we can repaly it ontop
-                    std::mem::swap(&mut new, partition);
-                    // replay any rows from our current partition onto our loaded one
-                    partition.rows.extend(new.rows.into_iter());
-                    // mark this partition as no longer needing to check disk since we just loaded it
-                    partition.check_disk = false;
+                    let new = SortedPartition::<R>::deserialize(&accessed).unwrap();
+                    // replay our in memory rows ontop of the copy we just read from disk
+                    partition.merge_from_disk(new);
                     // calculate the difference in our partition size
                     let diff = partition.size() as isize - old_size as isize;
                     // increment or decrement our memory usage
@@ -289,7 +302,7 @@ where
         // get the queries that were blocked on this partition
         self.blocked
             .remove(&loaded.partition_id)
-            .map(|unblocked| (unblocked, self.generation))
+            .map(|unblocked| (unblocked, self.flushed_generation))
     }
 
     /// Cast and handle a serialized query
@@ -349,7 +362,15 @@ where
             });
         // check if we need to convert this to a loaded partition or not
         let (size_diff, action) = match entry {
-            MaybeLoaded::Loaded { partition, .. } => partition.insert(row),
+            MaybeLoaded::Loaded {
+                partition,
+                generation,
+            } => {
+                // this partitions newest data is now in the log we are writing to, so
+                // it can't be evicted until that log has been compacted
+                *generation = self.generation;
+                partition.insert(row)
+            }
             MaybeLoaded::Accessible(read) => {
                 // convert this read to a accessible partition
                 let accessable = SortedPartition::<R>::access(&read).unwrap();
@@ -408,15 +429,20 @@ where
                             // load this partitions data from disk if needed
                             if partition.check_disk {
                                 // try to load this partition from disk if it exists
-                                let will_load = self
-                                    .storage
-                                    .load_partition(
-                                        self.table_name,
-                                        *partition_key,
-                                        &self.loader_tx,
-                                    )
-                                    .await
-                                    .unwrap();
+                                let will_load = if self.blocked.contains_key(partition_key) {
+                                    // a load is already in flight for this partition so queue
+                                    // behind it instead of reading the same data again
+                                    true
+                                } else {
+                                    self.storage
+                                        .load_partition(
+                                            self.table_name,
+                                            *partition_key,
+                                            &self.loader_tx,
+                                        )
+                                        .await
+                                        .unwrap()
+                                };
                                 // if this query was blocked then add it to our blocked list
                                 if will_load {
                                     // if we need to load this then add this query to a map of queries
@@ -475,11 +501,16 @@ where
                 // check if this partition exist and load it if it does
                 None => {
                     // try to load this partition from disk if it exists
-                    let will_load = self
-                        .storage
-                        .load_partition(self.table_name, *partition_key, &self.loader_tx)
-                        .await
-                        .unwrap();
+                    let will_load = if self.blocked.contains_key(partition_key) {
+                        // a load is already in flight for this partition so queue behind it
+                        // instead of reading the same data again
+                        true
+                    } else {
+                        self.storage
+                            .load_partition(self.table_name, *partition_key, &self.loader_tx)
+                            .await
+                            .unwrap()
+                    };
                     // if this query was blocked then add it to our blocket list
                     if will_load {
                         // if we need to load this then add this query to a map of queries
@@ -557,15 +588,20 @@ where
                             // load this partitions data from disk if needed
                             if partition.check_disk {
                                 // try to load this partition from disk if it exists
-                                let will_load = self
-                                    .storage
-                                    .load_partition(
-                                        self.table_name,
-                                        *partition_key,
-                                        &self.loader_tx,
-                                    )
-                                    .await
-                                    .unwrap();
+                                let will_load = if self.blocked.contains_key(partition_key) {
+                                    // a load is already in flight for this partition so queue
+                                    // behind it instead of reading the same data again
+                                    true
+                                } else {
+                                    self.storage
+                                        .load_partition(
+                                            self.table_name,
+                                            *partition_key,
+                                            &self.loader_tx,
+                                        )
+                                        .await
+                                        .unwrap()
+                                };
                                 // if this query was blocked then add it to our blocked list
                                 if will_load {
                                     let entry = self.blocked.entry(*partition_key).or_default();
@@ -620,11 +656,17 @@ where
                 }
                 // this partition is not loaded into memory
                 None => {
-                    let will_load = self
-                        .storage
-                        .load_partition(self.table_name, *partition_key, &self.loader_tx)
-                        .await
-                        .unwrap();
+                    // try to load this partition from disk if it exists
+                    let will_load = if self.blocked.contains_key(partition_key) {
+                        // a load is already in flight for this partition so queue behind it
+                        // instead of reading the same data again
+                        true
+                    } else {
+                        self.storage
+                            .load_partition(self.table_name, *partition_key, &self.loader_tx)
+                            .await
+                            .unwrap()
+                    };
                     if will_load {
                         let entry = self.blocked.entry(*partition_key).or_default();
                         let blocked_exists = exists_query.to_blocked(*partition_key);
@@ -676,7 +718,10 @@ where
                 // check if this partition is fully loaded in memory or not
                 match maybe_loaded {
                     // the partition is at least partially deserialized and loaded into memory
-                    MaybeLoaded::Loaded { partition, .. } => {
+                    MaybeLoaded::Loaded {
+                        partition,
+                        generation,
+                    } => {
                         // try to remove the target row
                         if let Some((size_diff, _)) = partition.remove(&sort) {
                             // we were able to delete this row so build the delete intent
@@ -691,17 +736,26 @@ where
                             let new_size = self.memory_usage.borrow().saturating_sub(size_diff);
                             // update the current memory usage
                             *self.memory_usage.borrow_mut() = new_size;
+                            // the tombstone we just wrote is the only thing shadowing this
+                            // rows archived copy, so this partition can't be evicted until
+                            // the log holding our delete intent has been compacted
+                            *generation = self.generation;
                             // remove from LRU cache since partition was just modified
                             self.lru.borrow_mut().pop(&(self.table_name, key));
                             // we can't acknowledge this delete until its intent is flushed
                             return None;
                         } else if partition.check_disk {
                             // we couldn't find the row to delete but it may be on on disk
-                            let will_load = self
-                                .storage
-                                .load_partition(self.table_name, key, &self.loader_tx)
-                                .await
-                                .unwrap();
+                            let will_load = if self.blocked.contains_key(&key) {
+                                // a load is already in flight for this partition so queue
+                                // behind it instead of reading the same data again
+                                true
+                            } else {
+                                self.storage
+                                    .load_partition(self.table_name, key, &self.loader_tx)
+                                    .await
+                                    .unwrap()
+                            };
                             // check if this partition has any on disk data to load
                             if will_load {
                                 // this partition has on disk data so block this query
@@ -780,11 +834,16 @@ where
             }
             None => {
                 // we don't have this partition loaded so try to load it
-                let will_load = self
-                    .storage
-                    .load_partition(self.table_name, key, &self.loader_tx)
-                    .await
-                    .unwrap();
+                let will_load = if self.blocked.contains_key(&key) {
+                    // a load is already in flight for this partition so queue behind it
+                    // instead of reading the same data again
+                    true
+                } else {
+                    self.storage
+                        .load_partition(self.table_name, key, &self.loader_tx)
+                        .await
+                        .unwrap()
+                };
                 // this partition exists and is being loaded
                 if will_load {
                     // get an entry to this partitions blocked queries
@@ -834,7 +893,10 @@ where
                 // check if this partition is fully loaded in memory or not
                 match maybe_loaded {
                     // the partition is at least partialy deserialzied and loaded into memory
-                    MaybeLoaded::Loaded { partition, .. } => {
+                    MaybeLoaded::Loaded {
+                        partition,
+                        generation,
+                    } => {
                         // update the target row if its loaded
                         if let Some(diff) = partition.update(&update) {
                             // we were able to update this partition so get its key
@@ -847,6 +909,9 @@ where
                             let action = ResponseAction::Update(true);
                             // add this to our pending queries until its commit is flushed
                             self.pending.add(meta, pos, action);
+                            // this partitions newest data is only in the log we are writing
+                            // to, so it can't be evicted until that log has been compacted
+                            *generation = self.generation;
                             // remove this partition from our lru cache as its no longer evictable
                             self.lru.borrow_mut().pop(&(self.table_name, key));
                             // do a saturating add on our memory usage
@@ -856,15 +921,20 @@ where
                             return None;
                         } else if partition.check_disk {
                             // we don't have this partition loaded so try to load it from disk
-                            let will_load = self
-                                .storage
-                                .load_partition(
-                                    self.table_name,
-                                    update.partition_key,
-                                    &self.loader_tx,
-                                )
-                                .await
-                                .unwrap();
+                            let will_load = if self.blocked.contains_key(&update.partition_key) {
+                                // a load is already in flight for this partition so queue
+                                // behind it instead of reading the same data again
+                                true
+                            } else {
+                                self.storage
+                                    .load_partition(
+                                        self.table_name,
+                                        update.partition_key,
+                                        &self.loader_tx,
+                                    )
+                                    .await
+                                    .unwrap()
+                            };
                             // if we are going to load it from disk add this query to our blocked queries
                             if will_load {
                                 // get an entry to this partitions blocked queries
@@ -935,11 +1005,16 @@ where
             }
             None => {
                 // we don't have this partition loaded so try to load it
-                let will_load = self
-                    .storage
-                    .load_partition(self.table_name, update.partition_key, &self.loader_tx)
-                    .await
-                    .unwrap();
+                let will_load = if self.blocked.contains_key(&update.partition_key) {
+                    // a load is already in flight for this partition so queue behind it
+                    // instead of reading the same data again
+                    true
+                } else {
+                    self.storage
+                        .load_partition(self.table_name, update.partition_key, &self.loader_tx)
+                        .await
+                        .unwrap()
+                };
                 // this partition exists and is being loaded
                 if will_load {
                     // get an entry to this partitions blocked queries
@@ -963,15 +1038,31 @@ where
     }
 
     /// Mark partitions as evictable if they are no longer in the intent log
+    ///
+    /// The generation we are given names an intent log that has been compacted into
+    /// an archive, so it also tells us how far our own data has been made durable.
+    ///
+    /// # Arguments
+    ///
+    /// * `generation` - The newest generation that has been compacted
+    /// * `partitions` - The partitions to consider marking as evictable
     #[instrument(name = "PersistentSortedTable::mark_evictable", skip(self, partitions), fields(partition_count = partitions.len()))]
     pub fn mark_evictable(&mut self, generation: u64, partitions: Vec<u64>) {
         let mut marked = 0;
+        let mut swept = 0;
+        // track how far our data has been compacted
+        self.flushed_generation = self.flushed_generation.max(generation);
         // check each partition that we find might be evictable now
         for partition in partitions {
             // try to get this partition
-            if let Some(maybe_loaded) = self.partitions.get(&partition) {
+            if let Some(maybe_loaded) = self.partitions.get_mut(&partition) {
                 // check if this partition is now evictable
                 if maybe_loaded.is_evictable(generation) {
+                    // this partitions deletes have been applied to its archive copy, so
+                    // any tombstones it still holds have nothing left to shadow
+                    if let MaybeLoaded::Loaded { partition, .. } = maybe_loaded {
+                        swept += partition.drop_tombstones();
+                    }
                     // get this partitions size
                     let size = maybe_loaded.size();
                     // insert this partition into our lru cache
@@ -982,7 +1073,12 @@ where
                 }
             }
         }
-        event!(Level::INFO, marked);
+        event!(
+            Level::INFO,
+            marked,
+            swept,
+            flushed_generation = self.flushed_generation
+        );
     }
 
     /// Evict partitions from memory

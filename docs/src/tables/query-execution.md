@@ -98,10 +98,16 @@ instead, but only after passing the filter
 ## Blocking on a disk read
 
 ```rust
-let will_load = self.storage
-    .load_partition(self.table_name, *partition_key, &self.loader_tx)
-    .await
-    .unwrap();
+let will_load = if self.blocked.contains_key(partition_key) {
+    // a load is already in flight for this partition so queue
+    // behind it instead of reading the same data again
+    true
+} else {
+    self.storage
+        .load_partition(self.table_name, *partition_key, &self.loader_tx)
+        .await
+        .unwrap()
+};
 if will_load {
     let entry = self.blocked.entry(*partition_key).or_default();
     let blocked_get = get.to_blocked(*partition_key);
@@ -111,7 +117,7 @@ if will_load {
 }
 ```
 
-`.../persistent/sorted.rs:410-434`
+`.../persistent/sorted.rs:428-470`
 
 `load_partition` returns whether a read was started
 ([Storage Overview](../storage/overview.md#the-archive-map)) — `false` means the archive map
@@ -123,7 +129,11 @@ accumulated in `pending_data`.
 
 Note the query is parked under `blocked[partition_key]`, keyed by partition rather than by
 query. Several queries waiting on the same partition share one entry and are all released by
-one read.
+one read — and, because a non-empty entry means a read is already in flight, they no longer
+each ask the loader for it. Unsorted tables express the same rule as a helper,
+`block_on_load` (`.../persistent/unsorted.rs:300-337`); sorted tables inline it at each of
+their eight blocking sites because the surrounding match already holds a borrow of
+`self.partitions`.
 
 ### Resumption
 
@@ -154,7 +164,12 @@ The `MarkEvictable` is deliberately sent *after* the replayed queries:
 
 Since the shard processes its queue in order, the partition cannot be evicted out from under
 the very queries that faulted it in. The table's `load_partition` also pops it from the LRU
-on arrival (`.../persistent/sorted.rs:267-270`) for the same reason.
+on arrival (`.../persistent/sorted.rs:279-281`) for the same reason.
+
+The `generation` in that message is the table's newest **compacted** generation, not the one it
+is currently writing in. Passing the open generation instead lets a query that has just been
+released mark its own uncompacted write as evictable
+([Resolved Issues #5](../appendix/resolved/resurrected-deletes.md)).
 
 ### Merging the loaded partition
 
@@ -201,7 +216,9 @@ subtraction floors shard memory usage at 0. See
 
 The unsorted variant does not merge at all — it overwrites `Accessible` with `Accessible` and
 leaves `Loaded` alone (`.../persistent/unsorted.rs:229-262`), which is right for a
-one-row-per-partition table where memory is always complete.
+one-row-per-partition table where memory is always complete. Leaving `Loaded` alone is also
+what keeps a tombstone from being clobbered by a read that was already in flight when the
+delete landed.
 
 ## Writes
 
@@ -255,8 +272,16 @@ that the row exists. All three states are handled — resident and found, reside
 `check_disk` set, and not resident — and the middle case parks the query for a disk read
 (`.../persistent/sorted.rs:667-813` for delete, `:826-963` for update).
 
-Unsorted updates and deletes do not do this. They consult memory only and report `false` if
-the partition is not resident ([Table Types](table-types.md#the-asymmetry-that-matters)).
+Unsorted updates and deletes do the same through `block_on_load`, with only two states to
+handle rather than three: an unsorted partition is either resident in full or not resident at
+all ([Table Types](table-types.md#both-types-consult-disk-on-every-operation)).
+
+An unsorted delete does not remove the key. It replaces the partition with
+`UnsortedPartition::tombstone(key)`, because the pre-delete copy may still be sitting in an
+archive and dropping the key outright would let the next read fault it back in. The tombstone
+costs 17 bytes, answers `Get(None)` / `Exists(false)` / `Delete(false)` / `Update(false)`
+without touching disk, and is evicted once compaction has pruned the archive entry it shadows
+([Partitions](partitions.md#tombstones)).
 
 ## exists
 
