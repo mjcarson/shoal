@@ -137,10 +137,12 @@ query per shard, naming only that shard's keys**. Shards are deduplicated, so a 
 of the keys gets one query naming both rather than the same query twice, and no shard is asked
 about partitions it does not own.
 
-It is also where a sorted query's `sort_keys` are put in sort order and deduplicated, once, for
-the same reason: this is the one place every query passes through no matter who built it, and a
-query arriving over the wire is deserialized straight into its struct without meeting a
-constructor ([Sort keys were accepted and ignored](../appendix/resolved/sort-keys.md)).
+It is also where a sorted query's `sort_select` is normalized — a set of sort keys put in sort
+order and deduplicated — once, for the same reason: this is the one place every query passes
+through no matter who built it, and a query arriving over the wire is deserialized straight into
+its struct without meeting a constructor
+([Sort keys were accepted and ignored](../appendix/resolved/sort-keys.md)). A range needs no
+normalizing, since it is already an ordered pair ([F1](../features/sort-key-ranges.md)).
 
 `QueryMetadata` carries the client id, the bundle id, the query's index within the bundle, an
 `end` flag, `Span::current()` for tracing, and `gather` (`server/messages.rs`). Index and `end`

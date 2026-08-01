@@ -16,12 +16,14 @@ list starts at 9 and skips 10, 26, and 39. The exceptions are items 9, 20, and 2
 only partly fixed: the open remainder is here and the rest is there.
 
 **Baseline as of writing:** `cargo check --workspace --all-targets` passes with warnings;
-`cargo test --workspace` passes — 115 integration tests (one ignored), 129 `shoal-core` unit
-tests, 8 doctests. That is up from 14 and 32 with the addition of SHQL coverage
+`cargo test --workspace` passes — 132 integration tests (one ignored), 159 `shoal-core` unit
+tests, 10 doctests. That is up from 14 and 32 with the addition of SHQL coverage
 ([SHQL](../api/shql.md#testing)), the restart and eviction tests added with items 4 and 5, the
 limit and cross-shard coverage added with item 7, the row-order and `IN`/`OR` coverage added
-with items 26 and 39, and the sort-key selection coverage added with item 8. The counts before
-item 8 were 105 and 116, and were re-run and confirmed unchanged when items 31–38 were added.
+with items 26 and 39, the sort-key selection coverage added with item 8, and the range coverage
+added with [F1](../features/sort-key-ranges.md). The counts before F1 were 115, 129, and 8, and
+before item 8 were 105 and 116; they were re-run and confirmed unchanged when items 31–38 were
+added.
 
 ---
 
@@ -495,9 +497,11 @@ be reached at all. It only started mattering with [item 8](resolved/sort-keys.md
 were ignored there was nothing to express.
 
 **Fix direction:** the same shape as 41, and worth doing in the same change. Collect the conditions
-naming each sort field, build the tuple in declaration order, and reject a partial one — a prefix
-of a composite sort key is a *range*, not a point, and there is no range predicate to lower it to
-([TODOs](todos.md#sort-key-range-predicates)).
+naming each sort field, build the tuple in declaration order, and reject a partial one. A prefix of
+a composite sort key is a *range*, not a point, and although ranges exist now
+([F1](../features/sort-key-ranges.md)) a range over a *prefix* still does not — lowering one needs
+synthesized minimum and maximum values for the fields the prefix leaves out, which `Sort` does not
+name ([TODOs](todos.md#sort-key-range-predicates--built)).
 
 ### 30. A sorted partition load can be silently thrown away
 

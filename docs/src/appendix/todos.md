@@ -72,40 +72,28 @@ strands data ([Partitioning](../architecture/partitioning.md#limitations)). Any 
 partition migration between shards and a way to discover files belonging to shards that no
 longer exist.
 
-### Sort-key range predicates
+### Sort-key range predicates — built
 
-A sort key now selects rows ([item 8](resolved/sort-keys.md)), which was the half of this that was
-a defect. What is left is the half that is a feature: `WHERE title >= 'M' AND title < 'N'`, and
-with it a cursor to page through a partition with.
+`WHERE title >= 'M' AND title < 'N'`, and the cursor to page a partition with, are
+[F1](../features/sort-key-ranges.md). Two pieces of what that section asked for were deliberately
+left out and are still open.
 
-The gap is sharper than it sounds. A `LIMIT 20` over a partition of a few thousand titles always
-answers with the *first* twenty, and there is no way to ask for the next twenty — the only
-spelling that could is an `IN` list of the exact keys you want, which you would have to already
-know. Paging over a large partition today means fetching all of it. With a lower bound it is a
-seek plus twenty rows, whatever page you are on:
+**`BETWEEN`.** `title BETWEEN 'M' AND 'N'` is sugar over `>= AND <=`. Its inner `AND` collides
+with the `AND` that joins clauses, so `where_conditions` needs to know it is inside a `BETWEEN`
+when it meets one, and the completion state machine needs its own `Expecting` states for the same
+reason — `AND` is already a transition out of `Continuation`. It buys nothing the two operators do
+not, which is why it was not built with them.
 
-```sql
-SELECT * FROM MovieByKeyword WHERE keyword = 'alien' AND title > 'Gravity' LIMIT 20
-```
+**Prefix ranges over a composite sort key.** Several `#[shoal(sort)]` fields make a tuple `Sort`,
+and the typed API can already range over whole tuples since a tuple is `Ord`. What neither front
+end can do is bound a *prefix* — `(author, title) >= ('Le Guin', ..)` — which needs synthesized
+minimum and maximum values for the remaining elements, so `Sort` would have to name them. SHQL
+cannot reach a composite sort key at all
+([item 42](known-issues.md#42-shql-cannot-express-a-composite-sort-key)).
 
-What it needs, and what the design already looks like:
-
-- **A query shape that can hold a bound.** `sort_keys: Vec<Sort>` says "these rows"; a range wants
-  `Bound<Sort>` pairs. New archived types, and `for_partitions`/`to_blocked` carrying them.
-- **SHQL operators.** The grammar has `=` and `IN` and nothing else. Adding `<`, `<=`, `>`, `>=`
-  (or `BETWEEN`) collides with the one-condition-per-field rule
-  ([item 26/39](resolved/partition-order.md)) — `title > 'a' AND title < 'z'` is two conditions on
-  one field, and that rule exists to reject exactly that shape on every *other* field.
-- **Prefix semantics for composite sort keys**, which is most of the cost, and which SHQL cannot
-  reach at all yet ([item 42](known-issues.md#42-shql-cannot-express-a-composite-sort-key)).
-
-Neither storage layer is a blocker. A resident partition is a `BTreeMap` and
-`ArchivedBTreeMap::range` (rkyv `collections/btree/map/iter.rs`) descends to its lower bound
-rather than scanning from the start, so both forms seek in `log n` — the same pair of paths the
-point lookup already uses.
-
-What a range does *not* change is the I/O: a cold partition is read whole either way, since there
-is no index within a partition on disk. The win is CPU and rows on the wire.
+Also still true, and worth keeping in front of anyone who reaches for a range to make a read
+cheaper: a **cold partition is read whole either way**, since there is no index within a partition
+on disk. A range changes what is deserialized and what crosses the wire, not what is read.
 
 ### Intersection across partitions (a real `AND` on one field)
 

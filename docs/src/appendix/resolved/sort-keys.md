@@ -165,18 +165,22 @@ trusting a client to have done something it has no way to check. `split_by_shard
 every query passes through, whoever built it.
 
 **Range predicates in the same change.** `title >= 'M' AND title < 'N'` is what would make paging
-inside a partition possible, and it is the larger half of what
-[TODOs](../todos.md#sort-key-range-predicates) asks for. It was kept out because it is a feature
-with a grammar design attached — a new query shape, new SHQL operators, and a rework of the
-one-condition-per-field rule item 26/39 introduced — while this was a field that was accepted and
-ignored. The set is the prerequisite either way: the seek machinery on both arms is what a range
-scan reuses.
+inside a partition possible, and it was the larger half of what TODOs asked for. It was kept out
+because it is a feature with a grammar design attached — a new query shape, new SHQL operators, and
+a rework of the one-condition-per-field rule item 26/39 introduced — while this was a field that
+was accepted and ignored. The set is the prerequisite either way: the seek machinery on both arms
+is what a range scan reuses, which is exactly what [F1](../../features/sort-key-ranges.md) went on
+to do.
 
 ## Invariants to uphold
 
-- **An empty `sort_keys` means every row.** It is how a get that never mentioned the sort key
-  reaches the table, and how `exists` asks about a partition rather than a row. A branch that
-  treats an empty set as "match nothing" turns every unnarrowed get into a miss.
+- ~~**An empty `sort_keys` means every row.**~~ **Superseded by
+  [F1](../../features/sort-key-ranges.md).** This was how a get that never mentioned the sort key
+  reached the table, and how `exists` asked about a partition rather than a row — because a bare
+  `Vec<Sort>` had no other way to say "unnarrowed". `SortSelect::All` says it now, and
+  `SortSelect::Keys(vec![])` is a set with nothing in it and matches nothing. The obligation the
+  rule existed for did not go away, it moved: **a query that never mentioned its sort key must
+  produce `All`**, and both the generated builders and the SHQL binding arm do.
 - **Sort keys reaching a table are sorted and deduplicated.** The scans seek in the order they are
   given and do not check for repeats, because `normalize_sort_keys` has already run. A new path
   that hands a get to a table without going through `split_by_shard` has to normalize for itself —
@@ -209,7 +213,9 @@ get path and wants the same fix: deregistering the query's own entries from `sel
 predates this change and the early return was kept exactly as it was, so naming sort keys neither
 causes it nor makes it likelier.
 
-**Range predicates.** See [TODOs](../todos.md#sort-key-range-predicates), which carries the design.
+**Range predicates — built.** [F1](../../features/sort-key-ranges.md). Read its invariants
+alongside the ones above before touching either scan: it kept every rule this page set except one,
+and the one it changed is the empty-list rule below.
 
 **A composite sort key cannot be named from SHQL.** Several `#[shoal(sort)]` fields make a tuple
 `Sort`, and no SHQL literal is a tuple. That was harmless while sort keys did nothing and is a real
@@ -226,11 +232,11 @@ partitions being read in place serializes those keys *k × p* times rather than 
 | `a_named_sort_key_selects_one_row`, `named_sort_keys_select_their_rows` (`.../tables/partitions.rs`) | The seek. A four-row partition asked for one row answers with four |
 | `a_missing_sort_key_finds_nothing` (same) | The same, in the shape that matters most: a named row this partition does not hold used to answer with every row it does |
 | `a_tombstoned_sort_key_is_not_found` (same) | The tombstone arm of the seek. A deleted row comes back |
-| `an_empty_sort_key_list_returns_every_row` (same) | Nothing — it pins the unnarrowed get, so a future selection cannot narrow a get that never asked to be narrowed |
+| `selecting_every_row_returns_every_row`, `an_empty_sort_key_selection_returns_no_rows` (same) | The unnarrowed get, so a future selection cannot narrow a get that never asked to be narrowed. These replaced `an_empty_sort_key_list_returns_every_row` when [F1](../../features/sort-key-ranges.md) made "unnarrowed" and "an empty set" two different questions |
 | `a_limit_bounds_a_sort_key_selection` (same) | Nothing today, since it passes either way. It pins the limit check inside the seek loop |
 | `exists_answers_for_a_named_sort_key`, `exists_is_true_for_any_named_sort_key`, `exists_is_false_for_a_tombstoned_sort_key` (same) | `SortedPartition::exists`, which did not exist. The unfixed behaviour of the path it replaced is pinned by the integration tests below |
-| `exists_with_no_sort_keys_asks_about_the_partition` (same) | Nothing — it pins the question `exists` used to answer for every query, which is still the right answer for this one |
-| `sort_keys_are_put_in_sort_order`, `a_repeated_sort_key_is_only_kept_once`, `no_sort_keys_stay_no_sort_keys` (`shared/queries.rs`) | `normalize_sort_keys`. Rows come back in the order the keys were typed, and a key named twice returns its row twice |
+| `exists_selecting_every_row_asks_about_the_partition` (same) | Nothing — it pins the question `exists` used to answer for every query, which is still the right answer for this one |
+| `sort_keys_are_put_in_sort_order`, `a_repeated_sort_key_is_only_kept_once`, `no_sort_keys_stay_no_sort_keys`, `a_key_selection_is_normalized` (`shared/queries.rs`) | `normalize_sort_keys`. Rows come back in the order the keys were typed, and a key named twice returns its row twice |
 | `get_selects_a_named_sort_key` (`shoal/tests/persistent_sorted_table.rs`) | The whole of the fix, end to end. Five rows for a get naming one |
 | `get_selects_several_sort_keys_in_sort_order` (same) | The normalization. The keys are named in reverse and the rows still come back in sort order |
 | `get_by_sort_key_misses_return_nothing` (same) | The seek. A miss answers with the whole partition |
@@ -239,7 +245,7 @@ partitions being read in place serializes those keys *k × p* times rather than 
 | `get_by_sort_key_stops_at_its_limit` (same) | The limit check inside the seek loop, across two partitions |
 | `exists_by_sort_key_is_false_for_a_missing_row` (same) | The exists half. A row that was never written exists, because the partition holds other rows |
 | `exists_by_sort_key_survives_a_disk_load` (same) | The archived arm of the exists, and the read before the answer |
-| `binds_sort_keys_from_an_in_list`, `binds_no_sort_keys_when_none_are_named` (`shoal/tests/shql.rs`) | Nothing — they pin the binding that feeds all of the above, which was already right |
+| `binds_sort_keys_from_an_in_list`, `binds_no_sort_keys_when_none_are_named` (`shoal/tests/shql.rs`) | Nothing — they pin the binding that feeds all of the above, which was already right. The second now also pins that an unnarrowed query binds to `SortSelect::All` and not to an empty set |
 
 ## Related
 

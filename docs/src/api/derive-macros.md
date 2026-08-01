@@ -121,11 +121,30 @@ names and, when the get is split across shards, every shard
 ([Query Execution](../tables/query-execution.md#what-a-get-actually-filters-on)). Since the order
 is defined, so is which rows it keeps: the first ones.
 
-The sorted form has `sort_keys` as well, with a `.sort_keys(vec![..])` builder on both `*Get` and
-`*Exists`. Each key names a row to return out of every partition the query reads, and leaving the
-list empty asks for all of them. The keys are a set, not a range: the rows come back in sort-key
-order whatever order they were listed in, and there is no way to express a bound
-([Sort keys were accepted and ignored](../appendix/resolved/sort-keys.md)).
+The sorted form has `sort_select` as well, on both `*Get` and `*Exists`:
+
+```rust
+pub struct MovieByKeywordGet {
+    pub partition_keys: Vec<String>,
+    pub sort_select: SortSelect<String>,
+    pub filters: Option<MovieByKeywordFilter>,
+    pub limit: Option<usize>,
+}
+```
+
+Two builders set it, and either replaces the other:
+
+- `.sort_keys(vec![..])` names rows — each key names a row to return out of every partition the
+  query reads ([Sort keys were accepted and ignored](../appendix/resolved/sort-keys.md)).
+- `.sort_range(..)` bounds them — `SortRange::after`, `starting_at`, `before`, `ending_at`, or
+  `new` with a pair of `Bound`s ([F1](../features/sort-key-ranges.md)).
+
+Setting neither leaves `SortSelect::All`, which is what asks for every row. Rows come back in
+sort-key order whichever of the three it is, so an `IN` list's written order does not matter and
+neither does the order two bounds were written in.
+
+The vocabulary lives on `SortRange` rather than being repeated as a builder method per table, so
+`.sort_range(SortRange::after(last))` is the paging idiom on every sorted table there is.
 
 `*Exists` still takes a single partition key on unsorted tables
 ([Known Issues #40](../appendix/known-issues.md#40-unsortedexists-still-names-a-single-partition)).
@@ -174,7 +193,9 @@ list (`shoal-derive/src/tables.rs:39-60`) so they stay in step.
 
 Filters are equality only, disjunctive within a field and conjunctive across them: every `Some`
 field must match, and a field matches on any of its values. No ranges, no negation, and no `OR`
-between two different fields ([TODOs](../appendix/todos.md#full-boolean-or)).
+between two different fields ([TODOs](../appendix/todos.md#full-boolean-or)). The range operators
+SHQL grew for sort keys therefore do not apply here — `shql_build_filters` refuses a bounded
+condition rather than reading its bounds as values, which is what it would otherwise do.
 
 Alongside the struct, `structs/filter.rs` emits an inherent `Movie::shql_build_filters` that
 turns the filter conditions of a parsed SHQL query into a `MovieFilter`, returning `None` when
@@ -320,7 +341,8 @@ a trait would have made the divergence a compile error.
 
 - Validation errors in the table derives are `panic!`s with no spans; only `#[db]` produces
   proper compile errors.
-- Filters are equality-only and conjunctive.
+- Filters are equality-only and conjunctive. Only a sort key can be bounded by a range
+  ([F1](../features/sort-key-ranges.md#limitations)).
 - Generated code is hard to read in errors, and `cargo expand` is effectively required for
   debugging.
 - `#[shoal_table(db = "...")]` is a string that must match a struct name, with no check until

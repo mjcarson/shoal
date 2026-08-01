@@ -176,9 +176,9 @@ and nothing else has no role, so the parser rejects it — and the menu never su
 
 ## Writing queries
 
-Queries are typed as [SHQL](../api/shql.md), so the UI inherits its limits: `SELECT *` only,
-equality only, a mandatory `WHERE`, and no `ORDER BY` — so a `LIMIT` returns whichever rows the
-scan reaches first.
+Queries are typed as [SHQL](../api/shql.md), so the UI inherits its limits: `SELECT *` only, a
+mandatory `WHERE`, and no `ORDER BY`. Fields are matched with `=` or `IN`; a **sort key** can also
+be bounded with `<`, `<=`, `>`, or `>=`.
 
 Assume a schema with these two tables:
 
@@ -194,9 +194,19 @@ pub struct Movie {
     pub watched: bool,
 }
 
+#[derive(ShoalSortedTable)]
+#[shoal_table(db = "Tmdb")]
+pub struct MovieByKeyword {
+    #[shoal(partition)]
+    pub keyword: String,
+    #[shoal(sort)]
+    pub title: String,
+}
+
 #[db]
 pub struct Tmdb {
     pub movies: PersistentUnsortedTable<Movie, FileSystem>,
+    pub movies_by_keyword: PersistentSortedTable<MovieByKeyword, FileSystem>,
 }
 ```
 
@@ -209,9 +219,12 @@ SELECT * FROM Movie WHERE id = 550 AND watched = true LIMIT 10;
 SELECT * FROM Movie WHERE id IN (550, 551)
 SELECT * FROM Movie WHERE id = 550 OR id = 551
 select * from Movie where id = 550
+SELECT * FROM MovieByKeyword WHERE keyword = 'alien'
+SELECT * FROM MovieByKeyword WHERE keyword = 'alien' AND title > 'Gravity' LIMIT 20
+SELECT * FROM MovieByKeyword WHERE keyword = 'alien' AND title >= 'G' AND title < 'H'
 ```
 
-### Four rules that catch people out
+### Five rules that catch people out
 
 **The name after `FROM` is the Rust struct name.** It is `Movie`, not the `movies` field on the
 schema struct and not a snake_cased table name. Keywords are case-insensitive but this
@@ -232,15 +245,36 @@ field are a union in shoal rather than an intersection and the query would have 
 opposite of what it says. Rows come back partition by partition in the order you listed them, so
 `LIMIT 2` on `IN ('a', 'b')` gives you the first two rows of `'a'`.
 
+**Only a sort key can be bounded, and it is how you page.** `<`, `<=`, `>`, and `>=` work on a
+`#[shoal(sort)]` field and nowhere else — a partition is found by hashing its exact key, and a
+filter is a per-row membership test, so a bound on either is refused with an error naming the
+field. Bounding one field from both ends is the one time `AND` may name a field twice.
+
+To walk a large partition, take the title of the last row you were given and ask again with it as
+an exclusive lower bound:
+
+```sql
+SELECT * FROM MovieByKeyword WHERE keyword = 'alien' AND title > 'Gravity' LIMIT 20
+```
+
+That is a seek plus twenty rows however far in you are, rather than a read of everything before
+it. The completion menu only offers the range operators when the field under the cursor is a sort
+key, so it will tell you which fields can be paged.
+
 ### What the errors mean
 
 | Message | Cause |
 | --- | --- |
 | `Expected SELECT * FROM <table>` | The query does not begin `SELECT * FROM <identifier>`, usually a named column instead of `*` |
 | `A WHERE clause is required, and it must constrain a partition key` | No `WHERE` clause at all |
-| `Expected '=' or IN after field 'x', SHQL only supports equality` | A `<`, `>`, `!=`, or `LIKE` was used |
+| `Expected an operator after field 'x'` | Something other than `=`, `IN`, `<`, `<=`, `>`, or `>=` was used — `!=`, `LIKE`, and `BETWEEN` all land here |
 | `'x' is constrained twice by AND` | One field was given two values with `AND`; the message names the `IN` list to write instead |
+| `'x' is given two lower bounds by AND` | One field was bounded twice at the same end; write the tighter of the two |
+| `'x' is constrained by both a value and a range` | A field was both matched and bounded, which are two different questions |
 | `'x' cannot be OR'd with 'y'` | `OR` was used between two different fields, which shoal cannot answer without a full scan |
+| `'x' cannot be OR'd with a range` | `OR` was used to join a bounded condition; a union of ranges has no access path |
+| `'x' is a partition key and cannot be given a range` | A partition is located by hashing its exact key, so there is no ordering to bound |
+| `'x' is a filter and cannot be given a range` | A filter is a membership test per row; only a sort key can be bounded |
 | `IN needs at least one value for field 'x'` | An empty `IN ()` list |
 | `Trailing comma in the IN list for field 'x'` | A comma with no value after it |
 | `Expected ',' or ')' in the IN list for field 'x'` | The list was never closed |

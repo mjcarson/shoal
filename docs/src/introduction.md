@@ -36,9 +36,11 @@ database") oversell the current state:
 - **No replication.** Every partition lives on exactly one shard, in one copy, on one disk.
 - **No transactions.** There is no atomicity across queries, no isolation between them, and
   no rollback. A bundle of queries is a batch, not a transaction.
-- **No secondary indexes and no range scans.** The only access path is by partition key.
-  Sort keys exist in the storage layer but are not yet usable as a query predicate
-  ([Query Execution](tables/query-execution.md)).
+- **No secondary indexes.** A partition is only ever found by its partition key; there is no
+  scan, which is why a `WHERE` clause is mandatory. *Within* a sorted partition a sort key can be
+  matched or bounded, so a large partition can be paged through
+  ([F1](features/sort-key-ranges.md)) — but that narrows what a partition returns, not which
+  partitions can be reached ([Query Execution](tables/query-execution.md)).
 - **No rebalancing.** Shard count is baked into the on-disk file layout. Changing it between
   restarts strands data ([Partitioning and the Ring](architecture/partitioning.md)).
 

@@ -46,8 +46,14 @@ pub enum Expecting {
     Where,
     /// The name of a field to constrain
     Field,
-    /// The `=` or `IN` that separates a field from the values it may take
-    Equals,
+    /// The operator that separates a field from what it is constrained to
+    ///
+    /// This carries the field so that the range operators can be offered only on a sort key,
+    /// which is the only role a range binds against.
+    Operator {
+        /// The field this operator is being written for
+        field: String,
+    },
     /// A literal value for a field
     Value {
         /// The field this value is being written for
@@ -105,6 +111,8 @@ enum Token {
     Star,
     /// An `=` sign
     Equals,
+    /// One of the range operators `<`, `<=`, `>`, or `>=`
+    RangeOperator,
     /// The `(` opening an `IN` list
     OpenParen,
     /// The `)` closing an `IN` list
@@ -183,6 +191,14 @@ fn tokenize(head: &str) -> Vec<Token> {
             '*' => tokens.push(Token::Star),
             // the equals sign separating a field from its value
             '=' => tokens.push(Token::Equals),
+            // a range operator, whose one and two character spellings both start the same way
+            '<' | '>' => {
+                // swallow the `=` of `<=` and `>=` so it is not read as a second operator
+                if chars.peek().is_some_and(|(_, next)| *next == '=') {
+                    chars.next();
+                }
+                tokens.push(Token::RangeOperator);
+            }
             // the parens wrapping the values of an IN list
             '(' => tokens.push(Token::OpenParen),
             ')' => tokens.push(Token::CloseParen),
@@ -268,8 +284,6 @@ pub fn analyze(query: &str, cursor: usize) -> CompletionContext {
     }
     // walk the tokens before this word to find out what the grammar expects here
     let mut expecting = Expecting::Select;
-    // the field the condition we are in the middle of is for
-    let mut pending_field = String::new();
     for token in tokenize(&query[..start]) {
         // take what we expected before this token so we can match on it by value
         let current = std::mem::replace(&mut expecting, Expecting::Nothing);
@@ -290,19 +304,16 @@ pub fn analyze(query: &str, cursor: usize) -> CompletionContext {
             // the mandatory WHERE clause
             (Expecting::Where, Token::Ident(word)) if is_keyword(word, "WHERE") => Expecting::Field,
             // a field name to constrain, which we hang on to so we can suggest its values
-            (Expecting::Field, Token::Ident(field)) => {
-                pending_field = field.clone();
-                Expecting::Equals
-            }
-            // the equals sign separating that field from its value
-            (Expecting::Equals, Token::Equals) => Expecting::Value {
-                field: pending_field.clone(),
+            (Expecting::Field, Token::Ident(field)) => Expecting::Operator {
+                field: field.clone(),
             },
+            // the equals sign separating that field from its value
+            (Expecting::Operator { field }, Token::Equals) => Expecting::Value { field },
+            // a range operator, which bounds that field at the value that follows it
+            (Expecting::Operator { field }, Token::RangeOperator) => Expecting::Value { field },
             // the IN keyword, which gives that field a whole list of values instead
-            (Expecting::Equals, Token::Ident(word)) if is_keyword(word, "IN") => {
-                Expecting::OpenList {
-                    field: pending_field.clone(),
-                }
+            (Expecting::Operator { field }, Token::Ident(word)) if is_keyword(word, "IN") => {
+                Expecting::OpenList { field }
             }
             // the paren opening that list
             (Expecting::OpenList { field }, Token::OpenParen) => Expecting::ValueList { field },
@@ -579,10 +590,34 @@ fn candidates<S: QuerySupport>(context: &CompletionContext) -> Vec<Suggestion> {
         Expecting::Star => vec![Suggestion::new("*", SuggestionKind::Keyword, "all columns")],
         Expecting::From => vec![keyword_suggestion("FROM", &context.word)],
         Expecting::Where => vec![keyword_suggestion("WHERE", &context.word)],
-        Expecting::Equals => vec![
-            Suggestion::new("=", SuggestionKind::Keyword, "equals"),
-            keyword_suggestion("IN", &context.word),
-        ],
+        // the operators this field can be constrained by, which depends on the role it plays
+        Expecting::Operator { field } => {
+            // every field can be matched against one value or against a list of them
+            let mut operators = vec![
+                Suggestion::new("=", SuggestionKind::Keyword, "equals"),
+                keyword_suggestion("IN", &context.word),
+            ];
+            // only a sort key can be bounded, so offering a range on anything else teaches
+            // the wrong thing and lands the user on a binding error
+            let sort_key = context
+                .table
+                .as_ref()
+                .and_then(|table| S::table_fields(table))
+                .is_some_and(|fields| {
+                    fields
+                        .iter()
+                        .any(|found| found.name == field && found.role == Some(FieldRole::Sort))
+                });
+            if sort_key {
+                operators.extend([
+                    Suggestion::new("<", SuggestionKind::Keyword, "less than"),
+                    Suggestion::new("<=", SuggestionKind::Keyword, "at most"),
+                    Suggestion::new(">", SuggestionKind::Keyword, "greater than"),
+                    Suggestion::new(">=", SuggestionKind::Keyword, "at least"),
+                ]);
+            }
+            operators
+        }
         Expecting::OpenList { .. } => vec![Suggestion::new(
             "(",
             SuggestionKind::Keyword,

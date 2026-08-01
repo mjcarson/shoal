@@ -11,7 +11,8 @@ feature are what that is for. A change that removes work from a path nothing is 
 change that only adds risk.
 
 Defects are in [Known Issues](known-issues.md); several entries below share a root cause with one
-and say so.
+and say so. An entry that has been done is struck through and kept, with what replaced it, for the
+same reason a resolved issue keeps its page.
 
 ---
 
@@ -102,10 +103,11 @@ The LRU sitting beside them already uses `BuildHasherDefault<GxHasher>` (`shard.
 
 ### O12. `to_blocked` clones the whole filter set per blocked partition
 
-`SortedGet::to_blocked` (`shared/queries/sorted.rs`) clones `sort_keys` and `filters` into the
+`SortedGet::to_blocked` (`shared/queries/sorted.rs`) clones `sort_select` and `filters` into the
 narrowed query, and `get` calls it once for every partition that has to be read from disk. A get
-across 100 cold partitions makes 100 copies of the same filters and the same key set, all of which
-are then held in `blocked` until the loads land.
+across 100 cold partitions makes 100 copies of the same filters and the same selection, all of
+which are then held in `blocked` until the loads land. A range clones two bounds rather than a key
+set, so it is the cheaper of the two selections to copy — but the filters dominate either way.
 
 ### O13. `blocked.retain(..)` runs inside the per-key loop
 
@@ -113,21 +115,21 @@ are then held in `blocked` until the loads land.
 key, making a get over *n* keys O(n²). Small *n* today, but *n* is the number of partitions a
 single query names, which is the one thing a caller controls directly.
 
-### O19. A wanted sort key is re-archived for every archived partition it is sought in
+### ~~O19. A wanted sort key is re-archived for every archived partition it is sought in~~
 
-`MaybeLoaded::seek_archived` (`.../tables/partitions.rs`) serializes the key it is looking for and
-validates the result, once per key per partition:
+**Done**, by [F1](../features/sort-key-ranges.md). `MaybeLoaded::seek_archived` used to serialize
+and validate the key it was looking for once per key per partition, so a get naming *k* sort keys
+across *p* archived partitions did that *k × p* times for *k* distinct values.
 
-```rust
-let raw = <R::Sort as RkyvSupport>::serialize(sort_key);
-let wanted = <R::Sort as RkyvSupport>::access(&raw).unwrap();
-```
+`SeekBytes` (`.../tables/partitions.rs`) now owns the archived forms of a query's keys and bounds,
+and `PersistentSortedTable::get`/`exists` build it **at most once per execution** — lazily, on the
+first partition actually being read in place, so a get every one of whose partitions is resident
+still builds none of it. Serialization is down from *k × p* to *k*; validation is still per
+archived partition, because holding a `&Archived<Sort>` across the loop would need a
+self-referential struct.
 
-A get naming *k* sort keys across *p* partitions that are being read in place does that *k × p*
-times for *k* distinct values. The keys are the same for every partition of one get — they are
-normalized once, per query — so the archived forms could be built once alongside them and carried
-into the scan. It only costs anything on the `Accessible` arm; a resident partition is sought with
-the key as it stands.
+Kept here rather than deleted because the shape it settled on is the one an equivalent change
+elsewhere should copy: bytes in the carrier, references built at the point of use.
 
 ### O20. A sort-key get reads a partition it may not need
 
@@ -139,6 +141,11 @@ as live rows or as tombstones — could answer without reading the partition at 
 warnings attached. It pays only when the *whole* key set hits, and it makes the cost of a query
 depend on what happens to be resident, which is the kind of thing that turns a reproducible
 latency into a flaky one.
+
+**It does not extend to a range.** A key set can in principle be checked off; a range cannot,
+because there is no way to know that the rows in memory are *all* of the rows in that span without
+reading the archive that might hold more. Ranges made this optimization strictly narrower rather
+than more attractive — see [F1](../features/sort-key-ranges.md#invariants-to-uphold).
 
 ---
 

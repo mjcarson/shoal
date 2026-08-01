@@ -41,6 +41,28 @@ fn parse_one(query: &str) -> WhereClause {
     parsed.conditions.remove(0)
 }
 
+/// Get the values a clause matched its field against, failing the test if it bounded it
+///
+/// # Arguments
+///
+/// * `clause` - The clause to read the values of
+fn values_of(clause: &WhereClause) -> &[WhereValue] {
+    clause
+        .as_values()
+        .unwrap_or_else(|| panic!("'{}' was bounded rather than matched", clause.field))
+}
+
+/// Get the range a clause bounded its field by, failing the test if it matched it
+///
+/// # Arguments
+///
+/// * `clause` - The clause to read the range of
+fn range_of(clause: &WhereClause) -> &WhereRange {
+    clause
+        .as_range()
+        .unwrap_or_else(|| panic!("'{}' was matched rather than bounded", clause.field))
+}
+
 #[test]
 /// A full query with every clause parses into its parts
 fn parses_a_complete_query() {
@@ -222,10 +244,10 @@ fn tracks_value_positions() {
     let parsed = parse(query);
     // the recorded span for the string should cover the quoted literal
     let title = &parsed.conditions[0];
-    assert_eq!(&query[title.values[0].start..title.values[0].end], "'Alien'");
+    assert_eq!(&query[values_of(&title)[0].start..values_of(&title)[0].end], "'Alien'");
     // and the span for the number should cover just the digits
     let id = &parsed.conditions[1];
-    assert_eq!(&query[id.values[0].start..id.values[0].end], "550");
+    assert_eq!(&query[values_of(&id)[0].start..values_of(&id)[0].end], "550");
 }
 
 #[test]
@@ -311,22 +333,188 @@ fn does_not_mistake_a_prefix_for_the_where_keyword() {
 }
 
 #[test]
-/// Only equality is supported so other operators are rejected
-fn rejects_non_equality_operators() {
-    // every comparison other than = should fail, naming the field and the restriction
+/// An operator that is not one we support is rejected, naming the ones that are
+///
+/// `!=` is the interesting one: its `=` would parse as equality if the operator scan ran
+/// after the equality one rather than before it.
+fn rejects_unsupported_operators() {
+    // every comparison outside the supported set should fail, naming the field
     for query in [
-        "SELECT * FROM Movie WHERE id > 1",
-        "SELECT * FROM Movie WHERE id < 1",
         "SELECT * FROM Movie WHERE id != 1",
+        "SELECT * FROM Movie WHERE id LIKE 1",
+        "SELECT * FROM Movie WHERE id BETWEEN 1 AND 2",
     ] {
         let message = parse_err(query);
         assert!(
-            message.contains("only supports equality") && message.contains("id"),
+            message.contains("Expected an operator") && message.contains("id"),
             "unexpected message for '{}': {}",
             query,
             message
         );
     }
+}
+
+#[test]
+/// Each range operator parses and lands on the end of the range it names
+fn parses_each_range_operator() {
+    // the two lower bounds, which differ only in whether they include their value
+    let greater = parse_one("SELECT * FROM Movie WHERE title > 'a'");
+    let lower = range_of(&greater).lower.as_ref().expect("a lower bound");
+    assert!(!lower.inclusive);
+    assert_eq!(lower.value.value, Value::String("a".to_string()));
+    assert!(range_of(&greater).upper.is_none());
+    let at_least = parse_one("SELECT * FROM Movie WHERE title >= 'a'");
+    assert!(
+        range_of(&at_least)
+            .lower
+            .as_ref()
+            .expect("a lower bound")
+            .inclusive
+    );
+    // and the two upper ones
+    let less = parse_one("SELECT * FROM Movie WHERE title < 'z'");
+    let upper = range_of(&less).upper.as_ref().expect("an upper bound");
+    assert!(!upper.inclusive);
+    assert_eq!(upper.value.value, Value::String("z".to_string()));
+    assert!(range_of(&less).lower.is_none());
+    let at_most = parse_one("SELECT * FROM Movie WHERE title <= 'z'");
+    assert!(
+        range_of(&at_most)
+            .upper
+            .as_ref()
+            .expect("an upper bound")
+            .inclusive
+    );
+}
+
+#[test]
+/// The two character operators are matched before the one character ones they contain
+///
+/// `>` is a prefix of `>=`, so a scan that checked the short one first would take the `=` as
+/// the start of the value and fail on it - or worse, read `>= 5` as `> (= 5)`.
+fn range_operators_prefer_their_longer_spelling() {
+    // an inclusive lower bound is one operator and not two
+    let clause = parse_one("SELECT * FROM Movie WHERE id >= 5");
+    let lower = range_of(&clause).lower.as_ref().expect("a lower bound");
+    assert!(lower.inclusive);
+    assert_eq!(lower.value.value.as_i64(), Some(5));
+}
+
+#[test]
+/// Two range conditions on one field fold into a single clause bounded at both ends
+///
+/// This is the one shape where `AND` may name a field twice, and folding them is what keeps
+/// the one clause per field rule everything downstream looks a field up with.
+fn two_bounds_on_one_field_fold_together() {
+    // bound one field from each end
+    let parsed = parse("SELECT * FROM Movie WHERE id = 1 AND title >= 'a' AND title < 'm'");
+    // the two title conditions came back as one clause
+    assert_eq!(parsed.conditions.len(), 2);
+    assert_eq!(parsed.conditions[1].field, "title");
+    // and that one clause holds both ends
+    let range = range_of(&parsed.conditions[1]);
+    assert!(range.lower.as_ref().expect("a lower bound").inclusive);
+    assert!(!range.upper.as_ref().expect("an upper bound").inclusive);
+}
+
+#[test]
+/// The order the two bounds are written in does not change the clause they fold into
+fn bounds_fold_in_either_order() {
+    // write the upper bound first
+    let parsed = parse("SELECT * FROM Movie WHERE id = 1 AND title < 'm' AND title >= 'a'");
+    let range = range_of(&parsed.conditions[1]);
+    // each end still landed on its own side
+    assert_eq!(
+        range.lower.as_ref().expect("a lower bound").value.value,
+        Value::String("a".to_string())
+    );
+    assert_eq!(
+        range.upper.as_ref().expect("an upper bound").value.value,
+        Value::String("m".to_string())
+    );
+}
+
+#[test]
+/// A field given the same end of a range twice is rejected
+///
+/// A range has one lower bound. Two of them means one of the pair, and shoal will not guess
+/// which.
+fn rejects_two_bounds_on_the_same_end() {
+    // two lower bounds on one field
+    let message = parse_err("SELECT * FROM Movie WHERE id = 1 AND title > 'a' AND title > 'b'");
+    assert!(
+        message.contains("two lower bounds") && message.contains("title"),
+        "unexpected message: {}",
+        message
+    );
+    // and the same for two upper ones
+    let message = parse_err("SELECT * FROM Movie WHERE id = 1 AND title < 'a' AND title <= 'b'");
+    assert!(
+        message.contains("two upper bounds") && message.contains("title"),
+        "unexpected message: {}",
+        message
+    );
+}
+
+#[test]
+/// A field cannot be both matched against a value and bounded by a range
+///
+/// The two are different questions about one field, and answering both would mean deciding
+/// which of them wins.
+fn rejects_a_value_and_a_range_on_one_field() {
+    // a value then a bound
+    let message = parse_err("SELECT * FROM Movie WHERE id = 1 AND title = 'a' AND title < 'm'");
+    assert!(
+        message.contains("both a value and a range") && message.contains("title"),
+        "unexpected message: {}",
+        message
+    );
+    // and a bound then a value, which folds the other way round
+    let message = parse_err("SELECT * FROM Movie WHERE id = 1 AND title < 'm' AND title = 'a'");
+    assert!(
+        message.contains("both a value and a range"),
+        "unexpected message: {}",
+        message
+    );
+}
+
+#[test]
+/// A range cannot be joined by OR
+///
+/// `OR` chooses between values for one field. Two ranges are a union, and there is no access
+/// path that reads one.
+fn rejects_a_range_joined_by_or() {
+    // two ranges on one field
+    let message = parse_err("SELECT * FROM Movie WHERE title > 'a' OR title < 'z'");
+    assert!(
+        message.contains("cannot be OR'd with a range"),
+        "unexpected message: {}",
+        message
+    );
+    // and a value OR'd with a range on the same field
+    let message = parse_err("SELECT * FROM Movie WHERE title = 'a' OR title < 'z'");
+    assert!(
+        message.contains("cannot be OR'd with a range"),
+        "unexpected message: {}",
+        message
+    );
+}
+
+#[test]
+/// A range operator records the span of the value it bounds at
+///
+/// Errors raised while binding a range point at the literal that failed, so the offsets have
+/// to survive the operator being parsed.
+fn tracks_the_positions_of_range_values() {
+    // parse a query bounded from both ends
+    let query = "SELECT * FROM Movie WHERE id = 1 AND title >= 'Alien' AND title < 'Zodiac'";
+    let parsed = parse(query);
+    // both literals can be sliced back out of the query they came from
+    let range = range_of(&parsed.conditions[1]);
+    let lower = &range.lower.as_ref().expect("a lower bound").value;
+    assert_eq!(&query[lower.start..lower.end], "'Alien'");
+    let upper = &range.upper.as_ref().expect("an upper bound").value;
+    assert_eq!(&query[upper.start..upper.end], "'Zodiac'");
 }
 
 #[test]
@@ -448,7 +636,8 @@ fn parses_an_in_list() {
     assert_eq!(condition.field, "id");
     // and they are kept in the order they were written
     let values: Vec<Option<i64>> = condition
-        .values
+        .as_values()
+        .expect("this field was matched rather than bounded")
         .iter()
         .map(|found| found.value.as_i64())
         .collect();
@@ -460,7 +649,7 @@ fn parses_an_in_list() {
 fn parses_a_single_value_in_list() {
     // a list with one value in it names one value
     let condition = parse_one("SELECT * FROM Movie WHERE id IN (1)");
-    assert_eq!(condition.values.len(), 1);
+    assert_eq!(values_of(&condition).len(), 1);
     assert_eq!(condition.first().as_i64(), Some(1));
 }
 
@@ -474,7 +663,7 @@ fn parses_in_without_regard_to_case_or_spacing() {
         "SELECT * FROM Movie WHERE id In(1,2)",
     ] {
         let condition = parse_one(query);
-        assert_eq!(condition.values.len(), 2, "failed to parse '{}'", query);
+        assert_eq!(values_of(&condition).len(), 2, "failed to parse '{}'", query);
     }
 }
 
@@ -483,10 +672,10 @@ fn parses_in_without_regard_to_case_or_spacing() {
 fn parses_mixed_literals_in_an_in_list() {
     // strings, numbers, booleans, and null are all values
     let condition = parse_one("SELECT * FROM Movie WHERE note IN ('a', 1, true, null)");
-    assert_eq!(condition.values.len(), 4);
-    assert_eq!(condition.values[0].value, Value::String("a".to_string()));
-    assert_eq!(condition.values[2].value, Value::Bool(true));
-    assert_eq!(condition.values[3].value, Value::Null);
+    assert_eq!(values_of(&condition).len(), 4);
+    assert_eq!(values_of(&condition)[0].value, Value::String("a".to_string()));
+    assert_eq!(values_of(&condition)[2].value, Value::Bool(true));
+    assert_eq!(values_of(&condition)[3].value, Value::Null);
 }
 
 #[test]
@@ -495,9 +684,9 @@ fn folds_or_into_one_condition() {
     // both values belong to the one field, so there is one condition and not two
     let condition = parse_one("SELECT * FROM Movie WHERE id = 1 OR id = 2");
     assert_eq!(condition.field, "id");
-    assert_eq!(condition.values.len(), 2);
-    assert_eq!(condition.values[0].value.as_i64(), Some(1));
-    assert_eq!(condition.values[1].value.as_i64(), Some(2));
+    assert_eq!(values_of(&condition).len(), 2);
+    assert_eq!(values_of(&condition)[0].value.as_i64(), Some(1));
+    assert_eq!(values_of(&condition)[1].value.as_i64(), Some(2));
 }
 
 #[test]
@@ -509,7 +698,8 @@ fn or_and_in_parse_the_same() {
     // pull the literals out of each so they can be compared
     let values = |condition: &WhereClause| -> Vec<Value> {
         condition
-            .values
+            .as_values()
+        .expect("this field was matched rather than bounded")
             .iter()
             .map(|found| found.value.clone())
             .collect()
@@ -522,7 +712,7 @@ fn or_and_in_parse_the_same() {
 fn or_keyword_is_case_insensitive() {
     // a lowercase or folds the same way an uppercase one does
     let condition = parse_one("SELECT * FROM Movie WHERE id = 1 or id = 2");
-    assert_eq!(condition.values.len(), 2);
+    assert_eq!(values_of(&condition).len(), 2);
 }
 
 #[test]
@@ -532,9 +722,9 @@ fn mixes_or_and_and() {
     let parsed = parse("SELECT * FROM Movie WHERE id = 1 OR id = 2 AND title = 'Alien'");
     assert_eq!(parsed.conditions.len(), 2);
     assert_eq!(parsed.conditions[0].field, "id");
-    assert_eq!(parsed.conditions[0].values.len(), 2);
+    assert_eq!(values_of(&parsed.conditions[0]).len(), 2);
     assert_eq!(parsed.conditions[1].field, "title");
-    assert_eq!(parsed.conditions[1].values.len(), 1);
+    assert_eq!(values_of(&parsed.conditions[1]).len(), 1);
 }
 
 #[test]
@@ -602,9 +792,9 @@ fn tracks_positions_across_an_in_list() {
     let query = "SELECT * FROM Movie WHERE title IN ('Alien', 'café')";
     let condition = parse_one(query);
     // each recorded span should slice back to the literal it came from
-    let first = &condition.values[0];
+    let first = &values_of(&condition)[0];
     assert_eq!(&query[first.start..first.end], "'Alien'");
-    let second = &condition.values[1];
+    let second = &values_of(&condition)[1];
     assert_eq!(&query[second.start..second.end], "'café'");
 }
 
@@ -614,14 +804,15 @@ fn deduplicates_repeated_values() {
     // the same literal written twice would otherwise read the same partition twice
     let condition = parse_one("SELECT * FROM Movie WHERE id IN (1, 2, 1)");
     let values: Vec<Option<i64>> = condition
-        .values
+        .as_values()
+        .expect("this field was matched rather than bounded")
         .iter()
         .map(|found| found.value.as_i64())
         .collect();
     assert_eq!(values, vec![Some(1), Some(2)]);
     // the same holds when the repeat was written with OR
     let with_or = parse_one("SELECT * FROM Movie WHERE id = 1 OR id = 1");
-    assert_eq!(with_or.values.len(), 1);
+    assert_eq!(values_of(&with_or).len(), 1);
 }
 
 #[test]
@@ -698,5 +889,5 @@ fn tracks_positions_across_multibyte_values() {
     let parsed = parse(query);
     // the recorded span should still slice back to the quoted literal
     let title = &parsed.conditions[0];
-    assert_eq!(&query[title.values[0].start..title.values[0].end], "'café'");
+    assert_eq!(&query[values_of(&title)[0].start..values_of(&title)[0].end], "'café'");
 }

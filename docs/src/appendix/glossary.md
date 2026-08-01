@@ -93,15 +93,25 @@ counter, not the core id. Shard names become filenames, which is why shard count
 the on-disk format.
 
 **SHQL** — Shoal Query Language. A small `SELECT`-only parser: `SELECT * FROM t WHERE f = v
-[AND ...] [LIMIT n]`. Equality and `IN` only, `WHERE` mandatory, no `ORDER BY`. Rows come back
-partition by partition in the order the query named them, and in sort-key order within each, so
-a `LIMIT` takes the first of those. See [SHQL](../api/shql.md).
+[AND ...] [LIMIT n]`. Equality and `IN` on any field, plus `<`, `<=`, `>`, `>=` on a sort key;
+`WHERE` mandatory, no `ORDER BY`. Rows come back partition by partition in the order the query
+named them, and in sort-key order within each, so a `LIMIT` takes the first of those. See
+[SHQL](../api/shql.md).
 
 **Sort key** — The `#[shoal(sort)]` fields, ordering rows within a sorted partition. It addresses
 a row for a delete or an update, decides the order a read returns a partition's rows in, and
 **selects** them: a get or an exists naming sort keys seeks those rows and answers about them
-alone. Naming none asks for the whole partition. There is no range predicate — a partition can be
-pointed into but not paged through.
+alone, and one bounding them by a range seeks the span between the bounds. A query narrowing
+itself neither way asks for the whole partition. See [Sort select](#sort-select).
+
+**Sort select** — `SortSelect`, the three ways a sorted get or exists can choose rows: `All`,
+`Keys([..])`, or `Range(..)`. It is an enum rather than a set of fields so that "these keys *and*
+this range" is not a state a query off the wire can arrive in. `All` is the only arm that means
+every row; an empty `Keys` list means none. See [F1](../features/sort-key-ranges.md).
+
+**Sort range** — `SortRange`, a pair of `Bound<Sort>`. An exclusive lower bound is a **cursor**:
+handed the sort key of the last row of a page it names the next page, which is how a large
+partition is paged through without reading all of it.
 
 **Sorted table** — `PersistentSortedTable`. Many rows per partition, ordered by sort key.
 

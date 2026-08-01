@@ -2,10 +2,12 @@
 
 use deepsize2::DeepSizeOf;
 use rkyv::{Archive, Deserialize, Serialize};
+use shoal_core::shared::queries::SortRange;
 use shoal_core::shared::traits::RkyvSupport;
 use shoal_core::storage::FileSystem;
 use shoal_core::tables::PersistentSortedTable;
 use shoal_derive::{db, ShoalSortedTable};
+use std::ops::Bound;
 use std::time::Duration;
 use tempfile::TempDir;
 
@@ -1540,6 +1542,354 @@ async fn exists_by_sort_key_survives_a_disk_load() -> Result<(), TestError> {
         )
         .await?;
     assert!(!exists, "a row that was never written exists");
+    // Shutdown server
+    pool.exit()?;
+    Ok(())
+}
+
+/// Run a get bounding its rows by a range and report the rows it answered with, in order
+///
+/// # Arguments
+///
+/// * `client` - The client to send our get with
+/// * `partition_keys` - The partitions to read, in the order to read them
+/// * `range` - The range of sort keys to select within each of those partitions
+async fn get_row_keys_by_range(
+    client: &shoal_core::client::Shoal<TestDbClient>,
+    partition_keys: Vec<String>,
+    range: SortRange<String>,
+) -> Result<Vec<(String, String)>, TestError> {
+    // build a get naming both the partitions and the span of rows we want out of them
+    let get = TestRecordGet::new(partition_keys).sort_range(range);
+    // read every one of those partitions at once
+    let mut stream = client.send(client.query().add(get)).await?;
+    drain_row_keys(&mut stream).await
+}
+
+/// Build a range over a pair of borrowed sort keys
+///
+/// # Arguments
+///
+/// * `start` - The lower bound of the range to build
+/// * `end` - The upper bound of the range to build
+fn range_of(start: Bound<&str>, end: Bound<&str>) -> SortRange<String> {
+    // owning the bound values is what a real query carries over the wire
+    let owned = |bound: Bound<&str>| match bound {
+        Bound::Included(key) => Bound::Included(key.to_string()),
+        Bound::Excluded(key) => Bound::Excluded(key.to_string()),
+        Bound::Unbounded => Bound::Unbounded,
+    };
+    SortRange::new(owned(start), owned(end))
+}
+
+/// Test that a range selects the rows between its bounds and no others
+#[tokio::test]
+async fn get_by_range_selects_its_rows() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = utils::test_dir();
+    // start a shoal server and build a client
+    let (client, pool) = utils::start::<TestDb>(&temp_dir).await?;
+    // write five rows into one partition
+    insert_rows(&client, "partition_key", &["a", "b", "c", "d", "e"]).await?;
+    // ask for the span between two of them
+    let names = vec!["partition_key".to_string()];
+    let range = range_of(Bound::Included("b"), Bound::Included("d"));
+    let rows = get_row_keys_by_range(&client, names.clone(), range).await?;
+    // the rows inside the range come back in sort order, and nothing outside it does
+    assert_eq!(rows, expected_row_keys(&names, &["b", "c", "d"]));
+    // Shutdown server
+    pool.exit()?;
+    Ok(())
+}
+
+/// Test that each end of a range decides for itself whether it keeps the row it names
+#[tokio::test]
+async fn get_by_range_honours_each_bound() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = utils::test_dir();
+    // start a shoal server and build a client
+    let (client, pool) = utils::start::<TestDb>(&temp_dir).await?;
+    // write four rows into one partition
+    insert_rows(&client, "partition_key", &["a", "b", "c", "d"]).await?;
+    let names = vec!["partition_key".to_string()];
+    // an excluded lower bound leaves out the row it names
+    let range = range_of(Bound::Excluded("a"), Bound::Excluded("d"));
+    let rows = get_row_keys_by_range(&client, names.clone(), range).await?;
+    assert_eq!(rows, expected_row_keys(&names, &["b", "c"]));
+    // and an included one keeps it
+    let range = range_of(Bound::Included("a"), Bound::Included("d"));
+    let rows = get_row_keys_by_range(&client, names.clone(), range).await?;
+    assert_eq!(rows, expected_row_keys(&names, &["a", "b", "c", "d"]));
+    // Shutdown server
+    pool.exit()?;
+    Ok(())
+}
+
+/// Test that a range selects rows out of a partition that has to be read from disk
+///
+/// This is the only cover for the archived range. The archived copy of a partition is walked
+/// in place with `ArchivedBTreeMap::range`, which is a wholly separate seek to the in memory
+/// one and cannot be reached without a real server.
+#[tokio::test]
+async fn get_by_range_reads_from_disk() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = utils::test_dir();
+    // leave a partition on disk with nothing resident in memory
+    let on_disk: Vec<TestRecord> = ["a", "b", "c", "d", "e"]
+        .iter()
+        .map(|sort_key| TestRecord::new("partition_on_disk", sort_key, "woot"))
+        .collect();
+    insert_rows_then_evict_to_disk(&temp_dir, &on_disk).await?;
+    // start a fresh server over that same storage
+    let (client, pool) =
+        utils::start_with_conf::<TestDb>(utils::build_single_shard_config(&temp_dir)).await?;
+    // ask for a span of the rows that only exist in an archive
+    let names = vec!["partition_on_disk".to_string()];
+    let range = range_of(Bound::Excluded("a"), Bound::Included("c"));
+    let rows = get_row_keys_by_range(&client, names.clone(), range).await?;
+    assert_eq!(rows, expected_row_keys(&names, &["b", "c"]));
+    // a range past every row that partition holds is still a miss
+    let range = range_of(Bound::Excluded("e"), Bound::Unbounded);
+    let rows = get_row_keys_by_range(&client, names, range).await?;
+    assert!(rows.is_empty(), "a range past the end answered with {rows:?}");
+    // Shutdown server
+    pool.exit()?;
+    Ok(())
+}
+
+/// Test that a range spans the rows in memory and the rows in an archive
+///
+/// A range that matches nothing resident says nothing about what an archive holds, so a get
+/// may never resolve early on the strength of its bounds. This is the range twin of the sort
+/// key test that pins the same rule.
+#[tokio::test]
+async fn get_by_range_spans_memory_and_disk() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = utils::test_dir();
+    // leave two rows of one partition on disk with nothing resident in memory
+    let on_disk: Vec<TestRecord> = ["a", "c"]
+        .iter()
+        .map(|sort_key| TestRecord::new("partition_key", sort_key, "woot"))
+        .collect();
+    insert_rows_then_evict_to_disk(&temp_dir, &on_disk).await?;
+    // start a fresh server over that same storage
+    let (client, pool) =
+        utils::start_with_conf::<TestDb>(utils::build_single_shard_config(&temp_dir)).await?;
+    // write a row of that same partition, which is resident and needs no read
+    insert_rows(&client, "partition_key", &["b"]).await?;
+    // ask for a range covering the resident row and both archived ones
+    let names = vec!["partition_key".to_string()];
+    let rows = get_row_keys_by_range(&client, names.clone(), SortRange::default()).await?;
+    // all three come back, in sort order, whichever copy each of them came from
+    assert_eq!(rows, expected_row_keys(&names, &["a", "b", "c"]));
+    // Shutdown server
+    pool.exit()?;
+    Ok(())
+}
+
+/// Test that a range that cannot contain a key answers with nothing rather than panicking
+///
+/// `BTreeMap::range` panics on an inverted range and on one whose ends meet on a key neither
+/// includes, so without the guard in front of the seek this takes the shard down.
+#[tokio::test]
+async fn get_by_an_empty_range_returns_nothing() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = utils::test_dir();
+    // start a shoal server and build a client
+    let (client, pool) = utils::start::<TestDb>(&temp_dir).await?;
+    // write three rows into one partition
+    insert_rows(&client, "partition_key", &["a", "b", "c"]).await?;
+    let names = vec!["partition_key".to_string()];
+    // a range running backwards holds nothing
+    let range = range_of(Bound::Included("c"), Bound::Included("a"));
+    let rows = get_row_keys_by_range(&client, names.clone(), range).await?;
+    assert!(rows.is_empty(), "an inverted range answered with {rows:?}");
+    // and neither does one whose ends meet on a key neither of them includes
+    let range = range_of(Bound::Excluded("b"), Bound::Excluded("b"));
+    let rows = get_row_keys_by_range(&client, names, range).await?;
+    assert!(rows.is_empty(), "an empty range answered with {rows:?}");
+    // the server is still answering, which is the half of this that matters
+    let exists = client
+        .exists(TestRecordExists::new(vec!["partition_key".to_string()]))
+        .await?;
+    assert!(exists, "the shard stopped answering after an empty range");
+    // Shutdown server
+    pool.exit()?;
+    Ok(())
+}
+
+/// Test that a limit bounds a range spanning partitions
+///
+/// The walk has to stop at the limit rather than at the upper bound, which is what makes a
+/// page cost a page rather than a partition.
+#[tokio::test]
+async fn get_by_range_stops_at_its_limit() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = utils::test_dir();
+    // start a single shard server so both partitions are answered by one shard
+    let (client, pool) =
+        utils::start_with_conf::<TestDb>(utils::build_single_shard_config(&temp_dir)).await?;
+    // write the same three sort keys into each of two partitions
+    insert_rows(&client, "first", &["a", "b", "c"]).await?;
+    insert_rows(&client, "second", &["a", "b", "c"]).await?;
+    // ask for an unbounded range of both partitions but only allow three rows back
+    let get = TestRecordGet::new(vec!["first".to_string(), "second".to_string()])
+        .sort_range(SortRange::default())
+        .limit(3);
+    let mut stream = client.send(client.query().add(get)).await?;
+    let rows = drain_row_keys(&mut stream).await?;
+    // the limit takes the first rows of the partition named first
+    assert_eq!(
+        rows,
+        vec![
+            ("first".to_string(), "a".to_string()),
+            ("first".to_string(), "b".to_string()),
+            ("first".to_string(), "c".to_string()),
+        ]
+    );
+    // Shutdown server
+    pool.exit()?;
+    Ok(())
+}
+
+/// Test that a partition can be paged through by feeding the last row back as a cursor
+///
+/// **This is the point of the whole feature.** Before it, the only way to read the tail of a
+/// large partition was to fetch all of it: a `LIMIT` always answered with the first rows and
+/// there was no way to ask for the next ones. Each page here costs a seek plus its own rows,
+/// on whatever page it is.
+#[tokio::test]
+async fn a_partition_can_be_paged_by_its_sort_key() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = utils::test_dir();
+    // start a shoal server and build a client
+    let (client, pool) = utils::start::<TestDb>(&temp_dir).await?;
+    // write seven rows into one partition, which pages of two do not divide evenly
+    let written = ["a", "b", "c", "d", "e", "f", "g"];
+    insert_rows(&client, "partition_key", &written).await?;
+    // walk the partition two rows at a time, starting from the beginning
+    let names = vec!["partition_key".to_string()];
+    let mut cursor: Option<String> = None;
+    let mut paged: Vec<String> = Vec::new();
+    loop {
+        // the page after the last row we saw, or the first page if we have not seen one
+        let range = match &cursor {
+            Some(last) => SortRange::after(last.clone()),
+            None => SortRange::default(),
+        };
+        // read this page
+        let get = TestRecordGet::new(names.clone())
+            .sort_range(range)
+            .limit(2);
+        let mut stream = client.send(client.query().add(get)).await?;
+        let page = drain_row_keys(&mut stream).await?;
+        // a page with nothing in it is the end of the partition
+        if page.is_empty() {
+            break;
+        }
+        // the last row of this page is the cursor onto the next one
+        cursor = Some(page[page.len() - 1].1.clone());
+        paged.extend(page.into_iter().map(|(_, sort_key)| sort_key));
+        // a partition of seven rows cannot take more than seven pages, so bail rather than spin
+        assert!(paged.len() <= written.len(), "paging did not terminate");
+    }
+    // every row came back exactly once, in sort order, with no gap and no repeat
+    let expected: Vec<String> = written.iter().map(|key| (*key).to_string()).collect();
+    assert_eq!(paged, expected);
+    // Shutdown server
+    pool.exit()?;
+    Ok(())
+}
+
+/// Test that an exists over a range answers for the rows inside it
+#[tokio::test]
+async fn exists_by_range_answers_for_its_rows() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = utils::test_dir();
+    // start a shoal server and build a client
+    let (client, pool) = utils::start::<TestDb>(&temp_dir).await?;
+    // write three rows into one partition
+    insert_rows(&client, "partition_key", &["a", "b", "c"]).await?;
+    // a range holding one of our rows exists
+    let exists = client
+        .exists(
+            TestRecordExists::new(vec!["partition_key".to_string()])
+                .sort_range(range_of(Bound::Included("b"), Bound::Included("b"))),
+        )
+        .await?;
+    assert!(exists, "a range holding a row did not exist");
+    // a range past every row we hold does not, even though the partition is not empty
+    let exists = client
+        .exists(
+            TestRecordExists::new(vec!["partition_key".to_string()])
+                .sort_range(range_of(Bound::Excluded("c"), Bound::Unbounded)),
+        )
+        .await?;
+    assert!(!exists, "a range holding no row exists");
+    // Shutdown server
+    pool.exit()?;
+    Ok(())
+}
+
+/// Test that an exists over a range still consults disk before answering false
+#[tokio::test]
+async fn exists_by_range_survives_a_disk_load() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = utils::test_dir();
+    // leave a partition on disk with nothing resident in memory
+    let on_disk: Vec<TestRecord> = ["a", "b", "c"]
+        .iter()
+        .map(|sort_key| TestRecord::new("partition_on_disk", sort_key, "woot"))
+        .collect();
+    insert_rows_then_evict_to_disk(&temp_dir, &on_disk).await?;
+    // start a fresh server over that same storage
+    let (client, pool) =
+        utils::start_with_conf::<TestDb>(utils::build_single_shard_config(&temp_dir)).await?;
+    // a range whose rows only exist in an archive still exists
+    let exists = client
+        .exists(
+            TestRecordExists::new(vec!["partition_on_disk".to_string()])
+                .sort_range(range_of(Bound::Included("b"), Bound::Included("b"))),
+        )
+        .await?;
+    assert!(exists, "a range read back from disk did not exist");
+    // and a range that partition never held does not
+    let exists = client
+        .exists(
+            TestRecordExists::new(vec!["partition_on_disk".to_string()])
+                .sort_range(range_of(Bound::Excluded("c"), Bound::Unbounded)),
+        )
+        .await?;
+    assert!(!exists, "a range holding no row exists");
+    // Shutdown server
+    pool.exit()?;
+    Ok(())
+}
+
+/// Test that a range typed as SHQL reaches the table and narrows the rows it answers with
+#[tokio::test]
+async fn shql_bounds_rows_by_a_sort_key_range() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = utils::test_dir();
+    // start a shoal server and build a client
+    let (client, pool) = utils::start::<TestDb>(&temp_dir).await?;
+    // write five rows into one partition
+    insert_rows(&client, "partition_key", &["a", "b", "c", "d", "e"]).await?;
+    // read a page of it the way a human would type it
+    //
+    // `Queries` has no Debug impl, so the parse result is unwrapped by hand rather than with
+    // `expect`
+    let Ok(queries) = client.query().parse(
+        "SELECT * FROM TestRecord WHERE partition_key = 'partition_key' \
+         AND sort_key > 'b' LIMIT 2",
+    ) else {
+        panic!("a sort key range should parse and bind");
+    };
+    let mut stream = client.send(queries).await?;
+    let rows = drain_row_keys(&mut stream).await?;
+    // the rows after the bound come back, stopped by the limit
+    let names = vec!["partition_key".to_string()];
+    assert_eq!(rows, expected_row_keys(&names, &["c", "d"]));
     // Shutdown server
     pool.exit()?;
     Ok(())

@@ -10,7 +10,10 @@
 //! query      := ws "SELECT" ws1 "*" ws1 "FROM" ws1 identifier where [ws limit] [ws ";"] ws eof
 //! where      := ws1 "WHERE" ws1 condition { ws "AND" ws1 condition }
 //! condition  := comparison { ws "OR" ws1 comparison }
-//! comparison := identifier ws ( "=" ws value | "IN" ws "(" ws value { ws "," ws value } ws ")" )
+//! comparison := identifier ws ( "=" ws value
+//!                             | "IN" ws "(" ws value { ws "," ws value } ws ")"
+//!                             | range_op ws value )
+//! range_op   := ">=" | "<=" | ">" | "<"
 //! limit      := "LIMIT" ws1 digits
 //! value      := string | float | integer | boolean | null
 //! string     := "'" { any character except "'" } "'"
@@ -54,7 +57,7 @@
 //! let parsed = ParsedSelect::new("SELECT * FROM Movie WHERE id IN (550, 551)")?;
 //!
 //! assert_eq!(parsed.conditions.len(), 1);
-//! assert_eq!(parsed.conditions[0].values.len(), 2);
+//! assert_eq!(parsed.conditions[0].values().count(), 2);
 //! # Ok::<(), shoal_core::client::ShqlParseError>(())
 //! ```
 //!
@@ -67,7 +70,45 @@
 //! let with_in = ParsedSelect::new("SELECT * FROM Movie WHERE id IN (550, 551)")?;
 //!
 //! assert_eq!(with_or.conditions.len(), with_in.conditions.len());
-//! assert_eq!(with_or.conditions[0].values.len(), with_in.conditions[0].values.len());
+//! assert_eq!(
+//!     with_or.conditions[0].values().count(),
+//!     with_in.conditions[0].values().count(),
+//! );
+//! # Ok::<(), shoal_core::client::ShqlParseError>(())
+//! ```
+//!
+//! # Bounding a field
+//!
+//! A field can be bounded instead of matched, with `<`, `<=`, `>`, or `>=`. Binding refuses
+//! this on anything but a sort key, since a partition is located by its exact key and a filter
+//! is a membership test - but the grammar itself does not know about roles:
+//!
+//! ```
+//! use shoal_core::shared::queries::parser::ParsedSelect;
+//!
+//! let parsed = ParsedSelect::new("SELECT * FROM Review WHERE movie = 550 AND reviewer > 'a'")?;
+//!
+//! let range = parsed.conditions[1].as_range().expect("reviewer is bounded");
+//! assert!(!range.lower.as_ref().expect("a lower bound").inclusive);
+//! assert!(range.upper.is_none());
+//! # Ok::<(), shoal_core::client::ShqlParseError>(())
+//! ```
+//!
+//! **A range is the one shape where `AND` may name a field twice.** The two comparisons bound
+//! opposite ends and are folded into a single clause, so everything downstream still sees one
+//! clause per field:
+//!
+//! ```
+//! use shoal_core::shared::queries::parser::ParsedSelect;
+//!
+//! let parsed = ParsedSelect::new(
+//!     "SELECT * FROM Review WHERE movie = 550 AND reviewer >= 'a' AND reviewer < 'm'",
+//! )?;
+//!
+//! assert_eq!(parsed.conditions.len(), 2);
+//! let range = parsed.conditions[1].as_range().expect("reviewer is bounded");
+//! assert!(range.lower.as_ref().expect("a lower bound").inclusive);
+//! assert!(!range.upper.as_ref().expect("an upper bound").inclusive);
 //! # Ok::<(), shoal_core::client::ShqlParseError>(())
 //! ```
 //!
@@ -112,12 +153,17 @@
 //! # What is not supported
 //!
 //! - Only `SELECT *`. There is no projection.
-//! - Only `=` and `IN`. No `<`, `>`, `!=`, `LIKE`, or `BETWEEN`.
-//! - `OR` only joins conditions on the same field, where it means the same thing as `IN`. A
-//!   partition key cannot be `OR`'d with a filter, because the only access path is by partition
-//!   key and there is no scan to answer the other side with. There are no parentheses.
-//! - A field cannot be constrained twice by `AND`. Two values for one field are a union, not an
-//!   intersection, so the query has to be written with `IN` to say what it means.
+//! - `=`, `IN`, and the range operators `<`, `<=`, `>`, `>=`. No `!=`, `LIKE`, or `BETWEEN`.
+//! - A range is only bindable on a **sort key**. Ranges on a partition key or a filter parse
+//!   and are then refused during binding, because a partition is located by its exact key and
+//!   a filter is a membership test.
+//! - `OR` only joins conditions on the same field, where it means the same thing as `IN`, and
+//!   it cannot join a range at all. A partition key cannot be `OR`'d with a filter, because the
+//!   only access path is by partition key and there is no scan to answer the other side with.
+//!   There are no parentheses.
+//! - A field cannot be constrained twice by `AND` unless the two conditions bound opposite ends
+//!   of one range. Two values for one field are a union, not an intersection, so that has to be
+//!   written with `IN` to say what it means.
 //! - No `ORDER BY`, `GROUP BY`, `JOIN`, or aggregates.
 //! - No `INSERT`, `UPDATE`, or `DELETE` — writes must be built as typed queries.
 //! - A `WHERE` clause is mandatory, and it must constrain a partition key.
@@ -908,10 +954,14 @@ fn connective(input: &mut &str) -> Option<Connective> {
 ///
 /// * `condition` - The condition to deduplicate the values of
 fn dedup_values(condition: &mut WhereClause) {
+    // only a set of values can hold the same literal twice
+    let WhereConstraint::Values(values) = &mut condition.constraint else {
+        return;
+    };
     // remember every literal we have kept so far
-    let mut seen: Vec<Value> = Vec::with_capacity(condition.values.len());
+    let mut seen: Vec<Value> = Vec::with_capacity(values.len());
     // keep the first write of each value and drop the rest
-    condition.values.retain(|found| {
+    values.retain(|found| {
         // a value we have already kept adds nothing to this query
         if seen.contains(&found.value) {
             return false;
@@ -921,51 +971,159 @@ fn dedup_values(condition: &mut WhereClause) {
     });
 }
 
-/// Reject a field constrained by more than one AND joined condition
+/// Fold the AND joined conditions naming one field into a single clause
 ///
-/// Two conditions on one field joined by `AND` ask for the rows satisfying both, which for a
-/// partition key means the rows present in every one of those partitions. Shoal answers a get
-/// by reading each named partition and returning their union, so this spelling would quietly
-/// hand back the rows in *any* of them. It is refused rather than answered wrongly.
+/// **A field may only be named twice when the two conditions bound opposite ends of one
+/// range**, and those two are folded together here so that everything downstream still sees
+/// exactly one clause per field. That is what makes the binding stage a lookup rather than a
+/// search, in the three separate places that do it.
+///
+/// Every other repeat is refused. Two conditions naming values on one field ask for the rows
+/// satisfying both, which for a partition key means the rows present in every one of those
+/// partitions. Shoal answers a get by reading each named partition and returning their union,
+/// so that spelling would quietly hand back the rows in *any* of them.
 ///
 /// # Arguments
 ///
-/// * `conditions` - The conditions in this WHERE clause
+/// * `conditions` - The conditions in this WHERE clause, in the order they were written
 /// * `original` - The original complete query string (used to build the suggestion)
-fn check_fields_unique(
-    conditions: &[WhereClause],
+fn merge_field_clauses(
+    conditions: Vec<WhereClause>,
     original: &str,
-) -> Result<(), ShqlParseError> {
-    // walk our conditions looking for one that was already constrained
-    for (index, condition) in conditions.iter().enumerate() {
-        // check this field against every condition written before it
-        let Some(earlier) = conditions[..index]
-            .iter()
-            .find(|earlier| earlier.field == condition.field)
-        else {
+) -> Result<Vec<WhereClause>, ShqlParseError> {
+    // build the one clause per field this WHERE clause comes down to
+    let mut merged: Vec<WhereClause> = Vec::with_capacity(conditions.len());
+    // fold each condition into the clause for the field it names, or start that clause
+    for condition in conditions {
+        // take this condition apart so its field can be looked up while its constraint moves
+        let WhereClause {
+            field,
+            field_start,
+            field_end,
+            constraint,
+        } = condition;
+        // find whether an earlier condition already named this field
+        let Some(index) = merged.iter().position(|earlier| earlier.field == field) else {
+            // this is the first condition to name this field, so it starts its clause
+            merged.push(WhereClause {
+                field,
+                field_start,
+                field_end,
+                constraint,
+            });
             continue;
         };
-        // rebuild both sets of literals as they were written so we can suggest an IN list
-        let literals: Vec<&str> = earlier
-            .values
-            .iter()
-            .chain(condition.values.iter())
-            .map(|found| &original[found.start..found.end])
-            .collect();
-        return Err(ShqlParseError::new(
-            format!(
-                "'{}' is constrained twice by AND. Several values for one field are a union in \
-                 shoal, not an intersection, so write it as {} IN ({})",
-                condition.field,
-                condition.field,
-                literals.join(", ")
-            ),
-            condition.field_start,
-            condition.field_end,
-            original,
-        ));
+        // decide what naming this field a second time meant
+        match (&mut merged[index].constraint, constraint) {
+            // two ranges bound one field from each end, which is the shape we allow
+            (WhereConstraint::Range(existing), WhereConstraint::Range(next)) => {
+                merge_ranges(existing, next, &field, field_start, field_end, original)?;
+            }
+            // two sets of values on one field ask for an intersection we cannot answer
+            (WhereConstraint::Values(existing), WhereConstraint::Values(next)) => {
+                // rebuild both sets of literals as they were written to suggest an IN list
+                let literals: Vec<&str> = existing
+                    .iter()
+                    .chain(next.iter())
+                    .map(|found| &original[found.start..found.end])
+                    .collect();
+                return Err(ShqlParseError::new(
+                    format!(
+                        "'{}' is constrained twice by AND. Several values for one field are a \
+                         union in shoal, not an intersection, so write it as {} IN ({})",
+                        field,
+                        field,
+                        literals.join(", ")
+                    ),
+                    field_start,
+                    field_end,
+                    original,
+                ));
+            }
+            // a value and a range are two different questions about one field
+            _ => {
+                return Err(ShqlParseError::new(
+                    format!(
+                        "'{}' is constrained by both a value and a range. A field is either \
+                         matched against values or bounded by a range, not both",
+                        field
+                    ),
+                    field_start,
+                    field_end,
+                    original,
+                ));
+            }
+        }
+    }
+    Ok(merged)
+}
+
+/// Fold one end of a range into the range a field already had
+///
+/// A comparison names exactly one end, so this succeeds when the two conditions named
+/// different ends and fails when they named the same one twice.
+///
+/// # Arguments
+///
+/// * `existing` - The range this field already had
+/// * `next` - The range the second condition on this field named
+/// * `field` - The name of the field being bounded, named in any error
+/// * `field_start` - The start position of that field name in the original query string
+/// * `field_end` - The end position of that field name in the original query string
+/// * `original` - The original complete query string (used to render the error)
+fn merge_ranges(
+    existing: &mut WhereRange,
+    next: WhereRange,
+    field: &str,
+    field_start: usize,
+    field_end: usize,
+    original: &str,
+) -> Result<(), ShqlParseError> {
+    // fold in the lower bound this condition named, if it named one
+    if let Some(lower) = next.lower {
+        // a range has one lower bound, so two of them is a query that means one of the pair
+        if existing.lower.is_some() {
+            return Err(two_bounds_error(field, "lower", field_start, field_end, original));
+        }
+        existing.lower = Some(lower);
+    }
+    // fold in the upper bound this condition named, if it named one
+    if let Some(upper) = next.upper {
+        // a range has one upper bound, so two of them is a query that means one of the pair
+        if existing.upper.is_some() {
+            return Err(two_bounds_error(field, "upper", field_start, field_end, original));
+        }
+        existing.upper = Some(upper);
     }
     Ok(())
+}
+
+/// Build the error for a field given the same end of a range twice
+///
+/// # Arguments
+///
+/// * `field` - The name of the field that was bounded twice
+/// * `end` - Which end of the range was given twice, named in the error
+/// * `field_start` - The start position of that field name in the original query string
+/// * `field_end` - The end position of that field name in the original query string
+/// * `original` - The original complete query string (used to render the error)
+fn two_bounds_error(
+    field: &str,
+    end: &str,
+    field_start: usize,
+    field_end: usize,
+    original: &str,
+) -> ShqlParseError {
+    ShqlParseError::new(
+        format!(
+            "'{}' is given two {} bounds by AND. A range has one {} bound, so write the tighter \
+             of the two",
+            field, end, end
+        ),
+        field_start,
+        field_end,
+        original,
+    )
 }
 
 /// Parse the conditions making up a WHERE clause
@@ -1027,12 +1185,28 @@ fn where_conditions<'a>(
                         original,
                     ));
                 }
-                previous.values.extend(next.values);
+                // OR chooses between values, and two ranges are a union with no access path
+                let (WhereConstraint::Values(kept), WhereConstraint::Values(added)) =
+                    (&mut previous.constraint, next.constraint)
+                else {
+                    return Err(ShqlParseError::new(
+                        format!(
+                            "'{}' cannot be OR'd with a range. OR chooses between values for one \
+                             field, and a union of ranges is not something shoal can read - bound \
+                             the field from each end with AND instead",
+                            next.field
+                        ),
+                        next.field_start,
+                        next.field_end,
+                        original,
+                    ));
+                };
+                kept.extend(added);
             }
         }
     }
-    // a field constrained twice by AND is an intersection, which we cannot answer
-    check_fields_unique(&conditions, original)?;
+    // fold the conditions naming one field together, refusing every repeat but a range
+    let mut conditions = merge_field_clauses(conditions, original)?;
     // drop any repeated value so a query naming one partition twice only reads it once
     for condition in &mut conditions {
         dedup_values(condition);

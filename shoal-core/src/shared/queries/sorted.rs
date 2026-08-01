@@ -70,6 +70,12 @@ impl<S: Ord + Clone> SortSelect<S> {
     }
 }
 
+/// `Default` for a selection, which is every row
+///
+/// This is written out rather than derived because `#[derive(Default)]` on a generic enum bounds
+/// every one of its type parameters on `Default`, and a sort key has no reason to have one. The
+/// arm this returns holds no `S` at all, so the bound would be asking for nothing.
+#[allow(clippy::derivable_impls)]
 impl<S> Default for SortSelect<S> {
     fn default() -> Self {
         SortSelect::All

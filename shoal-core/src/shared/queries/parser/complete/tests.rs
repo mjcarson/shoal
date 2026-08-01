@@ -71,9 +71,52 @@ fn partial_field_name_is_the_word() {
 }
 
 #[test]
-fn field_without_a_value_expects_equals() {
+fn field_without_a_value_expects_an_operator() {
     let context = at_end("SELECT * FROM Movie WHERE id ");
-    assert_eq!(context.expecting, Expecting::Equals);
+    assert_eq!(
+        context.expecting,
+        Expecting::Operator {
+            field: "id".to_string()
+        }
+    );
+}
+
+#[test]
+fn expects_a_value_after_each_range_operator() {
+    // every range operator puts us where an equals would, waiting for the value it bounds at
+    for query in [
+        "SELECT * FROM Movie WHERE title > ",
+        "SELECT * FROM Movie WHERE title >= ",
+        "SELECT * FROM Movie WHERE title < ",
+        "SELECT * FROM Movie WHERE title <= ",
+    ] {
+        assert_eq!(
+            at_end(query).expecting,
+            Expecting::Value {
+                field: "title".to_string()
+            },
+            "unexpected expectation for '{}'",
+            query
+        );
+    }
+}
+
+#[test]
+/// The `=` of `<=` is swallowed by the operator rather than read as a second one
+///
+/// `<` and `>` used to fall into the numeric fallback of the tokenizer, so a bounded query
+/// derailed to `Nothing` and offered no completions at all.
+fn a_two_character_operator_is_one_token() {
+    // a bounded condition is complete, so what follows it is another condition or a limit
+    assert_eq!(
+        at_end("SELECT * FROM Movie WHERE title >= 'a' ").expecting,
+        Expecting::Continuation
+    );
+    // and the second half of a range picks up where the first left off
+    assert_eq!(
+        at_end("SELECT * FROM Movie WHERE title >= 'a' AND title < 'm' ").expecting,
+        Expecting::Continuation
+    );
 }
 
 #[test]
@@ -195,9 +238,14 @@ fn a_cursor_past_the_end_is_clamped() {
 
 #[test]
 fn a_field_can_be_followed_by_an_in_list() {
-    // a field on its own is waiting for either operator
+    // a field on its own is waiting for an operator
     let context = at_end("SELECT * FROM Movie WHERE id ");
-    assert_eq!(context.expecting, Expecting::Equals);
+    assert_eq!(
+        context.expecting,
+        Expecting::Operator {
+            field: "id".to_string()
+        }
+    );
     // the IN keyword is waiting for the paren that opens its list
     let context = at_end("SELECT * FROM Movie WHERE id IN ");
     assert_eq!(

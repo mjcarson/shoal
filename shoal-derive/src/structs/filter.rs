@@ -64,10 +64,23 @@ pub fn add(
         quote! {
             // look for a where condition naming this filter field
             if let Some(condition) = conditions.iter().find(|cond| cond.field == #field_name_str) {
+                // a filter is a membership test, so there is nothing to bound it with
+                let condition_values = condition.as_values()
+                    .ok_or_else(|| shoal_core::client::ShqlParseError::new(
+                        format!(
+                            "'{}' is a filter and cannot be given a range. A filter checks a row \
+                             against the values it may take, so name them with = or IN. Only a \
+                             sort key can be bounded, because it is what a partition is ordered by",
+                            #field_name_str,
+                        ),
+                        condition.field_start,
+                        condition.field_end,
+                        query,
+                    ))?;
                 // a condition may name several values, all of which this field may take
-                let mut values = Vec::with_capacity(condition.values.len());
+                let mut values = Vec::with_capacity(condition_values.len());
                 // convert each literal from the query into this field's type
-                for found in &condition.values {
+                for found in condition_values {
                     let value = shoal_core::serde_json::from_value::<#ty>(found.value.clone())
                         .map_err(|error| shoal_core::client::ShqlParseError::new(
                             format!("Failed to deserialize filter '{}': {}", #field_name_str, error),

@@ -64,10 +64,29 @@ neither copy had a limit check, which is how `LIMIT` came to be accepted and dis
 sorted side has a matching pair for `exists`, added when it stopped answering about the partition
 instead of the row ([Sort keys were accepted and ignored](../appendix/resolved/sort-keys.md)).
 
-Each of those methods has two shapes inside it. A get or an exists naming sort keys **seeks** each
-of them — `BTreeMap::get` when the partition is resident, `ArchivedBTreeMap::get` when it is an
-archive being read in place — and one naming none walks every live row. A seek that lands on a
-`MaybeRow::Tombstone` has found a deleted row, so it is a miss and not a reason to look further.
+Each of those methods has three shapes inside it on the sorted side, one per `SortSelect` arm:
+
+| `SortSelect` | Resident | Archive read in place |
+| --- | --- | --- |
+| `All` | walk `live_row_values()` | walk `live_row_values()` |
+| `Keys([..])` | `BTreeMap::get` per key | `ArchivedBTreeMap::get` per key |
+| `Range(..)` | `BTreeMap::range` | `ArchivedBTreeMap::range` |
+
+A seek that lands on a `MaybeRow::Tombstone` has found a deleted row, so it is a miss and not a
+reason to look further; a range skips tombstones the way an unnarrowed walk does. **A range is
+checked for emptiness before either seek**, because `BTreeMap::range` panics on one whose start is
+past its end and on one whose ends meet on a key neither includes
+([F1](../features/sort-key-ranges.md#invariants-to-uphold)).
+
+What the three arms do *not* each have is their own copy of the filter, the limit check, and the
+push. Those live once in `collect_rows` and `any_row` on the resident side and in
+`collect_archived` and `any_archived` on the archived one; an arm builds an iterator and hands it
+over. Adding a fourth way to select rows should not be a fourth place to check the limit in the
+wrong order.
+
+A key or a bound being sought in an *archive* has to be in the archived form first, which
+`SeekBytes` builds — at most once per query execution, and only when a partition of it is actually
+being read in place, so an all-resident get pays nothing for it.
 
 `found` is the accumulator the whole get shares, not a per-partition buffer. That is why the
 limit is checked against it rather than against a local count, and why it is checked *before* the

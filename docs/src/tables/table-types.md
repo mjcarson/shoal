@@ -56,19 +56,27 @@ A sorted table gives you:
 - deterministic iteration order — a partition answers in sort-key order,
 - per-row deletes and updates addressed by sort key,
 - **point lookups by sort key.** `SortedGet` and `SortedExists` both carry
-  `sort_keys: Vec<R::Sort>`, and a query naming any of them is answered by seeking each key in the
-  `BTreeMap` rather than walking the partition. The same is true of a partition being read in
-  place from an archive, which is sought through `ArchivedBTreeMap::get`. An empty list still means
-  "every row in this partition".
+  `sort_select: SortSelect<R::Sort>`, and a query naming keys is answered by seeking each of them
+  in the `BTreeMap` rather than walking the partition. The same is true of a partition being read
+  in place from an archive, which is sought through `ArchivedBTreeMap::get`.
+- **range scans and paging by sort key.** `SortSelect::Range` bounds the rows a get or exists
+  wants, and both partition forms seek to the lower bound and stop past the upper one —
+  `BTreeMap::range` in memory and `ArchivedBTreeMap::range` in an archive. An exclusive lower
+  bound is therefore a cursor: the sort key of the last row of a page names where the next page
+  begins, so page *n* costs a seek plus its own rows rather than every row before it.
+
+`SortSelect::All` is what a query that narrowed itself in neither way carries, and is the only
+arm that means every row in the partition.
 
 The sort keys used to be carried to the table and thrown away, which is
 [item 8](../appendix/resolved/sort-keys.md) — worth reading before changing either scan, since it
-records what a seek is allowed to skip and what it is not.
+records what a seek is allowed to skip and what it is not. Ranges were added by
+[F1](../features/sort-key-ranges.md), which records the same for a span.
 
-What a sorted table still does not give you is a **range** predicate: `title >= 'M'`, or a cursor
-to page through a large partition with. That is [TODOs](../appendix/todos.md#sort-key-range-predicates),
+What a sorted table still does not give you is a range over a *prefix* of a composite sort key,
 and a composite sort key cannot be named from SHQL at all
-([item 42](../appendix/known-issues.md#42-shql-cannot-express-a-composite-sort-key)).
+([item 42](../appendix/known-issues.md#42-shql-cannot-express-a-composite-sort-key)). Nor does a
+range reduce I/O: a cold partition is read whole either way.
 
 ## PersistentUnsortedTable
 
@@ -204,7 +212,8 @@ implementations agree.
 
 ## Limitations
 
-- Sort keys are not usable as a query predicate.
+- A range over a *prefix* of a composite sort key is not expressible, and a range never reduces
+  the I/O of a cold partition ([F1](../features/sort-key-ranges.md#limitations)).
 - Unsorted updates and deletes ignore data on disk.
 - `EphemeralTable` cannot be used in a `#[db]` database.
 - No trait unifies the table implementations, so behavioural divergence is silent.

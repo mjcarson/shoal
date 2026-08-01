@@ -8,11 +8,12 @@
 use deepsize2::DeepSizeOf;
 use rkyv::{Archive, Deserialize, Serialize};
 use shoal_core::shared::queries::parser::{FieldRole, Suggestion, SuggestionKind};
-use shoal_core::shared::queries::{SortedQuery, UnsortedQuery};
+use shoal_core::shared::queries::{SortSelect, SortedQuery, UnsortedQuery};
 use shoal_core::shared::traits::{PartitionKeySupport, QuerySupport};
 use shoal_core::storage::FileSystem;
 use shoal_core::tables::{PersistentSortedTable, PersistentUnsortedTable};
 use shoal_derive::{db, ShoalSortedTable, ShoalUnsortedTable};
+use std::ops::Bound;
 
 /// An unsorted table with a partition key and two filterable fields
 #[derive(
@@ -283,7 +284,7 @@ fn binds_sort_keys() {
     // parse a query narrowing by sort key
     let get = parse_review("SELECT * FROM Review WHERE movie = 'alien' AND reviewer = 'ann'");
     // the sort key should have been picked up
-    assert_eq!(get.sort_keys, vec!["ann".to_string()]);
+    assert_eq!(get.sort_select.keys(), Some(["ann".to_string()].as_slice()));
 }
 
 #[test]
@@ -296,19 +297,111 @@ fn binds_sort_keys_from_an_in_list() {
     let get =
         parse_review("SELECT * FROM Review WHERE movie = 'alien' AND reviewer IN ('ann', 'bob')");
     // every value of the sort condition names a row to return
-    assert_eq!(get.sort_keys, vec!["ann".to_string(), "bob".to_string()]);
+    assert_eq!(
+        get.sort_select.keys(),
+        Some(["ann".to_string(), "bob".to_string()].as_slice())
+    );
 }
 
 #[test]
-/// A query naming no sort key leaves the sort keys empty
+/// A query naming no sort key asks for every row of its partitions
 ///
-/// An empty list is how a get asks for every row in its partitions, so a query that never
-/// mentions the sort key has to produce one.
+/// `SortSelect::All` is the only thing that means every row, so a query that never mentions
+/// the sort key has to produce it rather than an empty set of keys - which now means none.
 fn binds_no_sort_keys_when_none_are_named() {
     // parse a query that only names its partition
     let get = parse_review("SELECT * FROM Review WHERE movie = 'alien'");
     // nothing narrows this get to a row, so it asks for the whole partition
-    assert!(get.sort_keys.is_empty());
+    assert!(matches!(get.sort_select, SortSelect::All));
+}
+
+#[test]
+/// A range on the sort key binds to the bounds it was written with
+fn binds_a_sort_key_range() {
+    // parse a query bounded below and left open above
+    let get = parse_review("SELECT * FROM Review WHERE movie = 'alien' AND reviewer > 'ann'");
+    let range = get.sort_select.range().expect("reviewer should be bounded");
+    // the operator excluded the row it named, which is what makes it a cursor
+    assert_eq!(range.start, Bound::Excluded("ann".to_string()));
+    assert_eq!(range.end, Bound::Unbounded);
+}
+
+#[test]
+/// Each range operator binds to the bound that matches it
+fn binds_every_range_operator() {
+    // every spelling and the bound it should produce
+    let cases = [
+        (">", Bound::Excluded("m".to_string()), Bound::Unbounded),
+        (">=", Bound::Included("m".to_string()), Bound::Unbounded),
+        ("<", Bound::Unbounded, Bound::Excluded("m".to_string())),
+        ("<=", Bound::Unbounded, Bound::Included("m".to_string())),
+    ];
+    // check each of them binds to the end it names, with the right inclusivity
+    for (operator, start, end) in cases {
+        let query =
+            format!("SELECT * FROM Review WHERE movie = 'alien' AND reviewer {operator} 'm'");
+        let get = parse_review(&query);
+        let range = get.sort_select.range().expect("reviewer should be bounded");
+        assert_eq!(range.start, start, "wrong lower bound for '{}'", operator);
+        assert_eq!(range.end, end, "wrong upper bound for '{}'", operator);
+    }
+}
+
+#[test]
+/// Two bounds on the sort key bind into one range closed at both ends
+///
+/// The parser folds the two conditions into one clause, so the binder still finds a single
+/// sort condition and never has to search for a second.
+fn binds_a_sort_key_range_from_both_ends() {
+    // parse a query bounded from each end
+    let get = parse_review(
+        "SELECT * FROM Review WHERE movie = 'alien' AND reviewer >= 'ann' AND reviewer < 'zoe'",
+    );
+    let range = get.sort_select.range().expect("reviewer should be bounded");
+    // each operator kept its own inclusivity
+    assert_eq!(range.start, Bound::Included("ann".to_string()));
+    assert_eq!(range.end, Bound::Excluded("zoe".to_string()));
+}
+
+#[test]
+/// A range on a partition key is refused
+///
+/// A partition is located by hashing its exact key, so there is no ordering to bound it with
+/// and no scan to answer a bounded one.
+fn rejects_a_range_on_a_partition_key() {
+    let message = parse_err("SELECT * FROM Review WHERE movie > 'alien'");
+    assert!(
+        message.contains("partition key and cannot be given a range") && message.contains("movie"),
+        "unexpected message: {}",
+        message
+    );
+}
+
+#[test]
+/// A range on a filter is refused
+///
+/// A filter is a membership test evaluated per row, not an ordering, so a bound on one has
+/// nothing to mean.
+fn rejects_a_range_on_a_filter() {
+    let message = parse_err("SELECT * FROM Review WHERE movie = 'alien' AND source > 'imdb'");
+    assert!(
+        message.contains("filter and cannot be given a range") && message.contains("source"),
+        "unexpected message: {}",
+        message
+    );
+}
+
+#[test]
+/// A range on an unsorted table's filter is refused too
+///
+/// An unsorted table has no sort key at all, so every field of it is unbounded by definition.
+fn rejects_a_range_on_an_unsorted_table() {
+    let message = parse_err("SELECT * FROM Movie WHERE id = 550 AND title > 'Alien'");
+    assert!(
+        message.contains("filter and cannot be given a range"),
+        "unexpected message: {}",
+        message
+    );
 }
 
 #[test]
@@ -561,6 +654,29 @@ fn suggests_how_to_continue_a_query() {
     );
     // and a finished query has nothing left to offer
     assert!(suggest_text("SELECT * FROM Movie WHERE id = 550;").is_empty());
+}
+
+#[test]
+/// The range operators are offered on a sort key and on nothing else
+///
+/// Binding refuses a range on a partition key or a filter, so offering one there would walk
+/// the user straight into an error the menu could have kept them out of.
+fn suggests_range_operators_only_for_a_sort_key() {
+    // a sort key can be matched or bounded
+    assert_eq!(
+        suggest_text("SELECT * FROM Review WHERE reviewer "),
+        vec!["=", "IN", "<", "<=", ">", ">="]
+    );
+    // a partition key can only be matched
+    assert_eq!(
+        suggest_text("SELECT * FROM Review WHERE movie "),
+        vec!["=", "IN"]
+    );
+    // and so can a filter
+    assert_eq!(
+        suggest_text("SELECT * FROM Review WHERE source "),
+        vec!["=", "IN"]
+    );
 }
 
 #[test]

@@ -1,0 +1,28 @@
+# Delivered Features
+
+Capabilities that have been built, kept for the same reason [Resolved Issues](../appendix/resolved-issues.md)
+are kept: the reasoning behind a feature is worth more than the feature. Each page states what
+the thing does, the choices its design rests on, what was rejected on the way, what it still
+cannot do, and — the part that matters when changing this code later — the invariants it depends
+on.
+
+Item numbers are prefixed `F` and are **never reused**, the same rule [Known
+Issues](../appendix/known-issues.md) and [Optimizations](../appendix/optimizations.md) follow.
+
+| # | Feature | What it does |
+| --- | --- | --- |
+| F1 | [Sort-key range predicates](sort-key-ranges.md) | A sorted get or exists can bound its rows by a range of sort keys instead of naming them, in memory and in an archive, which makes an exclusive lower bound a cursor and paging a large partition cost a page |
+
+## How a feature gets written down
+
+Not every change earns a page. A bug fix gets one when it had a wrong mental model behind it; a
+feature gets one when it introduced a model that was not there before, because the next person to
+touch that code will reason from the model rather than from the diff. The sections are always the
+same:
+
+**Context** what was not possible, and why it mattered. **What it does**, across every front end
+that can reach it. **Design choices** and **Alternatives rejected**, together, because a design is
+only understandable next to what it is not. **Limitations**, so that the gap between what it looks
+like and what it does is written down rather than discovered. **Invariants to uphold**, which is
+the section to read before changing the code it describes. **Performance**, naming what got
+cheaper and what did not. **Tests**, naming what fails if the feature is reverted.

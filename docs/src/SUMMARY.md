@@ -42,6 +42,11 @@
 - [Benchmarking](operations/benchmarking.md)
 - [shoalctl](operations/shoalctl.md)
 
+# Features
+
+- [Delivered Features](features/delivered-features.md)
+  - [F1. Sort-key range predicates](features/sort-key-ranges.md)
+
 # Appendix
 
 - [Known Issues](appendix/known-issues.md)

@@ -3,8 +3,9 @@
 What the test suite reaches, what it does not, and the one place where it is unsound.
 
 **Established by running it.** `cargo check --workspace --all-targets` passes with warnings and
-`cargo test --workspace` passes: **115 integration tests** (one ignored), **129 `shoal-core` unit
-tests**, **8 doctests**. That is up from 105 and 116 with the sort-key selection coverage added
+`cargo test --workspace` passes: **132 integration tests** (one ignored), **159 `shoal-core` unit
+tests**, **10 doctests**. That is up from 115, 129, and 8 with the range coverage added by
+[F1](../features/sort-key-ranges.md), from 105 and 116 with the sort-key selection coverage added
 with [item 8](resolved/sort-keys.md), and from 87, 95, and 6 before the row-order and `IN`/`OR`
 coverage added with [items 26 and 39](resolved/partition-order.md). The two persistent-table
 binaries take about 24 seconds each; everything else finishes in well under a second. That is with
@@ -22,9 +23,9 @@ are in [Optimizations](optimizations.md).
 
 | Binary | Count | What it reaches |
 | --- | --- | --- |
-| `persistent_sorted_table.rs` | 36, one ignored | insert; `exists` true and false; delete; delete after restart; delete surviving restart; delete and update when the partition is not resident; delete and writes surviving eviction; update; update intent replay; acknowledgement surviving `SIGKILL`; five limit tests; two cross-shard tests; five row-order tests; six sort-key selection tests; two sort-key `exists` tests; two end-to-end SHQL tests |
+| `persistent_sorted_table.rs` | 46, one ignored | insert; `exists` true and false; delete; delete after restart; delete surviving restart; delete and update when the partition is not resident; delete and writes surviving eviction; update; update intent replay; acknowledgement surviving `SIGKILL`; five limit tests; two cross-shard tests; five row-order tests; six sort-key selection tests; two sort-key `exists` tests; six range tests including the archived seek and the memory/disk span; the paging walk; two range `exists` tests; three end-to-end SHQL tests |
 | `persistent_unsorted_table.rs` | 12 | insert; delete; update; delete and update when not resident; delete surviving eviction; insert after delete when not resident; zero limit; three multi-partition tests |
-| `shql.rs` | 38 | SHQL parsing and binding against a real schema, plus completion suggestions |
+| `shql.rs` | 45 | SHQL parsing and binding against a real schema, including range binding and the role refusals, plus completion suggestions |
 | `completion.rs` (`shoalctl`) | 22 | the completion menu, key handling, query wrapping, and rendering |
 | `lib.rs` (`shoal`) | 7 | the bencher's percentile and summary statistics, and baseline file handling |
 
@@ -37,12 +38,12 @@ exercise durability end to end, and they exist because
 
 | Module | Count | What it reaches |
 | --- | --- | --- |
-| `shared/queries/parser/tests.rs` | 48 | the SHQL grammar, including `IN` lists and `OR` folding |
-| `shared/queries/parser/complete/tests.rs` | 24 | completion suggestion generation |
+| `shared/queries/parser/tests.rs` | 56 | the SHQL grammar, including `IN` lists, `OR` folding, each range operator, and the folding and refusals around a range |
+| `shared/queries/parser/complete/tests.rs` | 26 | completion suggestion generation, including the range operator tokens |
 | `.../storage/fs/tests.rs` | 15 | the intent log reader against real files |
 | `.../storage/fs/stream_tests.rs` | 13 | `StreamWriter` alignment, padding, and watermarks |
-| `tables/partitions.rs` | 20 | tombstone bookkeeping, limits, sort-key selection on `get` and `exists`, `merge_from_disk` sizing |
-| `shared/queries.rs` | 3 | sort-key normalization |
+| `tables/partitions.rs` | 33 | tombstone bookkeeping, limits, sort-key selection and range selection on `get` and `exists`, the empty-range guard, `merge_from_disk` sizing |
+| `shared/queries.rs` | 10 | sort-key normalization, and `SortRange` emptiness and containment |
 | `tables/storage.rs` | 4 | `PendingResponse` release against a durable watermark |
 | `.../storage/fs/map.rs` | 1 | map intent replay |
 | `tables/persistent.rs` | 1 | |

@@ -93,12 +93,19 @@ partition.get(get, &mut data);
 
 The scan itself lives on the partition, in `MaybeLoaded<SortedPartition<R>>::get`
 (`.../tables/partitions.rs`), which covers both a resident partition and an archive being read
-in place. A get that named sort keys seeks each of them and returns those rows alone; a get that
-named none is asking for the whole partition, and walks every live row, filtered by the generated
-filter predicate and stopped by the limit:
+in place. A get selects its rows one of three ways, and `SortedGet::sort_select` says which:
+
+| `SortSelect` | How the rows are visited |
+| --- | --- |
+| `All` | walk every live row of the partition |
+| `Keys([..])` | seek each named key in the tree |
+| `Range(..)` | seek the lower bound, walk in sort order until the upper one |
+
+All three then run the same loop — `collect_rows`, which every arm shares so that the filtering,
+the limit check, and the push exist once rather than once per arm:
 
 ```rust
-for row in self.live_row_values() {
+for row in rows {
     if params.limit_reached(found) { break; }
     if let Some(filter) = &params.filters {
         if !T::is_filtered(filter, row) { continue; }
@@ -129,15 +136,23 @@ its second and then dropped the first — answering out of the partition that wa
 than the one it was asked for. An unread partition earlier in the query can still supply rows
 that come first, so nothing may be skipped past it.
 
-**`get.sort_keys` narrows which rows are read, and nothing else.** A named key is sought in the
+**`get.sort_select` narrows which rows are read, and nothing else.** A named key is sought in the
 `BTreeMap` — or, for a partition being read in place, in the archived one — so a partition of *n*
-rows asked for *k* of them costs `k log n` comparisons rather than *n* visits. What it may not do
-is change which *partitions* are read: a named key missing from the copy in memory says nothing
-about the copy in an archive, so a partition marked `check_disk` is read before it is answered
-about however narrow the get is. The keys arrive sorted and deduplicated, which
-`SortedQuery::split_by_shard` does once as the query enters the server, so seeking them in order
-produces sort order. See [item 8](../appendix/resolved/sort-keys.md) — there is still no *range*
-predicate ([TODOs](../appendix/todos.md#sort-key-range-predicates)).
+rows asked for *k* of them costs `k log n` comparisons rather than *n* visits. A range seeks to its
+lower bound and stops past its upper one, in both forms, so reading a page costs `log n` plus the
+page. What neither may do is change which *partitions* are read: a key or a bound that matches
+nothing in the copy in memory says nothing about the copy in an archive, so a partition marked
+`check_disk` is read before it is answered about however narrow the get is.
+
+Keys arrive sorted and deduplicated, which `SortSelect::normalized` does inside
+`SortedQuery::split_by_shard` once as the query enters the server, so seeking them in order
+produces sort order. A range needs no normalizing — it is already an ordered pair — but it *is*
+checked for emptiness before either scan seeks with it, because `BTreeMap::range` panics on a range
+whose start is past its end.
+
+`SortSelect::All` is the only arm that means every row. An empty `Keys` list selects nothing, which
+is a change from the bare `sort_keys: Vec<Sort>` this replaced. See
+[item 8](../appendix/resolved/sort-keys.md) and [F1](../features/sort-key-ranges.md).
 
 Rows are `clone()`d into the response. For an `Accessible` partition they are deserialized
 instead, but only after passing the filter
@@ -383,9 +398,12 @@ synchronisation mechanism. Simple, and dependent on nothing reordering that queu
 
 ## Limitations
 
-- A sort key selects rows but cannot bound them. There is no `title >= 'M'`, and so no cursor to
-  page through a large partition with ([TODOs](../appendix/todos.md#sort-key-range-predicates)).
-- A get naming no sort keys scans every live row in a partition — there is no index within a
+- A range bounds which rows are returned but not what is read: a cold partition is read whole
+  either way, since there is no index within a partition on disk. The win is CPU and rows on the
+  wire ([F1](../features/sort-key-ranges.md#limitations)).
+- A range applies to the whole `Sort` value. A range over a *prefix* of a composite sort key is
+  not expressible.
+- A get selecting every row scans every live row in a partition — there is no index within a
   partition on anything but the sort key, so a filter on any other field is a scan. A `limit`
   bounds how much of that scan runs, but only because it stops early.
 - Rows are grouped by partition rather than merged by sort key, so a get spanning partitions is
@@ -399,4 +417,3 @@ synchronisation mechanism. Simple, and dependent on nothing reordering that queu
   forever, with no way for the client to learn that.
 - `pending_data` and `blocked` are unbounded.
 - Memory accounting corrupts on the partition-shrinks path.
-- Debug `println!`s in `exists`.
