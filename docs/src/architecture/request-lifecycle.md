@@ -112,37 +112,77 @@ self.send_to_shard(peer, queries).await
 `Queries::access` validates the archive with `bytecheck` (`shared/queries.rs:89-102`), then
 `deserialize` **fully materialises the bundle**. On a branch named `ZeroCopyResponses` this is
 worth noticing: the request path is not zero-copy. Every query is deserialized here and then
-`clone()`d again per target shard (`shard.rs:430`).
+narrowed into one owned query per target shard.
 
-Fan-out attaches metadata to each query:
+Fan-out splits each query by shard and attaches metadata:
 
 ```rust
-let end_index = queries.queries.len() - 1;
-for (mut index, kind) in queries.queries.into_iter().enumerate() {
-    kind.find_shard(&self.ring, &mut found);
-    for shard_info in found.drain(..) {
-        index += queries.base_index;
-        let end = index == end_index;
-        let meta = QueryMetadata::new(client, queries.id, index, end);
-        self.comms.send(&shard_info.contact, ServerMsg::Query { meta, query: kind.clone() }).await?;
+let end_index = queries.base_index + query_count;
+for (index, kind) in queries.queries.into_iter().enumerate() {
+    let index = index + queries.base_index;
+    let end = index == end_index;
+    kind.split_by_shard(&self.ring, &mut found);
+    let gather = if found.len() > 1 { /* register, reply here */ } else { None };
+    for (shard_info, query) in found.drain(..) {
+        let meta = QueryMetadata::new(client, queries.id, index, end, gather.clone());
+        self.comms.send(&shard_info.contact, ServerMsg::Query { meta, query }).await?;
     }
 }
 ```
 
-`shoal-core/src/server/shard.rs:420-443`
+`shoal-core/src/server/shard.rs`
 
-`QueryMetadata` carries the client id, the bundle id, the query's index within the bundle,
-an `end` flag, and `Span::current()` for tracing (`server/messages.rs:14-46`). Index and
-`end` are how the client reassembles an ordered stream from responses that arrive out of
-order.
+`split_by_shard` groups a query's partition keys by the shard that owns them and emits **one
+query per shard, naming only that shard's keys**. Shards are deduplicated, so a shard owning two
+of the keys gets one query naming both rather than the same query twice, and no shard is asked
+about partitions it does not own.
 
-Two defects live in these twenty lines:
+It is also where a sorted query's `sort_keys` are put in sort order and deduplicated, once, for
+the same reason: this is the one place every query passes through no matter who built it, and a
+query arriving over the wire is deserialized straight into its struct without meeting a
+constructor ([Sort keys were accepted and ignored](../appendix/resolved/sort-keys.md)).
 
-- `queries.queries.len() - 1` underflows on an empty bundle.
-- `end` compares a `base_index`-adjusted `index` against an unadjusted `end_index`, so it is
-  wrong for any streamed bundle where `base_index > 0`.
+`QueryMetadata` carries the client id, the bundle id, the query's index within the bundle, an
+`end` flag, `Span::current()` for tracing, and `gather` (`server/messages.rs`). Index and `end`
+are how the client reassembles an ordered stream from responses that arrive out of order, which
+is why the index is computed **once per query** rather than once per target shard — every shard
+answering one query must answer it under the same index.
 
-See [Known Issues](../appendix/known-issues.md#10-end-flag-computation-is-wrong-for-streams).
+### Gathering a split query
+
+The client is owed exactly one response per query index; `ShoalResultStream` advances
+`next_index` once per response and parks out-of-order ones in a `BTreeMap` keyed by index, so a
+second response at an index it has already passed is unreachable.
+
+So when a query is split across more than one shard, the splitting shard registers a `Gather`
+under `(query id, index)` and sets `meta.gather` to its own contact. Each executing shard sends
+its share back as `ServerMsg::Gathered` instead of replying to the client. The splitting shard
+merges the shares — a get is their union, an exists is their disjunction — puts the merged rows
+back into the order the query named its partitions in, applies the query's limit to that union,
+and replies once.
+
+```rust
+merged.order_by_partitions(&gather.partition_order);
+if let Some(limit) = gather.limit {
+    merged.truncate(limit);
+}
+```
+
+`Gather` carries `partition_order` because the narrowed queries do not: `split_by_shard` hands
+each shard only its own keys, so the order the client asked for exists nowhere else by the time
+the shares come back. `order_by_partitions` is a **stable** sort by where each row's partition was
+named, which leaves the sort-key order each shard produced within a partition untouched.
+
+The two lines cannot be swapped. Truncating first keeps the rows that arrived first, which is
+whichever shard was quicker — the defect this replaced
+([26, 39](../appendix/resolved/partition-order.md)).
+
+A query answered by one shard alone leaves `gather` as `None` and keeps the direct
+shard-to-socket reply below, so the common path pays nothing for any of this.
+
+The gather entry is only released when every shard has reported. A shard that dies mid-query
+leaks it and the client waits forever, since there are no timeouts anywhere
+([Known Issues #15](../appendix/known-issues.md#15-no-backpressure-anywhere)).
 
 ## 4. Executing
 
@@ -150,11 +190,16 @@ The owning shard receives `ServerMsg::Query` and calls into the generated dispat
 
 ```rust
 if let Some((addr, query_id, response)) = self.tables.handle(meta, query).await {
-    self.reply(addr, query_id, span, response).await?;
+    match &gathered_meta.gather {
+        // this is our share of a query someone else split, so send it back to them
+        Some(contact) => self.comms.send(contact, ServerMsg::Gathered { .. }).await?,
+        // this query was ours alone to answer
+        None => self.reply(addr, query_id, span, response).await?,
+    }
 }
 ```
 
-`shoal-core/src/server/shard.rs:526-529`
+`shoal-core/src/server/shard.rs`
 
 `tables.handle` is generated by `shoal-derive/src/traits/db.rs:55-75`: it matches the
 `QueryKinds` variant, calls `handle` on the corresponding table field, and rewraps the result
@@ -316,3 +361,5 @@ whole lifecycle including the asynchronous flush.
 - The length prefix is unvalidated, so a bad length is an unbounded allocation.
 - Socket and channel errors are panics rather than per-connection teardown.
 - `end` is computed incorrectly for streamed bundles, and underflows on empty ones.
+- Reordering the gathered rows rehashes each row's partition key, since a response carries rows
+  and not the partition they came from ([Optimizations](../appendix/optimizations.md#o18-the-gathered-reorder-rehashes-every-rows-partition-key)).

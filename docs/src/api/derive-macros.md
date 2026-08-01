@@ -98,27 +98,37 @@ Movie
 
 ```rust
 pub struct MovieGet {
-    pub partition_key: u64,
+    pub partition_keys: Vec<u64>,
     pub filters: Option<MovieFilter>,
     pub limit: Option<usize>,
 }
 
 impl MovieGet {
-    pub fn new(id: u64) -> Self { ... }
+    pub fn new(partition_keys: Vec<u64>) -> Self { ... }
 }
 ```
 
-`shoal-derive/src/structs/get.rs:52-76` (unsorted form)
+`shoal-derive/src/structs/get.rs` (unsorted form)
 
-The partition key type is the field's type when there is one partition field, or a tuple when
-there are several (`structs/get.rs:24-32`). So `MovieGet::new` takes the partition fields by
-name and value, and the hashing to a `u64` happens inside.
+Both kinds of get take a `Vec` of partition keys and read them in the order they are given,
+which is the order their rows come back in
+([Query Execution](../tables/query-execution.md#the-order-rows-come-back-in)). The partition key
+type is the field's type when there is one partition field, or a tuple when there are several,
+and the hashing to a `u64` happens inside.
 
-Sorted gets take a `Vec` of partition keys, since a sorted get may span partitions
-(`structs/get.rs:add_sorted`).
+`limit` is generated on both, along with a `.limit(n)` builder. It spans every partition the get
+names and, when the get is split across shards, every shard
+([Query Execution](../tables/query-execution.md#what-a-get-actually-filters-on)). Since the order
+is defined, so is which rows it keeps: the first ones.
 
-`limit` is generated on both, and — for sorted tables — ignored by the server
-([Query Execution](../tables/query-execution.md#what-a-get-actually-filters-on)).
+The sorted form has `sort_keys` as well, with a `.sort_keys(vec![..])` builder on both `*Get` and
+`*Exists`. Each key names a row to return out of every partition the query reads, and leaving the
+list empty asks for all of them. The keys are a set, not a range: the rows come back in sort-key
+order whatever order they were listed in, and there is no way to express a bound
+([Sort keys were accepted and ignored](../appendix/resolved/sort-keys.md)).
+
+`*Exists` still takes a single partition key on unsorted tables
+([Known Issues #40](../appendix/known-issues.md#40-unsortedexists-still-names-a-single-partition)).
 
 ### Update and UpdateData
 
@@ -137,7 +147,19 @@ Update fields are wrapped in `Option`, so an update carries only what it changes
 
 ### Filter
 
-`MovieFilter` gets one optional field per `#[shoal(filter)]` field, and two evaluators:
+`MovieFilter` gets one field per `#[shoal(filter)]` field, holding every value that field may
+take:
+
+```rust
+pub struct MovieFilter {
+    pub title: Option<Vec<String>>,
+    pub watched: Option<Vec<bool>>,
+}
+```
+
+`None` means the field is unconstrained. A `Some` matches a row whose value is *any* of the
+listed ones, which is what makes `=` and `IN` one representation rather than two. Two
+evaluators are generated from it:
 
 ```rust
 fn is_filtered(filter: &Self::Filters, row: &Self) -> bool;
@@ -150,8 +172,9 @@ The archived variant is what allows filtering without deserializing
 ([Partitions](../tables/partitions.md#maybeloaded)). Both are generated from the same field
 list (`shoal-derive/src/tables.rs:39-60`) so they stay in step.
 
-Filters are conjunctive equality only: every `Some` field must match. No ranges, no `OR`, no
-negation.
+Filters are equality only, disjunctive within a field and conjunctive across them: every `Some`
+field must match, and a field matches on any of its values. No ranges, no negation, and no `OR`
+between two different fields ([TODOs](../appendix/todos.md#full-boolean-or)).
 
 Alongside the struct, `structs/filter.rs` emits an inherent `Movie::shql_build_filters` that
 turns the filter conditions of a parsed SHQL query into a `MovieFilter`, returning `None` when

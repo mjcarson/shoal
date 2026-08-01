@@ -37,7 +37,9 @@ use super::{Comms, Conf, ServerError};
 use crate::{
     shared::{
         queries::Queries,
-        traits::{QuerySupport, RkyvSupport, ShoalDatabase, ShoalQuerySupport},
+        traits::{
+            QuerySupport, RkyvSupport, ShoalDatabase, ShoalQuerySupport, ShoalResponseSupport,
+        },
     },
     storage::{FullArchiveMap, LoaderMsg, Loaders},
 };
@@ -216,6 +218,31 @@ async fn shutdown_tasks(tasks: Vec<Task<Result<(), ServerError>>>) -> Result<(),
     Ok(())
 }
 
+/// The shares of one query that was split across several shards
+///
+/// A query naming partitions on several shards is answered in pieces, but the client
+/// is owed exactly one response for it. The shard that split the query keeps one of
+/// these until every shard it sent a piece to has answered, then merges the pieces,
+/// puts their rows back into the order the query named its partitions in, applies the
+/// queries limit to their union, and replies once.
+struct Gather<D: ShoalDatabase> {
+    /// The id of the client waiting on this query
+    client: Uuid,
+    /// The span context for this query
+    span: Span,
+    /// How many shards have not yet sent us their share
+    outstanding: usize,
+    /// The most rows this query asked for, if it set a limit
+    limit: Option<usize>,
+    /// The partitions this query named, in the order it named them
+    ///
+    /// Shares arrive in whatever order the shards answer in, so this is what the merged
+    /// rows are put back into before the limit is applied to them.
+    partition_order: Vec<u64>,
+    /// The shares we have merged so far
+    merged: Option<<D::ClientType as QuerySupport>::ResponseKinds>,
+}
+
 pub(super) struct Shard<D: ShoalDatabase> {
     /// This shards info
     info: ShardInfo,
@@ -231,6 +258,11 @@ pub(super) struct Shard<D: ShoalDatabase> {
     table_map: FullArchiveMap<D::TableNames>,
     /// A map of channels to send responses to our client relays over
     client_map: HashMap<Uuid, AsyncSender<(Uuid, Span, AlignedVec)>>,
+    /// The queries we split across several shards and are collecting the shares of
+    ///
+    /// Keyed by (query id, index), the pair that uniquely identifies one query within
+    /// one bundle - the same key the tables use for their own partial results.
+    gathering: HashMap<(Uuid, usize), Gather<D>>,
     /// The channel to send shard local messages on
     shard_local_tx: AsyncSender<ServerMsg<D>>,
     /// The channel to Receive shard local messages on
@@ -337,6 +369,7 @@ where
             tables,
             table_map,
             client_map: HashMap::with_capacity(500),
+            gathering: HashMap::with_capacity(100),
             shard_local_tx,
             shard_local_rx,
             loader_channels,
@@ -416,24 +449,54 @@ where
         client: Uuid,
         queries: Queries<D::ClientType>,
     ) -> Result<(), ServerError> {
-        // initialize a vec to store the shards we find
+        // an empty bundle has no last query, and nothing to send either way
+        let Some(last_offset) = queries.queries.len().checked_sub(1) else {
+            return Ok(());
+        };
+        // initialize a vec to store the per shard queries we find
         let mut found = Vec::with_capacity(3);
-        // get the index for the last query in this bundle
-        let end_index = queries.queries.len() - 1;
+        // get the absolute index for the last query in this bundle
+        //
+        // every index below is absolute, so this has to carry the base index too or a
+        // streamed bundle would compare an absolute index against a relative one
+        let end_index = queries.base_index + last_offset;
         // crawl over our queries
-        for (mut index, kind) in queries.queries.into_iter().enumerate() {
-            // get our target shards info
-            kind.find_shard(&self.ring, &mut found);
-            // send this query to the right shards
-            for shard_info in found.drain(..) {
-                // add our base index to this messages index
-                index += queries.base_index;
-                // check if this is the last query or not
-                let end = index == end_index;
+        for (index, kind) in queries.queries.into_iter().enumerate() {
+            // get this queries absolute index in its stream
+            //
+            // this is per query and not per shard, so that every shard answering one
+            // query answers it under the same index
+            let index = index + queries.base_index;
+            // check if this is the last query or not
+            let end = index == end_index;
+            // split this query into the per shard queries that answer it
+            kind.split_by_shard(&self.ring, &mut found);
+            // a query answered by one shard alone is replied to directly, so only a
+            // query we actually split needs its shares collected back here
+            let gather = if found.len() > 1 {
+                // remember what we are owed before we send anything, so a share that
+                // comes straight back to us still finds somewhere to land
+                let gather = Gather {
+                    client,
+                    span: Span::current(),
+                    outstanding: found.len(),
+                    limit: kind.limit(),
+                    // remember the order this query named its partitions in, since the
+                    // narrowed queries only carry each shards own share of them
+                    partition_order: kind.partition_keys().to_vec(),
+                    merged: None,
+                };
+                self.gathering.insert((queries.id, index), gather);
+                // tell every shard we split this to answer back to us
+                Some(self.info.contact.clone())
+            } else {
+                None
+            };
+            // send each narrowed query to the shard that owns its partitions
+            for (shard_info, query) in found.drain(..) {
                 // build the metadata for this query
-                let meta = QueryMetadata::new(client, queries.id, index, end);
-                // clone our query
-                let query = kind.clone();
+                let meta =
+                    QueryMetadata::new(client, queries.id, index, end, gather.clone());
                 // build the mssage to send
                 let msg = ServerMsg::Query { meta, query };
                 // send this to correct shard
@@ -522,12 +585,96 @@ where
     {
         // copy our span for it we reply
         let span = meta.span.clone();
+        // keep a copy of our metadata, since handling this query consumes it and a
+        // share of a split query has to travel back with the metadata it came from
+        let gathered_meta = meta.clone();
         // try to handle this query
         if let Some((addr, query_id, response)) = self.tables.handle(meta, query).await {
-            // send this response back to the client
-            self.reply(addr, query_id, span, response).await?;
+            // a share of a query someone else split goes back to them, not to the client
+            match gathered_meta.gather.clone() {
+                Some(contact) => {
+                    // build the message carrying our share of this queries answer
+                    let msg = ServerMsg::Gathered {
+                        meta: gathered_meta,
+                        response,
+                    };
+                    // send our share to the shard collecting them
+                    self.comms.send(&contact, msg).await?;
+                }
+                // this query was ours alone to answer
+                None => self.reply(addr, query_id, span, response).await?,
+            }
         }
         Ok(())
+    }
+
+    /// Collect one shards share of a query we split across several shards
+    ///
+    /// The client is owed exactly one response per query, so the shares are merged
+    /// here and answered once, after the last shard we are waiting on has reported.
+    ///
+    /// # Arguments
+    ///
+    /// * `meta` - The metadata for the query this is part of the answer to
+    /// * `response` - This shards share of the answer
+    #[allow(clippy::future_not_send)]
+    #[instrument(
+        name = "Shard::handle_gathered",
+        parent = &meta.span,
+        skip(self, response),
+        fields(index = meta.index, id = meta.id.to_string()),
+        err(Debug)
+    )]
+    async fn handle_gathered(
+        &mut self,
+        meta: QueryMetadata,
+        response: <D::ClientType as QuerySupport>::ResponseKinds,
+    ) -> Result<(), ServerError> {
+        // find the query this share belongs to
+        let Some(gather) = self.gathering.get_mut(&(meta.id, meta.index)) else {
+            // we already answered this query, so this share arrived after we stopped
+            // waiting for it and there is nothing left to merge it into
+            event!(
+                Level::WARN,
+                msg = "A share arrived for a query we already answered",
+                id = meta.id.to_string(),
+                index = meta.index
+            );
+            return Ok(());
+        };
+        // merge this share into what we have collected so far
+        match &mut gather.merged {
+            Some(merged) => merged.merge(response),
+            // this is the first share we have seen for this query
+            None => gather.merged = Some(response),
+        }
+        // we are waiting on one fewer shard than we were
+        gather.outstanding -= 1;
+        // wait for the rest of our shares if any are still outstanding
+        if gather.outstanding > 0 {
+            return Ok(());
+        }
+        // every shard has reported, so this query is ours to answer now
+        let Some(gather) = self.gathering.remove(&(meta.id, meta.index)) else {
+            return Ok(());
+        };
+        // a query with no shares at all has nothing to answer with
+        let Some(mut merged) = gather.merged else {
+            return Ok(());
+        };
+        // the shares were merged as they arrived, so put their rows back into the order
+        // this query named its partitions in
+        //
+        // this has to happen before the limit is applied, or the rows kept would be the
+        // first ones to arrive rather than the first ones asked for
+        merged.order_by_partitions(&gather.partition_order);
+        // each shard applied our limit as it scanned, but their union can still be
+        // over it, so trim it back down to what was actually asked for
+        if let Some(limit) = gather.limit {
+            merged.truncate(limit);
+        }
+        // send our merged response back to the client
+        self.reply(gather.client, meta.id, gather.span, merged).await
     }
 
     /// Get all flushed messages and send their response back
@@ -622,6 +769,10 @@ where
                 ServerMsg::Client { peer, data } => self.handle_client(peer, data).await?,
                 // handle this query from the user
                 ServerMsg::Query { meta, query } => self.handle_query(meta, query).await?,
+                // collect this shards share of a query we split across shards
+                ServerMsg::Gathered { meta, response } => {
+                    self.handle_gathered(meta, response).await?
+                }
                 // load this partition from disk
                 ServerMsg::Partition(loaded) => {
                     self.tables

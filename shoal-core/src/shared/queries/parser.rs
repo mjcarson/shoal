@@ -9,7 +9,8 @@
 //! ```text
 //! query      := ws "SELECT" ws1 "*" ws1 "FROM" ws1 identifier where [ws limit] [ws ";"] ws eof
 //! where      := ws1 "WHERE" ws1 condition { ws "AND" ws1 condition }
-//! condition  := identifier ws "=" ws value
+//! condition  := comparison { ws "OR" ws1 comparison }
+//! comparison := identifier ws ( "=" ws value | "IN" ws "(" ws value { ws "," ws value } ws ")" )
 //! limit      := "LIMIT" ws1 digits
 //! value      := string | float | integer | boolean | null
 //! string     := "'" { any character except "'" } "'"
@@ -42,6 +43,34 @@
 //! # Ok::<(), shoal_core::client::ShqlParseError>(())
 //! ```
 //!
+//! # Choosing between values
+//!
+//! A field can be given several values at once with `IN`, which for a partition key means
+//! reading every one of those partitions:
+//!
+//! ```
+//! use shoal_core::shared::queries::parser::ParsedSelect;
+//!
+//! let parsed = ParsedSelect::new("SELECT * FROM Movie WHERE id IN (550, 551)")?;
+//!
+//! assert_eq!(parsed.conditions.len(), 1);
+//! assert_eq!(parsed.conditions[0].values.len(), 2);
+//! # Ok::<(), shoal_core::client::ShqlParseError>(())
+//! ```
+//!
+//! `OR` is spelled differently and means the same thing, so it folds into the same clause:
+//!
+//! ```
+//! use shoal_core::shared::queries::parser::ParsedSelect;
+//!
+//! let with_or = ParsedSelect::new("SELECT * FROM Movie WHERE id = 550 OR id = 551")?;
+//! let with_in = ParsedSelect::new("SELECT * FROM Movie WHERE id IN (550, 551)")?;
+//!
+//! assert_eq!(with_or.conditions.len(), with_in.conditions.len());
+//! assert_eq!(with_or.conditions[0].values.len(), with_in.conditions[0].values.len());
+//! # Ok::<(), shoal_core::client::ShqlParseError>(())
+//! ```
+//!
 //! Keywords are case-insensitive and the trailing semicolon is optional, so this is the same
 //! query:
 //!
@@ -55,7 +84,8 @@
 //! # Ok::<(), shoal_core::client::ShqlParseError>(())
 //! ```
 //!
-//! Conditions are joined with `AND` and kept in the order they were written:
+//! Conditions on different fields are joined with `AND` and kept in the order they were
+//! written:
 //!
 //! ```
 //! use shoal_core::shared::queries::parser::ParsedSelect;
@@ -75,14 +105,19 @@
 //! into partition keys, sort keys, and filters) happens in the `QuerySupport::parse` impl
 //! generated per database by `shoal-derive`.
 //!
-//! Each [`WhereClause`] carries the byte offsets of its literal in the original query so that
-//! errors raised during either stage can point at the offending value.
+//! Each [`WhereValue`] carries the byte offsets of its literal in the original query, and each
+//! [`WhereClause`] the offsets of its field name, so that errors raised during either stage can
+//! point at whatever was written wrong.
 //!
 //! # What is not supported
 //!
 //! - Only `SELECT *`. There is no projection.
-//! - Only `=`. No `<`, `>`, `!=`, `LIKE`, `IN`, or `BETWEEN`.
-//! - Only `AND`. No `OR` and no parentheses.
+//! - Only `=` and `IN`. No `<`, `>`, `!=`, `LIKE`, or `BETWEEN`.
+//! - `OR` only joins conditions on the same field, where it means the same thing as `IN`. A
+//!   partition key cannot be `OR`'d with a filter, because the only access path is by partition
+//!   key and there is no scan to answer the other side with. There are no parentheses.
+//! - A field cannot be constrained twice by `AND`. Two values for one field are a union, not an
+//!   intersection, so the query has to be written with `IN` to say what it means.
 //! - No `ORDER BY`, `GROUP BY`, `JOIN`, or aggregates.
 //! - No `INSERT`, `UPDATE`, or `DELETE` — writes must be built as typed queries.
 //! - A `WHERE` clause is mandatory, and it must constrain a partition key.
@@ -108,17 +143,146 @@ pub use complete::{CompletionContext, Expecting, analyze};
 #[cfg(feature = "shql-complete")]
 pub use complete::{Completions, Suggestion, SuggestionKind, suggest};
 
-/// A where clause in a query (e.g. where <field> = <value>)
+/// One literal in a where clause, and the span it occupied in the query
+#[derive(Debug, Clone)]
+pub struct WhereValue {
+    /// The value to check against when performing this query
+    pub value: Value,
+    /// The start position of this value in the original query string
+    pub start: usize,
+    /// The end position of this value in the original query string
+    pub end: usize,
+}
+
+/// One end of a range, and whether it includes the value it names
+#[derive(Debug, Clone)]
+pub struct WhereBound {
+    /// The value this end of the range is bounded at
+    pub value: WhereValue,
+    /// Whether this end includes the value it names, so `>=` rather than `>`
+    pub inclusive: bool,
+}
+
+/// The bounds a range clause puts on its field
+///
+/// A comparison names one end, so `title > 'a'` bounds only the lower one. Both ends are set
+/// when two comparisons on the same field are joined by `AND`, which is the one shape where a
+/// field may be named twice.
+#[derive(Debug, Clone, Default)]
+pub struct WhereRange {
+    /// The lower bound this field was given, from `>` or `>=`
+    pub lower: Option<WhereBound>,
+    /// The upper bound this field was given, from `<` or `<=`
+    pub upper: Option<WhereBound>,
+}
+
+/// What a where clause constrains its field to
+///
+/// The two arms are different questions and are answered by different access paths, so every
+/// consumer of a clause has to say which of them it can take. That is the point of the enum:
+/// a range on a partition key or on a filter has no meaning, and this makes each of those a
+/// place that has to decide rather than a case that falls through.
+#[derive(Debug, Clone)]
+pub enum WhereConstraint {
+    /// One of a set of values, from `=`, from `IN`, or from an `OR` of the same field
+    Values(Vec<WhereValue>),
+    /// A range of values, from `<`, `<=`, `>`, or `>=`
+    Range(WhereRange),
+}
+
+/// A field constrained by a where clause, and what it is constrained to
+///
+/// `field IN ('a', 'b')` and `field = 'a' OR field = 'b'` are two spellings of one query, so
+/// both parse into a single clause holding both values. A field bounded from both ends is two
+/// comparisons and still parses into a single clause, because the two are folded together
+/// while the `WHERE` clause is being read.
+///
+/// A field is only ever named by one clause, which is what leaves `AND` meaning a conjunction
+/// across fields and nothing else, and what lets everything downstream look a field up rather
+/// than search for it.
 #[derive(Debug, Clone)]
 pub struct WhereClause {
     /// The name of the field this clause is for
     pub field: String,
-    /// The value to check against when performing this query
-    pub value: Value,
-    /// The start position of this value in the original query string
-    pub value_start: usize,
-    /// The end position of this value in the original query string
-    pub value_end: usize,
+    /// The start position of this field name in the original query string
+    pub field_start: usize,
+    /// The end position of this field name in the original query string
+    pub field_end: usize,
+    /// What this field is constrained to
+    pub constraint: WhereConstraint,
+}
+
+impl WhereClause {
+    /// Every literal this clause named, whichever way it constrained its field
+    ///
+    /// Type checking and error rendering care about the literals and not about what they
+    /// mean, so both walk this rather than matching on the constraint.
+    pub fn values(&self) -> impl Iterator<Item = &WhereValue> {
+        // walk whichever set of literals this clause holds, in the order they were written
+        match &self.constraint {
+            WhereConstraint::Values(values) => Either::Values(values.iter()),
+            WhereConstraint::Range(range) => {
+                Either::Bounds(range.lower.iter().chain(range.upper.iter()))
+            }
+        }
+    }
+
+    /// The values this field may take, if it is matched against a set of them
+    pub fn as_values(&self) -> Option<&[WhereValue]> {
+        // only a set of values has a set of values to hand back
+        match &self.constraint {
+            WhereConstraint::Values(values) => Some(values),
+            WhereConstraint::Range(_) => None,
+        }
+    }
+
+    /// The bounds this field was given, if it is bounded by a range
+    pub fn as_range(&self) -> Option<&WhereRange> {
+        // only a range has bounds to hand back
+        match &self.constraint {
+            WhereConstraint::Range(range) => Some(range),
+            WhereConstraint::Values(_) => None,
+        }
+    }
+
+    /// The first value this clause named
+    ///
+    /// A comparison cannot parse without a value, so every clause holds at least one and this
+    /// never panics. It is for the callers that only ever expect one value.
+    pub fn first(&self) -> &Value {
+        &self
+            .values()
+            .next()
+            .expect("a where clause always names a value")
+            .value
+    }
+}
+
+/// One of the two ways a clause holds its literals
+///
+/// This exists only so that [`WhereClause::values`] can hand back one iterator for both arms
+/// without boxing it, since the two walk different collections.
+enum Either<V, B> {
+    /// The literals of a clause matching its field against a set of values
+    Values(V),
+    /// The literals of a clause bounding its field by a range
+    Bounds(B),
+}
+
+impl<'a, V, B> Iterator for Either<V, B>
+where
+    V: Iterator<Item = &'a WhereValue>,
+    B: Iterator<Item = &'a WhereBound>,
+{
+    type Item = &'a WhereValue;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        // take the next literal from whichever collection this clause holds
+        match self {
+            Either::Values(values) => values.next(),
+            Either::Bounds(bounds) => bounds.next().map(|bound| &bound.value),
+        }
+    }
 }
 
 /// The kind of field a where clause is restricting
@@ -428,10 +592,223 @@ fn select_from<'s>(input: &mut &'s str) -> winnow::Result<String> {
         .parse_next(input)
 }
 
-/// Parse a single WHERE condition "<field> = <value>"
+/// The keyword joining one comparison in a WHERE clause to the next
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Connective {
+    /// `AND`, which constrains another field
+    And,
+    /// `OR`, which gives the field the previous comparison named another value it may take
+    Or,
+}
+
+/// Whether the input begins with the `IN` keyword rather than an `=`
 ///
-/// Parses a single condition in a WHERE clause and tracks the position of the value
-/// in the original query string for error reporting.
+/// The keyword has to be followed by whitespace or by the opening paren of its list, so that a
+/// field compared against something starting with the letters `in` is not mistaken for one.
+///
+/// # Arguments
+///
+/// * `input` - The remaining input to check
+fn starts_with_in(input: &str) -> bool {
+    // grab exactly as many bytes as the keyword, bailing out if they are not a char boundary
+    match input.get(..2) {
+        // the keyword matched so make sure a list can follow it
+        Some(found) if found.eq_ignore_ascii_case("IN") => {
+            input[2..].starts_with(|c: char| c.is_whitespace() || c == '(')
+        }
+        _ => false,
+    }
+}
+
+/// Parse a single literal and record the span it occupied
+///
+/// # Arguments
+///
+/// * `input` - Mutable reference to the input string slice being parsed
+/// * `original` - The original complete query string (used to calculate positions)
+/// * `field` - The field this literal is being written for, named in any error
+fn where_value<'a>(
+    input: &mut &'a str,
+    original: &'a str,
+    field: &str,
+) -> Result<WhereValue, ShqlParseError> {
+    // track the position before and after parsing the value
+    let start = original.len() - input.len();
+    // parse the value we are checking
+    let literal = value.parse_next(input).map_err(|_| {
+        ShqlParseError::at_position(
+            format!(
+                "Expected a value for field '{}', which must be a quoted string, a number, a boolean, or null",
+                field
+            ),
+            start,
+            original,
+        )
+    })?;
+    // get the end position of this value for nice errors
+    let end = original.len() - input.len();
+    Ok(WhereValue {
+        value: literal,
+        start,
+        end,
+    })
+}
+
+/// Parse the parenthesised value list of an `IN` comparison
+///
+/// The `IN` keyword has already been looked ahead for by the caller, so it is consumed here.
+///
+/// # Arguments
+///
+/// * `input` - Mutable reference to the input string slice being parsed
+/// * `original` - The original complete query string (used to calculate positions)
+/// * `field` - The field this list is being written for, named in any error
+fn value_list<'a>(
+    input: &mut &'a str,
+    original: &'a str,
+    field: &str,
+) -> Result<Vec<WhereValue>, ShqlParseError> {
+    // consume the keyword we already know is there
+    let _: winnow::Result<&str> = winnow::ascii::Caseless("IN").parse_next(input);
+    // skip any whitespace between the keyword and its list
+    let _ = ws.parse_next(input);
+    // the values have to be wrapped in parens
+    let open: winnow::Result<&str> = "(".parse_next(input);
+    open.map_err(|_| {
+        ShqlParseError::at_position(
+            format!("Expected '(' after IN for field '{}'", field),
+            original.len() - input.len(),
+            original,
+        )
+    })?;
+    // skip any whitespace before the first value
+    let _ = ws.parse_next(input);
+    // a list with nothing in it matches nothing, so it is a mistake rather than a query
+    if input.starts_with(')') {
+        return Err(ShqlParseError::at_position(
+            format!("IN needs at least one value for field '{}'", field),
+            original.len() - input.len(),
+            original,
+        ));
+    }
+    // parse the first value, which every list has to have
+    let mut values = vec![where_value(input, original, field)?];
+    // keep taking values for as long as they are separated by commas
+    loop {
+        // skip any whitespace before the separator
+        let _ = ws.parse_next(input);
+        // look for a comma joining another value onto this list
+        let separator: winnow::Result<Option<&str>> = opt(",").parse_next(input);
+        // stop once there are no more values in this list
+        if !matches!(separator, Ok(Some(_))) {
+            break;
+        }
+        // skip any whitespace after the separator
+        let _ = ws.parse_next(input);
+        // a comma with nothing after it is a trailing comma, which is worth saying plainly
+        if input.starts_with(')') {
+            return Err(ShqlParseError::at_position(
+                format!("Trailing comma in the IN list for field '{}'", field),
+                original.len() - input.len(),
+                original,
+            ));
+        }
+        // parse the value this comma joined on
+        values.push(where_value(input, original, field)?);
+    }
+    // close the list
+    let close: winnow::Result<&str> = ")".parse_next(input);
+    close.map_err(|_| {
+        ShqlParseError::at_position(
+            format!("Expected ',' or ')' in the IN list for field '{}'", field),
+            original.len() - input.len(),
+            original,
+        )
+    })?;
+    Ok(values)
+}
+
+/// The comparison operator bounding one end of a range
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RangeOp {
+    /// `<`, which bounds the upper end without including the value it names
+    Less,
+    /// `<=`, which bounds the upper end including the value it names
+    LessEqual,
+    /// `>`, which bounds the lower end without including the value it names
+    Greater,
+    /// `>=`, which bounds the lower end including the value it names
+    GreaterEqual,
+}
+
+impl RangeOp {
+    /// Whether this operator bounds the lower end of a range rather than the upper one
+    fn is_lower(self) -> bool {
+        matches!(self, RangeOp::Greater | RangeOp::GreaterEqual)
+    }
+
+    /// Whether this operator includes the value it names
+    fn is_inclusive(self) -> bool {
+        matches!(self, RangeOp::LessEqual | RangeOp::GreaterEqual)
+    }
+
+    /// Turn this operator and the value it names into one end of a range
+    ///
+    /// # Arguments
+    ///
+    /// * `value` - The value this operator bounded its field at
+    fn into_range(self, value: WhereValue) -> WhereRange {
+        // build the end this operator names, remembering whether it includes its value
+        let bound = WhereBound {
+            value,
+            inclusive: self.is_inclusive(),
+        };
+        // place that end at whichever side of the range this operator bounds
+        if self.is_lower() {
+            WhereRange {
+                lower: Some(bound),
+                upper: None,
+            }
+        } else {
+            WhereRange {
+                lower: None,
+                upper: Some(bound),
+            }
+        }
+    }
+}
+
+/// Consume a range comparison operator if the input begins with one
+///
+/// The two character operators are tried before the one character ones, because `>` is a
+/// prefix of `>=` and matching it first would leave the `=` behind to be read as a value.
+///
+/// # Arguments
+///
+/// * `input` - Mutable reference to the input string slice being parsed
+fn range_operator(input: &mut &str) -> Option<RangeOp> {
+    // check the longer operators before the shorter ones they contain
+    for (text, operator) in [
+        (">=", RangeOp::GreaterEqual),
+        ("<=", RangeOp::LessEqual),
+        (">", RangeOp::Greater),
+        ("<", RangeOp::Less),
+    ] {
+        // consume this operator if it is the one that was written
+        if let Some(rest) = input.strip_prefix(text) {
+            *input = rest;
+            return Some(operator);
+        }
+    }
+    None
+}
+
+/// Parse a single comparison
+///
+/// Three spellings produce a set of values - `<field> = <value>`, `<field> IN (<values>)`, and
+/// the `OR` of two comparisons the caller folds together - since a field allowed to take
+/// several values is the same query however it was written. A fourth,
+/// `<field> <operator> <value>`, bounds one end of a range instead.
 ///
 /// # Arguments
 ///
@@ -440,61 +817,162 @@ fn select_from<'s>(input: &mut &'s str) -> winnow::Result<String> {
 ///
 /// # Returns
 ///
-/// A WhereClause containing the field name, value, and position information on success,
-/// or a parse error
-fn where_conditions_helper<'a>(
-    input: &mut &'a str,
-    original: &'a str,
-) -> Result<WhereClause, ShqlParseError> {
-    // record where this condition starts so every error below can point at it
-    let condition_start = original.len() - input.len();
-    // get the name of the field that we are parsing a where condition for
+/// A WhereClause containing the field name, what it is constrained to, and the positions of
+/// every literal on success, or a parse error
+fn comparison<'a>(input: &mut &'a str, original: &'a str) -> Result<WhereClause, ShqlParseError> {
+    // record where this comparison starts so every error below can point at it
+    let field_start = original.len() - input.len();
+    // get the name of the field that we are parsing a comparison for
     let field = identifier.parse_next(input).map_err(|_| {
-        ShqlParseError::at_position("Expected a field name in the WHERE clause", condition_start, original)
-    })?;
-    // skip whitespace
-    let _ = ws.parse_next(input);
-    // right now we only support '=' signs
-    let equals: winnow::Result<&str> = "=".parse_next(input);
-    equals.map_err(|_| {
         ShqlParseError::at_position(
-            format!(
-                "Expected '=' after field '{}', SHQL only supports equality",
-                field
-            ),
-            original.len() - input.len(),
+            "Expected a field name in the WHERE clause",
+            field_start,
             original,
         )
     })?;
-    // skip whitespace
+    // record where the field name ended so an error can underline just the name
+    let field_end = original.len() - input.len();
+    // skip any whitespace between the field and its operator
     let _ = ws.parse_next(input);
-    // Track the position before and after parsing the value
-    let value_start = original.len() - input.len();
-    // parse the value we are checking
-    let val = value.parse_next(input).map_err(|_| {
-        ShqlParseError::at_position(
-            format!(
-                "Expected a value for field '{}', which must be a quoted string, a number, a boolean, or null",
-                field
-            ),
-            value_start,
-            original,
-        )
-    })?;
-    // get the end position of this value for nice errors
-    let value_end = original.len() - input.len();
+    // each operator constrains its field differently, so pick the right parser for the one written
+    let constraint = if starts_with_in(input) {
+        // a list of values is written differently to a single one
+        WhereConstraint::Values(value_list(input, original, &field)?)
+    } else if let Some(operator) = range_operator(input) {
+        // this operator bounds one end of a range rather than naming a value
+        let _ = ws.parse_next(input);
+        WhereConstraint::Range(operator.into_range(where_value(input, original, &field)?))
+    } else {
+        // the only operator left that we support is equality
+        let equals: winnow::Result<&str> = "=".parse_next(input);
+        equals.map_err(|_| {
+            ShqlParseError::at_position(
+                format!(
+                    "Expected an operator after field '{}'. SHQL supports =, IN, and the range \
+                     operators <, <=, >, and >= on a sort key",
+                    field
+                ),
+                original.len() - input.len(),
+                original,
+            )
+        })?;
+        // skip any whitespace between the operator and its value
+        let _ = ws.parse_next(input);
+        WhereConstraint::Values(vec![where_value(input, original, &field)?])
+    };
     // build our where clause
     Ok(WhereClause {
         field,
-        value: val,
-        value_start,
-        value_end,
+        field_start,
+        field_end,
+        constraint,
     })
 }
 
-/// Parse multiple WHERE conditions separated by AND
+/// Parse the keyword joining another comparison onto a WHERE clause
 ///
-/// Parses a WHERE clause containing one or more conditions joined by the AND keyword.
+/// This goes through `opt` so that a failed match restores the input, otherwise a dangling
+/// keyword would be consumed and then silently ignored.
+///
+/// # Arguments
+///
+/// * `input` - Mutable reference to the input string slice being parsed
+///
+/// # Returns
+///
+/// The connective that was consumed, or None if no comparison is chained on
+fn connective(input: &mut &str) -> Option<Connective> {
+    // look for a keyword joining another comparison onto this clause
+    let chained: winnow::Result<Option<(&str, Connective, &str)>> = opt((
+        ws,
+        alt((
+            winnow::ascii::Caseless("AND").map(|_| Connective::And),
+            winnow::ascii::Caseless("OR").map(|_| Connective::Or),
+        )),
+        multispace1,
+    ))
+    .parse_next(input);
+    // pull the keyword out of whatever we matched
+    match chained {
+        Ok(Some((_, found, _))) => Some(found),
+        _ => None,
+    }
+}
+
+/// Drop any value a clause names more than once
+///
+/// A field naming the same value twice names the same partition twice, which would scan it
+/// twice and hand back each of its rows twice.
+///
+/// # Arguments
+///
+/// * `condition` - The condition to deduplicate the values of
+fn dedup_values(condition: &mut WhereClause) {
+    // remember every literal we have kept so far
+    let mut seen: Vec<Value> = Vec::with_capacity(condition.values.len());
+    // keep the first write of each value and drop the rest
+    condition.values.retain(|found| {
+        // a value we have already kept adds nothing to this query
+        if seen.contains(&found.value) {
+            return false;
+        }
+        seen.push(found.value.clone());
+        true
+    });
+}
+
+/// Reject a field constrained by more than one AND joined condition
+///
+/// Two conditions on one field joined by `AND` ask for the rows satisfying both, which for a
+/// partition key means the rows present in every one of those partitions. Shoal answers a get
+/// by reading each named partition and returning their union, so this spelling would quietly
+/// hand back the rows in *any* of them. It is refused rather than answered wrongly.
+///
+/// # Arguments
+///
+/// * `conditions` - The conditions in this WHERE clause
+/// * `original` - The original complete query string (used to build the suggestion)
+fn check_fields_unique(
+    conditions: &[WhereClause],
+    original: &str,
+) -> Result<(), ShqlParseError> {
+    // walk our conditions looking for one that was already constrained
+    for (index, condition) in conditions.iter().enumerate() {
+        // check this field against every condition written before it
+        let Some(earlier) = conditions[..index]
+            .iter()
+            .find(|earlier| earlier.field == condition.field)
+        else {
+            continue;
+        };
+        // rebuild both sets of literals as they were written so we can suggest an IN list
+        let literals: Vec<&str> = earlier
+            .values
+            .iter()
+            .chain(condition.values.iter())
+            .map(|found| &original[found.start..found.end])
+            .collect();
+        return Err(ShqlParseError::new(
+            format!(
+                "'{}' is constrained twice by AND. Several values for one field are a union in \
+                 shoal, not an intersection, so write it as {} IN ({})",
+                condition.field,
+                condition.field,
+                literals.join(", ")
+            ),
+            condition.field_start,
+            condition.field_end,
+            original,
+        ));
+    }
+    Ok(())
+}
+
+/// Parse the conditions making up a WHERE clause
+///
+/// Comparisons joined by `OR` are folded into the clause for the field they name, so a field
+/// allowed to take several values comes back as one condition however it was written.
+/// Comparisons joined by `AND` each constrain their own field.
 ///
 /// # Arguments
 ///
@@ -518,22 +996,46 @@ fn where_conditions<'a>(
             original,
         )
     })?;
-    // parse the first of any where conditions in this query
-    let mut conditions = vec![where_conditions_helper(input, original)?];
-    // continue to parse any where conditions chained by an 'and'
-    //
-    // this has to go through opt so that a failed match restores the input, otherwise a
-    // dangling 'AND' would be consumed and then silently ignored
-    loop {
-        // look for an AND joining another condition onto this clause
-        let chained: winnow::Result<Option<(&str, &str, &str)>> =
-            opt((ws, winnow::ascii::Caseless("AND"), multispace1)).parse_next(input);
-        // stop once there are no more conditions chained on
-        if !matches!(chained, Ok(Some(_))) {
-            break;
+    // parse the first of any comparisons in this query
+    let mut conditions = vec![comparison(input, original)?];
+    // continue to parse any comparisons chained onto this clause
+    while let Some(joined) = connective(input) {
+        // parse the comparison that keyword joined on
+        let next = comparison(input, original)?;
+        // place this comparison according to the keyword that joined it
+        match joined {
+            // AND constrains another field, so this is a condition of its own
+            Connective::And => conditions.push(next),
+            // OR gives the field the previous comparison named another value it may take
+            Connective::Or => {
+                // the condition we just parsed is the one this OR extends
+                let previous = conditions
+                    .last_mut()
+                    .expect("a where clause always has a first condition");
+                // an OR across two fields asks for rows outside any partition we named, and
+                // the only access path is by partition key, so there is nothing to answer
+                // the other side of it with
+                if previous.field != next.field {
+                    return Err(ShqlParseError::new(
+                        format!(
+                            "'{}' cannot be OR'd with '{}'. OR only joins conditions on the \
+                             same field, where it means the same thing as IN",
+                            previous.field, next.field
+                        ),
+                        next.field_start,
+                        next.field_end,
+                        original,
+                    ));
+                }
+                previous.values.extend(next.values);
+            }
         }
-        // parse this where condition
-        conditions.push(where_conditions_helper(input, original)?);
+    }
+    // a field constrained twice by AND is an intersection, which we cannot answer
+    check_fields_unique(&conditions, original)?;
+    // drop any repeated value so a query naming one partition twice only reads it once
+    for condition in &mut conditions {
+        dedup_values(condition);
     }
     Ok(conditions)
 }

@@ -94,13 +94,32 @@ pub trait ShoalQuerySupport: std::fmt::Debug + RkyvSupport + Sized + Send + Clon
     /// * `buff` - The buffer to deserialize into a response
     fn response_query_id(buff: &[u8]) -> Result<&Uuid, rkyv::rancor::Error>;
 
-    /// Find the right shards for this query
+    /// Split this query into the per shard queries that answer it
+    ///
+    /// A query naming several partition keys is only answerable by the shards that own
+    /// those keys, so it is narrowed to each shards own keys rather than sent whole to
+    /// every one of them. Shards are deduplicated too, so a shard owning two of the
+    /// keys gets one query naming both instead of the same query twice.
     ///
     /// # Arguments
     ///
     /// * `ring` - The shard ring to check against
-    /// * `found` - The shards we found for this query
-    fn find_shard<'a>(&self, ring: &'a Ring, found: &mut Vec<&'a ShardInfo>);
+    /// * `found` - The per shard queries we found for this query
+    fn split_by_shard<'a>(&self, ring: &'a Ring, found: &mut Vec<(&'a ShardInfo, Self)>);
+
+    /// Get the most rows this query asked for, if it set a limit
+    ///
+    /// A query split across shards has its limit applied on each of them as they scan,
+    /// so this is what the shard collecting those shares trims their union back down
+    /// to.
+    fn limit(&self) -> Option<usize>;
+
+    /// Get the partitions this query named, in the order it named them
+    ///
+    /// The rows of a get come back in this order, so the shard collecting the shares of a
+    /// split query uses it to put them back together. A query that returns no rows names no
+    /// partitions here.
+    fn partition_keys(&self) -> &[u64];
 }
 
 /// The traits ror responses from shoal
@@ -117,6 +136,35 @@ pub trait ShoalResponseSupport: std::fmt::Debug + RkyvSupport + Sized + Send {
     ///
     /// * `archived` - The archived type to get our query id from
     fn get_query_id(archived: &<Self as Archive>::Archived) -> Uuid;
+
+    /// Merge another shards share of one queries answer into this one
+    ///
+    /// Both shares answer the same query, so they are always the same variant. A share
+    /// of a different table's response would mean a query was routed to two different
+    /// tables, which cannot happen, so it is ignored rather than guessed at.
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The other shards share of this queries answer
+    fn merge(&mut self, other: Self);
+
+    /// Put our rows back into the order the query named their partitions in
+    ///
+    /// Shares are merged in the order they arrive, which is whichever shard answered first.
+    /// This is what makes the answer to a split query depend only on the query, and it has to
+    /// run before the limit is applied or the rows kept would be the wrong ones.
+    ///
+    /// # Arguments
+    ///
+    /// * `order` - The partitions this query named, in the order it named them
+    fn order_by_partitions(&mut self, order: &[u64]);
+
+    /// Drop any rows past this queries limit
+    ///
+    /// # Arguments
+    ///
+    /// * `limit` - The most rows this query asked for
+    fn truncate(&mut self, limit: usize);
 }
 
 pub trait QuerySupport: 'static + Sized {

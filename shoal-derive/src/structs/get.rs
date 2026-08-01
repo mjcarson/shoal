@@ -30,31 +30,13 @@ pub fn add_unsorted(
         let types: Vec<_> = partition_fields.iter().map(|(_, ty)| ty).collect();
         quote! { (#(#types),*) }
     };
-    // build the partition key type
-    let partition_args: Vec<_> = partition_fields
-        .iter()
-        .map(|(ident, ty)| quote! { #ident: #ty })
-        .collect();
-    // build the partition args to tuple init
-    let partition_init = if partition_fields.len() == 1 {
-        // we have a single partition key arg so just use type instead of a tuple
-        let (ident, _) = &partition_fields[0];
-        quote! { #ident }
-    } else {
-        // we have multiple partition key fields so get all of their idents
-        let idents = partition_fields.iter().map(|(ident, _)| {
-            quote! { #ident }
-        });
-        // wrap them in a tuple
-        quote! { (#(#idents,)*)  }
-    };
     // generate our get struct for this type and its methods
     stream.extend(quote! {
         #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
         #[rkyv(derive(Debug))]
         pub struct #get_name {
-            /// The partition key of the partition to get
-            pub partition_key: #partition_key_type,
+            /// The partition keys of the partitions to get
+            pub partition_keys: Vec<#partition_key_type>,
             /// Any filters to use when deciding what rows to return
             pub filters: Option<#filter_name>,
             /// The number of rows to return
@@ -67,9 +49,16 @@ pub fn add_unsorted(
         #[automatically_derived]
         impl #get_name {
             /// Create a new get query for this type
-            pub fn new(#(#partition_args),*) -> Self {
+            ///
+            /// The partitions are read in the order they are given here, and that is the
+            /// order their rows come back in.
+            ///
+            /// # Arguments
+            ///
+            /// * `partition_keys` - The keys of the partitions to read
+            pub fn new(partition_keys: Vec<#partition_key_type>) -> Self {
                 #get_name {
-                    partition_key: #partition_init,
+                    partition_keys,
                     filters: None,
                     limit: None,
                 }
@@ -86,6 +75,20 @@ pub fn add_unsorted(
                     self
                 }
 
+                /// Set the max number of rows to retrieve
+                ///
+                /// An unsorted partition holds exactly one row, so a limit only bites on a
+                /// get naming several partitions. The rows it keeps are the ones from the
+                /// partitions named first.
+                ///
+                /// # Arguments
+                ///
+                /// * `limit` - The max number of rows to return
+                pub fn limit(mut self, limit: usize) -> Self {
+                    // set our limit
+                    self.limit = Some(limit);
+                    self
+                }
         }
     });
 }
@@ -136,8 +139,8 @@ pub fn add_sorted(
         pub struct #get_name {
             /// The partition keys to get data from
             pub partition_keys: Vec<#partition_key_type>,
-            /// The sort keys to get data from
-            pub sort_keys: Vec<#sort_key_type>,
+            /// Which rows of each partition this get is asking for
+            pub sort_select: shoal_core::shared::queries::SortSelect<#sort_key_type>,
             /// Any filters to use when deciding what rows to return
             pub filters: Option<#filter_name>,
             /// The number of rows to return
@@ -157,20 +160,47 @@ pub fn add_sorted(
             pub fn new(partition_keys: Vec<#partition_key_type>) -> Self {
                 #get_name {
                     partition_keys,
-                    sort_keys: Vec::default(),
+                    sort_select: shoal_core::shared::queries::SortSelect::All,
                     filters: None,
                     limit: None,
                 }
             }
 
-            /// Set the sort keys to restrict data returned from partitions too
+            /// Set the sort keys of the rows this get should return
+            ///
+            /// These name rows rather than bound them: the get returns the rows it named
+            /// and no others, in sort order rather than in the order they were named. Use
+            /// `sort_range` to bound them instead, and leave both unset to return every
+            /// row in each of this gets partitions.
             ///
             /// # Arguments
             ///
-            /// * `sort_keys` - The sort keys to restrict data returned too
+            /// * `sort_keys` - The sort keys of the rows to return
             pub fn sort_keys(mut self, sort_keys: Vec<#sort_key_type>) -> Self {
-                // set our sort keys
-                self.sort_keys = sort_keys;
+                // set our sort keys, replacing whatever this get selected before
+                self.sort_select = shoal_core::shared::queries::SortSelect::Keys(sort_keys);
+                self
+            }
+
+            /// Bound the rows this get should return by a range of sort keys
+            ///
+            /// The rows inside the range come back in sort order, and a limit stops the
+            /// walk early - which is what makes paging a partition cost a page. An
+            /// exclusive lower bound of the last row of a page is the cursor onto the next
+            /// one, so `SortRange::after(last)` with the same limit reads the next page.
+            ///
+            /// This replaces any sort keys this get named, since a get either matches rows
+            /// against a set of keys or bounds them by a range.
+            ///
+            /// # Arguments
+            ///
+            /// * `sort_range` - The range of sort keys to return rows from
+            pub fn sort_range(
+                mut self,
+                sort_range: shoal_core::shared::queries::SortRange<#sort_key_type>,
+            ) -> Self {
+                // set our range, replacing whatever this get selected before
+                self.sort_select = shoal_core::shared::queries::SortSelect::Range(sort_range);
                 self
             }
 
@@ -233,8 +263,8 @@ fn add_sorted_exists(
         pub struct #exists_name {
             /// The partition keys to check for data in
             pub partition_keys: Vec<#partition_key_type>,
-            /// The sort keys to check for data with
-            pub sort_keys: Vec<#sort_key_type>,
+            /// Which rows of each partition this exists is asking about
+            pub sort_select: shoal_core::shared::queries::SortSelect<#sort_key_type>,
             /// Any filters to use when deciding what rows to check
             pub filters: Option<#filter_name>,
         }
@@ -255,18 +285,43 @@ fn add_sorted_exists(
             pub fn new(partition_keys: Vec<#partition_key_type>) -> Self {
                 #exists_name {
                     partition_keys,
-                    sort_keys: Vec::default(),
+                    sort_select: shoal_core::shared::queries::SortSelect::All,
                     filters: None,
                 }
             }
 
-            /// Set the sort keys to restrict data checked to
+            /// Set the sort keys of the rows this exists should check for
+            ///
+            /// An exists naming sort keys asks whether any of those rows is here. One
+            /// with neither keys nor a range set asks whether its partitions hold any row
+            /// at all.
             ///
             /// # Arguments
             ///
-            /// * `sort_keys` - The sort keys to restrict data checked to
+            /// * `sort_keys` - The sort keys of the rows to check for
             pub fn sort_keys(mut self, sort_keys: Vec<#sort_key_type>) -> Self {
-                self.sort_keys = sort_keys;
+                // set our sort keys, replacing whatever this exists selected before
+                self.sort_select = shoal_core::shared::queries::SortSelect::Keys(sort_keys);
+                self
+            }
+
+            /// Bound the rows this exists should check for by a range of sort keys
+            ///
+            /// This asks whether any row falls inside the range, which a sorted partition
+            /// answers with a seek rather than a walk.
+            ///
+            /// This replaces any sort keys this exists named, since an exists either
+            /// matches rows against a set of keys or bounds them by a range.
+            ///
+            /// # Arguments
+            ///
+            /// * `sort_range` - The range of sort keys to check for rows in
+            pub fn sort_range(
+                mut self,
+                sort_range: shoal_core::shared::queries::SortRange<#sort_key_type>,
+            ) -> Self {
+                // set our range, replacing whatever this exists selected before
+                self.sort_select = shoal_core::shared::queries::SortSelect::Range(sort_range);
                 self
             }
 

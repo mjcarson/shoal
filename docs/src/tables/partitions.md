@@ -35,23 +35,44 @@ searched, filtered, and answered from without ever being turned into Rust struct
 
 ```rust
 MaybeLoaded::Accessible(read) => {
-    let partition = SortedPartition::<R>::access(&read).unwrap();
-    for row in partition.live_row_values() {
-        if let Some(filters) = &get.filters {
-            if !R::is_filtered_archived(filters, row) { continue; }
+    let access = SortedPartition::<R>::access(read).unwrap();
+    for row in access.live_row_values() {
+        if params.limit_reached(found) { break; }
+        if let Some(filter) = &params.filters {
+            if !R::is_filtered_archived(filter, row) { continue; }
         }
-        let loaded_row = R::deserialize(row).unwrap();
-        data.push(loaded_row);
+        let loaded = R::deserialize(row).unwrap();
+        found.push(loaded);
     }
 }
 ```
 
-`.../persistent/sorted.rs:471-489`
+`.../tables/partitions.rs`
 
 Note `is_filtered_archived` — the derive macro generates a filter that operates on
 `<R as Archive>::Archived`, so rows that fail the filter are never deserialized. A selective
 query over a large partition deserializes only what it returns. This is the payoff for
 choosing rkyv as the on-disk format.
+
+### The scan lives on the partition
+
+Both arms are covered by one method per table kind — `MaybeLoaded<SortedPartition<R>>::get` and
+`MaybeLoaded<UnsortedPartition<R>>::get` — so the resident and archived paths cannot drift apart.
+The sorted one was missing for a long time, and the table inlined a copy of each arm instead;
+neither copy had a limit check, which is how `LIMIT` came to be accepted and discarded
+([`limit` was ignored by persistent sorted tables](../appendix/resolved/sorted-limit.md)). The
+sorted side has a matching pair for `exists`, added when it stopped answering about the partition
+instead of the row ([Sort keys were accepted and ignored](../appendix/resolved/sort-keys.md)).
+
+Each of those methods has two shapes inside it. A get or an exists naming sort keys **seeks** each
+of them — `BTreeMap::get` when the partition is resident, `ArchivedBTreeMap::get` when it is an
+archive being read in place — and one naming none walks every live row. A seek that lands on a
+`MaybeRow::Tombstone` has found a deleted row, so it is a miss and not a reason to look further.
+
+`found` is the accumulator the whole get shares, not a per-partition buffer. That is why the
+limit is checked against it rather than against a local count, and why it is checked *before* the
+push: a scan can be handed a vec that is already full, either by an earlier partition in the same
+get or by an earlier execution of a get that parked on a disk read.
 
 Deserialization happens lazily, on the first *mutation*: insert, update, and delete all
 convert `Accessible` into `Loaded`, then keep it that way "to avoid future deserialization
@@ -112,6 +133,11 @@ reasons unrelated to the data. See
 `SortedPartition` maintains its size incrementally by delta on every mutation
 (`.../tables/partitions.rs:308-330`, `:373-425`, `:466-487`), which avoids re-walking a large
 `BTreeMap` but accumulates drift and undercounts tombstones (see below).
+
+`merge_from_disk` (`.../tables/partitions.rs:442-462`) is the one exception: it sums the live
+rows it ended up holding. Neither input's size describes their union, and inheriting the disk
+copy's used to make a partition that had just grown report that it shrank
+([Resolved #6](../appendix/resolved/memory-accounting.md)).
 
 ## Tombstones
 

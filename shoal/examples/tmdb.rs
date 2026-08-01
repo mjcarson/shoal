@@ -517,7 +517,7 @@ impl MovieWorker {
                     self.buffer.add_mut(movie)
                 }
                 // add the query to get this movie to our query buffer
-                MovieMsg::Verify(movie) => self.buffer.add_mut(MovieGet::new(movie.id)),
+                MovieMsg::Verify(movie) => self.buffer.add_mut(MovieGet::new(vec![movie.id])),
                 // all commands have been sent so this worker can shutdown once everything
                 // has been processed
                 MovieMsg::Shutdown => {

@@ -7,7 +7,7 @@ use rkyv::util::AlignedVec;
 use tracing::Span;
 use uuid::Uuid;
 
-use super::shard::ShardInfo;
+use super::shard::{ShardContact, ShardInfo};
 use crate::shared::traits::{QuerySupport, ShoalDatabase};
 
 /// The metadata about a query from a client
@@ -21,6 +21,13 @@ pub struct QueryMetadata {
     pub index: usize,
     /// Whether this is the last query in a query bundle
     pub end: bool,
+    /// The shard collecting this queries responses if it was split across shards
+    ///
+    /// A query naming partitions on several shards is answered in pieces, and the
+    /// client is owed exactly one response for it, so those pieces go back to the
+    /// shard that split it instead of straight to the client. `None` means this query
+    /// is answered by one shard alone and needs no collecting.
+    pub gather: Option<ShardContact>,
     /// The span context for this query
     pub span: Span,
 }
@@ -34,12 +41,20 @@ impl QueryMetadata {
     /// * `id` - The id of this query
     /// * `index` - The index for this query in a bundle of queries
     /// * `end` - Whether this is the last query in a bundle or not
-    pub fn new(client: Uuid, id: Uuid, index: usize, end: bool) -> Self {
+    /// * `gather` - The shard collecting this queries responses if it was split
+    pub fn new(
+        client: Uuid,
+        id: Uuid,
+        index: usize,
+        end: bool,
+        gather: Option<ShardContact>,
+    ) -> Self {
         QueryMetadata {
             client,
             id,
             index,
             end,
+            gather,
             span: Span::current(),
         }
     }
@@ -79,6 +94,16 @@ where
         /// The query to execute
         query: <D::ClientType as QuerySupport>::QueryKinds,
     },
+    /// One shards share of a query that was split across several shards
+    ///
+    /// This travels from the shard that executed a piece of a query back to the shard
+    /// that split it, which merges the pieces and answers the client once.
+    Gathered {
+        /// The metadata for the query this is part of the answer to
+        meta: QueryMetadata,
+        /// This shards share of the answer
+        response: <D::ClientType as QuerySupport>::ResponseKinds,
+    },
     /// A partition loaded from disk. This can never be sent across threads!
     Partition(LoadedPartitionKinds<D>),
     /// Some data has been flushed to storage
@@ -114,6 +139,11 @@ impl<D: ShoalDatabase> Clone for ServerMsg<D> {
                 meta: meta.clone(),
                 query: query.clone(),
             },
+            // a gathered response travels to exactly one shard and is never broadcast,
+            // so there is nothing that would ever ask us to duplicate one
+            ServerMsg::Gathered { .. } => {
+                panic!("A gathered response is only ever sent to one shard")
+            }
             ServerMsg::Partition(loaded) => ServerMsg::Partition(loaded.clone()),
             ServerMsg::DataFlushed => ServerMsg::DataFlushed,
             ServerMsg::MarkEvictable {

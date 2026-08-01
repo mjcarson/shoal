@@ -43,12 +43,14 @@ fn add_get(stream: &mut proc_macro2::TokenStream, table_name: &Ident, query_kind
           impl From<#get_name> for #query_kinds {
               /// Build a `QueryKind` for getting rows
               fn from(specific: #get_name) -> Self {
-                  // build our partition key
-                  let partition_key =
-                      <#table_name as shoal_core::shared::traits::PartitionKeySupport>::get_partition_key_from_values(&specific.partition_key);
+                  // hash each partition key, keeping them in the order they were asked for
+                  let partition_keys = specific.partition_keys
+                      .iter()
+                      .map(|key| <#table_name as shoal_core::shared::traits::PartitionKeySupport>::get_partition_key_from_values(key))
+                      .collect();
                   // build the general query
                   let general = shoal_core::shared::queries::UnsortedGet {
-                      partition_key,
+                      partition_keys,
                       filters: specific.filters,
                       limit: specific.limit,
                   };

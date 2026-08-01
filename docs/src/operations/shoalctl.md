@@ -132,7 +132,7 @@ Query box, when the completion menu is open (`TabState::handle_query_input`,
 `Enter` only submits the query when the menu is closed, so how a query gets run depends on where
 it ends. `SELECT * FROM Movie WHERE id = 550` ends on a value that could be anything, which puts
 nothing on offer, so the first `Enter` submits. Type a trailing space and the menu comes back
-with `AND`/`LIMIT`/`;` — there, `Esc` then `Enter` runs it, or accept `;` and press `Enter`,
+with `AND`/`OR`/`LIMIT`/`;` — there, `Esc` then `Enter` runs it, or accept `;` and press `Enter`,
 since a terminated query has nothing left to suggest.
 
 Mouse clicks are captured and routed to panes (`app.rs:472`).
@@ -163,10 +163,12 @@ What is offered depends on where the cursor sits in the grammar:
 | Start of a query | `SELECT`, then `*`, then `FROM` |
 | After `FROM` | Every table in the schema |
 | After a table | `WHERE`, then its fields |
-| After `WHERE` or `AND` | The table's fields, partition keys first, annotated with role and type |
-| After a field | `=` |
+| After `WHERE`, `AND`, or `OR` | The table's fields, partition keys first, annotated with role and type |
+| After a field | `=`, `IN` |
 | After `=` | `true`/`false` for a bool, `null` for a nullable field, an opening quote for a string |
-| After a condition | `AND`, `LIMIT`, `;` |
+| After `IN` | `(` |
+| Inside an `IN` list | The same values as after `=`, then `,` or `)` |
+| After a condition | `AND`, `OR`, `LIMIT`, `;` |
 | After `LIMIT` or inside a value | Nothing — a number or a string can be anything |
 
 Only fields that can appear in a `WHERE` clause are offered. A field marked `#[shoal(update)]`
@@ -175,7 +177,8 @@ and nothing else has no role, so the parser rejects it — and the menu never su
 ## Writing queries
 
 Queries are typed as [SHQL](../api/shql.md), so the UI inherits its limits: `SELECT *` only,
-equality only, a mandatory `WHERE`, and a `LIMIT` the server ignores.
+equality only, a mandatory `WHERE`, and no `ORDER BY` — so a `LIMIT` returns whichever rows the
+scan reaches first.
 
 Assume a schema with these two tables:
 
@@ -203,10 +206,12 @@ Then these all work:
 SELECT * FROM Movie WHERE id = 550
 SELECT * FROM Movie WHERE id = 550 AND title = 'Fight Club'
 SELECT * FROM Movie WHERE id = 550 AND watched = true LIMIT 10;
+SELECT * FROM Movie WHERE id IN (550, 551)
+SELECT * FROM Movie WHERE id = 550 OR id = 551
 select * from Movie where id = 550
 ```
 
-### Three rules that catch people out
+### Four rules that catch people out
 
 **The name after `FROM` is the Rust struct name.** It is `Movie`, not the `movies` field on the
 schema struct and not a snake_cased table name. Keywords are case-insensitive but this
@@ -220,15 +225,27 @@ then fails to bind because `title` is a filter, not the partition key.
 **Strings use single quotes and have no escapes.** `'Fight Club'` is a string; `"Fight Club"` is
 not. There is no escape syntax, so a value containing a single quote cannot be written at all.
 
+**`OR` and `IN` choose values, `AND` joins fields.** To read two partitions at once write
+`id IN (550, 551)`, or `id = 550 OR id = 551` — they mean the same thing. `AND` is for conditions
+on *different* fields, and naming one field twice with it is an error, because two values for one
+field are a union in shoal rather than an intersection and the query would have meant the
+opposite of what it says. Rows come back partition by partition in the order you listed them, so
+`LIMIT 2` on `IN ('a', 'b')` gives you the first two rows of `'a'`.
+
 ### What the errors mean
 
 | Message | Cause |
 | --- | --- |
 | `Expected SELECT * FROM <table>` | The query does not begin `SELECT * FROM <identifier>`, usually a named column instead of `*` |
 | `A WHERE clause is required, and it must constrain a partition key` | No `WHERE` clause at all |
-| `Expected '=' after field 'x', SHQL only supports equality` | A `<`, `>`, `!=`, `LIKE`, or `IN` was used |
+| `Expected '=' or IN after field 'x', SHQL only supports equality` | A `<`, `>`, `!=`, or `LIKE` was used |
+| `'x' is constrained twice by AND` | One field was given two values with `AND`; the message names the `IN` list to write instead |
+| `'x' cannot be OR'd with 'y'` | `OR` was used between two different fields, which shoal cannot answer without a full scan |
+| `IN needs at least one value for field 'x'` | An empty `IN ()` list |
+| `Trailing comma in the IN list for field 'x'` | A comma with no value after it |
+| `Expected ',' or ')' in the IN list for field 'x'` | The list was never closed |
 | `Expected a value for field 'x'` | The literal is malformed — an unterminated string, or a number too large for its type |
-| `Unexpected trailing input` | Something follows the query, including a dangling `AND` |
+| `Unexpected trailing input` | Something follows the query, including a dangling `AND` or `OR` |
 | `Unknown table 'x'` | No table in the schema has that struct name |
 | `Unknown field 'x'` | The table has no field by that name, or the field is marked neither partition, sort, nor filter |
 | `Type mismatch for field 'x'` | The literal cannot deserialize into the field's declared type |

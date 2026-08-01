@@ -197,14 +197,35 @@ fn binds_an_unsorted_partition_key() {
     // parse a query constraining the partition key
     let get = parse_movie("SELECT * FROM Movie WHERE id = 550");
     // the hash should match what a typed query would have produced
-    assert_eq!(get.partition_key, Movie::get_partition_key_from_values(&550));
+    assert_eq!(
+        get.partition_keys,
+        vec![Movie::get_partition_key_from_values(&550)]
+    );
 }
 
 #[test]
-/// A sorted query collects every partition condition in the order it was written
+/// An IN list names several partitions on an unsorted table
+///
+/// This used to be impossible to express: `id = 1 AND id = 2` bound only the first value
+/// and the second was silently dropped.
+fn binds_unsorted_partition_keys_from_in() {
+    // parse a query naming two partitions
+    let get = parse_movie("SELECT * FROM Movie WHERE id IN (550, 551)");
+    // both partitions should be present, hashed, and in the order they were written
+    assert_eq!(
+        get.partition_keys,
+        vec![
+            Movie::get_partition_key_from_values(&550),
+            Movie::get_partition_key_from_values(&551),
+        ]
+    );
+}
+
+#[test]
+/// A sorted query collects every value its partition condition named, in order
 fn binds_sorted_partition_keys() {
     // parse a query naming two partitions
-    let get = parse_review("SELECT * FROM Review WHERE movie = 'alien' AND movie = 'aliens'");
+    let get = parse_review("SELECT * FROM Review WHERE movie IN ('alien', 'aliens')");
     // both partitions should be present, hashed, and in order
     assert_eq!(
         get.partition_keys,
@@ -216,12 +237,78 @@ fn binds_sorted_partition_keys() {
 }
 
 #[test]
+/// OR binds exactly the same way an IN list does
+fn binds_or_the_same_as_in() {
+    // parse the same partitions written both ways
+    let with_or = parse_review("SELECT * FROM Review WHERE movie = 'alien' OR movie = 'aliens'");
+    let with_in = parse_review("SELECT * FROM Review WHERE movie IN ('alien', 'aliens')");
+    assert_eq!(with_or.partition_keys, with_in.partition_keys);
+}
+
+#[test]
+/// Constraining a partition key twice with AND is rejected rather than answered as a union
+///
+/// This is the query that used to look like an intersection and behave like a union.
+fn rejects_a_partition_key_constrained_twice() {
+    // two values for one partition key have to be written as a union to mean one
+    let message = parse_err("SELECT * FROM Review WHERE movie = 'alien' AND movie = 'aliens'");
+    assert!(
+        message.contains("'movie' is constrained twice by AND"),
+        "unexpected message: {}",
+        message
+    );
+    // and the error should say how to write what was meant
+    assert!(
+        message.contains("movie IN ('alien', 'aliens')"),
+        "unexpected message: {}",
+        message
+    );
+}
+
+#[test]
+/// A partition key cannot be OR'd with a filter
+fn rejects_or_between_a_partition_key_and_a_filter() {
+    // the filter side of this names rows in no partition we could read
+    let message = parse_err("SELECT * FROM Movie WHERE id = 550 OR title = 'Alien'");
+    assert!(
+        message.contains("'id' cannot be OR'd with 'title'"),
+        "unexpected message: {}",
+        message
+    );
+}
+
+#[test]
 /// Sort key conditions are collected onto the get query
 fn binds_sort_keys() {
     // parse a query narrowing by sort key
     let get = parse_review("SELECT * FROM Review WHERE movie = 'alien' AND reviewer = 'ann'");
     // the sort key should have been picked up
     assert_eq!(get.sort_keys, vec!["ann".to_string()]);
+}
+
+#[test]
+/// An IN list on the sort key names each of its rows
+///
+/// A sort key is a set like a partition key is, so `IN` is how a query names more than one
+/// of the rows in a partition.
+fn binds_sort_keys_from_an_in_list() {
+    // parse a query naming several rows of one partition
+    let get =
+        parse_review("SELECT * FROM Review WHERE movie = 'alien' AND reviewer IN ('ann', 'bob')");
+    // every value of the sort condition names a row to return
+    assert_eq!(get.sort_keys, vec!["ann".to_string(), "bob".to_string()]);
+}
+
+#[test]
+/// A query naming no sort key leaves the sort keys empty
+///
+/// An empty list is how a get asks for every row in its partitions, so a query that never
+/// mentions the sort key has to produce one.
+fn binds_no_sort_keys_when_none_are_named() {
+    // parse a query that only names its partition
+    let get = parse_review("SELECT * FROM Review WHERE movie = 'alien'");
+    // nothing narrows this get to a row, so it asks for the whole partition
+    assert!(get.sort_keys.is_empty());
 }
 
 #[test]
@@ -244,7 +331,7 @@ fn binds_unsorted_filters() {
     let get = parse_movie("SELECT * FROM Movie WHERE id = 550 AND title = 'Alien'");
     // the filter should have been built and set
     let filters = get.filters.expect("expected filters to be set");
-    assert_eq!(filters.title, Some("Alien".to_string()));
+    assert_eq!(filters.title, Some(vec!["Alien".to_string()]));
     // the filter we did not name should be left unset
     assert_eq!(filters.watched, None);
 }
@@ -256,8 +343,28 @@ fn binds_multiple_filters() {
     let get = parse_movie("SELECT * FROM Movie WHERE id = 550 AND title = 'Alien' AND watched = true");
     // both filters should have been picked up
     let filters = get.filters.expect("expected filters to be set");
-    assert_eq!(filters.title, Some("Alien".to_string()));
-    assert_eq!(filters.watched, Some(true));
+    assert_eq!(filters.title, Some(vec!["Alien".to_string()]));
+    assert_eq!(filters.watched, Some(vec![true]));
+}
+
+#[test]
+/// A filter may be given several values with IN, and a row matching any of them passes
+fn binds_a_multi_value_filter() {
+    // parse a query whose filter names two titles
+    let get = parse_movie("SELECT * FROM Movie WHERE id = 550 AND title IN ('Alien', 'Aliens')");
+    // both values should be on the filter, in the order they were written
+    let filters = get.filters.expect("expected filters to be set");
+    assert_eq!(
+        filters.title,
+        Some(vec!["Alien".to_string(), "Aliens".to_string()])
+    );
+    // and OR on a filter field means the same thing
+    let with_or =
+        parse_movie("SELECT * FROM Movie WHERE id = 550 AND title = 'Alien' OR title = 'Aliens'");
+    assert_eq!(
+        with_or.filters.expect("expected filters to be set").title,
+        filters.title
+    );
 }
 
 #[test]
@@ -267,7 +374,7 @@ fn binds_sorted_filters() {
     let get = parse_review("SELECT * FROM Review WHERE movie = 'alien' AND source = 'imdb'");
     // the filter should have been built and set
     let filters = get.filters.expect("expected filters to be set");
-    assert_eq!(filters.source, Some("imdb".to_string()));
+    assert_eq!(filters.source, Some(vec!["imdb".to_string()]));
 }
 
 #[test]
@@ -302,11 +409,14 @@ fn rejects_a_filter_type_mismatch() {
 fn binds_a_lowercase_query() {
     // the same query written in lower case binds identically
     let get = parse_movie("select * from Movie where id = 550 and title = 'Alien' limit 2");
-    assert_eq!(get.partition_key, Movie::get_partition_key_from_values(&550));
+    assert_eq!(
+        get.partition_keys,
+        vec![Movie::get_partition_key_from_values(&550)]
+    );
     assert_eq!(get.limit, Some(2));
     assert_eq!(
         get.filters.expect("expected filters to be set").title,
-        Some("Alien".to_string())
+        Some(vec!["Alien".to_string()])
     );
 }
 
@@ -442,7 +552,7 @@ fn narrows_values_as_they_are_typed() {
 fn suggests_how_to_continue_a_query() {
     assert_eq!(
         suggest_text("SELECT * FROM Movie WHERE id = 550 "),
-        vec!["AND", "LIMIT", ";"]
+        vec!["AND", "OR", "LIMIT", ";"]
     );
     // after a limit only the terminator is left
     assert_eq!(
@@ -451,6 +561,60 @@ fn suggests_how_to_continue_a_query() {
     );
     // and a finished query has nothing left to offer
     assert!(suggest_text("SELECT * FROM Movie WHERE id = 550;").is_empty());
+}
+
+#[test]
+/// A field can be followed by an IN list as well as an equals
+fn suggests_in_alongside_equals() {
+    // both operators are offered once a field has been named
+    assert_eq!(
+        suggest_text("SELECT * FROM Movie WHERE id "),
+        vec!["=", "IN"]
+    );
+    // once IN has been typed the list has to be opened
+    assert_eq!(
+        suggest_text("SELECT * FROM Movie WHERE id IN "),
+        vec!["("]
+    );
+}
+
+#[test]
+/// Inside an IN list the fields own values are offered, then the way to carry on
+fn suggests_inside_an_in_list() {
+    // the first value in a list is one of the fields own values
+    assert_eq!(
+        suggest_text("SELECT * FROM Movie WHERE watched IN ("),
+        vec!["true", "false"]
+    );
+    // after a value the list can take another or be closed
+    assert_eq!(
+        suggest_text("SELECT * FROM Movie WHERE id IN (550 "),
+        vec![",", ")"]
+    );
+    // and after the separator we are back to offering values
+    assert_eq!(
+        suggest_text("SELECT * FROM Movie WHERE watched IN (true, "),
+        vec!["true", "false"]
+    );
+    // once the list is closed the query continues as any other condition would
+    assert_eq!(
+        suggest_text("SELECT * FROM Movie WHERE id IN (550) "),
+        vec!["AND", "OR", "LIMIT", ";"]
+    );
+}
+
+#[test]
+/// An OR is followed by another field just like an AND is
+fn suggests_a_field_after_or() {
+    // both connectives put us back to naming a field
+    let after_or = suggest_text("SELECT * FROM Movie WHERE id = 550 OR ");
+    let after_and = suggest_text("SELECT * FROM Movie WHERE id = 550 AND ");
+    assert_eq!(after_or, after_and);
+    assert!(
+        after_or.contains(&"id".to_string()),
+        "unexpected suggestions: {:?}",
+        after_or
+    );
 }
 
 #[test]

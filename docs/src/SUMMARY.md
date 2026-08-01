@@ -45,12 +45,18 @@
 # Appendix
 
 - [Known Issues](appendix/known-issues.md)
+- [Optimizations](appendix/optimizations.md)
+- [Test Coverage](appendix/test-coverage.md)
 - [Resolved Issues](appendix/resolved-issues.md)
   - [1-3. Acknowledged writes were not durable](appendix/resolved/durability.md)
   - [4. Unsorted updates and deletes never consult disk](appendix/resolved/unsorted-disk-consultation.md)
   - [5. Deleted rows came back](appendix/resolved/resurrected-deletes.md)
+  - [6. Memory accounting collapsed to zero on a partition load](appendix/resolved/memory-accounting.md)
+  - [7, 10. `limit` was ignored by persistent sorted tables](appendix/resolved/sorted-limit.md)
+  - [8. Sort keys were accepted and ignored](appendix/resolved/sort-keys.md)
   - [9. Recovery and compaction panicked on orphaned update intents](appendix/resolved/orphaned-update-intents.md)
   - [20. The storage tests were entirely commented out](appendix/resolved/storage-tests.md)
   - [24. A bad query could leave the terminal in raw mode](appendix/resolved/shoalctl-panic.md)
+  - [26, 39. A multi-partition get answered in an arbitrary order](appendix/resolved/partition-order.md)
 - [TODOs and Unbuilt Work](appendix/todos.md)
 - [Glossary](appendix/glossary.md)

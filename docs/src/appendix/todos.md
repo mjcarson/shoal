@@ -72,15 +72,124 @@ strands data ([Partitioning](../architecture/partitioning.md#limitations)). Any 
 partition migration between shards and a way to discover files belonging to shards that no
 longer exist.
 
-### Sort-key predicates
+### Sort-key range predicates
 
-`SortedGet::sort_keys` is plumbed end to end and ignored by the server
-([Known Issues #8](known-issues.md#8-sort-keys-are-accepted-and-ignored)). Since partitions
-are `BTreeMap`s, point lookups and range scans are cheap to implement — the field, the wire
-format, and the storage layout are all already in place. This is the single largest
-capability gain available for the least work.
+A sort key now selects rows ([item 8](resolved/sort-keys.md)), which was the half of this that was
+a defect. What is left is the half that is a feature: `WHERE title >= 'M' AND title < 'N'`, and
+with it a cursor to page through a partition with.
 
-`limit` is in the same position ([Known Issues #7](known-issues.md#7-limit-is-ignored-by-persistent-sorted-tables)).
+The gap is sharper than it sounds. A `LIMIT 20` over a partition of a few thousand titles always
+answers with the *first* twenty, and there is no way to ask for the next twenty — the only
+spelling that could is an `IN` list of the exact keys you want, which you would have to already
+know. Paging over a large partition today means fetching all of it. With a lower bound it is a
+seek plus twenty rows, whatever page you are on:
+
+```sql
+SELECT * FROM MovieByKeyword WHERE keyword = 'alien' AND title > 'Gravity' LIMIT 20
+```
+
+What it needs, and what the design already looks like:
+
+- **A query shape that can hold a bound.** `sort_keys: Vec<Sort>` says "these rows"; a range wants
+  `Bound<Sort>` pairs. New archived types, and `for_partitions`/`to_blocked` carrying them.
+- **SHQL operators.** The grammar has `=` and `IN` and nothing else. Adding `<`, `<=`, `>`, `>=`
+  (or `BETWEEN`) collides with the one-condition-per-field rule
+  ([item 26/39](resolved/partition-order.md)) — `title > 'a' AND title < 'z'` is two conditions on
+  one field, and that rule exists to reject exactly that shape on every *other* field.
+- **Prefix semantics for composite sort keys**, which is most of the cost, and which SHQL cannot
+  reach at all yet ([item 42](known-issues.md#42-shql-cannot-express-a-composite-sort-key)).
+
+Neither storage layer is a blocker. A resident partition is a `BTreeMap` and
+`ArchivedBTreeMap::range` (rkyv `collections/btree/map/iter.rs`) descends to its lower bound
+rather than scanning from the start, so both forms seek in `log n` — the same pair of paths the
+point lookup already uses.
+
+What a range does *not* change is the I/O: a cold partition is read whole either way, since there
+is no index within a partition on disk. The win is CPU and rows on the wire.
+
+### Intersection across partitions (a real `AND` on one field)
+
+`WHERE keyword = 'giant worm' AND keyword = 'alien'` reads as "movies with both keywords" and
+is currently a parse error telling you to write `IN (...)` if you meant either of them. There is
+no way to ask for both.
+
+The reason is what a partition holds. `MovieByKeyword` is partitioned by keyword and sorted by
+title, so each keyword's partition is the list of titles carrying it. Answering the
+intersection means reading every named partition in full, keeping the titles each one holds, and
+returning only the titles present in all of them. Three things make that different from the union
+a get does today:
+
+- **It cannot early exit on a limit.** A union can stop as soon as it has enough rows, because
+  every row it has is an answer. An intersection cannot: a title is only known to qualify once
+  every partition has been checked, so `LIMIT 2` still reads all of them. The
+  `PendingGet::filled_before` rule (`server/tables/persistent.rs`) that lets a limited get skip
+  later partitions has to be switched off for one.
+- **It has to happen after the shares are gathered,** not on each shard. Two keywords will
+  usually live on different shards, and neither can tell whether a title it holds is in the
+  other's partition. So the intersection belongs beside `order_by_partitions` in
+  `Shard::handle_gathered` (`server/shard.rs`), which means `ResponseAction::merge` needs to
+  learn a second mode rather than always taking the union.
+- **It needs a row identity to intersect on.** For a sorted table the sort key is the natural
+  one — two `MovieByKeyword` rows are the same movie when their titles match — but that is a
+  convention of this schema rather than something the table declares. A general answer wants
+  the row type to name the field the intersection is over, which is a new `#[shoal(...)]`
+  attribute.
+
+The cheaper alternative is a secondary index: a table keyed by movie holding its keywords, so
+the question becomes a single partition read and a filter rather than a scatter-gather. That is
+a larger feature but it is the one that scales, since the intersection above is `O(rows in the
+largest partition)` however few rows come back.
+
+Until one of those exists, the parse error is deliberate. The spelling used to be accepted and
+answered as a union, which is the opposite of what it says.
+
+### Full boolean `OR`
+
+`OR` currently joins conditions on one field, where it means the same thing as `IN`. Crossing
+fields is rejected. There are three separate cases hiding behind "support `OR`", and they are
+not equally hard.
+
+**Same field — built.** `keyword = 'a' OR keyword = 'b'` is a union of partitions, which is
+what `split_by_shard` already does with a list of keys.
+
+**Between filters, under a pinned partition — answerable, unbuilt.**
+`keyword = 'a' AND (title = 'x' OR watched = true)` is a per-row predicate evaluated inside a
+partition that has already been selected, so nothing about the access path changes. What
+changes is the filter representation. A generated `*Filter` is a struct of `Option<Vec<T>>`
+fields and `is_filtered` is a straight-line conjunction over them
+(`shoal-derive/src/tables.rs`), which can express "any of these values, for every named field"
+and nothing else. A disjunction needs:
+
+- a recursive predicate tree replacing the filter struct, which has to be an rkyv `Archive`
+  type — recursive, so its archived form is boxed (`rkyv::boxed::ArchivedBox`) rather than
+  inline
+- an evaluator over that tree for both `is_filtered` and `is_filtered_archived`
+- parentheses and precedence climbing in the parser, since without grouping the tree can only
+  ever be one level deep and is not worth having
+
+**A partition key `OR`'d with anything — not answerable.** `keyword = 'a' OR title = 'Alien'`
+asks for every row titled `Alien` in any partition. The only access path is by partition key
+and there is no scan, which is also why the `WHERE` clause is mandatory. This case has to stay
+an error whatever else is built, so `OR` will always be legal between some field pairs and
+illegal between others.
+
+There is a structural problem past the parser too. With standard precedence,
+
+```sql
+WHERE keyword = 'a' AND title = 'x' OR keyword = 'b' AND title = 'y'
+```
+
+is two disjuncts with *different filters per partition set*. `SortedGet` carries one `filters`
+for all of its `partition_keys` (`shared/queries/sorted.rs`), so this has to become two gets.
+That breaks the one-response-per-query contract `Gather` (`server/shard.rs`) and the client's
+index-ordered stream (`client.rs`) both rely on, and leaves `LIMIT` undefined across them.
+
+The way through is to normalise the parsed expression into disjunctive normal form, reject any
+disjunct that does not constrain a partition key, and group the rest into `(partition_keys,
+filter)` pairs. Disjuncts sharing a filter collapse into one get. The ones that do not need
+either a get that carries a filter per partition group, or a response model where several gets
+answer under one index — which is the same machinery a real `ORDER BY` across partitions would
+want, so it is worth building once rather than twice.
 
 ### An error channel in the protocol
 
@@ -133,19 +242,14 @@ exactly the alignment and `fdatasync` behaviour they exist to check.
 
 ### Tests
 
-`shoal-core` has 87 unit tests: the SHQL grammar, the intent log reader and stream writer, the
-archive map, and partition tombstone bookkeeping. The storage half of those were commented out
-until recently ([Resolved Issues #20](resolved/storage-tests.md)).
+Covered and uncovered flows are catalogued in [Test Coverage](test-coverage.md), along with the
+counts from an actual run. The short version: compaction and archive rotation, multi-log recovery,
+the streaming client APIs, and concurrency are the gaps worth closing first — and the suite's test
+binaries all bind the same ports, which
+[item 38](known-issues.md#38-integration-test-binaries-all-bind-the-same-ports) covers.
 
-The integration tests cover insert, get, exists, delete, and update on both table types, plus
-restart behaviour, crash recovery under `SIGKILL`, mutating a partition that exists only in an
-archive across enough restarts to catch a stale map entry
-([Resolved Issues #4](resolved/unsorted-disk-consultation.md)), and — under a config with a one
-byte memory limit — eviction and memory pressure
-([Resolved Issues #5](resolved/resurrected-deletes.md)).
-
-Not covered: archive compaction, multi-shard routing, streaming, and concurrency. Nothing
-exercises a workload large enough to rotate archives rather than intent logs.
+Multi-shard routing is no longer on that list; it gained coverage with
+[item 7](resolved/sorted-limit.md).
 
 ## Dead code
 

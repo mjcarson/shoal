@@ -13,16 +13,17 @@ mean — see [shoalctl](../operations/shoalctl.md#writing-queries).
 ## Grammar
 
 ```
-query   := ws "SELECT" ws1 "*" ws1 "FROM" ws1 identifier where [ws limit] [ws ";"] ws eof
-where   := ws1 "WHERE" ws1 condition { ws "AND" ws1 condition }
-condition := identifier ws "=" ws value
-limit   := "LIMIT" ws1 digits
-value   := string | float | integer | boolean | null
-string  := "'" { any character except "'" } "'"
-float   := ["-"|"+"] digits "." digits
-integer := ["-"|"+"] digits
-boolean := "true" | "false"        (case-insensitive)
-null    := "null"                  (case-insensitive)
+query      := ws "SELECT" ws1 "*" ws1 "FROM" ws1 identifier where [ws limit] [ws ";"] ws eof
+where      := ws1 "WHERE" ws1 condition { ws "AND" ws1 condition }
+condition  := comparison { ws "OR" ws1 comparison }
+comparison := identifier ws ( "=" ws value | "IN" ws "(" ws value { ws "," ws value } ws ")" )
+limit      := "LIMIT" ws1 digits
+value      := string | float | integer | boolean | null
+string     := "'" { any character except "'" } "'"
+float      := ["-"|"+"] digits "." digits
+integer    := ["-"|"+"] digits
+boolean    := "true" | "false"        (case-insensitive)
+null       := "null"                  (case-insensitive)
 identifier := xid_start { xid_continue }
 ```
 
@@ -39,14 +40,67 @@ can be typed in a query.
 ```sql
 SELECT * FROM Movie WHERE id = 12345;
 SELECT * FROM Movie WHERE id = 12345 AND title = 'Inception'
+SELECT * FROM Movie WHERE id IN (12345, 12346)
+SELECT * FROM Movie WHERE id = 12345 OR id = 12346
 select * from Movie where id = 12345 limit 10
 ```
 
+## `AND`, `OR`, and `IN`
+
+One rule decides which connective is legal where: **`OR` and `IN` choose between values for a
+single field, and `AND` joins conditions on different fields.**
+
+```sql
+-- allowed
+SELECT * FROM MovieByKeyword WHERE keyword IN ('giant worm', 'alien')
+SELECT * FROM MovieByKeyword WHERE keyword = 'giant worm' OR keyword = 'alien'
+SELECT * FROM Movie WHERE id = 550 AND title IN ('Alien', 'Aliens')
+
+-- rejected
+SELECT * FROM MovieByKeyword WHERE keyword = 'giant worm' AND keyword = 'alien'
+SELECT * FROM Movie WHERE id = 550 OR title = 'Alien'
+```
+
+`IN` is the primary spelling; `OR` between two conditions on the same field folds into exactly
+the same clause, so `id = 1 OR id = 2` and `id IN (1, 2)` are indistinguishable after parsing.
+Duplicated values are dropped, so `IN (1, 2, 1)` names two partitions rather than three.
+
+**Why `AND` cannot repeat a field.** Two conditions on one field ask for the rows satisfying
+both. For a partition key that means the rows present in *every* one of those partitions, and a
+get answers by reading each named partition and returning their union — so the query would have
+quietly returned the rows in *any* of them. The parser refuses it and names the `IN` list that
+was meant:
+
+```
+'keyword' is constrained twice by AND. Several values for one field are a union in shoal, not
+an intersection, so write it as keyword IN ('giant worm', 'alien')
+```
+
+A real intersection is unbuilt work; see
+[TODOs](../appendix/todos.md#intersection-across-partitions-a-real-and-on-one-field).
+
+**Why `OR` cannot cross fields.** `keyword = 'a' OR title = 'Alien'` asks for every row whose
+title is `Alien` in *any* partition, and the only access path in shoal is by partition key —
+there is no scan to answer that side with. Rather than accept some cross-field `OR`s and reject
+others, all of them are rejected. What a full boolean `OR` would take is written up in
+[TODOs](../appendix/todos.md#full-boolean-or).
+
+**Several filter values.** `IN` on a filterable field means the same thing it does on a
+partition key: a row matches if its value is any of the listed ones. Filters on *different*
+fields must all match, so `title IN ('Alien', 'Aliens') AND watched = true` is a disjunction
+inside a conjunction.
+
 ## What it does not support
 
-- **Only `SELECT *`.** No projection — the literal `*` is required (`parser.rs:370`).
-- **Only `=`.** No `<`, `>`, `!=`, `LIKE`, `IN`, or `BETWEEN` (`parser.rs:409`).
-- **Only `AND`.** No `OR` and no parentheses (`parser.rs:475-484`).
+- **Only `SELECT *`.** No projection — the literal `*` is required.
+- **Only `=` and `IN`.** No `<`, `>`, `!=`, `LIKE`, or `BETWEEN`.
+- **No parentheses,** other than the ones wrapping an `IN` list. There is no grouping and so no
+  precedence to reason about: a connective's meaning is decided entirely by whether its two
+  sides name the same field.
+- **`OR` only joins conditions on the same field,** and **`AND` cannot constrain one field
+  twice.** See [`AND`, `OR`, and `IN`](#and-or-and-in) above.
+- **Composite partition keys are not reachable.** A table with several `#[shoal(partition)]`
+  fields has a tuple `PartitionKey`, and no SHQL literal can produce one.
 - **No `ORDER BY`, `GROUP BY`, `JOIN`, or aggregates.**
 - **No `INSERT`, `UPDATE`, or `DELETE`.** Writes must be built as typed queries.
 - **No escape syntax in string literals.** `string_literal` is
@@ -90,7 +144,7 @@ select * from Movie where id = 12345 limit 10
         │ pull out the partition keys, then the sort keys
         │ Movie::shql_build_filters   — filter conditions → MovieFilter
         ▼
-  MovieGet { partition_key, sort_keys, filters, limit }  ──▶  DbQueryKinds::Movie(...)
+  MovieGet { partition_keys, sort_keys, filters, limit } ──▶  DbQueryKinds::Movie(...)
 ```
 
 ### Stage 1: parse
@@ -99,15 +153,25 @@ select * from Movie where id = 12345 limit 10
 `serde_json::Value` literals, tracking each value's byte offsets for error reporting:
 
 ```rust
+pub struct WhereValue {
+    pub value: Value,
+    pub start: usize,
+    pub end: usize,
+}
+
 pub struct WhereClause {
     pub field: String,
-    pub value: Value,
-    pub value_start: usize,
-    pub value_end: usize,
+    pub field_start: usize,
+    pub field_end: usize,
+    pub values: Vec<WhereValue>,
 }
 ```
 
-`parser.rs:101-111`
+A clause holds every value its field may take, so `IN` and `OR` produce one shape and a plain
+`=` is just the case where there is one of them. Folding happens during parsing: comparisons
+joined by `OR` are merged into the clause for the field they name, and the parser then checks
+that no field is named by two clauses. Downstream code can therefore assume **one clause per
+field**, which is what makes the binding stage a lookup rather than a search.
 
 `serde_json::Value` is the intermediate type because validation is done by round-tripping
 through serde, below.
@@ -129,17 +193,20 @@ field's declared type:
 let validator = <#inner_type as TableSchemaSupport>::get_field_validator(&condition.field)
     .ok_or_else(|| ShqlParseError::new(
         format!("No validator for field '{}'", condition.field),
-        condition.value_start, condition.value_end, query,
+        condition.field_start, condition.field_end, query,
     ))?;
-validator(&condition.value).map_err(|err| {
-    ShqlParseError::new(
-        format!("Type mismatch for field '{}': {}", condition.field, err),
-        condition.value_start, condition.value_end, query,
-    )
-})?;
+for found in &condition.values {
+    validator(&found.value).map_err(|err| {
+        ShqlParseError::new(
+            format!("Type mismatch for field '{}': {}", condition.field, err),
+            found.start, found.end, query,
+        )
+    })?;
+}
 ```
 
-`shoal-derive/src/structs/client.rs:139-153` (unsorted), `:210-224` (sorted)
+The check runs per value, so one bad literal in an `IN` list is underlined on its own rather
+than taking the whole list with it.
 
 Validators are generated closures over `serde_json::from_value::<T>`:
 
@@ -165,13 +232,15 @@ that type, then the real conversion happens separately in the generated parse ar
 **Pull out the keys.** Conditions are bucketed by the `FieldRole` the schema assigns each field
 (`shoal-derive/src/traits/table_schema.rs`). The two table kinds differ:
 
-- **Unsorted** takes the *first* partition condition via `.find(...)` and errors with
-  `Missing partition key in WHERE clause` if there is none
-  (`structs/client.rs:156-166`). Extra partition conditions are ignored, so
-  `WHERE id = 1 AND id = 2` becomes `id = 1`.
-- **Sorted** collects *every* partition condition into a `Vec` in written order, and every sort
-  condition into `sort_keys` (`structs/client.rs:227-270`). `WHERE movie = 'a' AND movie = 'b'`
-  queries both partitions.
+Both kinds now work the same way: there is at most one partition condition, and every value it
+names becomes a partition to read, in written order. A query with none errors with
+`Missing partition key in WHERE clause`. Sorted tables additionally collect the sort condition's
+values into `sort_keys`, each of which names a row to return out of every partition read. A query
+naming no sort key leaves that list empty, which is how it asks for every row.
+
+Unsorted gets used to carry a single scalar partition key, so `WHERE id = 1 AND id = 2` bound
+`id = 1` and dropped the second value without a word. `UnsortedGet` now carries a `Vec<u64>`
+like `SortedGet` does, and both split across shards the same way.
 
 A field with no role — declared on the struct but marked neither partition, sort, nor filter —
 has no `FieldRole` and produces `Unknown field`. The error lists `T::field_names()`, which
@@ -206,20 +275,61 @@ a span that lands mid-character falls back to showing the whole input instead of
 ## What actually happens to `LIMIT`
 
 It parses. It type-checks. It is stored on `ParsedSelect.limit`, copied into the generated
-`*Get` struct, serialized, sent over the wire, and delivered to the table.
+`*Get` struct, serialized, sent over the wire, and delivered to the table — which honours it.
 
-Then it is ignored. `PersistentSortedTable::get` inlines its own scan loop with no limit check
-(`shoal-core/src/server/tables/persistent/sorted.rs:436-448`), even though
-`SortedPartition::get` — which it does not call — implements it correctly
-(`.../tables/partitions.rs:278-284`). See
-[Known Issues](../appendix/known-issues.md#7-limit-is-ignored-by-persistent-sorted-tables).
+The limit is counted against the rows a get has accumulated, so it spans every partition the get
+names and survives a get that has to park on a disk read and resume
+([Query Execution](../tables/query-execution.md#what-a-get-actually-filters-on)).
 
-For unsorted tables the point is moot: a partition holds one row.
+Across shards it is still global: each shard applies the limit to its own share, and the shard
+that split the query merges the shares, puts their rows back into the order the query named its
+partitions in, and trims their union before replying. This was not always
+true — see [`limit` was ignored by persistent sorted tables](../appendix/resolved/sorted-limit.md).
 
-Similarly, sort-key conditions are collected onto `SortedGet::sort_keys` and then have no
-effect on a get, because the server ignores them
-([Known Issues](../appendix/known-issues.md#8-sort-keys-are-accepted-and-ignored)). A SHQL
-query narrowing by sort key will return the whole partition.
+Because the order is now defined, so is *which* rows a limit keeps: the first ones, in the order
+below. A get whose first partition has to be read from disk waits for it rather than answering
+out of a partition that was quicker — see
+[Row order](../appendix/resolved/partition-order.md).
+
+## Row order
+
+The rows a get answers with are a function of the query alone:
+
+1. Partitions come back in the order the query named them, which for `IN` is the order the
+   values were written.
+2. Within a partition, a sorted table's rows come back in sort-key order. An unsorted partition
+   holds one row.
+
+```sql
+SELECT * FROM MovieByKeyword WHERE keyword IN ('giant worm', 'alien') LIMIT 3
+```
+
+reads the `giant worm` partition first and answers with its first three titles; reversing the
+list answers out of `alien` instead. Running either query again returns the same rows in the
+same order, which is what makes paging over several partitions possible without pulling the
+whole result back and sorting it client side.
+
+This is not a global `ORDER BY`. Titles are not interleaved across the two keywords — every
+`giant worm` row comes before every `alien` one. Sorting the union by sort key would mean every
+named partition had to be read even under a small limit, which is a trade this has not made.
+
+`LIMIT 0` is honoured literally: nothing is scanned, nothing is read, and the response is an empty
+get. Note that an empty get is not distinguishable from a get that found nothing, so a `LIMIT 0`
+surfaces through `send_one` as a failed query.
+
+For unsorted tables the point is nearly moot: a partition holds one row, so `LIMIT 0` is the only
+limit an unsorted get can reach.
+
+Sort-key conditions are collected onto `SortedGet::sort_keys` and name the rows to return:
+`WHERE keyword = 'alien' AND title = 'Aliens'` answers with that row alone, and
+`title IN ('Alien', 'Aliens')` with those two. They are a set and not a range, so the rows still
+come back in sort-key order however the `IN` list was written, and a query that names no sort key
+still returns the whole partition. This used to be parsed and thrown away
+([item 8](../appendix/resolved/sort-keys.md)).
+
+A table with several `#[shoal(sort)]` fields cannot be narrowed this way at all, for the same
+reason a composite partition key cannot be named — no SHQL literal is a tuple
+([item 42](../appendix/known-issues.md#42-shql-cannot-express-a-composite-sort-key)).
 
 Filter conditions, by contrast, now do reach the server — they are applied through
 `ShoalTableSupport::is_filtered_archived` like filters on any typed query.
@@ -240,10 +350,15 @@ error can underline the literal, which is the difference between a usable REPL a
 frustrating one.
 
 **Nothing is consumed silently.** `ParsedSelect::new` rejects leftover input rather than
-stopping where it happens to run out of grammar, and the `AND` loop matches through `opt` so a
-failed match restores the input. Without the second part the first is useless: winnow's tuple
+stopping where it happens to run out of grammar, and the connective loop matches through `opt` so
+a failed match restores the input. Without the second part the first is useless: winnow's tuple
 parser does not backtrack on failure, so a dangling `AND` was being consumed by the failed match
 and then never noticed.
+
+**A spelling that cannot lie.** Where a query could be written in a way that reads as one thing
+and behaves as another, the parser rejects it and says what to write instead. That is why
+`keyword = 'a' AND keyword = 'b'` is an error rather than a synonym for `IN`: it would have kept
+working, and kept meaning the opposite of what it says.
 
 ## Completion
 
@@ -271,9 +386,16 @@ accepts and what type it is. No extra code is generated for it.
 ## Testing
 
 Stage 1 is covered by `shoal-core/src/shared/queries/parser/tests.rs` — the grammar, each
-literal form, keyword case-insensitivity, byte-offset tracking, and every error path including
-the overflow and trailing-input cases. The module docs on `parser.rs` carry doctests, so the
-documented grammar is compiler-verified.
+literal form, keyword case-insensitivity, byte-offset tracking, `IN` lists and their error
+cases, `OR` folding, and every other error path including the overflow and trailing-input
+cases. The module docs on `parser.rs` carry doctests, so the documented grammar is
+compiler-verified.
+
+The row order a query promises is covered end to end against a running server in
+`shoal/tests/persistent_sorted_table.rs` and `shoal/tests/persistent_unsorted_table.rs`, since
+it only holds once the shard collecting a split query's shares puts them back in order. The
+stability tests run the same query many times over, because the order they replaced depended on
+which shard happened to answer first and so could pass a single run by luck.
 
 Stage 2 is covered by `shoal/tests/shql.rs`, which defines a real sorted and unsorted table via
 the derive macros and asserts on the bound query. It needs no server, so it runs in
@@ -285,21 +407,26 @@ by `shoalctl/tests/completion.rs`.
 
 ## Limitations
 
-- Equality only, `AND` only, `SELECT *` only, reads only.
+- Equality and `IN` only, `SELECT *` only, reads only.
 - A `WHERE` clause is mandatory and must constrain a partition key.
+- `OR` only joins conditions on the same field, and no field may be constrained twice by `AND`.
+  There is no intersection across partitions and no full boolean `OR`
+  ([TODOs](../appendix/todos.md#intersection-across-partitions-a-real-and-on-one-field)).
+- Composite partition keys cannot be expressed, since no literal can produce a tuple.
 - String literals have no escape syntax, so they cannot contain a single quote — which makes
   rows whose partition key holds an apostrophe unreachable
   ([Known Issues #27](../appendix/known-issues.md#27-shql-cannot-express-a-string-containing-a-single-quote)).
 - Floats need digits on both sides of the point and have no exponent form, and `1e9` fails with
   a misleading trailing-input error
   ([#29](../appendix/known-issues.md#29-shql-rejects-exponent-notation-with-a-misleading-error)).
-- `LIMIT` is parsed and discarded by the server
-  ([#7](../appendix/known-issues.md#7-limit-is-ignored-by-persistent-sorted-tables)).
-- Sort-key conditions are parsed and discarded by the server
-  ([#8](../appendix/known-issues.md#8-sort-keys-are-accepted-and-ignored)).
-- Repeating a field is handled three different ways depending on where it lands — dropped for
-  unsorted partition keys and for filters, honoured as extra partitions for sorted ones
-  ([#26](../appendix/known-issues.md#26-shql-silently-drops-duplicate-conditions-on-one-field)).
+- There is no `ORDER BY`. Rows come back in the order the query named its partitions, and in
+  sort-key order within each of them, which is what `LIMIT` takes the first of. Sorting across
+  partitions is up to the caller.
+- A sort-key condition selects rows but cannot bound them: there is no `<`, `>`, or `BETWEEN`, so
+  a partition can be pointed into but not paged through
+  ([TODOs](../appendix/todos.md#sort-key-range-predicates)).
+- Composite sort keys cannot be expressed, for the same reason composite partition keys cannot
+  ([#42](../appendix/known-issues.md#42-shql-cannot-express-a-composite-sort-key)).
 - "Unknown field" can name a field that appears in the list of valid fields
   ([#28](../appendix/known-issues.md#28-shql-unknown-field-names-the-field-it-is-listing-as-valid)).
 - Requires `serde::DeserializeOwned` on every field type.

@@ -51,7 +51,7 @@ fn parses_a_complete_query() {
     // the single where condition is kept
     assert_eq!(parsed.conditions.len(), 1);
     assert_eq!(parsed.conditions[0].field, "id");
-    assert_eq!(parsed.conditions[0].value, Value::Number(550.into()));
+    assert_eq!(*parsed.conditions[0].first(), Value::Number(550.into()));
     // and the limit is picked up
     assert_eq!(parsed.limit, Some(10));
 }
@@ -154,14 +154,14 @@ fn rejects_identifiers_starting_with_a_digit() {
 fn parses_string_literals() {
     // a normal string literal keeps its contents without the quotes
     let condition = parse_one("SELECT * FROM Movie WHERE title = 'Alien'");
-    assert_eq!(condition.value, Value::String("Alien".to_string()));
+    assert_eq!(*condition.first(), Value::String("Alien".to_string()));
     // an empty string literal is allowed
     let empty = parse_one("SELECT * FROM Movie WHERE title = ''");
-    assert_eq!(empty.value, Value::String(String::new()));
+    assert_eq!(*empty.first(), Value::String(String::new()));
     // strings may contain spaces and punctuation
     let spaced = parse_one("SELECT * FROM Movie WHERE title = 'A Space Odyssey: 2001'");
     assert_eq!(
-        spaced.value,
+        *spaced.first(),
         Value::String("A Space Odyssey: 2001".to_string())
     );
 }
@@ -171,13 +171,13 @@ fn parses_string_literals() {
 fn parses_integer_literals() {
     // an unsigned integer
     let plain = parse_one("SELECT * FROM Movie WHERE id = 42");
-    assert_eq!(plain.value.as_i64(), Some(42));
+    assert_eq!(plain.first().as_i64(), Some(42));
     // a negative integer
     let negative = parse_one("SELECT * FROM Movie WHERE id = -17");
-    assert_eq!(negative.value.as_i64(), Some(-17));
+    assert_eq!(negative.first().as_i64(), Some(-17));
     // an explicitly signed positive integer
     let positive = parse_one("SELECT * FROM Movie WHERE id = +100");
-    assert_eq!(positive.value.as_i64(), Some(100));
+    assert_eq!(positive.first().as_i64(), Some(100));
 }
 
 #[test]
@@ -185,10 +185,10 @@ fn parses_integer_literals() {
 fn parses_float_literals() {
     // a positive float
     let plain = parse_one("SELECT * FROM Movie WHERE rating = 8.5");
-    assert_eq!(plain.value.as_f64(), Some(8.5));
+    assert_eq!(plain.first().as_f64(), Some(8.5));
     // a negative float
     let negative = parse_one("SELECT * FROM Movie WHERE rating = -0.5");
-    assert_eq!(negative.value.as_f64(), Some(-0.5));
+    assert_eq!(negative.first().as_f64(), Some(-0.5));
 }
 
 #[test]
@@ -196,20 +196,20 @@ fn parses_float_literals() {
 fn parses_boolean_and_null_literals() {
     // booleans in either case
     assert_eq!(
-        parse_one("SELECT * FROM Movie WHERE watched = true").value,
+        *parse_one("SELECT * FROM Movie WHERE watched = true").first(),
         Value::Bool(true)
     );
     assert_eq!(
-        parse_one("SELECT * FROM Movie WHERE watched = FALSE").value,
+        *parse_one("SELECT * FROM Movie WHERE watched = FALSE").first(),
         Value::Bool(false)
     );
     // and null in either case
     assert_eq!(
-        parse_one("SELECT * FROM Movie WHERE note = null").value,
+        *parse_one("SELECT * FROM Movie WHERE note = null").first(),
         Value::Null
     );
     assert_eq!(
-        parse_one("SELECT * FROM Movie WHERE note = NULL").value,
+        *parse_one("SELECT * FROM Movie WHERE note = NULL").first(),
         Value::Null
     );
 }
@@ -222,10 +222,10 @@ fn tracks_value_positions() {
     let parsed = parse(query);
     // the recorded span for the string should cover the quoted literal
     let title = &parsed.conditions[0];
-    assert_eq!(&query[title.value_start..title.value_end], "'Alien'");
+    assert_eq!(&query[title.values[0].start..title.values[0].end], "'Alien'");
     // and the span for the number should cover just the digits
     let id = &parsed.conditions[1];
-    assert_eq!(&query[id.value_start..id.value_end], "550");
+    assert_eq!(&query[id.values[0].start..id.values[0].end], "550");
 }
 
 #[test]
@@ -408,13 +408,252 @@ fn parses_a_zero_limit() {
 }
 
 #[test]
-/// Repeating a condition on the same field keeps both conditions
-fn keeps_duplicate_conditions() {
-    // the parser does not deduplicate, it hands both to the binding stage
-    let parsed = parse("SELECT * FROM Movie WHERE id = 1 AND id = 2");
+/// Constraining one field twice with AND is rejected and told how to say what it means
+///
+/// This spelling used to parse and then be answered as a union, so `id = 1 AND id = 2`
+/// returned the rows of either partition rather than the rows in both.
+fn rejects_a_field_constrained_twice_by_and() {
+    // two conditions on one field cannot both be satisfied by a union
+    let message = parse_err("SELECT * FROM Movie WHERE id = 1 AND id = 2");
+    assert!(
+        message.contains("'id' is constrained twice by AND"),
+        "unexpected message: {}",
+        message
+    );
+    // the error should suggest the IN list that was meant, quoting the literals as written
+    assert!(
+        message.contains("id IN (1, 2)"),
+        "unexpected message: {}",
+        message
+    );
+}
+
+#[test]
+/// A field constrained twice is caught even with another condition between the two
+fn rejects_a_field_constrained_twice_out_of_order() {
+    // the repeat is two conditions later rather than adjacent
+    let message = parse_err("SELECT * FROM Movie WHERE a = 1 AND b = 2 AND a = 3");
+    assert!(
+        message.contains("'a' is constrained twice by AND"),
+        "unexpected message: {}",
+        message
+    );
+}
+
+#[test]
+/// An IN list gives one field several values
+fn parses_an_in_list() {
+    // every value in the list belongs to the one condition
+    let condition = parse_one("SELECT * FROM Movie WHERE id IN (1, 2, 3)");
+    assert_eq!(condition.field, "id");
+    // and they are kept in the order they were written
+    let values: Vec<Option<i64>> = condition
+        .values
+        .iter()
+        .map(|found| found.value.as_i64())
+        .collect();
+    assert_eq!(values, vec![Some(1), Some(2), Some(3)]);
+}
+
+#[test]
+/// An IN list of one value is the same as an equality
+fn parses_a_single_value_in_list() {
+    // a list with one value in it names one value
+    let condition = parse_one("SELECT * FROM Movie WHERE id IN (1)");
+    assert_eq!(condition.values.len(), 1);
+    assert_eq!(condition.first().as_i64(), Some(1));
+}
+
+#[test]
+/// The IN keyword is matched without regard to case and does not need a space before its list
+fn parses_in_without_regard_to_case_or_spacing() {
+    // lowercase, uppercase, and a list pushed up against the keyword all parse
+    for query in [
+        "SELECT * FROM Movie WHERE id in (1, 2)",
+        "SELECT * FROM Movie WHERE id IN (1, 2)",
+        "SELECT * FROM Movie WHERE id In(1,2)",
+    ] {
+        let condition = parse_one(query);
+        assert_eq!(condition.values.len(), 2, "failed to parse '{}'", query);
+    }
+}
+
+#[test]
+/// An IN list may hold any literal the parser supports
+fn parses_mixed_literals_in_an_in_list() {
+    // strings, numbers, booleans, and null are all values
+    let condition = parse_one("SELECT * FROM Movie WHERE note IN ('a', 1, true, null)");
+    assert_eq!(condition.values.len(), 4);
+    assert_eq!(condition.values[0].value, Value::String("a".to_string()));
+    assert_eq!(condition.values[2].value, Value::Bool(true));
+    assert_eq!(condition.values[3].value, Value::Null);
+}
+
+#[test]
+/// A field named twice by OR is folded into one condition
+fn folds_or_into_one_condition() {
+    // both values belong to the one field, so there is one condition and not two
+    let condition = parse_one("SELECT * FROM Movie WHERE id = 1 OR id = 2");
+    assert_eq!(condition.field, "id");
+    assert_eq!(condition.values.len(), 2);
+    assert_eq!(condition.values[0].value.as_i64(), Some(1));
+    assert_eq!(condition.values[1].value.as_i64(), Some(2));
+}
+
+#[test]
+/// OR and IN are two spellings of the same query
+fn or_and_in_parse_the_same() {
+    // parse the same set of values written both ways
+    let with_or = parse_one("SELECT * FROM Movie WHERE id = 1 OR id = 2 OR id = 3");
+    let with_in = parse_one("SELECT * FROM Movie WHERE id IN (1, 2, 3)");
+    // pull the literals out of each so they can be compared
+    let values = |condition: &WhereClause| -> Vec<Value> {
+        condition
+            .values
+            .iter()
+            .map(|found| found.value.clone())
+            .collect()
+    };
+    assert_eq!(values(&with_or), values(&with_in));
+}
+
+#[test]
+/// The OR keyword is matched without regard to case
+fn or_keyword_is_case_insensitive() {
+    // a lowercase or folds the same way an uppercase one does
+    let condition = parse_one("SELECT * FROM Movie WHERE id = 1 or id = 2");
+    assert_eq!(condition.values.len(), 2);
+}
+
+#[test]
+/// OR and AND can be mixed, with OR choosing values and AND constraining another field
+fn mixes_or_and_and() {
+    // the two ids belong to one condition and the title to another
+    let parsed = parse("SELECT * FROM Movie WHERE id = 1 OR id = 2 AND title = 'Alien'");
     assert_eq!(parsed.conditions.len(), 2);
-    assert_eq!(parsed.conditions[0].value.as_i64(), Some(1));
-    assert_eq!(parsed.conditions[1].value.as_i64(), Some(2));
+    assert_eq!(parsed.conditions[0].field, "id");
+    assert_eq!(parsed.conditions[0].values.len(), 2);
+    assert_eq!(parsed.conditions[1].field, "title");
+    assert_eq!(parsed.conditions[1].values.len(), 1);
+}
+
+#[test]
+/// OR across two different fields is rejected
+///
+/// The right hand side would name rows in no partition we asked for, and a get can only
+/// read the partitions it names, so there is nothing to answer it with.
+fn rejects_or_across_two_fields() {
+    // a partition key OR'd with a filter is not answerable
+    let message = parse_err("SELECT * FROM Movie WHERE id = 550 OR title = 'Alien'");
+    assert!(
+        message.contains("'id' cannot be OR'd with 'title'"),
+        "unexpected message: {}",
+        message
+    );
+}
+
+#[test]
+/// An empty IN list is rejected rather than matching nothing
+fn rejects_an_empty_in_list() {
+    // a list with no values in it cannot match a row
+    let message = parse_err("SELECT * FROM Movie WHERE id IN ()");
+    assert!(
+        message.contains("IN needs at least one value for field 'id'"),
+        "unexpected message: {}",
+        message
+    );
+}
+
+#[test]
+/// A trailing comma in an IN list is rejected
+fn rejects_a_trailing_comma_in_an_in_list() {
+    // a comma with nothing after it is a mistake rather than an empty value
+    let message = parse_err("SELECT * FROM Movie WHERE id IN (1, 2,)");
+    assert!(
+        message.contains("Trailing comma"),
+        "unexpected message: {}",
+        message
+    );
+}
+
+#[test]
+/// An unclosed IN list is rejected
+fn rejects_an_unclosed_in_list() {
+    // a list that runs off the end of the query cannot be parsed
+    let message = parse_err("SELECT * FROM Movie WHERE id IN (1, 2");
+    assert!(
+        message.contains("Expected ',' or ')'"),
+        "unexpected message: {}",
+        message
+    );
+    // and neither can one whose values are not parenthesised at all
+    let unparenthesised = parse_err("SELECT * FROM Movie WHERE id IN 1, 2");
+    assert!(
+        unparenthesised.contains("Expected '(' after IN"),
+        "unexpected message: {}",
+        unparenthesised
+    );
+}
+
+#[test]
+/// Each value in an IN list records its own span
+fn tracks_positions_across_an_in_list() {
+    // parse a list mixing a string and a number so the spans differ in width
+    let query = "SELECT * FROM Movie WHERE title IN ('Alien', 'café')";
+    let condition = parse_one(query);
+    // each recorded span should slice back to the literal it came from
+    let first = &condition.values[0];
+    assert_eq!(&query[first.start..first.end], "'Alien'");
+    let second = &condition.values[1];
+    assert_eq!(&query[second.start..second.end], "'café'");
+}
+
+#[test]
+/// A repeated value names one partition once
+fn deduplicates_repeated_values() {
+    // the same literal written twice would otherwise read the same partition twice
+    let condition = parse_one("SELECT * FROM Movie WHERE id IN (1, 2, 1)");
+    let values: Vec<Option<i64>> = condition
+        .values
+        .iter()
+        .map(|found| found.value.as_i64())
+        .collect();
+    assert_eq!(values, vec![Some(1), Some(2)]);
+    // the same holds when the repeat was written with OR
+    let with_or = parse_one("SELECT * FROM Movie WHERE id = 1 OR id = 1");
+    assert_eq!(with_or.values.len(), 1);
+}
+
+#[test]
+/// A dangling OR with no comparison after it is rejected
+fn rejects_a_dangling_or() {
+    // an OR with nothing after it must not be silently dropped
+    let message = parse_err("SELECT * FROM Movie WHERE id = 1 OR");
+    assert!(
+        message.contains("trailing input"),
+        "unexpected message: {}",
+        message
+    );
+    // when the OR is followed by whitespace we get as far as looking for the next field
+    let trailing = parse_err("SELECT * FROM Movie WHERE id = 1 OR   ");
+    assert!(
+        trailing.contains("Expected a field name"),
+        "unexpected message: {}",
+        trailing
+    );
+}
+
+#[test]
+/// A field name that merely starts with a keyword is still a field name
+fn does_not_mistake_a_prefix_for_a_connective() {
+    // 'organisation' and 'android' both start with a connective keyword
+    let parsed = parse("SELECT * FROM Movie WHERE id = 1 AND organisation = 'x'");
+    assert_eq!(parsed.conditions[1].field, "organisation");
+    let anded = parse("SELECT * FROM Movie WHERE id = 1 AND android = 'x'");
+    assert_eq!(anded.conditions[1].field, "android");
+    // and a field named 'inn' is not an IN list
+    let inn = parse_one("SELECT * FROM Movie WHERE inn = 1");
+    assert_eq!(inn.field, "inn");
 }
 
 #[test]
@@ -459,5 +698,5 @@ fn tracks_positions_across_multibyte_values() {
     let parsed = parse(query);
     // the recorded span should still slice back to the quoted literal
     let title = &parsed.conditions[0];
-    assert_eq!(&query[title.value_start..title.value_end], "'café'");
+    assert_eq!(&query[title.values[0].start..title.values[0].end], "'café'");
 }

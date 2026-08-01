@@ -90,11 +90,64 @@ pub fn add(stream: &mut proc_macro2::TokenStream, struct_ident: &Ident, fields: 
             #archived_response_ident::#variant(resp) => Ok(&resp.id)
         }
     });
-    // Generate find_shard match arms
-    let find_shard_arms = tables.iter().map(|table| {
+    // Generate split_by_shard match arms
+    //
+    // each table splits its own query, so the narrowed queries that comes back have to
+    // be wrapped back up in the variant they came out of
+    let split_by_shard_arms = tables.iter().map(|table| {
         let variant = &table.variant_ident;
         quote! {
-            #query_ident::#variant(query) => query.find_shard(ring, found)
+            #query_ident::#variant(query) => {
+                // split this tables query up by shard
+                let mut split = Vec::default();
+                query.split_by_shard(ring, &mut split);
+                // wrap each narrowed query back up in the variant it came from
+                for (shard, narrowed) in split {
+                    found.push((shard, #query_ident::#variant(narrowed)));
+                }
+            }
+        }
+    });
+    // Generate limit match arms
+    let limit_arms = tables.iter().map(|table| {
+        let variant = &table.variant_ident;
+        quote! {
+            #query_ident::#variant(query) => query.limit()
+        }
+    });
+    // Generate partition_keys match arms
+    let partition_keys_arms = tables.iter().map(|table| {
+        let variant = &table.variant_ident;
+        quote! {
+            #query_ident::#variant(query) => query.partition_keys()
+        }
+    });
+    // Generate order_by_partitions match arms
+    //
+    // every row knows the partition it came from, whichever kind of table it is, so both
+    // kinds are reordered the same way
+    let order_by_partitions_arms = tables.iter().map(|table| {
+        let variant = &table.variant_ident;
+        quote! {
+            #response_ident::#variant(response) => response.order_by_partitions(order)
+        }
+    });
+    // Generate merge match arms
+    //
+    // both shares answer the same query, so they are always the same variant
+    let merge_arms = tables.iter().map(|table| {
+        let variant = &table.variant_ident;
+        quote! {
+            (#response_ident::#variant(ours), #response_ident::#variant(theirs)) => {
+                ours.merge(theirs)
+            }
+        }
+    });
+    // Generate truncate match arms
+    let truncate_arms = tables.iter().map(|table| {
+        let variant = &table.variant_ident;
+        quote! {
+            #response_ident::#variant(response) => response.truncate(limit)
         }
     });
     // Generate get_index_archived match arms
@@ -150,19 +203,33 @@ pub fn add(stream: &mut proc_macro2::TokenStream, struct_ident: &Ident, fields: 
                 }
             }
 
-            /// Find the right shards for this query
+            /// Split this query into the per shard queries that answer it
             ///
             /// # Arguments
             ///
             /// * `ring` - The shard ring to check against
-            /// * `found` - The shards we found for this query
-            fn find_shard<'a>(
+            /// * `found` - The per shard queries we found for this query
+            fn split_by_shard<'a>(
                 &self,
                 ring: &'a shoal_core::server::ring::Ring,
-                found: &mut Vec<&'a shoal_core::server::shard::ShardInfo>,
+                found: &mut Vec<(&'a shoal_core::server::shard::ShardInfo, Self)>,
             ) {
                 match &self {
-                    #(#find_shard_arms),*
+                    #(#split_by_shard_arms),*
+                }
+            }
+
+            /// Get the most rows this query asked for, if it set a limit
+            fn limit(&self) -> Option<usize> {
+                match &self {
+                    #(#limit_arms),*
+                }
+            }
+
+            /// Get the partitions this query named, in the order it named them
+            fn partition_keys(&self) -> &[u64] {
+                match &self {
+                    #(#partition_keys_arms),*
                 }
             }
         }
@@ -190,6 +257,42 @@ pub fn add(stream: &mut proc_macro2::TokenStream, struct_ident: &Ident, fields: 
             fn get_query_id(archived: &<Self as rkyv::Archive>::Archived) -> uuid::Uuid {
                 match archived {
                     #(#get_query_id_arms),*
+                }
+            }
+
+            /// Merge another shards share of one queries answer into this one
+            ///
+            /// # Arguments
+            ///
+            /// * `other` - The other shards share of this queries answer
+            fn merge(&mut self, other: Self) {
+                match (self, other) {
+                    #(#merge_arms),*,
+                    // a query is only ever routed to one table, so two shares of one
+                    // answer are always the same variant
+                    _ => (),
+                }
+            }
+
+            /// Put our rows back into the order the query named their partitions in
+            ///
+            /// # Arguments
+            ///
+            /// * `order` - The partitions this query named, in the order it named them
+            fn order_by_partitions(&mut self, order: &[u64]) {
+                match self {
+                    #(#order_by_partitions_arms),*
+                }
+            }
+
+            /// Drop any rows past this queries limit
+            ///
+            /// # Arguments
+            ///
+            /// * `limit` - The most rows this query asked for
+            fn truncate(&mut self, limit: usize) {
+                match self {
+                    #(#truncate_arms),*
                 }
             }
         }

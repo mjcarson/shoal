@@ -115,7 +115,7 @@ async fn insert() -> Result<(), TestError> {
     client.send_one(test_data.clone()).await?;
     // send this query
     let response = client
-        .send_one(TestRecordGet::new(test_data.partition_key.clone()))
+        .send_one(TestRecordGet::new(vec![test_data.partition_key.clone()]))
         .await?;
     // access our response
     let access = response.access::<TestRecord>()?.unwrap().first().unwrap();
@@ -141,7 +141,7 @@ async fn delete() -> Result<(), TestError> {
     client.send_one(test_data.clone()).await?;
     // send this query
     let response = client
-        .send_one(TestRecordGet::new(test_data.partition_key.clone()))
+        .send_one(TestRecordGet::new(vec![test_data.partition_key.clone()]))
         .await?;
     // access our response
     let access = response.access::<TestRecord>()?.unwrap().first().unwrap();
@@ -177,7 +177,7 @@ async fn update() -> Result<(), TestError> {
     client.send_one(test_data.clone()).await?;
     // verify the record was inserted
     let response = client
-        .send_one(TestRecordGet::new(test_data.partition_key.clone()))
+        .send_one(TestRecordGet::new(vec![test_data.partition_key.clone()]))
         .await?;
     let access = response.access::<TestRecord>()?.unwrap().first().unwrap();
     let record = TestRecord::deserialize(access).unwrap();
@@ -191,7 +191,7 @@ async fn update() -> Result<(), TestError> {
         .await?;
     // verify the record was updated
     let response = client
-        .send_one(TestRecordGet::new(test_data.partition_key.clone()))
+        .send_one(TestRecordGet::new(vec![test_data.partition_key.clone()]))
         .await?;
     let access = response.access::<TestRecord>()?.unwrap().first().unwrap();
     let record = TestRecord::deserialize(access).unwrap();
@@ -308,7 +308,7 @@ async fn update_when_not_resident() -> Result<(), TestError> {
         .await?;
     // verify the record was updated
     let response = client
-        .send_one(TestRecordGet::new(test_data.partition_key.clone()))
+        .send_one(TestRecordGet::new(vec![test_data.partition_key.clone()]))
         .await?;
     let access = response.access::<TestRecord>()?.unwrap().first().unwrap();
     let record = TestRecord::deserialize(access).unwrap();
@@ -321,7 +321,7 @@ async fn update_when_not_resident() -> Result<(), TestError> {
     let (client, pool) = utils::start::<TestDb>(&temp_dir).await?;
     // make sure our update survived being compacted into an archive
     let response = client
-        .send_one(TestRecordGet::new(test_data.partition_key.clone()))
+        .send_one(TestRecordGet::new(vec![test_data.partition_key.clone()]))
         .await?;
     let access = response.access::<TestRecord>()?.unwrap().first().unwrap();
     let record = TestRecord::deserialize(access).unwrap();
@@ -352,7 +352,7 @@ async fn insert_after_delete_when_not_resident() -> Result<(), TestError> {
     client.send_one(replacement.clone()).await?;
     // verify our replacement is what we get back
     let response = client
-        .send_one(TestRecordGet::new(test_data.partition_key.clone()))
+        .send_one(TestRecordGet::new(vec![test_data.partition_key.clone()]))
         .await?;
     let access = response.access::<TestRecord>()?.unwrap().first().unwrap();
     let record = TestRecord::deserialize(access).unwrap();
@@ -365,11 +365,164 @@ async fn insert_after_delete_when_not_resident() -> Result<(), TestError> {
     let (client, pool) = utils::start::<TestDb>(&temp_dir).await?;
     // make sure our replacement survived the delete being compacted
     let response = client
-        .send_one(TestRecordGet::new(test_data.partition_key.clone()))
+        .send_one(TestRecordGet::new(vec![test_data.partition_key.clone()]))
         .await?;
     let access = response.access::<TestRecord>()?.unwrap().first().unwrap();
     let record = TestRecord::deserialize(access).unwrap();
     assert_eq!(replacement, record);
+    // Shutdown server
+    pool.exit()?;
+    Ok(())
+}
+
+/// Test that a limit of zero returns nothing at all
+///
+/// An unsorted partition holds exactly one row, so a limit of zero is the only limit
+/// an unsorted get can ever reach. It is honoured so that `LIMIT 0` means the same
+/// thing on both kinds of table.
+#[tokio::test]
+async fn get_with_a_zero_limit_returns_nothing() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = utils::test_dir();
+    // start a shoal server and build a client
+    let (client, pool) = utils::start::<TestDb>(&temp_dir).await?;
+    // write a row to get back
+    client
+        .send_one(TestRecord::new("partition_key", "woot"))
+        .await?;
+    // get it back with a limit of zero
+    let result = client
+        .send_one(TestRecordGet::new(vec!["partition_key".to_string()]).limit(0))
+        .await;
+    // a get that asked for nothing gets nothing
+    assert!(matches!(
+        result,
+        Err(shoal_core::client::Errors::QueryDidNotSucceed {
+            kind: shoal_core::shared::responses::ResponseActionNames::Get,
+            ..
+        })
+    ));
+    // Shutdown server
+    pool.exit()?;
+    Ok(())
+}
+
+/// How many partitions the multi partition tests spread their rows over
+///
+/// This has to be enough that the consistent hash ring puts some of them on every shard, since
+/// a get that never splits proves nothing about how split gets are put back together.
+const SPREAD_PARTITIONS: usize = 20;
+
+/// Write one row into each of `SPREAD_PARTITIONS` partitions
+///
+/// Returns the partition keys that were written to.
+///
+/// # Arguments
+///
+/// * `client` - The client to insert our rows with
+async fn insert_spread_rows(
+    client: &shoal_core::client::Shoal<TestDbClient>,
+) -> Result<Vec<String>, TestError> {
+    // build a partition key per partition we are spreading over
+    let partition_keys = (0..SPREAD_PARTITIONS)
+        .map(|index| format!("partition_{index}"))
+        .collect::<Vec<_>>();
+    // write a row into each of those partitions
+    for partition_key in &partition_keys {
+        client
+            .send_one(TestRecord::new(partition_key.as_str(), "woot"))
+            .await?;
+    }
+    Ok(partition_keys)
+}
+
+/// Run a get over these partitions and report the partition keys it answered with, in order
+///
+/// # Arguments
+///
+/// * `client` - The client to send our get with
+/// * `partition_keys` - The partitions to read, in the order to read them
+/// * `limit` - The most rows to ask for, if any
+async fn get_partition_keys(
+    client: &shoal_core::client::Shoal<TestDbClient>,
+    partition_keys: Vec<String>,
+    limit: Option<usize>,
+) -> Result<Vec<String>, TestError> {
+    // build a get over every one of these partitions, with a limit if we were given one
+    let mut get = TestRecordGet::new(partition_keys);
+    if let Some(limit) = limit {
+        get = get.limit(limit);
+    }
+    // send it and collect the partitions the rows it answered with came from
+    let mut stream = client.send(client.query().add(get)).await?;
+    let mut found = Vec::new();
+    while let Some(response) = stream.next().await? {
+        if let Some(rows) = response.access::<TestRecord>()? {
+            for row in rows.iter() {
+                found.push(row.partition_key.to_string());
+            }
+        }
+    }
+    Ok(found)
+}
+
+/// Test that an unsorted get can read several partitions at once
+///
+/// An unsorted get used to name a single partition, so `id = 1 AND id = 2` bound only the first
+/// value and the second was dropped without a word.
+#[tokio::test]
+async fn get_reads_several_partitions() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = utils::test_dir();
+    // start a shoal server and build a client, which runs more than one shard
+    let (client, pool) = utils::start::<TestDb>(&temp_dir).await?;
+    // write a row into each of our partitions
+    let partition_keys = insert_spread_rows(&client).await?;
+    // read every one of them back in a single get
+    let found = get_partition_keys(&client, partition_keys.clone(), None).await?;
+    // each partition should have answered with its own row, exactly once
+    assert_eq!(found, partition_keys);
+    // Shutdown server
+    pool.exit()?;
+    Ok(())
+}
+
+/// Test that an unsorted get returns its partitions in the order it named them
+#[tokio::test]
+async fn get_returns_partitions_in_query_order() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = utils::test_dir();
+    // start a shoal server and build a client, which runs more than one shard
+    let (client, pool) = utils::start::<TestDb>(&temp_dir).await?;
+    // write a row into each of our partitions
+    let partition_keys = insert_spread_rows(&client).await?;
+    // naming the partitions backwards should turn the answer round with them
+    let reversed = partition_keys.iter().rev().cloned().collect::<Vec<_>>();
+    let found = get_partition_keys(&client, reversed.clone(), None).await?;
+    assert_eq!(found, reversed);
+    // and the same query has to answer the same way every time it runs
+    for run in 1..10 {
+        let repeated = get_partition_keys(&client, reversed.clone(), None).await?;
+        assert_eq!(repeated, found, "run {run} answered in a different order");
+    }
+    // Shutdown server
+    pool.exit()?;
+    Ok(())
+}
+
+/// Test that a limit on an unsorted get keeps the partitions it named first
+#[tokio::test]
+async fn get_limit_takes_the_first_partitions() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = utils::test_dir();
+    // start a shoal server and build a client, which runs more than one shard
+    let (client, pool) = utils::start::<TestDb>(&temp_dir).await?;
+    // write a row into each of our partitions
+    let partition_keys = insert_spread_rows(&client).await?;
+    // ask for fewer rows than we have partitions
+    let found = get_partition_keys(&client, partition_keys.clone(), Some(3)).await?;
+    // the rows we keep have to come from the partitions we named first
+    assert_eq!(found, partition_keys[..3].to_vec());
     // Shutdown server
     pool.exit()?;
     Ok(())

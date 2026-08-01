@@ -28,7 +28,9 @@ let new_size = self.memory_usage.borrow().saturating_add_signed(size_diff);
 
 Read the borrow, compute, then write — rather than `*x.borrow_mut() += d` — to avoid holding
 a mutable borrow across the computation. `saturating_add_signed` prevents underflow when a
-partition shrinks.
+partition shrinks. `adjust_memory_usage` (`.../tables/persistent.rs:22-27`) is that shape as a
+function; a signed change must go through it or spell it out, never through a cast to `usize`
+([Resolved #6](../appendix/resolved/memory-accounting.md)).
 
 Sizes come from `deepsize2`, which walks heap allocations, so a row's `String` and `Vec`
 contents are counted ([Partitions](partitions.md#sizes)).
@@ -41,18 +43,17 @@ since it replaces the whole partition rather than one entry inside it. The sorte
 at least bounded now: tombstones are swept when their partition is marked evictable, so they
 accumulate for one generation rather than forever.
 
-One path corrupts it outright. In `load_partition`, when a merged partition ends up smaller:
+One path used to corrupt it outright rather than drift: `load_partition` sized a merged
+partition from the archive extent it merged in, so a partition that had just grown reported that
+it shrank, and the shrink was applied with a cast that floored the counter at **0**. Both halves
+are fixed — the merge recomputes its size and the adjustment is signed
+([Resolved #6](../appendix/resolved/memory-accounting.md)). The merge is now the one place a
+sorted partition's size is recomputed instead of maintained by delta.
 
-```rust
-let new_mem_usage = self.memory_usage.borrow().saturating_sub(diff as usize);
-```
-
-`.../persistent/sorted.rs:275-277`
-
-`diff` is negative here, so `diff as usize` is astronomically large and the result saturates
-to **0**. The shard then believes it is using no memory and stops evicting until the counter
-climbs back above the limit. See
-[Known Issues](../appendix/known-issues.md#6-negative-isize-cast-collapses-memory-accounting).
+What remains is drift, not collapse. Note that the two arms of `load_partition` still count
+different things: a `Vacant` entry is accounted by the raw archive bytes it installs
+(`.../persistent/sorted.rs:289-295`), while a merge is accounted by `deep_size_of` over the
+rows.
 
 ## The LRU
 

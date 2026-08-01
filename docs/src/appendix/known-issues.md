@@ -6,57 +6,26 @@ the symptom, the cause, and a `file:line`.
 **How these were established.** Everything here comes from reading the source unless an entry
 says otherwise. Line numbers drift.
 
+Performance findings are catalogued separately in [Optimizations](optimizations.md), and what the
+test suite does and does not reach is in [Test Coverage](test-coverage.md).
+
 Defects that have been fixed move to [Resolved Issues](resolved-issues.md), one page each,
 carrying the reasoning and the invariants the fix depends on. Item numbers are shared between
 the two pages and never reused, so a number appears on exactly one of them — which is why this
-list starts at 6. The exceptions are items 9, 20, and 24, which were only partly fixed: the
-open remainder is here and the rest is there.
+list starts at 9 and skips 10, 26, and 39. The exceptions are items 9, 20, and 24, which were
+only partly fixed: the open remainder is here and the rest is there.
 
 **Baseline as of writing:** `cargo check --workspace --all-targets` passes with warnings;
-`cargo test --workspace` passes — 71 integration tests, 87 `shoal-core` unit tests, 6
-doctests. That is up from 14 and 32 with the addition of SHQL coverage
-([SHQL](../api/shql.md#testing)) and the restart and eviction tests added with items 4 and 5.
+`cargo test --workspace` passes — 115 integration tests (one ignored), 129 `shoal-core` unit
+tests, 8 doctests. That is up from 14 and 32 with the addition of SHQL coverage
+([SHQL](../api/shql.md#testing)), the restart and eviction tests added with items 4 and 5, the
+limit and cross-shard coverage added with item 7, the row-order and `IN`/`OR` coverage added
+with items 26 and 39, and the sort-key selection coverage added with item 8. The counts before
+item 8 were 105 and 116, and were re-run and confirmed unchanged when items 31–38 were added.
 
 ---
 
 ## High — data loss and silent failure
-
-### 6. Negative `isize` cast collapses memory accounting
-
-`.../persistent/sorted.rs:275-277`
-
-```rust
-let new_mem_usage = self.memory_usage.borrow().saturating_sub(diff as usize);
-```
-
-Reached only when `diff` is negative (the `else` branch of `if diff.is_positive()`). Casting a
-negative `isize` to `usize` wraps to a value near `usize::MAX`, so the saturating subtraction
-floors shard memory usage at **0**.
-
-The shard then believes it is using no memory and stops evicting until the counter climbs back
-above the limit — with the true resident set already past it.
-
-**Fix direction:** `saturating_sub(diff.unsigned_abs())`.
-
-### 7. `limit` is ignored by persistent sorted tables
-
-`.../persistent/sorted.rs:457-469`
-
-The get loop is inlined in the table and has no limit check. `SortedPartition::get` implements
-it correctly (`.../tables/partitions.rs:278-284`) but is not the method that runs.
-
-So `limit` is parsed by SHQL, type-checked, serialized, sent, and discarded. A query with
-`LIMIT 10` against a million-row partition returns a million rows.
-
-### 8. Sort keys are accepted and ignored
-
-`SortedGet::sort_keys` (`shared/queries/sorted.rs:78`) and `SortedExists::sort_keys` (`:106`)
-are populated by clients, carried through `to_blocked` (`:91-98`), and never read by the
-server. A get always scans every live row in the partition.
-
-Consequences: no point lookup by sort key, no range scans, and SHQL `WHERE sort_key = 'x'`
-returns the whole partition. Deletes and updates *do* use the sort key, so the field is only
-inert on read paths.
 
 ### 9. Orphaned update intents are dropped silently
 
@@ -71,29 +40,43 @@ That is the same gap as the mid-log corruption case in
 [Recovery](../storage/recovery.md#truncation-and-corruption), and both want the same thing: a
 counter of intents discarded during recovery, reported once at the end of startup.
 
+### 31. Multi-log recovery discards already-replayed intents
+
+`FileSystem::read_intents` (`.../storage/fs.rs:449-463`) replays every inactive intent log into
+one shared `partitions` map, in generation order, before replaying the active log. Each
+`replay_intent_log` (`.../storage/fs.rs:191-213`) runs its whole **scan** pass over the log
+before its **replay** pass, and `scan` inserts unconditionally:
+
+```rust
+// wrap this partition as being accessible
+let wrapped = MaybeLoaded::Accessible(partition_read);
+// load this partition
+partitions.insert(partition_key, wrapped);
+```
+
+`.../persistent/sorted.rs:1177-1179`, and the same shape in `.../persistent/unsorted.rs`.
+
+A partition that an earlier generation's log already replayed into as `MaybeLoaded::Loaded` is
+overwritten by the copy read back from the archive, and every intent replayed into it is lost.
+The archive predates those intents by definition — that is why they were still in a log.
+
+The memory accounting drifts with it: `sorted.rs:1175` adds the archive read's length to
+`memory_usage` without subtracting whatever it displaced.
+
+Reaching this needs two or more inactive logs — that is, compactions that were interrupted, which
+is exactly the crash case recovery exists for — the same partition touched in both, an `Update`
+intent in the later one, and the partition present in an archive. Single-log recovery is
+unaffected, which is why `update_intent_replay` does not catch it.
+
+**Fix direction:** `scan` should leave an existing entry alone rather than overwrite it. The
+distinction it needs is the one `load_partition` (`sorted.rs:256-295`) already draws between a
+`Vacant` and an `Occupied` entry — and note that the `Occupied` arm there has its own gap,
+[item 30](#30-a-sorted-partition-load-can-be-silently-thrown-away). Both are the same underlying
+question: what should happen when a copy read from disk meets a copy already in memory.
+
 ---
 
 ## Medium — robustness
-
-### 10. `end` flag computation is wrong for streams
-
-`shoal-core/src/server/shard.rs:422-435`
-
-```rust
-let end_index = queries.queries.len() - 1;
-for (mut index, kind) in queries.queries.into_iter().enumerate() {
-    ...
-    index += queries.base_index;
-    let end = index == end_index;
-```
-
-Two defects. `len() - 1` underflows and panics on an empty bundle. And `index` is adjusted by
-`base_index` while `end_index` is not, so for any streamed bundle with `base_index > 0` the
-comparison is meaningless — usually never true, so `end` is never set.
-
-Masked today because streaming clients set `unbounded_queries: true` and ignore the server's
-`end` entirely, terminating on a locally generated `ClientMsg::End`
-(`client.rs:1308-1313`).
 
 ### 11. Ring lookup panics on an empty ring
 
@@ -134,8 +117,8 @@ event!(Level::INFO, pre, post, diff = pre - post, ...);
 ```
 
 A plain `usize` subtraction inside a log statement. Any accounting drift leaving `post > pre`
-panics the shard — from the logging, not the logic. Given item 6 and the accounting
-inconsistencies in item 22, this is reachable.
+panics the shard — from the logging, not the logic. Given the accounting inconsistencies in item
+22, this is reachable.
 
 ### 14. Empty rotated intent logs are never deleted
 
@@ -203,32 +186,6 @@ if let Err(_) = self.spawn_task(table_name, partition_id).await {
 A partition load that fails to spawn panics the loader. Any query blocked on that partition
 then waits forever, since there is no timeout ([item 15](#15-no-backpressure-anywhere)).
 
-### 26. SHQL silently drops duplicate conditions on one field
-
-The parser keeps every condition in written order, but the generated binding arms pick with
-`.find(...)` and discard the rest. Three places do this, and they disagree with each other:
-
-| Query | Result |
-| --- | --- |
-| `WHERE id = 1 AND id = 2` on an **unsorted** table | `id = 1`. The second is dropped. |
-| `WHERE movie = 'a' AND movie = 'b'` on a **sorted** table | *Both*, as two partitions to scan. |
-| `WHERE id = 1 AND title = 'a' AND title = 'b'` (a filter) | `title = 'a'`. The second is dropped. |
-
-Confirmed by running each against a real schema. The user gets results for a query they did not
-write, with no warning.
-
-The unsorted partition pick is `structs/client.rs:156-166`; the filter pick is the
-`.find(...)` inside the generated `shql_build_filters`
-(`shoal-derive/src/structs/filter.rs:60-77`).
-
-**Fix direction:** equality conditions on the same field are contradictory, not refining —
-`id = 1 AND id = 2` can only match nothing. The honest fix is to reject a repeated field in the
-binding arms with a `Duplicate condition on field 'x'` error, which needs a pass over
-`parsed.conditions` before the role dispatch. The sorted multi-partition behavior is genuinely
-useful and should be kept, but it should be the documented meaning of repeating a *partition*
-field, not an accident of using `filter` instead of `find`. Note that `WhereClause` already
-carries byte offsets, so the error can point at the second occurrence.
-
 ### 27. SHQL cannot express a string containing a single quote
 
 `string_literal` is `delimited("'", take_till(0.., '\''), "'")`
@@ -246,6 +203,127 @@ quote. Backslash escapes would also work but diverge from SQL. Either way the by
 recorded in `WhereClause` must continue to span the *raw* literal including its quotes, since
 that is what error rendering slices; the decoded value and the source span will no longer be the
 same length.
+
+### 32. A disconnected client is never cleaned up anywhere
+
+Nothing removes an entry from `client_map` (`shard.rs:254`), and `ServerMsg` has no variant for a
+client going away. `client_rx_relay` breaks its loop on EOF (`shard.rs:57-61`) and tells nobody.
+
+Because `client_acceptor` broadcasts `NewClient` to every shard (`shard.rs:138-140`), every shard
+holds a clone of that client's `client_tx` for as long as the process runs. So the channel never
+closes, `client_tx_relay`'s `recv()` never returns `Err`, and the task never exits
+(`shard.rs:86-91`).
+
+Per connection that has already gone away, permanently:
+
+| Leaked | Where |
+| --- | --- |
+| One `client_map` entry | Every shard |
+| One `kanal` channel | Every shard holds the sender |
+| One detached glommio task | The accepting shard |
+
+A response that arrives for a dead client is not an error either — it is sent into an unbounded
+channel ([item 15](#15-no-backpressure-anywhere)) that nothing will ever read.
+
+This is the cost of a *disconnect*, not of a failure: an ordinary client that opens a pool, does
+its work, and exits leaves all of it behind. The client's own pool is 50 connections
+(`client.rs:140-148`).
+
+**Fix direction:** a `ServerMsg::ClientGone` broadcast from `client_rx_relay` when its loop ends.
+Dropping the sender from every `client_map` is what closes the channel, which is what lets
+`client_tx_relay` return on its own.
+
+### 33. Collected split-query state has no expiry
+
+A `Gather` is inserted when a query is split across shards (`shard.rs:470-480`) and removed only
+when `outstanding` reaches zero (`shard.rs:643-651`). Nothing else ever removes one.
+
+A shard that never sends its share leaves the entry resident forever and the client waiting
+forever. That is not hypothetical: a partition load that fails to spawn hits the `todo!()` in
+`.../fs/loader.rs:126-129` and panics the loader, stranding every query blocked on it
+([item 16](#16-panics-on-the-hot-path)), and there is no timeout anywhere to break the wait
+([TODOs](todos.md#timeouts)).
+
+Client disconnect does not clear them either, so this compounds with
+[item 32](#32-a-disconnected-client-is-never-cleaned-up-anywhere).
+
+### 34. The request length prefix is unvalidated
+
+```rust
+// parse the upcoming messages size
+let len = u64::from_le_bytes(len_bytes) as usize;
+// allocate a buffer that is exactly the right size
+let mut data = BytesMut::zeroed(len);
+```
+
+`shard.rs:66-68`
+
+The length is taken from the wire and used as an allocation size directly, before a single byte
+of the body has been read. There is no maximum message size in the protocol
+([Wire Protocol](../architecture/wire-protocol.md)), so a corrupt or hostile prefix asks for up to
+`usize::MAX` bytes. The relay also `panic!`s on the read that follows
+([item 16](#16-panics-on-the-hot-path)), so a truncated message takes the shard down rather than
+the connection.
+
+`zeroed` is also pure waste — `read_exact` overwrites every byte of it on the next line.
+
+### 36. A partial intent log buffer is only written when the shard's channel drains
+
+```rust
+// if we have no more messages then flush our current queries to disk
+if self.shard_local_rx.is_empty() {
+    self.tables.flush().await?;
+}
+```
+
+`shard.rs:787-789`
+
+`StreamWriter::prep` and `consume` (`.../fs/stream.rs:519-546`) write only when the staging buffer
+fills, so this `is_empty()` check is the only other path by which staged data reaches disk. Writes
+are acknowledged only once durable ([Resolved Issues #1-3](resolved/durability.md)), so whether a
+client hears back depends on the shard's channel happening to run dry.
+
+Under sustained load it does not. Worse, the writer's own `DataFlushed` wakeups
+(`.../fs/stream.rs:373`, sent per completed write) are themselves messages on that channel, so
+write traffic helps keep the condition false. The escape is an intent log rotation, which syncs
+unconditionally (`.../fs.rs:383`) — meaning a trailing write can wait for up to
+`intent_log_size`, 10 MiB by default, of *other* traffic before its client is answered.
+
+Not a durability bug: nothing is acknowledged that is not durable. It is an unbounded
+acknowledgement delay for the last writes before a lull.
+
+### 38. Integration test binaries all bind the same ports
+
+`shoal/tests/utils.rs:48-53` hands out ports from a counter:
+
+```rust
+static PORT_COUNTER: AtomicU16 = AtomicU16::new(13000);
+fn get_unique_port() -> u16 { PORT_COUNTER.fetch_add(1, Ordering::SeqCst) }
+```
+
+The counter is per test *binary*. Cargo runs binaries in parallel, so every binary starts handing
+out 13000, 13001, 13002 at the same time. Measured by capturing the `listening on` line
+(`conf.rs:111`) from each binary in turn: `persistent_sorted_table` binds 13000-13034,
+`persistent_unsorted_table` binds 13000-13021, and **all 22 of the unsorted binary's ports are
+also bound by the sorted one**.
+
+The bind does not fail, which is what makes this worth an entry. Glommio sets `SO_REUSEPORT` on
+listening sockets (`glommio/src/net/tcp_socket.rs:135`), so the second bind succeeds silently and
+the kernel load balances incoming connections between the two servers. A client in one test can
+therefore have its connection handed to a server owned by another test — a different schema, a
+different temp dir — with no error anywhere to say so.
+
+`persistent_sorted_table.rs:626` additionally hardcodes `let port = 13900`, so two concurrent runs
+of that one binary collide with each other regardless of the counter.
+
+**This has not been observed to fail.** `cargo test --workspace` was run four times while
+investigating and passed every time; the two binaries are simply never alive on the same port at
+the same moment. Nothing enforces that — it is timing, and it is the safety net every other item
+on this page is checked against.
+
+**Fix direction:** bind port 0 and read back the assigned port, which removes the shared namespace
+entirely. Failing that, give each binary a distinct base offset — but that only moves the
+collision to the next binary someone adds.
 
 ---
 
@@ -374,6 +452,53 @@ misleading because the grammar accepts a prefix of what the user meant. Note tha
 `serde_json::Number::from_f64` already rejects the infinities a large exponent can produce, so
 the overflow path is covered.
 
+### 40. `UnsortedExists` still names a single partition
+
+`UnsortedGet` now carries `partition_keys: Vec<u64>` and splits across shards like its sorted
+counterpart ([26, 39](resolved/partition-order.md)), but `UnsortedExists`
+(`shared/queries/unsorted.rs`) was left with a scalar `partition_key`. `SortedExists` has taken a
+`Vec` all along, so the two table kinds now disagree about what an exists can ask.
+
+Nothing is wrong today: SHQL emits no exists queries, so the only way to reach one is the typed
+API, where the single-partition shape is what the generated `*Exists` offers anyway. It is a
+consistency gap that will bite whoever adds `EXISTS` to the query language, since the sorted
+spelling will accept an `IN` list and the unsorted one will not.
+
+**Fix direction:** the same change `UnsortedGet` took — a `Vec<u64>`, `for_partitions`, and
+`group_by_shard` in `split_by_shard` — plus a `PendingGet`-shaped wait in the table so an exists
+spanning partitions can park on more than one read.
+
+### 41. SHQL cannot express a composite partition key
+
+A table with several `#[shoal(partition)]` fields gets a tuple `PartitionKey`
+(`shoal-derive/src/traits/partition_key.rs`), and the generated parse arm deserializes one
+literal straight into that type. No SHQL literal is a tuple, so every query against such a table
+fails with `Failed to deserialize partition key` however it is written.
+
+The parser now guarantees one clause per field, which is what makes the fix tractable: the arm
+could collect the conditions naming each partition field and build the tuple from them in
+declaration order, so `WHERE a = 1 AND b = 2` would name one partition. Note that this is the one
+place where `AND` across two fields is a conjunction *within* a key rather than a filter on top
+of one, and that `IN` over a composite key would need each field's values crossed with the
+others.
+
+### 42. SHQL cannot express a composite sort key
+
+The same defect as [41](#41-shql-cannot-express-a-composite-partition-key), one key over. Several
+`#[shoal(sort)]` fields make a tuple `Sort` (`shoal-derive/src/structs/get.rs`), and the sorted
+parse arm deserializes one literal straight into it, so `WHERE partition = 'x' AND a = 1 AND b = 2`
+fails with `Failed to deserialize sort key` rather than naming a row.
+
+Unlike the partition-key case the query still runs when the sort condition is simply left out — it
+just returns the whole partition — so this is a missing capability rather than a table that cannot
+be reached at all. It only started mattering with [item 8](resolved/sort-keys.md): while sort keys
+were ignored there was nothing to express.
+
+**Fix direction:** the same shape as 41, and worth doing in the same change. Collect the conditions
+naming each sort field, build the tuple in declaration order, and reject a partial one — a prefix
+of a composite sort key is a *range*, not a point, and there is no range predicate to lower it to
+([TODOs](todos.md#sort-key-range-predicates)).
+
 ### 30. A sorted partition load can be silently thrown away
 
 `.../persistent/sorted.rs:249-291` — `load_partition` merges a freshly read archive extent into
@@ -398,6 +523,52 @@ no-op at the end of an IO path: if the two ever diverge, nothing here would say 
 **Fix direction:** handle the arm explicitly, even if the body is `// the resident copy is the
 same extent, so keep it and drop what we read`. An `else` that says why is worth more than a
 pattern that quietly does not match.
+
+### 35. A `RefCell` borrow is held across three awaits in the compactor
+
+```rust
+if let Some(entry) = self.map.to_archive.borrow().get(partition) {
+    let handle = self.map.get_archive(&entry.archive).await?;
+    let read = handle.read_at(entry.offset, entry.size).await?;
+    let archived = <T as RkyvSupport>::access(&read)?;
+    handle.close().await?;
+```
+
+`.../fs/compactor.rs:180-193`
+
+`shoal-core` is edition 2021, where the temporary `Ref` produced by `.borrow()` lives to the end
+of the `if let` statement. So the shared borrow on `to_archive` is held across all three awaits,
+during which other tasks on the same executor run.
+
+It does not panic today, because the only `borrow_mut` callers — `set_partition` and
+`remove_partition` (`.../fs/map.rs:436-452`) — are the compactor itself, which is not running
+while it is parked here. It is listed because that is a property of who happens to call what, not
+of anything enforced, and because the fix is already sitting next to it:
+`ArchiveMap::find_partition` (`.../fs/map.rs:478-484`) exists to copy the entry out, `ArchiveEntry`
+is `Copy`, and the loader path already uses it (`.../fs.rs:505`, `:533`).
+
+Worth reading against the edition too: this becomes correct for free under edition 2024's
+temporary scoping, which means an edition bump would silently change the failure mode rather than
+the code.
+
+### 37. `Ring::add` is not idempotent
+
+`shoal-core/src/server/ring.rs:26-44` appends to `self.shards` and lays down 1000 vnodes every
+time it is called, with no check for a shard name it already knows:
+
+```rust
+self.shards.push(shard);
+let shard_id = self.shards.len();
+```
+
+A `Join` broadcast that arrives twice for the same shard counts that shard twice in `shards` and
+rewrites its 1000 vnodes to point at the new index, leaving the old index in `shards` with nothing
+on the ring pointing at it. The ring's shape therefore depends on `Join` being delivered exactly
+once, which nothing guarantees — `join_cluster` (`shard.rs:397-403`) is only called from `init`
+today, so the invariant holds by call site alone.
+
+Compounds with [item 12](#12-vnodes-provide-no-load-smoothing): both are reasons the ring's
+distribution is not what the vnode count suggests.
 
 ---
 
@@ -429,21 +600,24 @@ failure. Any change touching loader construction should be read against this.
 
 ## Suggested triage order
 
-1. **Item 6** — one-line fix that restores memory accounting. This is now the cheapest real
-   defect left, and eviction is exercised by tests for the first time
-   ([Resolved #5](resolved/resurrected-deletes.md)), so a fix would be checked rather than
-   assumed.
-2. **Items 7 and 8** — features that appear to work and do not; either implement or reject at
-   the API boundary.
+1. **Item 31** — the only item here that loses committed data. It needs a crash to reach, which is
+   the case recovery exists for, and the fix is small.
+2. **Item 38** — not a production defect, but the test suite is what every other fix on this page
+   is judged by, and right now two of its binaries can silently serve each other's traffic. Worth
+   doing before the fixes below rather than after them.
 3. **Items 11 and 16** — hot-path panics, and the empty-ring window a client can hit during
    startup.
 4. **Item 14** — empty rotated logs accumulating on disk and being replayed every startup.
-5. **Items 26 and 27** — SHQL returning results for a query the user did not write, and data
-   that SHQL cannot reach at all. Both are cheap fixes and both are now under test, so a
-   regression would be caught.
+5. **Items 27 and 42** — data that SHQL cannot reach at all: a partition key containing a quote,
+   and a composite sort key. Item 42 is the sharper of the two now that
+   [item 8](resolved/sort-keys.md) is fixed, since a sort key is a thing you can query with.
 6. **Item 9's remaining half and item 13** — two sides of the same absence: nothing counts what
    recovery discards, and nothing can observe memory accounting except a log line that panics
-   when it is wrong.
+   when it is wrong. Item 13 is the sharper of the two now that
+   [item 6](resolved/memory-accounting.md) is fixed: the accounting it reports on is closer to
+   right, so the log line that panics on it is the remaining hazard.
+7. **Items 32 and 33** — two leaks with one shape: state keyed by something that goes away and is
+   never told. They are cheap together, since a `ClientGone` broadcast is what both want.
 
 Everything that has been fixed, and why it was fixed the way it was, is in
 [Resolved Issues](resolved-issues.md). The SHQL parser has gained test coverage at both stages

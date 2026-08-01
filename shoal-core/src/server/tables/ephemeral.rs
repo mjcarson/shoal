@@ -105,6 +105,13 @@ impl<T: ShoalSortedTable> EphemeralTable<T> {
         let mut data = Vec::new();
         // build the sort key
         for key in &get.partition_keys {
+            // stop once we hold every row this get asked for
+            //
+            // an ephemeral table never blocks on a disk load, so unlike the persistent
+            // table there is no blocked list to keep walking our keys for
+            if get.limit_reached(&data) {
+                break;
+            }
             // get the partition for this key
             if let Some(partition) = self.partitions.get(key) {
                 // get rows from this partition
@@ -176,14 +183,8 @@ impl<T: ShoalSortedTable> EphemeralTable<T> {
         for key in &exists.partition_keys {
             // get the partition for this key
             if let Some(partition) = self.partitions.get(key) {
-                // check rows in this partition
-                for row in partition.live_row_values() {
-                    // check if we are supposed to filter our rows
-                    if let Some(filters) = &exists.filters {
-                        if !T::is_filtered(filters, row) {
-                            continue;
-                        }
-                    }
+                // check whether this partition holds any of the rows we were asked about
+                if partition.exists(exists) {
                     // found a matching row - data exists
                     return ResponseAction::Exists(true);
                 }

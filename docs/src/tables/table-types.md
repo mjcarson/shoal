@@ -48,22 +48,27 @@ Three fields do the asynchrony bookkeeping — `pending` (awaiting durability), 
 (awaiting a disk read), `pending_data` (partial results for a multi-partition get) — all
 described in [Query Execution](query-execution.md).
 
-### What "sorted" currently buys you
+### What "sorted" buys you
 
-Less than the name suggests. Rows are stored in sort-key order and iterate in that order, but
-**no query predicate uses the sort key**. `SortedGet` and `SortedExists` both carry a
-`sort_keys: Vec<R::Sort>` field (`shared/queries/sorted.rs:74-83`, `:102-110`) that the server
-never reads: `PersistentSortedTable::get` iterates every live row in the partition and applies
-only the filters (`.../persistent/sorted.rs:436-448`).
-
-So today a sorted table gives you:
+A sorted table gives you:
 
 - multiple rows per partition key,
-- deterministic iteration order,
-- per-row deletes and updates addressed by sort key (`Delete` and `Update` *do* use it),
+- deterministic iteration order — a partition answers in sort-key order,
+- per-row deletes and updates addressed by sort key,
+- **point lookups by sort key.** `SortedGet` and `SortedExists` both carry
+  `sort_keys: Vec<R::Sort>`, and a query naming any of them is answered by seeking each key in the
+  `BTreeMap` rather than walking the partition. The same is true of a partition being read in
+  place from an archive, which is sought through `ArchivedBTreeMap::get`. An empty list still means
+  "every row in this partition".
 
-but not point lookups by sort key, and not range scans. See
-[Known Issues](../appendix/known-issues.md#8-sort-keys-are-accepted-and-ignored).
+The sort keys used to be carried to the table and thrown away, which is
+[item 8](../appendix/resolved/sort-keys.md) — worth reading before changing either scan, since it
+records what a seek is allowed to skip and what it is not.
+
+What a sorted table still does not give you is a **range** predicate: `title >= 'M'`, or a cursor
+to page through a large partition with. That is [TODOs](../appendix/todos.md#sort-key-range-predicates),
+and a composite sort key cannot be named from SHQL at all
+([item 42](../appendix/known-issues.md#42-shql-cannot-express-a-composite-sort-key)).
 
 ## PersistentUnsortedTable
 

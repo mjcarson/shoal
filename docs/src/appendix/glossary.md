@@ -93,12 +93,15 @@ counter, not the core id. Shard names become filenames, which is why shard count
 the on-disk format.
 
 **SHQL** — Shoal Query Language. A small `SELECT`-only parser: `SELECT * FROM t WHERE f = v
-[AND ...] [LIMIT n]`. Equality only, `AND` only, `WHERE` mandatory, `LIMIT` ignored by the
-server. See [SHQL](../api/shql.md).
+[AND ...] [LIMIT n]`. Equality and `IN` only, `WHERE` mandatory, no `ORDER BY`. Rows come back
+partition by partition in the order the query named them, and in sort-key order within each, so
+a `LIMIT` takes the first of those. See [SHQL](../api/shql.md).
 
-**Sort key** — The `#[shoal(sort)]` fields, ordering rows within a sorted partition. Used by
-deletes and updates; **ignored by reads** — there is no point lookup or range scan by sort
-key.
+**Sort key** — The `#[shoal(sort)]` fields, ordering rows within a sorted partition. It addresses
+a row for a delete or an update, decides the order a read returns a partition's rows in, and
+**selects** them: a get or an exists naming sort keys seeks those rows and answers about them
+alone. Naming none asks for the whole partition. There is no range predicate — a partition can be
+pointed into but not paged through.
 
 **Sorted table** — `PersistentSortedTable`. Many rows per partition, ordered by sort key.
 

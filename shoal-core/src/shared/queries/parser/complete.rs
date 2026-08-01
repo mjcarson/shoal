@@ -46,11 +46,26 @@ pub enum Expecting {
     Where,
     /// The name of a field to constrain
     Field,
-    /// The `=` that separates a field from its value
+    /// The `=` or `IN` that separates a field from the values it may take
     Equals,
     /// A literal value for a field
     Value {
         /// The field this value is being written for
+        field: String,
+    },
+    /// The `(` that opens the value list of an `IN`
+    OpenList {
+        /// The field this list is being written for
+        field: String,
+    },
+    /// A literal value inside the value list of an `IN`
+    ValueList {
+        /// The field this list is being written for
+        field: String,
+    },
+    /// Another value in an `IN` list, or the `)` that closes it
+    ListContinuation {
+        /// The field this list is being written for
         field: String,
     },
     /// The count for a `LIMIT` clause
@@ -90,6 +105,12 @@ enum Token {
     Star,
     /// An `=` sign
     Equals,
+    /// The `(` opening an `IN` list
+    OpenParen,
+    /// The `)` closing an `IN` list
+    CloseParen,
+    /// A `,` separating the values of an `IN` list
+    Comma,
     /// A `;` terminator
     Semicolon,
     /// A quoted string literal
@@ -162,6 +183,11 @@ fn tokenize(head: &str) -> Vec<Token> {
             '*' => tokens.push(Token::Star),
             // the equals sign separating a field from its value
             '=' => tokens.push(Token::Equals),
+            // the parens wrapping the values of an IN list
+            '(' => tokens.push(Token::OpenParen),
+            ')' => tokens.push(Token::CloseParen),
+            // the separator between the values of an IN list
+            ',' => tokens.push(Token::Comma),
             // the optional query terminator
             ';' => tokens.push(Token::Semicolon),
             // a string literal, which runs until the next quote or the end of the text
@@ -272,6 +298,14 @@ pub fn analyze(query: &str, cursor: usize) -> CompletionContext {
             (Expecting::Equals, Token::Equals) => Expecting::Value {
                 field: pending_field.clone(),
             },
+            // the IN keyword, which gives that field a whole list of values instead
+            (Expecting::Equals, Token::Ident(word)) if is_keyword(word, "IN") => {
+                Expecting::OpenList {
+                    field: pending_field.clone(),
+                }
+            }
+            // the paren opening that list
+            (Expecting::OpenList { field }, Token::OpenParen) => Expecting::ValueList { field },
             // a literal value, completing this condition
             (Expecting::Value { .. }, Token::String | Token::Number) => Expecting::Continuation,
             // a bare true/false/null literal, which also completes this condition
@@ -280,8 +314,26 @@ pub fn analyze(query: &str, cursor: usize) -> CompletionContext {
             {
                 Expecting::Continuation
             }
+            // a literal value inside a list, which can be followed by another
+            (Expecting::ValueList { field }, Token::String | Token::Number) => {
+                Expecting::ListContinuation { field }
+            }
+            // a bare true/false/null literal inside a list
+            (Expecting::ValueList { field }, Token::Ident(word))
+                if is_keyword(word, "true") || is_keyword(word, "false") || is_keyword(word, "null") =>
+            {
+                Expecting::ListContinuation { field }
+            }
+            // a comma joining another value onto this list
+            (Expecting::ListContinuation { field }, Token::Comma) => Expecting::ValueList { field },
+            // the paren closing this list, which completes the condition
+            (Expecting::ListContinuation { .. }, Token::CloseParen) => Expecting::Continuation,
             // another condition joined onto this one
             (Expecting::Continuation, Token::Ident(word)) if is_keyword(word, "AND") => {
+                Expecting::Field
+            }
+            // another value for a field, written as an OR rather than as an IN list
+            (Expecting::Continuation, Token::Ident(word)) if is_keyword(word, "OR") => {
                 Expecting::Field
             }
             // a limit on how many rows to return
@@ -352,8 +404,9 @@ impl Suggestion {
     /// Most suggestions are followed by another token, so they get a trailing space. The ones
     /// that either open a literal or end the query do not.
     pub fn insert_text(&self) -> String {
-        // an opening quote and a terminator are never followed by anything we would add a space for
-        if self.text == "'" || self.text == ";" {
+        // an opening quote or paren and a terminator are never followed by anything we would
+        // add a space for
+        if self.text == "'" || self.text == ";" || self.text == "(" {
             self.text.clone()
         } else {
             format!("{} ", self.text)
@@ -526,9 +579,22 @@ fn candidates<S: QuerySupport>(context: &CompletionContext) -> Vec<Suggestion> {
         Expecting::Star => vec![Suggestion::new("*", SuggestionKind::Keyword, "all columns")],
         Expecting::From => vec![keyword_suggestion("FROM", &context.word)],
         Expecting::Where => vec![keyword_suggestion("WHERE", &context.word)],
-        Expecting::Equals => vec![Suggestion::new("=", SuggestionKind::Keyword, "equals")],
+        Expecting::Equals => vec![
+            Suggestion::new("=", SuggestionKind::Keyword, "equals"),
+            keyword_suggestion("IN", &context.word),
+        ],
+        Expecting::OpenList { .. } => vec![Suggestion::new(
+            "(",
+            SuggestionKind::Keyword,
+            "start of value list",
+        )],
+        Expecting::ListContinuation { .. } => vec![
+            Suggestion::new(",", SuggestionKind::Keyword, "another value"),
+            Suggestion::new(")", SuggestionKind::Keyword, "end of value list"),
+        ],
         Expecting::Continuation => vec![
             keyword_suggestion("AND", &context.word),
+            keyword_suggestion("OR", &context.word),
             keyword_suggestion("LIMIT", &context.word),
             Suggestion::new(";", SuggestionKind::Keyword, "end of query"),
         ],
@@ -568,8 +634,8 @@ fn candidates<S: QuerySupport>(context: &CompletionContext) -> Vec<Suggestion> {
             });
             fields.into_iter().map(|(_, field)| field).collect()
         }
-        // the literals the field being constrained will accept
-        Expecting::Value { field } => context
+        // the literals the field being constrained will accept, on its own or in a list
+        Expecting::Value { field } | Expecting::ValueList { field } => context
             .table
             .as_ref()
             .and_then(|table| S::table_field_validator(table, field))

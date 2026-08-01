@@ -31,69 +31,138 @@ different places.
 
 ## Reads
 
-`PersistentSortedTable::get` (`.../persistent/sorted.rs:387-525`) walks the requested
-partition keys, accumulating rows:
+`PersistentSortedTable::get` (`.../persistent/sorted.rs`) walks the requested partition keys,
+filling a slot per partition:
 
 ```rust
-let (mut data, mut blocked) = match self.pending_data.remove(&(meta.id, meta.index)) {
-    Some((data, blocked)) => (data, blocked),
-    None => (Vec::with_capacity(get.partition_keys.len()), Vec::default()),
+let mut pending = match self.pending_data.remove(&(meta.id, meta.index)) {
+    Some(pending) => pending,
+    None => PendingGet::new(&get.partition_keys, get.limit),
 };
 for partition_key in &get.partition_keys {
-    match self.partitions.get(partition_key) {
-        Some(MaybeLoaded::Loaded { partition, .. }) => { /* maybe load; else scan */ }
-        Some(MaybeLoaded::Accessible(read)) => { /* scan the archive in place */ }
-        None => { /* maybe load from disk */ }
-    }
+    let Some(rank) = pending.rank(*partition_key) else { continue };
+    if pending.filled_before(rank) { pending.fill(rank, Vec::new()); continue }
+    /* maybe read from disk, otherwise scan and fill this slot */
 }
-if !blocked.is_empty() {
-    self.pending_data.insert((meta.id, meta.index), (data, blocked));
+if pending.is_pending() {
+    self.pending_data.insert((meta.id, meta.index), pending);
     None
 } else {
-    /* build ResponseAction::Get and answer */
+    /* flatten the slots in order, truncate, and answer */
 }
 ```
 
 The first line is the key to the whole design: **a get can execute several times.** Each run
-picks up whatever the previous run accumulated, resolves what it can, and re-parks if
-partitions are still missing. It terminates when `blocked` is empty.
+picks up whatever the previous run accumulated, resolves what it can, and re-parks if partitions
+are still missing. It terminates when every slot is filled.
 
 `pending_data` is keyed by `(query id, index)` — the pair that uniquely identifies one query
 within one bundle.
 
-An unsorted get is simpler: one partition key, so there is nothing partial to accumulate
-(`.../persistent/unsorted.rs:374-437`).
+### Slots, not an accumulator
+
+Rows are not appended to one shared vec. `PendingGet` (`.../tables/persistent.rs`) gives each
+partition the get named its own slot, in the order the query named them:
+
+```rust
+struct PendingGet<R> {
+    keys: Vec<u64>,
+    slots: Vec<Option<Vec<R>>>,
+    limit: Option<usize>,
+}
+```
+
+That is what makes the answer's order a function of the query. A partition read back from disk is
+replayed long after the ones already resident, and with a shared accumulator its rows landed
+wherever the read happened to finish. With slots the replay fills the place the query asked for.
+`None` doubles as "not read yet", which is what `is_pending` gates the response on — so the
+blocked list the old code kept alongside the rows is no longer a separate thing to keep in sync.
+
+Partition keys are deduplicated by `group_by_shard` before a get reaches a table
+(`shared/queries.rs`), so a key names at most one slot and `rank` is an unambiguous lookup.
+
+An unsorted get uses the same structure. It used to name one partition and so had nothing partial
+to accumulate; it now names as many as a sorted one
+([26, 39](../appendix/resolved/partition-order.md)).
 
 ### What a get actually filters on
 
 ```rust
-for row in partition.live_row_values() {
-    if let Some(filters) = &get.filters {
-        if !R::is_filtered(filters, row) { continue; }
+partition.get(get, &mut data);
+```
+
+The scan itself lives on the partition, in `MaybeLoaded<SortedPartition<R>>::get`
+(`.../tables/partitions.rs`), which covers both a resident partition and an archive being read
+in place. A get that named sort keys seeks each of them and returns those rows alone; a get that
+named none is asking for the whole partition, and walks every live row, filtered by the generated
+filter predicate and stopped by the limit:
+
+```rust
+for row in self.live_row_values() {
+    if params.limit_reached(found) { break; }
+    if let Some(filter) = &params.filters {
+        if !T::is_filtered(filter, row) { continue; }
     }
-    data.push(row.clone());
+    found.push(row.clone());
 }
 ```
 
-`.../persistent/sorted.rs:436-448`
+`found` here is this partition's own slot, so `limit_reached` caps each partition at `limit` rows
+of its own. A partition can never contribute more than that to the first `limit` rows of the
+whole answer, so nothing correct is lost and the scan still stops early. Checking before the push
+rather than after is what makes `LIMIT 0` read nothing at all.
 
-A full scan of every live row in the partition, filtered by the generated filter predicate.
-Two things are conspicuously absent:
+The limit spanning the whole get is applied when the slots are flattened, and deciding whether a
+partition is worth reading at all is `PendingGet::filled_before`:
 
-- **`get.sort_keys` is never read.** The field exists on `SortedGet`
-  (`shared/queries/sorted.rs:74-83`) and is carried through `to_blocked`, but no code path
-  consults it. There is no point lookup by sort key and no range scan.
-- **`get.limit` is never applied.** `SortedPartition::get` does honour it
-  (`.../tables/partitions.rs:278-284`), but that method is not what runs here — this loop is
-  inlined in the table and has no limit check. So SHQL's `LIMIT` parses, type-checks, travels
-  the wire, and is discarded.
+```rust
+if pending.filled_before(rank) {
+    pending.fill(rank, Vec::new());
+    continue;
+}
+```
 
-See [Known Issues](../appendix/known-issues.md#7-limit-is-ignored-by-persistent-sorted-tables)
-and [#8](../appendix/known-issues.md#8-sort-keys-are-accepted-and-ignored).
+It is true only when every partition named *before* this one has been read and they already hold
+the whole limit. The "before" is the part that matters. The old code compared the limit against
+whatever rows it happened to hold, so a get whose *first* partition was on disk filled up from
+its second and then dropped the first — answering out of the partition that was quicker rather
+than the one it was asked for. An unread partition earlier in the query can still supply rows
+that come first, so nothing may be skipped past it.
+
+**`get.sort_keys` narrows which rows are read, and nothing else.** A named key is sought in the
+`BTreeMap` — or, for a partition being read in place, in the archived one — so a partition of *n*
+rows asked for *k* of them costs `k log n` comparisons rather than *n* visits. What it may not do
+is change which *partitions* are read: a named key missing from the copy in memory says nothing
+about the copy in an archive, so a partition marked `check_disk` is read before it is answered
+about however narrow the get is. The keys arrive sorted and deduplicated, which
+`SortedQuery::split_by_shard` does once as the query enters the server, so seeking them in order
+produces sort order. See [item 8](../appendix/resolved/sort-keys.md) — there is still no *range*
+predicate ([TODOs](../appendix/todos.md#sort-key-range-predicates)).
 
 Rows are `clone()`d into the response. For an `Accessible` partition they are deserialized
 instead, but only after passing the filter
 ([Partitions](partitions.md#maybeloaded)).
+
+### A limit across shards
+
+A get naming partitions on several shards is split across them, and each shard applies the limit
+to its own share as it scans. Their union can still be over the limit, so the shard that split
+the query merges the shares, puts their rows back into the order the query named its partitions
+in, and trims the union before replying — see
+[Request Lifecycle](../architecture/request-lifecycle.md). The limit a client sees is therefore
+global, not per shard.
+
+Keeping each shard's own first `limit` rows is enough to be sure the globally first `limit` are
+among them: a row in the global first `limit` has at most `limit - 1` rows before it anywhere,
+and so at most `limit - 1` on its own shard.
+
+### The order rows come back in
+
+A get answers with its partitions in the order the query named them, and with each partition's
+rows in sort-key order. Nothing is interleaved across partitions — this is a defined order, not
+an `ORDER BY`. Both halves are needed for it to hold: the slots above give the shard-local order,
+and the coordinator's reorder gives the cross-shard one. See
+[26, 39](../appendix/resolved/partition-order.md).
 
 ## Blocking on a disk read
 
@@ -178,10 +247,8 @@ hash_map::Entry::Occupied(mut entry) => {
     if let MaybeLoaded::Loaded { partition, .. } = entry.get_mut() {
         let old_size = partition.size();
         let accessed = SortedPartition::<R>::access(&loaded.data).unwrap();
-        let mut new = SortedPartition::<R>::deserialize(&accessed).unwrap();
-        std::mem::swap(&mut new, partition);
-        partition.rows.extend(new.rows.into_iter());
-        partition.check_disk = false;
+        let new = SortedPartition::<R>::deserialize(&accessed).unwrap();
+        partition.merge_from_disk(new);
         ...
     }
 }
@@ -191,7 +258,7 @@ hash_map::Entry::Vacant(entry) => {
 }
 ```
 
-`.../persistent/sorted.rs:238-288`
+`.../persistent/sorted.rs:250-301`
 
 If nothing is in memory, the raw bytes are installed as `Accessible` — no deserialization. If
 something *is* in memory, the disk copy becomes the base and the in-memory rows (including
@@ -202,17 +269,21 @@ Note the `if let` covers only the `Loaded` case. An `Occupied` entry holding `Ac
 left untouched and the freshly read data is dropped — correct, since both are copies of the
 same archive extent.
 
-The memory-usage adjustment in the shrinking branch is wrong:
+The merge recomputes the partition's size from the rows it ended up holding, and shard memory
+usage is moved by that signed difference:
 
 ```rust
-let new_mem_usage = self.memory_usage.borrow().saturating_sub(diff as usize);
+let diff = partition.size().cast_signed() - old_size.cast_signed();
+adjust_memory_usage(&self.memory_usage, diff);
 ```
 
-`.../persistent/sorted.rs:262-263`
+`.../persistent/sorted.rs:269-273`
 
-`diff` is a negative `isize` here, so `diff as usize` is an enormous number and the saturating
-subtraction floors shard memory usage at 0. See
-[Known Issues](../appendix/known-issues.md#6-negative-isize-cast-collapses-memory-accounting).
+The diff cannot be negative — in-memory rows win every collision in the `extend`, so the merged
+partition is a superset of what was resident. It is applied signed anyway because the sizes
+being subtracted are maintained by delta elsewhere and can drift. Both of those used to be
+wrong, and between them they floored shard memory usage at 0
+([Resolved #6](../appendix/resolved/memory-accounting.md)).
 
 The unsorted variant does not merge at all — it overwrites `Accessible` with `Accessible` and
 leaves `Loaded` alone (`.../persistent/unsorted.rs:229-262`), which is right for a
@@ -312,8 +383,16 @@ synchronisation mechanism. Simple, and dependent on nothing reordering that queu
 
 ## Limitations
 
-- `limit` is ignored; `sort_keys` is ignored.
-- Gets scan every live row in a partition — no index within a partition.
+- A sort key selects rows but cannot bound them. There is no `title >= 'M'`, and so no cursor to
+  page through a large partition with ([TODOs](../appendix/todos.md#sort-key-range-predicates)).
+- A get naming no sort keys scans every live row in a partition — there is no index within a
+  partition on anything but the sort key, so a filter on any other field is a scan. A `limit`
+  bounds how much of that scan runs, but only because it stops early.
+- Rows are grouped by partition rather than merged by sort key, so a get spanning partitions is
+  not globally sorted. Interleaving them would mean reading every named partition even under a
+  small limit.
+- A gather entry for a query split across shards is only released when every shard has reported.
+  A shard that dies mid-query leaks it and the client waits forever, since there are no timeouts.
 - Rows are cloned into responses; no zero-copy read path server-side.
 - No timeout on blocked queries. If a `ServerMsg::Partition` never arrives — a loader error,
   for instance, which hits a `todo!()` (`.../fs/loader.rs:128`) — the query is parked

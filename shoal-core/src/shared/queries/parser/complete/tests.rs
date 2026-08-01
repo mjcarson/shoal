@@ -192,3 +192,79 @@ fn a_cursor_past_the_end_is_clamped() {
     assert_eq!(context.expecting, Expecting::Table);
     assert_eq!(context.word_end, query.len());
 }
+
+#[test]
+fn a_field_can_be_followed_by_an_in_list() {
+    // a field on its own is waiting for either operator
+    let context = at_end("SELECT * FROM Movie WHERE id ");
+    assert_eq!(context.expecting, Expecting::Equals);
+    // the IN keyword is waiting for the paren that opens its list
+    let context = at_end("SELECT * FROM Movie WHERE id IN ");
+    assert_eq!(
+        context.expecting,
+        Expecting::OpenList {
+            field: "id".to_string()
+        }
+    );
+    // and once that paren is typed we are waiting for a value
+    let context = at_end("SELECT * FROM Movie WHERE id IN (");
+    assert_eq!(
+        context.expecting,
+        Expecting::ValueList {
+            field: "id".to_string()
+        }
+    );
+}
+
+#[test]
+fn walks_the_values_of_an_in_list() {
+    // a value in a list can be followed by another or by the closing paren
+    let context = at_end("SELECT * FROM Movie WHERE id IN (550 ");
+    assert_eq!(
+        context.expecting,
+        Expecting::ListContinuation {
+            field: "id".to_string()
+        }
+    );
+    // a comma puts us back to expecting a value
+    let context = at_end("SELECT * FROM Movie WHERE id IN (550, ");
+    assert_eq!(
+        context.expecting,
+        Expecting::ValueList {
+            field: "id".to_string()
+        }
+    );
+    // and closing the list completes the condition
+    let context = at_end("SELECT * FROM Movie WHERE id IN (550, 551) ");
+    assert_eq!(context.expecting, Expecting::Continuation);
+}
+
+#[test]
+fn an_in_list_may_hold_any_literal() {
+    // a string literal closes as it does anywhere else
+    let context = at_end("SELECT * FROM Movie WHERE title IN ('Alien' ");
+    assert_eq!(
+        context.expecting,
+        Expecting::ListContinuation {
+            field: "title".to_string()
+        }
+    );
+    // and so does a bare boolean
+    let context = at_end("SELECT * FROM Movie WHERE watched IN (true ");
+    assert_eq!(
+        context.expecting,
+        Expecting::ListContinuation {
+            field: "watched".to_string()
+        }
+    );
+}
+
+#[test]
+fn an_or_expects_another_field_the_way_an_and_does() {
+    // both connectives put the cursor back to naming a field
+    let context = at_end("SELECT * FROM Movie WHERE id = 550 OR ");
+    assert_eq!(context.expecting, Expecting::Field);
+    // and a lowercase or is the same keyword
+    let context = at_end("SELECT * FROM Movie WHERE id = 550 or ");
+    assert_eq!(context.expecting, Expecting::Field);
+}

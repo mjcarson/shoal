@@ -666,3 +666,881 @@ async fn ack_survives_sigkill() -> Result<(), TestError> {
     pool.exit()?;
     Ok(())
 }
+
+/// Insert several rows into one partition
+///
+/// # Arguments
+///
+/// * `client` - The client to insert our rows with
+/// * `partition_key` - The partition to insert our rows into
+/// * `sort_keys` - The sort keys to build a row for
+async fn insert_rows(
+    client: &shoal_core::client::Shoal<TestDbClient>,
+    partition_key: &str,
+    sort_keys: &[&str],
+) -> Result<(), TestError> {
+    // insert a row for each sort key we were given
+    for sort_key in sort_keys {
+        client
+            .send_one(TestRecord::new(partition_key, sort_key, "woot"))
+            .await?;
+    }
+    Ok(())
+}
+
+/// Test that a get returns no more rows than its limit
+///
+/// This is the headline case of a limit being parsed, sent, and then discarded: the
+/// table inlined its own scan loop with no limit check, so this came back with all
+/// five rows.
+#[tokio::test]
+async fn get_stops_at_its_limit() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = utils::test_dir();
+    // start a shoal server and build a client
+    let (client, pool) = utils::start::<TestDb>(&temp_dir).await?;
+    // write five rows into one partition
+    insert_rows(&client, "partition_key", &["a", "b", "c", "d", "e"]).await?;
+    // get them back with a limit of two
+    let response = client
+        .send_one(TestRecordGet::new(vec!["partition_key".to_string()]).limit(2))
+        .await?;
+    let rows = response.access::<TestRecord>()?.unwrap();
+    // our limit has to be honoured
+    assert_eq!(rows.len(), 2);
+    // Shutdown server
+    pool.exit()?;
+    Ok(())
+}
+
+/// Test that a limit of zero returns nothing at all
+///
+/// A limit of zero is reached before a single row is read, so the get scans nothing
+/// and answers `Get(None)`. `send_one` treats that as a failed query, which is the
+/// same thing it does for a get that found nothing - the two are not distinguishable
+/// until a response can carry a reason.
+#[tokio::test]
+async fn get_with_a_zero_limit_returns_nothing() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = utils::test_dir();
+    // start a shoal server and build a client
+    let (client, pool) = utils::start::<TestDb>(&temp_dir).await?;
+    // write five rows into one partition
+    insert_rows(&client, "partition_key", &["a", "b", "c", "d", "e"]).await?;
+    // get them back with a limit of zero
+    let result = client
+        .send_one(TestRecordGet::new(vec!["partition_key".to_string()]).limit(0))
+        .await;
+    // a get that asked for nothing gets nothing
+    assert!(matches!(
+        result,
+        Err(shoal_core::client::Errors::QueryDidNotSucceed {
+            kind: shoal_core::shared::responses::ResponseActionNames::Get,
+            ..
+        })
+    ));
+    // Shutdown server
+    pool.exit()?;
+    Ok(())
+}
+
+/// Test that a limit is spread across every partition a get names
+///
+/// The rows a get finds accumulate into one response, so its limit spans all of its
+/// partitions rather than resetting at each one. This runs a single shard so that
+/// both partitions are answered by the same shard.
+#[tokio::test]
+async fn get_spreads_its_limit_across_partitions() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = utils::test_dir();
+    // start a single shard server so both partitions land on one shard
+    let (client, pool) =
+        utils::start_with_conf::<TestDb>(utils::build_single_shard_config(&temp_dir)).await?;
+    // write three rows into each of two partitions
+    insert_rows(&client, "partition_a", &["a", "b", "c"]).await?;
+    insert_rows(&client, "partition_b", &["d", "e", "f"]).await?;
+    // get from both partitions with a limit of four
+    let response = client
+        .send_one(
+            TestRecordGet::new(vec!["partition_a".to_string(), "partition_b".to_string()]).limit(4),
+        )
+        .await?;
+    let rows = response.access::<TestRecord>()?.unwrap();
+    // our limit spans both partitions instead of allowing four from each
+    assert_eq!(rows.len(), 4);
+    // Shutdown server
+    pool.exit()?;
+    Ok(())
+}
+
+/// Test that a limit is honoured when the partition has to be read from disk
+///
+/// A get whose partition is not resident parks itself, is replayed once the read
+/// lands, and picks its earlier rows back up out of `pending_data`. This is also the
+/// only path that scans an archive in place rather than a loaded partition.
+#[tokio::test]
+async fn get_stops_at_its_limit_when_loaded_from_disk() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = utils::test_dir();
+    // write five rows and leave them on disk with nothing resident in memory
+    let (client, pool) = utils::start::<TestDb>(&temp_dir).await?;
+    insert_rows(&client, "partition_key", &["a", "b", "c", "d", "e"]).await?;
+    pool.exit()?;
+    // wait for threads to fully clean up and the port to be released
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    // cycle once more so those inserts have been compacted into an archive
+    cycle_server(&temp_dir).await?;
+    // start a fresh server, which has to read this partition back off disk
+    let (client, pool) = utils::start::<TestDb>(&temp_dir).await?;
+    let response = client
+        .send_one(TestRecordGet::new(vec!["partition_key".to_string()]).limit(2))
+        .await?;
+    let rows = response.access::<TestRecord>()?.unwrap();
+    // our limit has to survive the trip through the blocked query path
+    assert_eq!(rows.len(), 2);
+    // Shutdown server
+    pool.exit()?;
+    Ok(())
+}
+
+/// Test that a limit is honoured for a partition that keeps being evicted
+///
+/// This runs the shard under constant memory pressure so the partition is dropped
+/// and read back rather than answered from memory.
+#[tokio::test]
+async fn get_stops_at_its_limit_under_eviction() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = utils::test_dir();
+    // start a shoal server that evicts everything it is allowed to evict
+    let (client, pool) =
+        utils::start_with_conf::<TestDb>(utils::build_pressured_config(&temp_dir)).await?;
+    // write five rows into one partition
+    insert_rows(&client, "partition_key", &["a", "b", "c", "d", "e"]).await?;
+    // give the shard time to evict anything it thinks is durable
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    // get them back with a limit of two
+    let response = client
+        .send_one(TestRecordGet::new(vec!["partition_key".to_string()]).limit(2))
+        .await?;
+    let rows = response.access::<TestRecord>()?.unwrap();
+    // our limit has to be honoured however the partition happens to be held
+    assert_eq!(rows.len(), 2);
+    // Shutdown server
+    pool.exit()?;
+    Ok(())
+}
+
+/// How many partitions the cross shard tests spread their rows over
+///
+/// Enough that a multi shard ring is certain to own some of them on each side, so the
+/// get really is answered in pieces rather than by one shard alone.
+const SPREAD_PARTITIONS: usize = 20;
+
+/// How many rows each of those partitions holds
+const SPREAD_ROWS_PER_PARTITION: usize = 3;
+
+/// Write `SPREAD_ROWS_PER_PARTITION` rows into each of `SPREAD_PARTITIONS` partitions
+///
+/// Returns the partition keys that were written to.
+///
+/// # Arguments
+///
+/// * `client` - The client to insert our rows with
+async fn insert_spread_rows(
+    client: &shoal_core::client::Shoal<TestDbClient>,
+) -> Result<Vec<String>, TestError> {
+    // build a partition key per partition we are spreading over
+    let partition_keys = (0..SPREAD_PARTITIONS)
+        .map(|index| format!("partition_{index}"))
+        .collect::<Vec<_>>();
+    // write our rows into each of those partitions
+    for partition_key in &partition_keys {
+        insert_rows(client, partition_key, &["a", "b", "c"]).await?;
+    }
+    Ok(partition_keys)
+}
+
+/// Read a whole get stream and report how many responses and rows it produced
+///
+/// # Arguments
+///
+/// * `stream` - The result stream to drain
+async fn drain_get(
+    stream: &mut shoal_core::client::ShoalResultStream<TestDbClient>,
+) -> Result<(usize, usize), TestError> {
+    // count the responses and the rows they carried
+    let mut responses = 0;
+    let mut rows = 0;
+    // drain every response this get produced
+    while let Some(response) = stream.next().await? {
+        // count this response and the rows it carried
+        responses += 1;
+        if let Some(found) = response.access::<TestRecord>()? {
+            rows += found.len();
+        }
+    }
+    Ok((responses, rows))
+}
+
+/// Test that a get spanning several shards returns every row exactly once
+///
+/// A get naming partitions on several shards is split and answered in pieces. The
+/// client tracks one response per query index, so without the shard that split it
+/// merging those pieces the extra responses are dropped and the client is handed only
+/// whichever shard answered first.
+#[tokio::test]
+async fn get_across_shards_returns_every_row() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = utils::test_dir();
+    // start a shoal server and build a client, which runs more than one shard
+    let (client, pool) = utils::start::<TestDb>(&temp_dir).await?;
+    // spread our rows over enough partitions to land on every shard
+    let partition_keys = insert_spread_rows(&client).await?;
+    // get from every partition at once with no limit
+    let mut stream = client
+        .send(client.query().add(TestRecordGet::new(partition_keys)))
+        .await?;
+    let (responses, rows) = drain_get(&mut stream).await?;
+    // the client is owed exactly one response per query
+    assert_eq!(responses, 1, "A split query was answered more than once");
+    // and that response has to carry what every shard found, not just one of them
+    assert_eq!(rows, SPREAD_PARTITIONS * SPREAD_ROWS_PER_PARTITION);
+    // Shutdown server
+    pool.exit()?;
+    Ok(())
+}
+
+/// Test that a limit is applied across shards rather than on each of them
+///
+/// Each shard applies the limit to its own share as it scans, so their union can
+/// still be over it. The shard that split the query trims that union back down, which
+/// is the only place a limit spanning shards can be enforced. The limit here is
+/// deliberately larger than any one shard's share, so a per shard limit cannot reach
+/// it.
+#[tokio::test]
+async fn get_applies_its_limit_across_shards() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = utils::test_dir();
+    // start a shoal server and build a client, which runs more than one shard
+    let (client, pool) = utils::start::<TestDb>(&temp_dir).await?;
+    // spread our rows over enough partitions to land on every shard
+    let partition_keys = insert_spread_rows(&client).await?;
+    // ask for most of our rows, which is more than any single shard holds
+    let limit = SPREAD_PARTITIONS * SPREAD_ROWS_PER_PARTITION - 10;
+    // get from every partition at once with that limit
+    let mut stream = client
+        .send(
+            client
+                .query()
+                .add(TestRecordGet::new(partition_keys).limit(limit)),
+        )
+        .await?;
+    let (responses, rows) = drain_get(&mut stream).await?;
+    // the client is owed exactly one response per query
+    assert_eq!(responses, 1, "A split query was answered more than once");
+    // and our limit spans every shard rather than resetting on each of them
+    assert_eq!(rows, limit);
+    // Shutdown server
+    pool.exit()?;
+    Ok(())
+}
+
+/// Read a whole get stream and report its rows in the order they came back
+///
+/// # Arguments
+///
+/// * `stream` - The result stream to drain
+async fn drain_row_keys(
+    stream: &mut shoal_core::client::ShoalResultStream<TestDbClient>,
+) -> Result<Vec<(String, String)>, TestError> {
+    // collect the keys of every row this get answered with
+    let mut rows = Vec::new();
+    // drain every response this get produced
+    while let Some(response) = stream.next().await? {
+        // pull the keys out of each row this response carried
+        if let Some(found) = response.access::<TestRecord>()? {
+            for row in found.iter() {
+                rows.push((row.partition_key.to_string(), row.sort_key.to_string()));
+            }
+        }
+    }
+    Ok(rows)
+}
+
+/// Build the rows a get over these partitions should answer with, in order
+///
+/// Partitions come back in the order the query named them and their rows in sort key order,
+/// so the answer is one flattened out of the other.
+///
+/// # Arguments
+///
+/// * `partition_keys` - The partitions the query named, in the order it named them
+/// * `sort_keys` - The sort keys each of those partitions holds, in sort order
+fn expected_row_keys(partition_keys: &[String], sort_keys: &[&str]) -> Vec<(String, String)> {
+    partition_keys
+        .iter()
+        .flat_map(|partition_key| {
+            sort_keys
+                .iter()
+                .map(move |sort_key| (partition_key.clone(), (*sort_key).to_string()))
+        })
+        .collect()
+}
+
+/// Run a get over these partitions and report the rows it answered with, in order
+///
+/// # Arguments
+///
+/// * `client` - The client to send our get with
+/// * `partition_keys` - The partitions to read, in the order to read them
+async fn get_row_keys(
+    client: &shoal_core::client::Shoal<TestDbClient>,
+    partition_keys: Vec<String>,
+) -> Result<Vec<(String, String)>, TestError> {
+    // get from every one of these partitions at once
+    let mut stream = client
+        .send(client.query().add(TestRecordGet::new(partition_keys)))
+        .await?;
+    drain_row_keys(&mut stream).await
+}
+
+/// Test that a get spanning several shards returns its partitions in the order it named them
+///
+/// The shares of a split query used to be merged in whichever order the shards answered in, so
+/// the same get could come back with its partitions in a different order each time it ran.
+#[tokio::test]
+async fn get_returns_partitions_in_query_order() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = utils::test_dir();
+    // start a shoal server and build a client, which runs more than one shard
+    let (client, pool) = utils::start::<TestDb>(&temp_dir).await?;
+    // spread our rows over enough partitions to land on every shard
+    let partition_keys = insert_spread_rows(&client).await?;
+    // read them all back in the order we wrote them
+    let rows = get_row_keys(&client, partition_keys.clone()).await?;
+    // every partition should appear in the order the query named it, rows in sort order
+    assert_eq!(rows, expected_row_keys(&partition_keys, &["a", "b", "c"]));
+    // naming the partitions the other way round turns the answer round with it
+    let reversed = partition_keys.iter().rev().cloned().collect::<Vec<_>>();
+    let rows = get_row_keys(&client, reversed.clone()).await?;
+    assert_eq!(rows, expected_row_keys(&reversed, &["a", "b", "c"]));
+    // Shutdown server
+    pool.exit()?;
+    Ok(())
+}
+
+/// Test that the same get answers with the same rows in the same order every time
+///
+/// This is the property that makes paging over several partitions possible without pulling the
+/// whole result back and sorting it on the client. It only holds once the shard collecting the
+/// shares of a split query orders them by something other than which shard replied first, so a
+/// single run proves nothing and this runs the same query many times over.
+#[tokio::test]
+async fn get_partition_order_is_stable_across_repeats() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = utils::test_dir();
+    // start a shoal server and build a client, which runs more than one shard
+    let (client, pool) = utils::start::<TestDb>(&temp_dir).await?;
+    // spread our rows over enough partitions to land on every shard
+    let partition_keys = insert_spread_rows(&client).await?;
+    // take the answer to the first run as the one every other run has to match
+    let first = get_row_keys(&client, partition_keys.clone()).await?;
+    // run the same query again and again, since the old order depended on a race
+    for run in 1..20 {
+        let rows = get_row_keys(&client, partition_keys.clone()).await?;
+        assert_eq!(rows, first, "run {run} answered in a different order");
+    }
+    // Shutdown server
+    pool.exit()?;
+    Ok(())
+}
+
+/// Test that a limit takes the rows of the partitions a get named first
+///
+/// A limit is only meaningful once the order is, so this pins which rows are kept and not just
+/// how many of them there are.
+#[tokio::test]
+async fn get_limit_takes_the_first_partitions() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = utils::test_dir();
+    // start a shoal server and build a client, which runs more than one shard
+    let (client, pool) = utils::start::<TestDb>(&temp_dir).await?;
+    // spread our rows over enough partitions to land on every shard
+    let partition_keys = insert_spread_rows(&client).await?;
+    // ask for fewer rows than the first partition holds
+    let mut stream = client
+        .send(
+            client
+                .query()
+                .add(TestRecordGet::new(partition_keys.clone()).limit(2)),
+        )
+        .await?;
+    let rows = drain_row_keys(&mut stream).await?;
+    // those rows have to come from the partition we named first
+    assert_eq!(
+        rows,
+        expected_row_keys(&partition_keys[..1], &["a", "b"]),
+        "a limit kept rows from a partition named later"
+    );
+    // ask for enough rows to spill into the partition we named second
+    let mut stream = client
+        .send(
+            client
+                .query()
+                .add(TestRecordGet::new(partition_keys.clone()).limit(4)),
+        )
+        .await?;
+    let rows = drain_row_keys(&mut stream).await?;
+    // the spill has to land on the second partition and pick up its first row
+    let mut expected = expected_row_keys(&partition_keys[..1], &["a", "b", "c"]);
+    expected.push((partition_keys[1].clone(), "a".to_string()));
+    assert_eq!(rows, expected);
+    // Shutdown server
+    pool.exit()?;
+    Ok(())
+}
+
+/// Write several rows and leave them on disk with nothing resident in memory
+///
+/// This runs a single shard throughout, since a partition is stored under the shard that owns
+/// it and changing the shard count between runs would move where it lives.
+///
+/// # Arguments
+///
+/// * `temp_dir` - The temp dir this servers data lives in
+/// * `rows` - The rows to write
+async fn insert_rows_then_evict_to_disk(
+    temp_dir: &TempDir,
+    rows: &[TestRecord],
+) -> Result<(), TestError> {
+    // start a single shard server and write our rows to it
+    let (client, pool) =
+        utils::start_with_conf::<TestDb>(utils::build_single_shard_config(temp_dir)).await?;
+    for row in rows {
+        client.send_one(row.clone()).await?;
+    }
+    pool.exit()?;
+    // wait for threads to fully clean up and the port to be released
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    // cycle once more so these inserts have been compacted into an archive
+    let (_client, pool) =
+        utils::start_with_conf::<TestDb>(utils::build_single_shard_config(temp_dir)).await?;
+    pool.exit()?;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    Ok(())
+}
+
+/// Test that a partition read back from disk still answers in the place the query named it
+///
+/// A partition that has to be read from disk is replayed long after the ones already resident,
+/// so its rows used to be appended after theirs however the query was written.
+#[tokio::test]
+async fn get_partition_order_survives_disk_loads() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = utils::test_dir();
+    // leave one partition on disk with nothing resident in memory
+    let on_disk: Vec<TestRecord> = ["a", "b", "c"]
+        .iter()
+        .map(|sort_key| TestRecord::new("partition_on_disk", sort_key, "woot"))
+        .collect();
+    insert_rows_then_evict_to_disk(&temp_dir, &on_disk).await?;
+    // start a fresh server over that same storage
+    let (client, pool) =
+        utils::start_with_conf::<TestDb>(utils::build_single_shard_config(&temp_dir)).await?;
+    // write a second partition, which is resident and can answer without any read
+    insert_rows(&client, "partition_resident", &["a", "b", "c"]).await?;
+    // name the partition that has to be read from disk first
+    let names = vec![
+        "partition_on_disk".to_string(),
+        "partition_resident".to_string(),
+    ];
+    let rows = get_row_keys(&client, names.clone()).await?;
+    // its rows have to come first even though it answered last
+    assert_eq!(rows, expected_row_keys(&names, &["a", "b", "c"]));
+    // and naming it second puts its rows second
+    let reversed = names.iter().rev().cloned().collect::<Vec<_>>();
+    let rows = get_row_keys(&client, reversed.clone()).await?;
+    assert_eq!(rows, expected_row_keys(&reversed, &["a", "b", "c"]));
+    // Shutdown server
+    pool.exit()?;
+    Ok(())
+}
+
+/// Test that a limit keeps the rows of a partition still being read from disk
+///
+/// A get used to stop as soon as the rows it had already found filled its limit, and then drop
+/// the partitions it was still waiting on. With the partition it named first on disk and the
+/// one it named second in memory, that answered entirely out of the second one.
+#[tokio::test]
+async fn get_limit_prefers_a_blocked_partition() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = utils::test_dir();
+    // leave one partition on disk with nothing resident in memory
+    let on_disk: Vec<TestRecord> = ["a", "b", "c"]
+        .iter()
+        .map(|sort_key| TestRecord::new("partition_on_disk", sort_key, "woot"))
+        .collect();
+    insert_rows_then_evict_to_disk(&temp_dir, &on_disk).await?;
+    // start a fresh server over that same storage
+    let (client, pool) =
+        utils::start_with_conf::<TestDb>(utils::build_single_shard_config(&temp_dir)).await?;
+    // write a second partition, which is resident and can answer without any read
+    insert_rows(&client, "partition_resident", &["a", "b", "c"]).await?;
+    // ask for fewer rows than the partition on disk holds, naming it first
+    let mut stream = client
+        .send(
+            client.query().add(
+                TestRecordGet::new(vec![
+                    "partition_on_disk".to_string(),
+                    "partition_resident".to_string(),
+                ])
+                .limit(2),
+            ),
+        )
+        .await?;
+    let rows = drain_row_keys(&mut stream).await?;
+    // every row has to come from the partition we named first, not the one that was quicker
+    assert_eq!(
+        rows,
+        vec![
+            ("partition_on_disk".to_string(), "a".to_string()),
+            ("partition_on_disk".to_string(), "b".to_string()),
+        ]
+    );
+    // Shutdown server
+    pool.exit()?;
+    Ok(())
+}
+
+/// Test the reported query end to end, from a SHQL string to ordered rows
+///
+/// This is the case the whole change came from, with `TestRecord` standing in for
+/// `MovieByKeyword`: a partition per keyword, sorted by title. `keyword = 'a' AND keyword = 'b'`
+/// used to read as an intersection, answer as a union, and return the union in whichever order
+/// the shards replied in.
+#[tokio::test]
+async fn shql_in_reads_every_partition_in_order() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = utils::test_dir();
+    // start a shoal server and build a client, which runs more than one shard
+    let (client, pool) = utils::start::<TestDb>(&temp_dir).await?;
+    // write a few titles under each of two keywords
+    insert_rows(&client, "alien", &["Alien", "Aliens", "Prometheus"]).await?;
+    insert_rows(&client, "giant worm", &["Dune", "Tremors"]).await?;
+    // read both keywords with the spelling that says what it means
+    let query = client
+        .query()
+        .parse("SELECT * FROM TestRecord WHERE partition_key IN ('giant worm', 'alien') LIMIT 3")
+        .expect("failed to parse an IN query");
+    let mut stream = client.send(query).await?;
+    let rows = drain_row_keys(&mut stream).await?;
+    // the limit takes the first three rows of the keyword named first, in title order
+    assert_eq!(
+        rows,
+        vec![
+            ("giant worm".to_string(), "Dune".to_string()),
+            ("giant worm".to_string(), "Tremors".to_string()),
+            ("alien".to_string(), "Alien".to_string()),
+        ]
+    );
+    // naming the keywords the other way round answers out of the other one
+    let query = client
+        .query()
+        .parse("SELECT * FROM TestRecord WHERE partition_key IN ('alien', 'giant worm') LIMIT 3")
+        .expect("failed to parse an IN query");
+    let mut stream = client.send(query).await?;
+    let rows = drain_row_keys(&mut stream).await?;
+    assert_eq!(
+        rows,
+        vec![
+            ("alien".to_string(), "Alien".to_string()),
+            ("alien".to_string(), "Aliens".to_string()),
+            ("alien".to_string(), "Prometheus".to_string()),
+        ]
+    );
+    // Shutdown server
+    pool.exit()?;
+    Ok(())
+}
+
+/// Test that the spelling that used to lie is now refused
+///
+/// `keyword = 'a' AND keyword = 'b'` reads as "rows carrying both" and was answered as "rows
+/// carrying either". It is a parse error now, and the error says how to ask for either.
+#[tokio::test]
+async fn shql_rejects_a_partition_key_constrained_twice() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = utils::test_dir();
+    // start a shoal server and build a client
+    let (client, pool) = utils::start::<TestDb>(&temp_dir).await?;
+    // the query from the original report never reaches the server
+    //
+    // `Queries` has no Debug impl, so the error is pulled out by hand rather than with
+    // `expect_err`
+    let result = client.query().parse(
+        "SELECT * FROM TestRecord WHERE partition_key = 'giant worm' \
+         AND partition_key = 'alien' LIMIT 2",
+    );
+    let Err(error) = result else {
+        panic!("expected the AND spelling to be refused");
+    };
+    assert!(
+        error.message.contains("'partition_key' is constrained twice by AND"),
+        "unexpected message: {}",
+        error.message
+    );
+    // and it names the IN list that was meant, quoting the literals as they were written
+    assert!(
+        error
+            .message
+            .contains("partition_key IN ('giant worm', 'alien')"),
+        "unexpected message: {}",
+        error.message
+    );
+    // Shutdown server
+    pool.exit()?;
+    Ok(())
+}
+
+/// Run a get naming some sort keys and report the rows it answered with, in order
+///
+/// # Arguments
+///
+/// * `client` - The client to send our get with
+/// * `partition_keys` - The partitions to read, in the order to read them
+/// * `sort_keys` - The sort keys to select within each of those partitions
+async fn get_row_keys_by_sort_key(
+    client: &shoal_core::client::Shoal<TestDbClient>,
+    partition_keys: Vec<String>,
+    sort_keys: &[&str],
+) -> Result<Vec<(String, String)>, TestError> {
+    // build a get naming both the partitions and the rows we want out of them
+    let get = TestRecordGet::new(partition_keys)
+        .sort_keys(sort_keys.iter().map(|key| (*key).to_string()).collect());
+    // read every one of those partitions at once
+    let mut stream = client.send(client.query().add(get)).await?;
+    drain_row_keys(&mut stream).await
+}
+
+/// Test that a get naming a sort key returns that row alone
+///
+/// This is the headline case of a sort key being parsed, sent, and then discarded: the table
+/// scanned every live row in the partition, so this came back with all five rows.
+#[tokio::test]
+async fn get_selects_a_named_sort_key() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = utils::test_dir();
+    // start a shoal server and build a client
+    let (client, pool) = utils::start::<TestDb>(&temp_dir).await?;
+    // write five rows into one partition
+    insert_rows(&client, "partition_key", &["a", "b", "c", "d", "e"]).await?;
+    // ask for one of them by sort key
+    let names = vec!["partition_key".to_string()];
+    let rows = get_row_keys_by_sort_key(&client, names.clone(), &["c"]).await?;
+    // only the row we named comes back
+    assert_eq!(rows, expected_row_keys(&names, &["c"]));
+    // Shutdown server
+    pool.exit()?;
+    Ok(())
+}
+
+/// Test that a get naming several sort keys returns each of their rows in sort order
+///
+/// The keys are named in reverse, since a sort key list is a set and not an order - the rows
+/// still come back in the order the partition holds them.
+#[tokio::test]
+async fn get_selects_several_sort_keys_in_sort_order() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = utils::test_dir();
+    // start a shoal server and build a client
+    let (client, pool) = utils::start::<TestDb>(&temp_dir).await?;
+    // write five rows into one partition
+    insert_rows(&client, "partition_key", &["a", "b", "c", "d", "e"]).await?;
+    // ask for three of them, naming them in the opposite order to the one they sort in
+    let names = vec!["partition_key".to_string()];
+    let rows = get_row_keys_by_sort_key(&client, names.clone(), &["d", "a", "b"]).await?;
+    // every named row comes back, in sort order rather than the order they were asked for
+    assert_eq!(rows, expected_row_keys(&names, &["a", "b", "d"]));
+    // Shutdown server
+    pool.exit()?;
+    Ok(())
+}
+
+/// Test that a get naming a sort key no row carries finds nothing
+#[tokio::test]
+async fn get_by_sort_key_misses_return_nothing() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = utils::test_dir();
+    // start a shoal server and build a client
+    let (client, pool) = utils::start::<TestDb>(&temp_dir).await?;
+    // write three rows into one partition
+    insert_rows(&client, "partition_key", &["a", "b", "c"]).await?;
+    // ask for a row this partition does not hold
+    let names = vec!["partition_key".to_string()];
+    let rows = get_row_keys_by_sort_key(&client, names, &["z"]).await?;
+    // a miss is a miss, not the whole partition
+    assert!(rows.is_empty(), "a missing sort key answered with {rows:?}");
+    // Shutdown server
+    pool.exit()?;
+    Ok(())
+}
+
+/// Test that a sort key selects rows out of a partition that has to be read from disk
+///
+/// The archived copy of a partition is scanned in place rather than deserialized, so it is a
+/// second selection path with its own lookup and its own filter.
+#[tokio::test]
+async fn get_by_sort_key_reads_from_disk() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = utils::test_dir();
+    // leave a partition on disk with nothing resident in memory
+    let on_disk: Vec<TestRecord> = ["a", "b", "c", "d"]
+        .iter()
+        .map(|sort_key| TestRecord::new("partition_on_disk", sort_key, "woot"))
+        .collect();
+    insert_rows_then_evict_to_disk(&temp_dir, &on_disk).await?;
+    // start a fresh server over that same storage
+    let (client, pool) =
+        utils::start_with_conf::<TestDb>(utils::build_single_shard_config(&temp_dir)).await?;
+    // ask for one of the rows that only exists in an archive
+    let names = vec!["partition_on_disk".to_string()];
+    let rows = get_row_keys_by_sort_key(&client, names.clone(), &["c"]).await?;
+    // only the row we named comes back
+    assert_eq!(rows, expected_row_keys(&names, &["c"]));
+    // and a row that partition never held is still a miss
+    let rows = get_row_keys_by_sort_key(&client, names, &["z"]).await?;
+    assert!(rows.is_empty(), "a missing sort key answered with {rows:?}");
+    // Shutdown server
+    pool.exit()?;
+    Ok(())
+}
+
+/// Test that a sort key selection spans the rows in memory and the rows in an archive
+///
+/// A named key found in memory says nothing about the other named keys, which may only exist
+/// on disk, so a get may never resolve early on the strength of its sort keys. This is the
+/// test that pins that: one of the two rows asked for is resident and the other is not.
+#[tokio::test]
+async fn get_by_sort_key_spans_memory_and_disk() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = utils::test_dir();
+    // leave two rows of one partition on disk with nothing resident in memory
+    let on_disk: Vec<TestRecord> = ["a", "c"]
+        .iter()
+        .map(|sort_key| TestRecord::new("partition_key", sort_key, "woot"))
+        .collect();
+    insert_rows_then_evict_to_disk(&temp_dir, &on_disk).await?;
+    // start a fresh server over that same storage
+    let (client, pool) =
+        utils::start_with_conf::<TestDb>(utils::build_single_shard_config(&temp_dir)).await?;
+    // write a row of that same partition, which is resident and needs no read
+    insert_rows(&client, "partition_key", &["b"]).await?;
+    // ask for the resident row and one that only exists in the archive
+    let names = vec!["partition_key".to_string()];
+    let rows = get_row_keys_by_sort_key(&client, names.clone(), &["b", "c"]).await?;
+    // both come back, in sort order
+    assert_eq!(rows, expected_row_keys(&names, &["b", "c"]));
+    // Shutdown server
+    pool.exit()?;
+    Ok(())
+}
+
+/// Test that a limit bounds a sort key selection spanning partitions
+#[tokio::test]
+async fn get_by_sort_key_stops_at_its_limit() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = utils::test_dir();
+    // start a single shard server so both partitions are answered by one shard
+    let (client, pool) =
+        utils::start_with_conf::<TestDb>(utils::build_single_shard_config(&temp_dir)).await?;
+    // write the same three sort keys into each of two partitions
+    insert_rows(&client, "first", &["a", "b", "c"]).await?;
+    insert_rows(&client, "second", &["a", "b", "c"]).await?;
+    // name two rows in each partition but only allow three back
+    let get = TestRecordGet::new(vec!["first".to_string(), "second".to_string()])
+        .sort_keys(vec!["a".to_string(), "b".to_string()])
+        .limit(3);
+    let mut stream = client.send(client.query().add(get)).await?;
+    let rows = drain_row_keys(&mut stream).await?;
+    // the limit takes the first rows of the partition named first
+    assert_eq!(
+        rows,
+        vec![
+            ("first".to_string(), "a".to_string()),
+            ("first".to_string(), "b".to_string()),
+            ("second".to_string(), "a".to_string()),
+        ]
+    );
+    // Shutdown server
+    pool.exit()?;
+    Ok(())
+}
+
+/// Test that an exists naming a sort key answers for that row and not for its partition
+///
+/// This is the sharper half of the defect. The old exists answered true on the first live row
+/// it walked, so a partition holding any row at all answered true for every sort key, and a
+/// caller could not tell "this row is here" from "something is here".
+#[tokio::test]
+async fn exists_by_sort_key_is_false_for_a_missing_row() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = utils::test_dir();
+    // start a shoal server and build a client
+    let (client, pool) = utils::start::<TestDb>(&temp_dir).await?;
+    // write three rows into one partition
+    insert_rows(&client, "partition_key", &["a", "b", "c"]).await?;
+    // a row this partition holds exists
+    let exists = client
+        .exists(
+            TestRecordExists::new(vec!["partition_key".to_string()])
+                .sort_keys(vec!["b".to_string()]),
+        )
+        .await?;
+    assert!(exists, "a row that was written did not exist");
+    // a row it does not hold does not, even though the partition is not empty
+    let exists = client
+        .exists(
+            TestRecordExists::new(vec!["partition_key".to_string()])
+                .sort_keys(vec!["z".to_string()]),
+        )
+        .await?;
+    assert!(!exists, "a row that was never written exists");
+    // Shutdown server
+    pool.exit()?;
+    Ok(())
+}
+
+/// Test that an exists naming a sort key still consults disk before answering false
+#[tokio::test]
+async fn exists_by_sort_key_survives_a_disk_load() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = utils::test_dir();
+    // leave a partition on disk with nothing resident in memory
+    let on_disk: Vec<TestRecord> = ["a", "b", "c"]
+        .iter()
+        .map(|sort_key| TestRecord::new("partition_on_disk", sort_key, "woot"))
+        .collect();
+    insert_rows_then_evict_to_disk(&temp_dir, &on_disk).await?;
+    // start a fresh server over that same storage
+    let (client, pool) =
+        utils::start_with_conf::<TestDb>(utils::build_single_shard_config(&temp_dir)).await?;
+    // a row that only exists in an archive still exists
+    let exists = client
+        .exists(
+            TestRecordExists::new(vec!["partition_on_disk".to_string()])
+                .sort_keys(vec!["b".to_string()]),
+        )
+        .await?;
+    assert!(exists, "a row read back from disk did not exist");
+    // and a row that partition never held does not
+    let exists = client
+        .exists(
+            TestRecordExists::new(vec!["partition_on_disk".to_string()])
+                .sort_keys(vec!["z".to_string()]),
+        )
+        .await?;
+    assert!(!exists, "a row that was never written exists");
+    // Shutdown server
+    pool.exit()?;
+    Ok(())
+}

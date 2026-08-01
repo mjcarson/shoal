@@ -51,7 +51,7 @@ fn add_get(stream: &mut proc_macro2::TokenStream, table_name: &Ident, query_kind
                   // build the general query
                   let general = shoal_core::shared::queries::SortedGet {
                       partition_keys,
-                      sort_keys: specific.sort_keys,
+                      sort_select: specific.sort_select,
                       filters: specific.filters,
                       limit: specific.limit,
                   };
@@ -149,7 +149,7 @@ fn add_exists(stream: &mut proc_macro2::TokenStream, table_name: &Ident, query_k
                 // build the general query
                 let general = shoal_core::shared::queries::SortedExists {
                     partition_keys,
-                    sort_keys: specific.sort_keys,
+                    sort_select: specific.sort_select,
                     filters: specific.filters,
                 };
                 // build our query kind

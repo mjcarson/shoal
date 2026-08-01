@@ -2,11 +2,264 @@
 //! partitions contain multiple rows in a sorted structure.
 
 use rkyv::{Archive, Deserialize, Serialize};
+use std::ops::Bound;
 use uuid::Uuid;
 
 use crate::server::ring::Ring;
 use crate::server::shard::ShardInfo;
+use crate::shared::queries::{group_by_shard, normalize_sort_keys};
 use crate::shared::traits::{RkyvSupport, ShoalSortedTable};
+
+/// Which rows of a partition a sorted get or exists is asking for
+///
+/// A sorted partition is a tree keyed by sort key, so there are exactly three useful
+/// questions to ask it: all of it, some named rows, or a span of it. Each of those is an arm
+/// here, which is what keeps "these keys *and* this range" from being a state the server has
+/// to have an opinion about — a query arriving over the wire is deserialized straight into
+/// its struct and never passes through a constructor that could have rejected it.
+///
+/// [`SortSelect::All`] is the only arm that means every row. `Keys(vec![])` names no rows and
+/// so matches nothing, which is a change from the empty `sort_keys` list this replaced.
+#[derive(Debug, Archive, Serialize, Deserialize, Clone)]
+pub enum SortSelect<S> {
+    /// Every row in the partition
+    All,
+    /// The rows named by these sort keys, in sort order and without repeats
+    Keys(Vec<S>),
+    /// The rows whose sort key falls inside this range
+    Range(SortRange<S>),
+}
+
+impl<S> SortSelect<S> {
+    /// Get the sort keys this selection named, if it named a set of them
+    pub fn keys(&self) -> Option<&[S]> {
+        // only a set of keys has keys to hand back
+        match self {
+            SortSelect::Keys(keys) => Some(keys),
+            SortSelect::All | SortSelect::Range(_) => None,
+        }
+    }
+
+    /// Get the range this selection bounded its rows by, if it bounded them
+    pub fn range(&self) -> Option<&SortRange<S>> {
+        // only a range has bounds to hand back
+        match self {
+            SortSelect::Range(range) => Some(range),
+            SortSelect::All | SortSelect::Keys(_) => None,
+        }
+    }
+}
+
+impl<S: Ord + Clone> SortSelect<S> {
+    /// Put this selection in the form the scans below expect
+    ///
+    /// A set of keys is sorted and deduplicated by [`normalize_sort_keys`], because the scans
+    /// seek in the order they are given and do not check for repeats. The other two arms have
+    /// nothing to normalize: a range is already an ordered pair, and every row is every row.
+    ///
+    /// This is done as a query enters the server rather than as it is built, for the same
+    /// reason `group_by_shard` deduplicates partition keys there — it is the one place every
+    /// query passes through, whoever built it.
+    pub fn normalized(&self) -> Self {
+        // put a set of keys in the order the rows they name come back in
+        match self {
+            SortSelect::Keys(keys) => SortSelect::Keys(normalize_sort_keys(keys)),
+            SortSelect::All => SortSelect::All,
+            SortSelect::Range(range) => SortSelect::Range(range.clone()),
+        }
+    }
+}
+
+impl<S> Default for SortSelect<S> {
+    fn default() -> Self {
+        SortSelect::All
+    }
+}
+
+/// `Debug` for the archived form of a selection
+///
+/// This is written out rather than derived because rkyv's `derive(Debug)` emits an impl with
+/// no bounds on it, and an archived selection is only printable when the archived form of
+/// its sort key is. The generated per table query structs archive with `derive(Debug)`, so
+/// something has to carry that obligation.
+impl<S: Archive> std::fmt::Debug for ArchivedSortSelect<S>
+where
+    <Vec<S> as Archive>::Archived: std::fmt::Debug,
+    <SortRange<S> as Archive>::Archived: std::fmt::Debug,
+{
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // print whichever way this selection chose its rows
+        match self {
+            ArchivedSortSelect::All => formatter.write_str("All"),
+            ArchivedSortSelect::Keys(keys) => formatter.debug_tuple("Keys").field(keys).finish(),
+            ArchivedSortSelect::Range(range) => {
+                formatter.debug_tuple("Range").field(range).finish()
+            }
+        }
+    }
+}
+
+/// A range of sort keys, bounding the rows a get or exists asks for
+///
+/// This is what makes paging over a large partition possible: an exclusive lower bound of the
+/// last row of a page is a cursor onto the next one, so page *n* costs a seek plus its own
+/// rows rather than every row before it.
+#[derive(Debug, Archive, Serialize, Deserialize, Clone)]
+pub struct SortRange<S> {
+    /// The lower bound of this range
+    pub start: Bound<S>,
+    /// The upper bound of this range
+    pub end: Bound<S>,
+}
+
+impl<S> SortRange<S> {
+    /// Create a range from a pair of bounds
+    ///
+    /// # Arguments
+    ///
+    /// * `start` - The lower bound of this range
+    /// * `end` - The upper bound of this range
+    pub fn new(start: Bound<S>, end: Bound<S>) -> Self {
+        SortRange { start, end }
+    }
+
+    /// Create a range covering every row after a key, not including it
+    ///
+    /// This is the cursor: hand it the sort key of the last row of a page and it names the
+    /// next page.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The sort key to start after
+    pub fn after(key: S) -> Self {
+        SortRange::new(Bound::Excluded(key), Bound::Unbounded)
+    }
+
+    /// Create a range covering every row from a key onwards, including it
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The sort key to start at
+    pub fn starting_at(key: S) -> Self {
+        SortRange::new(Bound::Included(key), Bound::Unbounded)
+    }
+
+    /// Create a range covering every row before a key, not including it
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The sort key to stop before
+    pub fn before(key: S) -> Self {
+        SortRange::new(Bound::Unbounded, Bound::Excluded(key))
+    }
+
+    /// Create a range covering every row up to a key, including it
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The sort key to stop at
+    pub fn ending_at(key: S) -> Self {
+        SortRange::new(Bound::Unbounded, Bound::Included(key))
+    }
+
+    /// Set the lower bound of this range
+    ///
+    /// # Arguments
+    ///
+    /// * `start` - The lower bound to set
+    #[must_use]
+    pub fn with_start(mut self, start: Bound<S>) -> Self {
+        self.start = start;
+        self
+    }
+
+    /// Set the upper bound of this range
+    ///
+    /// # Arguments
+    ///
+    /// * `end` - The upper bound to set
+    #[must_use]
+    pub fn with_end(mut self, end: Bound<S>) -> Self {
+        self.end = end;
+        self
+    }
+
+    /// Borrow this ranges bounds in the form a tree seek takes
+    pub fn bounds(&self) -> (Bound<&S>, Bound<&S>) {
+        (self.start.as_ref(), self.end.as_ref())
+    }
+}
+
+impl<S: Ord> SortRange<S> {
+    /// Check whether this range can contain a key at all
+    ///
+    /// **This is not an optimization.** `BTreeMap::range` panics when it is handed a range
+    /// whose start is past its end, or one whose ends are equal and either of them excludes,
+    /// so every scan asks this before it seeks. A range that cannot contain a key also holds
+    /// no rows, so answering with none of them is both safe and right.
+    pub fn is_empty(&self) -> bool {
+        // an unbounded end can never cross the other one
+        let (start, end) = match (&self.start, &self.end) {
+            (Bound::Unbounded, _) | (_, Bound::Unbounded) => return false,
+            (Bound::Included(start) | Bound::Excluded(start), Bound::Included(end) | Bound::Excluded(end)) => (start, end),
+        };
+        // a start past its end names nothing, and a single key needs both ends to include it
+        match start.cmp(end) {
+            std::cmp::Ordering::Greater => true,
+            std::cmp::Ordering::Equal => !matches!(
+                (&self.start, &self.end),
+                (Bound::Included(_), Bound::Included(_))
+            ),
+            std::cmp::Ordering::Less => false,
+        }
+    }
+
+    /// Check whether a sort key falls inside this range
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The sort key to check
+    pub fn contains(&self, key: &S) -> bool {
+        // check this key against our lower bound
+        let above_start = match &self.start {
+            Bound::Unbounded => true,
+            Bound::Included(start) => key >= start,
+            Bound::Excluded(start) => key > start,
+        };
+        // a key below our lower bound is outside this range whatever the upper one is
+        if !above_start {
+            return false;
+        }
+        // check this key against our upper bound
+        match &self.end {
+            Bound::Unbounded => true,
+            Bound::Included(end) => key <= end,
+            Bound::Excluded(end) => key < end,
+        }
+    }
+}
+
+impl<S> Default for SortRange<S> {
+    fn default() -> Self {
+        SortRange::new(Bound::Unbounded, Bound::Unbounded)
+    }
+}
+
+/// `Debug` for the archived form of a range
+///
+/// Written out for the same reason [`ArchivedSortSelect`]'s is.
+impl<S: Archive> std::fmt::Debug for ArchivedSortRange<S>
+where
+    <Bound<S> as Archive>::Archived: std::fmt::Debug,
+{
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ArchivedSortRange")
+            .field("start", &self.start)
+            .field("end", &self.end)
+            .finish()
+    }
+}
 
 /// The different types of queries for a single datatype
 #[derive(Debug, Archive, Serialize, Deserialize, Clone)]
@@ -24,24 +277,68 @@ pub enum SortedQuery<T: ShoalSortedTable + std::fmt::Debug + RkyvSupport> {
 }
 
 impl<T: ShoalSortedTable + std::fmt::Debug> SortedQuery<T> {
-    // sort our queries by shard
-    pub fn find_shard<'a>(&self, ring: &'a Ring, tmp: &mut Vec<&'a ShardInfo>) {
-        // get the correct shard for this query
+    /// Split this query into the per shard queries that answer it
+    ///
+    /// A query naming several partition keys is only answerable by the shards that own
+    /// those keys, so it is narrowed to each shards own keys rather than sent whole to
+    /// every one of them. Shards are deduplicated too, so a shard owning two of the
+    /// keys gets one query naming both instead of the same query twice.
+    ///
+    /// # Arguments
+    ///
+    /// * `ring` - The shard ring to check against
+    /// * `found` - The per shard queries we found for this query
+    pub fn split_by_shard<'a>(&self, ring: &'a Ring, found: &mut Vec<(&'a ShardInfo, Self)>) {
+        // get the correct shards for this query
         match self {
             SortedQuery::Insert { key, .. } | SortedQuery::Delete { key, .. } => {
-                tmp.push(ring.find_shard(*key))
+                // a write names a single partition so it goes to a single shard
+                found.push((ring.find_shard(*key), self.clone()));
             }
             SortedQuery::Get(get) => {
-                for key in &get.partition_keys {
-                    tmp.push(ring.find_shard(*key))
+                // put this gets sort keys in the order the rows they name come back in
+                let sort_select = get.sort_select.normalized();
+                // narrow this get to each shards own partition keys
+                for (shard, keys) in group_by_shard(ring, &get.partition_keys) {
+                    let narrowed = get.for_partitions(keys, sort_select.clone());
+                    found.push((shard, SortedQuery::Get(narrowed)));
                 }
             }
             SortedQuery::Exists(exists) => {
-                for key in &exists.partition_keys {
-                    tmp.push(ring.find_shard(*key))
+                // drop any sort key this exists named more than once
+                let sort_select = exists.sort_select.normalized();
+                // narrow this exists to each shards own partition keys
+                for (shard, keys) in group_by_shard(ring, &exists.partition_keys) {
+                    let narrowed = exists.for_partitions(keys, sort_select.clone());
+                    found.push((shard, SortedQuery::Exists(narrowed)));
                 }
             }
-            SortedQuery::Update(update) => tmp.push(ring.find_shard(update.partition_key)),
+            SortedQuery::Update(update) => {
+                // an update names a single partition so it goes to a single shard
+                found.push((ring.find_shard(update.partition_key), self.clone()));
+            }
+        }
+    }
+
+    /// Get the most rows this query asked for, if it set a limit
+    pub fn limit(&self) -> Option<usize> {
+        // only a get returns rows that a limit could apply to
+        match self {
+            SortedQuery::Get(get) => get.limit,
+            _ => None,
+        }
+    }
+
+    /// Get the partitions this query named, in the order it named them
+    ///
+    /// This is the order the rows come back in, so the shard collecting the shares of a
+    /// split query uses it to put them back together. Only a get returns rows there is an
+    /// order to, so every other query names none.
+    pub fn partition_keys(&self) -> &[u64] {
+        // only a get returns rows whose order this could describe
+        match self {
+            SortedQuery::Get(get) => &get.partition_keys,
+            _ => &[],
         }
     }
 }
@@ -74,8 +371,11 @@ impl<R: ShoalSortedTable> TaggedSortedQuery<R> {
 pub struct SortedGet<R: ShoalSortedTable> {
     /// The partition keys to get data from
     pub partition_keys: Vec<u64>,
-    /// The sort keys to get data from
-    pub sort_keys: Vec<R::Sort>,
+    /// Which rows of each partition this get is asking for
+    ///
+    /// Rows come back in sort order whichever arm this is, rather than in the order a set
+    /// named its keys. [`SortSelect::All`] is the only arm that means every row.
+    pub sort_select: SortSelect<R::Sort>,
     /// Any filters to apply to rows
     pub filters: Option<R::Filters>,
     /// The number of rows to get at most
@@ -83,17 +383,64 @@ pub struct SortedGet<R: ShoalSortedTable> {
 }
 
 impl<R: ShoalSortedTable> SortedGet<R> {
+    /// Create a get for just some of this gets partitions
+    ///
+    /// Everything but the partition keys and the row selection is copied as is, including
+    /// the limit. The limit is deliberately not divided up, because a get counts its limit
+    /// against the rows it has accumulated so far rather than against any one scan, so a
+    /// narrowed get that is handed a partly filled response vec still stops in the
+    /// right place.
+    ///
+    /// The selection is passed in rather than copied because it is normalized once, where
+    /// this query entered the server, instead of once per shard it is split to.
+    ///
+    /// # Arguments
+    ///
+    /// * `partition_keys` - The keys of the partitions this get should cover
+    /// * `sort_select` - The normalized selection of the rows this get should return
+    pub fn for_partitions(
+        &self,
+        partition_keys: Vec<u64>,
+        sort_select: SortSelect<R::Sort>,
+    ) -> Self {
+        SortedGet {
+            partition_keys,
+            sort_select,
+            filters: self.filters.clone(),
+            limit: self.limit,
+        }
+    }
+
     /// Create a single partition get from another get
+    ///
+    /// The selection is carried over as it is, since a get being parked on a disk read has
+    /// already been through `split_by_shard` and had it normalized.
     ///
     /// # Arguments
     ///
     /// * `partition_key` - The key of the partition that needs to be loaded from disk
     pub fn to_blocked(&self, partition_key: u64) -> Self {
-        SortedGet {
-            partition_keys: vec![partition_key],
-            sort_keys: self.sort_keys.clone(),
-            filters: self.filters.clone(),
-            limit: self.limit,
+        self.for_partitions(vec![partition_key], self.sort_select.clone())
+    }
+
+    /// Check if we have already found every row this get asked for
+    ///
+    /// A get accumulates rows across every partition it names, and a get whose
+    /// partitions had to be read from disk accumulates them across several executions,
+    /// so this is asked about the rows found so far and not about the rows any one scan
+    /// produced. A limit of zero is reached before a single row is read, so a `LIMIT 0`
+    /// get scans nothing and loads nothing.
+    ///
+    /// # Arguments
+    ///
+    /// * `found` - The rows this get has found so far
+    pub fn limit_reached(&self, found: &[R]) -> bool {
+        // check whether this get was given a limit at all
+        match self.limit {
+            // we are done once we hold as many rows as we were asked for
+            Some(limit) => found.len() >= limit,
+            // a get with no limit can never fill
+            None => false,
         }
     }
 }
@@ -103,24 +450,44 @@ impl<R: ShoalSortedTable> SortedGet<R> {
 pub struct SortedExists<R: ShoalSortedTable> {
     /// The partition keys to check for data in
     pub partition_keys: Vec<u64>,
-    /// The sort keys to check for data with
-    pub sort_keys: Vec<R::Sort>,
+    /// Which rows of each partition this exists is asking about
+    ///
+    /// An exists naming keys or a range is asking whether any of those rows is here. One
+    /// selecting [`SortSelect::All`] is asking whether its partitions hold any row at all.
+    pub sort_select: SortSelect<R::Sort>,
     /// Any filters to apply to rows
     pub filters: Option<R::Filters>,
 }
 
 impl<R: ShoalSortedTable> SortedExists<R> {
+    /// Create an exists for just some of this exists partitions
+    ///
+    /// # Arguments
+    ///
+    /// * `partition_keys` - The keys of the partitions this exists should cover
+    /// * `sort_select` - The normalized selection of the rows this exists asks about
+    pub fn for_partitions(
+        &self,
+        partition_keys: Vec<u64>,
+        sort_select: SortSelect<R::Sort>,
+    ) -> Self {
+        SortedExists {
+            partition_keys,
+            sort_select,
+            filters: self.filters.clone(),
+        }
+    }
+
     /// Create a single partition exists from another exists
+    ///
+    /// The selection is carried over as it is, since an exists being parked on a disk read
+    /// has already been through `split_by_shard` and had it normalized.
     ///
     /// # Arguments
     ///
     /// * `partition_key` - The key of the partition that needs to be loaded from disk
     pub fn to_blocked(&self, partition_key: u64) -> Self {
-        SortedExists {
-            partition_keys: vec![partition_key],
-            sort_keys: self.sort_keys.clone(),
-            filters: self.filters.clone(),
-        }
+        self.for_partitions(vec![partition_key], self.sort_select.clone())
     }
 }
 

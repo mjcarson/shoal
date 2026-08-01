@@ -1,10 +1,11 @@
 //! A response from a set of queries
 use rkyv::{Archive, Deserialize, Serialize};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::{
     client::{Errors, QuerySuceededOpts},
-    shared::traits::ShoalSortedTable,
+    shared::traits::{PartitionKeySupport, ShoalSortedTable},
 };
 
 /// The different response kind types
@@ -37,6 +38,102 @@ pub enum ResponseAction<T> {
     Exists(bool),
 }
 
+impl<T> ResponseAction<T> {
+    /// Merge another shards share of this queries answer into ours
+    ///
+    /// Only a get and an exists can be split across shards, since every other query
+    /// names a single partition and so has a single owner. A write that somehow got
+    /// here keeps the answer it already had rather than inventing one.
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The other shards share of this queries answer
+    pub fn merge(&mut self, other: Self) {
+        // combine our two shares by the kind of query they answer
+        match (self, other) {
+            // a get is the union of the rows each shard found
+            (ResponseAction::Get(ours), ResponseAction::Get(theirs)) => {
+                // pull out the rows they found, if they found any
+                let Some(theirs) = theirs else {
+                    return;
+                };
+                // add their rows to ours, or take theirs if we found none
+                match ours {
+                    Some(ours) => ours.extend(theirs),
+                    None => *ours = Some(theirs),
+                }
+            }
+            // a row exists if any shard we asked found it
+            (ResponseAction::Exists(ours), ResponseAction::Exists(theirs)) => *ours |= theirs,
+            // every other query names a single partition, so it is never split
+            _ => (),
+        }
+    }
+
+    /// Drop any rows past this queries limit
+    ///
+    /// A limit is applied on each shard as it scans, so every share that arrives here
+    /// is already no longer than the limit. Their union can still be longer, which is
+    /// what this trims.
+    ///
+    /// # Arguments
+    ///
+    /// * `limit` - The most rows this query asked for
+    pub fn truncate(&mut self, limit: usize) {
+        // only a get returns rows that could be over a limit
+        if let ResponseAction::Get(Some(rows)) = self {
+            // drop everything past our limit
+            rows.truncate(limit);
+            // an emptied get answers None, the same as a get that found nothing
+            if rows.is_empty() {
+                *self = ResponseAction::Get(None);
+            }
+        }
+    }
+}
+
+impl<T: PartitionKeySupport> ResponseAction<T> {
+    /// Put our rows back into the order the query named their partitions in
+    ///
+    /// Each shard answers with the rows of its own partitions, in the order the query named
+    /// them, but the shares are merged in whatever order they arrive. Sorting by where each
+    /// rows partition was named undoes that, and leaves a get whose answer depends only on
+    /// the query and not on which shard happened to reply first.
+    ///
+    /// The sort is stable, so rows within one partition keep the order their shard gave them,
+    /// which for a sorted table is their sort key order.
+    ///
+    /// # Arguments
+    ///
+    /// * `order` - The partitions this query named, in the order it named them
+    pub fn order_by_partitions(&mut self, order: &[u64]) {
+        // only a get comes back as rows there is an order to
+        let ResponseAction::Get(Some(rows)) = self else {
+            return;
+        };
+        // a query naming one partition has nothing to interleave
+        if order.len() < 2 {
+            return;
+        }
+        // build the rank of each partition this query named
+        let ranks: HashMap<u64, usize> = order
+            .iter()
+            .enumerate()
+            .map(|(rank, key)| (*key, rank))
+            .collect();
+        // sort our rows by where their partition was named, hashing each row's key once
+        //
+        // a row from a partition this query did not name cannot happen, but sorting it last
+        // keeps this total rather than panicking on a key we cannot place
+        rows.sort_by_cached_key(|row| {
+            ranks
+                .get(&row.get_partition_key())
+                .copied()
+                .unwrap_or(usize::MAX)
+        });
+    }
+}
+
 /// A response from a query
 #[derive(Debug, Archive, Serialize, Deserialize)]
 pub struct Response<T> {
@@ -48,6 +145,37 @@ pub struct Response<T> {
     pub data: ResponseAction<T>,
     /// Whether this is the last response for a query or not
     pub end: bool,
+}
+
+impl<T> Response<T> {
+    /// Merge another shards share of this queries answer into ours
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The other shards share of this queries answer
+    pub fn merge(&mut self, other: Self) {
+        self.data.merge(other.data);
+    }
+
+    /// Drop any rows past this queries limit
+    ///
+    /// # Arguments
+    ///
+    /// * `limit` - The most rows this query asked for
+    pub fn truncate(&mut self, limit: usize) {
+        self.data.truncate(limit);
+    }
+}
+
+impl<T: PartitionKeySupport> Response<T> {
+    /// Put our rows back into the order the query named their partitions in
+    ///
+    /// # Arguments
+    ///
+    /// * `order` - The partitions this query named, in the order it named them
+    pub fn order_by_partitions(&mut self, order: &[u64]) {
+        self.data.order_by_partitions(order);
+    }
 }
 
 /// Check if a response succeeded or not

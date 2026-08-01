@@ -56,12 +56,16 @@ pub(super) fn add(
     let update_name = format_ident!("{}Update", name);
     let update_data_name = format_ident!("{}UpdateData", name);
     // build the is_filtered checks for regular rows
+    //
+    // a filter holds every value its field may take, so a row matches when it holds any one
+    // of them. separate filters still have to all match, which is what makes a query naming
+    // two different fields a conjunction
     let filter_checks: Vec<_> = filter_fields
         .iter()
         .map(|(ident, _)| {
             quote! {
-                if let Some(ref filter_val) = filter.#ident {
-                    if &row.#ident != filter_val {
+                if let Some(ref filter_vals) = filter.#ident {
+                    if !filter_vals.iter().any(|filter_val| &row.#ident == filter_val) {
                         return false;
                     }
                 }
@@ -73,8 +77,8 @@ pub(super) fn add(
         .iter()
         .map(|(ident, _)| {
             quote! {
-                if let Some(ref filter_val) = filter.#ident {
-                    if &row.#ident != filter_val {
+                if let Some(ref filter_vals) = filter.#ident {
+                    if !filter_vals.iter().any(|filter_val| &row.#ident == filter_val) {
                         return false;
                     }
                 }

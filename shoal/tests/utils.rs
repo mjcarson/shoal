@@ -119,6 +119,23 @@ pub fn build_pressured_config(temp_dir: &TempDir) -> Conf {
     conf
 }
 
+/// Create a config that runs every partition on a single shard
+///
+/// A get naming several partition keys is fanned out to the shards that own those
+/// keys, so with more than one shard a multi partition test depends on how the keys
+/// happen to hash. Running a single shard makes that deterministic.
+///
+/// # Arguments
+///
+/// * `temp_dir` - The temp dir to store this servers data in
+pub fn build_single_shard_config(temp_dir: &TempDir) -> Conf {
+    // start from the default test config
+    let mut conf = build_config(temp_dir);
+    // run a single shard so every partition key lands on it
+    conf.resources.cores = Some(1);
+    conf
+}
+
 /// Setup and start a default shoal server/config
 pub async fn start<T: ShoalDatabase>(
     temp_dir: &TempDir,

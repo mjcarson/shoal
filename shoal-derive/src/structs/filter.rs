@@ -48,10 +48,13 @@ pub fn add(
         return;
     }
 
-    // Build the fields for the filter struct (all optional)
+    // Build the fields for the filter struct
+    //
+    // a field holds every value it was given rather than a single one, so that `=` and `IN`
+    // are the same filter with one and several values in it
     let fields = filter_fields.iter().map(|(ident, ty)| {
         quote! {
-            pub #ident: Option<#ty>
+            pub #ident: Option<Vec<#ty>>
         }
     });
 
@@ -61,16 +64,21 @@ pub fn add(
         quote! {
             // look for a where condition naming this filter field
             if let Some(condition) = conditions.iter().find(|cond| cond.field == #field_name_str) {
-                // convert the literal from the query into this field's type
-                let value = shoal_core::serde_json::from_value::<#ty>(condition.value.clone())
-                    .map_err(|error| shoal_core::client::ShqlParseError::new(
-                        format!("Failed to deserialize filter '{}': {}", #field_name_str, error),
-                        condition.value_start,
-                        condition.value_end,
-                        query,
-                    ))?;
+                // a condition may name several values, all of which this field may take
+                let mut values = Vec::with_capacity(condition.values.len());
+                // convert each literal from the query into this field's type
+                for found in &condition.values {
+                    let value = shoal_core::serde_json::from_value::<#ty>(found.value.clone())
+                        .map_err(|error| shoal_core::client::ShqlParseError::new(
+                            format!("Failed to deserialize filter '{}': {}", #field_name_str, error),
+                            found.start,
+                            found.end,
+                            query,
+                        ))?;
+                    values.push(value);
+                }
                 // set this filter and remember that we have at least one
-                filters.#ident = Some(value);
+                filters.#ident = Some(values);
                 any_set = true;
             }
         }

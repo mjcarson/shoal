@@ -137,73 +137,96 @@ pub fn add(stream: &mut proc_macro2::TokenStream, struct_ident: &Ident, fields: 
         let table_name_str = inner_type.to_string();
         // Build the get struct name
         let get_ident = format_ident!("{}Get", inner_type);
+        // Build the type check every parse arm starts with
+        //
+        // a condition may name several values, and each of them has to be one this field can
+        // actually hold, so the check runs per value rather than per condition
+        let check_conditions = quote! {
+            for condition in &parsed.conditions {
+                // Validate field exists
+                let _role = <#inner_type as shoal_core::shared::traits::TableSchemaSupport>::get_field_role(&condition.field)
+                    .ok_or_else(|| shoal_core::client::ShqlParseError::new(
+                        format!(
+                            "Unknown field '{}'. Valid fields are: {:?}",
+                            condition.field,
+                            <#inner_type as shoal_core::shared::traits::TableSchemaSupport>::field_names()
+                        ),
+                        condition.field_start,
+                        condition.field_end,
+                        query,
+                    ))?;
+                // Validate field type
+                let validator = <#inner_type as shoal_core::shared::traits::TableSchemaSupport>::get_field_validator(&condition.field)
+                    .ok_or_else(|| shoal_core::client::ShqlParseError::new(
+                        format!("No validator for field '{}'", condition.field),
+                        condition.field_start,
+                        condition.field_end,
+                        query,
+                    ))?;
+                for found in &condition.values {
+                    validator(&found.value).map_err(|err| {
+                        shoal_core::client::ShqlParseError::new(
+                            format!("Type mismatch for field '{}': {}", condition.field, err),
+                            found.start,
+                            found.end,
+                            query,
+                        )
+                    })?;
+                }
+            }
+        };
+        // Build the partition key extraction every parse arm needs
+        //
+        // a partition key is named by at most one condition, since the parser rejects a field
+        // constrained twice, so every partition this query reads comes from that one condition
+        let partition_keys = quote! {
+            let partition_condition = parsed.conditions.iter()
+                .find(|c| {
+                    <#inner_type as shoal_core::shared::traits::TableSchemaSupport>::get_field_role(&c.field)
+                        == Some(shoal_core::shared::queries::parser::FieldRole::Partition)
+                })
+                .ok_or_else(|| shoal_core::client::ShqlParseError::new(
+                    "Missing partition key in WHERE clause".to_string(),
+                    0,
+                    query.len(),
+                    query,
+                ))?;
+            let mut partition_keys = Vec::with_capacity(partition_condition.values.len());
+            for found in &partition_condition.values {
+                let value = shoal_core::serde_json::from_value(found.value.clone())
+                    .map_err(|e| shoal_core::client::ShqlParseError::new(
+                        format!("Failed to deserialize partition key: {}", e),
+                        found.start,
+                        found.end,
+                        query,
+                    ))?;
+                partition_keys.push(value);
+            }
+        };
 
         match table.kind {
             TableKinds::Unsorted => {
                 quote! {
                     #table_name_str => {
-                        // Type check all conditions against this table's schema
-                        for condition in &parsed.conditions {
-                            // Validate field exists
-                            let _role = <#inner_type as shoal_core::shared::traits::TableSchemaSupport>::get_field_role(&condition.field)
-                                .ok_or_else(|| shoal_core::client::ShqlParseError::new(
-                                    format!(
-                                        "Unknown field '{}'. Valid fields are: {:?}",
-                                        condition.field,
-                                        <#inner_type as shoal_core::shared::traits::TableSchemaSupport>::field_names()
-                                    ),
-                                    condition.value_start,
-                                    condition.value_end,
-                                    query,
-                                ))?;
-                            // Validate field type
-                            let validator = <#inner_type as shoal_core::shared::traits::TableSchemaSupport>::get_field_validator(&condition.field)
-                                .ok_or_else(|| shoal_core::client::ShqlParseError::new(
-                                    format!("No validator for field '{}'", condition.field),
-                                    condition.value_start,
-                                    condition.value_end,
-                                    query,
-                                ))?;
-                            validator(&condition.value).map_err(|err| {
-                                shoal_core::client::ShqlParseError::new(
-                                    format!("Type mismatch for field '{}': {}", condition.field, err),
-                                    condition.value_start,
-                                    condition.value_end,
-                                    query,
-                                )
-                            })?;
-                        }
-                        // Extract partition key from conditions
-                        let partition_key = parsed.conditions.iter()
-                            .find(|c| {
-                                <#inner_type as shoal_core::shared::traits::TableSchemaSupport>::get_field_role(&c.field)
-                                    == Some(shoal_core::shared::queries::parser::FieldRole::Partition)
-                            })
-                            .ok_or_else(|| shoal_core::client::ShqlParseError::new(
-                                "Missing partition key in WHERE clause".to_string(),
-                                0,
-                                query.len(),
-                                query,
-                            ))?;
-                        // Deserialize the partition key value
-                        let partition_value = shoal_core::serde_json::from_value(partition_key.value.clone())
-                            .map_err(|e| shoal_core::client::ShqlParseError::new(
-                                format!("Failed to deserialize partition key: {}", e),
-                                partition_key.value_start,
-                                partition_key.value_end,
-                                query,
-                            ))?;
+                        // Type check every condition against this table's schema
+                        #check_conditions
+                        // Extract the partition keys, which every query has to constrain
+                        #partition_keys
                         // Build the Get query
-                        let mut get_query = #get_ident::new(partition_value);
+                        let mut get_query = #get_ident::new(partition_keys.clone());
                         if let Some(limit) = parsed.limit {
                             get_query.limit = Some(limit);
                         }
                         // Build any filters named by the where conditions
                         get_query.filters = <#inner_type>::shql_build_filters(&parsed.conditions, query)?;
+                        // Hash each partition key into the key of the partition holding it
+                        let partition_key_hashes: Vec<u64> = partition_keys.iter()
+                            .map(|pk| <#inner_type as shoal_core::shared::traits::PartitionKeySupport>::get_partition_key_from_values(pk))
+                            .collect();
                         // Wrap in UnsortedQuery::Get and then in QueryKinds
                         let unsorted_query = shoal_core::shared::queries::UnsortedQuery::Get(
                             shoal_core::shared::queries::UnsortedGet {
-                                partition_key: <#inner_type as shoal_core::shared::traits::PartitionKeySupport>::get_partition_key_from_values(&get_query.partition_key),
+                                partition_keys: partition_key_hashes,
                                 filters: get_query.filters,
                                 limit: get_query.limit,
                             }
@@ -215,91 +238,42 @@ pub fn add(stream: &mut proc_macro2::TokenStream, struct_ident: &Ident, fields: 
             TableKinds::Sorted => {
                 quote! {
                     #table_name_str => {
-                        // Type check all conditions against this table's schema
-                        for condition in &parsed.conditions {
-                            // Validate field exists
-                            let _role = <#inner_type as shoal_core::shared::traits::TableSchemaSupport>::get_field_role(&condition.field)
-                                .ok_or_else(|| shoal_core::client::ShqlParseError::new(
-                                    format!(
-                                        "Unknown field '{}'. Valid fields are: {:?}",
-                                        condition.field,
-                                        <#inner_type as shoal_core::shared::traits::TableSchemaSupport>::field_names()
-                                    ),
-                                    condition.value_start,
-                                    condition.value_end,
-                                    query,
-                                ))?;
-                            // Validate field type
-                            let validator = <#inner_type as shoal_core::shared::traits::TableSchemaSupport>::get_field_validator(&condition.field)
-                                .ok_or_else(|| shoal_core::client::ShqlParseError::new(
-                                    format!("No validator for field '{}'", condition.field),
-                                    condition.value_start,
-                                    condition.value_end,
-                                    query,
-                                ))?;
-                            validator(&condition.value).map_err(|err| {
-                                shoal_core::client::ShqlParseError::new(
-                                    format!("Type mismatch for field '{}': {}", condition.field, err),
-                                    condition.value_start,
-                                    condition.value_end,
-                                    query,
-                                )
-                            })?;
-                        }
-                        // Extract partition keys from conditions
-                        let partition_conditions: Vec<_> = parsed.conditions.iter()
-                            .filter(|c| {
-                                <#inner_type as shoal_core::shared::traits::TableSchemaSupport>::get_field_role(&c.field)
-                                    == Some(shoal_core::shared::queries::parser::FieldRole::Partition)
-                            })
-                            .collect();
-                        if partition_conditions.is_empty() {
-                            return Err(shoal_core::client::ShqlParseError::new(
-                                "Missing partition key in WHERE clause".to_string(),
-                                0,
-                                query.len(),
-                                query,
-                            ));
-                        }
-                        // Build partition keys vec
-                        let mut partition_keys = Vec::with_capacity(partition_conditions.len());
-                        for pc in &partition_conditions {
-                            let value = shoal_core::serde_json::from_value(pc.value.clone())
-                                .map_err(|e| shoal_core::client::ShqlParseError::new(
-                                    format!("Failed to deserialize partition key: {}", e),
-                                    pc.value_start,
-                                    pc.value_end,
-                                    query,
-                                ))?;
-                            partition_keys.push(value);
-                        }
-                        // Extract sort keys from conditions (if any)
-                        let sort_conditions: Vec<_> = parsed.conditions.iter()
-                            .filter(|c| {
+                        // Type check every condition against this table's schema
+                        #check_conditions
+                        // Extract the partition keys, which every query has to constrain
+                        #partition_keys
+                        // Extract the sort keys, which are optional
+                        //
+                        // a sort key is named by at most one condition, so all of its values
+                        // come from that one condition
+                        let mut sort_keys = Vec::default();
+                        if let Some(sort_condition) = parsed.conditions.iter()
+                            .find(|c| {
                                 <#inner_type as shoal_core::shared::traits::TableSchemaSupport>::get_field_role(&c.field)
                                     == Some(shoal_core::shared::queries::parser::FieldRole::Sort)
                             })
-                            .collect();
-                        let mut sort_keys = Vec::with_capacity(sort_conditions.len());
-                        for sc in &sort_conditions {
-                            let value = shoal_core::serde_json::from_value(sc.value.clone())
-                                .map_err(|e| shoal_core::client::ShqlParseError::new(
-                                    format!("Failed to deserialize sort key: {}", e),
-                                    sc.value_start,
-                                    sc.value_end,
-                                    query,
-                                ))?;
-                            sort_keys.push(value);
+                        {
+                            sort_keys.reserve(sort_condition.values.len());
+                            for found in &sort_condition.values {
+                                let value = shoal_core::serde_json::from_value(found.value.clone())
+                                    .map_err(|e| shoal_core::client::ShqlParseError::new(
+                                        format!("Failed to deserialize sort key: {}", e),
+                                        found.start,
+                                        found.end,
+                                        query,
+                                    ))?;
+                                sort_keys.push(value);
+                            }
                         }
                         // Build the Get query
                         let mut get_query = #get_ident::new(partition_keys.clone());
-                        get_query.sort_keys = sort_keys.clone();
+                        get_query.sort_select = sort_select;
                         if let Some(limit) = parsed.limit {
                             get_query.limit = Some(limit);
                         }
                         // Build any filters named by the where conditions
                         get_query.filters = <#inner_type>::shql_build_filters(&parsed.conditions, query)?;
-                        // Build partition key hashes
+                        // Hash each partition key into the key of the partition holding it
                         let partition_key_hashes: Vec<u64> = partition_keys.iter()
                             .map(|pk| <#inner_type as shoal_core::shared::traits::PartitionKeySupport>::get_partition_key_from_values(pk))
                             .collect();
@@ -307,7 +281,7 @@ pub fn add(stream: &mut proc_macro2::TokenStream, struct_ident: &Ident, fields: 
                         let sorted_query = shoal_core::shared::queries::SortedQuery::Get(
                             shoal_core::shared::queries::SortedGet {
                                 partition_keys: partition_key_hashes,
-                                sort_keys: get_query.sort_keys,
+                                sort_select: get_query.sort_select,
                                 filters: get_query.filters,
                                 limit: get_query.limit,
                             }

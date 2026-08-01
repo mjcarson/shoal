@@ -26,6 +26,7 @@ use uuid::Uuid;
 
 use crate::server::messages::{LoadedPartition, QueryMetadata, ServerMsg};
 use crate::server::tables::partitions::UnsortedPartition;
+use crate::server::tables::persistent::PendingGet;
 use crate::server::tables::storage::StorageSupport;
 use crate::server::{Conf, ServerError};
 use crate::shared::queries::{UnsortedExists, UnsortedGet, UnsortedQuery, UnsortedUpdate};
@@ -107,6 +108,8 @@ pub struct PersistentUnsortedTable<R: ShoalUnsortedTable, S: StorageSupport, N: 
     loader_tx: AsyncSender<LoaderMsg<N>>,
     /// A map of queries blocked on partitions being loaded from disk
     blocked: HashMap<u64, Vec<(QueryMetadata, UnsortedQuery<R>)>>,
+    /// The response data for gets that needed partitions to be loaded from disk
+    pending_data: HashMap<(Uuid, usize), PendingGet<R>>,
     /// The total size of all data on this shard
     memory_usage: Arc<RefCell<usize>>,
     /// The most recently used tables/partitions on this shard
@@ -191,6 +194,7 @@ where
             flushed: Vec::with_capacity(1000),
             loader_tx: loader_tx.clone(),
             blocked: HashMap::with_capacity(1000),
+            pending_data: HashMap::with_capacity(500),
             memory_usage: memory_usage.clone(),
             lru: lru.clone(),
         };
@@ -427,68 +431,93 @@ where
 
     /// Get some rows from some partitions
     ///
+    /// The rows come back in the order this get named its partitions, which a partition read
+    /// back from disk would otherwise break by answering after the ones already in memory.
+    ///
     /// # Arguments
     ///
     /// * `meta` - The metadata about this insert query
     /// * `get` - The get parameters to use
-    /// * `was_blocked` - Whether this query was blocked before being executed
     #[instrument(name = "PersistentTable::get", skip_all)]
     async fn get(
         &mut self,
         meta: QueryMetadata,
         get: UnsortedGet<R>,
     ) -> Option<(Uuid, Uuid, Response<R>)> {
-        // build a vec for the data we found
-        let mut data = Vec::new();
-        // try to get the partition for this key
-        match self.partitions.get(&get.partition_key) {
-            // this partition is loaded into memory
-            Some(partition) => {
-                // get this partitions data
-                let action = if partition.get(&get, &mut data) {
-                    // mark this partition as recently used in our lru cache
-                    self.lru
-                        .borrow_mut()
-                        .promote(&(self.table_name, get.partition_key));
-                    // this query found data
-                    ResponseAction::Get(Some(data))
-                } else {
-                    // this query did not find data
-                    ResponseAction::Get(None)
-                };
-                // cast this action to a response
-                let response = Response {
-                    id: meta.id,
-                    index: meta.index,
-                    data: action,
-                    end: meta.end,
-                };
-                Some((meta.client, meta.id, response))
+        // pick this get up where its last execution left off, or start it fresh
+        let mut pending = match self.pending_data.remove(&(meta.id, meta.index)) {
+            // carry on filling the slots this get already has
+            Some(pending) => pending,
+            // this query has never been executed before so start it off
+            None => PendingGet::new(&get.partition_keys, get.limit),
+        };
+        // check each of the partition keys this execution was handed
+        for partition_key in &get.partition_keys {
+            // find where this partitions row belongs in the answer
+            let Some(rank) = pending.rank(*partition_key) else {
+                // we have already read this partition, so it has nothing left to give
+                continue;
+            };
+            // once the partitions named before this one hold every row this get asked for,
+            // nothing this one holds can reach the answer, so it is not worth reading at all
+            if pending.filled_before(rank) {
+                pending.fill(rank, Vec::new());
+                continue;
             }
-            // this partition isn't loaded so lets try and load it from disk
-            None => {
-                // get this queries partition key before we hand our query off
-                let partition_key = get.partition_key;
-                // block this query if this partition has data on disk to load
-                if self
-                    .block_on_load(partition_key, &meta, UnsortedQuery::Get(get))
-                    .await
-                {
-                    // return None since we don't yet have a response for this query
-                    None
-                } else {
-                    // cast this action to a response
-                    let response = Response {
-                        id: meta.id,
-                        index: meta.index,
-                        data: ResponseAction::Get(None),
-                        end: meta.end,
-                    };
-                    // the requested partition doesn't exist
-                    Some((meta.client, meta.id, response))
+            // try to get the partition for this key
+            let mut rows = Vec::default();
+            match self.partitions.get(partition_key) {
+                // this partition is loaded into memory
+                Some(partition) => {
+                    // get this partitions data
+                    if partition.get(&get, &mut rows) {
+                        // mark this partition as recently used in our lru cache
+                        self.lru
+                            .borrow_mut()
+                            .promote(&(self.table_name, *partition_key));
+                    }
+                    pending.fill(rank, rows);
+                }
+                // this partition isn't loaded so lets try and load it from disk
+                None => {
+                    // build a query for just this blocked partition
+                    let blocked_get = UnsortedQuery::Get(get.to_blocked(*partition_key));
+                    // block this query if this partition has data on disk to load
+                    if !self
+                        .block_on_load(*partition_key, &meta, blocked_get)
+                        .await
+                    {
+                        // the requested partition doesn't exist so it has no row to give
+                        pending.fill(rank, rows);
+                    }
                 }
             }
         }
+        // hold this get until every partition it named has been read
+        if pending.is_pending() {
+            // remember what we have found so far for the replay to carry on from
+            self.pending_data.insert((meta.id, meta.index), pending);
+            // we have blocked partitions so return None
+            return None;
+        }
+        // flatten our slots back into the order this get named its partitions
+        let data = pending.finish();
+        // add this data to our response
+        let action = if data.is_empty() {
+            // this query did not find data
+            ResponseAction::Get(None)
+        } else {
+            // this query found data
+            ResponseAction::Get(Some(data))
+        };
+        // cast this action to a response
+        let response = Response {
+            id: meta.id,
+            index: meta.index,
+            data: action,
+            end: meta.end,
+        };
+        Some((meta.client, meta.id, response))
     }
 
     /// Check if data exists in this partition

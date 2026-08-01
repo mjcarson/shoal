@@ -24,6 +24,7 @@ use uuid::Uuid;
 
 use crate::server::messages::{LoadedPartition, QueryMetadata, ServerMsg};
 use crate::server::tables::partitions::SortedPartition;
+use crate::server::tables::persistent::{PendingGet, adjust_memory_usage};
 use crate::server::Conf;
 use crate::server::ServerError;
 use crate::shared::queries::{SortedExists, SortedGet, SortedQuery};
@@ -107,8 +108,13 @@ where
     flushed_generation: u64,
     /// The commits that are still pending storage confirmation
     pending: PendingResponse<R>,
-    /// The response data for queries that needed partitions to be loaded from disk
-    pending_data: HashMap<(Uuid, usize), (Vec<R>, Vec<u64>)>,
+    /// The response data for gets that needed partitions to be loaded from disk
+    pending_data: HashMap<(Uuid, usize), PendingGet<R>>,
+    /// The partitions each exists query is still waiting to have loaded from disk
+    ///
+    /// An exists answers with a bool rather than rows, so it only needs to know which of its
+    /// partitions it has yet to hear about.
+    pending_exists: HashMap<(Uuid, usize), Vec<u64>>,
     /// The responses for queries that have been flushed to disk
     flushed: Vec<(Uuid, Uuid, Span, Response<R>)>,
     /// The channel to send loader jobs on
@@ -198,6 +204,7 @@ where
             flushed_generation: 0,
             pending: PendingResponse::<R>::with_capacity(100),
             pending_data: HashMap::with_capacity(500),
+            pending_exists: HashMap::with_capacity(500),
             flushed: Vec::with_capacity(1000),
             loader_tx: loader_tx.clone(),
             blocked: HashMap::with_capacity(1000),
@@ -265,18 +272,11 @@ where
                     // replay our in memory rows ontop of the copy we just read from disk
                     partition.merge_from_disk(new);
                     // calculate the difference in our partition size
-                    let diff = partition.size() as isize - old_size as isize;
-                    // increment or decrement our memory usage
-                    if diff.is_positive() {
-                        // our partition got larger so increase our memory usage
-                        *self.memory_usage.borrow_mut() += diff as usize;
-                    } else {
-                        // our partition got smaller so decrease our memory usage
-                        let new_mem_usage =
-                            self.memory_usage.borrow().saturating_sub(diff as usize);
-                        // updat our memory usage
-                        *self.memory_usage.borrow_mut() = new_mem_usage;
-                    }
+                    let diff = partition.size().cast_signed() - old_size.cast_signed();
+                    // merging in the disk copy can only grow this partition since our in
+                    // memory rows win every collision, but apply the diff signed anyway so
+                    // drift in the delta maintained sizes can never wrap our counter
+                    adjust_memory_usage(&self.memory_usage, diff);
                     // remove this partition from our cache until any blocked queries have completed
                     self.lru
                         .borrow_mut()
@@ -410,288 +410,210 @@ where
         meta: QueryMetadata,
         get: &SortedGet<R>,
     ) -> Option<(Uuid, Uuid, Response<R>)> {
-        // get any dat from previously executed/blocked queries
-        let (mut data, mut blocked) = match self.pending_data.remove(&(meta.id, meta.index)) {
-            // use our existing data/blocked queries
-            Some((data, blocked)) => (data, blocked),
-            // this query has never been executed before so instance sane defaults
-            None => (Vec::with_capacity(get.partition_keys.len()), Vec::default()),
+        // pick this get up where its last execution left off, or start it fresh
+        //
+        // a get blocked on a partition is replayed once that partition has been read, so the
+        // rows it already found have to outlive the execution that found them
+        let mut pending = match self.pending_data.remove(&(meta.id, meta.index)) {
+            // carry on filling the slots this get already has
+            Some(pending) => pending,
+            // this query has never been executed before so start it off
+            None => PendingGet::new(&get.partition_keys, get.limit),
         };
-        // check each of the specified partition keys
+        // the archived forms of this gets keys, built the first time a partition of it is
+        // being read in place - a get every one of whose partitions is resident builds none
+        let mut seek = None;
+        // check each of the partition keys this execution was handed
         for partition_key in &get.partition_keys {
-            // try to get the partition for this key
-            match self.partitions.get(partition_key) {
-                // this partition may be loaded into memory
-                Some(partition) => {
-                    // if this partition is accessible then we don't need to check disk
-                    match partition {
-                        MaybeLoaded::Loaded { partition, .. } => {
-                            // load this partitions data from disk if needed
-                            if partition.check_disk {
-                                // try to load this partition from disk if it exists
-                                let will_load = if self.blocked.contains_key(partition_key) {
-                                    // a load is already in flight for this partition so queue
-                                    // behind it instead of reading the same data again
-                                    true
-                                } else {
-                                    self.storage
-                                        .load_partition(
-                                            self.table_name,
-                                            *partition_key,
-                                            &self.loader_tx,
-                                        )
-                                        .await
-                                        .unwrap()
-                                };
-                                // if this query was blocked then add it to our blocked list
-                                if will_load {
-                                    // if we need to load this then add this query to a map of queries
-                                    // that are blocked on partitions being loaded from disk
-                                    // get an entry to our partitions blocked queries
-                                    let entry = self.blocked.entry(*partition_key).or_default();
-                                    // build a query for just this blocked partition
-                                    let blocked_get = get.to_blocked(*partition_key);
-                                    // add our blocked query and its metadata for this partitions blocked query list
-                                    entry.push((meta.clone(), SortedQuery::Get(blocked_get)));
-                                    // add this partition to our blocked partition list
-                                    blocked.push(*partition_key);
-                                    // continue to the next partition key
-                                    continue;
-                                }
-                            }
-                            // get the live rows from our partition (tombstones are skipped)
-                            for row in partition.live_row_values() {
-                                // check if we are supposed to filter our rows
-                                if let Some(filters) = &get.filters {
-                                    // check if this row should be returned
-                                    if !R::is_filtered(filters, row) {
-                                        // skip this row as it doesn't match our filters
-                                        continue;
-                                    }
-                                }
-                                // add this row to our response
-                                data.push(row.clone());
-                            }
-                        }
-                        MaybeLoaded::Accessible(read) => {
-                            // This partition is accessible so it must have come from disk
-                            // we don't need to check it just access it
-                            let partition = SortedPartition::<R>::access(&read).unwrap();
-                            // get the live rows from our partition (tombstones are skipped)
-                            for row in partition.live_row_values() {
-                                // check if we are supposed to filter our rows
-                                if let Some(filters) = &get.filters {
-                                    // check if this row should be returned
-                                    if !R::is_filtered_archived(filters, row) {
-                                        // skip this row as it doesn't match our filters
-                                        continue;
-                                    }
-                                }
-                                // convert this to a loaded row
-                                let loaded_row = R::deserialize(row).unwrap();
-                                // add this row to our response
-                                data.push(loaded_row);
-                            }
-                        }
-                    }
-                    // remove this partition from our blocked queries
-                    blocked.retain(|key| key != partition_key);
-                }
-                // this partition is not loaded into memory
-                // check if this partition exist and load it if it does
-                None => {
-                    // try to load this partition from disk if it exists
-                    let will_load = if self.blocked.contains_key(partition_key) {
-                        // a load is already in flight for this partition so queue behind it
-                        // instead of reading the same data again
-                        true
-                    } else {
-                        self.storage
-                            .load_partition(self.table_name, *partition_key, &self.loader_tx)
-                            .await
-                            .unwrap()
-                    };
-                    // if this query was blocked then add it to our blocket list
-                    if will_load {
-                        // if we need to load this then add this query to a map of queries
-                        // that are blocked on partitions being loaded from disk
-                        // get an entry to our partitions blocked queries
-                        let entry = self.blocked.entry(*partition_key).or_default();
-                        // build a query for just this blocked partition
-                        let blocked_get = get.to_blocked(*partition_key);
-                        // add our blocked query and its metadata for this partitions
-                        // blocked query list
-                        entry.push((meta.clone(), SortedQuery::Get(blocked_get)));
-                        // add this partition to our blocked partition list
-                        blocked.push(*partition_key);
-                    }
+            // find where this partitions rows belong in the answer
+            let Some(rank) = pending.rank(*partition_key) else {
+                // we have already read this partition, so it has nothing left to give
+                continue;
+            };
+            // once the partitions named before this one hold every row this get asked for,
+            // nothing this one holds can reach the answer, so it is not worth reading at all
+            if pending.filled_before(rank) {
+                pending.fill(rank, Vec::new());
+                continue;
+            }
+            // work out whether we hold this partition and whether it might have rows on disk
+            let (resident, check_disk) = match self.partitions.get(partition_key) {
+                // a loaded partition may still have rows in an archive we have not read yet
+                Some(MaybeLoaded::Loaded { partition, .. }) => (true, partition.check_disk),
+                // an accessible partition is already the copy from disk
+                Some(MaybeLoaded::Accessible(_)) => (true, false),
+                // a partition we have never seen may still be on disk
+                None => (false, true),
+            };
+            // read this partition from disk if it might hold rows we do not have
+            if check_disk {
+                // try to load this partition from disk if it exists
+                let will_load = if self.blocked.contains_key(partition_key) {
+                    // a load is already in flight for this partition so queue behind it
+                    // instead of reading the same data again
+                    true
+                } else {
+                    self.storage
+                        .load_partition(self.table_name, *partition_key, &self.loader_tx)
+                        .await
+                        .unwrap()
+                };
+                // a partition being read fills its own slot when this get is replayed for it
+                if will_load {
+                    // add this query to the list of ones waiting on this partition
+                    let entry = self.blocked.entry(*partition_key).or_default();
+                    // build a query for just this blocked partition
+                    let blocked_get = get.to_blocked(*partition_key);
+                    // add our blocked query and its metadata to this partitions blocked list
+                    entry.push((meta.clone(), SortedQuery::Get(blocked_get)));
+                    // leave this slot empty for the replay to fill
+                    continue;
                 }
             }
+            // get the rows this get asked for from this partition
+            //
+            // these rows are this partitions alone, so the limit stops each partition after
+            // its own first `limit` rows rather than stopping the get at the first partition
+            // that happens to fill it
+            let mut rows = Vec::default();
+            // a partition we have never seen and that is not on disk has no rows to give
+            if resident {
+                // SAFETY: we looked this partition up above and have not touched the map since
+                if let Some(partition) = self.partitions.get(partition_key) {
+                    partition.get(get, &mut seek, &mut rows);
+                }
+            }
+            pending.fill(rank, rows);
         }
-        // if we have any blocked queries then add this to our pending data map
-        if !blocked.is_empty() {
-            // get an entry to this queries pending data
-            self.pending_data
-                .insert((meta.id, meta.index), (data, blocked));
-            // we have blocked queries so return None
-            None
+        // hold this get until every partition it named has been read
+        if pending.is_pending() {
+            // remember what we have found so far for the replay to carry on from
+            self.pending_data.insert((meta.id, meta.index), pending);
+            // we have blocked partitions so return None
+            return None;
+        }
+        // flatten our slots back into the order this get named its partitions
+        let data = pending.finish();
+        // add this data to our response
+        let action = if data.is_empty() {
+            // this query did not find data
+            ResponseAction::Get(None)
         } else {
-            // add this data to our response
-            let action = if data.is_empty() {
-                // this query did not find data
-                ResponseAction::Get(None)
-            } else {
-                // this query found data
-                ResponseAction::Get(Some(data))
-            };
-            // cast this action to a response
-            let response = Response {
-                id: meta.id,
-                index: meta.index,
-                data: action,
-                end: meta.end,
-            };
-            Some((meta.client, meta.id, response))
-        }
+            // this query found data
+            ResponseAction::Get(Some(data))
+        };
+        // cast this action to a response
+        let response = Response {
+            id: meta.id,
+            index: meta.index,
+            data: action,
+            end: meta.end,
+        };
+        Some((meta.client, meta.id, response))
     }
 
     /// Check if data exists in some partitions
     ///
+    /// The rows are checked by `MaybeLoaded::exists`, which covers both of the ways a
+    /// partition can be held, so this only has to decide which partitions to read. An
+    /// exists naming sort keys asks about those rows alone; one naming none asks whether
+    /// its partitions hold any row at all.
+    ///
+    /// A partition that might still have rows on disk is read before it is answered
+    /// about, even when this exists names sort keys. A named row missing from the copy in
+    /// memory says nothing about the copy in an archive.
+    ///
     /// # Arguments
     ///
     /// * `meta` - The metadata about this exists query
-    /// * `exists` - The exists parameters to use
+    /// * `exists_query` - The exists parameters to use
     #[instrument(name = "PersistentTable::exists", skip_all)]
     async fn exists(
         &mut self,
         meta: QueryMetadata,
         exists_query: &SortedExists<R>,
     ) -> Option<(Uuid, Uuid, Response<R>)> {
-        // get any data from previously executed/blocked queries
-        let mut blocked = match self.pending_data.remove(&(meta.id, meta.index)) {
-            // use our existing blocked queries
-            Some((_, blocked)) => blocked,
+        // pick up the partitions this exists is still waiting on, or start it fresh
+        let mut blocked = match self.pending_exists.remove(&(meta.id, meta.index)) {
+            // carry on with the partitions this exists has yet to read
+            Some(blocked) => blocked,
             // this query has never been executed before so instance sane defaults
             None => Vec::default(),
         };
-        println!("## Exists {exists_query:?} -> {blocked:?}");
-        // check each of the specified partition keys
+        // the archived forms of this exists keys, built the first time a partition of it is
+        // being read in place - an exists whose partitions are all resident builds none
+        let mut seek = None;
+        // check each of the partition keys this execution was handed
         for partition_key in &exists_query.partition_keys {
-            // try to get the partition for this key
-            match self.partitions.get(partition_key) {
-                // this partition may be loaded into memory
-                Some(partition) => {
-                    println!("SOME -> {partition:?}");
-                    // if this partition is accessible then we don't need to check disk
-                    match partition {
-                        MaybeLoaded::Loaded { partition, .. } => {
-                            // load this partitions data from disk if needed
-                            if partition.check_disk {
-                                // try to load this partition from disk if it exists
-                                let will_load = if self.blocked.contains_key(partition_key) {
-                                    // a load is already in flight for this partition so queue
-                                    // behind it instead of reading the same data again
-                                    true
-                                } else {
-                                    self.storage
-                                        .load_partition(
-                                            self.table_name,
-                                            *partition_key,
-                                            &self.loader_tx,
-                                        )
-                                        .await
-                                        .unwrap()
-                                };
-                                // if this query was blocked then add it to our blocked list
-                                if will_load {
-                                    let entry = self.blocked.entry(*partition_key).or_default();
-                                    let blocked_exists = exists_query.to_blocked(*partition_key);
-                                    entry.push((meta.clone(), SortedQuery::Exists(blocked_exists)));
-                                    blocked.push(*partition_key);
-                                    continue;
-                                }
-                            }
-                            // check the rows from our partition
-                            for row in partition.live_row_values() {
-                                // check if we are supposed to filter our rows
-                                if let Some(filters) = &exists_query.filters {
-                                    if !R::is_filtered(filters, row) {
-                                        continue;
-                                    }
-                                }
-                                // found a matching row - data exists
-                                let response = Response {
-                                    id: meta.id,
-                                    index: meta.index,
-                                    data: ResponseAction::Exists(true),
-                                    end: meta.end,
-                                };
-                                println!("%% partition_lo -> {partition:#?}");
-                                println!("@@ exists {exists_query:?} -> true");
-                                return Some((meta.client, meta.id, response));
-                            }
-                        }
-                        MaybeLoaded::Accessible(read) => {
-                            let partition = SortedPartition::<R>::access(&read).unwrap();
-                            for row in partition.live_row_values() {
-                                if let Some(filters) = &exists_query.filters {
-                                    if !R::is_filtered_archived(filters, row) {
-                                        continue;
-                                    }
-                                }
-                                // found a matching row - data exists
-                                let response = Response {
-                                    id: meta.id,
-                                    index: meta.index,
-                                    data: ResponseAction::Exists(true),
-                                    end: meta.end,
-                                };
-                                println!("@@ exists {exists_query:?} -> true");
-                                return Some((meta.client, meta.id, response));
-                            }
-                        }
-                    }
-                    // remove this partition from our blocked queries
-                    blocked.retain(|key| key != partition_key);
+            // work out whether we hold this partition and whether it might have rows on disk
+            let (resident, check_disk) = match self.partitions.get(partition_key) {
+                // a loaded partition may still have rows in an archive we have not read yet
+                Some(MaybeLoaded::Loaded { partition, .. }) => (true, partition.check_disk),
+                // an accessible partition is already the copy from disk
+                Some(MaybeLoaded::Accessible(_)) => (true, false),
+                // a partition we have never seen may still be on disk
+                None => (false, true),
+            };
+            // read this partition from disk if it might hold rows we do not have
+            if check_disk {
+                // try to load this partition from disk if it exists
+                let will_load = if self.blocked.contains_key(partition_key) {
+                    // a load is already in flight for this partition so queue behind it
+                    // instead of reading the same data again
+                    true
+                } else {
+                    self.storage
+                        .load_partition(self.table_name, *partition_key, &self.loader_tx)
+                        .await
+                        .unwrap()
+                };
+                // a partition being read is answered about when this exists is replayed for it
+                if will_load {
+                    // add this query to the list of ones waiting on this partition
+                    let entry = self.blocked.entry(*partition_key).or_default();
+                    // build a query for just this blocked partition
+                    let blocked_exists = exists_query.to_blocked(*partition_key);
+                    // add our blocked query and its metadata to this partitions blocked list
+                    entry.push((meta.clone(), SortedQuery::Exists(blocked_exists)));
+                    // remember that we are still waiting on this partition
+                    blocked.push(*partition_key);
+                    continue;
                 }
-                // this partition is not loaded into memory
-                None => {
-                    // try to load this partition from disk if it exists
-                    let will_load = if self.blocked.contains_key(partition_key) {
-                        // a load is already in flight for this partition so queue behind it
-                        // instead of reading the same data again
-                        true
-                    } else {
-                        self.storage
-                            .load_partition(self.table_name, *partition_key, &self.loader_tx)
-                            .await
-                            .unwrap()
-                    };
-                    if will_load {
-                        let entry = self.blocked.entry(*partition_key).or_default();
-                        let blocked_exists = exists_query.to_blocked(*partition_key);
-                        entry.push((meta.clone(), SortedQuery::Exists(blocked_exists)));
-                        blocked.push(*partition_key);
+            }
+            // this partition has been read so it is no longer one we are waiting on
+            blocked.retain(|key| key != partition_key);
+            // a partition we have never seen and that is not on disk has no rows to check
+            if resident {
+                // SAFETY: we looked this partition up above and have not touched the map since
+                if let Some(partition) = self.partitions.get(partition_key) {
+                    // check whether this partition holds any of the rows we were asked about
+                    if partition.exists(exists_query, &mut seek) {
+                        // this partition holds a row this exists named
+                        let response = Response {
+                            id: meta.id,
+                            index: meta.index,
+                            data: ResponseAction::Exists(true),
+                            end: meta.end,
+                        };
+                        return Some((meta.client, meta.id, response));
                     }
                 }
             }
         }
-        // if we have any blocked queries then add this to our pending data map
+        // hold this exists until every partition it named has been read
         if !blocked.is_empty() {
-            println!("## Still have blocked! -> {blocked:?}");
-            self.pending_data
-                .insert((meta.id, meta.index), (Vec::new(), blocked));
-            None
-        } else {
-            // no data found in any partition
-            let response = Response {
-                id: meta.id,
-                index: meta.index,
-                data: ResponseAction::Exists(false),
-                end: meta.end,
-            };
-            Some((meta.client, meta.id, response))
+            // remember what we are still waiting on for the replay to carry on from
+            self.pending_exists.insert((meta.id, meta.index), blocked);
+            return None;
         }
+        // none of the partitions we read held any of the rows this exists named
+        let response = Response {
+            id: meta.id,
+            index: meta.index,
+            data: ResponseAction::Exists(false),
+            end: meta.end,
+        };
+        Some((meta.client, meta.id, response))
     }
 
     /// Delete a row from this table

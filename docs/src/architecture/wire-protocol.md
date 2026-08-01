@@ -105,9 +105,10 @@ purely to know when the stream is complete (`client.rs:1142-1186`).
 
 For streams the client sets `unbounded_queries: true` and ignores the server's `end` entirely,
 terminating on a locally generated `ClientMsg::End(base_index)` sent by
-`ShoalQueryStream::close` (`client.rs:1308-1313`). This is why the broken `end` computation
-([Known Issues](../appendix/known-issues.md#10-end-flag-computation-is-wrong-for-streams))
-does not show up in stream tests — the flag is simply not consulted on that path.
+`ShoalQueryStream::close` (`client.rs:1308-1313`). This is why the `end` computation being wrong
+for streamed bundles never showed up in stream tests — the flag is simply not consulted on that
+path. It is [fixed](../appendix/resolved/sorted-limit.md) now, but this path still does not
+consult it.
 
 ## Alignment
 

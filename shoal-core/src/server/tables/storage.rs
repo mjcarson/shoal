@@ -423,6 +423,9 @@ mod tests {
                 id: Uuid::new_v4(),
                 index,
                 end: false,
+                // only gets and exists are ever split across shards, and this queue
+                // only ever holds the responses to writes
+                gather: None,
                 span: Span::none(),
             };
             pending.add(meta, *pos, ResponseAction::Insert(true));

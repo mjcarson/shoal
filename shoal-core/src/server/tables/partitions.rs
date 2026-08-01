@@ -9,11 +9,15 @@ use rkyv::rancor::Strategy;
 use rkyv::validation::archive::ArchiveValidator;
 use rkyv::validation::shared::SharedValidator;
 use rkyv::validation::Validator;
+use rkyv::util::AlignedVec;
 use rkyv::with::Skip;
 use rkyv::{Archive, Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::ops::Bound;
 
-use crate::shared::queries::{SortedGet, SortedUpdate, UnsortedGet, UnsortedUpdate};
+use crate::shared::queries::{
+    SortRange, SortSelect, SortedExists, SortedGet, SortedUpdate, UnsortedGet, UnsortedUpdate,
+};
 use crate::shared::responses::ResponseAction;
 use crate::shared::traits::{RkyvSupport, ShoalSortedTable, ShoalUnsortedTable};
 
@@ -120,6 +124,10 @@ impl<R: ShoalUnsortedTable> UnsortedPartition<R> {
     /// * `params` - The parameters to use to get the rows
     /// * `found` - The vector to push the data to return
     pub fn get(&self, params: &UnsortedGet<R>, found: &mut Vec<R>) -> bool {
+        // a get that already holds every row it asked for has nothing to take from us
+        if params.limit_reached(found) {
+            return false;
+        }
         // a deleted row has no data to return
         let MaybeRow::Row(row) = &self.row else {
             return false;
@@ -173,6 +181,10 @@ where
     /// * `params` - The parameters to use to get the rows
     /// * `found` - The vector to push the data to return
     pub fn get(&self, params: &UnsortedGet<R>, found: &mut Vec<R>) -> bool {
+        // a get that already holds every row it asked for has nothing to take from us
+        if params.limit_reached(found) {
+            return false;
+        }
         // if this row is loaded then use the get on the row
         match self {
             MaybeLoaded::Loaded { partition, .. } => partition.get(params, found),
@@ -335,15 +347,72 @@ impl<T: ShoalSortedTable> SortedPartition<T> {
         (diff, ResponseAction::Insert(true))
     }
 
-    /// Get some rows from this partition
+    /// Seek a live row in this partition by its sort key
+    ///
+    /// A tombstone is a row that was deleted, so it is a miss here rather than something
+    /// the caller has to remember to check for.
     ///
     /// # Arguments
     ///
-    /// * `params` - The parameters to use to get the rows
+    /// * `sort_key` - The sort key of the row to seek
+    fn live_row(&self, sort_key: &T::Sort) -> Option<&T> {
+        // only a live row is a row we hold
+        match self.rows.get(sort_key) {
+            Some(MaybeRow::Row(row)) => Some(row),
+            Some(MaybeRow::Tombstone) | None => None,
+        }
+    }
+
+    /// Iterate over the live rows of this partition whose sort key falls inside a range
+    ///
+    /// The caller has already checked that the range can contain a key, because
+    /// `BTreeMap::range` panics on one that cannot.
+    ///
+    /// # Arguments
+    ///
+    /// * `range` - The range of sort keys to walk
+    fn live_rows_in_range<'a>(
+        &'a self,
+        range: &'a SortRange<T::Sort>,
+    ) -> impl Iterator<Item = &'a T> {
+        // seek to this ranges lower bound and walk in sort order until its upper one
+        self.rows
+            .range(range.bounds())
+            .filter_map(|(_, row)| match row {
+                MaybeRow::Row(row) => Some(row),
+                MaybeRow::Tombstone => None,
+            })
+    }
+
+    /// Collect the rows a scan visited into a gets response
+    ///
+    /// The three ways a get can select rows differ only in which rows they visit, so the
+    /// filtering, the limit check, and the push live here once instead of once per arm.
+    ///
+    /// The limit is checked against `found` before a row is pushed rather than after,
+    /// because `found` is shared by every partition a get touches. Checking after the
+    /// push hands back one extra row for every partition past the one that filled the
+    /// limit, and hands back a row at all for a get whose limit was already full when it
+    /// got here.
+    ///
+    /// # Arguments
+    ///
+    /// * `params` - The parameters of the get these rows were visited for
+    /// * `rows` - The rows this gets selection visited, in sort order
     /// * `found` - The vector to push the data to return
-    pub fn get(&self, params: &SortedGet<T>, found: &mut Vec<T>) {
-        // get live rows from this partition (tombstones are skipped)
-        for row in self.live_row_values() {
+    fn collect_rows<'a, I: Iterator<Item = &'a T>>(
+        params: &SortedGet<T>,
+        rows: I,
+        found: &mut Vec<T>,
+    ) where
+        T: 'a,
+    {
+        // visit the rows this get selected until we hold as many as it asked for
+        for row in rows {
+            // stop scanning once we hold every row this get asked for
+            if params.limit_reached(found) {
+                break;
+            }
             // skip any rows that don't match our filter
             if let Some(filter) = &params.filters {
                 // check if this row should be filtered out
@@ -354,12 +423,99 @@ impl<T: ShoalSortedTable> SortedPartition<T> {
             }
             // add this row to our response
             found.push(row.clone());
-            // get our limit if we have one set
-            if let Some(limit) = params.limit {
-                // check if we found enough data
-                if found.len() >= limit {
-                    break;
+        }
+    }
+
+    /// Check whether any of the rows a scan visited survives an exists filters
+    ///
+    /// This is the twin of [`Self::collect_rows`] and is shared by the same three arms for
+    /// the same reason.
+    ///
+    /// # Arguments
+    ///
+    /// * `params` - The parameters of the exists these rows were visited for
+    /// * `rows` - The rows this exists selection visited, in sort order
+    fn any_row<'a, I: Iterator<Item = &'a T>>(params: &SortedExists<T>, rows: I) -> bool
+    where
+        T: 'a,
+    {
+        // visit the rows this exists selected until one of them survives our filters
+        for row in rows {
+            // skip any rows that don't match our filter
+            if let Some(filter) = &params.filters {
+                // check if this row should be filtered out
+                if !T::is_filtered(filter, row) {
+                    // skip this row since it doesn't match our filter
+                    continue;
                 }
+            }
+            // we hold one of the rows this exists asked about
+            return true;
+        }
+        // we hold none of the rows this exists asked about
+        false
+    }
+
+    /// Get some rows from this partition
+    ///
+    /// A get naming sort keys is asking for those rows and no others, so each of them is
+    /// sought in our tree rather than walked to. The keys are sought in the order they
+    /// were given, which is sort order because `normalize_sort_keys` put them in it when
+    /// this query entered the server. A get bounding them by a range seeks to that ranges
+    /// lower bound and walks until its upper one, which is why paging costs a page rather
+    /// than a partition. A get selecting every row walks all of them.
+    ///
+    /// # Arguments
+    ///
+    /// * `params` - The parameters to use to get the rows
+    /// * `found` - The vector to push the data to return
+    pub fn get(&self, params: &SortedGet<T>, found: &mut Vec<T>) {
+        // visit the rows this get selected, however it chose to select them
+        match &params.sort_select {
+            // this get asked for the whole partition, so walk it (tombstones are skipped)
+            SortSelect::All => Self::collect_rows(params, self.live_row_values(), found),
+            // this get named its rows, so seek each of them instead of walking to it
+            SortSelect::Keys(keys) => {
+                let rows = keys.iter().filter_map(|sort_key| self.live_row(sort_key));
+                Self::collect_rows(params, rows, found);
+            }
+            // this get bounded its rows, so seek to the lower bound and walk to the upper one
+            SortSelect::Range(range) => {
+                // a range that cannot contain a key holds no rows, and would panic the seek
+                if range.is_empty() {
+                    return;
+                }
+                Self::collect_rows(params, self.live_rows_in_range(range), found);
+            }
+        }
+    }
+
+    /// Check if any of the rows this exists selected are in this partition
+    ///
+    /// This is the twin of [`Self::get`] and selects its rows exactly the same three ways.
+    /// An exists selecting every row is asking whether this partition holds any row at all,
+    /// which is what it has always answered.
+    ///
+    /// # Arguments
+    ///
+    /// * `params` - The parameters to use to check for rows
+    pub fn exists(&self, params: &SortedExists<T>) -> bool {
+        // visit the rows this exists selected, however it chose to select them
+        match &params.sort_select {
+            // this exists asks about this partition and not about any row in particular
+            SortSelect::All => Self::any_row(params, self.live_row_values()),
+            // this exists named its rows, so seek each of them instead of walking to it
+            SortSelect::Keys(keys) => {
+                let rows = keys.iter().filter_map(|sort_key| self.live_row(sort_key));
+                Self::any_row(params, rows)
+            }
+            // this exists bounded its rows, so seek to the lower bound and walk to the upper
+            SortSelect::Range(range) => {
+                // a range that cannot contain a key holds no rows, and would panic the seek
+                if range.is_empty() {
+                    return false;
+                }
+                Self::any_row(params, self.live_rows_in_range(range))
             }
         }
     }
@@ -431,6 +587,11 @@ impl<T: ShoalSortedTable> SortedPartition<T> {
     /// memory is always the newer of the two. `BTreeMap::extend` overwrites on a key
     /// collision, so an in memory tombstone still shadows the archived row it hides.
     ///
+    /// This is the one place a partitions size is recomputed instead of maintained by
+    /// delta. Neither input describes what we end up holding: the disk copy's size
+    /// counts none of our in memory rows and ours counts none of the archived ones,
+    /// and only the rows themselves say which of the two won each key.
+    ///
     /// # Arguments
     ///
     /// * `disk` - The copy of this partition that was read from an archive
@@ -441,6 +602,16 @@ impl<T: ShoalSortedTable> SortedPartition<T> {
         self.rows.extend(memory.rows.into_iter());
         // archives never contain tombstones so only our in memory ones survived
         self.tombstones = memory.tombstones;
+        // the union of both copies is what we hold now, so recompute our size from
+        // the rows we ended up with, counting only the live ones like our other paths
+        self.size = self
+            .rows
+            .values()
+            .filter_map(|row| match row {
+                MaybeRow::Row(row) => Some(row.deep_size_of()),
+                MaybeRow::Tombstone => None,
+            })
+            .sum();
         // we just merged in the full disk copy so there is nothing left to load
         self.check_disk = false;
     }
@@ -538,6 +709,343 @@ where
     }
 }
 
+/// The archived forms of the sort keys a get or exists selected
+///
+/// A partition being read in place holds its keys in their archived form, so a key being
+/// sought there has to be put in that form to be compared against them. Those bytes are the
+/// same for every partition of one query, so they are built at most once per execution and
+/// only when a partition of it is actually being read in place - a resident partition is
+/// sought with the key exactly as it stands, and pays nothing for this.
+#[derive(Debug, Default)]
+pub struct SeekBytes {
+    /// The archived form of each sort key that was named, in the order they were named
+    keys: Vec<AlignedVec>,
+    /// The archived form of the value a ranges lower bound holds, if it holds one
+    start: Option<AlignedVec>,
+    /// The archived form of the value a ranges upper bound holds, if it holds one
+    end: Option<AlignedVec>,
+}
+
+impl SeekBytes {
+    /// Archive the keys and bounds a selection named
+    ///
+    /// A selection of every row names neither, so this is empty for it.
+    ///
+    /// # Arguments
+    ///
+    /// * `select` - The selection whose keys and bounds to archive
+    pub fn new<S: RkyvSupport>(select: &SortSelect<S>) -> Self {
+        // archive whichever of a set of keys or a pair of bounds this selection named
+        match select {
+            // a selection of every row names no key to seek with
+            SortSelect::All => SeekBytes::default(),
+            // a set of keys is archived one key at a time, in the order they were named
+            SortSelect::Keys(keys) => SeekBytes {
+                keys: keys.iter().map(|key| <S as RkyvSupport>::serialize(key)).collect(),
+                start: None,
+                end: None,
+            },
+            // a range only has a value to archive at an end that bounds something
+            SortSelect::Range(range) => SeekBytes {
+                keys: Vec::new(),
+                start: Self::bound_bytes(&range.start),
+                end: Self::bound_bytes(&range.end),
+            },
+        }
+    }
+
+    /// Archive the value one end of a range holds, if it holds one
+    ///
+    /// # Arguments
+    ///
+    /// * `bound` - The end of the range to archive
+    fn bound_bytes<S: RkyvSupport>(bound: &Bound<S>) -> Option<AlignedVec> {
+        // an unbounded end holds no value to compare an archives keys against
+        match bound {
+            Bound::Included(key) | Bound::Excluded(key) => {
+                Some(<S as RkyvSupport>::serialize(key))
+            }
+            Bound::Unbounded => None,
+        }
+    }
+
+    /// Iterate over the archived form of each sort key that was named
+    fn keys(&self) -> impl Iterator<Item = &AlignedVec> {
+        self.keys.iter()
+    }
+
+    /// Get the archived form of the value a ranges lower bound holds
+    fn start(&self) -> Option<&AlignedVec> {
+        self.start.as_ref()
+    }
+
+    /// Get the archived form of the value a ranges upper bound holds
+    fn end(&self) -> Option<&AlignedVec> {
+        self.end.as_ref()
+    }
+}
+
+impl<R: ShoalSortedTable> MaybeLoaded<SortedPartition<R>>
+where
+    <<R as ShoalSortedTable>::Sort as Archive>::Archived: Ord,
+    <R as Archive>::Archived: rkyv::Deserialize<R, Strategy<Pool, rkyv::rancor::Error>>,
+    for<'a> <<R as ShoalSortedTable>::Sort as Archive>::Archived:
+        CheckBytes<Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>>,
+    for<'a> <R as Archive>::Archived:
+        CheckBytes<Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>>,
+{
+    /// Seek a live row in an archived partition by the archived form of its sort key
+    ///
+    /// An archives keys are the archived form of a sort key, so the key being looked for
+    /// has to be put in that form to be compared against them, and the seek compares two
+    /// archived keys. That leans on `Archived<Sort>` ordering the way `Sort` does, which is
+    /// the same thing the archive already leans on: it was written out in `Sort` order and
+    /// is searched in `Archived<Sort>` order.
+    ///
+    /// The bytes are handed in rather than built here because they are the same for every
+    /// partition of one query - see [`SeekBytes`].
+    ///
+    /// # Arguments
+    ///
+    /// * `access` - The archived partition to seek in
+    /// * `raw` - The archived form of the sort key of the row to seek
+    fn seek_archived<'a>(
+        access: &'a ArchivedSortedPartition<R>,
+        raw: &AlignedVec,
+    ) -> Option<&'a <R as Archive>::Archived> {
+        // access the archived form of our key so it can be compared against the archives
+        let wanted = <R::Sort as RkyvSupport>::access(raw).unwrap();
+        // seek this key in the archive, where a tombstone is a row that was deleted
+        match access.rows.get(wanted) {
+            // this archive holds the row we were looking for
+            Some(ArchivedMaybeRow::Row(row)) => Some(row),
+            // this archive either never held this row or holds a tombstone of it
+            Some(ArchivedMaybeRow::Tombstone) | None => None,
+        }
+    }
+
+    /// Put one end of a range in the form an archives keys are in
+    ///
+    /// Only the value an end holds needs archiving; whether that end includes its value is
+    /// a property of the query and is carried over as it stands. An end holding no value
+    /// bounds nothing and stays unbounded.
+    ///
+    /// # Arguments
+    ///
+    /// * `bound` - The end of the range being archived
+    /// * `raw` - The archived form of the value that end holds, if it holds one
+    fn archived_bound<'a>(
+        bound: &Bound<R::Sort>,
+        raw: Option<&'a AlignedVec>,
+    ) -> Bound<&'a <<R as ShoalSortedTable>::Sort as Archive>::Archived> {
+        // an end with no value cannot bound anything
+        let Some(raw) = raw else {
+            return Bound::Unbounded;
+        };
+        // access the archived form of this ends value and keep whether it includes it
+        let wanted = <R::Sort as RkyvSupport>::access(raw).unwrap();
+        match bound {
+            Bound::Included(_) => Bound::Included(wanted),
+            Bound::Excluded(_) => Bound::Excluded(wanted),
+            Bound::Unbounded => Bound::Unbounded,
+        }
+    }
+
+    /// Collect the archived rows a scan visited into a gets response
+    ///
+    /// This is the archived twin of `SortedPartition::collect_rows` and is shared by the
+    /// same three arms for the same reason. A row is deserialized only once it has survived
+    /// the filters, so a scan pays for the rows it returns rather than the rows it visits.
+    ///
+    /// # Arguments
+    ///
+    /// * `params` - The parameters of the get these rows were visited for
+    /// * `rows` - The archived rows this gets selection visited, in sort order
+    /// * `found` - The vector to push the data to return
+    fn collect_archived<'a, I>(params: &SortedGet<R>, rows: I, found: &mut Vec<R>)
+    where
+        I: Iterator<Item = &'a <R as Archive>::Archived>,
+        <R as Archive>::Archived: 'a,
+    {
+        // visit the rows this get selected until we hold as many as it asked for
+        for row in rows {
+            // stop scanning once we hold every row this get asked for
+            if params.limit_reached(found) {
+                break;
+            }
+            // skip any rows that don't match our filter
+            if let Some(filter) = &params.filters {
+                // check if this row should be filtered out
+                if !R::is_filtered_archived(filter, row) {
+                    // skip this row since it doesn't match our filter
+                    continue;
+                }
+            }
+            // deserialize the row we are about to return
+            let loaded = R::deserialize(row).unwrap();
+            // add this row to our response
+            found.push(loaded);
+        }
+    }
+
+    /// Check whether any of the archived rows a scan visited survives an exists filters
+    ///
+    /// This is the twin of [`Self::collect_archived`]. Nothing is deserialized, because an
+    /// exists answers with a boolean and never returns a row.
+    ///
+    /// # Arguments
+    ///
+    /// * `params` - The parameters of the exists these rows were visited for
+    /// * `rows` - The archived rows this exists selection visited, in sort order
+    fn any_archived<'a, I>(params: &SortedExists<R>, rows: I) -> bool
+    where
+        I: Iterator<Item = &'a <R as Archive>::Archived>,
+        <R as Archive>::Archived: 'a,
+    {
+        // visit the rows this exists selected until one of them survives our filters
+        for row in rows {
+            // skip any rows that don't match our filter
+            if let Some(filter) = &params.filters {
+                // check if this row should be filtered out
+                if !R::is_filtered_archived(filter, row) {
+                    // skip this row since it doesn't match our filter
+                    continue;
+                }
+            }
+            // this archive holds one of the rows this exists asked about
+            return true;
+        }
+        // this archive holds nothing that survived our filters
+        false
+    }
+
+    /// Get some rows from this partition whether it is loaded or still an archive
+    ///
+    /// Rows are appended to `found`, which already holds everything the earlier
+    /// partitions of this get contributed, so a limit spans the whole get instead of
+    /// resetting at each partition.
+    ///
+    /// # Arguments
+    ///
+    /// * `params` - The parameters to use to get the rows
+    /// * `seek` - The archived keys of this get, built the first time one is needed
+    /// * `found` - The vector to push the data to return
+    pub fn get(&self, params: &SortedGet<R>, seek: &mut Option<SeekBytes>, found: &mut Vec<R>) {
+        // scan our rows however this partition happens to be held
+        match self {
+            // this partition is already in memory so scan it directly
+            MaybeLoaded::Loaded { partition, .. } => partition.get(params, found),
+            MaybeLoaded::Accessible(read) => {
+                // this partition came from disk so access it in place
+                let access = SortedPartition::<R>::access(read).unwrap();
+                // put this gets keys in the form this archives keys are in, once per query
+                let seek = seek.get_or_insert_with(|| SeekBytes::new(&params.sort_select));
+                // visit the rows this get selected, however it chose to select them
+                match &params.sort_select {
+                    // this get asked for the whole archive, so walk it (tombstones skipped)
+                    SortSelect::All => {
+                        Self::collect_archived(params, access.live_row_values(), found);
+                    }
+                    // this get named its rows, so seek each of them instead of walking to it
+                    SortSelect::Keys(_) => {
+                        let rows = seek
+                            .keys()
+                            .filter_map(|raw| Self::seek_archived(access, raw));
+                        Self::collect_archived(params, rows, found);
+                    }
+                    // this get bounded its rows, so seek to the lower bound and walk up
+                    SortSelect::Range(range) => {
+                        // a range that cannot contain a key holds no rows, and panics a seek
+                        if range.is_empty() {
+                            return;
+                        }
+                        let rows = Self::archived_rows_in_range(access, range, seek);
+                        Self::collect_archived(params, rows, found);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Check if any of the rows this exists selected are in this partition
+    ///
+    /// This is the twin of [`Self::get`] and exists for the same reason: an archived
+    /// partition has to be checked in place, so both of the ways a partition can be held
+    /// need covering, and a table should not have to know which of the two it has.
+    ///
+    /// # Arguments
+    ///
+    /// * `params` - The parameters to use to check for rows
+    /// * `seek` - The archived keys of this exists, built the first time one is needed
+    pub fn exists(&self, params: &SortedExists<R>, seek: &mut Option<SeekBytes>) -> bool {
+        // check our rows however this partition happens to be held
+        match self {
+            // this partition is already in memory so check it directly
+            MaybeLoaded::Loaded { partition, .. } => partition.exists(params),
+            MaybeLoaded::Accessible(read) => {
+                // this partition came from disk so access it in place
+                let access = SortedPartition::<R>::access(read).unwrap();
+                // put this exists keys in the form this archives keys are in, once per query
+                let seek = seek.get_or_insert_with(|| SeekBytes::new(&params.sort_select));
+                // visit the rows this exists selected, however it chose to select them
+                match &params.sort_select {
+                    // this exists asks about this archive and not about any row in particular
+                    SortSelect::All => Self::any_archived(params, access.live_row_values()),
+                    // this exists named its rows, so seek each of them instead of walking
+                    SortSelect::Keys(_) => {
+                        let rows = seek
+                            .keys()
+                            .filter_map(|raw| Self::seek_archived(access, raw));
+                        Self::any_archived(params, rows)
+                    }
+                    // this exists bounded its rows, so seek to the lower bound and walk up
+                    SortSelect::Range(range) => {
+                        // a range that cannot contain a key holds no rows, and panics a seek
+                        if range.is_empty() {
+                            return false;
+                        }
+                        let rows = Self::archived_rows_in_range(access, range, seek);
+                        Self::any_archived(params, rows)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Iterate over the live rows of an archive whose sort key falls inside a range
+    ///
+    /// `ArchivedBTreeMap::range` descends to the lower bound and stops at the first key
+    /// past the upper one, so this seeks in `log n` exactly the way the in memory scan
+    /// does rather than walking the archive from the start.
+    ///
+    /// The caller has already checked that the range can contain a key.
+    ///
+    /// # Arguments
+    ///
+    /// * `access` - The archived partition to walk
+    /// * `range` - The range of sort keys to walk
+    /// * `seek` - The archived forms of this ranges bounds
+    fn archived_rows_in_range<'a>(
+        access: &'a ArchivedSortedPartition<R>,
+        range: &SortRange<R::Sort>,
+        seek: &SeekBytes,
+    ) -> impl Iterator<Item = &'a <R as Archive>::Archived> {
+        // put both ends of this range in the form this archives keys are in
+        let bounds = (
+            Self::archived_bound(&range.start, seek.start()),
+            Self::archived_bound(&range.end, seek.end()),
+        );
+        // seek to this ranges lower bound and walk in sort order until its upper one
+        access
+            .rows
+            .range(bounds)
+            .filter_map(|(_, row)| match row {
+                ArchivedMaybeRow::Row(row) => Some(row),
+                ArchivedMaybeRow::Tombstone => None,
+            })
+    }
+}
+
 impl<T: ShoalSortedTable> RkyvSupport for SortedPartition<T> where
     <<T as ShoalSortedTable>::Sort as Archive>::Archived: Ord
 {
@@ -556,12 +1064,13 @@ where
 mod tests {
     use super::{MaybeRow, SortedPartition};
     use crate::shared::queries::parser::{FieldRole, TypeValidator};
-    use crate::shared::queries::SortedUpdate;
+    use crate::shared::queries::{SortRange, SortSelect, SortedExists, SortedGet, SortedUpdate};
     use crate::shared::traits::{
         PartitionKeySupport, RkyvSupport, ShoalSortedTable, ShoalTableSupport, TableSchemaSupport,
     };
     use deepsize2::DeepSizeOf;
     use rkyv::{Archive, Deserialize, Serialize};
+    use std::ops::Bound;
 
     /// The smallest sorted row that satisfies the table traits
     ///
@@ -680,6 +1189,542 @@ mod tests {
         assert_eq!(partition.tombstones, 1);
     }
 
+    /// Build a get for a partition with an optional limit
+    ///
+    /// # Arguments
+    ///
+    /// * `limit` - The limit to place on this get if it has one
+    fn get_with_limit(limit: Option<usize>) -> SortedGet<TestRow> {
+        SortedGet {
+            partition_keys: vec![0],
+            sort_select: SortSelect::All,
+            filters: None,
+            limit,
+        }
+    }
+
+    /// Build a partition holding a row for each of the given sort keys
+    ///
+    /// # Arguments
+    ///
+    /// * `sort_keys` - The sort keys to build rows for
+    fn partition_of(sort_keys: &[&str]) -> SortedPartition<TestRow> {
+        // build an empty partition to fill
+        let mut partition = SortedPartition::<TestRow>::new(0);
+        // add a row for each sort key we were given
+        for sort_key in sort_keys {
+            partition.insert(TestRow::new(sort_key));
+        }
+        partition
+    }
+
+    #[test]
+    /// A limit stops a scan, and takes the first rows in sort order
+    fn a_limit_stops_a_partition_scan() {
+        // build a partition with five rows in it
+        let partition = partition_of(&["a", "b", "c", "d", "e"]);
+        // scan it with a limit of two
+        let mut found = Vec::new();
+        partition.get(&get_with_limit(Some(2)), &mut found);
+        // a limit takes the first rows in sort order, not an arbitrary two
+        let sort_keys = found.iter().map(|row| row.sort_key.as_str()).collect::<Vec<_>>();
+        assert_eq!(sort_keys, vec!["a", "b"]);
+    }
+
+    #[test]
+    /// A limit spans every partition a get touches rather than resetting at each one
+    ///
+    /// The response vec is shared by every partition of a get, so a limit checked after
+    /// the push instead of before hands back one extra row for every partition past the
+    /// one that filled it. This fails with four rows against that version.
+    fn a_limit_is_shared_across_partitions() {
+        // build two partitions of three rows each
+        let first = partition_of(&["a", "b", "c"]);
+        let second = partition_of(&["d", "e", "f"]);
+        // scan both of them into the same response vec with a limit of three, which is
+        // exactly what the first partition holds
+        let get = get_with_limit(Some(3));
+        let mut found = Vec::new();
+        first.get(&get, &mut found);
+        second.get(&get, &mut found);
+        // the second partition must not have added anything
+        assert_eq!(found.len(), 3);
+    }
+
+    #[test]
+    /// A scan handed an already full response vec adds nothing
+    ///
+    /// This is the shape a get takes when it resumes after a partition was read from
+    /// disk: the rows it accumulated before it blocked are handed back to it, and its
+    /// limit has to be counted against those and not just against this scan.
+    fn a_full_found_vec_is_left_alone() {
+        // build a partition with rows in it
+        let partition = partition_of(&["a", "b", "c"]);
+        // pretend an earlier execution of this get already found its two rows
+        let mut found = vec![TestRow::new("x"), TestRow::new("y")];
+        partition.get(&get_with_limit(Some(2)), &mut found);
+        // our already full response is untouched
+        assert_eq!(found.len(), 2);
+        let sort_keys = found.iter().map(|row| row.sort_key.as_str()).collect::<Vec<_>>();
+        assert_eq!(sort_keys, vec!["x", "y"]);
+    }
+
+    #[test]
+    /// A limit of zero scans nothing at all
+    fn a_zero_limit_finds_no_rows() {
+        // build a partition with rows in it
+        let partition = partition_of(&["a", "b", "c"]);
+        // scan it with a limit of zero
+        let mut found = Vec::new();
+        partition.get(&get_with_limit(Some(0)), &mut found);
+        // a limit of zero is reached before a single row is read
+        assert!(found.is_empty());
+    }
+
+    #[test]
+    /// A get with no limit still returns every row
+    fn a_get_with_no_limit_returns_every_row() {
+        // build a partition with rows in it
+        let partition = partition_of(&["a", "b", "c"]);
+        // scan it with no limit at all
+        let mut found = Vec::new();
+        partition.get(&get_with_limit(None), &mut found);
+        // an unlimited get is never short circuited
+        assert_eq!(found.len(), 3);
+    }
+
+    /// Build a get naming some sort keys, with an optional limit
+    ///
+    /// The keys are handed over in the order they are given, since a scan trusts that
+    /// they were normalized upstream by `split_by_shard`.
+    ///
+    /// # Arguments
+    ///
+    /// * `sort_keys` - The sort keys this get should select
+    /// * `limit` - The limit to place on this get if it has one
+    fn get_with_sort_keys(sort_keys: &[&str], limit: Option<usize>) -> SortedGet<TestRow> {
+        SortedGet {
+            partition_keys: vec![0],
+            sort_select: SortSelect::Keys(
+                sort_keys.iter().map(|key| (*key).to_owned()).collect(),
+            ),
+            filters: None,
+            limit,
+        }
+    }
+
+    /// Build a get bounding its rows by a range of sort keys
+    ///
+    /// # Arguments
+    ///
+    /// * `range` - The range of sort keys this get should select
+    /// * `limit` - The limit to place on this get if it has one
+    fn get_with_range(range: SortRange<String>, limit: Option<usize>) -> SortedGet<TestRow> {
+        SortedGet {
+            partition_keys: vec![0],
+            sort_select: SortSelect::Range(range),
+            filters: None,
+            limit,
+        }
+    }
+
+    /// Build an exists bounding its rows by a range of sort keys
+    ///
+    /// # Arguments
+    ///
+    /// * `range` - The range of sort keys this exists should check
+    fn exists_with_range(range: SortRange<String>) -> SortedExists<TestRow> {
+        SortedExists {
+            partition_keys: vec![0],
+            sort_select: SortSelect::Range(range),
+            filters: None,
+        }
+    }
+
+    /// Build a range over a pair of borrowed sort keys
+    ///
+    /// # Arguments
+    ///
+    /// * `start` - The lower bound of the range to build
+    /// * `end` - The upper bound of the range to build
+    fn range_of(start: Bound<&str>, end: Bound<&str>) -> SortRange<String> {
+        // owning the bound values is what a real query hands the table
+        let owned = |bound: Bound<&str>| match bound {
+            Bound::Included(key) => Bound::Included(key.to_owned()),
+            Bound::Excluded(key) => Bound::Excluded(key.to_owned()),
+            Bound::Unbounded => Bound::Unbounded,
+        };
+        SortRange::new(owned(start), owned(end))
+    }
+
+    /// Build an exists naming some sort keys
+    ///
+    /// # Arguments
+    ///
+    /// * `sort_keys` - The sort keys this exists should check for
+    fn exists_with_sort_keys(sort_keys: &[&str]) -> SortedExists<TestRow> {
+        SortedExists {
+            partition_keys: vec![0],
+            sort_select: SortSelect::Keys(
+                sort_keys.iter().map(|key| (*key).to_owned()).collect(),
+            ),
+            filters: None,
+        }
+    }
+
+    #[test]
+    /// A named sort key selects its own row and nothing else
+    ///
+    /// This is the whole of the defect: the sort keys were carried to the table and
+    /// never read, so this came back with all four rows.
+    fn a_named_sort_key_selects_one_row() {
+        // build a partition with four rows in it
+        let partition = partition_of(&["a", "b", "c", "d"]);
+        // ask for one of them by sort key
+        let mut found = Vec::new();
+        partition.get(&get_with_sort_keys(&["c"], None), &mut found);
+        // only the row we named comes back
+        let sort_keys = found
+            .iter()
+            .map(|row| row.sort_key.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(sort_keys, vec!["c"]);
+    }
+
+    #[test]
+    /// Several named sort keys select each of their rows, in the order they were named
+    fn named_sort_keys_select_their_rows() {
+        // build a partition with five rows in it
+        let partition = partition_of(&["a", "b", "c", "d", "e"]);
+        // ask for two of them by sort key
+        let mut found = Vec::new();
+        partition.get(&get_with_sort_keys(&["b", "d"], None), &mut found);
+        // both of the rows we named come back and nothing else does
+        let sort_keys = found
+            .iter()
+            .map(|row| row.sort_key.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(sort_keys, vec!["b", "d"]);
+    }
+
+    #[test]
+    /// A sort key naming no row in this partition finds nothing
+    fn a_missing_sort_key_finds_nothing() {
+        // build a partition with rows in it
+        let partition = partition_of(&["a", "b", "c"]);
+        // ask for a row this partition does not hold
+        let mut found = Vec::new();
+        partition.get(&get_with_sort_keys(&["z"], None), &mut found);
+        // a miss is a miss, not the whole partition
+        assert!(found.is_empty());
+    }
+
+    #[test]
+    /// A get naming no sort keys still returns every row
+    ///
+    /// This pins the case that was already right, so a future selection cannot narrow a
+    /// get that never asked to be narrowed.
+    fn selecting_every_row_returns_every_row() {
+        // build a partition with rows in it
+        let partition = partition_of(&["a", "b", "c"]);
+        // ask for the partition without narrowing it at all
+        let mut found = Vec::new();
+        partition.get(&get_with_limit(None), &mut found);
+        // every row this partition holds comes back
+        assert_eq!(found.len(), 3);
+    }
+
+    #[test]
+    /// A get naming an empty set of sort keys names no rows
+    ///
+    /// This is the one behaviour `SortSelect` changed. An empty `sort_keys` list used to
+    /// mean the whole partition, because it was the only way a get could say it had not
+    /// narrowed itself. `SortSelect::All` says that now, so an empty set is a set with
+    /// nothing in it and selects nothing - which is what "these rows" has always meant for
+    /// every other set.
+    fn an_empty_sort_key_selection_returns_no_rows() {
+        // build a partition with rows in it
+        let partition = partition_of(&["a", "b", "c"]);
+        // ask for a set of rows without putting a single one in it
+        let mut found = Vec::new();
+        partition.get(&get_with_sort_keys(&[], None), &mut found);
+        // a set naming no rows selects none of them
+        assert!(found.is_empty());
+    }
+
+    #[test]
+    /// A tombstoned sort key is a miss and not a row
+    ///
+    /// A tombstone shadows a row that may still be in an archive, so a lookup that
+    /// lands on one has found a deleted row rather than a live one.
+    fn a_tombstoned_sort_key_is_not_found() {
+        // build a partition with rows in it and delete one of them
+        let mut partition = partition_of(&["a", "b", "c"]);
+        partition.remove(&"b".to_owned());
+        // ask for the row we just deleted
+        let mut found = Vec::new();
+        partition.get(&get_with_sort_keys(&["b"], None), &mut found);
+        // a deleted row is not returned by naming it
+        assert!(found.is_empty());
+    }
+
+    #[test]
+    /// A limit bounds a sort key selection like it bounds a scan
+    fn a_limit_bounds_a_sort_key_selection() {
+        // build a partition with rows in it
+        let partition = partition_of(&["a", "b", "c", "d"]);
+        // name three of them but only allow two back
+        let mut found = Vec::new();
+        partition.get(&get_with_sort_keys(&["a", "b", "c"], Some(2)), &mut found);
+        // the limit takes the first rows we named
+        let sort_keys = found
+            .iter()
+            .map(|row| row.sort_key.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(sort_keys, vec!["a", "b"]);
+    }
+
+    #[test]
+    /// An exists naming a sort key answers for that row alone
+    ///
+    /// This is the sharper half of the defect: the old exists returned true on the
+    /// first live row it walked, so it answered "does this partition hold anything"
+    /// for a partition that does not hold the named row at all.
+    fn exists_answers_for_a_named_sort_key() {
+        // build a partition with rows in it
+        let partition = partition_of(&["a", "b", "c"]);
+        // a row we hold exists
+        assert!(partition.exists(&exists_with_sort_keys(&["b"])));
+        // a row we do not hold does not, even though this partition is not empty
+        assert!(!partition.exists(&exists_with_sort_keys(&["z"])));
+    }
+
+    #[test]
+    /// An exists naming several sort keys is true if any of them exists
+    fn exists_is_true_for_any_named_sort_key() {
+        // build a partition with rows in it
+        let partition = partition_of(&["a", "b", "c"]);
+        // one of these two rows is held and one is not
+        assert!(partition.exists(&exists_with_sort_keys(&["z", "c"])));
+        // neither of these are
+        assert!(!partition.exists(&exists_with_sort_keys(&["y", "z"])));
+    }
+
+    #[test]
+    /// An exists naming a deleted row is false
+    fn exists_is_false_for_a_tombstoned_sort_key() {
+        // build a partition with rows in it and delete one of them
+        let mut partition = partition_of(&["a", "b", "c"]);
+        partition.remove(&"b".to_owned());
+        // the row we deleted no longer exists
+        assert!(!partition.exists(&exists_with_sort_keys(&["b"])));
+    }
+
+    #[test]
+    /// An exists selecting every row asks whether this partition holds any live row
+    fn exists_selecting_every_row_asks_about_the_partition() {
+        // build an exists that has not narrowed itself at all
+        let whole_partition = SortedExists {
+            partition_keys: vec![0],
+            sort_select: SortSelect::All,
+            filters: None,
+        };
+        // a partition with a live row in it holds something
+        let mut partition = partition_of(&["a"]);
+        assert!(partition.exists(&whole_partition));
+        // a partition holding only a tombstone does not
+        partition.remove(&"a".to_owned());
+        assert!(!partition.exists(&whole_partition));
+    }
+
+    #[test]
+    /// A range selects the rows between its bounds and no others
+    ///
+    /// This is the whole of the feature on the in memory side: a partition of n rows asked
+    /// for a span of k of them seeks to the lower bound instead of walking to it.
+    fn a_range_selects_its_rows() {
+        // build a partition with rows in it
+        let partition = partition_of(&["a", "b", "c", "d", "e"]);
+        // ask for the rows between two of them
+        let mut found = Vec::new();
+        let range = range_of(Bound::Included("b"), Bound::Included("d"));
+        partition.get(&get_with_range(range, None), &mut found);
+        // the rows inside the range come back, in sort order, and nothing else
+        let keys: Vec<&str> = found.iter().map(|row| row.sort_key.as_str()).collect();
+        assert_eq!(keys, vec!["b", "c", "d"]);
+    }
+
+    #[test]
+    /// An excluded lower bound leaves out the row it names
+    ///
+    /// This is the bound paging is built on: the last row of a page is excluded so the next
+    /// page starts after it rather than repeating it.
+    fn an_excluded_lower_bound_skips_its_key() {
+        // build a partition with rows in it
+        let partition = partition_of(&["a", "b", "c"]);
+        // ask for everything after the first row without including it
+        let mut found = Vec::new();
+        let range = range_of(Bound::Excluded("a"), Bound::Unbounded);
+        partition.get(&get_with_range(range, None), &mut found);
+        // the row the bound named is left out and the rest come back
+        let keys: Vec<&str> = found.iter().map(|row| row.sort_key.as_str()).collect();
+        assert_eq!(keys, vec!["b", "c"]);
+    }
+
+    #[test]
+    /// An excluded upper bound leaves out the row it names, and an included one keeps it
+    fn an_upper_bound_decides_whether_its_key_is_kept() {
+        // build a partition with rows in it
+        let partition = partition_of(&["a", "b", "c"]);
+        // ask for everything up to but not including the last row
+        let mut found = Vec::new();
+        let range = range_of(Bound::Unbounded, Bound::Excluded("c"));
+        partition.get(&get_with_range(range, None), &mut found);
+        let keys: Vec<&str> = found.iter().map(|row| row.sort_key.as_str()).collect();
+        assert_eq!(keys, vec!["a", "b"]);
+        // asking for everything up to and including it keeps it
+        let mut found = Vec::new();
+        let range = range_of(Bound::Unbounded, Bound::Included("c"));
+        partition.get(&get_with_range(range, None), &mut found);
+        let keys: Vec<&str> = found.iter().map(|row| row.sort_key.as_str()).collect();
+        assert_eq!(keys, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    /// A range bounded at neither end selects every row
+    fn an_unbounded_range_returns_every_row() {
+        // build a partition with rows in it
+        let partition = partition_of(&["a", "b", "c"]);
+        // ask for a range that bounds nothing
+        let mut found = Vec::new();
+        partition.get(&get_with_range(SortRange::default(), None), &mut found);
+        // every row this partition holds comes back
+        assert_eq!(found.len(), 3);
+    }
+
+    #[test]
+    /// A range whose start is past its end selects nothing instead of panicking
+    ///
+    /// `BTreeMap::range` panics on this shape, so the guard in front of the seek is what
+    /// this pins. Without it the scan takes the shard down rather than answering.
+    fn an_inverted_range_returns_nothing() {
+        // build a partition with rows in it
+        let partition = partition_of(&["a", "b", "c"]);
+        // ask for a range that runs backwards
+        let mut found = Vec::new();
+        let range = range_of(Bound::Included("c"), Bound::Included("a"));
+        partition.get(&get_with_range(range, None), &mut found);
+        // a range that cannot contain a key holds no rows
+        assert!(found.is_empty());
+    }
+
+    #[test]
+    /// A range over one key with an excluded end selects nothing instead of panicking
+    ///
+    /// The other shape `BTreeMap::range` panics on, and the easier of the two to write by
+    /// accident - `title > 'm' AND title < 'm'` is one typo away from a valid query.
+    fn an_empty_exclusive_range_returns_nothing() {
+        // build a partition with rows in it
+        let partition = partition_of(&["a", "b", "c"]);
+        // ask for a range whose ends meet on a key neither of them includes
+        let mut found = Vec::new();
+        let range = range_of(Bound::Excluded("b"), Bound::Excluded("b"));
+        partition.get(&get_with_range(range, None), &mut found);
+        // there is nothing between a key and itself
+        assert!(found.is_empty());
+    }
+
+    #[test]
+    /// A tombstone inside a range is skipped rather than returned
+    ///
+    /// A range walks rows rather than seeking each of them, so it meets tombstones the way
+    /// an unnarrowed scan does. Returning one resurrects a deleted row.
+    fn a_range_skips_tombstones() {
+        // build a partition with rows in it and delete one in the middle
+        let mut partition = partition_of(&["a", "b", "c"]);
+        partition.remove(&"b".to_owned());
+        // ask for a range covering all three of them
+        let mut found = Vec::new();
+        partition.get(&get_with_range(SortRange::default(), None), &mut found);
+        // the deleted row is not in the answer
+        let keys: Vec<&str> = found.iter().map(|row| row.sort_key.as_str()).collect();
+        assert_eq!(keys, vec!["a", "c"]);
+    }
+
+    #[test]
+    /// A range stops as soon as its get holds every row it asked for
+    ///
+    /// This is what makes a page cost a page: the walk ends at the limit rather than at the
+    /// upper bound, so a `LIMIT 20` over a range spanning a whole partition reads 20 rows.
+    fn a_range_stops_at_its_limit() {
+        // build a partition with rows in it
+        let partition = partition_of(&["a", "b", "c", "d", "e"]);
+        // ask for an unbounded range with a limit well inside it
+        let mut found = Vec::new();
+        partition.get(&get_with_range(SortRange::default(), Some(2)), &mut found);
+        // the walk stopped at the limit rather than at the end of the range
+        let keys: Vec<&str> = found.iter().map(|row| row.sort_key.as_str()).collect();
+        assert_eq!(keys, vec!["a", "b"]);
+    }
+
+    #[test]
+    /// A range that a get has already filled its limit from contributes nothing
+    ///
+    /// `found` is shared by every partition a get touches, so the limit check has to happen
+    /// before the first push of a range and not only between its rows.
+    fn a_full_get_takes_no_rows_from_a_range() {
+        // build a partition with rows in it
+        let partition = partition_of(&["a", "b", "c"]);
+        // hand the scan a response that already holds every row its get asked for
+        let mut found = vec![TestRow::new("z")];
+        partition.get(&get_with_range(SortRange::default(), Some(1)), &mut found);
+        // nothing was added to an answer that was already complete
+        assert_eq!(found.len(), 1);
+    }
+
+    #[test]
+    /// An exists answers for a range the same way a get selects one
+    fn exists_answers_for_a_range() {
+        // build a partition with rows in it
+        let partition = partition_of(&["a", "b", "c"]);
+        // a range holding one of our rows exists
+        assert!(partition.exists(&exists_with_range(range_of(
+            Bound::Included("b"),
+            Bound::Included("b")
+        ))));
+        // a range past every row we hold does not
+        assert!(!partition.exists(&exists_with_range(range_of(
+            Bound::Excluded("c"),
+            Bound::Unbounded
+        ))));
+    }
+
+    #[test]
+    /// An exists over a range of tombstones is false
+    ///
+    /// The rows are there in the tree, so an exists that did not skip them would answer for
+    /// rows that were deleted.
+    fn exists_is_false_for_a_range_of_tombstones() {
+        // build a partition and delete every row in it
+        let mut partition = partition_of(&["a", "b"]);
+        partition.remove(&"a".to_owned());
+        partition.remove(&"b".to_owned());
+        // a range covering both of them holds nothing live
+        assert!(!partition.exists(&exists_with_range(SortRange::default())));
+    }
+
+    #[test]
+    /// An exists over an empty range is false rather than a panic
+    fn exists_over_an_empty_range_is_false() {
+        // build a partition with rows in it
+        let partition = partition_of(&["a", "b", "c"]);
+        // ask about a range that cannot contain a key
+        assert!(!partition.exists(&exists_with_range(range_of(
+            Bound::Included("c"),
+            Bound::Included("a")
+        ))));
+    }
+
     #[test]
     /// Sweeping drops every tombstone and leaves live rows alone
     fn dropping_tombstones_keeps_live_rows() {
@@ -727,5 +1772,60 @@ mod tests {
         ));
         // we just loaded the whole partition so there is nothing left to check for
         assert!(!memory.check_disk);
+    }
+
+    #[test]
+    /// A merged in disk copy is sized from the rows the merge ended up with
+    ///
+    /// Neither input's size describes the union, so leaving either one in place makes a
+    /// partition that just grew report that it shrank - which is what floored shard
+    /// memory usage at zero in the load path.
+    fn merging_from_disk_recomputes_size() {
+        // build the copy of this partition that an archive would hold
+        let mut disk = SortedPartition::<TestRow>::new(0);
+        disk.insert(TestRow::new("a"));
+        // build a larger in memory copy holding rows the archive has never seen
+        let mut memory = SortedPartition::<TestRow>::new(0);
+        memory.insert(TestRow::new("b"));
+        memory.insert(TestRow::new("c"));
+        memory.insert(TestRow::new("d"));
+        // the disk copy has to be the smaller of the two for this to mean anything
+        let memory_size = memory.size;
+        assert!(disk.size < memory_size);
+        // merge the disk copy in
+        memory.merge_from_disk(disk);
+        // our size has to be the sum of every live row we ended up holding
+        let expected = memory
+            .rows
+            .values()
+            .filter_map(|row| match row {
+                MaybeRow::Row(row) => Some(row.deep_size_of()),
+                MaybeRow::Tombstone => None,
+            })
+            .sum::<usize>();
+        assert_eq!(memory.size, expected);
+        // a merge is a union so it can never leave us smaller than we already were
+        assert!(memory.size > memory_size);
+    }
+
+    #[test]
+    /// A tombstone that survives a merge contributes nothing to the merged size
+    fn merging_from_disk_sizes_only_live_rows() {
+        // build the copy of this partition that an archive would hold
+        let mut disk = SortedPartition::<TestRow>::new(0);
+        disk.insert(TestRow::new("a"));
+        disk.insert(TestRow::new("b"));
+        // build the in memory copy, which has deleted one of those rows
+        let mut memory = SortedPartition::<TestRow>::new(0);
+        memory.insert(TestRow::new("a"));
+        memory.remove(&"a".to_owned());
+        // merge the disk copy in
+        memory.merge_from_disk(disk);
+        // only the archived row our tombstone is not shadowing counts towards our size
+        let live = match memory.rows.get(&"b".to_owned()) {
+            Some(MaybeRow::Row(row)) => row.deep_size_of(),
+            _ => panic!("the archived row we never touched should have survived"),
+        };
+        assert_eq!(memory.size, live);
     }
 }

@@ -14,9 +14,13 @@ only partly fixed and appear on both: the fixed half here, the open remainder th
 | 1–3 | [Acknowledged writes were not durable](resolved/durability.md) | A rewritten intent log: real commit positions, a contiguous flush watermark, `fdatasync` before acknowledgement, block aligned writes |
 | 4 | [Unsorted updates and deletes never consult disk](resolved/unsorted-disk-consultation.md) | Both now park on `blocked` and replay once the partition is loaded, and an unsorted delete leaves a tombstone behind |
 | 5 | [Deleted rows came back](resolved/resurrected-deletes.md) | `MapIntent::Remove` for pruned partitions, and a real flushed generation so a tombstone is never evicted before its delete has been compacted |
+| 6 | [Memory accounting collapsed to zero on a partition load](resolved/memory-accounting.md) | A merge recomputes its size instead of inheriting the archive extent's, and the signed adjustment stopped going through a cast to `usize` |
+| 7, 10 | [`limit` was ignored by persistent sorted tables](resolved/sorted-limit.md) | One limit-aware scan shared by both partition forms, counted against accumulated rows; queries narrowed per shard instead of broadcast whole; and the splitting shard merges the shares so a limit spans shards |
+| 8 | [Sort keys were accepted and ignored](resolved/sort-keys.md) | Both scans seek their named keys instead of walking — in memory and in an archive — `exists` moved onto the same shared pair, and the keys are sorted and deduplicated once as a query enters the server |
 | 9 | [Recovery and compaction panicked on orphaned update intents](resolved/orphaned-update-intents.md) | `apply_intents` seeds from the archive copy, and both sites warn and skip instead of panicking |
 | 20 | [The storage tests were entirely commented out](resolved/storage-tests.md) | Rewritten against explicit on-disk fixtures and turned back on |
 | 24 | [A bad query could leave the terminal in raw mode](resolved/shoalctl-panic.md) | The parse error is rendered instead of panicking past `ratatui::restore()` |
+| 26, 39 | [A multi-partition get answered in an arbitrary order](resolved/partition-order.md) | `IN` and same-field `OR` replaced an `AND` that meant three different things; rows are slotted per partition on each shard and reordered by the coordinator before the limit is applied |
 
 ## How a fix gets written down
 

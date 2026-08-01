@@ -168,9 +168,9 @@ number of queries sent so indices stay globally ordered across bundles
 Both set `unbounded_queries: true`, which makes the result stream **ignore the server's `end`
 flag** and terminate only on `ShoalQueryStream::close`, which posts a local
 `ClientMsg::End(base_index)` directly into the response channel (`client.rs:1308-1313`). This
-is why the server's broken `end` computation
-([Known Issues](../appendix/known-issues.md#10-end-flag-computation-is-wrong-for-streams))
-does not surface in streaming tests.
+is why the server's `end` computation being wrong for streamed bundles never surfaced in
+streaming tests — the flag was simply not consulted on that path. It is
+[fixed](../appendix/resolved/sorted-limit.md) now, but nothing on this path depends on it.
 
 ## Result streams
 
