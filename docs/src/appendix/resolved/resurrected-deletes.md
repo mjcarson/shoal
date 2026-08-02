@@ -152,7 +152,7 @@ Generation counters now start at 1 (`.../fs.rs:294-295`) so that 0 can mean "not
 compacted yet", and each table adopts the generation its forced startup compaction opens
 (`.../persistent/sorted.rs:218-221`) rather than assuming it is still writing into the
 generation it replayed. `compact_intent` reports a generation even when the log compacted to
-nothing (`.../fs/compactor.rs:316-338`), so an empty generation advances the watermark instead
+nothing (`.../fs/compactor.rs:324-374`), so an empty generation advances the watermark instead
 of pinning everything tagged with it.
 
 **Sorted mutations refresh their generation.** Each in-place mutation that commits an intent

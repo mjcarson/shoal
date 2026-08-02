@@ -26,7 +26,7 @@ use uuid::Uuid;
 
 use crate::server::messages::{LoadedPartition, QueryMetadata, ServerMsg};
 use crate::server::tables::partitions::UnsortedPartition;
-use crate::server::tables::persistent::PendingGet;
+use crate::server::tables::persistent::{PendingGet, eviction_totals};
 use crate::server::tables::storage::StorageSupport;
 use crate::server::{Conf, ServerError};
 use crate::shared::queries::{UnsortedExists, UnsortedGet, UnsortedQuery, UnsortedUpdate};
@@ -35,7 +35,8 @@ use crate::shared::traits::{
     RkyvSupport, ShoalDatabase, ShoalTableSupport, ShoalUnsortedTable, TableNameSupport,
 };
 use crate::storage::{
-    FullArchiveMap, IntentReadSupport, LoaderMsg, Loaders, PendingResponse, ShouldPrune,
+    FullArchiveMap, IntentReadSupport, LoaderMsg, Loaders, PendingResponse, RecoveryStats,
+    ShouldPrune,
 };
 use crate::tables::partitions::{ArchivedMaybeRow, MaybeLoaded, MaybeRow};
 
@@ -114,6 +115,8 @@ pub struct PersistentUnsortedTable<R: ShoalUnsortedTable, S: StorageSupport, N: 
     memory_usage: Arc<RefCell<usize>>,
     /// The most recently used tables/partitions on this shard
     lru: Arc<RefCell<LruCache<(N, u64), usize, BuildHasherDefault<GxHasher>>>>,
+    /// What replaying this tables intent logs had to discard
+    recovery: RecoveryStats,
 }
 
 #[cfg_attr(feature = "hotpath", hotpath::measure_all)]
@@ -197,9 +200,11 @@ where
             pending_data: HashMap::with_capacity(500),
             memory_usage: memory_usage.clone(),
             lru: lru.clone(),
+            // nothing has been replayed yet so nothing has been discarded
+            recovery: RecoveryStats::default(),
         };
-        // load our intent log
-        table
+        // load our intent log, keeping what replaying it had to discard
+        table.recovery = table
             .storage
             .read_intents(
                 conf,
@@ -219,6 +224,11 @@ where
     /// Get the storage engine kind
     pub fn loader_kind(&self) -> Loaders {
         S::loader_kind()
+    }
+
+    /// Get what replaying this tables intent logs had to discard
+    pub fn recovery_stats(&self) -> RecoveryStats {
+        self.recovery
     }
 
     /// Spawn the loader for this storage engine type
@@ -820,24 +830,34 @@ where
     pub fn evict(&mut self, victims: Vec<u64>) {
         // get our current memory usage
         let pre = *self.memory_usage.borrow();
+        // track the total size of the partitions we actually dropped
+        let mut removed = 0;
         // step over and remove all of our victim partitions
         for victim in victims {
             // remove this partition if it exists
             if let Some(partition) = self.partitions.remove(&victim) {
+                // get the size this partition was accounted for at
+                let size = partition.size();
                 // get our new memory usage amount with this partition removed
-                let decreased = self.memory_usage.borrow().saturating_sub(partition.size());
+                let decreased = self.memory_usage.borrow().saturating_sub(size);
                 // update our memory usage
                 *self.memory_usage.borrow_mut() = decreased;
+                // track what this pass freed independently of the shards counter
+                removed += size;
             }
         }
         // get our post eviction memory usage
         let post = *self.memory_usage.borrow();
+        // summarize this pass without assuming our counter is consistent
+        let (reclaimed, drift) = eviction_totals(pre, post, removed);
         // log the change in memory usage
         event!(
             Level::INFO,
             pre,
             post,
-            diff = pre - post,
+            removed,
+            reclaimed,
+            drift,
             partitions = self.partitions.len(),
             evictable = self.lru.borrow().len(),
         );
@@ -895,43 +915,22 @@ where
     /// The intent type to use
     type Intent = UnsortedIntents<T>;
 
-    /// Load an intent logs partition from disk if its needed to replay this intent log
+    /// Name the partitions an intent needs loaded before it can be replayed
     ///
     /// # Arguments
     ///
-    /// * `read` - The intent to scan for partitions to load
-    /// * `storage` - The storage engine to load data from
-    /// * `partitions` - The partition map to load our partitions into
-    /// * `memory_usage` - The current memory usage for this shard
-    async fn scan<S: StorageSupport>(
-        read: &ReadResult,
-        storage: &S,
-        partitions: &mut HashMap<u64, MaybeLoaded<Self>>,
-        memory_usage: &mut Arc<RefCell<usize>>,
-    ) -> Result<(), ServerError> {
+    /// * `read` - The intent to name the partitions of
+    /// * `to_load` - The set of partition keys to add to
+    fn scan_keys(read: &ReadResult, to_load: &mut HashSet<u64>) -> Result<(), ServerError> {
         // access our data
         let intent = UnsortedIntents::<T>::access(read)?;
-        // build a set of partitions to load from disk
-        let mut to_load = HashSet::with_capacity(1000);
-        // we only need to load partitions for delete intents
+        // only an update needs its base row to already be there
         match intent {
             // we don't need to load inserts or deletes to replay its intent
             ArchivedUnsortedIntents::Insert(_) | ArchivedUnsortedIntents::Delete { .. } => (),
             // we need the data loaded in order to update it
             ArchivedUnsortedIntents::Update(update) => {
                 to_load.insert(update.partition_key.to_native());
-            }
-        }
-        // load all of our partitions
-        for partition_key in to_load {
-            // get this partitions data
-            if let Some(partition_read) = storage.load_partition_direct(partition_key).await? {
-                // update the memory usage for this partition
-                *memory_usage.borrow_mut() += partition_read.len();
-                // wrap this partition as being accessible
-                let wrapped = MaybeLoaded::Accessible(partition_read);
-                // load this partition
-                partitions.insert(partition_key, wrapped);
             }
         }
         Ok(())
@@ -945,11 +944,13 @@ where
     /// * `generation` - The generation to load these intents as
     /// * `partitions` - The map to load our intents into
     /// * `memory_usage` - The total memory usage of of this shard
+    /// * `stats` - The counts of what this recovery has discarded
     fn replay(
         read: &ReadResult,
         generation: u64,
         partitions: &mut HashMap<u64, MaybeLoaded<Self>>,
         memory_usage: &mut Arc<RefCell<usize>>,
+        stats: &mut RecoveryStats,
     ) -> Result<(), ServerError> {
         // access our data
         let intent = UnsortedIntents::<T>::access(read)?;
@@ -1020,6 +1021,12 @@ where
                 match partitions.get_mut(&update.partition_key) {
                     // update this row
                     Some(partition) => {
+                        // an update onto a deleted row is dropped, but that is the
+                        // delete working rather than data going missing
+                        if partition.is_tombstoned() {
+                            // count this as a drop that cost us nothing
+                            stats.updates_after_delete += 1;
+                        }
                         // get the size of not yet updated partition
                         let old_size = partition.size();
                         // update our row in place if its loaded or by replacement if its not
@@ -1040,10 +1047,14 @@ where
                     // This updates base row is neither resident nor on disk, so the
                     // insert it was built on is gone. Skip it rather than crashing a
                     // shard that would otherwise start.
-                    None => tracing::warn!(
-                        "Skipping update intent for missing partition {}",
-                        update.partition_key
-                    ),
+                    None => {
+                        tracing::warn!(
+                            "Skipping update intent for missing partition {}",
+                            update.partition_key
+                        );
+                        // this one really is data we no longer have
+                        stats.orphaned_updates += 1;
+                    }
                 }
             }
         }
@@ -1057,14 +1068,20 @@ where
     /// * `loaded` - The partitions loaded from their current archives
     /// * `key` - The key of the partition to apply intents to
     /// * `intents` - The intents to apply to this partition
+    /// * `stats` - The counts of what this compaction has discarded
     fn apply_intents(
         loaded: &mut HashMap<u64, Self>,
         key: u64,
         intents: Vec<Self::Intent>,
+        stats: &mut RecoveryStats,
     ) -> ShouldPrune {
         // start from this partitions current archive copy if it has one, since an
         // update can target a row whose insert was compacted generations ago
         let mut maybe_partition = loaded.remove(&key);
+        // a delete here drops the partition outright rather than tombstoning it, so
+        // without remembering that this batch is what dropped it an update that
+        // correctly lost its row looks exactly like one whose insert we lost
+        let mut deleted_here = false;
         // apply all of our intents to this partition
         for intent in intents {
             // apply this intent to our partition
@@ -1072,20 +1089,35 @@ where
                 UnsortedIntents::Insert(row) => {
                     // insert a new partition
                     maybe_partition = Some(Self::new(key, row));
+                    // this partition is live again, so a later miss is not a delete
+                    deleted_here = false;
                 }
-                UnsortedIntents::Delete { .. } => maybe_partition = None,
+                UnsortedIntents::Delete { .. } => {
+                    maybe_partition = None;
+                    // remember that this batch is what took this partition
+                    deleted_here = true;
+                }
                 UnsortedIntents::Update(update) => {
                     // apply this update if we have a partition
                     match &mut maybe_partition {
                         Some(partition) => {
-                            partition.update(&update);
+                            // a false here means this partition is a tombstone, which
+                            // is the delete working rather than data going missing
+                            if !partition.update(&update) {
+                                // count this as a drop that cost us nothing
+                                stats.updates_after_delete += 1;
+                            }
                         }
+                        // a delete in this batch took this partition, so dropping
+                        // this update is that delete working rather than a loss
+                        None if deleted_here => stats.updates_after_delete += 1,
                         // this updates base row is gone, so there is nothing to
                         // apply it to and nothing we can do but drop it
-                        None => tracing::warn!(
-                            "Skipping update intent for missing partition {}",
-                            key
-                        ),
+                        None => {
+                            tracing::warn!("Skipping update intent for missing partition {}", key);
+                            // this one really is data we no longer have
+                            stats.orphaned_updates += 1;
+                        }
                     }
                 }
             }

@@ -3,8 +3,16 @@
 A severity-ranked index of open defects on the `ZeroCopyResponses` branch. Each entry names
 the symptom, the cause, and a `file:line`.
 
-**How these were established.** Everything here comes from reading the source unless an entry
-says otherwise. Line numbers drift.
+**How these were established.** Everything currently here comes from reading the source. Entries
+that were later confirmed by reproduction say so on their resolved page, and item 14 was the last
+one on this page to carry that note before it moved
+([Resolved #14](resolved/empty-rotated-logs.md#evidence)). Line numbers drift.
+
+Reading is enough to find a defect and not always enough to characterise it. Item 13 was filed
+from a reading that called its panic reachable; trying to reproduce it showed the panic was
+latent and that the line's live cost was a different one
+([Resolved #13](resolved/eviction-log-underflow.md#evidence)). An entry here is a claim about the
+source, not yet a claim about a running server.
 
 Performance findings are catalogued separately in [Optimizations](optimizations.md), and what the
 test suite does and does not reach is in [Test Coverage](test-coverage.md).
@@ -12,138 +20,41 @@ test suite does and does not reach is in [Test Coverage](test-coverage.md).
 Defects that have been fixed move to [Resolved Issues](resolved-issues.md), one page each,
 carrying the reasoning and the invariants the fix depends on. Item numbers are shared between
 the two pages and never reused, so a number appears on exactly one of them — which is why this
-list starts at 9 and skips 10, 26, and 39. The exceptions are items 9, 20, and 24, which were
-only partly fixed: the open remainder is here and the rest is there.
+list starts at 15 and skips 26, 31, and 39. The exceptions are items 20 and 24, which were only
+partly fixed: the open remainder is here and the rest is there. Item 9 was a third exception
+until its second half was fixed, and is now on the resolved page alone.
 
 **Baseline as of writing:** `cargo check --workspace --all-targets` passes with warnings;
-`cargo test --workspace` passes — 132 integration tests (one ignored), 159 `shoal-core` unit
-tests, 10 doctests. That is up from 14 and 32 with the addition of SHQL coverage
+`cargo test --workspace` passes — 136 integration tests (one ignored), 178 `shoal-core` unit
+tests, 11 doctests. That is up from 14 and 32 with the addition of SHQL coverage
 ([SHQL](../api/shql.md#testing)), the restart and eviction tests added with items 4 and 5, the
 limit and cross-shard coverage added with item 7, the row-order and `IN`/`OR` coverage added
-with items 26 and 39, the sort-key selection coverage added with item 8, and the range coverage
-added with [F1](../features/sort-key-ranges.md). The counts before F1 were 115, 129, and 8, and
-before item 8 were 105 and 116; they were re-run and confirmed unchanged when items 31–38 were
-added.
+with items 26 and 39, the sort-key selection coverage added with item 8, the range coverage
+added with [F1](../features/sort-key-ranges.md), the multi-log recovery and recovery
+counting coverage added with items 31 and 9, the tablet map and storage marker coverage
+added with items 11 and 12, the eviction accounting coverage added with item 13, and the empty
+rotated log coverage added with item 14. The counts before item 14 were 135, 178 and 11;
+before item 13 were 135, 177 and 11; before items 11 and 12 were 133, 168 and 10; before
+items 9 and 31 were 132, 159 and 10; before F1 they were 115, 129, and 8, and before item 8
+were 105 and 116.
 
 ---
 
 ## High — data loss and silent failure
 
-### 9. Orphaned update intents are dropped silently
+*Nothing is currently filed at this severity.* Items 9 and 31 were the last two and are both
+[resolved](resolved-issues.md).
 
-The panics this item was filed for are
-[fixed](resolved/orphaned-update-intents.md). What is left is the observability half: an intent
-whose base row is genuinely gone is dropped with only a `warn!`
-(`.../persistent/unsorted.rs:1014`, `:1056`), and nothing counts it. There is no metric, no
-error surfaced to an operator, and no way to answer "did this restart lose anything?" other
-than grepping logs.
-
-That is the same gap as the mid-log corruption case in
-[Recovery](../storage/recovery.md#truncation-and-corruption), and both want the same thing: a
-counter of intents discarded during recovery, reported once at the end of startup.
-
-### 31. Multi-log recovery discards already-replayed intents
-
-`FileSystem::read_intents` (`.../storage/fs.rs:449-463`) replays every inactive intent log into
-one shared `partitions` map, in generation order, before replaying the active log. Each
-`replay_intent_log` (`.../storage/fs.rs:191-213`) runs its whole **scan** pass over the log
-before its **replay** pass, and `scan` inserts unconditionally:
-
-```rust
-// wrap this partition as being accessible
-let wrapped = MaybeLoaded::Accessible(partition_read);
-// load this partition
-partitions.insert(partition_key, wrapped);
-```
-
-`.../persistent/sorted.rs:1177-1179`, and the same shape in `.../persistent/unsorted.rs`.
-
-A partition that an earlier generation's log already replayed into as `MaybeLoaded::Loaded` is
-overwritten by the copy read back from the archive, and every intent replayed into it is lost.
-The archive predates those intents by definition — that is why they were still in a log.
-
-The memory accounting drifts with it: `sorted.rs:1175` adds the archive read's length to
-`memory_usage` without subtracting whatever it displaced.
-
-Reaching this needs two or more inactive logs — that is, compactions that were interrupted, which
-is exactly the crash case recovery exists for — the same partition touched in both, an `Update`
-intent in the later one, and the partition present in an archive. Single-log recovery is
-unaffected, which is why `update_intent_replay` does not catch it.
-
-**Fix direction:** `scan` should leave an existing entry alone rather than overwrite it. The
-distinction it needs is the one `load_partition` (`sorted.rs:256-295`) already draws between a
-`Vacant` and an `Occupied` entry — and note that the `Occupied` arm there has its own gap,
-[item 30](#30-a-sorted-partition-load-can-be-silently-thrown-away). Both are the same underlying
-question: what should happen when a copy read from disk meets a copy already in memory.
+One thread they shared is still worth pulling. Both were about what happens when a copy read
+from disk meets a copy already in memory: item 31's `scan` overwrote the in-memory copy, and
+[item 30](#30-a-sorted-partition-load-can-be-silently-thrown-away) is the `Occupied` arm of
+`load_partition` (`sorted.rs:256-295`) throwing the disk copy away instead. Item 31 answered the
+question for recovery by removing the collision entirely — nothing loads after a replay — which
+leaves item 30 as the remaining place the question is answered badly.
 
 ---
 
 ## Medium — robustness
-
-### 11. Ring lookup panics on an empty ring
-
-`shoal-core/src/server/ring.rs:60-65`
-
-```rust
-None => self.ring.range((Included(&0), Excluded(&partition))).next().unwrap(),
-```
-
-The wrap-around fallback `.unwrap()`s. If a query is routed before any `ServerMsg::Join` has
-been processed — a client connecting during the startup window — the shard panics. Each shard
-builds its ring from broadcasts, so the window is real if small.
-
-### 12. Vnodes provide no load smoothing
-
-`shoal-core/src/server/ring.rs:26-44`
-
-Every shard lays down 1000 vnodes at the same fixed stride `RING_JUMP = u64::MAX / 1000`, with
-only the starting offset varying by name hash. Because all combs share one period, the ring
-repeats every `RING_JUMP` with exactly N vnodes per period, so **each shard's share is
-identical to what it would get from a single vnode.**
-
-The variance reduction that vnodes normally provide is absent; shard shares are the gaps
-between N uniformly random points on a circle. For 16 shards the busiest should be expected to
-own roughly 3× the mean rather than ~1.1×. The 1000 entries cost a `BTreeMap` of 1000 × N per
-shard and buy nothing.
-
-**Fix direction:** hash `(name, i)` per vnode so positions are independent.
-
-Full reasoning in [Partitioning](../architecture/partitioning.md#the-vnodes-do-not-do-what-vnodes-usually-do).
-
-### 13. Eviction logging can underflow
-
-`.../persistent/sorted.rs:1106`, `.../persistent/unsorted.rs:811`
-
-```rust
-event!(Level::INFO, pre, post, diff = pre - post, ...);
-```
-
-A plain `usize` subtraction inside a log statement. Any accounting drift leaving `post > pre`
-panics the shard — from the logging, not the logic. Given the accounting inconsistencies in item
-22, this is reachable.
-
-### 14. Empty rotated intent logs are never deleted
-
-`.../fs/compactor.rs:316-338`
-
-```rust
-let partitions = if self.changes.is_empty() {
-    Vec::default()
-} else {
-    ...
-    glommio::io::remove(path).await?;
-    partitions
-};
-```
-
-The removal is inside the branch that had something to compact. A rotated log that produced no
-changes — an empty log, or one whose records all failed to parse — is left on disk forever and
-replayed on every startup. Since startup always forces a rotation
-(`.../persistent/sorted.rs:218`), a table that is never written accumulates one orphan file per
-restart.
-
-The generation is now reported either way (`.../fs/compactor.rs:334-336`), so an empty log no
-longer pins everything tagged with its generation — but the file itself still accumulates.
 
 ### 15. No backpressure anywhere
 
@@ -169,7 +80,6 @@ bounds in-flight writes only.
 | `shard.rs:493` | Reply for a client with no channel |
 | `shard.rs:623` | Client UUID collision |
 | `comms.rs:53`, `:72` | Unknown shard contact |
-| `ring.rs:65` | Empty ring (item 11) |
 | `.../fs/stream.rs:108`, `:115` | WAL write or notification failure |
 | `.../fs/loader.rs:138`, `:158` | Any loader task error |
 | `shared/traits.rs:54` | rkyv serialization failure |
@@ -305,9 +215,10 @@ fn get_unique_port() -> u16 { PORT_COUNTER.fetch_add(1, Ordering::SeqCst) }
 
 The counter is per test *binary*. Cargo runs binaries in parallel, so every binary starts handing
 out 13000, 13001, 13002 at the same time. Measured by capturing the `listening on` line
-(`conf.rs:111`) from each binary in turn: `persistent_sorted_table` binds 13000-13034,
-`persistent_unsorted_table` binds 13000-13021, and **all 22 of the unsorted binary's ports are
-also bound by the sorted one**.
+(`conf.rs:111`) from each binary in turn: `persistent_sorted_table` binds 13000-13085,
+`persistent_unsorted_table` binds 13000-13024, and **every one of the unsorted binary's ports is
+also bound by the sorted one**. Both ranges grow with every test that restarts a server — they
+were 13034 and 13021 when this was filed — so re-measure rather than trusting the numbers.
 
 The bind does not fail, which is what makes this worth an entry. Glommio sets `SO_REUSEPORT` on
 listening sockets (`glommio/src/net/tcp_socket.rs:135`), so the second bind succeeds silently and
@@ -315,7 +226,7 @@ the kernel load balances incoming connections between the two servers. A client 
 therefore have its connection handed to a server owned by another test — a different schema, a
 different temp dir — with no error anywhere to say so.
 
-`persistent_sorted_table.rs:626` additionally hardcodes `let port = 13900`, so two concurrent runs
+`persistent_sorted_table.rs:812` additionally hardcodes `let port = 13900`, so two concurrent runs
 of that one binary collide with each other regardless of the counter.
 
 **This has not been observed to fail.** `cargo test --workspace` was run four times while
@@ -555,24 +466,25 @@ Worth reading against the edition too: this becomes correct for free under editi
 temporary scoping, which means an edition bump would silently change the failure mode rather than
 the code.
 
-### 37. `Ring::add` is not idempotent
+### 43. The storage marker only guards the default storage root
 
-`shoal-core/src/server/ring.rs:26-44` appends to `self.shards` and lays down 1000 vnodes every
-time it is called, with no check for a shard name it already knows:
+`shoal-core/src/server.rs` claims `storage.default.filesystem.latency_sensitive.path`, and that
+one path alone, with the shard count that wrote it
+([items 11, 12](resolved/tablet-ring.md)).
 
-```rust
-self.shards.push(shard);
-let shard_id = self.shards.len();
-```
+A table with its own `storage.tables` entry pointing somewhere else is not covered. So a
+configuration that overrides one table's path keeps the guard for every other table and loses it
+for that one: reopening with a changed `cores` refuses to start only if the default root was
+also written, and if it was not, the overridden table's data is stranded exactly as silently as
+before.
 
-A `Join` broadcast that arrives twice for the same shard counts that shard twice in `shards` and
-rewrites its 1000 vnodes to point at the new index, leaving the old index in `shards` with nothing
-on the ring pointing at it. The ring's shape therefore depends on `Join` being delivered exactly
-once, which nothing guarantees — `join_cluster` (`shard.rs:397-403`) is only called from `init`
-today, so the invariant holds by call site alone.
+Found while building the marker rather than by reading the storage config, which is why it is
+recorded here instead of being fixed there — covering it properly means claiming every distinct
+root a config names, and deciding what a marker means when two tables disagree.
 
-Compounds with [item 12](#12-vnodes-provide-no-load-smoothing): both are reasons the ring's
-distribution is not what the vnode count suggests.
+**Fix direction:** collect the distinct roots across `storage.default` and every `storage.tables`
+entry, and claim each one. The shard count is the same for all of them, so the file's contents do
+not change — only how many are written.
 
 ---
 
@@ -604,23 +516,22 @@ failure. Any change touching loader construction should be read against this.
 
 ## Suggested triage order
 
-1. **Item 31** — the only item here that loses committed data. It needs a crash to reach, which is
-   the case recovery exists for, and the fix is small.
-2. **Item 38** — not a production defect, but the test suite is what every other fix on this page
+1. **Item 38** — not a production defect, but the test suite is what every other fix on this page
    is judged by, and right now two of its binaries can silently serve each other's traffic. Worth
    doing before the fixes below rather than after them.
-3. **Items 11 and 16** — hot-path panics, and the empty-ring window a client can hit during
+2. **Items 11 and 16** — hot-path panics, and the empty-ring window a client can hit during
    startup.
-4. **Item 14** — empty rotated logs accumulating on disk and being replayed every startup.
-5. **Items 27 and 42** — data that SHQL cannot reach at all: a partition key containing a quote,
+3. **Items 27 and 42** — data that SHQL cannot reach at all: a partition key containing a quote,
    and a composite sort key. Item 42 is the sharper of the two now that
    [item 8](resolved/sort-keys.md) is fixed, since a sort key is a thing you can query with.
-6. **Item 9's remaining half and item 13** — two sides of the same absence: nothing counts what
-   recovery discards, and nothing can observe memory accounting except a log line that panics
-   when it is wrong. Item 13 is the sharper of the two now that
-   [item 6](resolved/memory-accounting.md) is fixed: the accounting it reports on is closer to
-   right, so the log line that panics on it is the remaining hazard.
-7. **Items 32 and 33** — two leaks with one shape: state keyed by something that goes away and is
+4. **Item 22** — the size accounting the whole memory limit rests on, with three different bases
+   for the same field. It moved up this list because the two things that used to sit in front of
+   it are done: [item 6](resolved/memory-accounting.md) fixed the path that destroyed the counter
+   outright, and [item 13](resolved/eviction-log-underflow.md) turned the eviction log into
+   something that reports drift instead of breaking on it. That `drift` field is the instrument
+   for this one — a run under memory pressure now localizes the undercount rather than requiring
+   it to be reasoned about.
+5. **Items 32 and 33** — two leaks with one shape: state keyed by something that goes away and is
    never told. They are cheap together, since a `ClientGone` broadcast is what both want.
 
 Everything that has been fixed, and why it was fixed the way it was, is in

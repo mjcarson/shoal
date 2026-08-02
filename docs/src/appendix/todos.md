@@ -57,9 +57,23 @@ pub enum ShardContact {
 
 `shoal-core/src/server/shard.rs:167-172`
 
-The `match` in `Comms::send` (`comms.rs:46-56`) has one arm. Everything above it — the ring,
-`ShardInfo`, the `Join` broadcast — is already shaped for a multi-node cluster; the transport
+The `match` in `Comms::send` (`comms.rs:46-56`) has one arm. Everything above it — the tablet
+map, `ShardInfo`, the `Join` broadcast — is already shaped for a multi-node cluster; the transport
 and membership are missing. Adding a `Remote` variant is the seam.
+
+The tablet map ([items 11, 12, 37](resolved/tablet-ring.md)) changed what this costs. Ownership is
+now *stored* per tablet rather than derived from a hash, so the multi-node work is to make that
+table authoritative and movable rather than to reimplement routing. Two consequences worth
+knowing before starting:
+
+- **Replication widens the stored value.** `tablets: Vec<u16>` becomes a replica set per tablet,
+  primary first. On a token ring the replica set is a walk that skips vnodes belonging to a node
+  already chosen and filters by rack and DC; with tablets it is simply the value. That is the
+  ugliest part of the equivalent Cassandra code and Shoal does not have to write it.
+- **Somebody has to own the table.** A derived mapping needs no coordination — that is the whole
+  virtue of consistent hashing, and it is what is being given up. Scylla puts the tablet table
+  under Raft. This is less additive than it sounds, since membership and failure detection need
+  consensus anyway.
 
 Also needed for a real cluster: replication (there is exactly one copy of every partition),
 membership and failure detection, and rebalancing.
@@ -67,10 +81,28 @@ membership and failure detection, and rebalancing.
 ### Rebalancing
 
 Today the shard count is part of the on-disk format — intent logs are `Shard-N-active` and
-each shard has its own archive map. Changing `resources.cores` between restarts silently
-strands data ([Partitioning](../architecture/partitioning.md#limitations)). Any fix needs
-partition migration between shards and a way to discover files belonging to shards that no
-longer exist.
+each shard has its own archive map. Changing `resources.cores` between restarts now **refuses to
+start** rather than silently stranding data, since `StorageMeta` records the count a directory was
+written by ([Partitioning](../architecture/partitioning.md#limitations)) — a better failure, but
+not a fix.
+
+Two pieces are needed, in this order.
+
+**Persist the tablet assignment.** `Ring::new` recomputes `i % shard_count` on every start, so a
+tablet is movable in principle only: nothing can move one and have the move survive a restart.
+The map has to become durable state before it can become editable state. It is small — 4096
+entries — and `StorageMeta` is already the file that per-node durable facts belong in.
+
+**Key storage by tablet rather than by shard.** This is the larger half and the reason changing
+`cores` cannot work today. If intent logs and archive maps were named by tablet id instead of by
+`Shard-N`, moving a tablet between cores or nodes would be moving a file and flipping one map
+entry, rather than rehashing everything. It was deliberately not built with the tablet map, for a
+sequencing reason worth recording: what the layout should be depends on how migration streams
+data, and that protocol does not exist yet. Building the layout first risks building the wrong one
+and migrating twice. The tablet id — the name that makes it expressible — now exists either way.
+
+Still needed on top of both: a way to discover files belonging to shards that no longer exist,
+and a rebalancer that decides *when* to move a tablet rather than merely how.
 
 ### Sort-key range predicates — built
 
@@ -204,6 +236,37 @@ connect. A partition load that never completes parks its queries permanently.
 Archives write a size prefix before each partition specifically so a map could be rebuilt by
 scanning — the comment says so (`.../fs/compactor.rs:220-221`). No such path exists, so
 `ShoalError::MapCorruption` is fatal even though every byte of data is intact.
+
+### Observability
+
+Nothing a monitoring system can read exists — no metrics endpoint, no counters, no gauges
+([Observability](../operations/observability.md#what-is-missing)). Two pieces of this were
+carved off by [item 9](resolved/orphaned-update-intents.md) and are worth naming separately,
+because that item deliberately stopped short of both.
+
+**A metrics surface.** `RecoveryStats` is counted per table, summed per shard by the derive
+generated `ShoalDatabase::recovery_stats`, and emitted as one event per shard. The accessor
+exists precisely so something can read the numbers rather than parse them out of logs; nothing
+does. Whatever gets built should expect to carry more than recovery — resident bytes, LRU depth,
+compaction backlog and blocked-query count are the other obvious first residents.
+
+**Aggregating across shards.** The recovery summary is per shard, and there is no pool-wide
+total, because `ShoalPool::start` spawns its shard threads and returns without joining them —
+there is no moment at which every shard has finished starting. Giving the pool that moment is
+the actual work here, and it would be useful well beyond recovery: a readiness endpoint needs
+exactly the same thing.
+
+A third piece is smaller but blocks testing either of the above: `trace::setup` is never called
+by the library, only by the example binary, so no test can observe any event the server emits
+([Test Coverage](test-coverage.md)).
+
+**Promote eviction drift to a `WARN`.** The eviction event now carries a `drift` field — the gap
+between what a pass actually dropped and what the shard counter moved by, which is non zero only
+when the counter had already floored ([Resolved #13](resolved/eviction-log-underflow.md)). It is
+deliberately an `INFO` field rather than a warning, because
+[item 22](known-issues.md#22-size-accounting-inconsistencies) makes drift ordinary and a warning
+would fire on healthy runs. Once item 22 is closed, non zero drift becomes an invariant violation
+and should say so at `WARN`. Doing it before then trains people to ignore it.
 
 ### Archive checksums
 

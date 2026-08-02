@@ -81,9 +81,11 @@ assertion `left == right` failed     // memory usage after a -100 adjustment on 
 
 Not reproduced against a live server. Doing so needs a partition resident *and* an archive
 extent for the same key *and* enough memory pressure for the difference to matter, and the
-counter is not observable from a client — the eviction log line (`.../persistent/sorted.rs:1106`)
-is the only window onto it, and that line has its own defect
-([item 13](../known-issues.md#13-eviction-logging-can-underflow)).
+counter is not observable from a client — the eviction log line
+(`.../persistent/sorted.rs:1075-1092`) is the only window onto it, and that line had its own
+defect ([resolved as item 13](eviction-log-underflow.md)). That fix widened the window: the event
+now reports `drift`, the gap between what an eviction pass actually dropped and what the counter
+moved by, which is the reading a reproduction of this defect would have wanted.
 
 ## The fix
 

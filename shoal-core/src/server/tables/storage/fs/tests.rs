@@ -252,6 +252,89 @@ fn reader_good_then_bad_then_good() {
     });
 }
 
+/// Read an intent log and report whether the reader gave up on a damaged entry
+///
+/// # Arguments
+///
+/// * `path` - The intent log to read
+async fn read_all_truncated(path: &Path) -> bool {
+    // open this log with our reader
+    let mut reader = IntentLogReader::new(&path.to_path_buf())
+        .await
+        .expect("Failed to open log");
+    // read every record it will give us
+    while reader.next_buff().await.expect("Failed to read log").is_some() {}
+    // note whether it stopped on damage before closing it
+    let truncated = reader.truncated;
+    reader.close().await.expect("Failed to close reader");
+    truncated
+}
+
+#[test]
+/// A log that ends in damage is flagged as truncated
+///
+/// Every one of these stops the read the same way a clean end of log does, so
+/// without the flag a caller cannot tell that anything was lost.
+fn reader_flags_damaged_tails() {
+    LocalExecutor::default().run(async {
+        let temp_dir = test_dir();
+        // a partial size header
+        let size_header = temp_dir.path().join("flag-truncated-size");
+        let mut log = entry(b"valid entry");
+        log.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
+        std::fs::write(&size_header, &log).unwrap();
+        assert!(read_all_truncated(&size_header).await);
+        // an entry claiming more data than was written
+        let short_data = temp_dir.path().join("flag-truncated-data");
+        let mut log = Vec::new();
+        log.extend_from_slice(&1000usize.to_le_bytes());
+        log.extend_from_slice(&0u64.to_le_bytes());
+        log.extend_from_slice(&[0u8; 10]);
+        std::fs::write(&short_data, &log).unwrap();
+        assert!(read_all_truncated(&short_data).await);
+        // a size header pointing past the end of the file
+        let oversize = temp_dir.path().join("flag-oversize");
+        std::fs::write(&oversize, 999_999usize.to_le_bytes()).unwrap();
+        assert!(read_all_truncated(&oversize).await);
+        // an entry whose checksum does not match its data
+        let checksum = temp_dir.path().join("flag-bad-checksum");
+        std::fs::write(&checksum, bad_entry(b"some data here", 0xDEAD_BEEF)).unwrap();
+        assert!(read_all_truncated(&checksum).await);
+    });
+}
+
+#[test]
+/// A log that ends the way a healthy log ends is not flagged as truncated
+///
+/// This is the half that matters. A padded log, an empty log and a partly filled
+/// one all stop early by design, and flagging any of them would report data loss
+/// on every clean startup.
+fn reader_does_not_flag_healthy_tails() {
+    LocalExecutor::default().run(async {
+        let temp_dir = test_dir();
+        // a log with nothing in it at all
+        let empty = temp_dir.path().join("flag-empty");
+        std::fs::write(&empty, []).unwrap();
+        assert!(!read_all_truncated(&empty).await);
+        // a log read all the way to its end
+        let valid = temp_dir.path().join("flag-valid");
+        std::fs::write(&valid, entry(b"hello world")).unwrap();
+        assert!(!read_all_truncated(&valid).await);
+        // unwritten space in a partly filled log
+        let zero = temp_dir.path().join("flag-zero-size");
+        std::fs::write(&zero, 0usize.to_le_bytes()).unwrap();
+        assert!(!read_all_truncated(&zero).await);
+        // the padding a partial flush is rounded up with
+        let padded = temp_dir.path().join("flag-padded");
+        let mut log = entry(b"before the pad");
+        log.extend_from_slice(&PAD_SENTINEL.to_le_bytes());
+        log.resize(512, 0);
+        log.extend_from_slice(&entry(b"after the pad"));
+        std::fs::write(&padded, &log).unwrap();
+        assert!(!read_all_truncated(&padded).await);
+    });
+}
+
 // ========================================================================
 // Inactive intent log discovery tests
 // ========================================================================
@@ -347,3 +430,4 @@ fn map_corrupt_hash() {
         }
     });
 }
+

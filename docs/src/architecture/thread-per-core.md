@@ -38,10 +38,14 @@ executor IDs" (`shoal-core/src/server/shard.rs:695`). Shard names become filenam
 neither.
 
 > This makes shard identity **assignment-order dependent**. Shard 0 is whichever executor
-> reached the counter first, not a fixed core. Since the name determines both the ring
-> position and the on-disk filenames, this is fine within a run and fine across runs *as
-> long as the shard count does not change* — see
-> [Partitioning](partitioning.md#limitations).
+> reached the counter first, not a fixed core. The id determines both which tablets the shard
+> owns and its on-disk filenames, so this is fine within a run and fine across runs *as long
+> as the shard count does not change* — which is now checked at startup rather than assumed.
+> See [Partitioning](partitioning.md#limitations).
+>
+> Note the id, not the name, is what routing uses. The vnode ring hashed shard *names* into
+> ring positions; the tablet map assigns by index, and `ShardInfo::name` now only names files
+> and identifies a `Join`.
 
 ## What a shard owns
 

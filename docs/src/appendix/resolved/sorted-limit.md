@@ -235,6 +235,6 @@ giving `exists` the same `MaybeLoaded` treatment is a clean follow-up. *Done* �
 - [Query Execution](../../tables/query-execution.md) — the get loop and the blocked-replay model
 - [Partitions](../../tables/partitions.md) — `MaybeLoaded` and the scan methods
 - [SHQL](../../api/shql.md) — where `LIMIT` is parsed and bound
-- [Partitioning and the Ring](../../architecture/partitioning.md) — how keys are routed to shards
+- [Partitioning and the Tablet Map](../../architecture/partitioning.md) — how keys are routed to shards
 - [Request Lifecycle](../../architecture/request-lifecycle.md) — the fan-out and the reply path
 - [Memory accounting collapsed to zero on a partition load](memory-accounting.md) — the other defect on the load path

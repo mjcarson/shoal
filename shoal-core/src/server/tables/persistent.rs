@@ -2,8 +2,8 @@
 //!
 //! This means that data is retained through restarts at the cost of speed.
 
-mod sorted;
-mod unsorted;
+pub(crate) mod sorted;
+pub(crate) mod unsorted;
 
 use std::cell::RefCell;
 
@@ -134,10 +134,49 @@ pub(crate) fn adjust_memory_usage(memory_usage: &RefCell<usize>, diff: isize) {
     *memory_usage.borrow_mut() = adjusted;
 }
 
+/// Summarize what an eviction pass reclaimed
+///
+/// Both values saturate because the shard counter is an estimate that drifts, so no
+/// ordering between `pre`, `post`, and `removed` may be assumed. A plain subtraction
+/// here panics the shard from a log statement in a debug build and wraps to near
+/// `usize::MAX` in a release one.
+///
+/// # Arguments
+///
+/// * `pre` - Shard memory usage before the eviction pass
+/// * `post` - Shard memory usage after the eviction pass
+/// * `removed` - The total size of the partitions the pass actually dropped
+///
+/// # Returns
+///
+/// The bytes the shard counter moved by, and the bytes the dropped partitions were
+/// accounted for beyond that — non zero only when the counter had already drifted low.
+pub(crate) fn eviction_totals(pre: usize, post: usize, removed: usize) -> (usize, usize) {
+    // what the shard counter actually moved by
+    let reclaimed = pre.saturating_sub(post);
+    // what the dropped partitions were accounted for beyond that, which is only
+    // non zero when the counter had already drifted low and floored at 0
+    let drift = removed.saturating_sub(reclaimed);
+    (reclaimed, drift)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::adjust_memory_usage;
+    use super::{adjust_memory_usage, eviction_totals};
     use std::cell::RefCell;
+
+    #[test]
+    /// An eviction pass summarizes itself without underflowing on a drifted counter
+    fn eviction_logging_cannot_underflow() {
+        // an ordinary pass takes the partitions it dropped off of the counter
+        assert_eq!(eviction_totals(1000, 600, 400), (400, 0));
+        // a counter that had already drifted low floors at 0, so the partitions we
+        // dropped are accounted for more than the counter could give back
+        assert_eq!(eviction_totals(300, 0, 900), (300, 600));
+        // and a counter that somehow grew across the pass reports nothing reclaimed
+        // rather than taking the shard down from a log statement
+        assert_eq!(eviction_totals(600, 1000, 0), (0, 0));
+    }
 
     #[test]
     /// A shrinking partition subtracts its diff instead of wrapping the counter

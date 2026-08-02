@@ -42,7 +42,7 @@ database") oversell the current state:
   ([F1](features/sort-key-ranges.md)) — but that narrows what a partition returns, not which
   partitions can be reached ([Query Execution](tables/query-execution.md)).
 - **No rebalancing.** Shard count is baked into the on-disk file layout. Changing it between
-  restarts strands data ([Partitioning and the Ring](architecture/partitioning.md)).
+  restarts is refused at startup ([Partitioning and the Tablet Map](architecture/partitioning.md)).
 
 Shoal is best understood as a fast single-node partitioned key-value store with a
 persistence layer, on top of which distribution has not yet been built.

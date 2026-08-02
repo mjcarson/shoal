@@ -106,17 +106,19 @@ This is the correct invariant, and it has a consequence:
 
 ```rust
 async fn compact_intent(&mut self, path: PathBuf, generation: u64) -> Result<(), ServerError> {
-    self.sort_intent_log(&path).await?;
+    let truncated = self.sort_intent_log(&path).await?;
     let partitions = if self.changes.is_empty() {
+        // warn if this log was empty because we could not read any of it
+        if truncated { event!(Level::WARN, ..); }
         // this log had nothing to compact so there is nothing to write
         Vec::default()
     } else {
         self.load_partitions_for_intents().await?;
         self.apply_intents().await?;
-        let partitions = self.write_partition().await?;
-        glommio::io::remove(path).await?;
-        partitions
+        self.write_partition().await?
     };
+    // delete our no longer needed inactive intent log, which is safe for both arms
+    glommio::io::remove(path).await?;
     // tell our shard this generation is now durable even if it was empty, since
     // that is what tells our table how far its data has been compacted
     self.send_mark_evictables(generation, partitions).await?;
@@ -124,7 +126,7 @@ async fn compact_intent(&mut self, path: PathBuf, generation: u64) -> Result<(),
 }
 ```
 
-`.../fs/compactor.rs:316-338`
+`.../fs/compactor.rs:324-374`
 
 The `MarkEvictable` is sent unconditionally, even for a log that compacted to nothing. It is
 not only a list of partitions — it is also how a table learns how far its data has been
@@ -151,8 +153,8 @@ generation until some later compaction happened to lift the watermark past it.
         ▼
   archives/<active-uuid>  +  archives/intents/Shard-0
         │
-        │ 5. MarkEvictable ──▶ shard
-        │ 6. remove the inactive log
+        │ 5. remove the inactive log
+        │ 6. MarkEvictable ──▶ shard
         ▼
 ```
 
@@ -165,7 +167,7 @@ while let Some(read) = reader.next_buff().await? {
 }
 ```
 
-`.../fs/compactor.rs:139-149`
+`.../fs/compactor.rs:153-160`
 
 Grouping by partition turns scattered log records into one merge per partition, and preserves
 per-partition ordering because the log is read in order.
@@ -189,7 +191,7 @@ for partition in self.changes.keys() {
 }
 ```
 
-`.../fs/compactor.rs:174-193`
+`.../fs/compactor.rs:184-203`
 
 Read-modify-write per partition. This is the expensive part of compaction and the reason it
 runs on the medium-priority queue: a rotation touching a thousand partitions performs a
@@ -197,7 +199,7 @@ thousand random reads.
 
 ### 3. Apply
 
-`apply_intents` (`.../fs/compactor.rs:194-206`) dispatches to the table type. For sorted
+`apply_intents` (`.../fs/compactor.rs:204-216`) dispatches to the table type. For sorted
 tables:
 
 ```rust
@@ -285,21 +287,36 @@ Note `sync()` here is `DmaStreamWriter::sync`, glommio's, which does flush and f
 `StreamWriter::sync`, which only issues a background write
 ([The Intent Log](intent-log.md#group-commit)). Same name, different guarantee.
 
-### 5. Mark evictable
+### 5. Delete the log
+
+`glommio::io::remove(path)` (`.../fs/compactor.rs:370`), on every path out of the compaction.
+It sits after the write and before the `MarkEvictable`, which is the ordering that matters: the
+log is removed only once `write_partition` has synced both the archive and the map intent, and
+the generation is announced durable only once the log holding it is gone.
+
+~~Only reached when `changes` was non-empty. An intent log that produced no changes is never
+deleted, so it stays on disk and is replayed on every subsequent startup.~~ **No longer true.**
+The removal used to be the last statement of the branch that had partitions to write, so a
+rotation that compacted nothing — which is what every restart of a quiet table produces — left
+its log behind until the next startup swept it. Fixed by
+[item 14](../appendix/resolved/empty-rotated-logs.md), which also made a log the reader could
+read no entries from delete with a warning rather than silently.
+
+The log still gets created, though: a forced rotation happens whether or not the active log holds
+anything ([O21](../appendix/optimizations.md#o21-a-forced-rotation-of-an-empty-intent-log-does-the-whole-rotation-anyway)).
+
+### 6. Mark evictable
 
 `MarkEvictable { generation, table, partitions }` goes back to the shard
-(`.../fs/compactor.rs:279-294`), which routes it to the table's `mark_evictable`. Partitions
+(`.../fs/compactor.rs:306-320`), which routes it to the table's `mark_evictable`. Partitions
 whose generation is now covered are added to the shard LRU as eviction candidates, sorted
 partitions have their now-redundant tombstones swept, and the table advances its record of how
 far its data has been compacted
 ([Memory and Eviction](../tables/memory-and-eviction.md#becoming-evictable)).
 
-### 6. Delete the log
-
-Only reached when `changes` was non-empty. **An intent log that produced no changes is never
-deleted** (`.../fs/compactor.rs:316-338`), so it stays on disk and is replayed on every
-subsequent startup. See
-[Known Issues](../appendix/known-issues.md#14-empty-rotated-intent-logs-are-never-deleted).
+This is last, not fifth as this page used to number it. The removal has always come first on the
+path that had partitions to write; item 14 made that true of the other path too, and the order is
+now an invariant rather than an accident of which branch the code took.
 
 ## Archive compaction
 
@@ -388,7 +405,10 @@ per byte rewritten. It is hardcoded (`.../fs/compactor.rs:336`), as is
 
 ## Limitations
 
-- Empty rotated logs are never deleted and are replayed forever.
+- ~~Empty rotated logs are never deleted and are replayed forever.~~ Deleted like any other
+  rotated log since [item 14](../appendix/resolved/empty-rotated-logs.md). They are still
+  *created* on every forced rotation
+  ([O21](../appendix/optimizations.md#o21-a-forced-rotation-of-an-empty-intent-log-does-the-whole-rotation-anyway)).
 - Compaction thresholds are hardcoded.
 - `load_partitions_for_intents` issues one random read per changed partition with no
   batching, sorting by offset, or readahead.

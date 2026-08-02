@@ -15,7 +15,7 @@ use rkyv::validation::shared::SharedValidator;
 use rkyv::validation::Validator;
 use rkyv::Archive;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::Hasher;
 use std::io::Write;
 use std::path::PathBuf;
@@ -38,7 +38,9 @@ pub use map::ArchiveMap;
 use reader::IntentLogReader;
 use stream::StreamWriter;
 
-use super::{CompactionJob, FlushProgress, IntentReadSupport, StorageSupport};
+use super::{
+    CompactionJob, FlushProgress, IntentReadSupport, RecoveryStats, StorageSupport,
+};
 use crate::server::conf::TableSettings;
 use crate::server::messages::ServerMsg;
 use crate::server::{Conf, ServerError};
@@ -170,46 +172,75 @@ impl<D: ShoalDatabase> FileSystem<D> {
         Ok(())
     }
 
-    /// Replay a single intent log file into partitions
+    /// Read a single intent log file, collecting its entries and what they need loaded
+    ///
+    /// This deliberately does not replay anything. Loading a partition an update
+    /// names overwrites whatever is already in the partition map, so every log has
+    /// to be read, and every partition loaded, before any log is replayed.
     ///
     /// # Arguments
     ///
-    /// * `intent_path` - The path to the intent log file to replay
-    /// * `generation` - The generation to replay these intents as
-    /// * `partitions` - The map of partitions to load intents into
-    /// * `memory_usage` - The memory usage for this shard
-    async fn replay_intent_log<
-        P: IntentReadSupport<R> + PartitionSupport,
-        R: PartitionKeySupport,
-    >(
+    /// * `intent_path` - The path to the intent log file to read
+    /// * `to_load` - The set of partition keys these intents need loaded
+    /// * `stats` - The counts of what this recovery has discarded
+    #[instrument(name = "FileSystem::read_intent_log", skip_all, err(Debug))]
+    async fn read_intent_log<P: IntentReadSupport<R> + PartitionSupport, R: PartitionKeySupport>(
         &self,
         intent_path: &PathBuf,
-        generation: u64,
-        partitions: &mut HashMap<u64, MaybeLoaded<P>>,
-        memory_usage: &mut Arc<RefCell<usize>>,
-    ) -> Result<(), ServerError> {
-        // instance a vec to store our intent reads during the scan phase
+        to_load: &mut HashSet<u64>,
+        stats: &mut RecoveryStats,
+    ) -> Result<Vec<ReadResult>, ServerError> {
+        // instance a vec to store this logs intent reads
         let mut reads = Vec::with_capacity(1000);
         // create an intent log reader
         let mut reader = IntentLogReader::new(intent_path).await?;
-        // iterate over entries and scan for partitions we need to load
+        // iterate over entries and collect the partitions we need to load
         while let Some(read) = reader.next_buff().await? {
-            // load any partitions needed to properly handle updates/deletes
-            <P as IntentReadSupport<R>>::scan(&read, self, partitions, memory_usage).await?;
+            // name any partitions needed to properly handle updates
+            <P as IntentReadSupport<R>>::scan_keys(&read, to_load)?;
             // add this read to our read list
             reads.push(read);
         }
-        // now replay all intents and apply them to partition data
-        for read in reads {
-            if let Err(err) =
-                <P as IntentReadSupport<R>>::replay(&read, generation, partitions, memory_usage)
-            {
-                tracing::warn!("Skipping intent entry that was not fully committed: {err:#?}");
-                continue;
-            }
+        // a reader that stopped on a bad tail dropped everything after it
+        if reader.truncated {
+            // count this log as one we could not read to its end
+            stats.truncated_logs += 1;
         }
         // close our reader
         reader.close().await?;
+        Ok(reads)
+    }
+
+    /// Load every partition our intents need, skipping any we already hold
+    ///
+    /// # Arguments
+    ///
+    /// * `to_load` - The partition keys to load
+    /// * `partitions` - The map of partitions to load into
+    /// * `memory_usage` - The memory usage for this shard
+    #[instrument(name = "FileSystem::load_scanned", skip_all, err(Debug))]
+    async fn load_scanned<P: IntentReadSupport<R> + PartitionSupport, R: PartitionKeySupport>(
+        &self,
+        to_load: HashSet<u64>,
+        partitions: &mut HashMap<u64, MaybeLoaded<P>>,
+        memory_usage: &mut Arc<RefCell<usize>>,
+    ) -> Result<(), ServerError> {
+        // load each partition our intents named
+        for partition_key in to_load {
+            // never load over a partition we already hold, since ours is the newer copy
+            if partitions.contains_key(&partition_key) {
+                continue;
+            }
+            // get this partitions data
+            if let Some(partition_read) = self.load_partition_direct(partition_key).await? {
+                // update the memory usage for this partition
+                *memory_usage.borrow_mut() += partition_read.len();
+                // wrap this partition as being accessible
+                let wrapped = MaybeLoaded::Accessible(partition_read);
+                // load this partition
+                partitions.insert(partition_key, wrapped);
+            }
+        }
         Ok(())
     }
 }
@@ -440,28 +471,63 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
         generation: u64,
         partitions: &mut HashMap<u64, MaybeLoaded<P>>,
         memory_usage: &mut Arc<RefCell<usize>>,
-    ) -> Result<(), ServerError> {
+    ) -> Result<RecoveryStats, ServerError> {
+        // start with nothing discarded
+        let mut stats = RecoveryStats::default();
         // get this tables settings
         let table_conf = Self::get_settings::<R>(conf)?;
         // get our intent log directory for this table
         let intent_dir = table_conf.get_intent_path(R::name());
-        // find and replay any inactive intent logs from interrupted compactions
+        // find any inactive intent logs left by interrupted compactions
         let inactive_logs = find_inactive_intent_logs(&intent_dir, &self.shard_name);
-        for (gen, inactive_path) in &inactive_logs {
+        // our active log is always replayed last, after every generation before it
+        let active_path = intent_dir.join(format!("{}-active", self.shard_name));
+        // build the full ordered list of logs to recover
+        let mut paths: Vec<&PathBuf> = inactive_logs.iter().map(|(_, path)| path).collect();
+        paths.push(&active_path);
+        // read every log up front, since replaying one and then loading a partition
+        // for the next would drop that log straight over what we just replayed
+        let mut to_load = HashSet::with_capacity(1000);
+        let mut logs = Vec::with_capacity(paths.len());
+        for path in paths {
             // log that we are recovering an intent log
-            event!(Level::INFO, msg = "Recovering", gen);
-            self.replay_intent_log::<P, R>(inactive_path, generation, partitions, memory_usage)
+            event!(Level::INFO, msg = "Recovering", path = path.to_str());
+            // read this logs entries and note what they need loaded
+            let reads = self
+                .read_intent_log::<P, R>(path, &mut to_load, &mut stats)
                 .await?;
+            logs.push(reads);
+        }
+        // load every partition our intents named exactly once, before any replay
+        self.load_scanned::<P, R>(to_load, partitions, memory_usage)
+            .await?;
+        // now replay every log in generation order over those partitions
+        for reads in logs {
+            for read in reads {
+                // apply this intent, skipping it if it was never fully committed
+                if let Err(err) = <P as IntentReadSupport<R>>::replay(
+                    &read,
+                    generation,
+                    partitions,
+                    memory_usage,
+                    &mut stats,
+                ) {
+                    tracing::warn!("Skipping intent entry that was not fully committed: {err:#?}");
+                    // count this entry as one we could not replay at all
+                    stats.unreplayable_entries += 1;
+                    continue;
+                }
+            }
+        }
+        // only now that every log has been replayed is it safe to drop any of them,
+        // since a crash part way through this has to be able to start over
+        for (gen, inactive_path) in &inactive_logs {
             // delete this inactive log now that its intents have been replayed
             glommio::io::remove(inactive_path).await?;
             // log that we have finished recovering an intent log
             event!(Level::INFO, msg = "Replayed and removed", gen);
         }
-        // now replay the active intent log
-        let active_path = intent_dir.join(format!("{}-active", self.shard_name));
-        self.replay_intent_log::<P, R>(&active_path, generation, partitions, memory_usage)
-            .await?;
-        Ok(())
+        Ok(stats)
     }
 
     /// Get the type of loader this storage kind requires

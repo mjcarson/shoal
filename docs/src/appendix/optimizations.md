@@ -213,29 +213,35 @@ every `DataFlushed` wakeup — of which there is one per completed write.
 
 ## Recovery
 
-### O7. Startup reads the same archive once per update intent
+### ~~O7. Startup reads the same archive once per update intent~~
 
-`scan` is called once per intent record (`.../fs.rs:196-201`) and, per call, allocates a set sized
-for a thousand keys in order to hold at most one:
+**Done**, as a side effect of fixing [item 31](resolved/multi-log-recovery.md) rather than as an
+optimization in its own right — the correctness fix and this wanted the same change.
+
+`scan` used to be called once per intent record and, per call, allocate a set sized for a
+thousand keys in order to hold at most one:
 
 ```rust
 // build a set of partitions to load from disk
 let mut to_load = HashSet::with_capacity(1000);
 ```
 
-`.../persistent/sorted.rs:1160`, `unsorted.rs:886`
+It then called `load_partition_direct` for that key, which opens, reads, and closes an archive.
+Because the set was per record, nothing deduplicated across records: *N* update intents against
+one partition cost *N* archive reads.
 
-It then calls `load_partition_direct` for that key (`sorted.rs:1173`), which opens, reads, and
-closes an archive. Because the set is per record, nothing dedups across records: *N* update
-intents against one partition cost *N* archive reads.
+`scan` was split into a synchronous `scan_keys` that only names partition keys, and the loading
+moved into `read_intents`, which unions the keys across **every** log and then loads each one
+once. So the deduplication is now across all logs rather than merely across the records of one —
+and doing it only per log was never an option, because loading after a replay is precisely what
+item 31 was.
 
-`replay_intent_log` already walks the whole log once before replaying any of it
-(`.../fs.rs:196-201`), so the partition set could be collected in that existing pass and read once
-per distinct partition.
+The set is allocated once per recovery instead of once per record.
 
-Note in passing that the same loop holds every record's `ReadResult` in memory for the whole log
-(`.../fs.rs:192`, `:200`) before replaying any of them, so recovery's peak memory is the size of
-the log rather than the size of a record.
+Note in passing that recovery still holds every record's `ReadResult` in memory before replaying
+any of them, and now does so for every log at once rather than one log at a time, so peak memory
+went from the size of the largest log to the total size of all logs. That is a deliberate
+trade — see [Recovery](../storage/recovery.md#limitations).
 
 ---
 
@@ -312,33 +318,68 @@ Note also that `write_partition` iterates `self.loaded`, a `HashMap`
 (`.../fs/compactor.rs:223`), so partitions land in the archive in hash order and reads of
 related partitions get no locality from it.
 
+### O21. A forced rotation of an empty intent log does the whole rotation anyway
+
+`compact_if_needed` rotates on `force` without looking at whether the active log holds anything
+(`.../fs.rs:397-440`), and startup always forces one
+(`.../tables/persistent/sorted.rs:218`). A table nobody wrote to therefore pays, per restart per
+shard, a rename, a fresh file for the new active log, a `CompactionJob::IntentLog` that reads a
+zero length file, the `glommio::io::remove` that now deletes it
+([item 14](resolved/empty-rotated-logs.md)), and a `CompactionJob::Archives` behind it — which is
+[O9](#o9-every-intent-log-rotation-walks-the-entire-on-disk-partition-set)'s full walk of the
+on-disk partition set, the expensive part by some margin.
+
+Skipping the rotation when the log is empty is not a local change, which is why item 14 cleaned up
+after the rotation instead of preventing it: the generation counter, `FlushProgress.rotated`, and
+the `MarkEvictable` that advances a table's compacted generation are all keyed off the rotation
+happening. Suppressing the `Archives` job alone — queue it only when a rotation had changes to
+compact — is the cheap two thirds of this and does not touch generations at all.
+
+Startup cost only, not per write, which is why it is here rather than in Known Issues.
+
 ---
 
 ## Routing and memory
 
-### O6. The ring is a 1000×N `BTreeMap` answering a question arithmetic would answer
+### ~~O6. The ring is a 1000×N `BTreeMap` answering a question arithmetic would answer~~ — done
 
-`ring.rs:26-44` builds it, `ring.rs:51-68` searches it, and `find_shard` runs once per partition
-key per query. At 16 shards that is a 16,000-entry `BTreeMap` — pointer-chasing, one allocation
-per node — consulted on the hot path.
+**Taken, with [items 11, 12 and 37](resolved/tablet-ring.md).** The ring was replaced by a tablet
+map: `find_shard` is now a shift and two indexed loads into a 4096-entry `Vec<u16>` — 8 KiB,
+against a 16,000-entry `BTreeMap` — and there is no search at all.
 
-As built it does not need to be a search structure at all. Every shard uses the same fixed stride
-`RING_JUMP`, so the ring is exactly periodic and the owning shard is computable directly; that is
-the same property that makes the vnodes useless in
-[item 12](known-issues.md#12-vnodes-provide-no-load-smoothing). Once item 12 is fixed and positions
-become independent, a search is needed again — but a sorted `Vec<(u64, usize)>` with
-`partition_point` is still strictly better than a `BTreeMap` for a structure that is built once
-and then only read.
+The original entry read:
 
-The two items should be done together: fixing item 12 without touching this doubles down on the
-structure that costs the most.
+> `ring.rs:26-44` builds it, `ring.rs:51-68` searches it, and `find_shard` runs once per partition
+> key per query. At 16 shards that is a 16,000-entry `BTreeMap` — pointer-chasing, one allocation
+> per node — consulted on the hot path.
+>
+> As built it does not need to be a search structure at all. Every shard uses the same fixed stride
+> `RING_JUMP`, so the ring is exactly periodic and the owning shard is computable directly; that is
+> the same property that makes the vnodes useless in item 12. Once item 12 is fixed and positions
+> become independent, a search is needed again — but a sorted `Vec<(u64, usize)>` with
+> `partition_point` is still strictly better than a `BTreeMap` for a structure that is built once
+> and then only read.
+>
+> The two items should be done together: fixing item 12 without touching this doubles down on the
+> structure that costs the most.
+
+It was right that the two had to move together, and right that arithmetic could answer the
+question — but it framed the choice as *periodic ring, so compute* versus *independent positions,
+so search*. Tablets are neither: an explicit assignment table is a third option that is both O(1)
+*and* evenly balanced, which is the combination the entry assumed was unavailable. The reason to
+prefer it is not speed, though — it is that a stored assignment can be **moved**, which a computed
+one cannot, and that is what a distributed Shoal needs.
+
+Still unmeasured, as everything on this page is. The array is small enough to stay cache resident
+where the `BTreeMap` was not, but that is an argument, not a profile.
 
 ### O14. Fixed thousand-element preallocations on per-call paths
 
 - `evict_data` allocates a `Vec::with_capacity(1000)` per table it touches, to hold however many
   victims that table has (`shard.rs:693-696`).
 - `write_partition` allocates `to_mark` at 1000 per call (`.../fs/compactor.rs:219`).
-- The per-record `HashSet` in [O7](#o7-startup-reads-the-same-archive-once-per-update-intent).
+- ~~The per-record `HashSet` in [O7](#o7-startup-reads-the-same-archive-once-per-update-intent).~~
+  Gone — it is allocated once per recovery now.
 
 ### O15. One partition load costs a `dup` and a `close`
 
@@ -365,8 +406,8 @@ per archive for the life of the process.
    with request rate. Everything else gets worse under load; these get worse just by existing
    longer.
 4. **O5** and **O14** — near-free, and worth doing whenever the surrounding code is open.
-5. **O6** — but only together with [item 12](known-issues.md#12-vnodes-provide-no-load-smoothing),
-   since the fix for one determines the right structure for the other.
+
+**O6** has been taken, together with items 11, 12 and 37 as this list said it had to be.
 
 **O2** is deliberately not on this list. It is the largest single win available on the read path
 and also the largest change, because it needs `ResponseAction::Get` to hold something other than

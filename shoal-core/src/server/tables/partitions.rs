@@ -1062,14 +1062,20 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{MaybeRow, SortedPartition};
+    use super::{MaybeRow, SortedPartition, UnsortedPartition};
+    use crate::server::tables::persistent::sorted::replay_update;
+    use crate::server::tables::persistent::unsorted::UnsortedIntents;
     use crate::shared::queries::parser::{FieldRole, TypeValidator};
     use crate::shared::queries::{SortRange, SortSelect, SortedExists, SortedGet, SortedUpdate};
+    use crate::shared::queries::UnsortedUpdate;
     use crate::shared::traits::{
-        PartitionKeySupport, RkyvSupport, ShoalSortedTable, ShoalTableSupport, TableSchemaSupport,
+        PartitionKeySupport, RkyvSupport, ShoalSortedTable, ShoalTableSupport, ShoalUnsortedTable,
+        TableSchemaSupport,
     };
+    use crate::storage::{IntentReadSupport, RecoveryStats, ShouldPrune};
     use deepsize2::DeepSizeOf;
     use rkyv::{Archive, Deserialize, Serialize};
+    use std::collections::HashMap;
     use std::ops::Bound;
 
     /// The smallest sorted row that satisfies the table traits
@@ -1166,6 +1172,101 @@ mod tests {
         }
     }
 
+    /// A row is either sorted or unsorted in a real schema, but implementing both
+    /// here lets the same fixture cover an unsorted partition without a second copy
+    /// of every supporting trait.
+    impl ShoalUnsortedTable for TestRow {
+        fn update(&mut self, update: &UnsortedUpdate<Self>) {
+            self.data = update.update.clone();
+        }
+    }
+
+    /// Apply a batch of intents to an unsorted partition map and report the counts
+    ///
+    /// # Arguments
+    ///
+    /// * `loaded` - The partitions to apply these intents over
+    /// * `intents` - The intents to apply
+    fn apply_unsorted(
+        loaded: &mut HashMap<u64, UnsortedPartition<TestRow>>,
+        intents: Vec<UnsortedIntents<TestRow>>,
+    ) -> (ShouldPrune, RecoveryStats) {
+        // start this batch with nothing discarded
+        let mut stats = RecoveryStats::default();
+        // apply every intent to the one partition these tests use
+        let prune = UnsortedPartition::<TestRow>::apply_intents(loaded, 0, intents, &mut stats);
+        (prune, stats)
+    }
+
+    #[test]
+    /// Compacting an update whose partition is gone counts it as data we lost
+    fn apply_intents_counts_an_orphaned_update() {
+        // no archive copy and no insert, so this update has nothing to land on
+        let mut loaded = HashMap::new();
+        let (prune, stats) = apply_unsorted(
+            &mut loaded,
+            vec![UnsortedIntents::Update(UnsortedUpdate {
+                partition_key: 0,
+                update: "updated".to_owned(),
+            })],
+        );
+        // we ended with no row data, so this partition is pruned
+        assert!(matches!(prune, ShouldPrune::Yes));
+        // and the update we could not apply is counted as loss
+        assert_eq!(stats.orphaned_updates, 1);
+        assert!(!stats.is_clean());
+    }
+
+    #[test]
+    /// Compacting an update onto a partition this batch deleted is not data loss
+    ///
+    /// A delete here drops the partition outright rather than tombstoning it, so
+    /// without tracking the delete this looks identical to an orphaned update.
+    fn apply_intents_separates_deleted_partitions_from_lost_ones() {
+        // insert a partition, delete it, then update it - all in one batch
+        let mut loaded = HashMap::new();
+        let (prune, stats) = apply_unsorted(
+            &mut loaded,
+            vec![
+                UnsortedIntents::Insert(TestRow::new("a")),
+                UnsortedIntents::Delete { partition_key: 0 },
+                UnsortedIntents::Update(UnsortedUpdate {
+                    partition_key: 0,
+                    update: "updated".to_owned(),
+                }),
+            ],
+        );
+        // the delete still wins, so this partition is pruned
+        assert!(matches!(prune, ShouldPrune::Yes));
+        // but the update it swallowed was meant to be dropped
+        assert_eq!(stats.updates_after_delete, 1);
+        assert_eq!(stats.orphaned_updates, 0);
+        assert!(stats.is_clean());
+    }
+
+    #[test]
+    /// An update applied over an existing partition counts as nothing
+    fn apply_intents_counts_nothing_when_it_applies() {
+        // start from a partition that is already on disk
+        let mut loaded = HashMap::new();
+        loaded.insert(0, UnsortedPartition::new(0, TestRow::new("a")));
+        let (prune, stats) = apply_unsorted(
+            &mut loaded,
+            vec![UnsortedIntents::Update(UnsortedUpdate {
+                partition_key: 0,
+                update: "updated".to_owned(),
+            })],
+        );
+        // we still hold live row data so nothing is pruned
+        assert!(matches!(prune, ShouldPrune::No));
+        // and the update landed, so this recovery discarded nothing
+        assert_eq!(stats, RecoveryStats::default());
+        let MaybeRow::Row(row) = &loaded.get(&0).unwrap().row else {
+            panic!("our row was replaced by a tombstone");
+        };
+        assert_eq!(row.data, "updated");
+    }
+
     #[test]
     /// A delete leaves a tombstone behind and reinserting the row takes it away
     fn tombstones_are_counted() {
@@ -1187,6 +1288,62 @@ mod tests {
         // reinserting a deleted row takes its tombstone away
         partition.insert(TestRow::new("a"));
         assert_eq!(partition.tombstones, 1);
+    }
+
+    /// Build an update for one row of our test partition
+    ///
+    /// # Arguments
+    ///
+    /// * `sort_key` - The sort key of the row to update
+    fn update_for(sort_key: &str) -> SortedUpdate<TestRow> {
+        SortedUpdate {
+            partition_key: 0,
+            sort_key: sort_key.to_owned(),
+            update: "updated".to_owned(),
+        }
+    }
+
+    #[test]
+    /// A replayed update that lands on a live row is applied and counted as nothing
+    fn replay_update_applies_to_a_live_row() {
+        // build a partition holding the row our update names
+        let mut partition = SortedPartition::<TestRow>::new(0);
+        partition.insert(TestRow::new("a"));
+        // replay an update over it
+        let mut stats = RecoveryStats::default();
+        replay_update(&mut partition, &update_for("a"), &mut stats);
+        // the update landed, so nothing was discarded
+        assert_eq!(stats, RecoveryStats::default());
+        // and the row carries it
+        let MaybeRow::Row(row) = partition.rows.get(&"a".to_owned()).unwrap() else {
+            panic!("our row was replaced by a tombstone");
+        };
+        assert_eq!(row.data, "updated");
+    }
+
+    #[test]
+    /// A replayed update onto a deleted row is not counted as data loss
+    ///
+    /// `SortedPartition::update` answers `None` for a tombstoned row and for a row
+    /// that was never there, and only one of those means anything went missing.
+    fn replay_update_separates_deleted_rows_from_lost_ones() {
+        // build a partition with one live row and one we then delete
+        let mut partition = SortedPartition::<TestRow>::new(0);
+        partition.insert(TestRow::new("a"));
+        partition.remove(&"a".to_owned());
+        // an update onto the row a delete already took is the delete working
+        let mut stats = RecoveryStats::default();
+        replay_update(&mut partition, &update_for("a"), &mut stats);
+        assert_eq!(stats.updates_after_delete, 1);
+        assert_eq!(stats.orphaned_updates, 0);
+        // so this recovery has still not lost anything
+        assert!(stats.is_clean());
+        // an update onto a row that is simply not there is data we no longer have
+        replay_update(&mut partition, &update_for("never-inserted"), &mut stats);
+        assert_eq!(stats.updates_after_delete, 1);
+        assert_eq!(stats.orphaned_updates, 1);
+        // and that does make this recovery unclean
+        assert!(!stats.is_clean());
     }
 
     /// Build a get for a partition with an optional limit

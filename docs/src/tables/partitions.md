@@ -353,8 +353,15 @@ Both partition types implement:
 
 - `PartitionSupport` — sizing (`.../tables/partitions.rs:262-266`, `:546-553`).
 - `RkyvSupport` — `serialize`/`access`/`deserialize` (`.../tables/partitions.rs:257`, `:541`).
-- `IntentReadSupport<T>` — the recovery and compaction hooks: `scan`, `replay`,
-  `apply_intents`, `partition_key_and_intent` (`.../server/tables/storage.rs:167-210`).
+- `IntentReadSupport<T>` — the recovery and compaction hooks: `scan_keys`, `replay`,
+  `apply_intents`, `partition_key_and_intent` (`.../server/tables/storage.rs`).
+
+`scan_keys` only *names* the partitions an intent needs loaded; the loading itself belongs to
+the storage engine, which does it for every log at once before replaying any of them. It used to
+be a `scan` that loaded as it went, and that cost committed data
+([item 31](../appendix/resolved/multi-log-recovery.md)). `replay` and `apply_intents` each take a
+`&mut RecoveryStats` and count anything they cannot apply
+([Recovery](../storage/recovery.md#what-recovery-discards)).
 
 `IntentReadSupport` is where each table type defines what its intents mean. It is implemented
 on the *partition* type rather than the table, because compaction works on partitions without

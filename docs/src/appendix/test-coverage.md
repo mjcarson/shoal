@@ -3,11 +3,16 @@
 What the test suite reaches, what it does not, and the one place where it is unsound.
 
 **Established by running it.** `cargo check --workspace --all-targets` passes with warnings and
-`cargo test --workspace` passes: **132 integration tests** (one ignored), **159 `shoal-core` unit
-tests**, **10 doctests**. That is up from 115, 129, and 8 with the range coverage added by
-[F1](../features/sort-key-ranges.md), from 105 and 116 with the sort-key selection coverage added
-with [item 8](resolved/sort-keys.md), and from 87, 95, and 6 before the row-order and `IN`/`OR`
-coverage added with [items 26 and 39](resolved/partition-order.md). The two persistent-table
+`cargo test --workspace` passes: **136 integration tests** (one ignored), **178 `shoal-core` unit
+tests**, **11 doctests**. That is up from 135, 178, and 11 with the empty rotated log test added
+by [item 14](resolved/empty-rotated-logs.md), from 135, 177, and 11 with the eviction accounting
+test added by [item 13](resolved/eviction-log-underflow.md), from 133, 168, and 10 with the tablet map and
+storage marker tests added by [items 11, 12 and 37](resolved/tablet-ring.md), from 132, 159, and 10 with the
+multi-log recovery test added by [item 31](resolved/multi-log-recovery.md) and the recovery
+counting tests added by [item 9](resolved/orphaned-update-intents.md), from 115, 129, and 8 with
+the range coverage added by [F1](../features/sort-key-ranges.md), from 105 and 116 with the
+sort-key selection coverage added with [item 8](resolved/sort-keys.md), and from 87, 95, and 6
+before the row-order and `IN`/`OR` coverage added with [items 26 and 39](resolved/partition-order.md). The two persistent-table
 binaries take about 24 seconds each; everything else finishes in well under a second. That is with
 the default parallelism — the sorted binary takes nearly four minutes under `--test-threads=1`,
 because its restart and eviction tests each wait out a real server shutdown.
@@ -23,9 +28,10 @@ are in [Optimizations](optimizations.md).
 
 | Binary | Count | What it reaches |
 | --- | --- | --- |
-| `persistent_sorted_table.rs` | 46, one ignored | insert; `exists` true and false; delete; delete after restart; delete surviving restart; delete and update when the partition is not resident; delete and writes surviving eviction; update; update intent replay; acknowledgement surviving `SIGKILL`; five limit tests; two cross-shard tests; five row-order tests; six sort-key selection tests; two sort-key `exists` tests; six range tests including the archived seek and the memory/disk span; the paging walk; two range `exists` tests; three end-to-end SHQL tests |
+| `persistent_sorted_table.rs` | 48, one ignored | insert; `exists` true and false; delete; delete after restart; delete surviving restart; delete and update when the partition is not resident; delete and writes surviving eviction; update; update intent replay; multi-log recovery; empty rotated log cleanup; acknowledgement surviving `SIGKILL`; five limit tests; two cross-shard tests; five row-order tests; six sort-key selection tests; two sort-key `exists` tests; six range tests including the archived seek and the memory/disk span; the paging walk; two range `exists` tests; three end-to-end SHQL tests |
 | `persistent_unsorted_table.rs` | 12 | insert; delete; update; delete and update when not resident; delete surviving eviction; insert after delete when not resident; zero limit; three multi-partition tests |
 | `shql.rs` | 45 | SHQL parsing and binding against a real schema, including range binding and the role refusals, plus completion suggestions |
+| `storage_meta.rs` | 2 | that a storage directory restarts under the shard count that wrote it and refuses a changed one, end to end through a real server |
 | `completion.rs` (`shoalctl`) | 22 | the completion menu, key handling, query wrapping, and rendering |
 | `lib.rs` (`shoal`) | 7 | the bencher's percentile and summary statistics, and baseline file handling |
 
@@ -40,13 +46,15 @@ exercise durability end to end, and they exist because
 | --- | --- | --- |
 | `shared/queries/parser/tests.rs` | 56 | the SHQL grammar, including `IN` lists, `OR` folding, each range operator, and the folding and refusals around a range |
 | `shared/queries/parser/complete/tests.rs` | 26 | completion suggestion generation, including the range operator tokens |
-| `.../storage/fs/tests.rs` | 15 | the intent log reader against real files |
+| `.../storage/fs/tests.rs` | 17 | the intent log reader against real files, including which tail shapes are damage and which are how a healthy log ends |
 | `.../storage/fs/stream_tests.rs` | 13 | `StreamWriter` alignment, padding, and watermarks |
-| `tables/partitions.rs` | 33 | tombstone bookkeeping, limits, sort-key selection and range selection on `get` and `exists`, the empty-range guard, `merge_from_disk` sizing |
+| `tables/partitions.rs` | 38 | tombstone bookkeeping, limits, sort-key selection and range selection on `get` and `exists`, the empty-range guard, `merge_from_disk` sizing, and the recovery counting that separates a correctly dropped update from a lost one |
 | `shared/queries.rs` | 10 | sort-key normalization, and `SortRange` emptiness and containment |
-| `tables/storage.rs` | 4 | `PendingResponse` release against a durable watermark |
+| `tables/storage.rs` | 6 | `PendingResponse` release against a durable watermark, and `RecoveryStats` merging and cleanliness |
+| `server/ring.rs` | 6 | the tablet map: that an empty one cannot be built, that tablets are split evenly and no shard is starved, that ids come from the high bits so a split stays incremental, and that two independently built maps agree |
+| `server/meta.rs` | 3 | claiming a storage directory, reopening it under the same shard count, and refusing a changed one |
+| `tables/persistent.rs` | 2 | the two pieces of arithmetic on the shard memory counter: that a shrink subtracts instead of wrapping, and that an eviction summarizes itself without underflowing on a drifted counter |
 | `.../storage/fs/map.rs` | 1 | map intent replay |
-| `tables/persistent.rs` | 1 | |
 
 The storage tests run against a real filesystem on purpose — `TempDir::new_in(CARGO_TARGET_TMPDIR)`
 rather than `/tmp` — because glommio silently disables `O_DIRECT` on tmpfs, which would make
@@ -73,13 +81,47 @@ nothing shrinks it. Making `MIN_ARCHIVE_COMPACTABLE` configurable is already an 
 
 This is the largest gap on the page: compaction is the only component that rewrites committed data.
 
+*Intent* log compaction has one test now — `empty_rotated_intent_logs_are_deleted`, added with
+[item 14](resolved/empty-rotated-logs.md) — but it asserts on what the compactor removed, not on
+what it wrote. The archive side above is untouched by it.
+
 ### Multi-log recovery
 
-Every recovery test starts from at most one inactive intent log. Nothing produces the two-or-more
-case, which is exactly where
-[item 31](known-issues.md#31-multi-log-recovery-discards-already-replayed-intents) loses data. A
-test needs two `Shard-N-inactive-*` logs present at startup, the same partition touched in both,
-and an `Update` intent in the later one.
+**Now covered**, by `multi_log_recovery_keeps_earlier_intents`
+(`persistent_sorted_table.rs`), written to reproduce
+[item 31](resolved/multi-log-recovery.md). It is worth reading before writing another recovery
+test, because it works around the thing that made this gap persist: the only way to leave an
+inactive log behind is to interrupt a compaction, and a test cannot interrupt one reliably. So it
+does not try. Two real single-shard servers write two genuine intent logs, and the test then
+arranges them on disk — one renamed to `Shard-0-inactive-1`, the other copied in as the active
+log — into the state an interrupted compaction leaves behind. No `SIGKILL`, no timing.
+
+Writing it also corrected the gap's premise. Two inactive logs are not needed: the active log is
+always replayed last, so one inactive log plus the active log is enough — a single interrupted
+compaction, rather than two. ~~And that is a state a clean shutdown produces.~~ It was, while
+every clean shutdown left an empty inactive log behind; since
+[item 14](resolved/empty-rotated-logs.md) a clean shutdown leaves none, which is why the test
+stages the log by hand rather than arranging for one.
+
+What is still not covered is a recovery spanning *three or more* logs, and one where the same
+partition is touched in three different generations.
+
+### Anything that is only reported through `tracing`
+
+`ShoalPool::start` does not initialize a subscriber — `trace::setup` is called by the example
+binary, not by the server (`shoal/examples/tmdb.rs`). No integration test can therefore observe
+any event the server emits, and none tries.
+
+That is what the per-shard recovery summary added by
+[item 9](resolved/orphaned-update-intents.md) runs into: the counting that feeds it is unit
+tested from four directions, but the event itself — its level, its fields, and that it fires once
+per shard — was verified by hand against the `tmdb` example and has no automated coverage. The
+same is true of the compaction summary and every eviction event.
+
+Closing this needs a subscriber a test can install and read back. The obstacle is that a
+subscriber is process-global while these binaries run their tests in parallel threads
+([below](#the-suite-cannot-safely-run-its-binaries-in-parallel)), so captured events would have
+to be attributed to the test that caused them.
 
 ### The streaming client APIs
 
@@ -146,15 +188,19 @@ line (`conf.rs:111`) from each binary in turn:
 
 | Binary | Ports bound |
 | --- | --- |
-| `persistent_sorted_table` | 13000-13034, plus 13900 and 13901 |
-| `persistent_unsorted_table` | 13000-13021 |
+| `persistent_sorted_table` | 13000-13085, plus 13900 and 13901 |
+| `persistent_unsorted_table` | 13000-13024 |
+
+Both ranges have grown since they were first measured — 13034 and 13021 — because every test that
+restarts a server binds another port. Re-measure them with `-- --nocapture` rather than trusting
+the numbers above; the overlap is the point, not the endpoints.
 
 **Every port the unsorted binary binds is also bound by the sorted one.** The second bind does not
 fail: glommio sets `SO_REUSEPORT` on listening sockets, so it succeeds silently and the kernel load
 balances connections between the two servers. A client can be handed a server belonging to a
 different test, with a different schema and a different temp dir, and nothing reports it.
 
-`persistent_sorted_table.rs:626` also hardcodes `let port = 13900`, which collides with itself
+`persistent_sorted_table.rs:812` also hardcodes `let port = 13900`, which collides with itself
 across concurrent runs of that one binary.
 
 **This has not been observed to fail.** The full suite was run four times while establishing the

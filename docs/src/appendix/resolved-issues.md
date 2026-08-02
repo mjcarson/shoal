@@ -6,8 +6,12 @@ rejected on the way, and — the part that matters when changing this code later
 invariants the fix depends on.
 
 Item numbers are shared with [Known Issues](known-issues.md) and never reused, so a number
-appears on exactly one of the two pages. The exceptions are items 9, 20, and 24, which were
-only partly fixed and appear on both: the fixed half here, the open remainder there.
+appears on exactly one of the two pages. The exceptions are items 20 and 24, which were only
+partly fixed and appear on both: the fixed half here, the open remainder there. Item 9 was one
+of those exceptions until its second half was fixed, and now appears here alone.
+
+Numbers are also grouped when one change closed several items that turned out to share a cause —
+7 and 10, 26 and 39, and 11, 12 and 37 each have one page rather than three.
 
 | # | Issue | What fixed it |
 | --- | --- | --- |
@@ -17,10 +21,14 @@ only partly fixed and appear on both: the fixed half here, the open remainder th
 | 6 | [Memory accounting collapsed to zero on a partition load](resolved/memory-accounting.md) | A merge recomputes its size instead of inheriting the archive extent's, and the signed adjustment stopped going through a cast to `usize` |
 | 7, 10 | [`limit` was ignored by persistent sorted tables](resolved/sorted-limit.md) | One limit-aware scan shared by both partition forms, counted against accumulated rows; queries narrowed per shard instead of broadcast whole; and the splitting shard merges the shares so a limit spans shards |
 | 8 | [Sort keys were accepted and ignored](resolved/sort-keys.md) | Both scans seek their named keys instead of walking — in memory and in an archive — `exists` moved onto the same shared pair, and the keys are sorted and deduplicated once as a query enters the server |
-| 9 | [Recovery and compaction panicked on orphaned update intents](resolved/orphaned-update-intents.md) | `apply_intents` seeds from the archive copy, and both sites warn and skip instead of panicking |
+| 9 | [Orphaned update intents panicked, then were dropped silently](resolved/orphaned-update-intents.md) | `apply_intents` seeds from the archive copy and both sites warn and skip instead of panicking; then a `RecoveryStats` counted every drop, separated loss from a correctly dropped update, and reported it once per shard at the end of startup |
+| 11, 12, 37 | [The ring panicked on an empty lookup and never smoothed load](resolved/tablet-ring.md) | A tablet map replaced the vnode ring: ownership is stored per tablet instead of hashed, the map is built complete from the shard count before any shard starts so an empty or partial one cannot exist, tablet ids come from the high bits so a later split stays incremental, and `add` became idempotent |
+| 13 | [Eviction logging can underflow](resolved/eviction-log-underflow.md) | The subtraction moved into a total `eviction_totals`, and the event reports what the pass actually dropped alongside what the counter moved by, so drift is measured rather than assumed away |
+| 14 | [Empty rotated intent logs were never deleted](resolved/empty-rotated-logs.md) | The removal moved out of the arm that had partitions to write, so a rotation that compacted nothing cleans up after itself, and a log the reader could read nothing from is deleted with a warning rather than silently |
 | 20 | [The storage tests were entirely commented out](resolved/storage-tests.md) | Rewritten against explicit on-disk fixtures and turned back on |
 | 24 | [A bad query could leave the terminal in raw mode](resolved/shoalctl-panic.md) | The parse error is rendered instead of panicking past `ratatui::restore()` |
 | 26, 39 | [A multi-partition get answered in an arbitrary order](resolved/partition-order.md) | `IN` and same-field `OR` replaced an `AND` that meant three different things; rows are slotted per partition on each shard and reordered by the coordinator before the limit is applied |
+| 31 | [Multi-log recovery discarded already-replayed intents](resolved/multi-log-recovery.md) | One prescan across every log before any replay, so no load can overwrite a partition an earlier log replayed into; each partition loaded once; inactive logs deleted only once every replay has succeeded |
 
 ## How a fix gets written down
 

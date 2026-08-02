@@ -16,6 +16,7 @@ mod comms;
 pub mod conf;
 pub mod errors;
 pub mod messages;
+pub mod meta;
 pub mod ring;
 pub mod shard;
 pub mod tables;
@@ -24,6 +25,9 @@ pub mod trace;
 use comms::Comms;
 pub use conf::Conf;
 pub use errors::ServerError;
+pub use meta::StorageMeta;
+
+use crate::server::errors::ShoalError;
 
 use crate::shared::{
     queries::Queries,
@@ -68,6 +72,21 @@ where
     {
         // get the total number of cpus that we have
         let cpus = conf.resources.cpus()?;
+        // a node with no cores has no shards, and so nothing that could own any data
+        //
+        // this is caught here rather than in a shard so that a misconfigured `cores` or
+        // `exclude_cores` says so instead of failing somewhere further in
+        if cpus.is_empty() {
+            return Err(ServerError::Shoal(ShoalError::NoShards));
+        }
+        // check this storage directory was written by the shard count we are starting with
+        //
+        // this happens before any shard is spawned, so a mismatch is refused before a
+        // single write can land in the wrong place
+        StorageMeta::claim(
+            &conf.storage.default.filesystem.latency_sensitive.path,
+            cpus.len(),
+        )?;
         // spawn our shards
         let (shard_handles, should_shutdown) = shard::start::<S>(conf, cpus)?;
         // build the shoal pool object

@@ -191,6 +191,14 @@ Every filename is prefixed by shard name. This is the mechanism by which shard c
 part of the on-disk format — see
 [Partitioning](../architecture/partitioning.md#limitations).
 
+Because of that, **changing `resources.cores` between restarts on the same data directory is
+refused**. `shoal-meta.json` in the storage root records the shard count that wrote the
+directory, and `ShoalPool::start` errors with `ShardCountMismatch` before any shard spawns
+rather than starting and failing to find data that moved to another shard. There is no
+migration: to change the core count, start from an empty directory. The check covers the
+default storage root only, not a per-table `storage.tables` override
+([item 43](../appendix/known-issues.md#43-the-storage-marker-only-guards-the-default-storage-root)).
+
 Directories are created at startup by `setup_paths`, which walks each path component and
 calls `Directory::create` on it (`.../fs/conf.rs:158-171`, `:276-284`). The parent path
 (`/opt/shoal` by default) must already exist and be writable.

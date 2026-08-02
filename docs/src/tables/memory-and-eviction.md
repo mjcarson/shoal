@@ -28,9 +28,15 @@ let new_size = self.memory_usage.borrow().saturating_add_signed(size_diff);
 
 Read the borrow, compute, then write — rather than `*x.borrow_mut() += d` — to avoid holding
 a mutable borrow across the computation. `saturating_add_signed` prevents underflow when a
-partition shrinks. `adjust_memory_usage` (`.../tables/persistent.rs:22-27`) is that shape as a
+partition shrinks. `adjust_memory_usage` (`.../tables/persistent.rs:130-135`) is that shape as a
 function; a signed change must go through it or spell it out, never through a cast to `usize`
 ([Resolved #6](../appendix/resolved/memory-accounting.md)).
+
+**Reading the counter is subject to the same rule as writing it.** `eviction_totals`
+(`.../tables/persistent.rs:144-166`) is its counterpart for the eviction log, and saturates for
+the same reason: the counter is an estimate, so arithmetic on it may not assume an ordering, and
+arithmetic in a log statement may not be able to fail
+([Resolved #13](../appendix/resolved/eviction-log-underflow.md)).
 
 Sizes come from `deepsize2`, which walks heap allocations, so a row's `String` and `Vec`
 contents are counted ([Partitions](partitions.md#sizes)).
@@ -113,7 +119,7 @@ pub fn mark_evictable(&mut self, generation: u64, partitions: Vec<u64>) {
 `.../persistent/sorted.rs:1049-1081`
 
 Driven by `ServerMsg::MarkEvictable`, sent by the compactor after it writes and syncs a batch
-of partitions ([Compaction](../storage/compaction.md#5-mark-evictable)), and by the
+of partitions ([Compaction](../storage/compaction.md#6-mark-evictable)), and by the
 `load_partition` path once blocked queries have been queued.
 
 **Which generation is passed matters more than it looks.** The compactor's message carries the
@@ -204,25 +210,39 @@ Dropping is straightforward:
 ```rust
 pub fn evict(&mut self, victims: Vec<u64>) {
     let pre = *self.memory_usage.borrow();
+    let mut removed = 0;
     for victim in victims {
         if let Some(partition) = self.partitions.remove(&victim) {
-            let decreased = self.memory_usage.borrow().saturating_sub(partition.size());
+            let size = partition.size();
+            let decreased = self.memory_usage.borrow().saturating_sub(size);
             *self.memory_usage.borrow_mut() = decreased;
+            removed += size;
         }
     }
     let post = *self.memory_usage.borrow();
-    event!(Level::INFO, pre, post, diff = pre - post, ...);
+    let (reclaimed, drift) = eviction_totals(pre, post, removed);
+    event!(Level::INFO, pre, post, removed, reclaimed, drift, ...);
 }
 ```
 
-`.../persistent/sorted.rs:1085-1109`
+`.../persistent/sorted.rs:1059-1092`
 
 `partitions.remove` drops the partition. Its data is already in an archive, so a later read
 faults it back in ([Query Execution](query-execution.md#blocking-on-a-disk-read)).
 
-`diff = pre - post` is a plain subtraction on `usize`. Any accounting bug that leaves `post >
-pre` panics here — in the logging statement, not the logic. See
-[Known Issues](../appendix/known-issues.md#13-eviction-logging-can-underflow).
+**The event reports two independent numbers, not one.** `removed` is summed from the partitions
+that were actually dropped; `reclaimed` is how far the shard counter moved; `drift` is the gap
+between them, and is non-zero only when the counter had already drifted low enough to floor at 0.
+Since this event is the only window onto the counter, a drifted counter used to make the window
+report the drift as though it were the truth.
+
+The subtractions live in `eviction_totals` (`.../tables/persistent.rs:144-166`) and both saturate.
+That line used to read `diff = pre - post` — a plain `usize` subtraction inside a log statement,
+which panics the shard on any counter state where `post > pre`, from the logging rather than the
+logic ([Resolved #13](../appendix/resolved/eviction-log-underflow.md)). That state turned out not
+to be reachable through this loop, since every mutation in it saturates; the fix is what keeps it
+unreachable regardless of what the loop is changed into, and the drift reading is what it bought
+along the way.
 
 ## The generation trap
 
@@ -272,12 +292,17 @@ and keeps the eviction path synchronous — at the cost of the generation trap.
 
 ## Limitations
 
-- Memory accounting collapses to zero on the partition-shrink path.
+- ~~Memory accounting collapses to zero on the partition-shrink path.~~ Fixed: a merge recomputes
+  its size and the adjustment is signed ([Resolved #6](../appendix/resolved/memory-accounting.md)).
+  What remains is drift, not collapse.
 - Sorted reads never `promote`, so sorted LRU ordering does not reflect reads.
 - Under sustained writes the limit is unenforceable.
 - The limit is per shard but configured globally.
 - Tombstones and drifting cached sizes make the counter approximate, though sorted tombstones
   no longer accumulate past the generation that compacts them.
-- `diff = pre - post` can panic.
+- ~~`diff = pre - post` can panic.~~ Fixed: the subtractions saturate inside `eviction_totals`
+  ([Resolved #13](../appendix/resolved/eviction-log-underflow.md)). The event now also reports
+  `drift`, so a floored counter is visible rather than silently reported as the truth — but drift
+  is only measured, not repaired.
 - No metrics beyond two `INFO` events; no way to observe resident bytes, LRU depth, or
   eviction rate other than by reading logs.

@@ -4,30 +4,18 @@ Recovery runs per table, per shard, during `PersistentSortedTable::new` /
 `PersistentUnsortedTable::new` — before the shard accepts any connections:
 
 ```rust
-table.storage.read_intents(conf, table.generation, &mut table.partitions, &mut table.memory_usage).await?;
+table.recovery = table.storage.read_intents(conf, table.generation, &mut table.partitions, &mut table.memory_usage).await?;
 table.storage.compact_if_needed::<R>(true).await?;
 ```
 
-`shoal-core/src/server/tables/persistent/sorted.rs:199-211`
+`shoal-core/src/server/tables/persistent/sorted.rs`
 
 Two steps: replay every intent log into memory, then force a compaction so the replayed state
-is written into archives and the logs can be discarded.
+is written into archives and the logs can be discarded. `read_intents` returns a
+[`RecoveryStats`](#what-recovery-discards) recording anything it had to throw away, which the
+shard reports once it has finished starting.
 
 ## Replay order
-
-```rust
-let inactive_logs = Self::find_inactive_intent_logs(&intent_dir, &self.shard_name);
-for (gen, inactive_path) in &inactive_logs {
-    event!(Level::INFO, msg = "Recovering", gen);
-    self.replay_intent_log::<P, R>(inactive_path, generation, partitions, memory_usage).await?;
-    glommio::io::remove(inactive_path).await?;
-    event!(Level::INFO, msg = "Replayed and removed", gen);
-}
-let active_path = intent_dir.join(format!("{}-active", self.shard_name));
-self.replay_intent_log::<P, R>(&active_path, generation, partitions, memory_usage).await?;
-```
-
-`shoal-core/src/server/tables/storage/fs.rs:439-458`
 
 Sealed logs first, oldest generation first, then the active log:
 
@@ -55,72 +43,77 @@ inactive_logs.sort_by_key(|(gen, _)| *gen);
 Ordering is essential — intents are not commutative. An insert followed by a delete in a later
 generation must not be replayed the other way round.
 
-Sealed logs exist only when a crash interrupted compaction between `refresh` and the
-compactor's `remove`. In a clean shutdown there are none.
+A sealed log is the mark of a crash that interrupted compaction between `refresh` and the
+compactor's `remove`. Finding one at startup is a diagnostic, and it is worth treating as one.
+
+~~But not always, because an empty rotated log is never removed at all. A clean shutdown leaves a
+zero byte one behind, so the presence of an inactive log does not by itself mean a compaction was
+interrupted.~~ **No longer true.** The compactor used to remove a log only on the branch that had
+partitions to write, so every clean shutdown left a zero byte `Shard-N-inactive-1` behind and the
+signal meant nothing. Fixed by
+[item 14](../appendix/resolved/empty-rotated-logs.md) — a rotation that compacts nothing now
+deletes its log too.
 
 > This uses blocking `std::fs::read_dir` rather than glommio IO, with a comment noting it
-> "only runs during startup recovery" (`.../fs.rs:194`). Fine here; it would block the
-> executor anywhere else.
+> "only runs during startup recovery". Fine here; it would block the executor anywhere else.
 
-Note that inactive logs are deleted *immediately after replay*, before the forced compaction
-that follows. A crash in that window loses their contents, since the state exists only in
-memory at that point. The window is small but real.
+~~Note that inactive logs are deleted *immediately after replay*, before the forced compaction
+that follows. A crash in that window loses their contents, since the state exists only in memory
+at that point.~~ **No longer true.** Every log is deleted only after every log has been replayed,
+which is the fourth phase below. A crash part way through recovery now leaves all of them on disk
+and recovery starts over. Changed by
+[item 31](../appendix/resolved/multi-log-recovery.md).
 
-## The two-pass replay
+## The three-phase replay
 
-Each log is read twice:
+Recovery reads **every** log before it replays **any** of them:
 
-```rust
-let mut reads = Vec::with_capacity(1000);
-let mut reader = IntentLogReader::new(intent_path).await?;
-// pass 1: scan
-while let Some(read) = reader.next_buff().await? {
-    <P as IntentReadSupport<R>>::scan(&read, self, partitions, memory_usage).await?;
-    reads.push(read);
-}
-// pass 2: replay
-for read in reads {
-    if let Err(err) = <P as IntentReadSupport<R>>::replay(&read, generation, partitions, memory_usage) {
-        tracing::warn!("Skipping intent entry that was not fully committed: {err:#?}");
-        continue;
-    }
-}
+```
+phase 1  read every log once, in generation order, collecting each log's entries
+         and unioning the partition keys their Update intents name
+phase 2  load every collected key exactly once, skipping any key already held
+phase 3  replay every log's entries, in the same generation order
+phase 4  delete the inactive logs
 ```
 
-`.../fs.rs:147-180`
+`.../storage/fs.rs`, `read_intents`
 
-**Why two passes.** `Update` intents carry only changed fields, so replaying one requires the
-base partition. `scan` looks ahead for update intents and pre-loads their partitions off disk:
+**Why the loading is separate.** `Update` intents carry only changed fields, so replaying one
+requires the base partition. `scan_keys` names the partitions an update needs:
 
 ```rust
 match intent {
     ArchivedSortedIntents::Insert(_) | ArchivedSortedIntents::Delete { .. } => (),
     ArchivedSortedIntents::Update(update) => { to_load.insert(update.partition_key.to_native()); }
 }
-for partition_key in to_load {
-    if let Some(partition_read) = storage.load_partition_direct(partition_key).await? {
-        *memory_usage.borrow_mut() += partition_read.len();
-        partitions.insert(partition_key, MaybeLoaded::Accessible(partition_read));
-    }
-}
 ```
-
-`.../persistent/sorted.rs:1081-1112`
 
 Inserts need nothing (they carry the whole row); deletes need nothing (a tombstone is written
 unconditionally). Only updates need to read.
 
-`load_partition_direct` bypasses the loader task and reads synchronously
-(`.../fs.rs:523-539`) — during startup there is no shard loop to post a `ServerMsg::Partition`
-back to.
+**Why the phases, and not per-log passes.** This used to be two passes *per log* — scan a log,
+replay it, move to the next. Loading a partition writes an archive copy into the partition map,
+and an archive copy is by definition older than any intent still sitting in a log, so from the
+second log onward the scan pass was overwriting partitions the previous log had just replayed
+into. That was [item 31](../appendix/resolved/multi-log-recovery.md), and it lost committed data
+silently. Doing all the loading before any of the replaying removes the collision rather than
+guarding against it, which is why the ordering is stated as an invariant on that page:
 
-The whole log is held in memory as a `Vec<ReadResult>` between passes. Replay memory is
-therefore proportional to log size, bounded by `intent_log_size` (default 10 MiB) per table
-per shard.
+> **No scan pass may ever run after a replay pass.**
 
-`scan` allocates a fresh `HashSet::with_capacity(1000)` per record to hold at most one key
-(`.../persistent/sorted.rs:1090`) — a per-record allocation of a 1000-slot set for a
-single-element lookup.
+Loading once across all logs, rather than once per log, also fixed a `memory_usage` drift: the
+key set was previously rebuilt per *entry*, so two updates naming the same partition charged it
+twice.
+
+`load_partition_direct` bypasses the loader task and reads synchronously — during startup there
+is no shard loop to post a `ServerMsg::Partition` back to. It also skips any key already in the
+partition map, so a copy read from disk can never displace a newer one.
+
+Every log's entries are held in memory as a `Vec<ReadResult>` until phase 3. Replay memory is
+therefore proportional to the total size of all logs, each bounded by `intent_log_size` (default
+10 MiB) per table per shard. That is a change: it used to be the size of the largest single log.
+The count of inactive logs is the count of interrupted compactions, normally zero or one, so the
+difference is small — but it is a real one.
 
 ## Replaying an intent
 
@@ -156,11 +149,21 @@ An `Accessible` partition is a complete archive copy, so once deserialized the i
 is authoritative.
 
 The unsorted variant used to be less forgiving — an update whose partition was absent panicked
-outright, taking down a shard on the one path where that is least recoverable. It now warns
-and skips the intent, which is reachable whenever an update's base row was compacted into an
-archive in an earlier generation *and* `scan`'s `load_partition_direct` found nothing, for
-instance if the map entry was lost. See
+outright, taking down a shard on the one path where that is least recoverable. It now warns,
+counts and skips the intent, which is reachable whenever an update's base row was compacted into
+an archive in an earlier generation *and* `load_partition_direct` found nothing, for instance if
+the map entry was lost. See
 [Resolved Issues #9](../appendix/resolved/orphaned-update-intents.md).
+
+The sorted variant used to be the *quieter* of the two: it applied an update with
+`partition.update(&update).unwrap_or(0)`, which discards a miss without so much as a warning.
+Both now go through the same classification, because `SortedPartition::update` answers `None`
+for two different situations and only one of them is a problem:
+
+| What is under the sort key | What it means | Counted as |
+| --- | --- | --- |
+| `MaybeRow::Tombstone` | A delete already took this row; the update was *meant* to be dropped | `updates_after_delete` |
+| Nothing at all | This row's insert is gone | `orphaned_updates`, and a `warn!` |
 
 Unsorted `Delete` intents replay into a tombstone rather than a removal:
 
@@ -176,39 +179,77 @@ the row, and a `remove` leaves nothing to shadow it with.
 
 ## Truncation and corruption
 
-`IntentLogReader::next_buff` (`.../fs/reader.rs:41-100`) treats every anomaly as end of log:
+`IntentLogReader::next_buff` (`.../fs/reader.rs`) treats every anomaly as end of log, and marks
+itself `truncated` for the ones that mean something was damaged rather than that the log simply
+ended:
 
-| Condition | Action |
-| --- | --- |
-| File is empty | `None` |
-| Fewer than 8 bytes of size header | warn, `None` |
-| `size + 8` exceeds remaining bytes | `None` (padding past the last record) |
-| `size == 0` | `None` |
-| Fewer than 8 bytes of checksum | warn, `None` |
-| Short payload | warn, `None` |
-| Checksum mismatch | warn, `None` |
-| Otherwise | `Some(read)` |
+| Condition | Action | `truncated` |
+| --- | --- | --- |
+| File is empty | `None` | no |
+| Fewer than 8 bytes of size header | warn, `None` | yes |
+| `size + 8` exceeds remaining bytes, size nonzero | warn, `None` | **yes** |
+| `size + 8` exceeds remaining bytes, size zero | `None` (padding past the last record) | no |
+| `size == 0` | `None` | no |
+| Fewer than 8 bytes of checksum | warn, `None` | yes |
+| Short payload | warn, `None` | yes |
+| Checksum mismatch | warn, `None` | yes |
+| `PAD_SENTINEL` | skip to the next alignment boundary and keep reading | no |
+| Otherwise | `Some(read)` | no |
 
-```rust
-if expected_checksum != actual_checksum {
-    tracing::warn!("Checksum mismatch at position {} ... - treating as end of intent log", ...);
-    return Ok(None);
-}
-```
+**The two rows for `size + 8` exceeding the remaining bytes used to be one row, and calling it
+padding was wrong.** A torn size header lands there too — reading past the end of a file inside
+an already aligned block zero fills rather than returning a short read, so half of a written
+header comes back as a *nonzero* size that cannot possibly fit. A zero size there is the
+unwritten tail of a partly filled log; anything else is an entry whose data was never written.
+This was found by writing the test for the `truncated` flag and watching the truncated-header
+case fail ([item 9](../appendix/resolved/orphaned-update-intents.md)).
 
-`.../fs/reader.rs:87-93`
+**Stopping at the first bad record is right for a torn tail and wrong for mid-log corruption.**
+Direct IO writes whole buffers, so a crash truncates at a buffer boundary and everything before
+it is intact — stopping there loses exactly the uncommitted tail.
 
-**This is right for a torn tail and wrong for mid-log corruption.** Direct IO writes whole
-buffers, so a crash truncates at a buffer boundary and everything before it is intact —
-stopping at the first bad record loses exactly the uncommitted tail.
-
-But the reader cannot distinguish "torn tail" from "one corrupt record with good records
-after it". A single flipped bit mid-log silently discards every subsequent intent, with only
-a `warn!` to show for it. Nothing counts these events, and nothing surfaces them beyond the
-log.
+But the reader cannot distinguish "torn tail" from "one corrupt record with good records after
+it". A single flipped bit mid-log still discards every subsequent intent. ~~Nothing counts these
+events, and nothing surfaces them beyond the log.~~ **They are counted now**: the reader's
+`truncated` flag becomes a `truncated_logs` count, and a shard that recovered with a nonzero one
+says so at `WARN` when it finishes starting. What has *not* changed is the discarding itself —
+the data after the flipped bit is still dropped, it is just no longer dropped in silence.
 
 The `size == 0` case exists because DMA writes are block-aligned: the file may be padded with
 zeros past the last record, and a zero size is that padding.
+
+## What recovery discards
+
+`read_intents` returns a `RecoveryStats` (`.../tables/storage.rs`) counting everything it could
+not apply:
+
+| Counter | Meaning | Loss? |
+| --- | --- | --- |
+| `orphaned_updates` | An update whose base partition was in no archive and in no earlier log | yes |
+| `unreplayable_entries` | An entry that could not be replayed at all | yes |
+| `truncated_logs` | A log whose reader gave up on a damaged entry | yes |
+| `updates_after_delete` | An update onto a row a delete had already taken | **no** |
+
+The last one is counted precisely so the other three can be trusted. An update that lands on a
+deleted row was meant to be dropped, and folding it in with real loss would make the number
+useless. `RecoveryStats::is_clean` ignores it.
+
+Each table keeps its own; `ShoalDatabase::recovery_stats`, generated by the `#[db]` derive, sums
+them across a shard's tables; and `Shard::init` emits one event per shard once every table has
+been replayed — `INFO` when clean, `WARN` with the counts when not:
+
+```
+WARN Shard::init: msg="Recovery discarded data" shard="Shard-0" orphaned_updates=0
+     unreplayable_entries=0 truncated_logs=1 updates_after_delete=0
+```
+
+Per-shard is as far as this goes. `ShoalPool::start` spawns its shard threads and returns without
+joining them, so there is no moment at which every shard has finished starting and a pool-wide
+total could be reported. See [Observability](../operations/observability.md).
+
+Compaction counts the same way but reports separately, because it runs for the life of a shard
+rather than only at startup — a forced compaction at startup is *dispatched* to the compactor
+task, not awaited, so its drops could not be in the startup summary even if they belonged there.
 
 ## Forced compaction
 
@@ -250,18 +291,32 @@ the same value, deletes tombstone rows that are already gone.
 
 **Fail-forward on corruption.** Shoal chooses availability: truncate and start rather than
 refuse to start. For a database with no replication to fall back on, that is defensible, but
-it should be loud, and it is not.
+~~it should be loud, and it is not~~ **it has to be loud, and it now is** — a shard that
+discarded anything says so at `WARN` before it serves a query
+([item 9](../appendix/resolved/orphaned-update-intents.md)). Refusing to start instead was
+rejected on that page: a torn tail is what an ordinary crash leaves behind, so refusing would
+block the common case.
+
+**Load before replay, never during it.** Every partition an update needs is loaded before any
+log is replayed. This is the invariant [item 31](../appendix/resolved/multi-log-recovery.md)
+turns on, and the reason recovery is phased rather than per-log.
 
 ## Limitations
 
-- Mid-log corruption silently discards the remainder of the log.
-- No metric or alert for truncated or corrupt logs.
+- Mid-log corruption discards the remainder of the log. It is now counted and reported, but the
+  data is still discarded.
 - No checksum on archive data, so archive corruption is not detected at all.
 - `MapCorruption` is fatal with no rebuild-by-scan path, even though archives carry size
   prefixes specifically to enable one.
-- Whole logs are buffered in memory between the two replay passes.
-- The unsorted replay path panics rather than skipping an unresolvable update.
-- Inactive logs are deleted before the forced compaction that persists their contents.
+- Every log is buffered in memory until the replay phase, so peak recovery memory is the total
+  size of all logs rather than the largest one.
+- ~~No metric or alert for truncated or corrupt logs.~~ Counted and reported per shard now,
+  though still only as a log event rather than a metric — nothing scrapes it.
+- ~~The unsorted replay path panics rather than skipping an unresolvable update.~~ It warns,
+  counts and skips.
+- ~~Inactive logs are deleted before the forced compaction that persists their contents.~~ They
+  are deleted only after every log has been replayed.
+- Nothing aggregates the per-shard recovery counts into one number for a pool.
 - Durability is only as good as the filesystem underneath. btrfs silently falls back to
   buffered IO for a misaligned O_DIRECT write instead of returning `EINVAL`, so an alignment
   bug in the write path would not surface there — the write-path tests deliberately run

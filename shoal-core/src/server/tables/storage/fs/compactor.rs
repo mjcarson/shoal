@@ -26,7 +26,7 @@ use super::IntentLogReader;
 use crate::server::messages::ServerMsg;
 use crate::server::ServerError;
 use crate::shared::traits::{PartitionKeySupport, RkyvSupport, ShoalDatabase};
-use crate::storage::{CompactionJob, IntentReadSupport, ShouldPrune};
+use crate::storage::{CompactionJob, IntentReadSupport, RecoveryStats, ShouldPrune};
 
 /// The minimum size an active archive must be in order to be considered for compaction
 /// This is 100 Mebibytes
@@ -132,8 +132,16 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
     }
 
     /// Read and sort this intent log by partition
+    ///
+    /// Returns whether this log ended on a damaged entry instead of a clean end of log,
+    /// since a log we read nothing from is deleted either way and the two reasons it
+    /// can be empty are worth telling apart.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The path to the intent log to read
     #[instrument(name = "FileSystemCompactor::sort_intent_log", skip_all, err(Debug))]
-    async fn sort_intent_log(&mut self, path: &PathBuf) -> Result<(), ServerError>
+    async fn sort_intent_log(&mut self, path: &PathBuf) -> Result<bool, ServerError>
     where
         for<'a> <T::Intent as Archive>::Archived: CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
@@ -150,9 +158,11 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             // add our change
             entry.push(intent);
         }
+        // remember whether this reader stopped on damage before we drop it
+        let truncated = reader.truncated;
         // close our reader
         reader.close().await?;
-        Ok(())
+        Ok(truncated)
     }
 
     /// Load all of our partitions from disk
@@ -196,18 +206,35 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
     }
 
     /// Apply our intents to our loaded partitions
+    ///
+    /// A compaction runs for the life of a shard rather than only at startup, so what
+    /// it discards is reported here instead of in the summary a shard emits once it
+    /// has finished starting.
     #[instrument(name = "FileSystemCompactor::apply_intents", skip_all, err(Debug))]
     async fn apply_intents(&mut self) -> Result<(), ServerError> {
+        // start this job with nothing discarded
+        let mut stats = RecoveryStats::default();
         // replay all intents over our partitions
         for (partition, intents) in self.changes.drain() {
             // apply these intents to the correct partition
-            if let ShouldPrune::Yes = T::apply_intents(&mut self.loaded, partition, intents) {
+            if let ShouldPrune::Yes =
+                T::apply_intents(&mut self.loaded, partition, intents, &mut stats)
+            {
                 // this partition should be pruned as it is empty
                 self.loaded.remove(&partition);
                 // this partition is not going to be rewritten, so its old archive entry
                 // has to go too or the map keeps pointing at its pre-delete copy
                 self.removals.push(partition);
             }
+        }
+        // say so loudly if this job could not apply everything it was given
+        if !stats.is_clean() {
+            event!(
+                Level::WARN,
+                msg = "Compaction discarded intents",
+                orphaned_updates = stats.orphaned_updates,
+                updates_after_delete = stats.updates_after_delete,
+            );
         }
         Ok(())
     }
@@ -315,9 +342,18 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         >,
     {
         // read and sort this intent log
-        self.sort_intent_log(&path).await?;
+        let truncated = self.sort_intent_log(&path).await?;
         // check if we have any compacted partitions to write
         let partitions = if self.changes.is_empty() {
+            // warn if this log was empty because we could not read any of it, since
+            // an empty log is otherwise just a rotation that had nothing to rotate
+            if truncated {
+                event!(
+                    Level::WARN,
+                    msg = "Discarding an intent log we could read no entries from",
+                    path = path.to_str()
+                );
+            }
             // this log had nothing to compact so there is nothing to write
             Vec::default()
         } else {
@@ -326,11 +362,12 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             // apply the new intents to our loaded partitions
             self.apply_intents().await?;
             // write our compacted partitions to disk
-            let partitions = self.write_partition().await?;
-            // delete our no longer needed inactive intent log
-            glommio::io::remove(path).await?;
-            partitions
+            self.write_partition().await?
         };
+        // delete our no longer needed inactive intent log, which is safe for both arms
+        // above: write_partition syncs everything it wrote before returning, and a log
+        // we compacted nothing from has nothing left to make durable
+        glommio::io::remove(path).await?;
         // tell our shard this generation is now durable even if it was empty, since
         // that is what tells our table how far its data has been compacted
         self.send_mark_evictables(generation, partitions).await?;

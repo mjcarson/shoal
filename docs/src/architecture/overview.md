@@ -13,7 +13,7 @@ own background tasks. Nothing is shared between shards except channels.
   │ Shoal  │──TCP──────▶│  shard 0 (core 1)   shard 1 (core 2) │
   │ <S>    │            │  ┌───────────────┐  ┌──────────────┐ │
   │        │◀───────────│  │ tcp accept    │  │ tcp accept   │ │
-  └────────┘            │  │ ring routing  │  │ ring routing │ │
+  └────────┘            │  │ tablet routing│  │tablet routing│ │
    bb8 pool             │  ├───────────────┤  ├──────────────┤ │
    + response           │  │ tables        │  │ tables       │ │
      demux              │  │  partitions   │  │  partitions  │ │
@@ -91,7 +91,7 @@ Types that must agree across the wire.
 | File | Contents |
 | --- | --- |
 | `shard.rs` | The shard event loop, TCP relays, query fan-out, eviction trigger. The core of the server. |
-| `ring.rs` | Consistent hash ring mapping partition key → shard. |
+| `ring.rs` | The tablet map: partition key → tablet → owning shard. |
 | `comms.rs` | The channel mesh between shards. |
 | `messages.rs` | `ServerMsg<D>`, the single enum every shard-local event flows through. |
 | `conf.rs` | Configuration. |

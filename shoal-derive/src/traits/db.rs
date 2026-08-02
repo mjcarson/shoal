@@ -51,6 +51,16 @@ pub fn add(
             }
         }
     });
+    // build our recovery stat arms
+    let recovery_stats_arms = fields.named.iter().map(|field| {
+        // get our field ident
+        let field_ident = field.ident.as_ref().unwrap();
+        // fold what this tables recovery discarded into our total
+        quote! {
+            // add this tables counts to the ones we already have
+            stats.merge(self.#field_ident.recovery_stats());
+        }
+    });
     // build our handle query arms
     let handle_arms = fields.named.iter().map(|field| {
         // get our field ident and type
@@ -224,6 +234,15 @@ pub fn add(
                 // spawn this loader if needed
                 #(#spawn_loader_arms)*
                 Ok(())
+            }
+
+            /// Get what replaying every tables intent logs had to discard
+            fn recovery_stats(&self) -> shoal_core::storage::RecoveryStats {
+                // start with nothing discarded
+                let mut stats = shoal_core::storage::RecoveryStats::default();
+                // add in what each of our tables recovery discarded
+                #(#recovery_stats_arms)*
+                stats
             }
 
             /// Handle messages for different table types

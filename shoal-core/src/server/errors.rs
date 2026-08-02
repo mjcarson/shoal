@@ -47,6 +47,8 @@ pub enum ServerError {
     ByteUnitParse(byte_unit::ParseError),
     /// An error converting an integer
     TryFromInt(TryFromIntError),
+    /// An error reading or writing json
+    SerdeJson(serde_json::Error),
 }
 
 // convert all of our external error types to our error type
@@ -175,6 +177,17 @@ impl From<TryFromIntError> for ServerError {
     }
 }
 
+impl From<serde_json::Error> for ServerError {
+    /// Conver this error to our error type
+    ///
+    /// # Arguments
+    ///
+    /// * `error` - The error to convert
+    fn from(error: serde_json::Error) -> Self {
+        ServerError::SerdeJson(error)
+    }
+}
+
 /// The errors specific to Shoal server code
 #[derive(Debug)]
 pub enum ShoalError {
@@ -188,4 +201,14 @@ pub enum ShoalError {
     PartitionNotFound { partition_id: u64 },
     /// A table was not found in the archive map (corrupt or missing map)
     TableMapMissing,
+    /// This node has no shards, so nothing could own any data
+    NoShards,
+    /// This node has more shards than a tablet can name an owner for
+    TooManyShards { shards: usize },
+    /// This storage directory was written by a different number of shards
+    ///
+    /// The shard that owns a partition is decided by the shard count, and a shards data
+    /// is stored under its own name, so reading a directory back with a different count
+    /// looks for every partition in the wrong place.
+    ShardCountMismatch { found: usize, expected: usize },
 }

@@ -83,9 +83,20 @@ it is a hash, **partition keys collide**, and nothing detects it.
 past its record, released once the durability watermark passes it. See
 [Durability model](../storage/overview.md#durability-model).
 
-**Ring** — The consistent hash ring mapping partition key to shard. Each shard lays down 1000
-virtual nodes at a fixed stride from its name hash. See
-[Partitioning](../architecture/partitioning.md).
+**Recovery stats** — `RecoveryStats`, the counts of everything replaying a table's intent logs
+had to discard. Three of its four counters mean data was lost; `updates_after_delete` does not,
+and exists so the other three can be trusted. Summed across a shard's tables and reported once
+when the shard finishes starting. See
+[Recovery](../storage/recovery.md#what-recovery-discards).
+
+**Ring** — The tablet map, still named `Ring` in the source. Maps a partition key to the tablet
+holding it, and that tablet to the shard that owns it. Built whole from the shard count before
+any shard starts. See [Partitioning](../architecture/partitioning.md).
+
+**Tablet** — A slice of the partition key space named by the top 12 bits of the key, and the unit
+ownership is recorded for. 4096 of them, assigned to shards round robin. Ownership is *stored*
+per tablet rather than derived from a hash, which is what would let a tablet be moved between
+shards. See [Partitioning](../architecture/partitioning.md#the-tablet-map).
 
 **Shard** — One glommio executor pinned to one core, owning a slice of every table, its own
 intent logs, archives, and background tasks. Named `Shard-N`, where N comes from a startup
@@ -102,7 +113,7 @@ named them, and in sort-key order within each, so a `LIMIT` takes the first of t
 a row for a delete or an update, decides the order a read returns a partition's rows in, and
 **selects** them: a get or an exists naming sort keys seeks those rows and answers about them
 alone, and one bounding them by a range seeks the span between the bounds. A query narrowing
-itself neither way asks for the whole partition. See [Sort select](#sort-select).
+itself neither way asks for the whole partition. See **Sort select** below.
 
 **Sort select** — `SortSelect`, the three ways a sorted get or exists can choose rows: `All`,
 `Keys([..])`, or `Range(..)`. It is an enum rather than a set of fields so that "these keys *and*

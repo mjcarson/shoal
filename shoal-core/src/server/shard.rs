@@ -306,12 +306,16 @@ where
     ///
     /// # Arguments
     ///
-    /// * `addr` - The address to bind our udp socket too
+    /// * `conf` - The config to build this shard with
+    /// * `comms` - The channels to the other shards on this node
+    /// * `shard_counter` - The counter assigning shard ids on this node
+    /// * `shard_count` - The number of shards on this node
     #[instrument(name = "Shard::new", skip_all, err(Debug))]
     pub async fn new(
         conf: &Conf,
         comms: Comms<D>,
         shard_counter: &AtomicUsize,
+        shard_count: usize,
     ) -> Result<Self, ServerError> {
         // get a handle to our current executor
         let executor = glommio::executor();
@@ -364,7 +368,9 @@ where
         let shard = Shard {
             info,
             conf: conf.clone(),
-            ring: Ring::default(),
+            // built from the shard count rather than from joins, so it is already
+            // complete and this shard can never route against a partial map
+            ring: Ring::new(shard_count)?,
             comms,
             tables,
             table_map,
@@ -439,7 +445,39 @@ where
         )?;
         // add this task to our task list
         self.tasks.push(handle);
+        // report what our recovery discarded now that every table has been replayed
+        self.report_recovery();
         Ok(())
+    }
+
+    /// Report what replaying this shards intent logs discarded
+    ///
+    /// Tables are built in `Shard::new`, so by the time a shard finishes initializing
+    /// this is everything its recovery lost. There is no equivalent report across a
+    /// whole pool: `ShoalPool::start` spawns its shard threads and returns without
+    /// joining them, so no moment exists at which every shard has finished starting.
+    fn report_recovery(&self) {
+        // gather what every table on this shard had to discard
+        let recovery = self.tables.recovery_stats();
+        // an operator has to be told about loss, so say it at a level they will see
+        if recovery.is_clean() {
+            event!(
+                Level::INFO,
+                msg = "Recovery complete",
+                shard = self.info.name,
+                updates_after_delete = recovery.updates_after_delete,
+            );
+        } else {
+            event!(
+                Level::WARN,
+                msg = "Recovery discarded data",
+                shard = self.info.name,
+                orphaned_updates = recovery.orphaned_updates,
+                unreplayable_entries = recovery.unreplayable_entries,
+                truncated_logs = recovery.truncated_logs,
+                updates_after_delete = recovery.updates_after_delete,
+            );
+        }
     }
 
     /// Forward our queries to the correct shards
@@ -834,22 +872,23 @@ where
             Strategy<rkyv::de::Pool, rkyv::rancor::Error>,
         >,
 {
+    // we will have one shard per core, which every shard builds its tablet map from
+    let shard_count = cpus.len();
     // build our comms object for this nodes shards
-    // we will have one shard per core
-    let comms = Comms::<S>::with_capacity(cpus.len());
+    let comms = Comms::<S>::with_capacity(shard_count);
     // An atomic bool used to signal that shards should exit
     let should_shutdown = Arc::new(AtomicBool::new(false));
     // A counter to assign shard IDs starting from zero, independent of executor IDs
     let shard_counter = Arc::new(AtomicUsize::new(0));
     // setup our executor
     let executor_builder =
-        LocalExecutorPoolBuilder::new(PoolPlacement::MaxSpread(cpus.len(), Some(cpus)));
+        LocalExecutorPoolBuilder::new(PoolPlacement::MaxSpread(shard_count, Some(cpus)));
     // build and spawn our shards on all of remaining available cores
     let shards = executor_builder.on_all_shards(
         enclose!((comms, should_shutdown, shard_counter) move || {
             async move {
                 // build an empty shard
-                let shard: Shard<S> = Shard::new(&conf, comms, &shard_counter).await?;
+                let shard: Shard<S> = Shard::new(&conf, comms, &shard_counter, shard_count).await?;
                 // start this shard
                 shard.start(should_shutdown.clone()).await
             }

@@ -19,6 +19,13 @@ pub struct IntentLogReader {
     pub position: u64,
     /// The direct IO alignment this intent log was written with
     pub alignment: u64,
+    /// Whether this reader stopped on a damaged entry rather than the end of the log
+    ///
+    /// A torn or corrupt entry ends the read exactly like a clean end of log does,
+    /// so without this a caller cannot tell a log it read all of from one it gave up
+    /// part way through. Only the damaged cases set this - the two shapes a normally
+    /// padded log ends in do not, or every clean startup would look damaged.
+    pub truncated: bool,
 }
 
 impl IntentLogReader {
@@ -37,6 +44,7 @@ impl IntentLogReader {
             size,
             position: 0,
             alignment,
+            truncated: false,
         };
         Ok(reader)
     }
@@ -61,6 +69,8 @@ impl IntentLogReader {
             // check if we read a complete size header
             if size_read.len() < 8 {
                 tracing::warn!("Truncated size header at position {} (got {} bytes) - treating as end of intent log", self.position, size_read.len());
+                // we stopped on damage, not on the end of this log
+                self.truncated = true;
                 return Ok(None);
             }
             let raw_size = u64::from_le_bytes(size_read[..8].try_into()?);
@@ -78,6 +88,21 @@ impl IntentLogReader {
             // if our size plus the checksum is bigger than our remaining data
             // then its the end of the log and we are reading padded data
             if size + 8 > (self.size - self.position) as usize {
+                // A zero here is the unwritten tail of a partly filled log, which is
+                // how a healthy log ends. Anything else is a size header whose entry
+                // was never written - a torn tail rather than padding. A short read
+                // lands here too, since reading past the end of a file inside an
+                // already aligned block zero fills rather than returning fewer bytes.
+                if size != 0 {
+                    tracing::warn!(
+                        "Entry at position {} claims {} bytes but only {} remain - treating as end of intent log",
+                        self.position,
+                        size,
+                        self.size - self.position
+                    );
+                    // we stopped on damage, not on the end of this log
+                    self.truncated = true;
+                }
                 return Ok(None);
             }
             // increment past the size header
@@ -93,6 +118,8 @@ impl IntentLogReader {
                     "Truncated checksum at position {} - treating as end of intent log",
                     self.position
                 );
+                // we stopped on damage, not on the end of this log
+                self.truncated = true;
                 return Ok(None);
             }
             let expected_checksum = u64::from_le_bytes(checksum_read[..8].try_into()?);
@@ -102,6 +129,8 @@ impl IntentLogReader {
             // check if we read the full entry data
             if row_read.len() < size {
                 tracing::warn!("Truncated data at position {} (expected {} bytes, got {}) - treating as end of intent log", self.position, size, row_read.len());
+                // we stopped on damage, not on the end of this log
+                self.truncated = true;
                 return Ok(None);
             }
             // verify the checksum
@@ -113,6 +142,8 @@ impl IntentLogReader {
                     "Checksum mismatch at position {} (expected {:#x}, got {:#x}) - treating as end of intent log",
                     self.position, expected_checksum, actual_checksum
                 );
+                // we stopped on damage, not on the end of this log
+                self.truncated = true;
                 return Ok(None);
             }
             // increment this readers current position

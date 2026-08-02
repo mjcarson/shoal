@@ -100,28 +100,65 @@ is the main reason the flush pipeline is debuggable at all.
 
 ### Events
 
-Only a handful of `event!` calls exist, all at `INFO`:
+Only a handful of `event!` calls exist, all at `INFO` except the two recovery summaries:
 
-| Event | Fields | Location |
-| --- | --- | --- |
-| Eviction | `pre`, `post`, `diff`, `partitions`, `evictable` | `.../persistent/sorted.rs:1006-1013` |
-| Mark evictable | `marked` | `.../persistent/sorted.rs:985` |
-| Compaction totals | `post_compaction`, `precompaction` | `.../fs/compactor.rs:455` |
-| Archive removal | `msg`, `path` | `.../fs/compactor.rs:477-482` |
-| Recovery progress | `msg`, `gen` | `.../fs.rs:447`, `:453` |
-| Skipped archive | `archive`, `skip` | `.../fs/compactor.rs:338` |
+| Event | Level | Fields | Location |
+| --- | --- | --- | --- |
+| Eviction | INFO | `pre`, `post`, `removed`, `reclaimed`, `drift`, `partitions`, `evictable` | `.../persistent/sorted.rs` |
+| Mark evictable | INFO | `marked` | `.../persistent/sorted.rs` |
+| Compaction totals | INFO | `post_compaction`, `precompaction` | `.../fs/compactor.rs` |
+| Archive removal | INFO | `msg`, `path` | `.../fs/compactor.rs` |
+| Recovery progress | INFO | `msg`, `path` / `gen` | `.../fs.rs`, in `read_intents` |
+| Skipped archive | INFO | `archive`, `skip` | `.../fs/compactor.rs` |
+| **Recovery summary** | INFO / **WARN** | `msg`, `shard`, `orphaned_updates`, `unreplayable_entries`, `truncated_logs`, `updates_after_delete` | `Shard::report_recovery` (`shard.rs`) |
+| **Compaction discarded intents** | **WARN** | `msg`, `orphaned_updates`, `updates_after_delete` | `FileSystemCompactor::apply_intents` |
 
-There are no counters and no gauges. Throughput, latency, queue depth, resident bytes, cache
-hit rate, and the number of blocked queries are all unobservable except by inference from
-spans.
+The eviction event is worth reading closely, because it is the only window onto shard memory.
+`removed` is summed from the partitions the pass actually dropped and `reclaimed` is how far the
+shard counter moved; `drift` is the gap. A persistently non-zero `drift` means the size accounting
+is undercounting somewhere ([Known Issues #22](../appendix/known-issues.md#22-size-accounting-inconsistencies)),
+not that eviction failed. It is an `INFO` field rather than a warning for exactly that reason
+([Resolved #13](../appendix/resolved/eviction-log-underflow.md)).
 
-### Corruption is silent
+There are still no counters and no gauges in the sense of something scrapeable. Throughput,
+latency, queue depth, resident bytes, cache hit rate, and the number of blocked queries are all
+unobservable except by inference from spans.
+
+The one exception is recovery, which does keep counts —
+[`RecoveryStats`](../storage/recovery.md#what-recovery-discards), reachable in-process through
+`ShoalDatabase::recovery_stats`. It is emitted as an event rather than exposed as a metric, but
+it is the shape the rest of this page is missing, and the hook a real metrics surface would read
+first.
+
+### Corruption is no longer silent
 
 The intent log reader emits `tracing::warn!` on truncation and checksum failure
-(`.../fs/reader.rs:53`, `:71`, `:80`, `:88`), and replay warns on a skipped entry
-(`.../fs.rs:173`). Nothing counts these, so silently discarding the tail of a log
-([Recovery](../storage/recovery.md#truncation-and-corruption)) produces one `WARN` line and no
-other signal.
+(`.../fs/reader.rs`), and replay warns on a skipped entry (`.../fs.rs`). ~~Nothing counts these,
+so silently discarding the tail of a log produces one `WARN` line and no other signal.~~
+
+Each of those is now counted, and a shard that discarded anything during recovery says so once,
+at `WARN`, before it accepts a connection:
+
+```
+WARN Shard::init: msg="Recovery discarded data" shard="Shard-0" orphaned_updates=0
+     unreplayable_entries=0 truncated_logs=1 updates_after_delete=0
+```
+
+Fixed by [item 9](../appendix/resolved/orphaned-update-intents.md). Two things about it are worth
+knowing before relying on it:
+
+- **`updates_after_delete` is not loss.** An update replayed onto a row a delete had already
+  taken was meant to be dropped. It is reported alongside the others so the counts that *do* mean
+  loss can be trusted, and it never on its own raises the event to `WARN`.
+- **The summary is per shard, and there is no pool-wide total.** `ShoalPool::start` spawns its
+  shard threads and returns without joining them, so there is no moment at which every shard has
+  finished starting. Expect one line per shard and aggregate them yourself.
+
+Compaction reports separately, and keeps reporting for the life of the shard rather than only at
+startup — a startup compaction is dispatched to the compactor task, not awaited.
+
+What is *not* fixed is the discarding itself: a flipped bit mid-log still costs every intent
+after it ([Recovery](../storage/recovery.md#truncation-and-corruption)).
 
 ### Debug output that is not tracing
 
@@ -179,7 +216,9 @@ The workspace also has `cargo-flamegraph` available, and a `profile.json.gz` and
 
 For running Shoal anywhere real, the gaps are:
 
-- **No metrics.** No Prometheus endpoint, no counters, no histograms.
+- **No metrics.** No Prometheus endpoint, no histograms, and no counters other than the recovery
+  ones, which are emitted as an event rather than exposed. Filed in
+  [TODOs](../appendix/todos.md#observability).
 - **No health or readiness endpoint.** Liveness can only be inferred by connecting.
 - **No introspection.** No way to ask a running server for its shard count, table list,
   resident bytes, LRU depth, or compaction backlog.
@@ -205,6 +244,10 @@ instrumentation away, so the hot path pays nothing in a default release build.
 - `RemoteTracing::Grpc` uses HTTP.
 - `trace::setup` is never called by the library.
 - `PersistentSortedTable` is not `hotpath`-instrumented.
-- Corruption and truncation are warnings with no counters.
+- ~~Corruption and truncation are warnings with no counters.~~ Counted and summarized per shard
+  now, but only as an event — nothing scrapes it, and nothing aggregates across shards.
+- Because `trace::setup` is never called by the library, none of these events reach a test. The
+  recovery summary has no automated coverage for that reason
+  ([Test Coverage](../appendix/test-coverage.md)).
 - Three `println!` sites bypass the log level.
-- No metrics, health checks, or runtime introspection of any kind.
+- No health checks or runtime introspection of any kind, and no metrics beyond recovery.

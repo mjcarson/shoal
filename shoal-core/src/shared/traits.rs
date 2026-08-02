@@ -32,7 +32,7 @@ use crate::server::shard::ShardInfo;
 use crate::server::{Conf, ServerError};
 use crate::shared::queries::parser::{FieldInfo, FieldRole, TypeValidator};
 use crate::shared::responses::ResponseActionNames;
-use crate::storage::{FullArchiveMap, LoaderMsg, Loaders};
+use crate::storage::{FullArchiveMap, LoaderMsg, Loaders, RecoveryStats};
 
 pub use sorted::ShoalSortedTable;
 pub use unsorted::ShoalUnsortedTable;
@@ -314,6 +314,13 @@ pub trait ShoalDatabase: 'static + Sized {
         >,
         shard_local_tx: &AsyncSender<ServerMsg<Self>>,
     ) -> Result<(), ServerError>;
+
+    /// Get what replaying every tables intent logs had to discard
+    ///
+    /// Tables are built before a shard finishes starting, so this is the whole of
+    /// what this shards recovery lost by the time its startup summary is emitted.
+    #[cfg(feature = "server")]
+    fn recovery_stats(&self) -> RecoveryStats;
 
     /// Build a default queries bundle
     #[must_use]

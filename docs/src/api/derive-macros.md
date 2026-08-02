@@ -314,6 +314,18 @@ Note this generated code calls `.unwrap()` on channel sends and refers to `shoal
 absolute path — so `shoal_core` must be resolvable at the call site, which it is via the
 `shoal` façade's re-exports.
 
+Not every generated method is a match. `recovery_stats` folds instead, summing what each table's
+intent log replay had to discard so a shard can report it once
+([Recovery](../storage/recovery.md#what-recovery-discards)):
+
+```rust
+stats.merge(self.#field_ident.recovery_stats());
+```
+
+This is the cheap shape for anything shard-wide that a table already owns: no change to
+`ShoalDatabase::new`, no new parameter threaded through every table constructor, and nothing to
+keep in sync — a new table field is summed automatically.
+
 ## Design notes
 
 **The schema is the type system.** There is no catalog, no runtime type information, and no

@@ -1,7 +1,7 @@
-# Partitioning and the Ring
+# Partitioning and the Tablet Map
 
 Every row in Shoal belongs to exactly one partition, identified by a `u64` partition key.
-Every partition belongs to exactly one shard, decided by a consistent hash ring.
+Every partition belongs to exactly one tablet, and every tablet to exactly one shard.
 
 ## From field values to a partition key
 
@@ -29,161 +29,193 @@ keys hashing to the same `u64` share a partition and, for sorted tables, share a
 Nothing detects this. For unsorted tables, where a partition holds exactly one row, a
 collision means one row silently overwrites another.
 
-## The ring
+## The tablet map
+
+A partition key does not name a shard directly. It names a **tablet**, and the tablet names
+the shard that owns it:
+
+```
+partition key ──gxhash──> token ──top bits──> tablet id ──array lookup──> owner
+                                  (arithmetic)            (stored, movable)
+```
 
 ```rust
-/// Each node in the cluster should have 1000 parts of the ring
-const RING_JUMP: u64 = u64::MAX / 1000;
+/// The number of bits of a partition key that name its tablet
+const TABLET_BITS: u32 = 12;
+/// The number of tablets the partition key space is cut into
+const TABLET_COUNT: usize = 1 << TABLET_BITS;
 
 pub struct Ring {
-    ring: BTreeMap<u64, usize>,   // vnode position -> index into `shards`
+    /// The shard that owns each tablet, indexed by tablet id
+    tablets: Vec<u16>,
     pub shards: Vec<ShardInfo>,
 }
 ```
 
-`shoal-core/src/server/ring.rs:12-22`
+`shoal-core/src/server/ring.rs:25-42`
 
-Adding a shard hashes its *name* and lays down 1000 virtual nodes from there:
-
-```rust
-let mut hasher = GxHasher::default();
-hasher.write(shard.name.as_bytes());
-self.shards.push(shard);
-let shard_id = self.shards.len();
-let mut vnode = hasher.finish();
-for _ in 0..1000 {
-    vnode = vnode.wrapping_add(RING_JUMP);
-    self.ring.insert(vnode, shard_id - 1);
-}
-```
-
-`shoal-core/src/server/ring.rs:26-44`
-
-Lookup walks to the next vnode at or above the key, wrapping to the lowest vnode if the key
-is past the last one:
+The map is built from the shard count, giving tablet `i` to shard `i % shard_count`:
 
 ```rust
-let (_, index) = match self.ring.range((Included(&partition), Included(&u64::MAX))).next() {
-    Some((vnode, index)) => (vnode, index),
-    None => self.ring.range((Included(&0), Excluded(&partition))).next().unwrap(),
-};
-&self.shards[*index]
+let shards = (0..shard_count).map(ShardInfo::new).collect();
+let tablets = (0..TABLET_COUNT).map(|tablet| (tablet % shard_count) as u16).collect();
 ```
 
-`shoal-core/src/server/ring.rs:51-68`
+`ring.rs:82-92`
 
-### Why arrival order does not matter
+And a lookup is a shift and two indexed loads:
 
-Each shard builds its own `Ring` independently, from `ServerMsg::Join` broadcasts that arrive
-in nondeterministic order (`shoal-core/src/server/shard.rs:617`). The stored value is
-`self.shards.len() - 1`, an arrival-order index — so different shards genuinely do store
-different indices for the same shard.
-
-This is nonetheless consistent, and it is worth understanding why. The vnode *positions* come
-from the shard's name hash, and the index stored at those positions points at the `ShardInfo`
-that produced them. Both halves derive from the same `ShardInfo`, so `find_shard` always
-returns the shard whose name hashed to that arc, whatever slot it happens to occupy in the
-local `shards` vector. Every shard resolves a given key to the same *`ShardInfo`*, even
-though they disagree about its index.
-
-The ring is only fully populated once every `Join` has been processed. Until then a shard has
-a partial ring and will route to whichever shards it has heard from.
-
-## The vnodes do not do what vnodes usually do
-
-Virtual nodes normally reduce load imbalance: scatter each shard's tokens randomly around the
-ring and each shard's share concentrates on the mean as the token count rises.
-
-Shoal's vnodes are not scattered. Every shard lays down 1000 vnodes at a **fixed stride**,
-`RING_JUMP`, with only the starting offset varying by name hash. Since `1000 × RING_JUMP ≈
-u64::MAX`, each shard's vnodes form an evenly spaced comb that wraps the ring exactly once,
-and all N combs share the same period.
-
-The consequence is that the ring repeats with period `RING_JUMP`. Within one period there are
-exactly N vnodes, one per shard, at offsets fixed by the N name hashes. A key's owner is
-decided by its position *within a period*, so each shard owns the same arc in every period:
-the gap between its offset and the preceding shard's.
-
-```
-   one period (RING_JUMP wide), repeated ~1000 times around the ring
-   ├────────────────────────────────────────────────────────┤
-   │      ▲              ▲                    ▲             │
-   │   shard 2        shard 0             shard 1           │
-   │◀────────────▶│◀──────────────▶│◀────────────────────▶│
-   │  shard 2's      shard 0's          shard 1's           │
-   │    share          share              share             │
+```rust
+let tablet = (partition >> (u64::BITS - TABLET_BITS)) as usize;
+let owner = usize::from(self.tablets[tablet]);
+&self.shards[owner]
 ```
 
-So the load distribution is **identical to giving each shard a single vnode**. The 1000
-vnodes cost memory (a `BTreeMap` of 1000 × N entries per shard, rebuilt on every shard) and
-buy nothing. Shard shares are the gaps between N uniformly random points on a circle, which
-is a high-variance distribution: for 16 shards, the busiest shard should be expected to own
-roughly three times the mean share rather than the ~1.1× that 1000 independent vnodes would
-give.
+`ring.rs:135-147`
 
-Making the vnode positions independent — for example hashing `(name, i)` per vnode instead of
-striding — would restore the intended behaviour. See
-[Known Issues](../appendix/known-issues.md#12-vnodes-provide-no-load-smoothing).
+### Why the owner is stored rather than computed
+
+This is the one idea the rest of the page follows from, and it is worth stating plainly.
+
+A consistent hash ring makes ownership a **pure function of the member set**: every participant
+recomputes the same answer from the same node list, and nobody has to agree on anything. That is
+its virtue and it is exactly its limitation — *you cannot express an ownership you did not
+derive*. You cannot move one range off a shard that has grown hot. You cannot place one table
+differently from another. You cannot add capacity incrementally, because changing the member set
+re-derives every boundary at once.
+
+A tablet map stores ownership, so ownership becomes editable. The cost is that something has to
+be authoritative about the table; the benefit is everything in the previous paragraph. ScyllaDB
+made this same move in 6.0, from a vnode token ring to per-table tablets whose assignments live
+in a system table.
+
+Shoal is node-local today, so there is no authority to speak of — every shard derives the same
+map from `cores`, and they agree because the derivation is identical rather than because anyone
+coordinated. What the shape buys now is exactness and speed; what it buys later is the ability to
+move a tablet at all.
+
+### Why the id comes from the high bits
+
+`tablet_of` keeps the *top* `TABLET_BITS` of the key, not `partition % TABLET_COUNT`. The
+difference only matters once tablets split, but it decides whether they ever can.
+
+Taking the high bits means a tablet divides in two by consuming one more bit: its keys stay
+contiguous, its two halves are exactly the keys it already held, and no other tablet is
+disturbed. Taking the low bits by modulo means changing the tablet count reshuffles every
+assignment at once, which is the same all-at-once rebuild the ring was replaced to escape.
+
+Nothing splits tablets today. The derivation is fixed now because it is the one decision here
+that would be expensive to reverse later.
+
+### Why every shard agrees
+
+Shard count is known at `shard::start` from `cpus.len()` before any shard is spawned, and each
+shard builds its own map from that one number in `Shard::new`. The maps are therefore *identical*
+rather than merely equivalent, and `shards[i].mesh_id() == i` on every shard.
+
+This matters more than it looks. The ring this replaced stored an **arrival-order** index built
+from `Join` broadcasts, so two shards genuinely held different indices for the same shard, and
+their agreeing about ownership required an argument. It was a correct argument, but it was load
+bearing, and it depended on a window in which a shard's map was still filling. Both the argument
+and the window are gone: a shard cannot route against a partial map because a partial map is
+never constructed.
+
+`ServerMsg::Join` still exists and is still broadcast. `Ring::add` ignores a shard it already
+knows — node-locally, every one of them — and warns about a shard it does not, since placing a
+new shard needs tablet migration and a rebalancer that do not exist. It is a seam for the
+multi-node case, not a working membership protocol.
+
+## Load distribution
+
+With `TABLET_COUNT` tablets over N shards, every shard owns either `⌊T/N⌋` or `⌈T/N⌉` tablets —
+a difference of at most one. At 4096 tablets and 16 shards that is exactly 256 each.
+
+This is worth contrasting with what it replaced, because the old design looked like it should
+have been better and was measurably worse. Every shard laid down 1000 vnodes at the same fixed
+stride `RING_JUMP`, with only the starting offset varying by name hash. All N combs therefore
+shared one period, the ring repeated every `RING_JUMP`, and each shard owned the identical arc in
+every period — **the load distribution of a single vnode**, at the cost of a 1000 × N `BTreeMap`
+per shard. Measured on a 16 shard ring, the busiest shard owned **3.54×** the mean, and 1000 out
+of 1000 sampled keys routed identically one period away.
+
+Independent vnode positions would have brought that to about 1.07×. An assignment table brings
+it to exactly 1.00×, which is the part of this change that is simply free.
+
+Full reasoning in [items 11, 12 and 37](../appendix/resolved/tablet-ring.md).
 
 ## Query fan-out
 
 Routing happens in the coordinator shard, per query in the bundle:
 
 ```rust
-kind.find_shard(&self.ring, &mut found);
-for shard_info in found.drain(..) { ... }
+kind.split_by_shard(&self.ring, &mut found);
 ```
 
-`shoal-core/src/server/shard.rs:426-441`
+`shoal-core/src/server/shard.rs:505`
 
-`find_shard` takes a `&mut Vec` rather than returning, because one query may target many
-shards:
+`split_by_shard` takes a `&mut Vec` rather than returning, because one query may be answered by
+several shards. A query naming several partition keys is **narrowed** to each shard's own keys
+rather than sent whole to every one of them:
 
 ```rust
-match self {
-    SortedQuery::Insert { key, .. } | SortedQuery::Delete { key, .. } =>
-        tmp.push(ring.find_shard(*key)),
-    SortedQuery::Get(get) =>
-        for key in &get.partition_keys { tmp.push(ring.find_shard(*key)) },
-    SortedQuery::Exists(exists) =>
-        for key in &exists.partition_keys { tmp.push(ring.find_shard(*key)) },
-    SortedQuery::Update(update) => tmp.push(ring.find_shard(update.partition_key)),
+SortedQuery::Get(get) => {
+    let sort_select = get.sort_select.normalized();
+    for (shard, keys) in group_by_shard(ring, &get.partition_keys) {
+        found.push((shard, SortedQuery::Get(get.for_partitions(keys, sort_select.clone()))));
+    }
 }
 ```
 
-`shoal-core/src/shared/queries/sorted.rs:28-46`
+`shoal-core/src/shared/queries/sorted.rs:298-327`
 
-A multi-partition get is therefore sent to each owning shard as a *complete copy of the
-query*, not a narrowed one. Each recipient scans only the partition keys it owns, and each
-produces a `Response` carrying the same `index`. The client's ordered stream will see several
-responses at the same index and will treat all but the first as out-of-order. This is a real
-gap in multi-partition gets against a multi-shard deployment; the narrowing machinery
-(`to_blocked`, `.../queries/sorted.rs:91-98`) exists but is only used for the disk-load path,
-not for fan-out.
+`group_by_shard` (`shared/queries.rs:61-87`) is what calls `find_shard`, once per partition key.
+It deduplicates on `mesh_id()`, so a shard owning two of a get's keys receives one query naming
+both rather than the same query twice, and a key named twice is grouped once.
 
-Note also that `found` is a `Vec` with no deduplication, so if two of a get's partition keys
-land on the same shard, that shard receives the query twice.
+When a query is split across more than one shard, the shares come back to the splitting shard to
+be merged rather than going straight to the client, so the client is owed exactly one response
+per query and a `limit` spans shards. That machinery is [items 7, 10, 26 and
+39](../appendix/resolved-issues.md); the routing above only decides who is asked.
 
 ## Design notes
 
-**Hashing the shard name, not the id.** Ring positions derive from `"Shard-3"` rather than
-from `3`. Since names also become filenames, ring position and on-disk location share a
-single source of truth, and a shard that restarts under the same name reclaims the same arc.
+**Hashing the shard name, not the id — no longer true.** ~~Ring positions derive from `"Shard-3"`
+rather than from `3`, so ring position and on-disk location share a single source of truth.~~
+Tablet assignment derives from the shard *count* and the shard *index*; names no longer
+participate in routing at all. The property that mattered still holds, by a shorter route: a
+shard that restarts under the same id reclaims the same tablets, because the assignment is a
+function of the id and the count. `Ring::add` is the only place a name is still compared, and
+only to recognise a join it has already placed.
 
-**Routing lives on the server.** The client knows nothing about the ring; it sends a bundle
-to whichever connection it grabbed. This keeps the client simple and lets the ring change
-without a client update, at the cost of an extra hop for nearly every query.
+**Routing lives on the server.** The client knows nothing about the tablet map; it sends a bundle
+to whichever connection it grabbed. This keeps the client simple and lets the map change without
+a client update, at the cost of an extra hop for nearly every query. It is also what makes the
+map's one theoretical disadvantage free: a client cannot derive ownership from a node list the
+way it could with a hash, but Shoal's client never tried to.
+
+**The tablet count is a fixed constant.** 4096 is far larger than any plausible shard count, so
+`i % shard_count` stays even, and small enough that the map is 8 KiB. A distributed Shoal would
+size tablets by *data* instead — Scylla targets a few GiB per tablet and splits or merges to hold
+it — which is the point at which the count stops being a constant and the high-bit derivation
+starts earning its keep.
 
 ## Limitations
 
 - **Shard count is part of the on-disk format.** Intent logs are named `Shard-N-active` and
-  each shard has its own archive map (`maps/Shard-N`). If you restart with a different
-  `cores` value, the ring changes *and* the file set changes: partitions now hashing to
-  shard 5 will not find the data written under `Shard-2`'s files, and files belonging to
-  shards that no longer exist are never read again. There is no migration, no rebalancing,
-  and no warning. Treat shard count as fixed for the lifetime of a data directory.
+  each shard has its own archive map (`maps/Shard-N`), so a partition that moves to another
+  shard cannot find the data written under the old one's files. This is now **refused rather
+  than silent**: `StorageMeta` (`server/meta.rs`) records the shard count a directory was
+  written by and `ShoalPool::start` errors with `ShardCountMismatch` before any shard spawns.
+  That is a better failure, not a fix — there is still no migration and no rebalancing. Treat
+  shard count as fixed for the lifetime of a data directory.
+- **The storage marker only covers the default storage root.** A per-table `storage.tables`
+  override pointing elsewhere is unguarded
+  ([item 43](../appendix/known-issues.md#43-the-storage-marker-only-guards-the-default-storage-root)).
+- **Tablet assignment is derived, not persisted.** `Ring::new` recomputes it on every start, so
+  a tablet is movable in principle only; nothing can move one and have it survive a restart.
+  Persisting the map is the first half of rebalancing
+  ([TODOs](../appendix/todos.md#rebalancing)).
+- **There is no migration from the old ring.** This mapping is not the one the vnode ring
+  produced, and nothing detects a directory written by it. Old data directories are removed.
 - **No replication.** One shard, one copy.
 - Partition key collisions are undetected and, for unsorted tables, lossy.
-- Multi-partition gets fan out unnarrowed and undeduplicated.
-- `find_shard` `.unwrap()`s on an empty ring
-  ([Known Issues](../appendix/known-issues.md#11-ring-lookup-panics-on-an-empty-ring)).

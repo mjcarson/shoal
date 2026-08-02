@@ -9,6 +9,7 @@ use rkyv::validation::Validator;
 use rkyv::{de::Pool, rancor::Strategy, Archive};
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -164,18 +165,67 @@ pub enum ShouldPrune {
     Yes,
 }
 
+/// Counts of everything recovery discarded for a table
+///
+/// Three of these mean data was lost and one does not, which is the whole point of
+/// keeping them apart: an update that lands on a row a delete already tombstoned is
+/// correctly dropped, and counting it as loss would make the numbers that do mean
+/// loss useless. Only [`RecoveryStats::is_clean`] decides which is which.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct RecoveryStats {
+    /// Update intents whose base partition was in no archive and in no earlier log
+    pub orphaned_updates: u64,
+    /// Update intents that targeted a row a delete had already tombstoned
+    ///
+    /// This is not data loss - the row was meant to be gone.
+    pub updates_after_delete: u64,
+    /// Intent log entries that could not be replayed at all
+    pub unreplayable_entries: u64,
+    /// Intent logs whose reader stopped early on a truncated or corrupt tail
+    pub truncated_logs: u64,
+}
+
+impl RecoveryStats {
+    /// Check whether recovery discarded anything that counted as data
+    #[must_use]
+    pub fn is_clean(&self) -> bool {
+        // an update dropped onto a deleted row is not loss, so it does not count here
+        self.orphaned_updates == 0 && self.unreplayable_entries == 0 && self.truncated_logs == 0
+    }
+
+    /// Add another set of counts to this one
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The counts to add to ours
+    pub fn merge(&mut self, other: Self) {
+        // saturate rather than wrap, since a wrapped counter reads as a clean startup
+        self.orphaned_updates = self.orphaned_updates.saturating_add(other.orphaned_updates);
+        self.updates_after_delete = self
+            .updates_after_delete
+            .saturating_add(other.updates_after_delete);
+        self.unreplayable_entries = self
+            .unreplayable_entries
+            .saturating_add(other.unreplayable_entries);
+        self.truncated_logs = self.truncated_logs.saturating_add(other.truncated_logs);
+    }
+}
+
 pub trait IntentReadSupport<T: RkyvSupport>: Sized + RkyvSupport + PartitionSupport {
     /// The intent type to use
     type Intent: RkyvSupport;
 
-    /// Load an intent logs partition from disk if its needed to replay this intent log
-    #[allow(async_fn_in_trait)]
-    async fn scan<S: StorageSupport>(
-        read: &ReadResult,
-        storage: &S,
-        partitions: &mut HashMap<u64, MaybeLoaded<Self>>,
-        memory_usage: &mut Arc<RefCell<usize>>,
-    ) -> Result<(), ServerError>;
+    /// Name the partitions an intent needs loaded before it can be replayed
+    ///
+    /// This only collects keys, it does not load them. The load is done once for
+    /// every log at a time when no replay has happened yet, since a load that runs
+    /// after a replay overwrites what that replay built.
+    ///
+    /// # Arguments
+    ///
+    /// * `read` - The intent to name the partitions of
+    /// * `to_load` - The set of partition keys to add to
+    fn scan_keys(read: &ReadResult, to_load: &mut HashSet<u64>) -> Result<(), ServerError>;
 
     /// Load a intent from a read and insert it into our map
     ///
@@ -185,20 +235,30 @@ pub trait IntentReadSupport<T: RkyvSupport>: Sized + RkyvSupport + PartitionSupp
     /// * `generation` - The generation to load these intents as
     /// * `partitions` - The map to load our intents into
     /// * `memory_usage` - The total memory usage of of this shard
+    /// * `stats` - The counts of what this recovery has discarded
     fn replay(
         read: &ReadResult,
         generation: u64,
         partitions: &mut HashMap<u64, MaybeLoaded<Self>>,
         memory_usage: &mut Arc<RefCell<usize>>,
+        stats: &mut RecoveryStats,
     ) -> Result<(), ServerError>;
 
     /// Apply an intent to this partition
     ///
     /// This will also return whether a partition should be pruned or not.
+    ///
+    /// # Arguments
+    ///
+    /// * `loaded` - The partitions loaded from their current archives
+    /// * `key` - The key of the partition to apply intents to
+    /// * `intents` - The intents to apply to this partition
+    /// * `stats` - The counts of what this compaction has discarded
     fn apply_intents(
         loaded: &mut HashMap<u64, Self>,
         key: u64,
         intents: Vec<Self::Intent>,
+        stats: &mut RecoveryStats,
     ) -> ShouldPrune;
 
     /// Get the partition key for a specific intent
@@ -348,6 +408,8 @@ pub trait StorageSupport: Sized {
 
     /// Read an intent log from storage
     ///
+    /// Returns the counts of everything this recovery had to discard.
+    ///
     /// # Arguments
     ///
     /// * `shard_name` - The name of the shard to read intents for
@@ -361,7 +423,7 @@ pub trait StorageSupport: Sized {
         generation: u64,
         partitions: &mut HashMap<u64, MaybeLoaded<T>>,
         memory_usage: &mut Arc<RefCell<usize>>,
-    ) -> Result<(), ServerError>;
+    ) -> Result<RecoveryStats, ServerError>;
 
     /// Get the type of loader this storage kind requires
     fn loader_kind() -> Loaders;
@@ -403,7 +465,7 @@ pub trait StorageSupport: Sized {
 
 #[cfg(test)]
 mod tests {
-    use super::{PendingResponse, QueryMetadata};
+    use super::{PendingResponse, QueryMetadata, RecoveryStats};
     use crate::shared::responses::ResponseAction;
     use tracing::Span;
     use uuid::Uuid;
@@ -482,5 +544,69 @@ mod tests {
         // draining again yields nothing since the queue is now empty
         pending.drain_all(&mut flushed);
         assert_eq!(flushed.len(), 3);
+    }
+
+    #[test]
+    /// Merging accumulates every count
+    fn recovery_stats_merge_accumulates() {
+        // start from one tables counts
+        let mut stats = RecoveryStats {
+            orphaned_updates: 1,
+            updates_after_delete: 2,
+            unreplayable_entries: 3,
+            truncated_logs: 4,
+        };
+        // fold in a second tables counts
+        stats.merge(RecoveryStats {
+            orphaned_updates: 10,
+            updates_after_delete: 20,
+            unreplayable_entries: 30,
+            truncated_logs: 40,
+        });
+        assert_eq!(stats.orphaned_updates, 11);
+        assert_eq!(stats.updates_after_delete, 22);
+        assert_eq!(stats.unreplayable_entries, 33);
+        assert_eq!(stats.truncated_logs, 44);
+        // a merge that would overflow saturates, since a wrapped counter would
+        // read as a shard that recovered cleanly
+        stats.merge(RecoveryStats {
+            orphaned_updates: u64::MAX,
+            updates_after_delete: u64::MAX,
+            unreplayable_entries: u64::MAX,
+            truncated_logs: u64::MAX,
+        });
+        assert_eq!(stats.orphaned_updates, u64::MAX);
+        assert_eq!(stats.truncated_logs, u64::MAX);
+    }
+
+    #[test]
+    /// Only the counts that mean data was lost make a recovery unclean
+    fn recovery_stats_is_clean_ignores_deleted_rows() {
+        // a recovery that discarded nothing is clean
+        assert!(RecoveryStats::default().is_clean());
+        // an update dropped onto a row a delete already took is the delete working,
+        // so it must not make a healthy startup look like it lost something
+        let after_delete = RecoveryStats {
+            updates_after_delete: 5,
+            ..RecoveryStats::default()
+        };
+        assert!(after_delete.is_clean());
+        // each of the other three does mean data we no longer have
+        for stats in [
+            RecoveryStats {
+                orphaned_updates: 1,
+                ..RecoveryStats::default()
+            },
+            RecoveryStats {
+                unreplayable_entries: 1,
+                ..RecoveryStats::default()
+            },
+            RecoveryStats {
+                truncated_logs: 1,
+                ..RecoveryStats::default()
+            },
+        ] {
+            assert!(!stats.is_clean(), "{stats:?} should not be clean");
+        }
     }
 }
