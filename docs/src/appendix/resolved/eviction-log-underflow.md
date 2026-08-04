@@ -169,6 +169,11 @@ defect; the same applies here.
 - [Item 22](../known-issues.md#22-size-accounting-inconsistencies) is untouched — the drift this
   now reports is still there to report. `drift` is the instrument for closing it: a run under
   memory pressure that logs a persistently non-zero drift localizes the undercount to a table.
+  Item 22 now names a first candidate to test against: recovery adds a partition to the counter
+  in archive bytes and eviction takes it off in deep size, so a shard that recovered from a log
+  naming many partitions should show drift proportional to how many, and one that started clean
+  should show none. That is a sharper prediction than "some table under-reports" and it is
+  falsifiable in one run.
 - The eviction event is still the only window onto shard memory. There is no gauge for resident
   bytes, LRU depth, or eviction rate ([Memory and Eviction](../../tables/memory-and-eviction.md#limitations)).
 - Promoting drift to a `WARN` once item 22 is closed is filed in [Todos](../todos.md).

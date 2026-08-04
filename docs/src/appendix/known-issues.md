@@ -20,20 +20,22 @@ test suite does and does not reach is in [Test Coverage](test-coverage.md).
 Defects that have been fixed move to [Resolved Issues](resolved-issues.md), one page each,
 carrying the reasoning and the invariants the fix depends on. Item numbers are shared between
 the two pages and never reused, so a number appears on exactly one of them — which is why this
-list starts at 15 and skips 26, 31, and 39. The exceptions are items 20 and 24, which were only
+list starts at 15 and skips 26, 31, 39, 44, and 45. The exceptions are items 20 and 24, which were only
 partly fixed: the open remainder is here and the rest is there. Item 9 was a third exception
 until its second half was fixed, and is now on the resolved page alone.
 
 **Baseline as of writing:** `cargo check --workspace --all-targets` passes with warnings;
-`cargo test --workspace` passes — 136 integration tests (one ignored), 178 `shoal-core` unit
+`cargo test --workspace` passes — 136 integration tests (one ignored), 183 `shoal-core` unit
 tests, 11 doctests. That is up from 14 and 32 with the addition of SHQL coverage
 ([SHQL](../api/shql.md#testing)), the restart and eviction tests added with items 4 and 5, the
 limit and cross-shard coverage added with item 7, the row-order and `IN`/`OR` coverage added
 with items 26 and 39, the sort-key selection coverage added with item 8, the range coverage
 added with [F1](../features/sort-key-ranges.md), the multi-log recovery and recovery
 counting coverage added with items 31 and 9, the tablet map and storage marker coverage
-added with items 11 and 12, the eviction accounting coverage added with item 13, and the empty
-rotated log coverage added with item 14. The counts before item 14 were 135, 178 and 11;
+added with items 11 and 12, the eviction accounting coverage added with item 13, the empty
+rotated log coverage added with item 14, and the compaction tail loss and marker format coverage
+added with items 44 and 45. The counts before items 44 and 45 were 136, 178 and 11; before
+item 14 were 135, 178 and 11;
 before item 13 were 135, 177 and 11; before items 11 and 12 were 133, 168 and 10; before
 items 9 and 31 were 132, 159 and 10; before F1 they were 115, 129, and 8, and before item 8
 were 105 and 116.
@@ -293,6 +295,19 @@ Also `RemoteTracing::Grpc` exports over HTTP (`trace.rs:36-40`), and
 - `SortedPartition` tombstones subtract the row's bytes but the tombstone still occupies a
   `BTreeMap` slot, so delete-heavy partitions under-report.
 - Sorted partition sizes are maintained by delta and never recomputed, so they drift.
+- Recovery adds a partition to the counter in *archive bytes* and eviction takes it off in
+  *deep size*. `FileSystem::load_scanned` (`.../storage/fs.rs`) does `*memory_usage.borrow_mut()
+  += partition_read.len()`, which matches `MaybeLoaded::size()` while the entry is
+  `Accessible`. Replay then converts it to `MaybeLoaded::Loaded` (`.../persistent/sorted.rs`,
+  `.../persistent/unsorted.rs`) adding only the update's `diff`, so `size()` starts answering
+  `partition.size()` — a `deep_size_of` — against an amount that was the archive extent's length.
+  `evict` subtracts the new base. The residual per partition is `read.len() - partition.size()`,
+  either sign. This is the most concrete candidate for the `drift` that
+  [item 13](resolved/eviction-log-underflow.md) now reports, because it is the one place two
+  different size *bases* meet on the same counter rather than two different arithmetic paths.
+  Note [item 31](resolved/multi-log-recovery.md) shrank this considerably without meaning to —
+  the old `scan` re-added `read.len()` once per update intent, so a partition with *N* updates
+  was counted *N* times.
 
 ### 23. Client stream and pool rough edges
 
@@ -486,6 +501,83 @@ root a config names, and deciding what a marker means when two tables disagree.
 entry, and claim each one. The shard count is the same for all of them, so the file's contents do
 not change — only how many are written.
 
+### 46. An unmarked storage directory is claimed rather than refused
+
+`StorageMeta::claim` (`server/meta.rs`) treats a missing `shoal-meta.json` as a directory nothing
+has written to, creates one, and starts:
+
+```rust
+// this directory has never been written to, so claim it for this shard count
+Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+    std::fs::create_dir_all(root)?;
+    std::fs::write(&path, serde_json::to_vec_pretty(&StorageMeta::new(shards))?)?;
+```
+
+"Has no marker" and "has never been written to" were the same statement for exactly as long as
+the marker has existed, which is one commit. Every directory written before
+[items 11 and 12](resolved/tablet-ring.md) has no marker and plenty of data, and that change also
+replaced the vnode ring with a tablet map — so ownership moved from a hash of the shard's *name*
+to `top-12-bits-of-key % shard_count`, and effectively every partition now belongs to a different
+shard than the one whose archive map holds it. A shard's data is stored under its own name, so
+each shard reads its own archives, finds none of the partitions it is now asked for, and the
+server comes up empty.
+
+This is the exact failure `StorageMeta` was built to prevent. It is missed because the marker is
+newer than the data it guards, and a guard that only fires when it recognises the directory
+cannot fire on the one case where it does not.
+
+The severity is bounded by who has such a directory: this is a pre-1.0 branch and the only known
+instances are disposable dev data, which is why this is filed rather than fixed. It is recorded
+because the reasoning generalises — the next on-disk marker will have the same blind spot on the
+day it ships.
+
+**Fix direction:** claiming is only safe for a directory that is genuinely empty. Before writing a
+marker, check the root for archives and `*-active` intent logs; if any exist, refuse with a
+distinct error saying the directory predates the marker and no migration exists. An empty
+directory is still claimed, which keeps first start working. Note this cannot be a `format`
+check — [item 45](resolved/storage-marker-format.md) covers a marker that is *wrong*, and this is
+one that is *absent*.
+
+### 47. A torn tail on the active log is counted as data loss
+
+`FileSystem::read_intents` (`.../storage/fs.rs`) counts a `truncated` reader against
+`RecoveryStats::truncated_logs`, and it does so for the active log on the same terms as for an
+inactive one:
+
+```rust
+// a reader that stopped on a bad tail dropped everything after it
+if reader.truncated {
+    stats.truncated_logs += 1;
+}
+```
+
+`RecoveryStats::is_clean` treats any non-zero `truncated_logs` as loss
+([Recovery](../storage/recovery.md#what-recovery-discards)), so `Shard::report_recovery` emits
+`WARN Recovery discarded data` — after an ordinary crash, where nothing was lost.
+
+A torn tail on the active log is what a crash *looks like*. Writes are acknowledged only after
+they are durable — that is [items 1-3](resolved/durability.md), and `ack_survives_sigkill`
+(`shoal/tests/persistent_sorted_table.rs`) is the end-to-end proof — so the half-written entry at
+the end of the log belongs to a write no client was ever told about. Dropping it is the design
+working.
+
+This matters by the recovery page's own argument. `updates_after_delete` is kept out of
+`is_clean` because "an update that lands on a row a delete already tombstoned is correctly
+dropped, and counting it as loss would make the numbers that do mean loss useless"
+([storage.rs](../storage/recovery.md#what-recovery-discards)). Counting benign torn tails is the
+same mistake in the opposite direction: every unclean shutdown produces a `WARN` that claims
+data was discarded, so the warning that means real corruption is buried in warnings that mean a
+process was killed. [Item 44](resolved/compaction-tail-loss.md) draws this same distinction
+correctly on the compaction side.
+
+**Fix direction:** the reader already knows where it stopped. A tail whose remainder is padding
+or zeros is the benign shape; damage with non-zero bytes after it is a corrupt record with data
+behind it. `IntentLogReader` can scan the remainder once on the way out and set two different
+flags. Failing that, the cheaper split is positional — count damage in the *active* log
+separately from damage in an inactive one, since an inactive log has been fully written and
+rotated, so damage in it is never benign. Either way `is_clean` should ignore the benign counter,
+the way it already ignores `updates_after_delete`.
+
 ---
 
 ## Unsafe `Send` invariant
@@ -519,20 +611,28 @@ failure. Any change touching loader construction should be read against this.
 1. **Item 38** — not a production defect, but the test suite is what every other fix on this page
    is judged by, and right now two of its binaries can silently serve each other's traffic. Worth
    doing before the fixes below rather than after them.
-2. **Items 11 and 16** — hot-path panics, and the empty-ring window a client can hit during
-   startup.
-3. **Items 27 and 42** — data that SHQL cannot reach at all: a partition key containing a quote,
+2. **Item 16** — the hot-path panics. This entry used to read "items 11 and 16"; item 11, the
+   empty-ring window a client could hit during startup, is [resolved](resolved/tablet-ring.md) and
+   was made unbuildable rather than checked.
+3. **Item 22** — the size accounting the whole memory limit rests on, now with *four* different
+   bases for the same field. It moved up this list because the two things that used to sit in
+   front of it are done: [item 6](resolved/memory-accounting.md) fixed the path that destroyed the
+   counter outright, and [item 13](resolved/eviction-log-underflow.md) turned the eviction log into
+   something that reports drift instead of breaking on it. That `drift` field is the instrument for
+   this one, and it now has a first hypothesis to test rather than a whole page to reason about:
+   recovery adds a partition in archive bytes and eviction takes it off in deep size, which
+   predicts drift proportional to how many partitions a shard's recovery loaded and none on a
+   shard that started clean.
+4. **Item 47** — cheap, and it is making the recovery counters harder to trust the longer it sits.
+   Every unclean shutdown currently reports discarded data, so the warning that means real
+   corruption is buried under warnings that mean a process was killed.
+5. **Items 27 and 42** — data that SHQL cannot reach at all: a partition key containing a quote,
    and a composite sort key. Item 42 is the sharper of the two now that
    [item 8](resolved/sort-keys.md) is fixed, since a sort key is a thing you can query with.
-4. **Item 22** — the size accounting the whole memory limit rests on, with three different bases
-   for the same field. It moved up this list because the two things that used to sit in front of
-   it are done: [item 6](resolved/memory-accounting.md) fixed the path that destroyed the counter
-   outright, and [item 13](resolved/eviction-log-underflow.md) turned the eviction log into
-   something that reports drift instead of breaking on it. That `drift` field is the instrument
-   for this one — a run under memory pressure now localizes the undercount rather than requiring
-   it to be reasoned about.
-5. **Items 32 and 33** — two leaks with one shape: state keyed by something that goes away and is
+6. **Items 32 and 33** — two leaks with one shape: state keyed by something that goes away and is
    never told. They are cheap together, since a `ClientGone` broadcast is what both want.
+7. **Items 43 and 46** — the two remaining holes in the storage marker. Worth doing together,
+   since both are changes to what `StorageMeta::claim` looks at before it writes.
 
 Everything that has been fixed, and why it was fixed the way it was, is in
 [Resolved Issues](resolved-issues.md). The SHQL parser has gained test coverage at both stages

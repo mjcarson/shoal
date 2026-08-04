@@ -211,4 +211,10 @@ pub enum ShoalError {
     /// is stored under its own name, so reading a directory back with a different count
     /// looks for every partition in the wrong place.
     ShardCountMismatch { found: usize, expected: usize },
+    /// This storage directorys marker was written in a format we cannot read
+    ///
+    /// Every other field in the marker only means what we think it means if we agree
+    /// about the shape it was written in, so an unreadable format has to be refused
+    /// before the shard count inside it is trusted.
+    StorageFormatMismatch { found: u32, expected: u32 },
 }

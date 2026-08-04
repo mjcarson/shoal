@@ -111,7 +111,8 @@ Only a handful of `event!` calls exist, all at `INFO` except the two recovery su
 | Recovery progress | INFO | `msg`, `path` / `gen` | `.../fs.rs`, in `read_intents` |
 | Skipped archive | INFO | `archive`, `skip` | `.../fs/compactor.rs` |
 | **Recovery summary** | INFO / **WARN** | `msg`, `shard`, `orphaned_updates`, `unreplayable_entries`, `truncated_logs`, `updates_after_delete` | `Shard::report_recovery` (`shard.rs`) |
-| **Compaction discarded intents** | **WARN** | `msg`, `orphaned_updates`, `updates_after_delete` | `FileSystemCompactor::apply_intents` |
+| **Compaction discarded intents** | **WARN** | `msg`, `orphaned_updates`, `unreplayable_entries`, `truncated_logs`, `updates_after_delete` | `FileSystemCompactor::apply_intents` |
+| **Discarded intent log** | **WARN** | `msg`, `path` | `FileSystemCompactor::compact_intent` |
 
 The eviction event is worth reading closely, because it is the only window onto shard memory.
 `removed` is summed from the partitions the pass actually dropped and `reclaimed` is how far the
@@ -154,11 +155,23 @@ knowing before relying on it:
   shard threads and returns without joining them, so there is no moment at which every shard has
   finished starting. Expect one line per shard and aggregate them yourself.
 
+- **A torn tail on the active log raises this to `WARN` too**, and that is the common case rather
+  than a rare one — it is what every unclean shutdown leaves behind, and nothing acknowledged was
+  lost in it. Treat a `truncated_logs=1` on a shard that was killed as expected until
+  [item 47](../appendix/known-issues.md#47-a-torn-tail-on-the-active-log-is-counted-as-data-loss)
+  separates it from real corruption.
+
 Compaction reports separately, and keeps reporting for the life of the shard rather than only at
-startup — a startup compaction is dispatched to the compactor task, not awaited.
+startup — a startup compaction is dispatched to the compactor task, not awaited. It emits two
+distinct events: `apply_intents` counts what it could not apply, and `compact_intent` says when a
+log it is about to delete was one it could not read to the end. That second event covers both a
+log nothing could be read from and one that gave up part way through after merging what it had —
+the second used to be silent, which meant the larger loss was the quieter one
+([item 44](../appendix/resolved/compaction-tail-loss.md)).
 
 What is *not* fixed is the discarding itself: a flipped bit mid-log still costs every intent
-after it ([Recovery](../storage/recovery.md#truncation-and-corruption)).
+after it ([Recovery](../storage/recovery.md#truncation-and-corruption)), on the compaction path
+as much as the recovery one.
 
 ### Debug output that is not tracing
 

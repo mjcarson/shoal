@@ -156,6 +156,13 @@ with why suppressing the rotation is a larger change than suppressing its cleanu
 that was zero length on disk.** `truncated` covers damage, not the difference between "no records
 written" and "file never grown". Nothing currently needs that distinction.
 
+~~**The warning only covers a log nothing could be read from.**~~ **Fixed**, and it was this
+change that opened the gap: moving the delete out of the `else` arm so an empty log is cleaned up
+left the report behind in the arm it came from, so a log that yielded records and *then* hit
+damage was deleted in silence. That is [item 44](compaction-tail-loss.md) — the `truncated` flag
+introduced here now feeds a three-way `classify_tail` and the report sits beside the delete
+rather than inside one of its arms.
+
 ## Tests
 
 | Test | Fails without |

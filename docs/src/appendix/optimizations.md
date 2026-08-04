@@ -243,6 +243,36 @@ any of them, and now does so for every log at once rather than one log at a time
 went from the size of the largest log to the total size of all logs. That is a deliberate
 trade — see [Recovery](../storage/recovery.md#limitations).
 
+### O22. Recovery loads the partitions it scanned one await at a time
+
+`FileSystem::load_scanned` (`.../storage/fs.rs`) walks the key set the prescan built and awaits
+one load per key:
+
+```rust
+for partition_key in to_load {
+    if partitions.contains_key(&partition_key) { continue; }
+    if let Some(partition_read) = self.load_partition_direct(partition_key).await? {
+```
+
+This is [O8](#o8-partitions-are-read-one-at-a-time-each-with-its-own-dup-and-close)'s shape on
+the recovery path rather than the compaction one, and each iteration also pays
+[O15](#o15-one-partition-load-costs-a-dup-and-a-close)'s `dup`/`close`. Neither of those covers
+this loop, so it is filed separately — but it should be fixed in the same change as O8, since
+grouping by archive file is the same work in both places.
+
+What makes it newly worth filing is that [item 31](resolved/multi-log-recovery.md) is what made
+it possible. Under the old `scan` the loads were interleaved with reading, one key at a time,
+discovered as each record went past — there was no set to batch. The whole key set is now known
+before a single load happens, which is exactly the precondition for grouping them by archive and
+issuing them concurrently. The correctness fix handed this optimization its opening.
+
+Worth taking together with the [item 22](known-issues.md#22-size-accounting-inconsistencies)
+bullet about this same loop: it is where a partition enters the memory counter in archive bytes,
+so whatever touches it next is already reading that line.
+
+**Not taken**, because it is on the startup path rather than a hot one, and the set is normally
+small — an interrupted compaction is rare and the active log usually names few partitions.
+
 ---
 
 ## Compaction

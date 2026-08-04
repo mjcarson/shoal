@@ -67,5 +67,7 @@
   - [24. A bad query could leave the terminal in raw mode](appendix/resolved/shoalctl-panic.md)
   - [26, 39. A multi-partition get answered in an arbitrary order](appendix/resolved/partition-order.md)
   - [31. Multi-log recovery discarded already-replayed intents](appendix/resolved/multi-log-recovery.md)
+  - [44. A compaction discarded a damaged log's tail in silence](appendix/resolved/compaction-tail-loss.md)
+  - [45. The storage marker's format field was written and never read](appendix/resolved/storage-marker-format.md)
 - [TODOs and Unbuilt Work](appendix/todos.md)
 - [Glossary](appendix/glossary.md)

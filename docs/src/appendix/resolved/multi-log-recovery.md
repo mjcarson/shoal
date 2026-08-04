@@ -140,6 +140,20 @@ of inactive logs is the count of interrupted compactions — normally zero or on
 bounded and small, but it is a real change and it is recorded in
 [Recovery](../../storage/recovery.md#limitations) rather than left to be discovered.
 
+**The loads this made batchable are still serial.** Collecting the key set before any load
+happens is precisely the precondition for grouping those loads by archive file and issuing them
+concurrently, which was not available while `scan` discovered keys one record at a time. Nothing
+here took that opening; it is filed as
+[O22](../optimizations.md#o22-recovery-loads-the-partitions-it-scanned-one-await-at-a-time),
+to be done alongside [O8](../optimizations.md#o8-partitions-are-read-one-at-a-time-each-with-its-own-dup-and-close)
+since it is the same work on the compaction path.
+
+**`load_scanned` is where a partition enters the memory counter in archive bytes**, and replay
+converts it to a form the counter is read back in deep size from. That mismatch is a bullet on
+[item 22](../known-issues.md#22-size-accounting-inconsistencies) — this change shrank it sharply
+without setting out to, since the old `scan` re-added the archive length once per update intent
+rather than once per partition.
+
 ~~**A clean shutdown still leaves an empty inactive log behind.** Noticed while building the
 reproduction: after `pool.exit()` a zero byte `Shard-N-inactive-1` remains on disk. It is
 harmless — a zero length log reads as an immediate end of log — but it means "an inactive log

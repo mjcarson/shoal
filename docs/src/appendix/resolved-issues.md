@@ -29,6 +29,8 @@ Numbers are also grouped when one change closed several items that turned out to
 | 24 | [A bad query could leave the terminal in raw mode](resolved/shoalctl-panic.md) | The parse error is rendered instead of panicking past `ratatui::restore()` |
 | 26, 39 | [A multi-partition get answered in an arbitrary order](resolved/partition-order.md) | `IN` and same-field `OR` replaced an `AND` that meant three different things; rows are slotted per partition on each shard and reordered by the coordinator before the limit is applied |
 | 31 | [Multi-log recovery discarded already-replayed intents](resolved/multi-log-recovery.md) | One prescan across every log before any replay, so no load can overwrite a partition an earlier log replayed into; each partition loaded once; inactive logs deleted only once every replay has succeeded |
+| 44 | [A compaction discarded a damaged log's tail in silence](resolved/compaction-tail-loss.md) | The report moved out of the arm that had nothing to compact and down beside the delete it describes, split into three named outcomes by `classify_tail`, and `truncated_logs` now reaches the compaction path's counters |
+| 45 | [The storage marker's format field was written and never read](resolved/storage-marker-format.md) | `claim` refuses a marker whose `format` it does not know, and refuses on it before reading the shard count out of a layout it cannot interpret |
 
 ## How a fix gets written down
 

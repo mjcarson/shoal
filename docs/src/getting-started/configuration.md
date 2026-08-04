@@ -195,9 +195,20 @@ Because of that, **changing `resources.cores` between restarts on the same data 
 refused**. `shoal-meta.json` in the storage root records the shard count that wrote the
 directory, and `ShoalPool::start` errors with `ShardCountMismatch` before any shard spawns
 rather than starting and failing to find data that moved to another shard. There is no
-migration: to change the core count, start from an empty directory. The check covers the
-default storage root only, not a per-table `storage.tables` override
-([item 43](../appendix/known-issues.md#43-the-storage-marker-only-guards-the-default-storage-root)).
+migration: to change the core count, start from an empty directory.
+
+The marker also carries a `format` version, and a marker written in a format this build does not
+know is refused before its shard count is read — a count read out of a layout we cannot interpret
+is a guess, and a guess that happens to match starts the server
+([item 45](../appendix/resolved/storage-marker-format.md)).
+
+Two holes remain in the guard. It covers the default storage root only, not a per-table
+`storage.tables` override
+([item 43](../appendix/known-issues.md#43-the-storage-marker-only-guards-the-default-storage-root)),
+and a directory with *no* marker is claimed rather than refused — which includes every directory
+written before the marker existed
+([item 46](../appendix/known-issues.md#46-an-unmarked-storage-directory-is-claimed-rather-than-refused)).
+If you have a data directory older than the marker, start from an empty one.
 
 Directories are created at startup by `setup_paths`, which walks each path component and
 calls `Directory::create` on it (`.../fs/conf.rs:158-171`, `:276-284`). The parent path

@@ -107,16 +107,22 @@ This is the correct invariant, and it has a consequence:
 ```rust
 async fn compact_intent(&mut self, path: PathBuf, generation: u64) -> Result<(), ServerError> {
     let truncated = self.sort_intent_log(&path).await?;
+    // work out what deleting this log is about to cost us before we touch it
+    let loss = classify_tail(truncated, !self.changes.is_empty());
     let partitions = if self.changes.is_empty() {
-        // warn if this log was empty because we could not read any of it
-        if truncated { event!(Level::WARN, ..); }
         // this log had nothing to compact so there is nothing to write
         Vec::default()
     } else {
         self.load_partitions_for_intents().await?;
-        self.apply_intents().await?;
+        self.apply_intents(loss).await?;
         self.write_partition().await?
     };
+    // say what this log cost us, on both paths
+    match loss {
+        TailLoss::None => (),
+        TailLoss::Whole => event!(Level::WARN, msg = "Discarding an intent log we could read no entries from", ..),
+        TailLoss::Tail  => event!(Level::WARN, msg = "Discarding the unreadable tail of an intent log we compacted", ..),
+    }
     // delete our no longer needed inactive intent log, which is safe for both arms
     glommio::io::remove(path).await?;
     // tell our shard this generation is now durable even if it was empty, since
@@ -126,7 +132,15 @@ async fn compact_intent(&mut self, path: PathBuf, generation: u64) -> Result<(),
 }
 ```
 
-`.../fs/compactor.rs:324-374`
+`.../fs/compactor.rs`
+
+**The report sits below the branch because the delete does.** `self.changes.is_empty()` asks
+whether there is work to do, not whether anything was lost, and a log is removed on both of its
+arms. Reporting from inside one arm meant a compaction that read half a damaged log and merged
+that half said nothing at all, while one that read none of it warned — the more data dropped, the
+quieter the compaction ([item 44](../appendix/resolved/compaction-tail-loss.md)). `classify_tail`
+is called *before* the branch because `apply_intents` drains `self.changes`, so asking afterwards
+would call every damaged log `Whole`.
 
 The `MarkEvictable` is sent unconditionally, even for a log that compacted to nothing. It is
 not only a list of partitions — it is also how a table learns how far its data has been
@@ -315,8 +329,11 @@ far its data has been compacted
 ([Memory and Eviction](../tables/memory-and-eviction.md#becoming-evictable)).
 
 This is last, not fifth as this page used to number it. The removal has always come first on the
-path that had partitions to write; item 14 made that true of the other path too, and the order is
-now an invariant rather than an accident of which branch the code took.
+path that had partitions to write; [item 14](../appendix/resolved/empty-rotated-logs.md) made that
+true of the other path too, and the order is now an invariant rather than an accident of which
+branch the code took. What that unification cost is worth reading alongside it: it left the
+report of *what the removal discarded* behind in one branch, which is
+[item 44](../appendix/resolved/compaction-tail-loss.md).
 
 ## Archive compaction
 

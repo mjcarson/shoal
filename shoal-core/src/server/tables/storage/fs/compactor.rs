@@ -32,6 +32,47 @@ use crate::storage::{CompactionJob, IntentReadSupport, RecoveryStats, ShouldPrun
 /// This is 100 Mebibytes
 const MIN_ARCHIVE_COMPACTABLE: u64 = 10 << 20;
 
+/// What reading an intent log for compaction cost us
+///
+/// A compaction deletes the log it just read on every path out, so whatever the reader
+/// gave up on is gone the moment that delete lands. How much was lost is not the same
+/// question as whether anything was: a log that yielded records before it stopped had a
+/// tail dropped, and a log that yielded none was dropped whole.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TailLoss {
+    /// This log was read to its end and nothing was discarded
+    None,
+    /// This log stopped on damage before a single record could be read from it
+    Whole,
+    /// This log gave us records and then stopped on damage, dropping the rest
+    Tail,
+}
+
+/// Work out what a compaction is about to throw away with the log it read
+///
+/// This is split out from `compact_intent` because it is the whole of the decision and
+/// the rest of that function cannot be reached without a live shard behind it. The
+/// distinction it draws is the point: an empty log is the ordinary result of rotating a
+/// table nobody wrote to, so `truncated` alone cannot say whether anything was lost.
+///
+/// # Arguments
+///
+/// * `truncated` - Whether the reader gave up on a damaged entry
+/// * `read_any` - Whether the reader yielded any records before it stopped
+pub(crate) fn classify_tail(truncated: bool, read_any: bool) -> TailLoss {
+    // a reader that ran to the end of its log discarded nothing, however little it found
+    if !truncated {
+        return TailLoss::None;
+    }
+    // a log we read part of lost only what came after the damage
+    if read_any {
+        TailLoss::Tail
+    } else {
+        // and one we read nothing from was discarded in its entirety
+        TailLoss::Whole
+    }
+}
+
 /// Write a new intent to our maps intent log
 ///
 /// # Arguments
@@ -210,10 +251,19 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
     /// A compaction runs for the life of a shard rather than only at startup, so what
     /// it discards is reported here instead of in the summary a shard emits once it
     /// has finished starting.
+    ///
+    /// # Arguments
+    ///
+    /// * `loss` - What reading the log these intents came from already cost us
     #[instrument(name = "FileSystemCompactor::apply_intents", skip_all, err(Debug))]
-    async fn apply_intents(&mut self) -> Result<(), ServerError> {
-        // start this job with nothing discarded
-        let mut stats = RecoveryStats::default();
+    async fn apply_intents(&mut self, loss: TailLoss) -> Result<(), ServerError> {
+        // start this job with whatever reading its log already discarded, so the
+        // summary below counts the records we never saw alongside the ones we could
+        // not apply rather than reporting only half of what went missing
+        let mut stats = RecoveryStats {
+            truncated_logs: u64::from(loss != TailLoss::None),
+            ..RecoveryStats::default()
+        };
         // replay all intents over our partitions
         for (partition, intents) in self.changes.drain() {
             // apply these intents to the correct partition
@@ -233,6 +283,8 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                 Level::WARN,
                 msg = "Compaction discarded intents",
                 orphaned_updates = stats.orphaned_updates,
+                unreplayable_entries = stats.unreplayable_entries,
+                truncated_logs = stats.truncated_logs,
                 updates_after_delete = stats.updates_after_delete,
             );
         }
@@ -343,27 +395,38 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
     {
         // read and sort this intent log
         let truncated = self.sort_intent_log(&path).await?;
+        // work out what deleting this log is about to cost us before we touch it
+        let loss = classify_tail(truncated, !self.changes.is_empty());
         // check if we have any compacted partitions to write
         let partitions = if self.changes.is_empty() {
-            // warn if this log was empty because we could not read any of it, since
-            // an empty log is otherwise just a rotation that had nothing to rotate
-            if truncated {
-                event!(
-                    Level::WARN,
-                    msg = "Discarding an intent log we could read no entries from",
-                    path = path.to_str()
-                );
-            }
             // this log had nothing to compact so there is nothing to write
             Vec::default()
         } else {
             // load any existing partitions from disk
             self.load_partitions_for_intents().await?;
             // apply the new intents to our loaded partitions
-            self.apply_intents().await?;
+            self.apply_intents(loss).await?;
             // write our compacted partitions to disk
             self.write_partition().await?
         };
+        // say what this log cost us, on both paths - an empty log is the ordinary
+        // result of rotating a table nobody wrote to, and a damaged one is not
+        match loss {
+            // this log was read to its end, so there is nothing to report
+            TailLoss::None => (),
+            // we could not read a single record out of this log before deleting it
+            TailLoss::Whole => event!(
+                Level::WARN,
+                msg = "Discarding an intent log we could read no entries from",
+                path = path.to_str(),
+            ),
+            // we compacted what we could read and the rest goes with the file
+            TailLoss::Tail => event!(
+                Level::WARN,
+                msg = "Discarding the unreadable tail of an intent log we compacted",
+                path = path.to_str(),
+            ),
+        }
         // delete our no longer needed inactive intent log, which is safe for both arms
         // above: write_partition syncs everything it wrote before returning, and a log
         // we compacted nothing from has nothing left to make durable

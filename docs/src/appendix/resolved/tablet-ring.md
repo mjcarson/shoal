@@ -234,6 +234,15 @@ a different directory is unguarded, so a mixed configuration can still strand th
 table's data silently. Filed as
 [item 43](../known-issues.md#43-the-storage-marker-only-guards-the-default-storage-root).
 
+**`StorageMeta` does not guard a directory written before it existed.** A directory with no
+marker is claimed rather than refused, and every directory written before this change has none —
+while this change is also what moved every partition to a different shard. So the one case the
+marker most needed to catch is the one case it cannot see. Filed as
+[item 46](../known-issues.md#46-an-unmarked-storage-directory-is-claimed-rather-than-refused).
+The marker's `format` field is now checked, which was a separate hole in the same guard
+([item 45](storage-marker-format.md)) and does not help with this one: that is a marker that is
+wrong, this is a marker that is absent.
+
 **`Ring::add` cannot place an unknown shard.** It warns and ignores. That is the honest behaviour
 until a rebalancer exists, but it means the multi-node seam is a seam and not a partial
 implementation.

@@ -274,6 +274,24 @@ Intent log records and the map snapshot are checksummed; archive payloads are no
 there is caught only if rkyv validation happens to reject it, and several call sites
 `.unwrap()` that result.
 
+### Quarantining a damaged intent log
+
+A compaction now says when it deletes a log it could not read to the end
+([item 44](resolved/compaction-tail-loss.md)), but it still deletes it, so an operator who reads
+the warning has nothing left to look at. The obvious answer — keep the file — does not work as
+stated: a log left in the intent directory is not inert, because `find_inactive_intent_logs`
+matches on the name, so every subsequent startup replays it, hits the same damage, and re-drops
+the same tail forever.
+
+What is wanted is a rename out of that pattern — a `.corrupt` sideline the compactor moves the
+file to instead of removing it — plus something that stops those accumulating without bound. Both
+halves are small; the reason this is filed rather than done is that neither has a caller yet.
+Nothing reads a quarantined log, and until a repair tool or an operator workflow exists, moving
+files into a directory nothing ever looks at is worse than the warning alone.
+
+The same argument applies on the recovery path, which discards a damaged tail with the same
+finality ([Recovery](../storage/recovery.md#truncation-and-corruption)).
+
 ### Storage engine abstraction
 
 `StorageSupport` (`.../storage.rs:225`) and `Loaders` (`:189-193`) are written as extension

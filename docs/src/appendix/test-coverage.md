@@ -3,8 +3,13 @@
 What the test suite reaches, what it does not, and the one place where it is unsound.
 
 **Established by running it.** `cargo check --workspace --all-targets` passes with warnings and
-`cargo test --workspace` passes: **136 integration tests** (one ignored), **178 `shoal-core` unit
-tests**, **11 doctests**. That is up from 135, 178, and 11 with the empty rotated log test added
+`cargo test --workspace` passes: **136 integration tests** (one ignored), **183 `shoal-core` unit
+tests**, **11 doctests**. That is up from 136, 178, and 11 with the compaction tail loss tests
+added by [item 44](resolved/compaction-tail-loss.md) and the marker format test added by
+[item 45](resolved/storage-marker-format.md) — both fixes are unit-testable end to end and
+neither added an integration test, which is itself the
+[observability gap](todos.md#observability) talking: no test can observe an event the server
+emits. It is up from 135, 178, and 11 with the empty rotated log test added
 by [item 14](resolved/empty-rotated-logs.md), from 135, 177, and 11 with the eviction accounting
 test added by [item 13](resolved/eviction-log-underflow.md), from 133, 168, and 10 with the tablet map and
 storage marker tests added by [items 11, 12 and 37](resolved/tablet-ring.md), from 132, 159, and 10 with the
@@ -46,13 +51,13 @@ exercise durability end to end, and they exist because
 | --- | --- | --- |
 | `shared/queries/parser/tests.rs` | 56 | the SHQL grammar, including `IN` lists, `OR` folding, each range operator, and the folding and refusals around a range |
 | `shared/queries/parser/complete/tests.rs` | 26 | completion suggestion generation, including the range operator tokens |
-| `.../storage/fs/tests.rs` | 17 | the intent log reader against real files, including which tail shapes are damage and which are how a healthy log ends |
+| `.../storage/fs/tests.rs` | 21 | the intent log reader against real files, including which tail shapes are damage and which are how a healthy log ends, and what a compaction is about to throw away with the log it deletes |
 | `.../storage/fs/stream_tests.rs` | 13 | `StreamWriter` alignment, padding, and watermarks |
 | `tables/partitions.rs` | 38 | tombstone bookkeeping, limits, sort-key selection and range selection on `get` and `exists`, the empty-range guard, `merge_from_disk` sizing, and the recovery counting that separates a correctly dropped update from a lost one |
 | `shared/queries.rs` | 10 | sort-key normalization, and `SortRange` emptiness and containment |
 | `tables/storage.rs` | 6 | `PendingResponse` release against a durable watermark, and `RecoveryStats` merging and cleanliness |
 | `server/ring.rs` | 6 | the tablet map: that an empty one cannot be built, that tablets are split evenly and no shard is starved, that ids come from the high bits so a split stays incremental, and that two independently built maps agree |
-| `server/meta.rs` | 3 | claiming a storage directory, reopening it under the same shard count, and refusing a changed one |
+| `server/meta.rs` | 4 | claiming a storage directory, reopening it under the same shard count, refusing a changed one, and refusing a marker whose format this build does not know |
 | `tables/persistent.rs` | 2 | the two pieces of arithmetic on the shard memory counter: that a shrink subtracts instead of wrapping, and that an eviction summarizes itself without underflowing on a drifted counter |
 | `.../storage/fs/map.rs` | 1 | map intent replay |
 

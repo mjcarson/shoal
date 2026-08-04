@@ -72,8 +72,9 @@ impl StorageMeta {
     ///
     /// # Errors
     ///
-    /// This will fail if the directory was written by a different number of shards, or if
-    /// the metadata cannot be read or written.
+    /// This will fail if the directory was marked in a format we cannot read, if it was
+    /// written by a different number of shards, or if the metadata cannot be read or
+    /// written.
     #[instrument(name = "StorageMeta::claim", skip_all, err(Debug))]
     pub fn claim(root: &Path, shards: usize) -> Result<(), ServerError> {
         // get the path this directorys metadata lives at
@@ -84,6 +85,14 @@ impl StorageMeta {
             Ok(raw) => {
                 // parse the metadata we found
                 let found: StorageMeta = serde_json::from_slice(&raw)?;
+                // a format we cannot read makes every field inside it a guess, including
+                // the shard count, so settle the format before anything is read from it
+                if found.format != META_FORMAT {
+                    return Err(ServerError::Shoal(ShoalError::StorageFormatMismatch {
+                        found: found.format,
+                        expected: META_FORMAT,
+                    }));
+                }
                 // a different shard count would look for every partition in the wrong place
                 if found.shards != shards {
                     return Err(ServerError::Shoal(ShoalError::ShardCountMismatch {
@@ -142,6 +151,39 @@ mod tests {
         StorageMeta::claim(dir.path(), 4).expect("failed to claim a new directory");
         // reopening it with that same count is the ordinary restart
         StorageMeta::claim(dir.path(), 4).expect("failed to reopen with the same shard count");
+    }
+
+    /// A marker written by a format we do not understand is refused
+    ///
+    /// The shard count in a marker is only meaningful if we agree about what the fields
+    /// around it mean, so the format has to be settled before the count is read.
+    #[test]
+    fn an_unknown_format_is_refused() {
+        // get a directory nothing has written to
+        let dir = tempfile::tempdir().expect("failed to build a temp dir");
+        // make sure the directory we are staging a marker in exists
+        std::fs::create_dir_all(dir.path()).expect("failed to build our storage directory");
+        // stage a marker written by a format later than the one we know
+        let future = StorageMeta {
+            format: META_FORMAT + 1,
+            shards: 4,
+        };
+        std::fs::write(
+            StorageMeta::path(dir.path()),
+            serde_json::to_vec_pretty(&future).expect("failed to build our marker"),
+        )
+        .expect("failed to stage our marker");
+        // reading it under a format we do not understand has to refuse
+        let error =
+            StorageMeta::claim(dir.path(), 4).expect_err("an unknown marker format started");
+        // and has to say which format it could not read rather than guess at the fields
+        assert!(matches!(
+            error,
+            ServerError::Shoal(ShoalError::StorageFormatMismatch {
+                found: 2,
+                expected: 1
+            })
+        ));
     }
 
     /// A directory reopened by a different shard count is refused

@@ -18,6 +18,7 @@ use std::hash::Hasher;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
+use super::compactor::{classify_tail, TailLoss};
 use super::reader::IntentLogReader;
 use super::stream::PAD_SENTINEL;
 use super::find_inactive_intent_logs;
@@ -333,6 +334,48 @@ fn reader_does_not_flag_healthy_tails() {
         std::fs::write(&padded, &log).unwrap();
         assert!(!read_all_truncated(&padded).await);
     });
+}
+
+// ========================================================================
+// Compaction tail loss tests
+// ========================================================================
+
+#[test]
+/// A log a compaction read to its end costs nothing
+fn classify_tail_reports_no_loss_for_a_clean_log() {
+    // a log with records in it that was read all the way through
+    assert_eq!(classify_tail(false, true), TailLoss::None);
+    // and a log that was simply empty, which is what rotating an unwritten table leaves
+    assert_eq!(classify_tail(false, false), TailLoss::None);
+}
+
+#[test]
+/// A damaged log a compaction still read records out of loses only its tail
+///
+/// This is the case that used to be silent. The compaction deletes the log on every
+/// path out, so the records after the damage go with the file, and reporting only the
+/// log we could read nothing from meant the larger loss was the quiet one.
+fn classify_tail_reports_a_dropped_tail() {
+    assert_eq!(classify_tail(true, true), TailLoss::Tail);
+}
+
+#[test]
+/// A damaged log a compaction read nothing out of is lost whole
+fn classify_tail_reports_a_log_dropped_whole() {
+    assert_eq!(classify_tail(true, false), TailLoss::Whole);
+}
+
+#[test]
+/// Every kind of loss has to be distinguishable from a clean read
+///
+/// `apply_intents` turns this into `truncated_logs`, and folding either damaged case
+/// in with a clean one would put a compaction that dropped records back into the
+/// silence this came out of.
+fn classify_tail_separates_loss_from_a_clean_read() {
+    // both damaged shapes have to count as loss
+    for read_any in [true, false] {
+        assert_ne!(classify_tail(true, read_any), TailLoss::None);
+    }
 }
 
 // ========================================================================
