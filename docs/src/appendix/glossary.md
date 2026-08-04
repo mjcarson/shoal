@@ -79,6 +79,16 @@ row.
 **Partition key** — A `u64` produced by `gxhash`ing the `#[shoal(partition)]` fields. Because
 it is a hash, **partition keys collide**, and nothing detects it.
 
+**Projection** — A struct naming a subset of a table's fields, which a get can ask to be answered
+with instead of whole rows. Declared with `#[derive(ShoalProjection)]` and listed on the database
+field holding its table. A projection reads only the fields it names out of an archived row, and
+answers in a response variant of its own so the client can name its type. It must carry its
+table's partition key. See [F2](../features/projections.md).
+
+**Identity projection** — The projection of a row into itself: a clone from a resident row, a
+deserialize from an archived one. It is what a get that named no projection is answered with, which
+is what makes a projected get and an unprojected one the same code path.
+
 **Pending response** — A response held in `PendingResponse` against the intent log offset one
 past its record, released once the durability watermark passes it. See
 [Durability model](../storage/overview.md#durability-model).
@@ -103,8 +113,8 @@ intent logs, archives, and background tasks. Named `Shard-N`, where N comes from
 counter, not the core id. Shard names become filenames, which is why shard count is part of
 the on-disk format.
 
-**SHQL** — Shoal Query Language. A small `SELECT`-only parser: `SELECT * FROM t WHERE f = v
-[AND ...] [LIMIT n]`. Equality and `IN` on any field, plus `<`, `<=`, `>`, `>=` on a sort key;
+**SHQL** — Shoal Query Language. A small `SELECT`-only parser: `SELECT <*|projection> FROM t
+WHERE f = v [AND ...] [LIMIT n]`. Equality and `IN` on any field, plus `<`, `<=`, `>`, `>=` on a sort key;
 `WHERE` mandatory, no `ORDER BY`. Rows come back partition by partition in the order the query
 named them, and in sort-key order within each, so a `LIMIT` takes the first of those. See
 [SHQL](../api/shql.md).

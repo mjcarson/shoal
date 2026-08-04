@@ -6,11 +6,21 @@ use syn::{Ident, FieldsNamed};
 use crate::utils;
 
 
+/// Extend a token stream with a `ShoalDatabase` implementation for a database struct
+///
+/// # Arguments
+///
+/// * `stream` - The stream to extend
+/// * `struct_ident` - The name of the database struct
+/// * `fields` - The tables in this database
+/// * `variants` - The row type of each of those tables
+/// * `projections` - The projections each of those tables declared
 pub fn add(
     stream: &mut proc_macro2::TokenStream,
     struct_ident: &Ident,
     fields: &FieldsNamed,
     variants: &Vec<Ident>,
+    projections: &[Vec<Ident>],
 ) {
     // build our new idents
     let client_ident = format_ident!("{}Client", struct_ident);
@@ -62,23 +72,51 @@ pub fn add(
         }
     });
     // build our handle query arms
-    let handle_arms = fields.named.iter().map(|field| {
+    let handle_arms = fields.named.iter().zip(projections).map(|(field, declared)| {
         // get our field ident and type
         let field_ident = field.ident.as_ref().unwrap();
         // get the variant name from the inner type
         let variant_ident = utils::extract_inner_table_ident(&field.ty)
             .expect("Failed to extract inner table ident");
+        // build the name of this tables projection enum
+        let projection_ident = format_ident!("{}Projection", variant_ident);
+        // build one arm per projection, each picking up the row type it answers with
+        //
+        // the table is generic in what it builds, so this match is the only place a
+        // projection costs anything at runtime, and it runs once per query rather than
+        // once per row
+        let projection_arms = declared.iter().map(|projection| {
+            quote! {
+                #projection_ident::#projection => {
+                    match self.#field_ident.handle::<#projection>(meta, query).await {
+                        Some((client, query_id, response)) => {
+                            let wrapped = #response_ident::#projection(response);
+                            Some((client, query_id, wrapped))
+                        }
+                        None => None,
+                    }
+                }
+            }
+        });
         // build our handle query arm for this field
         quote! {
             #query_ident::#variant_ident(query) => {
-                // handle these queries
-                match self.#field_ident.handle(meta, query).await {
-                    Some((client, query_id, response)) => {
-                        // wrap our response with the right table kind
-                        let wrapped = #response_ident::#variant_ident(response);
-                        Some((client, query_id, wrapped))
+                // a get can ask to be answered with a subset of each rows fields, which
+                // decides the row type this table builds and the variant it answers in
+                match query.projection() {
+                    #(#projection_arms)*
+                    // a get that named no projection, and every query that is not a get,
+                    // answers with whole rows
+                    _ => {
+                        match self.#field_ident.handle::<#variant_ident>(meta, query).await {
+                            Some((client, query_id, response)) => {
+                                // wrap our response with the right table kind
+                                let wrapped = #response_ident::#variant_ident(response);
+                                Some((client, query_id, wrapped))
+                            }
+                            None => None,
+                        }
                     }
-                    None => None,
                 }
             },
         }

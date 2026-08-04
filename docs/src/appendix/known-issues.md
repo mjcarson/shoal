@@ -20,12 +20,12 @@ test suite does and does not reach is in [Test Coverage](test-coverage.md).
 Defects that have been fixed move to [Resolved Issues](resolved-issues.md), one page each,
 carrying the reasoning and the invariants the fix depends on. Item numbers are shared between
 the two pages and never reused, so a number appears on exactly one of them — which is why this
-list starts at 15 and skips 26, 31, 39, 44, and 45. The exceptions are items 20 and 24, which were only
+list starts at 15 and skips 26, 31, 39, 44, 45, and 48. The exceptions are items 20 and 24, which were only
 partly fixed: the open remainder is here and the rest is there. Item 9 was a third exception
 until its second half was fixed, and is now on the resolved page alone.
 
 **Baseline as of writing:** `cargo check --workspace --all-targets` passes with warnings;
-`cargo test --workspace` passes — 136 integration tests (one ignored), 183 `shoal-core` unit
+`cargo test --workspace` passes — 168 integration tests (one ignored), 194 `shoal-core` unit
 tests, 11 doctests. That is up from 14 and 32 with the addition of SHQL coverage
 ([SHQL](../api/shql.md#testing)), the restart and eviction tests added with items 4 and 5, the
 limit and cross-shard coverage added with item 7, the row-order and `IN`/`OR` coverage added
@@ -33,8 +33,11 @@ with items 26 and 39, the sort-key selection coverage added with item 8, the ran
 added with [F1](../features/sort-key-ranges.md), the multi-log recovery and recovery
 counting coverage added with items 31 and 9, the tablet map and storage marker coverage
 added with items 11 and 12, the eviction accounting coverage added with item 13, the empty
-rotated log coverage added with item 14, and the compaction tail loss and marker format coverage
-added with items 44 and 45. The counts before items 44 and 45 were 136, 178 and 11; before
+rotated log coverage added with item 14, the compaction tail loss and marker format coverage
+added with items 44 and 45, and the query error display coverage added with
+[item 48](resolved/query-error-display.md). The counts before item 48 were 157, 194 and 11;
+before F2 were 136, 183 and 11; before items 44 and 45
+were 136, 178 and 11; before
 item 14 were 135, 178 and 11;
 before item 13 were 135, 177 and 11; before items 11 and 12 were 133, 168 and 10; before
 items 9 and 31 were 132, 159 and 10; before F1 they were 115, 129, and 8, and before item 8
@@ -379,6 +382,41 @@ an optional exponent to `float_number` rather than special-casing the error — 
 misleading because the grammar accepts a prefix of what the user meant. Note that
 `serde_json::Number::from_f64` already rejects the infinities a large exponent can produce, so
 the overflow path is covered.
+
+### 49. The coarsest parse errors report a span covering the whole query
+
+Three of the errors a user hits most often blame the entire query rather than the part of it that
+is wrong:
+
+| Query | Reported span |
+| --- | --- |
+| `SELECT * FROM Nope WHERE id = 1` | `0..31` — all of it, for a table name in bytes 14 to 18 |
+| `SELECT * FROM Movie WHERE title = 'a'` | `0..37` — all of it, for a missing partition key |
+| `PICK * FROM Movie WHERE id = 1` | `0..30` — all of it, for a keyword in bytes 0 to 4 |
+
+The first comes from the unknown-table arm the derive generates
+(`shoal-derive/src/structs/client.rs`), which passes `0, query.len()`; the second from the
+missing-partition-key arm beside it, which does the same; the third from `ParsedSelect::new`
+(`shoal-core/src/shared/queries/parser.rs`), which reports `at_position(..., 0, query)` because
+the winnow parser it wraps returns a `ContextError`, and a `ContextError` carries no input slice
+to recover an offset from.
+
+Everywhere else the parser tracks real offsets — `field_start`/`field_end` on a `WhereClause`,
+`start`/`end` on a `WhereValue` and a `ParsedProjection` — and computes them from
+`original.len() - input.len()` on the surrounding `&str`. These three sites can do the same; the
+`ContextError` is not the obstacle it looks like, because the offset comes from the input the
+parser was handed rather than from the error it returned.
+
+The cost is paid in shoalctl, which underlines the span an error names
+([item 48](resolved/query-error-display.md)). A span covering the whole query is refused as
+misleading, so exactly the errors a beginner hits first are the ones drawn without a mark. The
+message names the position instead, which is correct and less useful.
+
+**Fix direction:** for the unknown table, `ParsedSelect` already has the table name and could
+carry its offsets alongside it the way `ParsedProjection` does. For the missing partition key,
+the honest span is the whole `WHERE` clause rather than the whole query, since that is the clause
+that has to change. For the failed `SELECT`, `query.len() - parsable.len()` at the point winnow
+gave up is the offset, and it is already in scope.
 
 ### 40. `UnsortedExists` still names a single partition
 

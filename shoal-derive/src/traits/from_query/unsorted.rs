@@ -53,6 +53,8 @@ fn add_get(stream: &mut proc_macro2::TokenStream, table_name: &Ident, query_kind
                       partition_keys,
                       filters: specific.filters,
                       limit: specific.limit,
+                      // carry over the subset of each row this get asked for
+                      projection: specific.projection,
                   };
                   // build our query kind
                   Self::#table_name(shoal_core::shared::queries::UnsortedQuery::Get(general))

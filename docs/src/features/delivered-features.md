@@ -12,6 +12,7 @@ Issues](../appendix/known-issues.md) and [Optimizations](../appendix/optimizatio
 | # | Feature | What it does |
 | --- | --- | --- |
 | F1 | [Sort-key range predicates](sort-key-ranges.md) | A sorted get or exists can bound its rows by a range of sort keys instead of naming them, in memory and in an archive, which makes an exclusive lower bound a cursor and paging a large partition cost a page |
+| F2 | [Projections on get queries](projections.md) | A get can ask to be answered with a named subset of a tables fields instead of whole rows, which reads only those fields out of an archive rather than deserializing every field of every row it returns |
 
 ## How a feature gets written down
 

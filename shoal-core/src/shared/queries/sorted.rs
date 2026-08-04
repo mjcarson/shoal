@@ -326,6 +326,19 @@ impl<T: ShoalSortedTable + std::fmt::Debug> SortedQuery<T> {
         }
     }
 
+    /// Get the subset of each rows fields this query asked to be answered with
+    ///
+    /// Only a get returns rows, so every other query answers with the whole row it would have
+    /// carried. That is the same answer a get that named no projection gives, which is what
+    /// lets the database dispatch on this one value rather than on the query kind as well.
+    pub fn projection(&self) -> T::Projection {
+        // only a get returns rows there is a subset of
+        match self {
+            SortedQuery::Get(get) => get.projection,
+            _ => T::Projection::default(),
+        }
+    }
+
     /// Get the most rows this query asked for, if it set a limit
     pub fn limit(&self) -> Option<usize> {
         // only a get returns rows that a limit could apply to
@@ -386,6 +399,8 @@ pub struct SortedGet<R: ShoalSortedTable> {
     pub filters: Option<R::Filters>,
     /// The number of rows to get at most
     pub limit: Option<usize>,
+    /// The subset of each rows fields this get is asking to be answered with
+    pub projection: R::Projection,
 }
 
 impl<R: ShoalSortedTable> SortedGet<R> {
@@ -414,6 +429,8 @@ impl<R: ShoalSortedTable> SortedGet<R> {
             sort_select,
             filters: self.filters.clone(),
             limit: self.limit,
+            // a narrowed get answers with the same rows the get it came from asked for
+            projection: self.projection,
         }
     }
 
@@ -437,10 +454,14 @@ impl<R: ShoalSortedTable> SortedGet<R> {
     /// produced. A limit of zero is reached before a single row is read, so a `LIMIT 0`
     /// get scans nothing and loads nothing.
     ///
+    /// The rows are counted rather than inspected, so this is generic in what a get is being
+    /// answered with: a projected get fills its limit with the same number of rows an
+    /// unprojected one does.
+    ///
     /// # Arguments
     ///
     /// * `found` - The rows this get has found so far
-    pub fn limit_reached(&self, found: &[R]) -> bool {
+    pub fn limit_reached<P>(&self, found: &[P]) -> bool {
         // check whether this get was given a limit at all
         match self.limit {
             // we are done once we hold as many rows as we were asked for

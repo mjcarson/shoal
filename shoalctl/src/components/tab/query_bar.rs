@@ -63,11 +63,26 @@ pub async fn run<S: QuerySupport>(
         .await
         .unwrap();
 }
+/// One wrapped row of a query
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryRow {
+    /// The query text drawn on this row
+    pub text: String,
+    /// The rest of the selected completion, where it trails this row
+    pub hint: String,
+    /// The byte offset in the query that this row's text starts at
+    ///
+    /// Wrapping is the only place a query stops being a single string, so this is what lets a
+    /// span measured against the whole query — a parse error's, say — be found again on the row
+    /// it was drawn on.
+    pub start: usize,
+}
+
 /// A query broken into the rows it will be drawn on
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueryLayout {
     /// The wrapped rows, each holding the text typed on it and the hint trailing it
-    pub rows: Vec<(String, String)>,
+    pub rows: Vec<QueryRow>,
     /// The row the cursor sits on, counted from the first row of the query
     pub cursor_row: usize,
     /// The column the cursor sits at within that row
@@ -81,7 +96,7 @@ pub struct QueryLayout {
 /// decided to break, which is a guess that goes wrong the moment a name is not ascii.
 struct Wrapper {
     /// The rows built so far
-    rows: Vec<(String, String)>,
+    rows: Vec<QueryRow>,
     /// The columns used up on the row currently being built
     used: usize,
     /// The width every row is wrapped at
@@ -96,15 +111,27 @@ impl Wrapper {
     /// * `width` - The number of columns each row has room for
     fn new(width: usize) -> Self {
         Wrapper {
-            rows: vec![(String::new(), String::new())],
+            rows: vec![QueryRow {
+                text: String::new(),
+                hint: String::new(),
+                start: 0,
+            }],
             used: 0,
             width,
         }
     }
 
     /// Start a new row
-    fn wrap(&mut self) {
-        self.rows.push((String::new(), String::new()));
+    ///
+    /// # Arguments
+    ///
+    /// * `start` - The byte offset in the query the new row starts at
+    fn wrap(&mut self, start: usize) {
+        self.rows.push(QueryRow {
+            text: String::new(),
+            hint: String::new(),
+            start,
+        });
         self.used = 0;
     }
 
@@ -114,30 +141,35 @@ impl Wrapper {
     ///
     /// # Arguments
     ///
+    /// * `index` - The byte offset of this character in the query
     /// * `character` - The character to add
     /// * `hint` - Whether this character is part of the trailing hint rather than the query
-    fn push(&mut self, character: char, hint: bool) {
+    fn push(&mut self, index: usize, character: char, hint: bool) {
         // work out how many columns this character takes up
         let width = character.width().unwrap_or(0);
         // move down a row when this character no longer fits on the current one
         if self.used + width > self.width {
-            self.wrap();
+            self.wrap(index);
         }
         // add it to whichever half of this row it belongs to
         let row = self.rows.last_mut().expect("a wrapper always has a row");
         if hint {
-            row.1.push(character);
+            row.hint.push(character);
         } else {
-            row.0.push(character);
+            row.text.push(character);
         }
         self.used += width;
     }
 
     /// Get the row and column the next character would be placed at
-    fn position(&mut self) -> (usize, u16) {
+    ///
+    /// # Arguments
+    ///
+    /// * `index` - The byte offset in the query of the character that would be placed there
+    fn position(&mut self, index: usize) -> (usize, u16) {
         // a full row has no room left for a cursor, so it moves down to the next one
         if self.used >= self.width {
-            self.wrap();
+            self.wrap(index);
         }
         (self.rows.len() - 1, self.used as u16)
     }
@@ -163,6 +195,7 @@ impl Wrapper {
 /// let layout = layout_query("SELECT * FROM Movie", "", 19, 10);
 ///
 /// assert_eq!(layout.rows.len(), 2);
+/// assert_eq!(layout.rows[1].start, 10);
 /// assert_eq!(layout.cursor_row, 1);
 /// assert_eq!(layout.cursor_col, 9);
 /// ```
@@ -177,18 +210,21 @@ pub fn layout_query(query: &str, hint: &str, cursor: usize, width: u16) -> Query
     for (index, character) in query.char_indices() {
         // this is where the cursor sits if we have just reached it
         if index == cursor {
-            position = Some(wrapper.position());
+            position = Some(wrapper.position(index));
         }
-        wrapper.push(character, false);
+        wrapper.push(index, character, false);
     }
     // a cursor at the end of the query sits just past the last character
     let (cursor_row, cursor_col) = match position {
         Some(position) => position,
-        None => wrapper.position(),
+        None => wrapper.position(query.len()),
     };
     // lay the hint out behind it, kept apart so it can be dimmed
+    //
+    // the hint is not part of the query, so a row it wraps onto holds none of it and starts
+    // where the query ended
     for character in hint.chars() {
-        wrapper.push(character, true);
+        wrapper.push(query.len(), character, true);
     }
     QueryLayout {
         rows: wrapper.rows,
@@ -262,9 +298,73 @@ impl TabQueryBar {
         layout.rows.len().clamp(1, MAX_QUERY_ROWS) as u16 + 2
     }
 
+    /// Get the part of a row an error span covers, in offsets into that row's own text
+    ///
+    /// A span is measured against the whole query while a row holds a slice of it, so the two
+    /// have to be intersected before either can be drawn. A cut that does not land on a
+    /// character boundary is refused rather than clamped — the span came from a string that is
+    /// no longer this one, and half a character is worse than no underline.
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row being drawn
+    /// * `highlight` - The byte range of the query the error covers
+    fn row_span(row: &QueryRow, highlight: Option<(usize, usize)>) -> Option<(usize, usize)> {
+        // there is nothing to draw unless an error is pointing somewhere
+        let (start, end) = highlight?;
+        // the range of the query this row holds
+        let row_end = row.start + row.text.len();
+        // clip the error to this row, which leaves nothing when it lands on another one
+        let from = start.max(row.start).min(row_end);
+        let to = end.min(row_end).max(from);
+        if from >= to {
+            return None;
+        }
+        // move it into this row's own text
+        let (from, to) = (from - row.start, to - row.start);
+        // never cut a row anywhere but on a character boundary
+        if !row.text.is_char_boundary(from) || !row.text.is_char_boundary(to) {
+            return None;
+        }
+        Some((from, to))
+    }
+
+    /// Build the line a row is drawn as, underlining the part of it an error covers
+    ///
+    /// The underline is a style on the cells the query is already drawn into rather than
+    /// anything added to the text, so a query drawn under an error is the same characters in
+    /// the same columns as one drawn without it.
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row being drawn
+    /// * `highlight` - The byte range of the query the error covers
+    fn row_line(row: &QueryRow, highlight: Option<(usize, usize)>) -> Line<'static> {
+        // the hint always trails the row dimmed, whatever the query in front of it is doing
+        let hint = Span::styled(row.hint.clone(), Style::default().fg(Color::DarkGray));
+        // the style a query is drawn in when nothing is wrong with it
+        let plain = Style::default().fg(Color::White);
+        // draw the row in one piece when no error lands on it
+        let Some((from, to)) = Self::row_span(row, highlight) else {
+            return Line::from(vec![Span::styled(row.text.clone(), plain), hint]);
+        };
+        // the style the offending part of a query is drawn in
+        let marked = Style::default()
+            .fg(Color::Red)
+            .add_modifier(Modifier::UNDERLINED);
+        // split the row around the part the error covers
+        Line::from(vec![
+            Span::styled(row.text[..from].to_string(), plain),
+            Span::styled(row.text[from..to].to_string(), marked),
+            Span::styled(row.text[to..].to_string(), plain),
+            hint,
+        ])
+    }
+
     /// Render the query input to the frame
     ///
-    /// Displays the current query text with a cursor, wrapped to the width of the box.
+    /// Displays the current query text with a cursor, wrapped to the width of the box. Where an
+    /// error points at part of the query, that part is drawn red and underlined.
     ///
     /// # Arguments
     ///
@@ -301,18 +401,18 @@ impl TabQueryBar {
         // scroll the box so the row the cursor is on is always in view
         let visible = usize::from(area.height.saturating_sub(2)).max(1);
         let scroll = (layout.cursor_row + 1).saturating_sub(visible);
+        // work out which part of the query an error is pointing at, if one is
+        let highlight = tab
+            .error
+            .as_ref()
+            .and_then(|error| error.highlight_span(&tab.query));
         // build a line for each visible row, dimming the part that has not been typed yet
         let lines: Vec<Line> = layout
             .rows
             .iter()
             .skip(scroll)
             .take(visible)
-            .map(|(text, hint)| {
-                Line::from(vec![
-                    Span::styled(text.clone(), Style::default().fg(Color::White)),
-                    Span::styled(hint.clone(), Style::default().fg(Color::DarkGray)),
-                ])
-            })
+            .map(|row| Self::row_line(row, highlight))
             .collect();
         // build the input widget
         let input = Paragraph::new(lines)

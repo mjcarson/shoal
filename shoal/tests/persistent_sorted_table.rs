@@ -6,7 +6,7 @@ use shoal_core::shared::queries::SortRange;
 use shoal_core::shared::traits::RkyvSupport;
 use shoal_core::storage::FileSystem;
 use shoal_core::tables::PersistentSortedTable;
-use shoal_derive::{db, ShoalSortedTable};
+use shoal_derive::{db, ShoalProjection, ShoalSortedTable};
 use std::ops::Bound;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -51,10 +51,27 @@ impl TestRecord {
     }
 }
 
+/// A projection of a test record that leaves its payload behind
+///
+/// The partition key is here because every projection carries its rows partition key, and the
+/// sort key is here so a test can tell which rows came back and in what order. The payload is
+/// what a projection of this table exists to skip.
+#[derive(Debug, Archive, Serialize, Deserialize, Clone, ShoalProjection, PartialEq, Eq)]
+#[rkyv(derive(Debug))]
+#[shoal_projection(table = "TestRecord")]
+pub struct TestRecordKeys {
+    /// The partition this row belonged to
+    #[shoal(partition)]
+    pub partition_key: String,
+    /// The key this row was sorted by within its partition
+    pub sort_key: String,
+}
+
 /// The test database schema
 #[db]
 pub struct TestDb {
     /// The sorted test table
+    #[shoal(projections(TestRecordKeys))]
     pub test_records: PersistentSortedTable<TestRecord, FileSystem>,
 }
 
@@ -2074,6 +2091,340 @@ async fn shql_bounds_rows_by_a_sort_key_range() -> Result<(), TestError> {
     // the rows after the bound come back, stopped by the limit
     let names = vec!["partition_key".to_string()];
     assert_eq!(rows, expected_row_keys(&names, &["c", "d"]));
+    // Shutdown server
+    pool.exit()?;
+    Ok(())
+}
+
+/// Drain a stream and collect the keys of every projected row it answered with
+///
+/// This is the twin of `drain_row_keys` and reads the projections own variant of the response
+/// rather than the tables, which is what a projected get answers in.
+///
+/// # Arguments
+///
+/// * `stream` - The stream to drain
+async fn drain_projected_keys(
+    stream: &mut shoal_core::client::ShoalResultStream<TestDbClient>,
+) -> Result<Vec<(String, String)>, TestError> {
+    // collect the keys of every row this get answered with
+    let mut rows = Vec::new();
+    // drain every response this get produced
+    while let Some(response) = stream.next().await? {
+        // pull the keys out of each projected row this response carried
+        if let Some(found) = response.access::<TestRecordKeys>()? {
+            for row in found.iter() {
+                rows.push((row.partition_key.to_string(), row.sort_key.to_string()));
+            }
+        }
+    }
+    Ok(rows)
+}
+
+/// Test that a projected get answers with the projection rather than the row
+///
+/// This is the headline case: the rows come back as `TestRecordKeys`, so the payload the
+/// projection left out was never copied, and the response lands in the projections own variant
+/// rather than the tables.
+#[tokio::test]
+async fn projection_returns_only_its_own_fields() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = utils::test_dir();
+    // start a shoal server and build a client
+    let (client, pool) = utils::start::<TestDb>(&temp_dir).await?;
+    // write three rows into one partition
+    insert_rows(&client, "partition_key", &["a", "b", "c"]).await?;
+    // read them back as the projection instead of as whole rows
+    let response = client
+        .send_one(
+            TestRecordGet::new(vec!["partition_key".to_owned()])
+                .projection::<TestRecordKeys>(),
+        )
+        .await?;
+    // the rows are in the projections variant, not the tables
+    let rows = response.access::<TestRecordKeys>()?.unwrap();
+    let keys: Vec<String> = rows.iter().map(|row| row.sort_key.to_string()).collect();
+    assert_eq!(keys, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+    // every projected row still names the partition it came from
+    for row in rows.iter() {
+        assert_eq!(row.partition_key.as_str(), "partition_key");
+    }
+    // Shutdown server
+    pool.exit()?;
+    Ok(())
+}
+
+/// Test that asking a projected response for whole rows is an error rather than an empty answer
+///
+/// A projection answers in a variant of its own, so a caller that reaches for the row type gets
+/// told it asked for the wrong thing instead of silently getting nothing back.
+#[tokio::test]
+async fn a_projected_response_is_not_the_row_type() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = utils::test_dir();
+    // start a shoal server and build a client
+    let (client, pool) = utils::start::<TestDb>(&temp_dir).await?;
+    // write a row to read back
+    insert_rows(&client, "partition_key", &["a"]).await?;
+    // read it back as the projection
+    let response = client
+        .send_one(
+            TestRecordGet::new(vec!["partition_key".to_owned()])
+                .projection::<TestRecordKeys>(),
+        )
+        .await?;
+    // reaching for the row type is the wrong type, not an empty answer
+    assert!(response.access::<TestRecord>().is_err());
+    // Shutdown server
+    pool.exit()?;
+    Ok(())
+}
+
+/// Test that a projection reads a partition that is still an archive on disk
+///
+/// This is the path a projection exists for: the partition is read in place and only the fields
+/// the projection named are pulled out of it, instead of the whole row being deserialized.
+#[tokio::test]
+async fn projection_reads_an_archived_partition() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = utils::test_dir();
+    // build a test row to insert
+    let test_data = TestRecord::new("partition_key", "sort_key", "woot");
+    // leave this row on disk with nothing resident in memory
+    insert_then_evict_to_disk(&temp_dir, &test_data).await?;
+    // start a shoal server and build a client
+    let (client, pool) = utils::start::<TestDb>(&temp_dir).await?;
+    // read it back as the projection, which has to find it on disk first
+    let response = client
+        .send_one(
+            TestRecordGet::new(vec!["partition_key".to_owned()])
+                .projection::<TestRecordKeys>(),
+        )
+        .await?;
+    // the projection came out of the archive with both of its keys intact
+    let rows = response.access::<TestRecordKeys>()?.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows.first().unwrap().sort_key.as_str(), "sort_key");
+    assert_eq!(
+        rows.first().unwrap().partition_key.as_str(),
+        "partition_key"
+    );
+    // Shutdown server
+    pool.exit()?;
+    // wait for threads to fully clean up and the port to be released
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    Ok(())
+}
+
+/// Test that a projection survives a get being parked on a disk read
+///
+/// A get whose partition has to be read from disk is parked and replayed once it arrives, and
+/// what it found so far is kept in a map that no longer knows the row type. This is the test
+/// that the parked rows come back as the projection they were asked for: dropping the
+/// projection from `to_blocked`, or resuming a parked get as the wrong type, both fail here.
+#[tokio::test]
+async fn projection_survives_a_blocked_disk_read() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = utils::test_dir();
+    // build a test row to insert
+    let test_data = TestRecord::new("partition_key", "sort_key", "woot");
+    // leave this row on disk with nothing resident in memory
+    insert_then_evict_to_disk(&temp_dir, &test_data).await?;
+    // start a shoal server that evicts everything it is allowed to evict
+    let (client, pool) =
+        utils::start_with_conf::<TestDb>(utils::build_pressured_config(&temp_dir)).await?;
+    // give the shard time to evict anything it thinks is durable
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    // read it back as the projection, which parks on the load of this partition
+    let response = client
+        .send_one(
+            TestRecordGet::new(vec!["partition_key".to_owned()])
+                .projection::<TestRecordKeys>(),
+        )
+        .await?;
+    // the replayed get answered with the projection it was sent with
+    let rows = response.access::<TestRecordKeys>()?.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows.first().unwrap().sort_key.as_str(), "sort_key");
+    // Shutdown server
+    pool.exit()?;
+    // wait for threads to fully clean up and the port to be released
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    Ok(())
+}
+
+/// Test that a projected get spanning several partitions comes back in the order it named them
+///
+/// The shard collecting the shares of a split get asks each row which partition it came from,
+/// so this is the test that a projection carries its rows partition key and hashes it the same
+/// way the row does.
+#[tokio::test]
+async fn projection_orders_rows_across_partitions() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = utils::test_dir();
+    // start a shoal server and build a client
+    let (client, pool) = utils::start::<TestDb>(&temp_dir).await?;
+    // write rows into three partitions, which may land on different shards
+    let partitions = vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string()];
+    for partition in &partitions {
+        insert_rows(&client, partition, &["a", "b"]).await?;
+    }
+    // read every partition back as the projection, in the order named here
+    let queries = client
+        .query()
+        .add(TestRecordGet::new(partitions.clone()).projection::<TestRecordKeys>());
+    let mut stream = client.send(queries).await?;
+    let rows = drain_projected_keys(&mut stream).await?;
+    // the rows come back partition by partition, in the order the query named them
+    assert_eq!(rows, expected_row_keys(&partitions, &["a", "b"]));
+    // Shutdown server
+    pool.exit()?;
+    Ok(())
+}
+
+/// Test that a projected get is still bounded by its limit, its filters and its sort range
+///
+/// A projection changes what a row comes back as and nothing about which rows come back, so
+/// every way a get narrows itself has to keep working through one.
+#[tokio::test]
+async fn projection_keeps_the_rest_of_the_get() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = utils::test_dir();
+    // start a shoal server and build a client
+    let (client, pool) = utils::start::<TestDb>(&temp_dir).await?;
+    // write five rows into one partition
+    insert_rows(&client, "partition_key", &["a", "b", "c", "d", "e"]).await?;
+    // a limit still stops a projected get where it stops an unprojected one
+    let queries = client.query().add(
+        TestRecordGet::new(vec!["partition_key".to_owned()])
+            .projection::<TestRecordKeys>()
+            .limit(2),
+    );
+    let mut stream = client.send(queries).await?;
+    let limited = drain_projected_keys(&mut stream).await?;
+    let names = vec!["partition_key".to_string()];
+    assert_eq!(limited, expected_row_keys(&names, &["a", "b"]));
+    // a sort key range still bounds a projected get the same way
+    let queries = client.query().add(
+        TestRecordGet::new(vec!["partition_key".to_owned()])
+            .projection::<TestRecordKeys>()
+            .sort_range(SortRange::new(
+                Bound::Excluded("b".to_string()),
+                Bound::Included("d".to_string()),
+            )),
+    );
+    let mut stream = client.send(queries).await?;
+    let ranged = drain_projected_keys(&mut stream).await?;
+    assert_eq!(ranged, expected_row_keys(&names, &["c", "d"]));
+    // naming sort keys still picks out those rows and no others
+    let queries = client.query().add(
+        TestRecordGet::new(vec!["partition_key".to_owned()])
+            .projection::<TestRecordKeys>()
+            .sort_keys(vec!["a".to_string(), "e".to_string()]),
+    );
+    let mut stream = client.send(queries).await?;
+    let named = drain_projected_keys(&mut stream).await?;
+    assert_eq!(named, expected_row_keys(&names, &["a", "e"]));
+    // Shutdown server
+    pool.exit()?;
+    Ok(())
+}
+
+/// Test that a projected get and a whole row get in one batch each land in their own variant
+///
+/// Every response carries the index of the query it answers, so two gets over the same
+/// partition asking for different shapes have to come back as those two shapes rather than as
+/// whichever one was dispatched last.
+#[tokio::test]
+async fn a_projected_get_and_a_row_get_share_a_batch() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = utils::test_dir();
+    // start a shoal server and build a client
+    let (client, pool) = utils::start::<TestDb>(&temp_dir).await?;
+    // write two rows into one partition
+    insert_rows(&client, "partition_key", &["a", "b"]).await?;
+    // ask for whole rows and for the projection in the same batch
+    let queries = client
+        .query()
+        .add(TestRecordGet::new(vec!["partition_key".to_owned()]))
+        .add(
+            TestRecordGet::new(vec!["partition_key".to_owned()])
+                .projection::<TestRecordKeys>(),
+        );
+    let mut stream = client.send(queries).await?;
+    // the first response holds whole rows and carries the payload the projection drops
+    let first = stream.next().await?.expect("a response for the row get");
+    let rows = first.access::<TestRecord>()?.unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows.first().unwrap().data.as_str(), "woot");
+    // the second holds the projection, in the projections own variant
+    let second = stream
+        .next()
+        .await?
+        .expect("a response for the projected get");
+    let projected = second.access::<TestRecordKeys>()?.unwrap();
+    assert_eq!(projected.len(), 2);
+    assert_eq!(projected.first().unwrap().sort_key.as_str(), "a");
+    // Shutdown server
+    pool.exit()?;
+    Ok(())
+}
+
+/// Test that a projection named in SHQL binds to that projection
+///
+/// A projection is a named type rather than a column list, so the name a query wrote has to be
+/// matched against the projections its table declared.
+#[tokio::test]
+async fn shql_binds_a_named_projection() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = utils::test_dir();
+    // start a shoal server and build a client
+    let (client, pool) = utils::start::<TestDb>(&temp_dir).await?;
+    // write three rows into one partition
+    insert_rows(&client, "partition_key", &["a", "b", "c"]).await?;
+    // read them back the way a human would type it
+    //
+    // `Queries` has no Debug impl, so the parse result is unwrapped by hand rather than with
+    // `expect`
+    let Ok(queries) = client.query().parse(
+        "SELECT TestRecordKeys FROM TestRecord WHERE partition_key = 'partition_key' LIMIT 2",
+    ) else {
+        panic!("a named projection should parse and bind");
+    };
+    let mut stream = client.send(queries).await?;
+    let rows = drain_projected_keys(&mut stream).await?;
+    // the projection answered, and the limit still applied
+    let names = vec!["partition_key".to_string()];
+    assert_eq!(rows, expected_row_keys(&names, &["a", "b"]));
+    // Shutdown server
+    pool.exit()?;
+    Ok(())
+}
+
+/// Test that a star still asks for whole rows
+///
+/// The projection slot in the grammar takes a star as well as a name, so this is the test that
+/// adding names to it did not change what a star means.
+#[tokio::test]
+async fn shql_star_still_asks_for_whole_rows() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = utils::test_dir();
+    // start a shoal server and build a client
+    let (client, pool) = utils::start::<TestDb>(&temp_dir).await?;
+    // write a row to read back
+    insert_rows(&client, "partition_key", &["a"]).await?;
+    // read it back with a star
+    let Ok(queries) = client
+        .query()
+        .parse("SELECT * FROM TestRecord WHERE partition_key = 'partition_key'")
+    else {
+        panic!("a star should parse and bind");
+    };
+    let mut stream = client.send(queries).await?;
+    let rows = drain_row_keys(&mut stream).await?;
+    // the whole row came back, in the tables own variant
+    let names = vec!["partition_key".to_string()];
+    assert_eq!(rows, expected_row_keys(&names, &["a"]));
     // Shutdown server
     pool.exit()?;
     Ok(())

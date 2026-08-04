@@ -7,7 +7,8 @@
 //! # Grammar
 //!
 //! ```text
-//! query      := ws "SELECT" ws1 "*" ws1 "FROM" ws1 identifier where [ws limit] [ws ";"] ws eof
+//! query      := ws "SELECT" ws1 projection ws1 "FROM" ws1 identifier where [ws limit] [ws ";"] ws eof
+//! projection := "*" | identifier
 //! where      := ws1 "WHERE" ws1 condition { ws "AND" ws1 condition }
 //! condition  := comparison { ws "OR" ws1 comparison }
 //! comparison := identifier ws ( "=" ws value
@@ -152,7 +153,10 @@
 //!
 //! # What is not supported
 //!
-//! - Only `SELECT *`. There is no projection.
+//! - A projection is a **named type**, not a column list. `SELECT *` asks for whole rows and
+//!   `SELECT MovieSummary` asks for one of the projections that table declared. There is no
+//!   `SELECT title, year`, because the rows come back as an archive of a concrete type and an
+//!   arbitrary column list has no type to be.
 //! - `=`, `IN`, and the range operators `<`, `<=`, `>`, `>=`. No `!=`, `LIKE`, or `BETWEEN`.
 //! - A range is only bindable on a **sort key**. Ranges on a partition key or a filter parse
 //!   and are then refused during binding, because a partition is located by its exact key and
@@ -612,7 +616,25 @@ fn starts_with_keyword(input: &str, keyword: &str) -> bool {
     }
 }
 
-/// Parse "SELECT * FROM <table>"
+/// Parse what a query asked each row to come back as
+///
+/// A star asks for the whole row, and a name asks for one of the projections its table
+/// declared. Which projections exist is a per table question that only the generated binder
+/// can answer, so a name is carried out of here as written and checked there.
+///
+/// # Arguments
+///
+/// * `input` - Mutable reference to the input string slice being parsed
+///
+/// # Returns
+///
+/// The projection name if one was written, or None for a star
+fn projection<'s>(input: &mut &'s str) -> winnow::Result<Option<String>> {
+    // a star asks for every field, and anything else has to name a projection
+    winnow::combinator::alt(("*".map(|_| None), identifier.map(Some))).parse_next(input)
+}
+
+/// Parse "SELECT <projection> FROM <table>"
 ///
 /// Parses the SELECT clause of a SHQL query.
 ///
@@ -622,19 +644,19 @@ fn starts_with_keyword(input: &str, keyword: &str) -> bool {
 ///
 /// # Returns
 ///
-/// The table name as a String on success, or a parse error
-fn select_from<'s>(input: &mut &'s str) -> winnow::Result<String> {
+/// The projection this query asked for and the table name, or a parse error
+fn select_from<'s>(input: &mut &'s str) -> winnow::Result<(Option<String>, String)> {
     (
         winnow::ascii::Caseless("SELECT"),
         multispace1,
-        "*",
+        projection,
         multispace1,
         winnow::ascii::Caseless("FROM"),
         multispace1,
         identifier,
     )
-        // we only care about the table name
-        .map(|(_, _, _, _, _, _, table)| table)
+        // we only care about what was projected and the table it came from
+        .map(|(_, _, projected, _, _, _, table)| (projected, table))
         .parse_next(input)
 }
 
@@ -1235,11 +1257,27 @@ fn limit_clause(input: &mut &str) -> winnow::Result<usize> {
         .parse_next(input)
 }
 
+/// The projection a query named in place of a star
+///
+/// Whether the name is one the table declared is a question only the generated binder can
+/// answer, so the offsets are carried alongside it for the error it raises when it is not.
+#[derive(Debug, Clone)]
+pub struct ParsedProjection {
+    /// The name of the projection this query asked for
+    pub name: String,
+    /// The byte offset the name starts at in the original query
+    pub start: usize,
+    /// The byte offset just past the end of the name in the original query
+    pub end: usize,
+}
+
 /// A parsed SELECT query
 #[derive(Debug, Clone)]
 pub struct ParsedSelect {
     /// The name of the table this query is for
     pub table_name: String,
+    /// The projection this query asked for, or None if it wrote a star
+    pub projection: Option<ParsedProjection>,
     /// The uncategorized conditions in this query
     pub conditions: Vec<WhereClause>,
     /// Optional limit on the number of results to return
@@ -1265,10 +1303,31 @@ impl ParsedSelect {
         // parse and consume any leading whitespace before the SELECT keyword
         ws.parse_next(&mut parsable)
             .map_err(|e| ShqlParseError::at_position(format!("Parse error: {}", e), 0, query))?;
-        // parse the SELECT * FROM <table> clause and extract the table name
-        let table_name = select_from.parse_next(&mut parsable).map_err(|e| {
-            ShqlParseError::at_position(format!("Expected SELECT * FROM <table>: {}", e), 0, query)
+        // remember where the SELECT keyword starts, so a bad projection can be pointed at
+        //
+        // the clause is parsed as a whole, so the offset of what it named is worked out from
+        // what it consumed rather than being handed back by it
+        let select_start = query.len() - parsable.len();
+        // parse the SELECT <projection> FROM <table> clause
+        let (projected, table_name) = select_from.parse_next(&mut parsable).map_err(|e| {
+            ShqlParseError::at_position(
+                format!("Expected SELECT <projection> FROM <table>: {}", e),
+                0,
+                query,
+            )
         })?;
+        // find where a named projection was written, so a name no table declared can be shown
+        let projection = projected.map(|name| {
+            // the projection follows the SELECT keyword and the whitespace after it
+            let after_select = select_start + "SELECT".len();
+            let leading = query[after_select..].len() - query[after_select..].trim_start().len();
+            let start = after_select + leading;
+            ParsedProjection {
+                end: start + name.len(),
+                start,
+                name,
+            }
+        });
         // bail out early with a descriptive error if there is no WHERE clause to parse, so a
         // missing clause does not get a generic failure from inside the WHERE parser
         if !starts_with_keyword(parsable.trim_start(), "WHERE") {
@@ -1317,6 +1376,7 @@ impl ParsedSelect {
         // return the successfully parsed query structure
         Ok(ParsedSelect {
             table_name,
+            projection,
             conditions,
             limit,
         })

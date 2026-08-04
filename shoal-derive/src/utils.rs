@@ -116,6 +116,60 @@ pub fn extract_inner_table_ident(ty: &syn::Type) -> Option<Ident> {
     None
 }
 
+/// Take the projections each table of a database declares off of its field
+///
+/// A projection is declared on the field holding the table it projects, because the database
+/// macro is the only thing that sees every projection of every table at once: the response
+/// kinds enum needs a variant for each of them, and an enum cannot be added to later.
+///
+/// The attribute is consumed here rather than left on the struct, since the struct this macro
+/// emits has no derive that would know what `shoal` means.
+///
+/// # Arguments
+///
+/// * `fields` - The named fields of the database struct
+pub fn take_projections(fields: &mut syn::FieldsNamed) -> Vec<Vec<Ident>> {
+    // collect the projections declared on each table, in field order
+    let mut declared = Vec::with_capacity(fields.named.len());
+    for field in fields.named.iter_mut() {
+        // the projections this field declared, if it declared any
+        let mut projections = Vec::new();
+        // keep every attribute that is not a projection list, so nothing else is swallowed
+        field.attrs.retain(|attr| {
+            // only a `#[shoal(..)]` attribute can hold a projection list
+            if !attr.path().is_ident("shoal") {
+                return true;
+            }
+            // whether this attribute turned out to be the projection list
+            let mut is_projections = false;
+            // walk the arguments looking for `projections(..)`
+            let parsed = attr.parse_nested_meta(|meta| {
+                // anything other than a projection list belongs to somebody else
+                if !meta.path.is_ident("projections") {
+                    return Err(meta.error("expected `projections(..)`"));
+                }
+                is_projections = true;
+                // each name in the list is a projection of this fields table
+                meta.parse_nested_meta(|inner| {
+                    let ident = inner
+                        .path
+                        .get_ident()
+                        .ok_or_else(|| inner.error("a projection has to be a type name"))?;
+                    projections.push(ident.clone());
+                    Ok(())
+                })
+            });
+            // a `#[shoal(..)]` that is not a projection list is left for whoever owns it
+            match parsed {
+                Ok(()) if is_projections => false,
+                _ => true,
+            }
+        });
+        declared.push(projections);
+    }
+    declared
+}
+
 /// Rewrite table fields to add `<StructName>` to storage types and append `{StructName}TableNames`.
 ///
 /// Transforms `PersistentUnsortedTable<Movie, FileSystem>` into

@@ -10,13 +10,14 @@ the thread, it is almost certainly because you have walked into generated code.
 cargo expand --example tmdb > /tmp/expanded.rs
 ```
 
-## The three macros
+## The four macros
 
 | Macro | Applied to | Generates |
 | --- | --- | --- |
 | `#[derive(ShoalSortedTable)]` | A row struct | Query structs and trait impls for a sorted table |
 | `#[derive(ShoalUnsortedTable)]` | A row struct | The same for an unsorted table |
-| `#[db]` | The database struct | `TableNames`, `*Client`, `QueryKinds`, `ResponseKinds`, and the `ShoalDatabase` impl |
+| `#[derive(ShoalProjection)]` | A projection struct | The conversions that build a subset of a table's row out of one |
+| `#[db]` | The database struct | `TableNames`, `*Client`, `QueryKinds`, `ResponseKinds`, the `{Row}Projection` enums, and the `ShoalDatabase` impl |
 
 ## Field attributes
 
@@ -91,6 +92,7 @@ Movie
     ├── TableRowFormat           — headers()/row_values(), for shoalctl
     ├── ShoalTableSupport        — is_filtered / is_filtered_archived
     ├── ShoalSortedTable | ShoalUnsortedTable
+    ├── ShoalProjection          — the identity projection of the row into itself
     └── FromShoal<DbClient>      — response downcasting
 ```
 
@@ -101,6 +103,7 @@ pub struct MovieGet {
     pub partition_keys: Vec<u64>,
     pub filters: Option<MovieFilter>,
     pub limit: Option<usize>,
+    pub projection: MovieProjection,
 }
 
 impl MovieGet {
@@ -129,6 +132,7 @@ pub struct MovieByKeywordGet {
     pub sort_select: SortSelect<String>,
     pub filters: Option<MovieByKeywordFilter>,
     pub limit: Option<usize>,
+    pub projection: MovieByKeywordProjection,
 }
 ```
 
@@ -146,8 +150,55 @@ neither does the order two bounds were written in.
 The vocabulary lives on `SortRange` rather than being repeated as a builder method per table, so
 `.sort_range(SortRange::after(last))` is the paging idiom on every sorted table there is.
 
+`projection` is generated on both kinds of get, along with a `.projection::<P>()` builder. It names
+which subset of each row this get wants back and defaults to the whole row
+([Projections](#projections)). `*Exists` has none, since an exists answers with a boolean.
+
 `*Exists` still takes a single partition key on unsorted tables
 ([Known Issues #40](../appendix/known-issues.md#40-unsortedexists-still-names-a-single-partition)).
+
+### Projections
+
+A projection is a struct naming a subset of a table's fields, declared with its own derive and the
+table it projects:
+
+```rust
+#[derive(Debug, Archive, Serialize, Deserialize, Clone, ShoalProjection, PartialEq)]
+#[rkyv(derive(Debug))]
+#[shoal_projection(table = "Movie")]
+pub struct MovieSummary {
+    #[shoal(partition)]
+    pub id: u64,
+    pub title: String,
+}
+```
+
+`shoal-derive/src/projections.rs`
+
+It generates `ShoalProjection` — a `from_row` that clones the named fields and a `from_archived`
+that reads them straight out of an archived row — plus `RkyvSupport`, `PartitionKeySupport` and
+`TableRowFormat`, all from the same generators the table derive uses. A field the row does not have
+fails to compile inside `from_row`, which is the check, so there is no separate validation for it.
+
+`#[shoal(partition)]` is the only field attribute a projection takes, and at least one field must
+carry it. A projection has to be able to say which partition its row came from, because the shard
+collecting the shares of a split get puts the rows back in the order the query named their
+partitions in ([F2](../features/projections.md#invariants-to-uphold)). The derive also emits a
+compile-time assertion that the projection's `PartitionKey` type is the same type the row's is.
+
+Which projections a table has is declared on the database, not on the table:
+
+```rust
+#[db]
+pub struct Tmdb {
+    #[shoal(projections(MovieSummary, MovieCard))]
+    pub movie: PersistentUnsortedTable<Movie, FileSystem>,
+}
+```
+
+`#[db]` is the only macro that sees every projection of every table at once, and both the
+`{Row}Projection` enum and the response kinds need the whole set. It consumes the attribute rather
+than leaving it on the struct it emits.
 
 ### Update and UpdateData
 
@@ -269,8 +320,11 @@ From `shoal-derive/src/lib.rs:250-262`:
 | `Display for TestDbTableNames` | `traits/display.rs` | Logging. |
 | `impl ShoalDatabase for TestDb` | `traits/db.rs` | The dispatch layer. |
 | `TestDbClient` | `structs/client.rs` | The client-side `QuerySupport` impl. |
-| `TestDbQueryKinds` / `TestDbResponseKinds` | `structs/query_kinds.rs` | Wire enums, one variant per table. |
+| `TestDbQueryKinds` | `structs/query_kinds.rs` | A wire enum, one variant per table. |
+| `TestDbResponseKinds` | `structs/query_kinds.rs` | A wire enum, one variant per table **and one per projection**, so a projected get answers as its own type ([F2](../features/projections.md#design-choices)). |
+| `{Row}Projection` | `projections.rs` | A unit enum per table naming its projections, with `Full` as the default. |
 | `From` impls | `traits/from_query.rs` | So `client.send_one(row)` works without manual wrapping. |
+| `FromShoal` for each projection | `traits/from_shoal.rs` | Response downcasting, from the same generator a row uses. |
 
 Variant names come from the *inner row type*, not the field name
 (`shoal-derive/src/utils.rs:56-66`) — so a field `test_records: PersistentSortedTable<TestRecord, _>`
@@ -283,17 +337,28 @@ produces a variant `TestRecord`.
 
 ```rust
 #query_ident::#variant_ident(query) => {
-    match self.#field_ident.handle(meta, query).await {
-        Some((client, query_id, response)) => {
-            let wrapped = #response_ident::#variant_ident(response);
-            Some((client, query_id, wrapped))
+    match query.projection() {
+        // one arm per projection this table declared
+        #projection_ident::#projection => { ... handle::<#projection>(meta, query) ... }
+        // a get that named no projection, and every query that is not a get
+        _ => {
+            match self.#field_ident.handle::<#variant_ident>(meta, query).await {
+                Some((client, query_id, response)) => {
+                    let wrapped = #response_ident::#variant_ident(response);
+                    Some((client, query_id, wrapped))
+                }
+                None => None,
+            }
         }
-        None => None,
     }
 },
 ```
 
-`shoal-derive/src/traits/db.rs:62-74`
+`shoal-derive/src/traits/db.rs`
+
+The match on the projection is the only thing a projection costs at runtime, and it runs once per
+query rather than once per row: the table is generic in what it builds, so each arm is a separate
+monomorphised scan ([F2](../features/projections.md#design-choices)).
 
 and `load_partition`, which contains the ordering subtlety described in
 [Query Execution](../tables/query-execution.md#resumption):
@@ -361,4 +426,9 @@ a trait would have made the divergence a compile error.
   the generated identifier fails to resolve.
 - `EphemeralTable` does not satisfy the interface the `#[db]` macro generates calls against, so
   it cannot appear in a database struct ([Table Types](../tables/table-types.md#ephemeraltable)).
+- A projection has to name its table's partition key, and the compile-time check only catches a
+  mismatched key *type* — two fields of the same type in the wrong order pass it
+  ([F2](../features/projections.md#limitations)).
+- A projection is declared on the database's field rather than on the table it projects, so a table
+  cannot be moved between databases without moving its projection list with it.
 - Generated code `.unwrap()`s on channel sends.

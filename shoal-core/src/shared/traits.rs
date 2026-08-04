@@ -223,6 +223,14 @@ pub trait QuerySupport: 'static + Sized {
     /// These are the names that can follow `FROM` in a query.
     fn table_names() -> &'static [&'static str];
 
+    /// Get the name of every projection in this database, paired with the table it projects
+    ///
+    /// These are the names that can stand in place of the `*` in a query. They are not scoped
+    /// to a table here because the projection is parsed before the `FROM` clause that names
+    /// the table, so completion has to offer all of them and binding is what rejects a
+    /// projection of the wrong table.
+    fn projection_names() -> &'static [(&'static str, &'static str)];
+
     /// Get the fields for a table and the role each one plays in a query
     ///
     /// # Arguments
@@ -489,6 +497,14 @@ pub trait ShoalTableSupport:
     /// Any filters to apply when listing/crawling rows
     type Filters: rkyv::Archive + std::fmt::Debug + Clone;
 
+    /// The subsets of this tables rows that a get can ask to be answered with
+    ///
+    /// This is a unit enum naming every projection declared for this table, plus the whole
+    /// row itself. It is what a get carries over the wire, and what the database matches on
+    /// to pick the row type a scan builds. Its default is the whole row, so a get that never
+    /// names a projection behaves exactly as it did before projections existed.
+    type Projection: RkyvSupport + std::fmt::Debug + Clone + Copy + Default + PartialEq + Eq + Send;
+
     /// Determine if a row should be filtered
     ///
     /// # Arguments
@@ -507,4 +523,50 @@ pub trait ShoalTableSupport:
         filter: &Self::Filters,
         row: &<Self as rkyv::Archive>::Archived,
     ) -> bool;
+}
+
+/// A subset of a tables row that a get can be answered with instead of the whole row
+///
+/// A projection is built from a row rather than read from one, so the two ways a partition can
+/// be held each get their own constructor: a resident partition holds rows, and a partition
+/// still in the archive it was read from holds their archived forms. Building from the archived
+/// form is the reason projections are worth having at all, since it copies only the fields the
+/// projection named instead of every field the row has.
+///
+/// A whole row is the identity projection of itself, which is what keeps a projected get and an
+/// unprojected one the same code path. `from_row` on a row is a clone and `from_archived` on a
+/// row is the deserialize a get has always done, so the unprojected path costs what it always
+/// did once these are inlined.
+///
+/// A projection has to carry its rows partition key, because the shard collecting the shares of
+/// a split get puts the rows back in the order the query named their partitions in, and it asks
+/// each row which partition it came from to do it.
+pub trait ShoalProjection:
+    std::fmt::Debug + Clone + RkyvSupport + PartitionKeySupport + Sized + Send + 'static
+{
+    /// The table whose rows this projects
+    type Row: ShoalTableSupport;
+
+    /// Which of its tables projections this type is
+    ///
+    /// This is what a get carries over the wire, and what the database matches on to pick this
+    /// type back up when the query reaches the shard that answers it.
+    const PROJECTION: <Self::Row as ShoalTableSupport>::Projection;
+
+    /// Build this projection from a resident row
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to project
+    fn from_row(row: &Self::Row) -> Self;
+
+    /// Build this projection from a row that is still in the archive it was read from
+    ///
+    /// Only the fields this projection named are read out of the archive, so a projection of a
+    /// wide row skips deserializing every field it left out.
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The archived row to project
+    fn from_archived(row: &<Self::Row as Archive>::Archived) -> Self;
 }

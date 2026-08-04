@@ -3,8 +3,12 @@
 What the test suite reaches, what it does not, and the one place where it is unsound.
 
 **Established by running it.** `cargo check --workspace --all-targets` passes with warnings and
-`cargo test --workspace` passes: **136 integration tests** (one ignored), **183 `shoal-core` unit
-tests**, **11 doctests**. That is up from 136, 178, and 11 with the compaction tail loss tests
+`cargo test --workspace` passes: **168 integration tests** (one ignored), **194 `shoal-core` unit
+tests**, **11 doctests**. That is up from 157, 194, and 11 with the query error display coverage
+added by [item 48](resolved/query-error-display.md) — eleven rendering tests and no unit tests,
+because everything the fix does it does on screen. It is up from 136, 183, and 11 with the
+projection coverage added by
+[F2](../features/projections.md), and from 136, 178, and 11 with the compaction tail loss tests
 added by [item 44](resolved/compaction-tail-loss.md) and the marker format test added by
 [item 45](resolved/storage-marker-format.md) — both fixes are unit-testable end to end and
 neither added an integration test, which is itself the
@@ -33,11 +37,11 @@ are in [Optimizations](optimizations.md).
 
 | Binary | Count | What it reaches |
 | --- | --- | --- |
-| `persistent_sorted_table.rs` | 48, one ignored | insert; `exists` true and false; delete; delete after restart; delete surviving restart; delete and update when the partition is not resident; delete and writes surviving eviction; update; update intent replay; multi-log recovery; empty rotated log cleanup; acknowledgement surviving `SIGKILL`; five limit tests; two cross-shard tests; five row-order tests; six sort-key selection tests; two sort-key `exists` tests; six range tests including the archived seek and the memory/disk span; the paging walk; two range `exists` tests; three end-to-end SHQL tests |
-| `persistent_unsorted_table.rs` | 12 | insert; delete; update; delete and update when not resident; delete surviving eviction; insert after delete when not resident; zero limit; three multi-partition tests |
-| `shql.rs` | 45 | SHQL parsing and binding against a real schema, including range binding and the role refusals, plus completion suggestions |
+| `persistent_sorted_table.rs` | 57, one ignored | insert; `exists` true and false; delete; delete after restart; delete surviving restart; delete and update when the partition is not resident; delete and writes surviving eviction; update; update intent replay; multi-log recovery; empty rotated log cleanup; acknowledgement surviving `SIGKILL`; five limit tests; two cross-shard tests; five row-order tests; six sort-key selection tests; two sort-key `exists` tests; six range tests including the archived seek and the memory/disk span; the paging walk; two range `exists` tests; three end-to-end SHQL tests; nine projection tests including the archived scan, the blocked disk read, the cross-partition order, and a projected and an unprojected get in one batch |
+| `persistent_unsorted_table.rs` | 15 | insert; delete; update; delete and update when not resident; delete surviving eviction; insert after delete when not resident; zero limit; three multi-partition tests; three projection tests |
+| `shql.rs` | 53 | SHQL parsing and binding against a real schema, including range binding and the role refusals, projection binding and its two refusals, plus completion suggestions |
 | `storage_meta.rs` | 2 | that a storage directory restarts under the shard count that wrote it and refuses a changed one, end to end through a real server |
-| `completion.rs` (`shoalctl`) | 22 | the completion menu, key handling, query wrapping, and rendering |
+| `completion.rs` (`shoalctl`) | 34 | the completion menu, key handling, query wrapping, and rendering, including the projection slot; and the error box, the underline under the part of a query that failed to parse, the cases where that underline is refused as misleading, and that an error never becomes part of the query it describes |
 | `lib.rs` (`shoal`) | 7 | the bencher's percentile and summary statistics, and baseline file handling |
 
 The restart, eviction, and `SIGKILL` tests are the valuable ones: they are the only tests that
@@ -49,11 +53,11 @@ exercise durability end to end, and they exist because
 
 | Module | Count | What it reaches |
 | --- | --- | --- |
-| `shared/queries/parser/tests.rs` | 56 | the SHQL grammar, including `IN` lists, `OR` folding, each range operator, and the folding and refusals around a range |
-| `shared/queries/parser/complete/tests.rs` | 26 | completion suggestion generation, including the range operator tokens |
+| `shared/queries/parser/tests.rs` | 60 | the SHQL grammar, including `IN` lists, `OR` folding, each range operator, the folding and refusals around a range, and the projection slot with its offsets |
+| `shared/queries/parser/complete/tests.rs` | 27 | completion suggestion generation, including the range operator tokens and a projection standing where the star does |
 | `.../storage/fs/tests.rs` | 21 | the intent log reader against real files, including which tail shapes are damage and which are how a healthy log ends, and what a compaction is about to throw away with the log it deletes |
 | `.../storage/fs/stream_tests.rs` | 13 | `StreamWriter` alignment, padding, and watermarks |
-| `tables/partitions.rs` | 38 | tombstone bookkeeping, limits, sort-key selection and range selection on `get` and `exists`, the empty-range guard, `merge_from_disk` sizing, and the recovery counting that separates a correctly dropped update from a lost one |
+| `tables/partitions.rs` | 45 | tombstone bookkeeping, limits, sort-key selection and range selection on `get` and `exists`, the empty-range guard, `merge_from_disk` sizing, the recovery counting that separates a correctly dropped update from a lost one, and the projected scan across all three selections |
 | `shared/queries.rs` | 10 | sort-key normalization, and `SortRange` emptiness and containment |
 | `tables/storage.rs` | 6 | `PendingResponse` release against a durable watermark, and `RecoveryStats` merging and cleanliness |
 | `server/ring.rs` | 6 | the tablet map: that an empty one cannot be built, that tablets are split evenly and no shard is starved, that ids come from the high bits so a split stays incremental, and that two independently built maps agree |

@@ -46,6 +46,7 @@
 
 - [Delivered Features](features/delivered-features.md)
   - [F1. Sort-key range predicates](features/sort-key-ranges.md)
+  - [F2. Projections on get queries](features/projections.md)
 
 # Appendix
 
@@ -69,5 +70,6 @@
   - [31. Multi-log recovery discarded already-replayed intents](appendix/resolved/multi-log-recovery.md)
   - [44. A compaction discarded a damaged log's tail in silence](appendix/resolved/compaction-tail-loss.md)
   - [45. The storage marker's format field was written and never read](appendix/resolved/storage-marker-format.md)
+  - [48. A query that does not parse was answered with silence](appendix/resolved/query-error-display.md)
 - [TODOs and Unbuilt Work](appendix/todos.md)
 - [Glossary](appendix/glossary.md)

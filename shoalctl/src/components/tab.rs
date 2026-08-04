@@ -23,11 +23,13 @@ use crate::AppEvent;
 
 mod completion;
 mod content;
+mod error;
 mod query_bar;
 
 pub use completion::{CompletionMenu, CompletionState};
 pub use content::TabContent;
-pub use query_bar::{QueryLayout, TabQueryBar, layout_query};
+pub use error::{ErrorBar, QueryError};
+pub use query_bar::{QueryLayout, QueryRow, TabQueryBar, layout_query};
 
 /// A single tab in the application
 #[derive(Debug, Clone)]
@@ -38,8 +40,8 @@ pub struct Tab<S: QuerySupport> {
     pub label: String,
     /// The content to display (query results or messages)
     pub content: String,
-    /// The error to display above the query
-    pub error: Option<String>,
+    /// The error to display under the query, which is cleared by any edit to it
+    pub error: Option<QueryError>,
     /// This query string for this tab
     pub query: String,
     /// The cursor position within the query text
@@ -112,6 +114,16 @@ where
             .map(|c| self.query_cursor + c.len_utf8())
     }
 
+    /// Forget the error shown under the query
+    ///
+    /// This is called by every edit to the query and by none of the cursor moves, because an
+    /// error describes the query it was parsed from. Moving the cursor leaves that query alone,
+    /// so the error is still true; changing a character of it means the error is about a query
+    /// that no longer exists, and the span it carries no longer points at what it named.
+    fn clear_error(&mut self) {
+        self.error = None;
+    }
+
     /// Insert a character at the current cursor position
     ///
     /// # Arguments
@@ -120,6 +132,8 @@ where
     pub fn insert_char(&mut self, c: char) {
         self.query.insert(self.query_cursor, c);
         self.query_cursor += c.len_utf8();
+        // the query this error was about has just been edited
+        self.clear_error();
     }
 
     /// Delete the character before the cursor (backspace)
@@ -128,6 +142,8 @@ where
         if let Some(start) = self.prev_boundary() {
             self.query.remove(start);
             self.query_cursor = start;
+            // the query this error was about has just been edited
+            self.clear_error();
         }
     }
 
@@ -136,6 +152,8 @@ where
         // there is only a character to delete if the cursor isn't at the end
         if self.query_cursor < self.query.len() {
             self.query.remove(self.query_cursor);
+            // the query this error was about has just been edited
+            self.clear_error();
         }
     }
 
@@ -215,6 +233,8 @@ where
         let (start, end) = self.completion.word_span();
         self.query.replace_range(start..end, &text);
         self.query_cursor = start + text.len();
+        // the query this error was about has just been edited
+        self.clear_error();
         // the word we were completing is gone, so build the menu for whatever comes next
         self.refresh_completions(false);
     }
@@ -237,8 +257,9 @@ where
         let query = match S::parse(&self.query) {
             Ok(q) => q,
             Err(e) => {
-                // show the parse error in the UI and leave the query for the user to fix
-                self.error = Some(format!("Parse error: {}", e));
+                // show the parse error in the UI and leave the query for the user to fix, with
+                // the span kept apart from the message so the query box can underline it
+                self.error = Some(QueryError::parse(&e));
                 return;
             }
         };
@@ -663,6 +684,8 @@ where
             active_tab.query_cursor = 0;
             // there is nothing left to complete
             active_tab.completion.clear();
+            // and nothing left for an error to be about
+            active_tab.clear_error();
         }
     }
 }

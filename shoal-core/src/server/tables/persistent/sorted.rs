@@ -25,14 +25,15 @@ use uuid::Uuid;
 
 use crate::server::messages::{LoadedPartition, QueryMetadata, ServerMsg};
 use crate::server::tables::partitions::SortedPartition;
-use crate::server::tables::persistent::{PendingGet, adjust_memory_usage, eviction_totals};
+use crate::server::tables::persistent::{adjust_memory_usage, eviction_totals, PendingGets};
 use crate::server::Conf;
 use crate::server::ServerError;
 use crate::shared::queries::{SortedExists, SortedGet, SortedQuery};
 use crate::shared::queries::{SortedUpdate, UnsortedGet};
 use crate::shared::responses::{Response, ResponseAction};
 use crate::shared::traits::{
-    RkyvSupport, ShoalDatabase, ShoalSortedTable, ShoalTableSupport, TableNameSupport,
+    RkyvSupport, ShoalDatabase, ShoalProjection, ShoalSortedTable, ShoalTableSupport,
+    TableNameSupport,
 };
 use crate::storage::{
     FullArchiveMap, IntentReadSupport, LoaderMsg, Loaders, PendingResponse, RecoveryStats,
@@ -151,7 +152,7 @@ where
     /// The commits that are still pending storage confirmation
     pending: PendingResponse<R>,
     /// The response data for gets that needed partitions to be loaded from disk
-    pending_data: HashMap<(Uuid, usize), PendingGet<R>>,
+    pending_data: PendingGets,
     /// The partitions each exists query is still waiting to have loaded from disk
     ///
     /// An exists answers with a bool rather than rows, so it only needs to know which of its
@@ -247,7 +248,7 @@ where
             generation: 1,
             flushed_generation: 0,
             pending: PendingResponse::<R>::with_capacity(100),
-            pending_data: HashMap::with_capacity(500),
+            pending_data: PendingGets::with_capacity(500),
             pending_exists: HashMap::with_capacity(500),
             flushed: Vec::with_capacity(1000),
             loader_tx: loader_tx.clone(),
@@ -363,11 +364,11 @@ where
     /// * `meta` - The metadata for this query
     /// * `query` - The query to execute
     #[instrument(name = "PersistentTable::handle", skip(self, query))]
-    pub async fn handle(
+    pub async fn handle<P: ShoalProjection<Row = R>>(
         &mut self,
         meta: QueryMetadata,
         query: SortedQuery<R>,
-    ) -> Option<(Uuid, Uuid, Response<R>)> {
+    ) -> Option<(Uuid, Uuid, Response<P>)> {
         // execute the correct query type
         match query {
             // insert a row into this partition
@@ -390,7 +391,7 @@ where
     /// * `meta` - The metadata about this insert query
     /// * `row` - The row to insert
     #[instrument(name = "PersistentTable::insert", skip_all)]
-    async fn insert(&mut self, meta: QueryMetadata, row: R) -> Option<(Uuid, Uuid, Response<R>)> {
+    async fn insert<P>(&mut self, meta: QueryMetadata, row: R) -> Option<(Uuid, Uuid, Response<P>)> {
         // get our partition key
         let key = row.get_partition_key();
         // wrap our row in an insert intent
@@ -456,21 +457,18 @@ where
     /// * `meta` - The metadata about this insert query
     /// * `get` - The get parameters to use
     #[instrument(name = "PersistentTable::get", skip_all)]
-    async fn get(
+    async fn get<P: ShoalProjection<Row = R>>(
         &mut self,
         meta: QueryMetadata,
         get: &SortedGet<R>,
-    ) -> Option<(Uuid, Uuid, Response<R>)> {
+    ) -> Option<(Uuid, Uuid, Response<P>)> {
         // pick this get up where its last execution left off, or start it fresh
         //
         // a get blocked on a partition is replayed once that partition has been read, so the
         // rows it already found have to outlive the execution that found them
-        let mut pending = match self.pending_data.remove(&(meta.id, meta.index)) {
-            // carry on filling the slots this get already has
-            Some(pending) => pending,
-            // this query has never been executed before so start it off
-            None => PendingGet::new(&get.partition_keys, get.limit),
-        };
+        let mut pending =
+            self.pending_data
+                .resume::<P>(&(meta.id, meta.index), &get.partition_keys, get.limit);
         // the archived forms of this gets keys, built the first time a partition of it is
         // being read in place - a get every one of whose partitions is resident builds none
         let mut seek = None;
@@ -539,7 +537,7 @@ where
         // hold this get until every partition it named has been read
         if pending.is_pending() {
             // remember what we have found so far for the replay to carry on from
-            self.pending_data.insert((meta.id, meta.index), pending);
+            self.pending_data.park((meta.id, meta.index), pending);
             // we have blocked partitions so return None
             return None;
         }
@@ -579,11 +577,11 @@ where
     /// * `meta` - The metadata about this exists query
     /// * `exists_query` - The exists parameters to use
     #[instrument(name = "PersistentTable::exists", skip_all)]
-    async fn exists(
+    async fn exists<P>(
         &mut self,
         meta: QueryMetadata,
         exists_query: &SortedExists<R>,
-    ) -> Option<(Uuid, Uuid, Response<R>)> {
+    ) -> Option<(Uuid, Uuid, Response<P>)> {
         // pick up the partitions this exists is still waiting on, or start it fresh
         let mut blocked = match self.pending_exists.remove(&(meta.id, meta.index)) {
             // carry on with the partitions this exists has yet to read
@@ -679,12 +677,12 @@ where
     /// * `key` - The key to the partition to delete data from
     /// * `sort` - The sort key to delete
     #[instrument(name = "PersistentTable::delete", skip_all)]
-    async fn delete(
+    async fn delete<P>(
         &mut self,
         meta: QueryMetadata,
         key: u64,
         sort: R::Sort,
-    ) -> Option<(Uuid, Uuid, Response<R>)> {
+    ) -> Option<(Uuid, Uuid, Response<P>)> {
         // get the partition we want to delete from
         match self.partitions.get_mut(&key) {
             Some(maybe_loaded) => {
@@ -855,11 +853,11 @@ where
     /// * `meta` - The metadata about this update query
     /// * `update` - The update to apply to a row in this table
     #[instrument(name = "PersistentTable::update", skip_all)]
-    async fn update(
+    async fn update<P>(
         &mut self,
         meta: QueryMetadata,
         update: SortedUpdate<R>,
-    ) -> Option<(Uuid, Uuid, Response<R>)> {
+    ) -> Option<(Uuid, Uuid, Response<P>)> {
         // get the partition we want to update
         match self.partitions.get_mut(&update.partition_key) {
             Some(maybe_loaded) => {

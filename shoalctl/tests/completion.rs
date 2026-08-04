@@ -8,11 +8,15 @@ use deepsize2::DeepSizeOf;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::layout::Rect;
+use ratatui::style::Modifier;
 use rkyv::{Archive, Deserialize, Serialize};
 use shoal::storage::FileSystem;
 use shoal::tables::{PersistentSortedTable, PersistentUnsortedTable};
-use shoal::{ShoalSortedTable, ShoalUnsortedTable, db};
-use shoalctl::components::{CompletionMenu, Tab, TabQueryBar, layout_query};
+use shoal::traits::QuerySupport;
+use shoal::{ShoalProjection, ShoalSortedTable, ShoalUnsortedTable, db};
+use shoalctl::components::{
+    CompletionMenu, ErrorBar, QueryError, QueryRow, Tab, TabContent, TabQueryBar, layout_query,
+};
 
 /// An unsorted table with a partition key and a couple of filters
 #[derive(
@@ -93,10 +97,23 @@ pub struct Wide {
     pub field_k: String,
 }
 
+/// A projection of a movie, so the menu has one to offer where the star goes
+#[derive(Debug, Archive, Serialize, Deserialize, Clone, ShoalProjection, PartialEq)]
+#[rkyv(derive(Debug))]
+#[shoal_projection(table = "Movie")]
+pub struct MovieSummary {
+    /// The partition this movie was in
+    #[shoal(partition)]
+    pub id: u64,
+    /// The title of this movie
+    pub title: String,
+}
+
 /// The database the query box is completing against
 #[db]
 pub struct TestDb {
     /// The unsorted movie table
+    #[shoal(projections(MovieSummary))]
     pub movie: PersistentUnsortedTable<Movie, FileSystem>,
     /// The sorted movie by keyword table
     pub movie_by_keyword: PersistentSortedTable<MovieByKeyword, FileSystem>,
@@ -199,6 +216,113 @@ fn render_query(
         .draw(|frame| cursor = TabQueryBar::new().render(frame, area, Some(tab), true))
         .expect("failed to draw the query box");
     (drawn(&terminal, size), cursor)
+}
+
+/// Render a tab's results pane and hand back what was drawn, a line at a time
+///
+/// # Arguments
+///
+/// * `tab` - The tab whose results should be drawn
+/// * `size` - The width and height of the terminal to draw into
+/// * `area` - The area to draw the results pane in
+fn render_content(tab: &Tab<TestDbClient>, size: (u16, u16), area: Rect) -> Vec<String> {
+    // draw the results pane into an in memory terminal
+    let (width, height) = size;
+    let mut terminal =
+        Terminal::new(TestBackend::new(width, height)).expect("failed to build a terminal");
+    terminal
+        .draw(|frame| TabContent::new().render(frame, area, Some(tab)))
+        .expect("failed to draw the results pane");
+    drawn(&terminal, size)
+}
+
+/// Pull the underlines drawn into a terminal back out, a row at a time
+///
+/// A cell carrying the underline is marked with a squiggle and every other cell with a space,
+/// so what an error underlined can be read off directly under what was drawn.
+///
+/// # Arguments
+///
+/// * `terminal` - The terminal that was drawn into
+/// * `size` - The width and height of that terminal
+fn underlines(terminal: &Terminal<TestBackend>, size: (u16, u16)) -> Vec<String> {
+    let (width, height) = size;
+    let buffer = terminal.backend().buffer().clone();
+    (0..height)
+        .map(|y| {
+            (0..width)
+                .map(|x| {
+                    if buffer[(x, y)]
+                        .style()
+                        .add_modifier
+                        .contains(Modifier::UNDERLINED)
+                    {
+                        '~'
+                    } else {
+                        ' '
+                    }
+                })
+                .collect::<String>()
+                .trim_end()
+                .to_string()
+        })
+        .collect()
+}
+
+/// Render a tab's query box and hand back what it underlined, a row at a time
+///
+/// # Arguments
+///
+/// * `tab` - The tab whose query box should be drawn
+/// * `size` - The width and height of the terminal to draw into
+/// * `area` - The area to draw the query box in
+fn underlined_query(tab: &Tab<TestDbClient>, size: (u16, u16), area: Rect) -> Vec<String> {
+    // draw the query box into an in memory terminal
+    let (width, height) = size;
+    let mut terminal =
+        Terminal::new(TestBackend::new(width, height)).expect("failed to build a terminal");
+    terminal
+        .draw(|frame| {
+            TabQueryBar::new().render(frame, area, Some(tab), true);
+        })
+        .expect("failed to draw the query box");
+    underlines(&terminal, size)
+}
+
+/// Render a tab's error box and hand back what was drawn, a line at a time
+///
+/// # Arguments
+///
+/// * `tab` - The tab whose error should be drawn
+/// * `size` - The width and height of the terminal to draw into
+/// * `area` - The area to draw the error box in
+fn render_error(tab: &Tab<TestDbClient>, size: (u16, u16), area: Rect) -> Vec<String> {
+    // draw the error box into an in memory terminal
+    let (width, height) = size;
+    let mut terminal =
+        Terminal::new(TestBackend::new(width, height)).expect("failed to build a terminal");
+    terminal
+        .draw(|frame| ErrorBar::new().render(frame, area, Some(tab)))
+        .expect("failed to draw the error box");
+    drawn(&terminal, size)
+}
+
+/// Build a tab holding a query that does not parse, along with the error it failed with
+///
+/// This is what `Tab::submit_query` does with a query enter was pressed on, minus the client it
+/// would have sent a query that did parse to.
+///
+/// # Arguments
+///
+/// * `query` - The query to type into the tab
+fn errored(query: &str) -> Tab<TestDbClient> {
+    // type the query out the way a user would
+    let mut tab = typed(query);
+    // parse it, which is expected to fail
+    let error = TestDbClient::parse(&tab.query).expect_err("this query was meant not to parse");
+    // record what went wrong, keeping the span apart from the message
+    tab.error = Some(QueryError::parse(&error));
+    tab
 }
 
 /// Get the text of every suggestion a tab is offering
@@ -535,16 +659,25 @@ fn wraps_a_query_at_its_width() {
     assert_eq!((layout.cursor_row, layout.cursor_col), (0, 8));
     // a longer one breaks at exactly the width it was given
     let layout = layout_query("SELECT * FROM Movie", "", 19, 10);
-    assert_eq!(layout.rows[0].0, "SELECT * F");
-    assert_eq!(layout.rows[1].0, "ROM Movie");
+    assert_eq!(layout.rows[0].text, "SELECT * F");
+    assert_eq!(layout.rows[1].text, "ROM Movie");
     assert_eq!((layout.cursor_row, layout.cursor_col), (1, 9));
+    // each row knows where in the query it started, which is what a span is found again by
+    assert_eq!((layout.rows[0].start, layout.rows[1].start), (0, 10));
     // a cursor at the end of a full row moves down to the start of the next one
     let layout = layout_query("SELECT * F", "", 10, 10);
     assert_eq!(layout.rows.len(), 2);
     assert_eq!((layout.cursor_row, layout.cursor_col), (1, 0));
     // the hint trailing the query is kept apart from it so it can be dimmed
     let layout = layout_query("Mov", "ie", 3, 20);
-    assert_eq!(layout.rows[0], ("Mov".to_string(), "ie".to_string()));
+    assert_eq!(
+        layout.rows[0],
+        QueryRow {
+            text: "Mov".to_string(),
+            hint: "ie".to_string(),
+            start: 0
+        }
+    );
     assert_eq!((layout.cursor_row, layout.cursor_col), (0, 3));
 }
 
@@ -553,9 +686,11 @@ fn wraps_a_query_at_its_width() {
 fn keeps_wide_characters_whole() {
     // seven columns are used before the last character, which needs two more than are left
     let layout = layout_query("FROM 映画", "", 11, 8);
-    assert_eq!(layout.rows[0].0, "FROM 映");
-    assert_eq!(layout.rows[1].0, "画");
+    assert_eq!(layout.rows[0].text, "FROM 映");
+    assert_eq!(layout.rows[1].text, "画");
     assert_eq!((layout.cursor_row, layout.cursor_col), (1, 2));
+    // the second row starts where the character moved down to it does, in bytes not columns
+    assert_eq!(layout.rows[1].start, 8);
 }
 
 #[test]
@@ -610,4 +745,270 @@ fn control_c_closes_and_control_space_opens() {
     assert!(tab.handle_completion_key(control(KeyCode::Char(' '))));
     assert!(tab.completion.is_open());
     assert_eq!(offered(&tab), vec!["Movie", "MovieByKeyword"]);
+}
+
+#[test]
+/// The menu offers the star and every projection where a query says what to select
+///
+/// A projection stands where the star does, so the slot that used to have exactly one thing in
+/// it now has a set of them, and the menu opens on it like it does anywhere else.
+fn offers_projections_where_the_star_goes() {
+    // with nothing typed after SELECT, the star and every projection are on offer
+    let tab = typed("SELECT ");
+    assert!(tab.completion.is_open());
+    assert_eq!(offered(&tab), vec!["*", "MovieSummary"]);
+    // and typing the start of a projection narrows it the way typing a table name does
+    let tab = typed("SELECT Movie");
+    assert!(tab.completion.is_open());
+    assert_eq!(offered(&tab), vec!["MovieSummary"]);
+}
+
+#[test]
+/// A query that does not parse is answered with a box saying what was wrong with it
+fn a_bad_query_shows_an_error_box() {
+    // a query naming a field the table does not have
+    let tab = errored("SELECT * FROM Movie WHERE bogus = 1");
+    // the box asks for room for its message between two borders
+    let height = ErrorBar::height(Some(&tab), 60);
+    assert_eq!(height, 4);
+    // and draws the message the parser gave in it
+    let rendered = render_error(&tab, (60, height), Rect::new(0, 0, 60, height));
+    assert!(
+        rendered[0].contains("Error"),
+        "the box was not labelled: {rendered:#?}"
+    );
+    assert!(
+        rendered.join(" ").contains("Unknown field 'bogus'"),
+        "the message was not drawn: {rendered:#?}"
+    );
+}
+
+#[test]
+/// The error box takes up no room at all while there is nothing wrong
+fn the_error_box_takes_no_room_when_there_is_no_error() {
+    // a query that has not been submitted has no error on it
+    let tab = typed("SELECT * FROM Movie WHERE id = 5");
+    assert_eq!(ErrorBar::height(Some(&tab), 60), 0);
+    // and neither does a tab that has never held a query
+    let tab = Tab::<TestDbClient>::new("test");
+    assert_eq!(ErrorBar::height(Some(&tab), 60), 0);
+    // nor is there a tab to read one off at all before one is opened
+    assert_eq!(ErrorBar::height::<TestDbClient>(None, 60), 0);
+}
+
+#[test]
+/// The part of a query an error points at is underlined where it was typed
+fn the_offending_part_of_a_query_is_underlined() {
+    // the parser blames the field name, which starts 26 bytes into the query
+    let tab = errored("SELECT * FROM Movie WHERE bogus = 1");
+    let underlined = underlined_query(&tab, (60, 3), Rect::new(0, 0, 60, 3));
+    // the query is drawn one column in from the border, so the mark lands there too
+    assert_eq!(
+        underlined[1],
+        format!("{}~~~~~", " ".repeat(27)),
+        "unexpected underline: {underlined:#?}"
+    );
+    // and nothing else on the box is marked
+    assert_eq!(underlined[0], "");
+    assert_eq!(underlined[2], "");
+}
+
+#[test]
+/// An underline follows a query that wraps onto the row the rest of it landed on
+fn an_underline_follows_a_wrapped_query_onto_its_next_row() {
+    // twenty eight columns of room splits the query in the middle of the offending field
+    let tab = errored("SELECT * FROM Movie WHERE bogus = 1");
+    let height = TabQueryBar::height(Some(&tab), 30);
+    assert_eq!(height, 4);
+    let underlined = underlined_query(&tab, (30, height), Rect::new(0, 0, 30, height));
+    // the first two characters of the field are the last two on the first row
+    assert_eq!(
+        underlined[1],
+        format!("{}~~", " ".repeat(27)),
+        "unexpected underline: {underlined:#?}"
+    );
+    // and the rest of it is at the start of the next one
+    assert_eq!(
+        underlined[2],
+        " ~~~",
+        "unexpected underline: {underlined:#?}"
+    );
+}
+
+#[test]
+/// An error covering the whole query is written out rather than underlined
+///
+/// Several errors are about a query rather than about a part of one, and underlining every
+/// character of it would say nothing about which of them to change.
+fn a_whole_query_span_is_not_underlined() {
+    // a query with no partition key is blamed on all of itself
+    let tab = errored("SELECT * FROM Movie WHERE title = 'a'");
+    // so nothing on the query box is marked
+    let underlined = underlined_query(&tab, (60, 3), Rect::new(0, 0, 60, 3));
+    assert!(
+        underlined.iter().all(|row| row.is_empty()),
+        "the whole query was underlined: {underlined:#?}"
+    );
+    // and the message stands on its own, with no position bolted onto it
+    let height = ErrorBar::height(Some(&tab), 60);
+    let rendered = render_error(&tab, (60, height), Rect::new(0, 0, 60, height));
+    assert!(
+        rendered.join(" ").contains("Missing partition key"),
+        "the message was not drawn: {rendered:#?}"
+    );
+    assert!(
+        !rendered.join(" ").contains("at position"),
+        "a position was added to an error that is about the whole query: {rendered:#?}"
+    );
+}
+
+#[test]
+/// A span over characters that do not take up a cell is written out rather than underlined
+///
+/// A control character is drawn in no columns of its own, so an underline drawn across one
+/// lands somewhere other than under the text it was measured against. The message carries the
+/// position instead, where it cannot be misread as part of the query.
+fn a_span_over_control_characters_is_not_underlined() {
+    // a query with a control character in the middle of it
+    let mut tab = Tab::<TestDbClient>::new("test");
+    for character in "SELECT * FROM Movie WHERE id\u{7} = 1".chars() {
+        tab.insert_char(character);
+    }
+    // an error blaming the field, whose span takes the control character in with it
+    tab.error = Some(QueryError {
+        message: "Unknown field".to_string(),
+        span: Some((26, 30)),
+    });
+    // nothing is underlined, because nothing can be underlined honestly
+    let underlined = underlined_query(&tab, (60, 3), Rect::new(0, 0, 60, 3));
+    assert!(
+        underlined.iter().all(|row| row.is_empty()),
+        "an underline was drawn over a control character: {underlined:#?}"
+    );
+    // so the message says where to look instead
+    let height = ErrorBar::height(Some(&tab), 60);
+    let rendered = render_error(&tab, (60, height), Rect::new(0, 0, 60, height));
+    assert!(
+        rendered.join(" ").contains("at position 26"),
+        "the position was not drawn: {rendered:#?}"
+    );
+}
+
+#[test]
+/// An error changes how a query is drawn and never what it says
+///
+/// The whole reason the underline is a style rather than a row of drawn carets is that a
+/// decoration made of characters can end up read back as part of the query it describes. This
+/// is the test that says it cannot.
+fn an_error_never_reaches_the_query_text() {
+    let query = "SELECT * FROM Movie WHERE bogus = 1";
+    let tab = errored(query);
+    // the query is still exactly what was typed
+    assert_eq!(tab.query, query);
+    // and it is drawn as exactly the same characters as the same query with no error on it
+    let clean = typed(query);
+    let (with_error, _) = render_query(&tab, (60, 3), Rect::new(0, 0, 60, 3));
+    let (without_error, _) = render_query(&clean, (60, 3), Rect::new(0, 0, 60, 3));
+    assert_eq!(
+        with_error, without_error,
+        "an error changed the characters a query is drawn as"
+    );
+    // drawing it changed nothing about the query either
+    assert_eq!(tab.query, query);
+}
+
+#[test]
+/// Editing a query forgets the error the last one failed with, and moving through it does not
+fn editing_the_query_clears_the_error() {
+    // typing clears it, since what was typed is not what failed
+    let mut tab = errored("SELECT * FROM Movie WHERE bogus = 1");
+    tab.insert_char('2');
+    assert!(tab.error.is_none());
+    // so does deleting backwards
+    let mut tab = errored("SELECT * FROM Movie WHERE bogus = 1");
+    tab.delete_char_before();
+    assert!(tab.error.is_none());
+    // and deleting forwards
+    let mut tab = errored("SELECT * FROM Movie WHERE bogus = 1");
+    tab.query_cursor = 0;
+    tab.delete_char_at();
+    assert!(tab.error.is_none());
+    // and so does taking a completion, which rewrites part of the query
+    let mut tab = errored("SELECT * FROM Mov");
+    assert!(tab.completion.is_open());
+    tab.accept_completion();
+    assert!(tab.error.is_none());
+    // but moving the cursor leaves the query alone, so the error is still true
+    let mut tab = errored("SELECT * FROM Movie WHERE bogus = 1");
+    tab.move_cursor_left();
+    tab.move_cursor_right();
+    assert!(tab.error.is_some());
+}
+
+#[test]
+/// A message too long for the box is cut short rather than allowed to grow it
+fn a_long_error_message_is_capped() {
+    // an error carrying far more message than a narrow box has room for
+    let mut tab = typed("SELECT * FROM Movie WHERE id = 5");
+    tab.error = Some(QueryError::plain(
+        "something went wrong ".repeat(20).trim_end(),
+    ));
+    // the box grows to its cap and no further
+    let height = ErrorBar::height(Some(&tab), 30);
+    assert_eq!(height, 5);
+    // and the message it drew says it was cut
+    let rendered = render_error(&tab, (30, height), Rect::new(0, 0, 30, height));
+    assert!(
+        rendered[3].contains('…'),
+        "a cut message did not say so: {rendered:#?}"
+    );
+    // the box is still exactly as tall as it asked to be, borders and all
+    assert!(
+        rendered[height as usize - 1].starts_with('└'),
+        "the box did not close where it said it would: {rendered:#?}"
+    );
+}
+
+#[test]
+/// A server error arrives as pretty printed debug output and still ends up in one box
+fn a_multi_line_server_error_stays_one_box() {
+    // the shape App::handle_result hands over for an error the server sent back
+    let mut tab = typed("SELECT * FROM Movie WHERE id = 5");
+    tab.error = Some(QueryError::plain(
+        "Error: Shoalctl(\n    \"the shard\\n was busy\",\n)",
+    ));
+    // the newlines are gone, so the box is the height it worked out it would be
+    let height = ErrorBar::height(Some(&tab), 60);
+    let rendered = render_error(&tab, (60, height + 2), Rect::new(0, 0, 60, height));
+    assert_eq!(
+        rendered[1],
+        "│Error: Shoalctl( \"the shard\\n was busy\", )                │",
+        "unexpected render: {rendered:#?}"
+    );
+    // and nothing was drawn past the row the box closes on
+    assert!(
+        rendered[height as usize].is_empty(),
+        "the box drew past its own border: {rendered:#?}"
+    );
+}
+
+#[test]
+/// Rows left over from an older query say that is what they are
+fn stale_rows_say_so() {
+    // a tab holding the rows of a query that worked
+    let mut tab = errored("SELECT * FROM Movie WHERE bogus = 1");
+    tab.content = "| id | title |".to_string();
+    // the pane says the rows no longer answer the query in the box
+    let rendered = render_content(&tab, (40, 4), Rect::new(0, 0, 40, 4));
+    assert!(
+        rendered[0].contains("Results (stale)"),
+        "stale rows were not labelled: {rendered:#?}"
+    );
+    // and it goes back to plain results once the query is being fixed
+    tab.insert_char('2');
+    let rendered = render_content(&tab, (40, 4), Rect::new(0, 0, 40, 4));
+    assert!(
+        rendered[0].contains("Results") && !rendered[0].contains("stale"),
+        "rows stayed labelled stale after the error went: {rendered:#?}"
+    );
 }

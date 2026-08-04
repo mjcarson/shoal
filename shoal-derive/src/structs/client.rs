@@ -37,36 +37,62 @@ fn extract_table_info(fields: &FieldsNamed) -> Vec<TableInfo> {
         .collect()
 }
 
-// Add a client for this database
-pub fn add(stream: &mut proc_macro2::TokenStream, struct_ident: &Ident, fields: &FieldsNamed) {
+/// Add a client for this database
+///
+/// # Arguments
+///
+/// * `stream` - The stream to extend
+/// * `struct_ident` - The name of the database this client is for
+/// * `fields` - The tables in this database
+/// * `projections` - The projections each of those tables declared
+pub fn add(
+    stream: &mut proc_macro2::TokenStream,
+    struct_ident: &Ident,
+    fields: &FieldsNamed,
+    projections: &[Vec<Ident>],
+) {
     // extract the info for all tables in this db
     let tables = extract_table_info(fields);
+    // every projection of every table, which each answer in a variant of their own
+    let projected: Vec<&Ident> = projections.iter().flatten().collect();
     // build our new idents
     let client_ident = format_ident!("{}Client", struct_ident);
     let query_ident = format_ident!("{struct_ident}QueryKinds");
     let response_ident = format_ident!("{struct_ident}ResponseKinds");
     let archived_response_ident = format_ident!("Archived{struct_ident}ResponseKinds");
     // build our succeeded response arms
-    let succeeded_arms = tables.iter().map(|table| {
-        let variant_ident = &table.variant_ident;
-        quote! {
-            #archived_response_ident::#variant_ident(response)=> response.succeeded(opts),
-        }
-    });
+    let succeeded_arms = tables
+        .iter()
+        .map(|table| table.variant_ident.clone())
+        // a projected get answers in a variant of its own, which reads the same way
+        .chain(projected.iter().map(|projection| (*projection).clone()))
+        .map(|variant_ident| {
+            quote! {
+                #archived_response_ident::#variant_ident(response)=> response.succeeded(opts),
+            }
+        });
     // build our kind arms
-    let kind_arms = tables.iter().map(|table| {
-        let variant_ident = &table.variant_ident;
-        quote! {
-            #archived_response_ident::#variant_ident(response)=> response.kind(),
-        }
-    });
+    let kind_arms = tables
+        .iter()
+        .map(|table| table.variant_ident.clone())
+        // a projected get answers in a variant of its own, which reads the same way
+        .chain(projected.iter().map(|projection| (*projection).clone()))
+        .map(|variant_ident| {
+            quote! {
+                #archived_response_ident::#variant_ident(response)=> response.kind(),
+            }
+        });
     // build our get_exists arms
-    let get_exists_arms = tables.iter().map(|table| {
-        let variant_ident = &table.variant_ident;
-        quote! {
-            #archived_response_ident::#variant_ident(response)=> response.get_exists(),
-        }
-    });
+    let get_exists_arms = tables
+        .iter()
+        .map(|table| table.variant_ident.clone())
+        // a projected get answers in a variant of its own, which reads the same way
+        .chain(projected.iter().map(|projection| (*projection).clone()))
+        .map(|variant_ident| {
+            quote! {
+                #archived_response_ident::#variant_ident(response)=> response.get_exists(),
+            }
+        });
     // build our table names ident
     let table_names_ident = format_ident!("{}TableNames", struct_ident);
     // build our query_table_name arms
@@ -77,17 +103,28 @@ pub fn add(stream: &mut proc_macro2::TokenStream, struct_ident: &Ident, fields: 
         }
     });
     // build our response_table_name arms
-    let response_table_name_arms = tables.iter().map(|table| {
+    let mut response_table_name_arms = Vec::with_capacity(tables.len() + projected.len());
+    for (table, declared) in tables.iter().zip(projections) {
         let variant_ident = &table.variant_ident;
-        quote! {
+        // this tables own response, which holds whole rows
+        response_table_name_arms.push(quote! {
             #archived_response_ident::#variant_ident(_) => #table_names_ident::#variant_ident,
+        });
+        // a projections rows came out of the table it projects, so it names that one
+        for projection in declared {
+            response_table_name_arms.push(quote! {
+                #archived_response_ident::#projection(_) => #table_names_ident::#variant_ident,
+            });
         }
-    });
+    }
     // build our format_response arms
-    let format_response_arms = tables.iter().map(|table| {
-        let variant_ident = &table.variant_ident;
-        let inner_type = &table.inner_type;
-        let archived_inner = format_ident!("Archived{}", inner_type);
+    let format_response_arms = tables
+        .iter()
+        .map(|table| table.inner_type.clone())
+        // a projection prints the fields it named rather than every field of its row
+        .chain(projected.iter().map(|projection| (*projection).clone()))
+        .map(|variant_ident| {
+        let archived_inner = format_ident!("Archived{}", variant_ident);
         quote! {
             #archived_response_ident::#variant_ident(response) => {
                 match &response.data {
@@ -113,6 +150,15 @@ pub fn add(stream: &mut proc_macro2::TokenStream, struct_ident: &Ident, fields: 
         .iter()
         .map(|table| table.inner_type.to_string())
         .collect();
+    // build every projection name in this database paired with the table it projects
+    let projection_name_pairs = tables.iter().zip(projections).flat_map(|(table, declared)| {
+        let table_name_str = table.inner_type.to_string();
+        declared.iter().map(move |projection| {
+            let projection_str = projection.to_string();
+            let table_name_str = table_name_str.clone();
+            quote! { (#projection_str, #table_name_str) }
+        })
+    });
     // build our table_fields arms
     let table_fields_arms = tables.iter().map(|table| {
         let inner_type = &table.inner_type;
@@ -130,9 +176,53 @@ pub fn add(stream: &mut proc_macro2::TokenStream, struct_ident: &Ident, fields: 
         }
     });
     // build our parse arms for each table
-    let parse_arms = tables.iter().map(|table| {
+    let parse_arms = tables.iter().zip(projections).map(|(table, declared)| {
         let variant_ident = &table.variant_ident;
         let inner_type = &table.inner_type;
+        // build the name of this tables projection enum
+        let projection_enum = format_ident!("{}Projection", inner_type);
+        // the name of this table as it must be typed in a query
+        let table_name_str_for_projection = inner_type.to_string();
+        // build one arm per projection this table declared, matched on by name
+        let projection_arms = declared.iter().map(|projection| {
+            let projection_str = projection.to_string();
+            quote! {
+                #projection_str => #projection_enum::#projection,
+            }
+        });
+        // name every projection this table has, so a wrong one can say what the right ones are
+        let projection_strs: Vec<String> =
+            declared.iter().map(|projection| projection.to_string()).collect();
+        // Build the projection binding every parse arm needs
+        //
+        // a projection is a named type rather than a column list, so the name a query wrote
+        // has to be one this table declared. a projection of another table is rejected here
+        // rather than answered with rows from a table the query never named
+        let bind_projection = quote! {
+            let projection = match &parsed.projection {
+                // this query named a projection, so it has to be one of ours
+                Some(named) => match named.name.as_str() {
+                    #(#projection_arms)*
+                    _ => {
+                        // annotated because a table with no projections has an empty list here
+                        let known: &[&str] = &[#(#projection_strs),*];
+                        return Err(shoal_core::client::ShqlParseError::new(
+                            format!(
+                                "'{}' is not a projection of {}. Its projections are: {:?}",
+                                named.name,
+                                #table_name_str_for_projection,
+                                known,
+                            ),
+                            named.start,
+                            named.end,
+                            query,
+                        ));
+                    }
+                },
+                // a query that wrote a star asked for every field of every row
+                None => #projection_enum::Full,
+            };
+        };
         // The table name string to match against (the struct name)
         let table_name_str = inner_type.to_string();
         // Build the get struct name
@@ -224,6 +314,8 @@ pub fn add(stream: &mut proc_macro2::TokenStream, struct_ident: &Ident, fields: 
                         #check_conditions
                         // Extract the partition keys, which every query has to constrain
                         #partition_keys
+                        // Work out which of each rows fields this query asked for
+                        #bind_projection
                         // Build the Get query
                         let mut get_query = #get_ident::new(partition_keys.clone());
                         if let Some(limit) = parsed.limit {
@@ -241,6 +333,7 @@ pub fn add(stream: &mut proc_macro2::TokenStream, struct_ident: &Ident, fields: 
                                 partition_keys: partition_key_hashes,
                                 filters: get_query.filters,
                                 limit: get_query.limit,
+                                projection,
                             }
                         );
                         Ok(#query_ident::#variant_ident(unsorted_query))
@@ -254,6 +347,8 @@ pub fn add(stream: &mut proc_macro2::TokenStream, struct_ident: &Ident, fields: 
                         #check_conditions
                         // Extract the partition keys, which every query has to constrain
                         #partition_keys
+                        // Work out which of each rows fields this query asked for
+                        #bind_projection
                         // Work out which rows of each partition this query selected
                         //
                         // a sort key is named by at most one condition - the parser folds the
@@ -336,6 +431,7 @@ pub fn add(stream: &mut proc_macro2::TokenStream, struct_ident: &Ident, fields: 
                                 sort_select: get_query.sort_select,
                                 filters: get_query.filters,
                                 limit: get_query.limit,
+                                projection,
                             }
                         );
                         Ok(#query_ident::#variant_ident(sorted_query))
@@ -417,6 +513,11 @@ pub fn add(stream: &mut proc_macro2::TokenStream, struct_ident: &Ident, fields: 
             /// Get the names of every table in this database
             fn table_names() -> &'static [&'static str] {
                 &[#(#table_name_strs),*]
+            }
+
+            /// Get every projection in this database, paired with the table it projects
+            fn projection_names() -> &'static [(&'static str, &'static str)] {
+                &[#(#projection_name_pairs),*]
             }
 
             /// Get the fields for a table and the role each one plays in a query

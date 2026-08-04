@@ -5,7 +5,7 @@ use rkyv::{Archive, Deserialize, Serialize};
 use shoal::client::Shoal;
 use shoal::storage::FileSystem;
 use shoal::tables::{PersistentSortedTable, PersistentUnsortedTable};
-use shoal::{ShoalSortedTable, ShoalUnsortedTable, db};
+use shoal::{ShoalProjection, ShoalSortedTable, ShoalUnsortedTable, db};
 use std::sync::Arc;
 
 /// Deserialize a comma-space separated string into a Vec<String>
@@ -94,6 +94,24 @@ pub struct Movie {
     pub keywords: Vec<String>,
 }
 
+/// A projection of a movie holding just enough to list one
+///
+/// A movie is a wide row, most of it strings, and listing them needs three fields of it. This
+/// is what a get asks to be answered with instead, so the rest of each row is never copied out
+/// of the archive it was read from.
+#[derive(Debug, Archive, Serialize, Deserialize, Clone, ShoalProjection, PartialEq)]
+#[rkyv(derive(Debug))]
+#[shoal_projection(table = "Movie")]
+pub struct MovieSummary {
+    /// The id of this movie, which is the partition it was in
+    #[shoal(partition)]
+    pub id: u64,
+    /// The name of this movie
+    pub title: String,
+    /// The vote average for this movie
+    pub vote_average: f64,
+}
+
 #[derive(
     Debug,
     Archive,
@@ -121,6 +139,7 @@ pub struct MovieByKeyword {
 #[db]
 pub struct Tmdb {
     /// A basic key value table
+    #[shoal(projections(MovieSummary))]
     pub movie: PersistentUnsortedTable<Movie, FileSystem>,
     /// A sorted table of movies by keywords
     pub movie_by_keyword: PersistentSortedTable<MovieByKeyword, FileSystem>,

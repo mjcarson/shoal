@@ -55,6 +55,7 @@ pub(super) fn add(
     let filter_name = format_ident!("{}Filter", name);
     let update_name = format_ident!("{}Update", name);
     let update_data_name = format_ident!("{}UpdateData", name);
+    let projection_enum = format_ident!("{}Projection", name);
     // build the is_filtered checks for regular rows
     //
     // a filter holds every value its field may take, so a row matches when it holds any one
@@ -98,6 +99,9 @@ pub(super) fn add(
             /// Any filters to apply when listing/crawling rows
             type Filters = #filter_name;
 
+            /// The subsets of this tables rows that a get can ask to be answered with
+            type Projection = #projection_enum;
+
             fn is_filtered(filter: &Self::Filters, row: &Self) -> bool {
                 #(#filter_checks)*
                 true
@@ -109,6 +113,41 @@ pub(super) fn add(
             ) -> bool {
                 #(#filter_archived_checks)*
                 true
+            }
+        }
+
+        /// A whole row is the identity projection of itself
+        ///
+        /// This is what lets a projected get and an unprojected one be the same code path: a
+        /// scan is generic in what it is building, and a get that named no projection builds
+        /// this one. Both conversions are what a get has always done, so once they are inlined
+        /// an unprojected get costs exactly what it did before projections existed.
+        #[automatically_derived]
+        impl shoal_core::shared::traits::ShoalProjection for #name {
+            /// A row projects its own table
+            type Row = #name;
+
+            /// The whole row is the projection a get gets when it names none
+            const PROJECTION: #projection_enum = #projection_enum::Full;
+
+            /// Build a whole row from a resident one, which is a clone
+            ///
+            /// # Arguments
+            ///
+            /// * `row` - The row to project
+            #[inline]
+            fn from_row(row: &#name) -> Self {
+                row.clone()
+            }
+
+            /// Build a whole row from an archived one, which is a deserialize
+            ///
+            /// # Arguments
+            ///
+            /// * `row` - The archived row to project
+            #[inline]
+            fn from_archived(row: &<#name as rkyv::Archive>::Archived) -> Self {
+                <#name as shoal_core::shared::traits::RkyvSupport>::deserialize(row).unwrap()
             }
         }
     });

@@ -5,7 +5,7 @@ use rkyv::{Archive, Deserialize, Serialize};
 use shoal_core::shared::traits::RkyvSupport;
 use shoal_core::storage::FileSystem;
 use shoal_core::tables::PersistentUnsortedTable;
-use shoal_derive::{db, ShoalUnsortedTable};
+use shoal_derive::{db, ShoalProjection, ShoalUnsortedTable};
 use std::time::Duration;
 use tempfile::TempDir;
 
@@ -43,10 +43,25 @@ impl TestRecord {
     }
 }
 
+/// A projection of a test record that leaves its payload behind
+///
+/// An unsorted partition holds one row, so a projection of one carries its partition key and
+/// nothing else. That key is what the shard collecting the shares of a split get uses to put
+/// the rows back in the order the query named their partitions in.
+#[derive(Debug, Archive, Serialize, Deserialize, Clone, ShoalProjection, PartialEq, Eq)]
+#[rkyv(derive(Debug))]
+#[shoal_projection(table = "TestRecord")]
+pub struct TestRecordKey {
+    /// The partition this row belonged to
+    #[shoal(partition)]
+    pub partition_key: String,
+}
+
 /// The test database schema
 #[db]
 pub struct TestDb {
     /// The sorted test table
+    #[shoal(projections(TestRecordKey))]
     pub test_record: PersistentUnsortedTable<TestRecord, FileSystem>,
 }
 
@@ -525,5 +540,117 @@ async fn get_limit_takes_the_first_partitions() -> Result<(), TestError> {
     assert_eq!(found, partition_keys[..3].to_vec());
     // Shutdown server
     pool.exit()?;
+    Ok(())
+}
+
+/// Run a projected get over these partitions and report the keys it answered with, in order
+///
+/// This is the twin of `get_partition_keys` and reads the projections own variant of the
+/// response, which is what a projected get answers in.
+///
+/// # Arguments
+///
+/// * `client` - The client to send our get with
+/// * `partition_keys` - The partitions to read, in the order to read them
+/// * `limit` - The most rows to ask for, if this get should set a limit
+async fn get_projected_keys(
+    client: &shoal_core::client::Shoal<TestDbClient>,
+    partition_keys: Vec<String>,
+    limit: Option<usize>,
+) -> Result<Vec<String>, TestError> {
+    // build a projected get over every one of these partitions, with a limit if we have one
+    let mut get = TestRecordGet::new(partition_keys).projection::<TestRecordKey>();
+    if let Some(limit) = limit {
+        get = get.limit(limit);
+    }
+    // send it and collect the partitions the rows it answered with came from
+    let mut stream = client.send(client.query().add(get)).await?;
+    let mut found = Vec::new();
+    while let Some(response) = stream.next().await? {
+        if let Some(rows) = response.access::<TestRecordKey>()? {
+            for row in rows.iter() {
+                found.push(row.partition_key.to_string());
+            }
+        }
+    }
+    Ok(found)
+}
+
+/// Test that a projected get on an unsorted table answers with the projection
+#[tokio::test]
+async fn projection_returns_only_its_own_fields() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = utils::test_dir();
+    // start a shoal server and build a client
+    let (client, pool) = utils::start::<TestDb>(&temp_dir).await?;
+    // write a row to read back
+    client
+        .send_one(TestRecord::new("partition_key", "woot"))
+        .await?;
+    // read it back as the projection instead of as the whole row
+    let response = client
+        .send_one(
+            TestRecordGet::new(vec!["partition_key".to_owned()]).projection::<TestRecordKey>(),
+        )
+        .await?;
+    // the row is in the projections variant, not the tables
+    let rows = response.access::<TestRecordKey>()?.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows.first().unwrap().partition_key.as_str(), "partition_key");
+    // reaching for the row type is the wrong type, not an empty answer
+    assert!(response.access::<TestRecord>().is_err());
+    // Shutdown server
+    pool.exit()?;
+    Ok(())
+}
+
+/// Test that a projected get spread over several shards keeps its partition order and its limit
+///
+/// The shard collecting the shares of a split get asks each row which partition it came from,
+/// so this is where a projection that could not name its partition would come back shuffled.
+#[tokio::test]
+async fn projection_orders_rows_across_partitions() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = utils::test_dir();
+    // start a shoal server and build a client, which runs more than one shard
+    let (client, pool) = utils::start::<TestDb>(&temp_dir).await?;
+    // write a row into each of our partitions
+    let partition_keys = insert_spread_rows(&client).await?;
+    // read them all back as the projection, in the order named here
+    let found = get_projected_keys(&client, partition_keys.clone(), None).await?;
+    assert_eq!(found, partition_keys);
+    // a limit still keeps the partitions this get named first
+    let limited = get_projected_keys(&client, partition_keys.clone(), Some(3)).await?;
+    assert_eq!(limited, partition_keys[..3].to_vec());
+    // Shutdown server
+    pool.exit()?;
+    Ok(())
+}
+
+/// Test that a projection reads an unsorted partition that is still an archive on disk
+#[tokio::test]
+async fn projection_reads_an_archived_partition() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = utils::test_dir();
+    // build a test row to insert
+    let test_data = TestRecord::new("partition_key", "woot");
+    // leave this row on disk with nothing resident in memory
+    insert_then_evict_to_disk(&temp_dir, &test_data).await?;
+    // start a shoal server and build a client
+    let (client, pool) = utils::start::<TestDb>(&temp_dir).await?;
+    // read it back as the projection, which has to find it on disk first
+    let response = client
+        .send_one(
+            TestRecordGet::new(vec!["partition_key".to_owned()]).projection::<TestRecordKey>(),
+        )
+        .await?;
+    // the projection came out of the archive
+    let rows = response.access::<TestRecordKey>()?.unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows.first().unwrap().partition_key.as_str(), "partition_key");
+    // Shutdown server
+    pool.exit()?;
+    // wait for threads to fully clean up and the port to be released
+    tokio::time::sleep(Duration::from_secs(1)).await;
     Ok(())
 }

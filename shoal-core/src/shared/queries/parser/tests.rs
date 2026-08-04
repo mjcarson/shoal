@@ -165,7 +165,7 @@ fn rejects_identifiers_starting_with_a_digit() {
     // a table name starting with a digit is not a valid identifier
     let message = parse_err("SELECT * FROM 2Movie WHERE id = 1");
     assert!(
-        message.contains("SELECT * FROM"),
+        message.contains("SELECT <projection> FROM"),
         "unexpected message: {}",
         message
     );
@@ -271,22 +271,53 @@ fn rejects_a_missing_select() {
     // a query that does not start with SELECT cannot be parsed
     let message = parse_err("FROM Movie WHERE id = 1");
     assert!(
-        message.contains("SELECT * FROM"),
+        message.contains("SELECT <projection> FROM"),
         "unexpected message: {}",
         message
     );
 }
 
 #[test]
-/// Only SELECT * is supported so a projection is rejected
-fn rejects_a_projection() {
-    // naming columns instead of using * is not supported
-    let message = parse_err("SELECT id FROM Movie WHERE id = 1");
+/// A projection names a single type, so a list of columns is rejected
+fn rejects_a_column_list() {
+    // a projection is a named type rather than an arbitrary set of columns, so a list of
+    // them has no type to come back as and is a parse error
+    let message = parse_err("SELECT id, title FROM Movie WHERE id = 1");
     assert!(
-        message.contains("SELECT * FROM"),
+        message.contains("SELECT <projection> FROM"),
         "unexpected message: {}",
         message
     );
+}
+
+#[test]
+/// A star asks for whole rows and names no projection
+fn a_star_names_no_projection() {
+    // a query that wrote a star asked for every field of every row
+    let parsed = ParsedSelect::new("SELECT * FROM Movie WHERE id = 1").unwrap();
+    assert!(parsed.projection.is_none());
+}
+
+#[test]
+/// A name in place of the star is carried out as the projection this query asked for
+fn a_name_in_place_of_the_star_is_a_projection() {
+    // whether this name is a projection the table declared is checked when it is bound
+    let parsed = ParsedSelect::new("SELECT MovieSummary FROM Movie WHERE id = 1").unwrap();
+    let projection = parsed.projection.expect("a projection was named");
+    assert_eq!(projection.name, "MovieSummary");
+    // the offsets point at the name so a projection no table declared can be shown
+    assert_eq!(projection.start, "SELECT ".len());
+    assert_eq!(projection.end, "SELECT MovieSummary".len());
+}
+
+#[test]
+/// The offsets of a projection survive the whitespace a query is allowed to have
+fn a_projections_offsets_survive_extra_whitespace() {
+    // extra whitespace between SELECT and the projection does not move where the name is
+    let query = "SELECT   MovieSummary FROM Movie WHERE id = 1";
+    let parsed = ParsedSelect::new(query).unwrap();
+    let projection = parsed.projection.expect("a projection was named");
+    assert_eq!(&query[projection.start..projection.end], "MovieSummary");
 }
 
 #[test]
@@ -295,7 +326,7 @@ fn rejects_a_missing_from() {
     // leaving out the FROM clause is a parse error
     let message = parse_err("SELECT * Movie WHERE id = 1");
     assert!(
-        message.contains("SELECT * FROM"),
+        message.contains("SELECT <projection> FROM"),
         "unexpected message: {}",
         message
     );

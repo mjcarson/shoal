@@ -26,13 +26,14 @@ use uuid::Uuid;
 
 use crate::server::messages::{LoadedPartition, QueryMetadata, ServerMsg};
 use crate::server::tables::partitions::UnsortedPartition;
-use crate::server::tables::persistent::{PendingGet, eviction_totals};
+use crate::server::tables::persistent::{eviction_totals, PendingGets};
 use crate::server::tables::storage::StorageSupport;
 use crate::server::{Conf, ServerError};
 use crate::shared::queries::{UnsortedExists, UnsortedGet, UnsortedQuery, UnsortedUpdate};
 use crate::shared::responses::{Response, ResponseAction};
 use crate::shared::traits::{
-    RkyvSupport, ShoalDatabase, ShoalTableSupport, ShoalUnsortedTable, TableNameSupport,
+    RkyvSupport, ShoalDatabase, ShoalProjection, ShoalTableSupport, ShoalUnsortedTable,
+    TableNameSupport,
 };
 use crate::storage::{
     FullArchiveMap, IntentReadSupport, LoaderMsg, Loaders, PendingResponse, RecoveryStats,
@@ -110,7 +111,7 @@ pub struct PersistentUnsortedTable<R: ShoalUnsortedTable, S: StorageSupport, N: 
     /// A map of queries blocked on partitions being loaded from disk
     blocked: HashMap<u64, Vec<(QueryMetadata, UnsortedQuery<R>)>>,
     /// The response data for gets that needed partitions to be loaded from disk
-    pending_data: HashMap<(Uuid, usize), PendingGet<R>>,
+    pending_data: PendingGets,
     /// The total size of all data on this shard
     memory_usage: Arc<RefCell<usize>>,
     /// The most recently used tables/partitions on this shard
@@ -197,7 +198,7 @@ where
             flushed: Vec::with_capacity(1000),
             loader_tx: loader_tx.clone(),
             blocked: HashMap::with_capacity(1000),
-            pending_data: HashMap::with_capacity(500),
+            pending_data: PendingGets::with_capacity(500),
             memory_usage: memory_usage.clone(),
             lru: lru.clone(),
             // nothing has been replayed yet so nothing has been discarded
@@ -349,11 +350,11 @@ where
     /// * `meta` - The metadata for this query
     /// * `archived` - The archived query to execute
     #[instrument(name = "PersistentTable::handle", skip(self, query))]
-    pub async fn handle(
+    pub async fn handle<P: ShoalProjection<Row = R>>(
         &mut self,
         meta: QueryMetadata,
         query: UnsortedQuery<R>,
-    ) -> Option<(Uuid, Uuid, Response<R>)>
+    ) -> Option<(Uuid, Uuid, Response<P>)>
     where
         for<'a> <<R as ShoalTableSupport>::UpdateData as Archive>::Archived: CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
@@ -394,7 +395,7 @@ where
     /// * `meta` - The metadata about this insert query
     /// * `row` - The row to insert
     #[instrument(name = "PersistentTable::insert", skip_all)]
-    async fn insert(&mut self, meta: QueryMetadata, row: R) -> Option<(Uuid, Uuid, Response<R>)>
+    async fn insert<P>(&mut self, meta: QueryMetadata, row: R) -> Option<(Uuid, Uuid, Response<P>)>
     where
         for<'a> <<R as ShoalTableSupport>::UpdateData as Archive>::Archived: CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
@@ -449,18 +450,15 @@ where
     /// * `meta` - The metadata about this insert query
     /// * `get` - The get parameters to use
     #[instrument(name = "PersistentTable::get", skip_all)]
-    async fn get(
+    async fn get<P: ShoalProjection<Row = R>>(
         &mut self,
         meta: QueryMetadata,
         get: UnsortedGet<R>,
-    ) -> Option<(Uuid, Uuid, Response<R>)> {
+    ) -> Option<(Uuid, Uuid, Response<P>)> {
         // pick this get up where its last execution left off, or start it fresh
-        let mut pending = match self.pending_data.remove(&(meta.id, meta.index)) {
-            // carry on filling the slots this get already has
-            Some(pending) => pending,
-            // this query has never been executed before so start it off
-            None => PendingGet::new(&get.partition_keys, get.limit),
-        };
+        let mut pending =
+            self.pending_data
+                .resume::<P>(&(meta.id, meta.index), &get.partition_keys, get.limit);
         // check each of the partition keys this execution was handed
         for partition_key in &get.partition_keys {
             // find where this partitions row belongs in the answer
@@ -506,7 +504,7 @@ where
         // hold this get until every partition it named has been read
         if pending.is_pending() {
             // remember what we have found so far for the replay to carry on from
-            self.pending_data.insert((meta.id, meta.index), pending);
+            self.pending_data.park((meta.id, meta.index), pending);
             // we have blocked partitions so return None
             return None;
         }
@@ -537,11 +535,11 @@ where
     /// * `meta` - The metadata about this exists query
     /// * `exists_query` - The exists parameters to use
     #[instrument(name = "PersistentTable::exists", skip_all)]
-    async fn exists(
+    async fn exists<P>(
         &mut self,
         meta: QueryMetadata,
         exists_query: &UnsortedExists<R>,
-    ) -> Option<(Uuid, Uuid, Response<R>)> {
+    ) -> Option<(Uuid, Uuid, Response<P>)> {
         // try to get the partition for this key
         match self.partitions.get(&exists_query.partition_key) {
             // this partition is loaded into memory
@@ -626,7 +624,7 @@ where
     /// * `meta` - The metadata about this delete query
     /// * `key` - The key to the partition to dlete data from
     #[instrument(name = "PersistentTable::delete", skip_all)]
-    async fn delete(&mut self, meta: QueryMetadata, key: u64) -> Option<(Uuid, Uuid, Response<R>)>
+    async fn delete<P>(&mut self, meta: QueryMetadata, key: u64) -> Option<(Uuid, Uuid, Response<P>)>
     where
         for<'a> <<R as ShoalTableSupport>::UpdateData as Archive>::Archived: CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
@@ -706,11 +704,11 @@ where
     /// * `meta` - The metadata about this insert query
     /// * `update` - The update to apply to a row in this table
     #[instrument(name = "PersistentTable::update", skip_all)]
-    async fn update(
+    async fn update<P>(
         &mut self,
         meta: QueryMetadata,
         update: UnsortedUpdate<R>,
-    ) -> Option<(Uuid, Uuid, Response<R>)>
+    ) -> Option<(Uuid, Uuid, Response<P>)>
     where
         for<'a> <<R as ShoalTableSupport>::UpdateData as Archive>::Archived: CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,

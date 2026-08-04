@@ -66,6 +66,13 @@ from memory goes **rows → cloned rows → bytes**.
 The response type is what forces it: `ResponseAction::Get(Option<Vec<T>>)`
 (`shared/responses.rs:31`) can only hold owned rows.
 
+**Narrowed, not closed, by [F2](../features/projections.md).** Both lines above are now
+`P::from_row(row)` and `P::from_archived(row)`, where `P` is what the get asked to be answered with.
+A get that named a projection copies only the fields that projection declared, so the archive path
+materializes a smaller owned value and the wire carries less. A get that named none still copies the
+whole row twice — the identity projection is exactly the two lines above — so the shape of this
+entry is unchanged and only its magnitude moved.
+
 ### O3. Every archived read is fully validated, inside a tracing span
 
 ```rust
@@ -170,6 +177,11 @@ the end, so it means buffering the shares and merging them together. Alternative
 carry its rows grouped — `Vec<(u64, Vec<T>)>` rather than `Vec<T>` — which removes the question
 entirely, at the cost of a wire format change that lands on the same `ResponseAction::Get` shape
 **O2** wants to change for a different reason. Worth doing with O2 rather than before it.
+
+[F2](../features/projections.md) added a second argument for the grouped share. A projection has to
+carry its table's partition key for no reason other than this rehash, which is a real constraint on
+what a projection is allowed to leave out — a projection of a title alone is not expressible. Taking
+this entry would lift that requirement as well as removing the hash.
 
 ## Write path
 

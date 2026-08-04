@@ -5,7 +5,10 @@
 pub(crate) mod sorted;
 pub(crate) mod unsorted;
 
+use std::any::Any;
 use std::cell::RefCell;
+use std::collections::HashMap;
+use uuid::Uuid;
 
 pub use sorted::PersistentSortedTable;
 pub use unsorted::PersistentUnsortedTable;
@@ -115,6 +118,85 @@ impl<R> PendingGet<R> {
             data.truncate(limit);
         }
         data
+    }
+}
+
+/// The gets a table has parked while it waits for their partitions to be read from disk
+///
+/// A get can be answered with whole rows or with any of its tables projections, so what a
+/// parked get has found so far is a `PendingGet` of a different type for each of them. A table
+/// has one of these rather than one map per projection, so the row type is erased here and
+/// recovered when the get is picked back up.
+///
+/// The erasure costs an allocation and a downcast, and only ever on the path that is already
+/// waiting on a disk read: a get every one of whose partitions is resident finishes in one
+/// execution and is never parked at all.
+#[derive(Default)]
+pub(crate) struct PendingGets {
+    /// What each parked get has found so far, keyed by the query it answers
+    parked: HashMap<(Uuid, usize), Box<dyn Any>>,
+}
+
+impl std::fmt::Debug for PendingGets {
+    /// Print how many gets are parked, since what they hold has no type to print
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PendingGets")
+            .field("parked", &self.parked.len())
+            .finish()
+    }
+}
+
+impl PendingGets {
+    /// Build somewhere to park gets waiting on a disk read
+    ///
+    /// # Arguments
+    ///
+    /// * `capacity` - The number of parked gets to make room for up front
+    pub fn with_capacity(capacity: usize) -> Self {
+        PendingGets {
+            parked: HashMap::with_capacity(capacity),
+        }
+    }
+
+    /// Pick a parked get back up, or start it fresh if it has never run before
+    ///
+    /// A get is replayed with the projection it was sent with, because the query parked on the
+    /// partition is a copy of the one that parked it, so the type asked for here is always the
+    /// type stored. A downcast that fails would mean two gets shared a query id and index while
+    /// asking for different rows, which cannot happen, so it is a panic rather than a fresh
+    /// start that would silently drop the rows already found.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The query id and index of the get being executed
+    /// * `partition_keys` - The partition keys this get named, in the order it named them
+    /// * `limit` - The most rows this get asked for, if it set a limit
+    pub fn resume<P: 'static>(
+        &mut self,
+        key: &(Uuid, usize),
+        partition_keys: &[u64],
+        limit: Option<usize>,
+    ) -> PendingGet<P> {
+        // take this gets progress back out, if it has run before
+        match self.parked.remove(key) {
+            // carry on filling the slots this get already has
+            Some(parked) => match parked.downcast::<PendingGet<P>>() {
+                Ok(pending) => *pending,
+                Err(_) => panic!("a parked get was resumed with a different projection"),
+            },
+            // this query has never been executed before so start it off
+            None => PendingGet::new(partition_keys, limit),
+        }
+    }
+
+    /// Park a get until the partitions it is still waiting on have been read
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The query id and index of the get being parked
+    /// * `pending` - What this get has found so far
+    pub fn park<P: 'static>(&mut self, key: (Uuid, usize), pending: PendingGet<P>) {
+        self.parked.insert(key, Box::new(pending));
     }
 }
 

@@ -64,7 +64,13 @@ indices stay globally ordered across bundles.
 
 ### `ResponseKinds`
 
-Also generated, mirroring `QueryKinds`, and wrapping:
+Also generated. It has one variant per table, mirroring `QueryKinds`, **and one per projection** —
+a get that named a projection answers as that type rather than as its table's row type, so the
+client can `access::<MovieSummary>()` it ([F2](../features/projections.md#design-choices)). An
+archived enum is the size of its largest variant and every `Response<T>` archives to the same size
+— a relative pointer and a length — so the extra variants cost nothing on the wire.
+
+Every variant wraps:
 
 ```rust
 pub struct Response<T> {

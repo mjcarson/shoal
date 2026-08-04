@@ -35,17 +35,16 @@ different places.
 filling a slot per partition:
 
 ```rust
-let mut pending = match self.pending_data.remove(&(meta.id, meta.index)) {
-    Some(pending) => pending,
-    None => PendingGet::new(&get.partition_keys, get.limit),
-};
+let mut pending = self
+    .pending_data
+    .resume::<P>(&(meta.id, meta.index), &get.partition_keys, get.limit);
 for partition_key in &get.partition_keys {
     let Some(rank) = pending.rank(*partition_key) else { continue };
     if pending.filled_before(rank) { pending.fill(rank, Vec::new()); continue }
     /* maybe read from disk, otherwise scan and fill this slot */
 }
 if pending.is_pending() {
-    self.pending_data.insert((meta.id, meta.index), pending);
+    self.pending_data.park((meta.id, meta.index), pending);
     None
 } else {
     /* flatten the slots in order, truncate, and answer */
@@ -57,7 +56,11 @@ picks up whatever the previous run accumulated, resolves what it can, and re-par
 are still missing. It terminates when every slot is filled.
 
 `pending_data` is keyed by `(query id, index)` — the pair that uniquely identifies one query
-within one bundle.
+within one bundle. What it holds is type-erased, because a parked get can be waiting for whole rows
+or for any of its table's projections. `resume::<P>` downcasts back to the type the query named, and
+panics rather than silently starting fresh, which would discard the rows already found
+([F2](../features/projections.md#invariants-to-uphold)). The box is only ever allocated on this
+path: a get whose partitions are all resident finishes in one execution and never parks.
 
 ### Slots, not an accumulator
 
@@ -65,12 +68,14 @@ Rows are not appended to one shared vec. `PendingGet` (`.../tables/persistent.rs
 partition the get named its own slot, in the order the query named them:
 
 ```rust
-struct PendingGet<R> {
+struct PendingGet<P> {
     keys: Vec<u64>,
-    slots: Vec<Option<Vec<R>>>,
+    slots: Vec<Option<Vec<P>>>,
     limit: Option<usize>,
 }
 ```
+
+`P` is what this get asked to be answered with, which is the row type unless it named a projection.
 
 That is what makes the answer's order a function of the query. A partition read back from disk is
 replayed long after the ones already resident, and with a shared accumulator its rows landed
@@ -110,9 +115,14 @@ for row in rows {
     if let Some(filter) = &params.filters {
         if !T::is_filtered(filter, row) { continue; }
     }
-    found.push(row.clone());
+    found.push(P::from_row(row));
 }
 ```
+
+`P` is what this get asked to be answered with. A get that named no projection asks for the whole
+row, whose `from_row` is a clone, so this is exactly what the loop did before
+[F2](../features/projections.md) — the scan is monomorphised per projection, so an unprojected get
+has no branch here at all.
 
 `found` here is this partition's own slot, so `limit_reached` caps each partition at `limit` rows
 of its own. A partition can never contribute more than that to the first `limit` rows of the
@@ -156,7 +166,10 @@ is a change from the bare `sort_keys: Vec<Sort>` this replaced. See
 
 Rows are `clone()`d into the response. For an `Accessible` partition they are deserialized
 instead, but only after passing the filter
-([Partitions](partitions.md#maybeloaded)).
+([Partitions](partitions.md#maybeloaded)). Both of those are the *identity* projection; a get that
+named a projection copies only the fields that projection declared, which for an archived partition
+means the rest of each row is never deserialized at all
+([F2](../features/projections.md#performance)).
 
 ### A limit across shards
 
@@ -411,7 +424,12 @@ synchronisation mechanism. Simple, and dependent on nothing reordering that queu
   small limit.
 - A gather entry for a query split across shards is only released when every shard has reported.
   A shard that dies mid-query leaks it and the client waits forever, since there are no timeouts.
-- Rows are cloned into responses; no zero-copy read path server-side.
+- Rows are cloned into responses; no zero-copy read path server-side. A projection narrows what is
+  cloned or deserialized to the fields it names, but it is still a copy
+  ([F2](../features/projections.md#performance)).
+- A projection changes what is deserialized, not what is read: a cold partition is read whole
+  either way, the same caveat a range carries
+  ([F2](../features/projections.md#limitations)).
 - No timeout on blocked queries. If a `ServerMsg::Partition` never arrives — a loader error,
   for instance, which hits a `todo!()` (`.../fs/loader.rs:128`) — the query is parked
   forever, with no way for the client to learn that.

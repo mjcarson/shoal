@@ -5,12 +5,27 @@ use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{Data, Fields, Ident};
 
+mod projections;
 mod structs;
 mod tables;
 mod traits;
 mod utils;
 
 use tables::{ShoalField, ShoalTable};
+
+/// Derive the traits that let a struct be a projection of one of a databases tables
+///
+/// A projection names a subset of a rows fields and a get can ask to be answered with it,
+/// which copies only the fields it named out of each row instead of every field the row has.
+/// The table it projects is named with `#[shoal_projection(table = "Movie")]`, and the
+/// database it belongs to lists it on the field holding that table.
+#[proc_macro_derive(ShoalProjection, attributes(shoal_projection, shoal))]
+pub fn derive_shoal_projection(stream: TokenStream) -> TokenStream {
+    // parse our target struct
+    let ast = syn::parse_macro_input!(stream as syn::DeriveInput);
+    // build everything this projection needs
+    projections::derive(&ast).into()
+}
 
 /// Derive the basic traits and functions for a type to be a table in shoal
 #[proc_macro_derive(ShoalSortedTable, attributes(shoal_table, shoal))]
@@ -224,6 +239,9 @@ pub fn db(_attr: TokenStream, item: TokenStream) -> TokenStream {
         .into();
     };
 
+    // the projections each of this databases tables declared, in field order
+    let mut projections = Vec::default();
+
     // rewrite field types: add <StructName> to storage and append TableNames
     if let Fields::Named(fields) = &mut item_struct.fields {
         if fields.named.is_empty() {
@@ -234,6 +252,8 @@ pub fn db(_attr: TokenStream, item: TokenStream) -> TokenStream {
             .to_compile_error()
             .into();
         }
+        // take the projections each table declared off of its field before we emit the struct
+        projections = utils::take_projections(fields);
         utils::rewrite_table_fields(fields, &struct_ident);
     }
 
@@ -252,13 +272,17 @@ pub fn db(_attr: TokenStream, item: TokenStream) -> TokenStream {
     traits::table_name::add(&mut output, &enum_ident, &variants);
     // add display support to this enum
     traits::display::add(&mut output, &enum_ident, &variants);
+    // add the enum naming each tables projections, since only we see all of them
+    projections::add_enums(&mut output, &variants, &projections);
     // add ShoalDatabase support to our root struct
-    traits::db::add(&mut output, &struct_ident, fields, &variants);
+    traits::db::add(&mut output, &struct_ident, fields, &variants, &projections);
     // add our client
-    structs::client::add(&mut output, &struct_ident, fields);
+    structs::client::add(&mut output, &struct_ident, fields, &projections);
     // add our query kinds and response kinds enums with trait impls
-    structs::query_kinds::add(&mut output, &struct_ident, fields);
+    structs::query_kinds::add(&mut output, &struct_ident, fields, &projections);
     // add our query conversion traits
     traits::from_query::add(&mut output, &struct_ident, fields);
+    // let every projection be pulled back out of a response the same way a row is
+    projections::add_from_shoal(&mut output, &struct_ident, &projections);
     output.into()
 }

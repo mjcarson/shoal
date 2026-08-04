@@ -18,6 +18,7 @@ pub fn add_unsorted(
     // build our struct names
     let get_name = format_ident!("{}Get", name);
     let filter_name = format_ident!("{}Filter", name);
+    let projection_enum = format_ident!("{}Projection", name);
     // also add the exists struct
     add_unsorted_exists(stream, name, partition_fields);
     // build the partition key type
@@ -41,6 +42,8 @@ pub fn add_unsorted(
             pub filters: Option<#filter_name>,
             /// The number of rows to return
             pub limit: Option<usize>,
+            /// The subset of each rows fields this get is asking to be answered with
+            pub projection: #projection_enum,
         }
 
         #[automatically_derived]
@@ -61,6 +64,8 @@ pub fn add_unsorted(
                     partition_keys,
                     filters: None,
                     limit: None,
+                    // a get asks for the whole row until it is told to project it
+                    projection: #projection_enum::Full,
                 }
             }
 
@@ -89,6 +94,24 @@ pub fn add_unsorted(
                     self.limit = Some(limit);
                     self
                 }
+
+            /// Ask for a subset of each rows fields instead of the whole row
+            ///
+            /// A projection copies only the fields it names out of each row, which for a wide
+            /// row is most of the cost of reading it. The response comes back as the
+            /// projection rather than as the row, so it is retrieved with
+            /// `response.access::<P>()` and not `response.access::<Self>()`.
+            ///
+            /// The type parameter is what names the projection, so a projection of another
+            /// table will not compile here rather than failing when the query is answered.
+            pub fn projection<P>(mut self) -> Self
+            where
+                P: shoal_core::shared::traits::ShoalProjection<Row = #name>,
+            {
+                // remember which of this tables projections was asked for
+                self.projection = <P as shoal_core::shared::traits::ShoalProjection>::PROJECTION;
+                self
+            }
         }
     });
 }
@@ -110,6 +133,7 @@ pub fn add_sorted(
     // build our struct names
     let get_name = format_ident!("{}Get", name);
     let filter_name = format_ident!("{}Filter", name);
+    let projection_enum = format_ident!("{}Projection", name);
     // also add the exists struct
     add_sorted_exists(stream, name, partition_fields, sort_fields);
     // Build the partition key type
@@ -145,6 +169,8 @@ pub fn add_sorted(
             pub filters: Option<#filter_name>,
             /// The number of rows to return
             pub limit: Option<usize>,
+            /// The subset of each rows fields this get is asking to be answered with
+            pub projection: #projection_enum,
         }
 
         #[automatically_derived]
@@ -163,6 +189,8 @@ pub fn add_sorted(
                     sort_select: shoal_core::shared::queries::SortSelect::All,
                     filters: None,
                     limit: None,
+                    // a get asks for the whole row until it is told to project it
+                    projection: #projection_enum::Full,
                 }
             }
 
@@ -217,6 +245,24 @@ pub fn add_sorted(
             /// * `limit` - The max number of rows to return
             pub fn limit(mut self, limit: usize) -> Self {
                 self.limit = Some(limit);
+                self
+            }
+
+            /// Ask for a subset of each rows fields instead of the whole row
+            ///
+            /// A projection copies only the fields it names out of each row, which for a wide
+            /// row is most of the cost of reading it. The response comes back as the
+            /// projection rather than as the row, so it is retrieved with
+            /// `response.access::<P>()` and not `response.access::<Self>()`.
+            ///
+            /// The type parameter is what names the projection, so a projection of another
+            /// table will not compile here rather than failing when the query is answered.
+            pub fn projection<P>(mut self) -> Self
+            where
+                P: shoal_core::shared::traits::ShoalProjection<Row = #name>,
+            {
+                // remember which of this tables projections was asked for
+                self.projection = <P as shoal_core::shared::traits::ShoalProjection>::PROJECTION;
                 self
             }
         }

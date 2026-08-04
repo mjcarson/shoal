@@ -47,9 +47,28 @@ fn extract_table_info(fields: &FieldsNamed) -> Vec<TableInfo> {
 }
 
 /// Generate the QueryKinds and ResponseKinds enums and their trait implementations
-pub fn add(stream: &mut proc_macro2::TokenStream, struct_ident: &Ident, fields: &FieldsNamed) {
+///
+/// A projection answers in its own response variant rather than sharing its tables one, so
+/// that the rows a projected get comes back with have a type the client can name. That is also
+/// why every arm below is built over the tables and their projections together: a variant the
+/// merge or the reorder does not cover would silently drop a projected gets rows.
+///
+/// # Arguments
+///
+/// * `stream` - The stream to extend
+/// * `struct_ident` - The name of the database these queries are for
+/// * `fields` - The tables in this database
+/// * `projections` - The projections each of those tables declared
+pub fn add(
+    stream: &mut proc_macro2::TokenStream,
+    struct_ident: &Ident,
+    fields: &FieldsNamed,
+    projections: &[Vec<Ident>],
+) {
     // extract the info for all tables in this db
     let tables = extract_table_info(fields);
+    // every projection of every table, which each answer in a variant of their own
+    let projected: Vec<&Ident> = projections.iter().flatten().collect();
     // build our ident for the structs we need to use/generate
     let query_ident = format_ident!("{}QueryKinds", struct_ident);
     let response_ident = format_ident!("{}ResponseKinds", struct_ident);
@@ -76,20 +95,32 @@ pub fn add(stream: &mut proc_macro2::TokenStream, struct_ident: &Ident, fields: 
         }
     });
     // Generate ResponseKinds enum variants
-    let response_variants = tables.iter().map(|table| {
-        let variant = &table.variant_ident;
-        let inner = &table.inner_type;
-        quote! {
-            #variant(shoal_core::shared::responses::Response<#inner>)
-        }
-    });
+    let response_variants = tables
+        .iter()
+        .map(|table| {
+            let variant = &table.variant_ident;
+            let inner = &table.inner_type;
+            quote! {
+                #variant(shoal_core::shared::responses::Response<#inner>)
+            }
+        })
+        // a projection answers in a variant named after itself, holding its own rows
+        .chain(projected.iter().map(|projection| {
+            quote! {
+                #projection(shoal_core::shared::responses::Response<#projection>)
+            }
+        }));
     // Generate response_query_id match arms
-    let response_query_id_arms = tables.iter().map(|table| {
-        let variant = &table.variant_ident;
-        quote! {
-            #archived_response_ident::#variant(resp) => Ok(&resp.id)
-        }
-    });
+    let response_query_id_arms = tables
+        .iter()
+        .map(|table| table.variant_ident.clone())
+        // a projections rows are answered with the same way a rows are
+        .chain(projected.iter().map(|projection| (*projection).clone()))
+        .map(|variant| {
+            quote! {
+                #archived_response_ident::#variant(resp) => Ok(&resp.id)
+            }
+        });
     // Generate split_by_shard match arms
     //
     // each table splits its own query, so the narrowed queries that comes back have to
@@ -126,51 +157,76 @@ pub fn add(stream: &mut proc_macro2::TokenStream, struct_ident: &Ident, fields: 
     //
     // every row knows the partition it came from, whichever kind of table it is, so both
     // kinds are reordered the same way
-    let order_by_partitions_arms = tables.iter().map(|table| {
-        let variant = &table.variant_ident;
-        quote! {
-            #response_ident::#variant(response) => response.order_by_partitions(order)
-        }
-    });
+    let order_by_partitions_arms = tables
+        .iter()
+        .map(|table| table.variant_ident.clone())
+        // a projections rows are answered with the same way a rows are
+        .chain(projected.iter().map(|projection| (*projection).clone()))
+        .map(|variant| {
+            quote! {
+                #response_ident::#variant(response) => response.order_by_partitions(order)
+            }
+        });
     // Generate merge match arms
     //
     // both shares answer the same query, so they are always the same variant
-    let merge_arms = tables.iter().map(|table| {
-        let variant = &table.variant_ident;
-        quote! {
-            (#response_ident::#variant(ours), #response_ident::#variant(theirs)) => {
-                ours.merge(theirs)
+    let merge_arms = tables
+        .iter()
+        .map(|table| table.variant_ident.clone())
+        // every shard answers a projected get with the same projection, so its shares are
+        // always the same variant too
+        .chain(projected.iter().map(|projection| (*projection).clone()))
+        .map(|variant| {
+            quote! {
+                (#response_ident::#variant(ours), #response_ident::#variant(theirs)) => {
+                    ours.merge(theirs)
+                }
             }
-        }
-    });
+        });
     // Generate truncate match arms
-    let truncate_arms = tables.iter().map(|table| {
-        let variant = &table.variant_ident;
-        quote! {
-            #response_ident::#variant(response) => response.truncate(limit)
-        }
-    });
+    let truncate_arms = tables
+        .iter()
+        .map(|table| table.variant_ident.clone())
+        // a projections rows are answered with the same way a rows are
+        .chain(projected.iter().map(|projection| (*projection).clone()))
+        .map(|variant| {
+            quote! {
+                #response_ident::#variant(response) => response.truncate(limit)
+            }
+        });
     // Generate get_index_archived match arms
-    let get_index_arms = tables.iter().map(|table| {
-        let variant = &table.variant_ident;
-        quote! {
-            #archived_response_ident::#variant(resp) => resp.index.to_native() as usize
-        }
-    });
+    let get_index_arms = tables
+        .iter()
+        .map(|table| table.variant_ident.clone())
+        // a projections rows are answered with the same way a rows are
+        .chain(projected.iter().map(|projection| (*projection).clone()))
+        .map(|variant| {
+            quote! {
+                #archived_response_ident::#variant(resp) => resp.index.to_native() as usize
+            }
+        });
     // Generate is_end_of_stream match arms
-    let is_end_of_stream_arms = tables.iter().map(|table| {
-        let variant = &table.variant_ident;
-        quote! {
-            #archived_response_ident::#variant(resp) => resp.end
-        }
-    });
+    let is_end_of_stream_arms = tables
+        .iter()
+        .map(|table| table.variant_ident.clone())
+        // a projections rows are answered with the same way a rows are
+        .chain(projected.iter().map(|projection| (*projection).clone()))
+        .map(|variant| {
+            quote! {
+                #archived_response_ident::#variant(resp) => resp.end
+            }
+        });
     // Generate get_query_id match arms
-    let get_query_id_arms = tables.iter().map(|table| {
-        let variant = &table.variant_ident;
-        quote! {
-            #archived_response_ident::#variant(resp) => resp.id.to_owned()
-        }
-    });
+    let get_query_id_arms = tables
+        .iter()
+        .map(|table| table.variant_ident.clone())
+        // a projections rows are answered with the same way a rows are
+        .chain(projected.iter().map(|projection| (*projection).clone()))
+        .map(|variant| {
+            quote! {
+                #archived_response_ident::#variant(resp) => resp.id.to_owned()
+            }
+        });
 
     // Generate the enums and trait implementations
     stream.extend(quote! {

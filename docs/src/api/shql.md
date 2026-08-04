@@ -13,7 +13,8 @@ mean — see [shoalctl](../operations/shoalctl.md#writing-queries).
 ## Grammar
 
 ```
-query      := ws "SELECT" ws1 "*" ws1 "FROM" ws1 identifier where [ws limit] [ws ";"] ws eof
+query      := ws "SELECT" ws1 projection ws1 "FROM" ws1 identifier where [ws limit] [ws ";"] ws eof
+projection := "*" | identifier
 where      := ws1 "WHERE" ws1 condition { ws "AND" ws1 condition }
 condition  := comparison { ws "OR" ws1 comparison }
 comparison := identifier ws ( "=" ws value
@@ -47,6 +48,33 @@ SELECT * FROM Movie WHERE id IN (12345, 12346)
 SELECT * FROM Movie WHERE id = 12345 OR id = 12346
 select * from Movie where id = 12345 limit 10
 SELECT * FROM MovieByKeyword WHERE keyword = 'alien' AND title > 'Gravity' LIMIT 20
+```
+
+## Projections
+
+The slot before `FROM` takes either a star or the name of a projection:
+
+```sql
+SELECT * FROM Movie WHERE id = 550
+SELECT MovieSummary FROM Movie WHERE id = 550
+```
+
+A star asks for whole rows, which is what every query asked for before
+[F2](../features/projections.md). A name asks for one of the projections that table declared, and
+the rows come back as that type — so a client retrieves them with `response.access::<MovieSummary>()`
+rather than `response.access::<Movie>()`.
+
+A projection is a **named type**, not a column list. `SELECT title, year FROM Movie` is a parse
+error, because the response is an archive of a concrete type and an arbitrary set of columns has no
+type to be. Which projections a table has is decided where the database is declared, not in the
+query ([Derive Macros](derive-macros.md#projections)).
+
+The name is carried out of stage 1 as written, with its offsets, and checked in stage 2 — a
+projection is a per-table question and the parser knows no schema. A name no table declared, or one
+belonging to a different table, is a binding error naming the ones that would have worked:
+
+```
+'ReviewSource' is not a projection of Movie. Its projections are: ["MovieSummary"]
 ```
 
 ## Range operators
@@ -136,7 +164,11 @@ inside a conjunction.
 
 ## What it does not support
 
-- **Only `SELECT *`.** No projection — the literal `*` is required.
+- ~~**Only `SELECT *`.** No projection — the literal `*` is required.~~ A projection is now a
+  **named type**: `SELECT *` asks for whole rows and `SELECT MovieSummary` asks for one of the
+  projections that table declared ([F2](../features/projections.md)). There is still no column
+  list — `SELECT title, year` does not parse, because the rows come back as an archive of a
+  concrete type and an arbitrary set of columns has no type to be.
 - **`=`, `IN`, and the range operators `<`, `<=`, `>`, `>=`.** No `!=`, `LIKE`, or `BETWEEN`.
   `BETWEEN` is sugar over `>= AND <=` and its inner `AND` collides with the one that joins
   clauses, so it was deliberately left out ([TODOs](../appendix/todos.md)).
@@ -184,12 +216,13 @@ inside a conjunction.
                   │
                   │ ParsedSelect::new       — syntax only
                   ▼
-  ParsedSelect { table_name: "Movie", conditions: [...], limit: Some(10) }
+  ParsedSelect { table_name: "Movie", projection: None, conditions: [...], limit: Some(10) }
                   │
                   │ generated parse arms    — per table, from structs/client.rs
                   ▼
         ┌─────────┴──────────┐
         │ validate + type check each condition against the schema
+        │ bind the projection this query named, if it named one
         │ pull out the partition keys, then the row selection
         │ Movie::shql_build_filters   — filter conditions → MovieFilter
         ▼
@@ -231,7 +264,17 @@ pub struct WhereBound {
     pub value: WhereValue,
     pub inclusive: bool,
 }
+
+pub struct ParsedProjection {
+    pub name: String,
+    pub start: usize,
+    pub end: usize,
+}
 ```
+
+A star produces `projection: None` and a name produces `Some(ParsedProjection)`. The offsets are
+carried for the same reason a `WhereValue`'s are: whether a name is a projection its table declared
+is a stage 2 question, and the error it raises has to point at the name it was given.
 
 A `Values` clause holds every value its field may take, so `IN` and `OR` produce one shape and a
 plain `=` is just the case where there is one of them. Folding happens during parsing:
@@ -359,6 +402,12 @@ rather than at the whole query — the reason `WhereClause` tracks offsets at al
 in `shoal-core/src/client/errors.rs`, and it slices the span with `get` rather than indexing, so
 a span that lands mid-character falls back to showing the whole input instead of panicking.
 
+`Display` is for a terminal that has only one line to give. A caller that can do better should
+read `message`, `start` and `end` off the struct instead — they are public, and `Display` folds
+them together across two lines, which is the wrong shape for a UI that wants to mark the query
+in place. That is what shoalctl does with them
+([item 48](../appendix/resolved/query-error-display.md)).
+
 ## What actually happens to `LIMIT`
 
 It parses. It type-checks. It is stored on `ParsedSelect.limit`, copied into the generated
@@ -442,7 +491,11 @@ a `Value` clone per validation.
 
 **Positions tracked from the start.** Carrying byte offsets through both stages means a type
 error can underline the literal, which is the difference between a usable REPL and a
-frustrating one.
+frustrating one. It took a while for anything to collect on that: shoalctl threw the span away
+until [item 48](../appendix/resolved/query-error-display.md), and now draws it red and
+underlined under the character it names. Not every error pays out yet — three of them still
+report a span covering the whole query, which cannot be underlined
+([item 49](../appendix/known-issues.md#49-the-coarsest-parse-errors-report-a-span-covering-the-whole-query)).
 
 **Nothing is consumed silently.** `ParsedSelect::new` rejects leftover input rather than
 stopping where it happens to run out of grammar, and the connective loop matches through `opt` so
@@ -476,6 +529,11 @@ Value suggestions and the type names shown beside each field come free from the 
 deserializes, so feeding a validator one literal of each shape reveals both what the field
 accepts and what type it is. No extra code is generated for it.
 
+The projection slot offers the star and every projection in the database. The table is not known
+yet at that point in the query — it comes after `FROM` — so all of them are offered and binding is
+what rejects one belonging to another table. `QuerySupport::projection_names` is what the menu
+reads, and it pairs each projection with the table it projects so the menu can say so.
+
 The operator slot is the one place the menu consults a field's role: `=` and `IN` are offered for
 every field, and `<`, `<=`, `>`, `>=` only for a sort key. Binding refuses a range anywhere else,
 so offering one there would walk a user straight into an error the menu could see coming.
@@ -506,7 +564,8 @@ by `shoalctl/tests/completion.rs`.
 
 ## Limitations
 
-- Equality, `IN`, and the range operators only; `SELECT *` only; reads only.
+- Equality, `IN`, and the range operators only; reads only. A query selects whole rows with `*`
+  or one named projection, never a column list ([F2](../features/projections.md#limitations)).
 - A `WHERE` clause is mandatory and must constrain a partition key.
 - `OR` only joins conditions on the same field and cannot join a range, and no field may be
   constrained twice by `AND` unless the two bound opposite ends of one range. There is no
@@ -515,6 +574,9 @@ by `shoalctl/tests/completion.rs`.
 - A range binds on a sort key alone, applies to the whole `Sort` value rather than a prefix of a
   composite one, and does not reduce the I/O of a cold partition
   ([F1](../features/sort-key-ranges.md#limitations)).
+- A projection has to be a type the table declared. A name no table declared, or one belonging to
+  another table, is a binding error rather than a query
+  ([F2](../features/projections.md#what-it-does)).
 - Composite partition keys cannot be expressed, since no literal can produce a tuple.
 - String literals have no escape syntax, so they cannot contain a single quote — which makes
   rows whose partition key holds an apostrophe unreachable

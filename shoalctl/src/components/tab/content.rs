@@ -33,6 +33,10 @@ impl TabContent {
     /// Displays the content of the currently selected tab.
     /// Shows a placeholder message if no tab is selected or content is empty.
     ///
+    /// Rows are left where they are when a query fails, since the query being fixed is usually
+    /// the one that produced them and comparing the two is the point. What they must not do is
+    /// go on claiming to answer the query in the box, so the pane says they are stale instead.
+    ///
     /// # Arguments
     ///
     /// * `frame` - The frame to render to
@@ -52,12 +56,15 @@ impl TabContent {
             Some(_) => ("Enter a query and press Enter to see results", 0, 0),
             None => ("No tab selected", 0, 0),
         };
+        // say so when these rows answer a query that is no longer the one in the box
+        let stale = matches!(selected, Some(tab) if tab.error.is_some() && !tab.content.is_empty());
+        let title = if stale { "Results (stale)" } else { "Results" };
         // build a paragraph with the tab's content
         let content = Paragraph::new(text)
             .block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title("Results")
+                    .title(title)
                     .border_style(Style::default().fg(Color::Cyan)),
             )
             .style(Style::default().fg(Color::White))

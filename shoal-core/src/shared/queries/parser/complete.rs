@@ -36,7 +36,7 @@ mod tests;
 pub enum Expecting {
     /// The `SELECT` keyword that starts every query
     Select,
-    /// The `*` projection
+    /// The `*` that asks for whole rows, or the name of a projection
     Star,
     /// The `FROM` keyword
     From,
@@ -292,8 +292,9 @@ pub fn analyze(query: &str, cursor: usize) -> CompletionContext {
             (Expecting::Select, Token::Ident(word)) if is_keyword(word, "SELECT") => {
                 Expecting::Star
             }
-            // the projection, which can only ever be a star
+            // the projection, which is either a star or the name of a projection
             (Expecting::Star, Token::Star) => Expecting::From,
+            (Expecting::Star, Token::Ident(_)) => Expecting::From,
             // the FROM naming which table to read
             (Expecting::From, Token::Ident(word)) if is_keyword(word, "FROM") => Expecting::Table,
             // the table itself, which we hang on to so we can complete its fields later
@@ -377,6 +378,8 @@ pub enum SuggestionKind {
     Table,
     /// The name of a field
     Field,
+    /// The name of a projection
+    Projection,
     /// A literal value
     Value,
 }
@@ -587,7 +590,22 @@ fn candidates<S: QuerySupport>(context: &CompletionContext) -> Vec<Suggestion> {
     match &context.expecting {
         // the keywords and punctuation that hold a query together
         Expecting::Select => vec![keyword_suggestion("SELECT", &context.word)],
-        Expecting::Star => vec![Suggestion::new("*", SuggestionKind::Keyword, "all columns")],
+        // a query asks for whole rows with a star, or for a subset of them by naming one of
+        // this databases projections. the table is not known yet at this point in the query,
+        // so every projection is offered and binding is what rejects one of another table
+        Expecting::Star => std::iter::once(Suggestion::new(
+            "*",
+            SuggestionKind::Keyword,
+            "all columns",
+        ))
+        .chain(S::projection_names().iter().map(|(projection, table)| {
+            Suggestion::new(
+                *projection,
+                SuggestionKind::Projection,
+                format!("projection of {table}"),
+            )
+        }))
+        .collect(),
         Expecting::From => vec![keyword_suggestion("FROM", &context.word)],
         Expecting::Where => vec![keyword_suggestion("WHERE", &context.word)],
         // the operators this field can be constrained by, which depends on the role it plays

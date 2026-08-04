@@ -21,7 +21,7 @@ for a typo.
 
 ## The fix
 
-The error is recorded on the tab and rendered:
+The error is recorded on the tab ~~and rendered~~:
 
 ```rust
 let query = match S::parse(&self.query) {
@@ -36,6 +36,13 @@ let query = match S::parse(&self.query) {
 
 `shoalctl/src/components/tab.rs:237-244`
 
+**"And rendered" was not true.** Nothing read `Tab::error` — the field was written here, written
+again for server errors, and never drawn anywhere. Pressing enter on a bad query stopped
+panicking and started doing nothing at all, which is what this page should have said. That was
+filed as item 48 and is now [fixed](query-error-display.md): the error carries its span rather
+than a formatted string, an `Error` box under the query shows the message, and the part of the
+query the parser blamed is drawn red and underlined.
+
 Leaving the query text in the input rather than clearing it matters as much as not panicking: a
 parse error is usually a typo, and retyping the whole query to fix one character is its own
 kind of hostile.
@@ -46,9 +53,12 @@ kind of hostile.
   a panic skips it. Any new code between "read a key" and "render a frame" has to handle its
   own errors, including the ones it thinks are impossible.
 - **User input errors are UI state, not control flow.** Parse failures belong in `self.error`,
-  where the renderer can show them; they are not exceptional.
+  where the renderer can show them; they are not exceptional. Which requires a renderer that
+  reads the field — see [item 48](query-error-display.md), where writing it was mistaken for
+  showing it for as long as this page went unchallenged.
 
 ## Related
 
+- [48. A query that does not parse was answered with silence](query-error-display.md)
 - [shoalctl](../../operations/shoalctl.md)
 - [SHQL](../../api/shql.md)

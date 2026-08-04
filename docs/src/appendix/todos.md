@@ -127,6 +127,35 @@ Also still true, and worth keeping in front of anyone who reaches for a range to
 cheaper: a **cold partition is read whole either way**, since there is no index within a partition
 on disk. A range changes what is deserialized and what crosses the wire, not what is read.
 
+### Projections — built
+
+A get can be answered with a named subset of a table's fields instead of whole rows, in the typed
+API and in SHQL, and it reads only those fields out of an archived partition
+([F2](../features/projections.md)). Four pieces of what a projection could be were deliberately left
+out.
+
+**A column list in SHQL.** `SELECT title, year FROM Movie` is still a parse error. A response is an
+archive of a concrete type and the client reads it without deserializing, so an arbitrary set of
+columns has no type to be. Answering one would mean a per-query row shape and a client that walks
+bytes by offset instead of by type — a different protocol, not an extension of this one.
+
+**Deriving a projection from a field list.** A projection is a struct that has to be written out,
+and there is nothing that turns `#[shoal(project(id, title))]` into one, or that says "everything
+but `data`". This is only ergonomics, but it is the ergonomics people will ask for first.
+
+**Projections on ephemeral tables.** An `EphemeralTable` cannot be a field of a `#[db]` struct, so
+there is nowhere to declare a projection for one. It carries an `ShoalProjection<Row = Self>` bound
+and answers with whole rows. Fixing it is the same work as making ephemeral tables usable in a
+database at all ([Table Types](../tables/table-types.md#ephemeraltable)).
+
+**A projection that leaves out the partition key.** A projection has to carry its table's partition
+key, because the shard collecting the shares of a split get asks each row which partition it came
+from. Lifting that means carrying the grouping on the wire instead, which is
+[O18](optimizations.md#o18-the-gathered-reorder-rehashes-every-rows-partition-key).
+
+Also still true, and the same caveat a range carries: a **cold partition is read whole either way**.
+A projection changes what is deserialized and what crosses the wire, not what is read.
+
 ### Intersection across partitions (a real `AND` on one field)
 
 `WHERE keyword = 'giant worm' AND keyword = 'alien'` reads as "movies with both keywords" and

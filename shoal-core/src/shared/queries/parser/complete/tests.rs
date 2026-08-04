@@ -189,7 +189,18 @@ fn a_finished_query_expects_nothing() {
 #[test]
 fn a_malformed_query_expects_nothing() {
     assert_eq!(at_end("DELETE * FROM Movie ").expecting, Expecting::Nothing);
-    assert_eq!(at_end("SELECT id FROM Movie ").expecting, Expecting::Nothing);
+    assert_eq!(at_end("SELECT * * FROM Movie ").expecting, Expecting::Nothing);
+}
+
+#[test]
+fn a_projection_stands_where_the_star_does() {
+    // a name in place of the star is a projection, so what follows it is still the FROM
+    assert_eq!(at_end("SELECT MovieSummary ").expecting, Expecting::From);
+    // and the rest of the query carries on exactly as it does after a star
+    assert_eq!(
+        at_end("SELECT MovieSummary FROM Movie ").expecting,
+        Expecting::Where
+    );
 }
 
 #[test]

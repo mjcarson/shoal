@@ -19,7 +19,7 @@ use crate::shared::queries::{
     SortRange, SortSelect, SortedExists, SortedGet, SortedUpdate, UnsortedGet, UnsortedUpdate,
 };
 use crate::shared::responses::ResponseAction;
-use crate::shared::traits::{RkyvSupport, ShoalSortedTable, ShoalUnsortedTable};
+use crate::shared::traits::{RkyvSupport, ShoalProjection, ShoalSortedTable, ShoalUnsortedTable};
 
 pub trait PartitionSupport: DeepSizeOf {
     /// Get this partitions size
@@ -123,7 +123,11 @@ impl<R: ShoalUnsortedTable> UnsortedPartition<R> {
     ///
     /// * `params` - The parameters to use to get the rows
     /// * `found` - The vector to push the data to return
-    pub fn get(&self, params: &UnsortedGet<R>, found: &mut Vec<R>) -> bool {
+    pub fn get<P: ShoalProjection<Row = R>>(
+        &self,
+        params: &UnsortedGet<R>,
+        found: &mut Vec<P>,
+    ) -> bool {
         // a get that already holds every row it asked for has nothing to take from us
         if params.limit_reached(found) {
             return false;
@@ -140,8 +144,11 @@ impl<R: ShoalUnsortedTable> UnsortedPartition<R> {
                 return false;
             }
         }
-        // add this row to our response
-        found.push(row.clone());
+        // project this row into the shape this get asked to be answered with
+        //
+        // an unprojected get asks for the whole row, whose projection is a clone, so this is
+        // what it has always done
+        found.push(P::from_row(row));
         true
     }
 
@@ -180,7 +187,11 @@ where
     ///
     /// * `params` - The parameters to use to get the rows
     /// * `found` - The vector to push the data to return
-    pub fn get(&self, params: &UnsortedGet<R>, found: &mut Vec<R>) -> bool {
+    pub fn get<P: ShoalProjection<Row = R>>(
+        &self,
+        params: &UnsortedGet<R>,
+        found: &mut Vec<P>,
+    ) -> bool {
         // a get that already holds every row it asked for has nothing to take from us
         if params.limit_reached(found) {
             return false;
@@ -203,10 +214,11 @@ where
                         return false;
                     }
                 }
-                // deserialize our row
-                let row = R::deserialize(archived).unwrap();
-                // add this row to our response
-                found.push(row);
+                // read the fields this get asked for straight out of the archive
+                //
+                // a projection of a wide row is the whole point of this path, since it copies
+                // the fields it named instead of every field the row has
+                found.push(P::from_archived(archived));
                 true
             }
         }
@@ -400,10 +412,10 @@ impl<T: ShoalSortedTable> SortedPartition<T> {
     /// * `params` - The parameters of the get these rows were visited for
     /// * `rows` - The rows this gets selection visited, in sort order
     /// * `found` - The vector to push the data to return
-    fn collect_rows<'a, I: Iterator<Item = &'a T>>(
+    fn collect_rows<'a, P: ShoalProjection<Row = T>, I: Iterator<Item = &'a T>>(
         params: &SortedGet<T>,
         rows: I,
-        found: &mut Vec<T>,
+        found: &mut Vec<P>,
     ) where
         T: 'a,
     {
@@ -421,8 +433,11 @@ impl<T: ShoalSortedTable> SortedPartition<T> {
                     continue;
                 }
             }
-            // add this row to our response
-            found.push(row.clone());
+            // project this row into the shape this get asked to be answered with
+            //
+            // an unprojected get asks for the whole row, whose projection is a clone, so this
+            // is what it has always done
+            found.push(P::from_row(row));
         }
     }
 
@@ -469,7 +484,7 @@ impl<T: ShoalSortedTable> SortedPartition<T> {
     ///
     /// * `params` - The parameters to use to get the rows
     /// * `found` - The vector to push the data to return
-    pub fn get(&self, params: &SortedGet<T>, found: &mut Vec<T>) {
+    pub fn get<P: ShoalProjection<Row = T>>(&self, params: &SortedGet<T>, found: &mut Vec<P>) {
         // visit the rows this get selected, however it chose to select them
         match &params.sort_select {
             // this get asked for the whole partition, so walk it (tombstones are skipped)
@@ -862,8 +877,9 @@ where
     /// * `params` - The parameters of the get these rows were visited for
     /// * `rows` - The archived rows this gets selection visited, in sort order
     /// * `found` - The vector to push the data to return
-    fn collect_archived<'a, I>(params: &SortedGet<R>, rows: I, found: &mut Vec<R>)
+    fn collect_archived<'a, P, I>(params: &SortedGet<R>, rows: I, found: &mut Vec<P>)
     where
+        P: ShoalProjection<Row = R>,
         I: Iterator<Item = &'a <R as Archive>::Archived>,
         <R as Archive>::Archived: 'a,
     {
@@ -881,10 +897,11 @@ where
                     continue;
                 }
             }
-            // deserialize the row we are about to return
-            let loaded = R::deserialize(row).unwrap();
-            // add this row to our response
-            found.push(loaded);
+            // read the fields this get asked for straight out of the archive
+            //
+            // an unprojected get asks for the whole row, whose projection is the deserialize
+            // this has always done, and a projected one copies only the fields it named
+            found.push(P::from_archived(row));
         }
     }
 
@@ -930,7 +947,12 @@ where
     /// * `params` - The parameters to use to get the rows
     /// * `seek` - The archived keys of this get, built the first time one is needed
     /// * `found` - The vector to push the data to return
-    pub fn get(&self, params: &SortedGet<R>, seek: &mut Option<SeekBytes>, found: &mut Vec<R>) {
+    pub fn get<P: ShoalProjection<Row = R>>(
+        &self,
+        params: &SortedGet<R>,
+        seek: &mut Option<SeekBytes>,
+        found: &mut Vec<P>,
+    ) {
         // scan our rows however this partition happens to be held
         match self {
             // this partition is already in memory so scan it directly
@@ -1069,8 +1091,8 @@ mod tests {
     use crate::shared::queries::{SortRange, SortSelect, SortedExists, SortedGet, SortedUpdate};
     use crate::shared::queries::UnsortedUpdate;
     use crate::shared::traits::{
-        PartitionKeySupport, RkyvSupport, ShoalSortedTable, ShoalTableSupport, ShoalUnsortedTable,
-        TableSchemaSupport,
+        PartitionKeySupport, RkyvSupport, ShoalProjection, ShoalSortedTable, ShoalTableSupport,
+        ShoalUnsortedTable, TableSchemaSupport,
     };
     use crate::storage::{IntentReadSupport, RecoveryStats, ShouldPrune};
     use deepsize2::DeepSizeOf;
@@ -1147,6 +1169,7 @@ mod tests {
         type Update = String;
         type UpdateData = String;
         type Filters = String;
+        type Projection = TestProjectionKind;
 
         fn is_filtered(_filter: &Self::Filters, _row: &Self) -> bool {
             true
@@ -1157,6 +1180,98 @@ mod tests {
             _row: &<Self as Archive>::Archived,
         ) -> bool {
             true
+        }
+    }
+
+    /// The subsets of a test rows fields a get can be answered with
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Archive, Serialize, Deserialize)]
+    enum TestProjectionKind {
+        /// The whole row, which is what a get that names no projection asks for
+        #[default]
+        Full,
+        /// The sort key alone, which is what `SortKeyOnly` returns
+        SortKeyOnly,
+    }
+
+    impl RkyvSupport for TestProjectionKind {}
+
+    /// A whole row is the identity projection of itself
+    impl ShoalProjection for TestRow {
+        type Row = TestRow;
+
+        const PROJECTION: TestProjectionKind = TestProjectionKind::Full;
+
+        fn from_row(row: &TestRow) -> Self {
+            row.clone()
+        }
+
+        fn from_archived(row: &<TestRow as Archive>::Archived) -> Self {
+            <TestRow as RkyvSupport>::deserialize(row).unwrap()
+        }
+    }
+
+    /// A projection that drops everything but the keys naming a row
+    ///
+    /// This carries the partition key because every projection has to, and the sort key so a
+    /// test can tell which rows a scan returned and in what order. What it leaves out is the
+    /// payload, which is what a projection is for.
+    #[derive(Debug, Clone, PartialEq, Eq, Archive, Serialize, Deserialize, DeepSizeOf)]
+    struct SortKeyOnly {
+        /// The partition this row belonged to
+        partition_key: String,
+        /// The key this row was sorted by within its partition
+        sort_key: String,
+    }
+
+    impl RkyvSupport for SortKeyOnly {}
+
+    impl PartitionKeySupport for SortKeyOnly {
+        type PartitionKey = String;
+
+        fn name() -> &'static str {
+            "SortKeyOnly"
+        }
+
+        fn get_partition_key(&self) -> u64 {
+            0
+        }
+
+        fn get_partition_key_from_values(_sort: &Self::PartitionKey) -> u64 {
+            0
+        }
+
+        fn get_partition_key_from_archived_insert(_intent: &<Self as Archive>::Archived) -> u64 {
+            0
+        }
+    }
+
+    impl ShoalProjection for SortKeyOnly {
+        type Row = TestRow;
+
+        const PROJECTION: TestProjectionKind = TestProjectionKind::SortKeyOnly;
+
+        fn from_row(row: &TestRow) -> Self {
+            SortKeyOnly {
+                partition_key: row.partition_key.clone(),
+                sort_key: row.sort_key.clone(),
+            }
+        }
+
+        fn from_archived(row: &<TestRow as Archive>::Archived) -> Self {
+            // read only the two keys out of the archive, leaving the payload where it is
+            let mut pool = rkyv::de::Pool::new();
+            SortKeyOnly {
+                partition_key: rkyv::api::deserialize_using::<String, _, rkyv::rancor::Error>(
+                    &row.partition_key,
+                    &mut pool,
+                )
+                .unwrap(),
+                sort_key: rkyv::api::deserialize_using::<String, _, rkyv::rancor::Error>(
+                    &row.sort_key,
+                    &mut pool,
+                )
+                .unwrap(),
+            }
         }
     }
 
@@ -1357,6 +1472,7 @@ mod tests {
             sort_select: SortSelect::All,
             filters: None,
             limit,
+            projection: TestProjectionKind::Full,
         }
     }
 
@@ -1381,7 +1497,7 @@ mod tests {
         // build a partition with five rows in it
         let partition = partition_of(&["a", "b", "c", "d", "e"]);
         // scan it with a limit of two
-        let mut found = Vec::new();
+        let mut found: Vec<TestRow> = Vec::new();
         partition.get(&get_with_limit(Some(2)), &mut found);
         // a limit takes the first rows in sort order, not an arbitrary two
         let sort_keys = found.iter().map(|row| row.sort_key.as_str()).collect::<Vec<_>>();
@@ -1401,7 +1517,7 @@ mod tests {
         // scan both of them into the same response vec with a limit of three, which is
         // exactly what the first partition holds
         let get = get_with_limit(Some(3));
-        let mut found = Vec::new();
+        let mut found: Vec<TestRow> = Vec::new();
         first.get(&get, &mut found);
         second.get(&get, &mut found);
         // the second partition must not have added anything
@@ -1432,7 +1548,7 @@ mod tests {
         // build a partition with rows in it
         let partition = partition_of(&["a", "b", "c"]);
         // scan it with a limit of zero
-        let mut found = Vec::new();
+        let mut found: Vec<TestRow> = Vec::new();
         partition.get(&get_with_limit(Some(0)), &mut found);
         // a limit of zero is reached before a single row is read
         assert!(found.is_empty());
@@ -1444,7 +1560,7 @@ mod tests {
         // build a partition with rows in it
         let partition = partition_of(&["a", "b", "c"]);
         // scan it with no limit at all
-        let mut found = Vec::new();
+        let mut found: Vec<TestRow> = Vec::new();
         partition.get(&get_with_limit(None), &mut found);
         // an unlimited get is never short circuited
         assert_eq!(found.len(), 3);
@@ -1467,7 +1583,21 @@ mod tests {
             ),
             filters: None,
             limit,
+            projection: TestProjectionKind::Full,
         }
+    }
+
+    /// Turn a get into one asking to be answered with the sort key projection
+    ///
+    /// A projection changes what a get comes back as and nothing about which rows it selects,
+    /// so every test below builds its get the usual way and then projects it.
+    ///
+    /// # Arguments
+    ///
+    /// * `get` - The get to project
+    fn projected(mut get: SortedGet<TestRow>) -> SortedGet<TestRow> {
+        get.projection = TestProjectionKind::SortKeyOnly;
+        get
     }
 
     /// Build a get bounding its rows by a range of sort keys
@@ -1482,6 +1612,7 @@ mod tests {
             sort_select: SortSelect::Range(range),
             filters: None,
             limit,
+            projection: TestProjectionKind::Full,
         }
     }
 
@@ -1538,7 +1669,7 @@ mod tests {
         // build a partition with four rows in it
         let partition = partition_of(&["a", "b", "c", "d"]);
         // ask for one of them by sort key
-        let mut found = Vec::new();
+        let mut found: Vec<TestRow> = Vec::new();
         partition.get(&get_with_sort_keys(&["c"], None), &mut found);
         // only the row we named comes back
         let sort_keys = found
@@ -1554,7 +1685,7 @@ mod tests {
         // build a partition with five rows in it
         let partition = partition_of(&["a", "b", "c", "d", "e"]);
         // ask for two of them by sort key
-        let mut found = Vec::new();
+        let mut found: Vec<TestRow> = Vec::new();
         partition.get(&get_with_sort_keys(&["b", "d"], None), &mut found);
         // both of the rows we named come back and nothing else does
         let sort_keys = found
@@ -1570,7 +1701,7 @@ mod tests {
         // build a partition with rows in it
         let partition = partition_of(&["a", "b", "c"]);
         // ask for a row this partition does not hold
-        let mut found = Vec::new();
+        let mut found: Vec<TestRow> = Vec::new();
         partition.get(&get_with_sort_keys(&["z"], None), &mut found);
         // a miss is a miss, not the whole partition
         assert!(found.is_empty());
@@ -1585,7 +1716,7 @@ mod tests {
         // build a partition with rows in it
         let partition = partition_of(&["a", "b", "c"]);
         // ask for the partition without narrowing it at all
-        let mut found = Vec::new();
+        let mut found: Vec<TestRow> = Vec::new();
         partition.get(&get_with_limit(None), &mut found);
         // every row this partition holds comes back
         assert_eq!(found.len(), 3);
@@ -1603,7 +1734,7 @@ mod tests {
         // build a partition with rows in it
         let partition = partition_of(&["a", "b", "c"]);
         // ask for a set of rows without putting a single one in it
-        let mut found = Vec::new();
+        let mut found: Vec<TestRow> = Vec::new();
         partition.get(&get_with_sort_keys(&[], None), &mut found);
         // a set naming no rows selects none of them
         assert!(found.is_empty());
@@ -1619,7 +1750,7 @@ mod tests {
         let mut partition = partition_of(&["a", "b", "c"]);
         partition.remove(&"b".to_owned());
         // ask for the row we just deleted
-        let mut found = Vec::new();
+        let mut found: Vec<TestRow> = Vec::new();
         partition.get(&get_with_sort_keys(&["b"], None), &mut found);
         // a deleted row is not returned by naming it
         assert!(found.is_empty());
@@ -1631,7 +1762,7 @@ mod tests {
         // build a partition with rows in it
         let partition = partition_of(&["a", "b", "c", "d"]);
         // name three of them but only allow two back
-        let mut found = Vec::new();
+        let mut found: Vec<TestRow> = Vec::new();
         partition.get(&get_with_sort_keys(&["a", "b", "c"], Some(2)), &mut found);
         // the limit takes the first rows we named
         let sort_keys = found
@@ -1703,7 +1834,7 @@ mod tests {
         // build a partition with rows in it
         let partition = partition_of(&["a", "b", "c", "d", "e"]);
         // ask for the rows between two of them
-        let mut found = Vec::new();
+        let mut found: Vec<TestRow> = Vec::new();
         let range = range_of(Bound::Included("b"), Bound::Included("d"));
         partition.get(&get_with_range(range, None), &mut found);
         // the rows inside the range come back, in sort order, and nothing else
@@ -1720,7 +1851,7 @@ mod tests {
         // build a partition with rows in it
         let partition = partition_of(&["a", "b", "c"]);
         // ask for everything after the first row without including it
-        let mut found = Vec::new();
+        let mut found: Vec<TestRow> = Vec::new();
         let range = range_of(Bound::Excluded("a"), Bound::Unbounded);
         partition.get(&get_with_range(range, None), &mut found);
         // the row the bound named is left out and the rest come back
@@ -1734,13 +1865,13 @@ mod tests {
         // build a partition with rows in it
         let partition = partition_of(&["a", "b", "c"]);
         // ask for everything up to but not including the last row
-        let mut found = Vec::new();
+        let mut found: Vec<TestRow> = Vec::new();
         let range = range_of(Bound::Unbounded, Bound::Excluded("c"));
         partition.get(&get_with_range(range, None), &mut found);
         let keys: Vec<&str> = found.iter().map(|row| row.sort_key.as_str()).collect();
         assert_eq!(keys, vec!["a", "b"]);
         // asking for everything up to and including it keeps it
-        let mut found = Vec::new();
+        let mut found: Vec<TestRow> = Vec::new();
         let range = range_of(Bound::Unbounded, Bound::Included("c"));
         partition.get(&get_with_range(range, None), &mut found);
         let keys: Vec<&str> = found.iter().map(|row| row.sort_key.as_str()).collect();
@@ -1753,7 +1884,7 @@ mod tests {
         // build a partition with rows in it
         let partition = partition_of(&["a", "b", "c"]);
         // ask for a range that bounds nothing
-        let mut found = Vec::new();
+        let mut found: Vec<TestRow> = Vec::new();
         partition.get(&get_with_range(SortRange::default(), None), &mut found);
         // every row this partition holds comes back
         assert_eq!(found.len(), 3);
@@ -1768,7 +1899,7 @@ mod tests {
         // build a partition with rows in it
         let partition = partition_of(&["a", "b", "c"]);
         // ask for a range that runs backwards
-        let mut found = Vec::new();
+        let mut found: Vec<TestRow> = Vec::new();
         let range = range_of(Bound::Included("c"), Bound::Included("a"));
         partition.get(&get_with_range(range, None), &mut found);
         // a range that cannot contain a key holds no rows
@@ -1784,7 +1915,7 @@ mod tests {
         // build a partition with rows in it
         let partition = partition_of(&["a", "b", "c"]);
         // ask for a range whose ends meet on a key neither of them includes
-        let mut found = Vec::new();
+        let mut found: Vec<TestRow> = Vec::new();
         let range = range_of(Bound::Excluded("b"), Bound::Excluded("b"));
         partition.get(&get_with_range(range, None), &mut found);
         // there is nothing between a key and itself
@@ -1801,7 +1932,7 @@ mod tests {
         let mut partition = partition_of(&["a", "b", "c"]);
         partition.remove(&"b".to_owned());
         // ask for a range covering all three of them
-        let mut found = Vec::new();
+        let mut found: Vec<TestRow> = Vec::new();
         partition.get(&get_with_range(SortRange::default(), None), &mut found);
         // the deleted row is not in the answer
         let keys: Vec<&str> = found.iter().map(|row| row.sort_key.as_str()).collect();
@@ -1817,7 +1948,7 @@ mod tests {
         // build a partition with rows in it
         let partition = partition_of(&["a", "b", "c", "d", "e"]);
         // ask for an unbounded range with a limit well inside it
-        let mut found = Vec::new();
+        let mut found: Vec<TestRow> = Vec::new();
         partition.get(&get_with_range(SortRange::default(), Some(2)), &mut found);
         // the walk stopped at the limit rather than at the end of the range
         let keys: Vec<&str> = found.iter().map(|row| row.sort_key.as_str()).collect();
@@ -1985,4 +2116,128 @@ mod tests {
         };
         assert_eq!(memory.size, live);
     }
+
+    #[test]
+    /// A projected scan of the whole partition answers with the projection
+    ///
+    /// The scan is generic in what it builds, so this is the test that a projection reaches
+    /// it at all: the rows come back as `SortKeyOnly` and never as `TestRow`.
+    fn a_projected_scan_returns_the_projection() {
+        // build a partition with rows in it
+        let partition = partition_of(&["a", "b", "c"]);
+        // ask for the whole partition as the projection
+        let mut found: Vec<SortKeyOnly> = Vec::new();
+        partition.get(&projected(get_with_limit(None)), &mut found);
+        // every row comes back, projected, in sort order
+        let sort_keys = found
+            .iter()
+            .map(|row| row.sort_key.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(sort_keys, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    /// A projected get still carries the partition its rows came from
+    ///
+    /// The shard collecting the shares of a split get asks each row which partition it came
+    /// from, so a projection that dropped that key would come back shuffled.
+    fn a_projected_row_still_names_its_partition() {
+        // build a partition with a row in it
+        let partition = partition_of(&["a"]);
+        // ask for it as the projection
+        let mut found: Vec<SortKeyOnly> = Vec::new();
+        partition.get(&projected(get_with_limit(None)), &mut found);
+        // the projected row names the partition its row was in
+        assert_eq!(found.first().unwrap().partition_key, "partition");
+    }
+
+    #[test]
+    /// A projected get naming sort keys seeks the rows it named, like an unprojected one
+    fn a_projected_sort_key_selection_seeks_its_rows() {
+        // build a partition with rows in it
+        let partition = partition_of(&["a", "b", "c", "d"]);
+        // name two of them and ask for the projection
+        let mut found: Vec<SortKeyOnly> = Vec::new();
+        partition.get(&projected(get_with_sort_keys(&["b", "d"], None)), &mut found);
+        // the rows we named come back and no others
+        let sort_keys = found
+            .iter()
+            .map(|row| row.sort_key.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(sort_keys, vec!["b", "d"]);
+    }
+
+    #[test]
+    /// A projected get bounded by a range walks the same span an unprojected one does
+    fn a_projected_range_bounds_its_rows() {
+        // build a partition with rows in it
+        let partition = partition_of(&["a", "b", "c", "d", "e"]);
+        // bound it at both ends and ask for the projection
+        let range = SortRange::new(
+            Bound::Excluded("b".to_owned()),
+            Bound::Included("d".to_owned()),
+        );
+        let mut found: Vec<SortKeyOnly> = Vec::new();
+        partition.get(&projected(get_with_range(range, None)), &mut found);
+        // only the rows inside the range come back
+        let sort_keys = found
+            .iter()
+            .map(|row| row.sort_key.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(sort_keys, vec!["c", "d"]);
+    }
+
+    #[test]
+    /// A limit stops a projected scan where it stops an unprojected one
+    ///
+    /// The limit is counted against what a get has found rather than against what it read, so
+    /// a projected get fills its limit with the same number of rows a whole row get does.
+    fn a_limit_bounds_a_projected_scan() {
+        // build a partition with rows in it
+        let partition = partition_of(&["a", "b", "c", "d"]);
+        // ask for the projection but only allow two rows back
+        let mut found: Vec<SortKeyOnly> = Vec::new();
+        partition.get(&projected(get_with_limit(Some(2))), &mut found);
+        // the limit takes the first rows in sort order
+        let sort_keys = found
+            .iter()
+            .map(|row| row.sort_key.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(sort_keys, vec!["a", "b"]);
+    }
+
+    #[test]
+    /// A projected scan skips a tombstone the same way an unprojected one does
+    fn a_projected_scan_skips_tombstones() {
+        // build a partition with rows in it and delete one of them
+        let mut partition = partition_of(&["a", "b", "c"]);
+        partition.remove(&"b".to_owned());
+        // ask for the whole partition as the projection
+        let mut found: Vec<SortKeyOnly> = Vec::new();
+        partition.get(&projected(get_with_limit(None)), &mut found);
+        // the deleted row is not projected into the answer
+        let sort_keys = found
+            .iter()
+            .map(|row| row.sort_key.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(sort_keys, vec!["a", "c"]);
+    }
+
+    #[test]
+    /// A projection built from an archived row reads only the fields it named
+    ///
+    /// This is the conversion the archived scan uses, and the reason a projection is cheaper
+    /// than the get it replaces: the payload is left in the archive rather than deserialized.
+    fn a_projection_reads_an_archived_row() {
+        // archive a row the way a partition on disk holds one
+        let row = TestRow::new("a");
+        let archived_bytes = <TestRow as RkyvSupport>::serialize(&row);
+        let archived = <TestRow as RkyvSupport>::access(&archived_bytes).unwrap();
+        // project it straight out of the archive
+        let projection = <SortKeyOnly as ShoalProjection>::from_archived(archived);
+        // both of the fields it named came across
+        assert_eq!(projection.sort_key, "a");
+        assert_eq!(projection.partition_key, "partition");
+    }
+
 }

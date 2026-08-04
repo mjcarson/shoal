@@ -18,7 +18,8 @@ use uuid::Uuid;
 
 use crate::AppEvent;
 use crate::components::{
-    CompletionMenu, HelpOverlay, StatusBar, TabContent, TabQueryBar, TabSelector, TabState,
+    CompletionMenu, ErrorBar, HelpOverlay, QueryError, StatusBar, TabContent, TabQueryBar,
+    TabSelector, TabState,
 };
 
 /// Format column headers and row data as an ASCII table
@@ -157,6 +158,8 @@ pub struct App<S: QuerySupport + Send + Sync> {
     status_bar: StatusBar,
     /// The query input component for entering queries
     query_input: TabQueryBar,
+    /// The error box component for showing what was wrong with a query
+    error_bar: ErrorBar,
     /// The help overlay component for displaying shortcuts
     help_overlay: HelpOverlay,
     /// The completion menu component for suggesting query text
@@ -230,6 +233,7 @@ where
             content_component: TabContent::new(),
             status_bar: StatusBar::new(),
             query_input: TabQueryBar::new(),
+            error_bar: ErrorBar::new(),
             help_overlay: HelpOverlay::new(),
             completion_menu: CompletionMenu::new(),
             shortcut_mode_active: false,
@@ -478,7 +482,9 @@ where
                     tab.error = None;
                 }
                 QueryResult::Error(error) => {
-                    tab.error = Some(format!("Error: {:#?}", error));
+                    // a server error has nothing in the query to point at, and arrives as
+                    // pretty printed debug output that the error box has to flatten
+                    tab.error = Some(QueryError::plain(format!("Error: {error:?}")));
                 }
             }
         }
@@ -536,10 +542,13 @@ where
 
         // the query box is only as tall as its query, so measure it before laying anything out
         let query_height = TabQueryBar::height(self.tabs.get_active(), frame.area().width);
-        // Fixed chrome: tab bar + query bar + hypertile middle + status bar
+        // the error box is only there while there is an error, so it usually measures zero
+        let error_height = ErrorBar::height(self.tabs.get_active(), frame.area().width);
+        // Fixed chrome: tab bar + query bar + error box + hypertile middle + status bar
         let chunks = Layout::vertical([
             Constraint::Length(3),            // tab bar
             Constraint::Length(query_height), // query bar
+            Constraint::Length(error_height), // error box, zero rows when there is no error
             Constraint::Min(0),               // hypertile-managed area
             Constraint::Length(2),            // status bar
         ])
@@ -547,16 +556,18 @@ where
 
         // Render fixed chrome
         self.tabs_component.render(frame, chunks[0], &self.tabs);
-        self.status_bar.render(frame, chunks[3], self.mode);
+        self.status_bar.render(frame, chunks[4], self.mode);
         // hang on to the query box's area so clicks on it can be spotted
         self.query_area = Some(chunks[1]);
         // draw the query box, which hands back where it put the cursor
         let cursor =
             self.query_input
                 .render(frame, chunks[1], self.tabs.get_active(), self.query_focused);
+        // draw whatever went wrong with that query under it
+        self.error_bar.render(frame, chunks[2], self.tabs.get_active());
 
         // Compute pane rectangles for the content section
-        self.hypertile.compute_layout(chunks[2]);
+        self.hypertile.compute_layout(chunks[3]);
         let snapshots: Vec<_> = self.hypertile.panes_iter().collect();
 
         // First pass: update viewport dimensions from computed rects

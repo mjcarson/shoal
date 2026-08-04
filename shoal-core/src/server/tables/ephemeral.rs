@@ -10,7 +10,7 @@ use super::partitions::SortedPartition;
 use crate::server::Conf;
 use crate::shared::queries::{SortedExists, SortedGet, SortedQuery, SortedUpdate};
 use crate::shared::responses::{Response, ResponseAction};
-use crate::shared::traits::ShoalSortedTable;
+use crate::shared::traits::{ShoalProjection, ShoalSortedTable};
 
 /// A Table that stores all data only in memory
 #[derive(Debug)]
@@ -31,7 +31,13 @@ impl<T: ShoalSortedTable> Default for EphemeralTable<T> {
     }
 }
 
-impl<T: ShoalSortedTable> EphemeralTable<T> {
+/// An ephemeral table always answers with whole rows
+///
+/// A projection is declared on the database a table belongs to, and an ephemeral table cannot
+/// be a field of one, so the only projection it can be asked for is the identity one every row
+/// type has of itself. That is what this bound says, and it is why the scan below can hand its
+/// partitions a vec of rows.
+impl<T: ShoalSortedTable + ShoalProjection<Row = T>> EphemeralTable<T> {
     /// Create an ephemeral shoal table
     ///
     /// # Arguments

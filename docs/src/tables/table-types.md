@@ -19,7 +19,7 @@ pub struct PersistentSortedTable<R: ShoalSortedTable, S: StorageSupport, N: Tabl
     storage: S,
     generation: u64,
     pending: PendingResponse<R>,
-    pending_data: HashMap<(Uuid, usize), (Vec<R>, Vec<u64>)>,
+    pending_data: PendingGets,
     flushed: Vec<(Uuid, Uuid, Span, Response<R>)>,
     loader_tx: AsyncSender<LoaderMsg<N>>,
     blocked: HashMap<u64, Vec<(QueryMetadata, SortedQuery<R>)>>,
@@ -46,7 +46,9 @@ derive macro panics otherwise (`shoal-derive/src/lib.rs:62-69`).
 
 Three fields do the asynchrony bookkeeping — `pending` (awaiting durability), `blocked`
 (awaiting a disk read), `pending_data` (partial results for a multi-partition get) — all
-described in [Query Execution](query-execution.md).
+described in [Query Execution](query-execution.md). `pending_data` holds its rows type-erased,
+because a parked get can be waiting for whole rows or for any of this table's projections
+([F2](../features/projections.md#design-choices)).
 
 ### What "sorted" buys you
 
@@ -82,8 +84,9 @@ range reduce I/O: a cold partition is read whole either way.
 
 `shoal-core/src/server/tables/persistent/unsorted.rs:87-108`
 
-Structurally the same minus `pending_data` — an unsorted get targets exactly one partition, so
-there are no partial results to accumulate.
+Structurally the same. An unsorted get can name several partitions, so it accumulates partial
+results in a `pending_data` of its own, one slot per partition
+([Query Execution](query-execution.md#slots-not-an-accumulator)).
 
 ```rust
 pub struct UnsortedPartition<R: ShoalUnsortedTable> {
@@ -162,6 +165,11 @@ pub struct EphemeralTable<T: ShoalSortedTable> {
 In-memory only. No storage engine, no intent log, no eviction, no `MaybeLoaded` — partitions
 are always fully resident. Its `handle` returns a `Response<T>` directly rather than an
 `Option`, since nothing is ever deferred (`.../ephemeral.rs:47-77`).
+
+It answers with whole rows only. A projection is declared on the database field holding its table
+and an ephemeral table cannot be one, so the only projection it can be asked for is the identity
+one every row type has of itself — which is what the `ShoalProjection<Row = T>` bound on its impl
+block says ([F2](../features/projections.md#limitations)).
 
 It is exported (`shoal/src/lib.rs`) and documented in the CLAUDE.md table list, but the `#[db]`
 macro's generated `ShoalDatabase` impl calls methods `EphemeralTable` does not have —

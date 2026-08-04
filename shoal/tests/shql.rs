@@ -12,7 +12,7 @@ use shoal_core::shared::queries::{SortSelect, SortedQuery, UnsortedQuery};
 use shoal_core::shared::traits::{PartitionKeySupport, QuerySupport};
 use shoal_core::storage::FileSystem;
 use shoal_core::tables::{PersistentSortedTable, PersistentUnsortedTable};
-use shoal_derive::{db, ShoalSortedTable, ShoalUnsortedTable};
+use shoal_derive::{db, ShoalProjection, ShoalSortedTable, ShoalUnsortedTable};
 use std::ops::Bound;
 
 /// An unsorted table with a partition key and two filterable fields
@@ -57,12 +57,38 @@ pub struct Review {
     pub data: String,
 }
 
+/// A projection of a movie holding only what a list of them needs
+#[derive(Debug, Archive, Serialize, Deserialize, Clone, ShoalProjection, PartialEq, Eq)]
+#[rkyv(derive(Debug))]
+#[shoal_projection(table = "Movie")]
+pub struct MovieSummary {
+    /// The partition this movie was in
+    #[shoal(partition)]
+    pub id: u64,
+    /// The title of this movie
+    pub title: String,
+}
+
+/// A projection of a review, so a projection of the wrong table can be tested
+#[derive(Debug, Archive, Serialize, Deserialize, Clone, ShoalProjection, PartialEq, Eq)]
+#[rkyv(derive(Debug))]
+#[shoal_projection(table = "Review")]
+pub struct ReviewSource {
+    /// The partition this review was in
+    #[shoal(partition)]
+    pub movie: String,
+    /// Where this review came from
+    pub source: String,
+}
+
 /// The test database schema
 #[db]
 pub struct ShqlDb {
     /// The unsorted movie table
+    #[shoal(projections(MovieSummary))]
     pub movies: PersistentUnsortedTable<Movie, FileSystem>,
     /// The sorted review table
+    #[shoal(projections(ReviewSource))]
     pub reviews: PersistentSortedTable<Review, FileSystem>,
 }
 
@@ -769,4 +795,105 @@ fn exposes_the_schema_to_a_client() {
     assert_eq!(fields[3].role, None);
     // a table that is not in the schema has nothing to expose
     assert!(ShqlDbClient::table_fields("Nope").is_none());
+}
+
+#[test]
+/// A star binds to the whole row
+fn a_star_binds_to_the_whole_row() {
+    // a query that wrote a star asked for every field of every row
+    let get = parse_movie("SELECT * FROM Movie WHERE id = 1");
+    assert_eq!(get.projection, MovieProjection::Full);
+}
+
+#[test]
+/// A named projection binds to that projection
+fn a_named_projection_binds_to_it() {
+    // the name a query wrote is matched against the projections its table declared
+    let get = parse_movie("SELECT MovieSummary FROM Movie WHERE id = 1");
+    assert_eq!(get.projection, MovieProjection::MovieSummary);
+    // and the rest of the query still binds the way it always did
+    assert_eq!(get.partition_keys.len(), 1);
+}
+
+#[test]
+/// A projection binds on a sorted table too
+fn a_named_projection_binds_on_a_sorted_table() {
+    // a sorted get carries its projection alongside its row selection
+    let get = parse_review("SELECT ReviewSource FROM Review WHERE movie = 'fight club'");
+    assert_eq!(get.projection, ReviewProjection::ReviewSource);
+    // a query that never narrowed itself still wants every row
+    assert!(matches!(get.sort_select, SortSelect::All));
+}
+
+#[test]
+/// A projection no table declared is rejected, and says which ones exist
+fn rejects_an_unknown_projection() {
+    // a name that is not a projection of this table cannot be answered
+    let message = parse_err("SELECT Nope FROM Movie WHERE id = 1");
+    assert!(
+        message.contains("is not a projection of Movie"),
+        "unexpected message: {}",
+        message
+    );
+    // and the error names the projections that would have worked
+    assert!(
+        message.contains("MovieSummary"),
+        "unexpected message: {}",
+        message
+    );
+}
+
+#[test]
+/// A projection of another table is rejected rather than silently answered
+///
+/// A projection is scoped to the table it projects, so naming one belonging to a different
+/// table is the same mistake as naming one that does not exist.
+fn rejects_a_projection_of_another_table() {
+    // ReviewSource is a projection, but not one of the movie table
+    let message = parse_err("SELECT ReviewSource FROM Movie WHERE id = 1");
+    assert!(
+        message.contains("is not a projection of Movie"),
+        "unexpected message: {}",
+        message
+    );
+}
+
+#[test]
+/// Every projection in the database is offered where the star goes
+///
+/// The table is not known yet at that point in the query, so all of them are offered and
+/// binding is what rejects a projection of the wrong table.
+fn suggests_every_projection_in_place_of_the_star() {
+    // a star and every projection are what can follow SELECT
+    let offered = suggest_text("SELECT ");
+    assert_eq!(offered, vec!["*", "MovieSummary", "ReviewSource"]);
+    // a projection is suggested as a projection, not as a table or a field
+    let kinds: Vec<SuggestionKind> = suggest("SELECT ")
+        .iter()
+        .skip(1)
+        .map(|suggestion| suggestion.kind)
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![SuggestionKind::Projection, SuggestionKind::Projection]
+    );
+}
+
+#[test]
+/// A partly typed projection narrows the projections offered
+fn narrows_projections_as_they_are_typed() {
+    // typing the start of a projection name leaves only the ones that could still match
+    assert_eq!(suggest_text("SELECT Movie"), vec!["MovieSummary"]);
+    // and a name no projection starts with offers nothing
+    assert!(suggest_text("SELECT zzz").is_empty());
+}
+
+#[test]
+/// Every projection is exposed through the schema a client exposes
+fn exposes_projections_to_a_client() {
+    // each projection is paired with the table it projects
+    assert_eq!(
+        ShqlDbClient::projection_names(),
+        &[("MovieSummary", "Movie"), ("ReviewSource", "Review")]
+    );
 }

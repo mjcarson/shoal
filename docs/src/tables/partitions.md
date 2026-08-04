@@ -41,8 +41,7 @@ MaybeLoaded::Accessible(read) => {
         if let Some(filter) = &params.filters {
             if !R::is_filtered_archived(filter, row) { continue; }
         }
-        let loaded = R::deserialize(row).unwrap();
-        found.push(loaded);
+        found.push(P::from_archived(row));
     }
 }
 ```
@@ -53,6 +52,13 @@ Note `is_filtered_archived` — the derive macro generates a filter that operate
 `<R as Archive>::Archived`, so rows that fail the filter are never deserialized. A selective
 query over a large partition deserializes only what it returns. This is the payoff for
 choosing rkyv as the on-disk format.
+
+`P::from_archived` is where that payoff is taken further. `P` is what this get asked to be answered
+with: for a get that named no projection it is the row itself, whose `from_archived` is the
+`R::deserialize` this line used to be. For a get that named a projection it reads only the fields
+that projection declared straight out of the archive, so the rest of the row stays where it is
+([F2](../features/projections.md)). The scan is monomorphised over `P`, so neither case pays for
+the other.
 
 ### The scan lives on the partition
 
