@@ -21,8 +21,9 @@ Two things follow from this:
   produces defaults, not an error. A typo in the filename is silent.
 - Environment variables prefixed `SHOAL_` override file values.
 
-Unknown keys in the YAML are ignored rather than rejected, which is the root of the
-`exluded_cores` bug below.
+Unknown keys are rejected inside `resources`, which is `deny_unknown_fields` — see
+[below](#the-exluded_cores-typo--fixed). Everywhere else they are still ignored rather than
+rejected, so a misspelling outside that block is still silently dropped.
 
 ## The full schema
 
@@ -243,21 +244,24 @@ Conf::default()
 
 `shoal/tests/utils/utils.rs:19-46`
 
-## The `exluded_cores` typo
+## ~~The `exluded_cores` typo~~ — fixed
 
-The checked-in `shoal.yml` contains:
+> ~~The checked-in `shoal.yml` sets `exluded_cores`, the struct field is `exclude_cores`, and
+> because the `config` crate ignores unknown keys **this setting does nothing**.~~
 
-```yaml
-resources:
-  exluded_cores: [28, 29, 30, 31]
-```
+Both halves of this are fixed, and the fix is wider than the typo:
+`Resources` is now `#[serde(deny_unknown_fields)]`, so a misspelled resource setting **fails
+the load and names the key it could not place** rather than being dropped. Correcting one
+spelling would have closed the entry; it would not have closed the class.
 
-The struct field is `exclude_cores` (`shoal-core/src/server/conf.rs:21`). Because the
-`config` crate ignores unknown keys, **this setting does nothing** — Shoal will happily
-schedule shards onto cores 28–31.
+Checking that the corrected key did anything then turned up a considerably larger defect —
+which cpu each shard ran on was decided by a hash seed and changed on every process start. See
+[Resolved #18, #50](../appendix/resolved/excluded-cores-typo.md).
 
-The same typo is reproduced in `CLAUDE.md`, so it propagates to anyone following that as a
-reference. See [Known Issues](../appendix/known-issues.md#18-exluded_cores-is-silently-ignored).
+Note the neighbouring hazard this does **not** remove: `Conf::from_file` marks the file
+`required(false)`, so a typo in the config file's *path* still runs silently on defaults.
+`deny_unknown_fields` catches a bad key inside a file that was found; it cannot catch a file
+that was never read.
 
 ## Design notes
 

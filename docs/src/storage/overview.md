@@ -161,10 +161,16 @@ A get for a partition that has never been written costs one hash lookup and no I
 3. The `StreamWriter` writes buffers out asynchronously. Completions land in `FlushState`,
    shared between the writer and its detached IO tasks, which advances a *contiguous*
    watermark and then group commits an `fdatasync` behind it.
-4. `PendingResponse::get` releases every response at or below the durable watermark
-   (`.../storage.rs:102-130`).
+4. The completion also posts a `ServerMsg::DataFlushed` to the shard, which is what tells it to
+   go and look. `PendingResponse::get` then releases every response at or below the durable
+   watermark (`.../storage.rs`).
 
 The client therefore hears "inserted" only after the intent is fdatasynced.
+
+**Step 4's wakeup is a requirement, not a nicety.** The shard used to sweep its tables after every
+message it handled, so the message was one of several things that could trigger a release; since
+[F5](../features/flushed-sweep-gate.md) it is the only one. A watermark that advances without one
+behind it is a write that is durable and never acknowledged.
 
 Two properties make step 3 sound, and both matter:
 
@@ -181,7 +187,11 @@ write can be acknowledged and then lost to power loss.
 
 If you want to know what the fsync actually costs on your hardware, measure it rather than
 guessing — [Benchmarking](../operations/benchmarking.md) covers how, and why btrfs is a poor
-host for this write path.
+host for this write path. **Measure it on your own hardware, not from the numbers here**: the
+development machine writes to an Intel Optane SSD, whose fsync latency is roughly an order of
+magnitude below a consumer NVMe, so it is close to the best case this decision has
+([Performance Baseline](../operations/performance-baseline.md#hardware)). An `Async` versus
+`Fsync` comparison has not been captured yet.
 
 Also solid: the archive map's snapshot uses a proper write-temp → sync → rename → fsync parent
 sequence (`.../fs/map.rs:206-228`), and intent log rotation fsyncs before and after the
@@ -222,12 +232,18 @@ block another on IO. The cost is that shard count is baked into the layout
 ## Limitations
 
 - Acknowledgement latency now includes an `fdatasync`. Group commit amortises this under
-  load, but a single isolated write pays a full write plus fsync round trip.
-- The filesystem matters more than it looks. btrfs is copy-on-write and commits a log tree on
-  every `fdatasync`, which makes it a poor choice for a write-ahead log; ext4 or XFS on a
-  drive with power-loss protection is substantially faster. btrfs also silently falls back to
-  buffered IO for a misaligned O_DIRECT write where ext4 and XFS return `EINVAL`, so a bug in
-  the write path's alignment can hide there.
+  load, but a single isolated write pays a full write plus fsync round trip. This is measured:
+  `stream::write_helper`, the DMA write and the sync behind it, averages **32.6 ms per call**
+  against 344 ns for the partition insert it is persisting
+  ([Performance Baseline](../operations/performance-baseline.md#profile--where-the-time-goes)).
+  The write path waits on storage, not on CPU.
+- The filesystem matters more than it looks. **Shoal's storage is now on XFS**; it was on
+  btrfs, which is copy-on-write and commits a log tree on every `fdatasync`, making it a poor
+  choice for a write-ahead log. There is no before-and-after measurement of that change — no
+  baseline existed when it happened. btrfs also silently falls back to buffered IO for a
+  misaligned O_DIRECT write where ext4 and XFS return `EINVAL`, so a bug in the write path's
+  alignment could hide there and **cannot hide on XFS** — the same misalignment now fails the
+  write outright.
 - One storage engine; `Loaders` has a single variant (`.../storage.rs:189-193`).
 - No checksums on archive data — only on intent log records and the map snapshot. A corrupt
   archive extent is detected only if rkyv validation happens to fail.

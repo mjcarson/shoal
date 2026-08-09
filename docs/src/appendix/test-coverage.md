@@ -3,8 +3,17 @@
 What the test suite reaches, what it does not, and the one place where it is unsound.
 
 **Established by running it.** `cargo check --workspace --all-targets` passes with warnings and
-`cargo test --workspace` passes: **168 integration tests** (one ignored), **194 `shoal-core` unit
-tests**, **11 doctests**. That is up from 157, 194, and 11 with the query error display coverage
+`cargo test --workspace` passes: **172 integration tests** (one ignored), **215 `shoal-core` unit
+tests**, **11 doctests**. That is up from 172, 213, and 11 with the two tests
+[F5](../features/flushed-sweep-gate.md) added to pin the premises its gate rests on — that staging a
+response cannot release one, and that submitting a write moves neither watermark. It is up from
+172, 199, and 11 with the fourteen archived-partition
+tests added by [F4](../features/validated-archives.md) — the first coverage the `Accessible` arm has
+ever had, because until F4 gave `MaybeLoaded` a buffer type parameter that variant could not be
+constructed outside a running server. It is up from 168, 194, and 11 with the five config and cpu
+selection tests added by [items 18 and 50](resolved/excluded-cores-typo.md) and the four
+baseline versioning and throughput tests added by
+[F3](../features/performance-harness.md). It is up from 157, 194, and 11 with the query error display coverage
 added by [item 48](resolved/query-error-display.md) — eleven rendering tests and no unit tests,
 because everything the fix does it does on screen. It is up from 136, 183, and 11 with the
 projection coverage added by
@@ -42,7 +51,7 @@ are in [Optimizations](optimizations.md).
 | `shql.rs` | 53 | SHQL parsing and binding against a real schema, including range binding and the role refusals, projection binding and its two refusals, plus completion suggestions |
 | `storage_meta.rs` | 2 | that a storage directory restarts under the shard count that wrote it and refuses a changed one, end to end through a real server |
 | `completion.rs` (`shoalctl`) | 34 | the completion menu, key handling, query wrapping, and rendering, including the projection slot; and the error box, the underline under the part of a query that failed to parse, the cases where that underline is refused as misleading, and that an error never becomes part of the query it describes |
-| `lib.rs` (`shoal`) | 7 | the bencher's percentile and summary statistics, and baseline file handling |
+| `lib.rs` (`shoal`) | 11 | the bencher's percentile and summary statistics; baseline file handling, including that a baseline from another schema version is refused rather than compared; and that throughput counts rows rather than batches |
 
 The restart, eviction, and `SIGKILL` tests are the valuable ones: they are the only tests that
 exercise durability end to end, and they exist because
@@ -53,14 +62,15 @@ exercise durability end to end, and they exist because
 
 | Module | Count | What it reaches |
 | --- | --- | --- |
-| `shared/queries/parser/tests.rs` | 60 | the SHQL grammar, including `IN` lists, `OR` folding, each range operator, the folding and refusals around a range, and the projection slot with its offsets |
+| `shared/queries/parser/tests.rs` | 59 | the SHQL grammar, including `IN` lists, `OR` folding, each range operator, the folding and refusals around a range, and the projection slot with its offsets |
 | `shared/queries/parser/complete/tests.rs` | 27 | completion suggestion generation, including the range operator tokens and a projection standing where the star does |
 | `.../storage/fs/tests.rs` | 21 | the intent log reader against real files, including which tail shapes are damage and which are how a healthy log ends, and what a compaction is about to throw away with the log it deletes |
-| `.../storage/fs/stream_tests.rs` | 13 | `StreamWriter` alignment, padding, and watermarks |
-| `tables/partitions.rs` | 45 | tombstone bookkeeping, limits, sort-key selection and range selection on `get` and `exists`, the empty-range guard, `merge_from_disk` sizing, the recovery counting that separates a correctly dropped update from a lost one, and the projected scan across all three selections |
+| `.../storage/fs/stream_tests.rs` | 14 | `StreamWriter` alignment, padding, and watermarks, including that submitting a write advances neither watermark in either durability mode — the premise [F5](../features/flushed-sweep-gate.md)'s sweep gate rests on |
+| `tables/partitions.rs` | 59 | tombstone bookkeeping, limits, sort-key selection and range selection on `get` and `exists`, the empty-range guard, `merge_from_disk` sizing, the recovery counting that separates a correctly dropped update from a lost one, and the projected scan across all three selections; plus the archived arm of all of those — that a truncated or root-corrupted archive is refused, that the unchecked read lands on the same reference the checked one does, and that an archived partition answers every selection identically to a resident one holding the same rows ([F4](../features/validated-archives.md)) |
 | `shared/queries.rs` | 10 | sort-key normalization, and `SortRange` emptiness and containment |
-| `tables/storage.rs` | 6 | `PendingResponse` release against a durable watermark, and `RecoveryStats` merging and cleanliness |
+| `tables/storage.rs` | 7 | `PendingResponse` release against a durable watermark — including that staging a response never releases one, which is why [F5](../features/flushed-sweep-gate.md) can skip its sweep on a write — and `RecoveryStats` merging and cleanliness |
 | `server/ring.rs` | 6 | the tablet map: that an empty one cannot be built, that tablets are split evenly and no shard is starved, that ids come from the high bits so a split stays incremental, and that two independently built maps agree |
+| `server/conf.rs` | 5 | that a misspelled resource key fails the load instead of being dropped, that `exclude_cores` is parsed and removes both threads of a core, and that cpu selection is deterministic and fills distinct physical cores before pairing onto an SMT sibling |
 | `server/meta.rs` | 4 | claiming a storage directory, reopening it under the same shard count, refusing a changed one, and refusing a marker whose format this build does not know |
 | `tables/persistent.rs` | 2 | the two pieces of arithmetic on the shard memory counter: that a shrink subtracts instead of wrapping, and that an eviction summarizes itself without underflowing on a drifted counter |
 | `.../storage/fs/map.rs` | 1 | map intent replay |

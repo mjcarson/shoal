@@ -66,9 +66,14 @@ cargo build --release
 cargo check --workspace --all-targets
 ```
 
-`.cargo` config in the workspace sets `-Ctarget-cpu=native`. `gxhash`, Shoal's hash function
-everywhere, depends on AES-NI intrinsics, so builds are not portable across machines with
-different instruction sets.
+`.cargo/config.toml` in the workspace sets `-Ctarget-cpu=native`. `gxhash`, Shoal's hash
+function everywhere, depends on AES-NI intrinsics, so builds are not portable across machines
+with different instruction sets.
+
+> This page claimed that before the file existed. The flag was in a `[build]` table in the
+> workspace `Cargo.toml`, where **cargo silently ignores it** — which is why the docs and
+> `shoal_looper.sh` both passed `RUSTFLAGS` by hand. Any measurement taken before
+> `.cargo/config.toml` was added was built without it.
 
 ## Tests
 
@@ -91,13 +96,18 @@ machine's core count and to ports already in use.
 | --- | --- | --- |
 | `shoal-core` | `server` *(default)* | Pulls in `glommio` and compiles the server half. Without it you get a client-only build. |
 | `shoal-core` | `hotpath` | Enables the `hotpath` profiler, activating `#[hotpath::measure]` / `#[measure_all]` attributes scattered through the hot path. |
-| `shoal` | `hotpath` | Same, forwarded. |
+| `shoal` | `hotpath` | Same, **forwarded to `shoal-core/hotpath`** — it was not, and the resulting profile was empty. |
+| `shoal-core` | `bench` | Re-exports crate private internals as `tables::bench_exports` so the criterion benches can reach them. Not a supported API. |
+| `shoal` | `bench` | Same, forwarded. Required to build `shoal/benches`. |
+| `shoal-core` | `shql-complete` | SHQL autocompletion support for clients. |
 
 ```bash
-cargo build --features hotpath
+cargo build --release --example tmdb --features hotpath   # a profiling build
+cargo bench -p shoal --features bench                     # the micro benchmarks
 ```
 
-See [Observability](../operations/observability.md) for what `hotpath` actually reports.
+See [Observability](../operations/observability.md) for what `hotpath` reports and
+[Benchmarking](../operations/benchmarking.md) for how to run either.
 
 ## Running the example
 
@@ -112,8 +122,10 @@ It takes a full CLI — `--help` lists every flag. See [Benchmarking](../operati
 for what the numbers mean and how to get a result worth comparing.
 
 Note that the checked-in `shoal.yml` points storage at `/opt/shoal`, which must exist and be
-writable. It also contains a typo that silently disables core exclusion — see
-[Configuration](configuration.md#the-exluded_cores-typo).
+writable. It is also the benchmark configuration, so changing it invalidates the recorded
+baseline ([Performance Baseline](../operations/performance-baseline.md)). It used to carry a
+typo that silently disabled core exclusion; a misspelled resource key now fails the load
+instead ([Configuration](configuration.md#the-exluded_cores-typo--fixed)).
 
 ## Design notes
 

@@ -156,6 +156,18 @@ pub fn add(
             self.#field_ident.flush().await?;
         }
     });
+    // build our compaction due arms
+    let compaction_due_arms = fields.named.iter().map(|field| {
+        // get our field ident and type
+        let field_ident = field.ident.as_ref().unwrap();
+        // build our compaction due arm for this field
+        quote! {
+            // one table being due is enough, so stop looking at the first one
+            if self.#field_ident.compaction_due() {
+                return true;
+            }
+        }
+    });
     // build our handle flushed arms
     let handle_flushed_arms = fields.named.iter().map(|field| {
         // get our field ident and type
@@ -189,7 +201,8 @@ pub fn add(
                 //  get this partition loads table name and partition id
                 let table = loaded_kinds.table;
                 let id = loaded_kinds.loaded.partition_id;
-                if let Some((unblocked, generation)) = self.#field_ident.load_partition(loaded_kinds.loaded).await {
+                // a load is where an archive is validated, so it can fail on a corrupt one
+                if let Some((unblocked, generation)) = self.#field_ident.load_partition(loaded_kinds.loaded).await? {
                     // build a mark evictable message for this partition so we don't mark this as
                     // evictable until we have completed all blocked queries to prevent load/reloading
                     // the same partition over and over again
@@ -334,6 +347,13 @@ pub fn add(
             async fn flush(&mut self) -> Result<(), shoal_core::server::ServerError> {
                 #(#flush_arms)*
                 Ok(())
+            }
+
+            /// Check if any of our tables intent logs are due to be rotated
+            fn compaction_due(&self) -> bool {
+                #(#compaction_due_arms)*
+                // no table has grown past the size it rotates at
+                false
             }
 
             /// Get all flushed messages and send their response back

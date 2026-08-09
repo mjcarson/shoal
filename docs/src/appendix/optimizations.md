@@ -4,21 +4,181 @@ Work that would make Shoal faster, indexed the same way as [Known Issues](known-
 entry names what the code does, where, and why it costs. Item numbers are prefixed `O` and are
 never reused.
 
-**None of these are measured.** They come from reading the source, and they are ordered by the
+~~**None of these are measured.** They come from reading the source, and they are ordered by the
 size of the argument for them, not by observed benefit. Anything here should be confirmed against
 a profile before it is acted on — [Benchmarking](../operations/benchmarking.md) and the `hotpath`
-feature are what that is for. A change that removes work from a path nothing is waiting on is a
-change that only adds risk.
+feature are what that is for.~~
+
+That was true of every entry below when it was filed, and it is worth keeping because it says
+what the entries *are*: arguments from the source, ordered by the strength of the argument
+rather than by observed benefit. What has changed is that there is now somewhere to settle
+them. [F3](../features/performance-harness.md) built a harness that can resolve a few percent,
+[Performance Baseline](../operations/performance-baseline.md) records what the system currently
+does, and the `hotpath` feature — which until then was wired up in a way that produced an empty
+profile — reports 57 scopes on a `tmdb` run.
+
+So the rule is now stronger rather than weaker. **An entry is not acted on until a benchmark
+exists that would show the difference**, and the entry says which one. An entry with no such
+benchmark is asking for the benchmark first. A change that removes work from a path nothing is
+waiting on is a change that only adds risk, and a change that cannot be measured is
+indistinguishable from one.
+
+**The first entry settled this way was [O3 + O23](#o3-every-archived-read-is-fully-validated-inside-a-tracing-span)**,
+and [F4](../features/validated-archives.md) is worth reading for what the rule cost and bought. It
+cost an extra capture: the benchmark that would show the difference did not exist and could not be
+written without part of the change, so the enabling half landed and was measured on its own first.
+It bought a 99.5% result with a control, a null, and a confirming repeat behind it — and it caught a
+[measurement defect](#o24-two-benchmarks-move-with-the-shape-of-the-binary-around-them) that would
+otherwise have read as a regression the change caused.
 
 Defects are in [Known Issues](known-issues.md); several entries below share a root cause with one
 and say so. An entry that has been done is struck through and kept, with what replaced it, for the
 same reason a resolved issue keeps its page.
+
+## How these are ranked
+
+Every open entry carries a scorecard under its heading, and [the priority queue](#the-priority-queue)
+orders all of them. Four axes, graded the same way everywhere.
+
+**Impact** is graded by *what backs the claim*, not by how large the claim is. That distinction is
+the whole point of the rule above, so it is a column rather than a caveat:
+
+| Grade | Means |
+| --- | --- |
+| **Measured** | A micro-benchmark or a baseline figure, cited on the entry |
+| **Profiled** | A `hotpath` scope. Attribution only — [never a result](../operations/performance-baseline.md#profile--where-the-time-goes) — so a call count is worth more here than a duration |
+| **Asymptotic** | The cost grows in something a caller controls, so it is established without a number |
+| **Argued** | Source reading alone. The default, and the weakest |
+
+**Difficulty**:
+
+| Grade | Means |
+| --- | --- |
+| **S** | A local edit or a type annotation |
+| **M** | Contained to one module |
+| **L** | Crosses module boundaries, or changes an internal type that travels between them |
+| **XL** | Reaches the wire format, the on-disk format, or the client |
+
+**Tradeoff** is `None`, `Contained` (a local behaviour change, revertible), or `Major` (safety,
+determinism, or a compatibility break). A `Major` entry is not a worse entry — O3 is the best one
+here — but it is one that needs a decision rather than a patch.
+
+**Depends on** and **Blocks** carry hard edges only. **A missing benchmark is a dependency**, since
+this page forbids acting without one, and it is the most common one: five entries are blocked on a
+benchmark rather than on any code.
+
+## The priority queue
+
+Tiered rather than a single 1-to-N ordering, because an entry backed by a measurement and an entry
+backed by an argument are not comparable on one scale, and pretending otherwise would undo the rule
+this page opens with. Ordered inside each tier.
+
+**Tier A — the cost is established and the change is contained.** These are actionable now.
+
+| # | Entry | Impact | Diff | Depends on | Tradeoff | Adjudicable today |
+| --- | --- | --- | --- | --- | --- | --- |
+| ~~**A1**~~ | ~~[**O3** + **O23**](#o3-every-archived-read-is-fully-validated-inside-a-tracing-span)~~ — **done**, by [F4](../features/validated-archives.md) | Measured — 29.89 µs of a 30.43 µs cold single-row get | M | — | Contained | it was, and it was |
+| ~~**A2**~~ | ~~[**O17**](#o17-handle_flushed-runs-on-every-message)~~ — **done**, by [F5](../features/flushed-sweep-gate.md) | Profiled — 711,638 calls became 21,279 | S | — | Contained | it was, on the profile alone |
+| **A3** | [**O13**](#o13-a-multi-partition-get-is-quadratic-in-the-partitions-it-names) (+ [**O12**](#o12-to_blocked-clones-the-whole-filter-set-per-blocked-partition) beside it) — the quadratic multi-partition get | Asymptotic — O(n²) in a caller-set n | S | — | None | no — still needs a bench over `PersistentSortedTable::get` |
+| **A4** | [**O5**](#o5-the-hottest-maps-use-siphash), [**O14**](#o14-fixed-thousand-element-preallocations-on-per-call-paths) — hasher and allocation sizes | Argued | S | — | None | no — needs a table-layer bench |
+| **A5** | [**O25**](#o25-two-instrument-spans-remain-on-per-query-paths) — two `#[instrument]` spans on per-query paths | Argued — but the cost is in the *uninstrumented* binary | S | — | Contained | no — needs a with/without capture |
+
+**A3 is now the head of the queue**, and it is the first one there that a profile cannot settle: it
+needs a benchmark over `PersistentSortedTable::get` that does not exist yet. A1 and A2 are struck
+rather than deleted because what each got wrong is the useful part — A1 claimed the narrow form
+needed no `unsafe`, and there is no such form; A2 accepted a rotation delay that turned out not to be
+necessary, and would have quietly changed what four tests exercise if it had been. See
+[O3](#o3-every-archived-read-is-fully-validated-inside-a-tracing-span) and
+[O17](#o17-handle_flushed-runs-on-every-message).
+
+**A5 is new and comes out of doing A2.** It is ranked last in the tier despite being the smallest
+diff, because unlike everything else here its impact is argued rather than profiled — a span's cost
+is invisible to the profile that would normally rank it, which is precisely what makes it worth
+filing.
+
+**Tier B — argued, contained, waiting on its benchmark.** The profile is what orders this tier:
+`write_helper` is 30.5 ms per call against roughly 350 ns for the insert it persists, so a write-path
+entry is removing work from a path that is [already waiting on the
+device](../operations/performance-baseline.md#profile--where-the-time-goes). O9 and O8 lead it
+because they are the exception — their cost scales with data on disk rather than with request rate,
+so they get worse by existing longer rather than under load.
+
+| # | Entry | Impact | Diff | Depends on | Tradeoff | Adjudicable today |
+| --- | --- | --- | --- | --- | --- | --- |
+| **B1** | [**O9**](#o9-every-intent-log-rotation-walks-the-entire-on-disk-partition-set) → [**O8**](#o8-partitions-are-read-one-at-a-time-each-with-its-own-dup-and-close) (with [**O22**](#o22-recovery-loads-the-partitions-it-scanned-one-await-at-a-time) in the same change) | Argued — but O(data on disk) | M, then L | O9 before O8 | Contained | no |
+| **B2** | [**O4**](#o4-deep_size_of-is-a-recursive-walk-called-on-every-mutation) — carry a row's measured size | Argued | M | — | Contained | no — and it settles [item 22](known-issues.md#22-size-accounting-inconsistencies) either way |
+| **B3** | [**O10**](#o10-serializedmapsave-snapshots-by-cloning), [**O15**](#o15-one-partition-load-costs-a-dup-and-a-close), [**O21**](#o21-a-forced-rotation-of-an-empty-intent-log-does-the-whole-rotation-anyway) — contained cleanups | Argued | S–M | — | Contained | no |
+| **B4** | [**O11**](#o11-a-fresh-alignedvec-per-write-and-per-response) — reuse the serialization buffer | Argued | M | a storage write-path bench | None | no |
+
+**Tier C — blocked on a design pass, not on effort.**
+
+| # | Entry | Impact | Diff | Depends on | Tradeoff | Adjudicable today |
+| --- | --- | --- | --- | --- | --- | --- |
+| **C1** | [**O1**](#o1-queries-are-fully-deserialized-on-arrival) — zero-copy the request half | Argued | L | a `wire_codec` bench; the `BytesMut` reaching the shard | Contained | no |
+| **C2** | [**O2**](#o2-every-returned-row-is-copied-at-least-twice) + [**O18**](#o18-the-gathered-reorder-rehashes-every-rows-partition-key), together | Argued — the largest read-path win available | **XL** | each other; a `wire_codec` bench | **Major** — wire format and the client | no |
+
+**Tier D — declined, kept with the reason.** A rejected optimization is recorded, not dropped.
+
+| Entry | Why it is not in the queue |
+| --- | --- |
+| [**O20**](#o20-a-sort-key-get-reads-a-partition-it-may-not-need) | Makes the cost of a query depend on what happens to be resident, which turns a reproducible latency into a flaky one. Declined on determinism, not on difficulty |
+| [**O22**](#o22-recovery-loads-the-partitions-it-scanned-one-await-at-a-time) standalone | Startup path, and the set is normally small. It rides along with O8 in **B1** or it does not happen |
+| [**O16**](#o16-compaction-shares-the-shards-executor) | Not an actionable entry — it is a consequence of thread-per-core. Its effect on this page is that it **raises O8 and O9**, since it means their cost lands on query serving rather than in the background |
+
+### Dependency edges
+
+Rendered as a table rather than a graph: the book has no mermaid preprocessor, so a diagram would
+come out as a code block.
+
+| Edge | Why |
+| --- | --- |
+| ~~**O23 ⊂ O3**~~ | Not two entries. O23 was the measurement of O3, and they were taken as one — [F4](../features/validated-archives.md) |
+| **O9 → O8** | O9 replaces the full scan with an incremental total. Doing O8 first means grouping reads inside a walk that O9 would have deleted |
+| **O8 ↔ O22** | The same edit — group by archive file, issue concurrently — in the compactor and in recovery |
+| **O2 ↔ O18** | Both change `ResponseAction::Get`. Landing either alone means paying the wire-format break twice |
+| **O18 → F2** | A projection is [required to carry its table's partition key](../features/projections.md#limitations) only so that O18's rehash can work. Taking O18 lifts that |
+| **O4 → item 22** | The mismatched size bases exist *because* the size is re-derived at each site. One edit closes both |
+| **O16 raises O8, O9** | Compaction shares the query executor, so their cost is not background cost |
+| **O3 → archive checksums** | Only for the *drop validation outright* form, which [F4](../features/validated-archives.md) did **not** take. Still unpaid: validation, now once per read rather than once per query, is still the only thing between a corrupt archive and a bad pointer |
+| **`wire_codec` bench → O1, O2, O18** | Unbuilt ([TODOs](todos.md#benchmark-coverage-the-harness-does-not-have)) |
+| **table-layer bench → O5, O12, O13** | Unbuilt, and until recently believed to exist — see below. [F4](../features/validated-archives.md) closed half the gap by making `MaybeLoaded` constructible, but all three of these live a layer above it in `PersistentSortedTable` |
+| **write-path bench → O11, O21** | Unbuilt, and it is the layer that dominates the profile |
+
+### Which entries a benchmark can currently adjudicate
+
+| Entry | Benchmark that would show it |
+| --- | --- |
+| O1, O18, O19 | none yet — a `wire_codec` bench over `Queries` and `ResponseKinds` is unbuilt ([TODOs](todos.md)) |
+| O2 | `partition_sorted/maybe_loaded/get_all` and `archived/walk_all`, with `get_all` for the resident twin |
+| ~~O3, O23~~ | `partition_sorted/maybe_loaded/get_key` and `exists_key`, against `codec/access` — **settled**, see [F4](../features/validated-archives.md#performance) |
+| O5, O12, O13 | **none yet** — a bench over `PersistentSortedTable::get` is unbuilt ([TODOs](todos.md#benchmark-coverage-the-harness-does-not-have)). `maybe_loaded/*` reaches `MaybeLoaded`, one layer below where all three live |
+| O20 | none yet — a `routing` bench over `Ring::find_shard` and `split_by_shard` is unbuilt |
+| O21 | `hotpath` `fs::commit` and `stream::prep` only; no micro-benchmark of the write path exists |
+
+> This table previously claimed that `partition_sorted/insert` and `get_key` adjudicated **O5**,
+> and that `seek_bytes/*` adjudicated **O12** and **O13**. ~~It was wrong about all three.~~ Those
+> benchmarks construct a `SortedPartition` directly (`shoal/benches/partitions.rs`) and never build
+> a `PersistentSortedTable`, which is where all three entries live — the `partitions` and `blocked`
+> maps, `to_blocked`, and the quadratic loop are in `persistent/sorted.rs` and
+> `shared/queries/sorted.rs`, none of which those benches reach. `seek_bytes/new` measures
+> `SeekBytes::new` and nothing around it. **The three cheapest entries on this page were the three
+> whose evidence was furthest away**, and the table said the opposite.
 
 ---
 
 ## Read path
 
 ### O1. Queries are fully deserialized on arrival
+
+| | |
+| --- | --- |
+| **Rank** | **C1** — blocked on a design pass |
+| **Impact** | Argued — every `String`, `Vec` and filter in a bundle, per request |
+| **Difficulty** | L — the `BytesMut` has to survive as far as the shard that executes the query |
+| **Depends on** | A `wire_codec` bench; `ServerMsg::Query` giving up its owned `QueryKinds` |
+| **Blocks** | nothing |
+| **Tradeoff** | Contained — a lifetime on the query type, not a format change |
+| **Benchmark** | none — `wire_codec` is unbuilt |
 
 ```rust
 // load our arhived query from buffer
@@ -42,6 +202,16 @@ this is not a call-site swap. It needs the archived form to survive as far as th
 executes the query, which means the `BytesMut` has to travel with it.
 
 ### O2. Every returned row is copied at least twice
+
+| | |
+| --- | --- |
+| **Rank** | **C2**, with O18 — the largest read-path win, and the largest change |
+| **Impact** | Argued — two copies per returned row, on every get |
+| **Difficulty** | **XL** — `ResponseAction::Get` reaches the wire format and the client |
+| **Depends on** | O18, which changes the same shape; a `wire_codec` bench |
+| **Blocks** | O18 |
+| **Tradeoff** | **Major** — a wire-format break, and `FromShoal::retrieve`'s signature with it |
+| **Benchmark** | `partition_sorted/archived/walk_all` and `get_all` bound the copies; nothing covers the wire half |
 
 `SortedPartition::get` deep-clones out of the `BTreeMap`:
 
@@ -73,54 +243,153 @@ materializes a smaller owned value and the wire carries less. A get that named n
 whole row twice — the identity projection is exactly the two lines above — so the shape of this
 entry is unchanged and only its magnitude moved.
 
-### O3. Every archived read is fully validated, inside a tracing span
+### ~~O3. Every archived read is fully validated, inside a tracing span~~
 
-```rust
-#[instrument(name = "RkyvSupport::access", skip_all, err(Debug))]
-fn access(raw: &[u8]) -> Result<&<Self as Archive>::Archived, rkyv::rancor::Error> {
-    rkyv::access::<<Self as Archive>::Archived, rkyv::rancor::Error>(raw)
-}
-```
+**Done, in the narrow form**, by [F4](../features/validated-archives.md), together with
+[O23](#o23-a-cold-get-of-one-row-validates-the-whole-partition-it-landed-in) as this page said it
+had to be. A partition read off disk is validated once, when the read lands, and held as a
+`ValidatedArchive` that carries that fact; the thirteen `access(read).unwrap()` sites on the
+`MaybeLoaded::Accessible` arms became `read.archived()`. `SeekBytes` took the same treatment, so a
+sort key is validated once per query rather than once per key per partition.
 
-`shared/traits.rs:62-77`
+The original entry read:
 
-`rkyv::access` is the *checked* entry point: it runs `bytecheck` over the whole buffer, O(bytes),
-every call. The `#[instrument]` adds a span creation and enter on top of that.
+> **Take the narrow form first.** Validating once when a partition is read off disk, and holding the
+> validated form, removes the per-get walk without a single `unsafe` and without depending on
+> checksums — and O23's measurement says that is where nearly all of the cost is. `access_unchecked`
+> is a second, separable decision; the precedent for it already exists in the tree, at
+> `shared/traits.rs` for queries and in `sorted.rs` for intent replay, both on data this process
+> wrote moments earlier.
+>
+> ```rust
+> #[instrument(name = "RkyvSupport::access", skip_all, err(Debug))]
+> fn access(raw: &[u8]) -> Result<&<Self as Archive>::Archived, rkyv::rancor::Error> {
+>     rkyv::access::<<Self as Archive>::Archived, rkyv::rancor::Error>(raw)
+> }
+> ```
+>
+> `shared/traits.rs:62-77`
+>
+> `rkyv::access` is the *checked* entry point: it runs `bytecheck` over the whole buffer, O(bytes),
+> every call. The `#[instrument]` adds a span creation and enter on top of that.
+>
+> The bytes were written by this process and read back from a file it owns, so they are validated
+> once per read from disk at best and once per *query* as it stands. Validating at load and using
+> `access_unchecked` afterwards removes both the walk and the span from the read path — at the cost
+> of making [archive checksums](todos.md#archive-checksums) matter more, since validation is
+> currently the only thing standing between a corrupt archive and a bad pointer.
+>
+> This is the entry with the best ratio of cost removed to code changed.
 
-Call sites on live request paths, one per query against an `Accessible` partition:
-`tables/partitions.rs:189`, `:217`, `:243`, `:260`, `:593`; `.../persistent/sorted.rs:263`,
-`:370`, `:610`, `:763`, `:935`.
+It was right about the ranking, right that the narrow form was the one to take, and right that
+`access_unchecked` everywhere is a separate decision — which is **still not taken**, and still
+depends on [archive checksums](todos.md#archive-checksums).
 
-The bytes were written by this process and read back from a file it owns, so they are validated
-once per read from disk at best and once per *query* as it stands. Validating at load and using
-`access_unchecked` afterwards removes both the walk and the span from the read path — at the cost
-of making [archive checksums](todos.md#archive-checksums) matter more, since validation is
-currently the only thing standing between a corrupt archive and a bad pointer.
+**It was wrong about `unsafe`, and that is the part worth keeping.** ~~"without a single
+`unsafe`"~~ — there is no such form. `rkyv::access` returns a reference *into* the buffer, so
+holding "the validated form" means holding a reference beside the thing it borrows from, which is
+self-referential. What is holdable is the *fact* that validation happened, and reading through that
+fact is one `unsafe` block behind a private constructor. Every byte is still validated, exactly
+once, by the same validator. See
+[F4's invariants](../features/validated-archives.md#invariants-to-uphold) before touching it.
 
-This is the entry with the best ratio of cost removed to code changed.
+The `#[instrument]` was kept rather than removed: it now fires once per partition load, which is
+where a span belongs.
 
 ### O5. The hottest maps use SipHash
 
-`partitions: HashMap<u64, MaybeLoaded<..>>`, `blocked: HashMap<u64, ..>`, and `pending_data`
-(`.../persistent/sorted.rs:98`, `:112`, `:118`; `unsorted.rs:176`, `:193`) all use std's default
-hasher. `partitions` is looked up at least once per query.
+| | |
+| --- | --- |
+| **Rank** | **A4** — near-free, do it whenever the surrounding code is open |
+| **Impact** | Argued — one SipHash per query at minimum, more on a parked one |
+| **Difficulty** | S — a type annotation |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | None |
+| **Benchmark** | none — the `partition_sorted/*` benches never build a `PersistentSortedTable` |
 
-The LRU sitting beside them already uses `BuildHasherDefault<GxHasher>` (`shard.rs:338`), and
-`gxhash` is already a dependency, so this is a type annotation rather than a change.
+`partitions: HashMap<u64, MaybeLoaded<..>>` and `blocked: HashMap<u64, ..>`
+(`.../persistent/sorted.rs:166`, `:237`, `:256`; `unsorted.rs:94`, `:112`, `:183`, `:200`) all use
+std's default hasher. `partitions` is looked up at least once per query.
+
+Two more have joined them since this was filed, and both are keyed by `(Uuid, usize)` rather than
+by a `u64` — sixteen bytes of SipHash instead of eight: `PendingGets::parked`
+(`.../tables/persistent.rs:137`) and `pending_exists` (`.../persistent/sorted.rs:160`). They are
+touched only by a query that parked on a disk read, which is the path that is already waiting, so
+they are the less interesting half of the entry.
+
+The LRU sitting beside them already uses `BuildHasherDefault<GxHasher>` (`shard.rs:294`, `:348`),
+and `gxhash` is already a dependency, so this is a type annotation rather than a change.
 
 ### O12. `to_blocked` clones the whole filter set per blocked partition
 
-`SortedGet::to_blocked` (`shared/queries/sorted.rs`) clones `sort_select` and `filters` into the
-narrowed query, and `get` calls it once for every partition that has to be read from disk. A get
-across 100 cold partitions makes 100 copies of the same filters and the same selection, all of
-which are then held in `blocked` until the loads land. A range clones two bounds rather than a key
-set, so it is the cheaper of the two selections to copy — but the filters dominate either way.
+| | |
+| --- | --- |
+| **Rank** | **A3**, beside O13 — same function, same loop |
+| **Impact** | Argued — one filter-set clone per cold partition named |
+| **Difficulty** | S — an `Rc`/`Arc` around the filters, or a borrowed narrowed query |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | None |
+| **Benchmark** | none — needs the table-layer bench |
 
-### O13. `blocked.retain(..)` runs inside the per-key loop
+`SortedGet::to_blocked` (`shared/queries/sorted.rs:445`) calls `for_partitions` (`:422-435`), which
+clones `sort_select` and `filters` into the narrowed query, and `get` calls it once for every
+partition that has to be read from disk (`.../persistent/sorted.rs:516`). A get across 100 cold
+partitions makes 100 copies of the same filters and the same selection, all of which are then held
+in `blocked` until the loads land. A range clones two bounds rather than a key set, so it is the
+cheaper of the two selections to copy — but the filters dominate either way.
 
-`.../persistent/sorted.rs:424`, `:473`, `:630` — a linear scan of the blocked list per partition
-key, making a get over *n* keys O(n²). Small *n* today, but *n* is the number of partitions a
-single query names, which is the one thing a caller controls directly.
+`SortedExists::to_blocked` (`:516`, calling `:496-506`) and the unsorted twin
+(`shared/queries/unsorted.rs:165`, `:207`) have the same shape, reached from
+`.../persistent/sorted.rs:625` and `unsorted.rs:492`.
+
+### O13. A multi-partition get is quadratic in the partitions it names
+
+| | |
+| --- | --- |
+| **Rank** | **A3** — the best difficulty-to-argument ratio on the page |
+| **Impact** | **Asymptotic** — O(n²) in *n*, the partition count a caller sets directly |
+| **Difficulty** | S — a rank index on `PendingGet`, and a running count in `filled_before` |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | None |
+| **Benchmark** | none — needs the table-layer bench |
+
+**This entry was filed against code that has since moved, and it came out broader.** It used to
+read:
+
+> ### ~~O13. `blocked.retain(..)` runs inside the per-key loop~~
+>
+> `.../persistent/sorted.rs:424`, `:473`, `:630` — a linear scan of the blocked list per partition
+> key, making a get over *n* keys O(n²). Small *n* today, but *n* is the number of partitions a
+> single query names, which is the one thing a caller controls directly.
+
+Two of those three sites are gone, and the surviving `blocked.retain` is not on the get path at
+all. What is left, and what was found in its place:
+
+| Where | Per key | Reached by |
+| --- | --- | --- |
+| `PendingGet::rank` — `keys.iter().position(..)` (`.../tables/persistent.rs:58`) | scan of every key the get named | **every** multi-partition get |
+| `PendingGet::filled_before` — walks `slots[..rank]` (`:93`) | scan of every slot before this one | every multi-partition get **with a limit** |
+| `blocked.retain(..)` (`.../persistent/sorted.rs:634`) | scan of the keys still outstanding | an `exists` replayed after a disk read |
+
+So the quadratic term did not go away when [items 26 and 39](resolved/partition-order.md)
+introduced slot-based gathering — it moved from the blocked list into `PendingGet`, and **widened
+in the process**. The old shape cost O(n²) only on a get whose partitions were being read from
+disk; `rank` is called once per key on the resident path too, so every multi-partition get pays it
+now, and a limited get pays `filled_before` on top. That is worse than what was filed, on a path
+that is not waiting for anything.
+
+It is still small *n* today and still O(n²), and *n* is still the one quantity a caller controls
+directly — which is the argument for fixing it while it is cheap. `PendingGet` already owns `keys`
+and `slots` side by side, so a `HashMap<u64, usize>` built once in `new` answers `rank` in O(1),
+and carrying a running row count answers `filled_before` the same way.
+
+**Filed on the way:** the entry's original claim is now false as written, which is why the old text
+is kept above rather than edited in place. Nothing here is a defect — a quadratic term in a small
+*n* is a cost, not a bug — so it stays on this page rather than moving to
+[Known Issues](known-issues.md).
 
 ### ~~O19. A wanted sort key is re-archived for every archived partition it is sought in~~
 
@@ -140,6 +409,16 @@ elsewhere should copy: bytes in the carrier, references built at the point of us
 
 ### O20. A sort-key get reads a partition it may not need
 
+| | |
+| --- | --- |
+| **Rank** | **Tier D — declined.** Not on difficulty; on determinism |
+| **Impact** | Argued — saves a whole archive read, but only when the *entire* key set hits in memory |
+| **Difficulty** | M |
+| **Depends on** | a `routing` bench; the invariant in [item 8](resolved/sort-keys.md#invariants-to-uphold) |
+| **Blocks** | nothing |
+| **Tradeoff** | **Major** — makes query cost depend on residency, turning a reproducible latency into a flaky one |
+| **Benchmark** | none — `routing` is unbuilt, and no bench varies residency |
+
 An in-memory row or tombstone shadows whatever an archive holds for the same key
 (`SortedPartition::merge_from_disk`), so a get whose named sort keys are *all* resolved in memory —
 as live rows or as tombstones — could answer without reading the partition at all, even with
@@ -157,6 +436,16 @@ than more attractive — see [F1](../features/sort-key-ranges.md#invariants-to-u
 ---
 
 ### O18. The gathered reorder rehashes every row's partition key
+
+| | |
+| --- | --- |
+| **Rank** | **C2**, with O2 — the same shape, so the same change |
+| **Impact** | Argued — one gxhash per row of a split query |
+| **Difficulty** | **XL** — a grouped share is a wire-format change |
+| **Depends on** | O2; a `wire_codec` bench |
+| **Blocks** | [F2](../features/projections.md#limitations) — a projection must carry its partition key only because of this |
+| **Tradeoff** | **Major** — wire format, shared with O2 |
+| **Benchmark** | none — `wire_codec` is unbuilt |
 
 `ResponseAction::order_by_partitions` (`shared/responses.rs`) sorts the merged rows of a split
 query by where their partition was named. A `Response` carries rows and nothing else, so the only
@@ -183,9 +472,62 @@ carry its table's partition key for no reason other than this rehash, which is a
 what a projection is allowed to leave out — a projection of a title alone is not expressible. Taking
 this entry would lift that requirement as well as removing the hash.
 
+---
+
+### ~~O23. A cold get of one row validates the whole partition it landed in~~
+
+**Done**, by [F4](../features/validated-archives.md), as one unit with
+[O3](#o3-every-archived-read-is-fully-validated-inside-a-tracing-span). This was never a separate
+entry — it was O3's measurement, and it is the reason O3 was taken before anything else on this
+page.
+
+The first entry here that was found by measurement rather than by reading, and it is worth keeping
+for what the measurement said:
+
+| Partition rows | Access, then project one row |
+| --- | --- |
+| 16 | 158 ns |
+| 256 | 1.93 µs |
+| 1,024 | 7.89 µs |
+| 4,096 | 31.0 µs |
+
+Linear in the partition, for a query whose answer is one row — the same shape
+[F1](../features/sort-key-ranges.md) removed from the *resident* path, still present on the archived
+one. `partition_sorted/get_range_64` is flat at ~3.03 µs across those same sizes.
+
+The entry closed with a warning that was worth having and turned out to matter:
+
+> Worth confirming against a realistic row shape before acting: the benchmark rows are small, so
+> this measures validator overhead per row at close to its worst ratio.
+
+That is still true, and it bounds what F4 claims. The rows here are two short strings, so the
+validator does the most work it can per byte of payload. On a wide row the same partition is more
+bytes of payload and fewer relative pointers to check, and the ratio moves. What does not move is
+the *shape*: the cost was per query and is now per read.
+
+**A benchmark that reached the real code did not exist when this was filed.**
+`archived/access_and_one_row` mimicked `MaybeLoaded::Accessible` by hand because that variant could
+not be constructed outside a running server. `partition_sorted/maybe_loaded/*` is the group that
+actually calls it, and `archived/*` and `codec/*` are kept beside it as controls — they exercise
+`RkyvSupport::access` directly, which F4 did not change, so if they move the machine moved.
+
 ## Write path
 
 ### O4. `deep_size_of()` is a recursive walk called on every mutation
+
+| | |
+| --- | --- |
+| **Rank** | **B2** — the entry whose *correctness* value exceeds its performance value |
+| **Impact** | Argued, and discounted — the write path is [waiting on the device](../operations/performance-baseline.md#profile--where-the-time-goes), not on this |
+| **Difficulty** | M — 13 call sites, but they all want the same thing |
+| **Depends on** | nothing |
+| **Blocks** | [item 22](known-issues.md#22-size-accounting-inconsistencies) — the same edit settles it |
+| **Tradeoff** | Contained — a row's size becomes state that can go stale, which is the thing to test |
+| **Benchmark** | none; `partition_sorted/insert` covers the partition but not the accounting |
+
+Ranked above the other write-path entries despite the profile, because it is the only one that
+buys a correctness fix with the same edit. Take it for item 22 and treat the cost removal as
+change left over.
 
 It measures the whole object graph, so its cost is proportional to the row, not constant. Call
 sites on the write path:
@@ -205,6 +547,16 @@ instead of being owned by one.
 
 ### O11. A fresh `AlignedVec` per write and per response
 
+| | |
+| --- | --- |
+| **Rank** | **B4** — last in its tier, because the profile says its path is already waiting |
+| **Impact** | Argued — one allocation and one extra copy per write and per response |
+| **Difficulty** | M — rkyv can serialize into a caller-supplied buffer |
+| **Depends on** | a storage write-path bench, which is [the biggest gap in the harness](todos.md#benchmark-coverage-the-harness-does-not-have) |
+| **Blocks** | nothing |
+| **Tradeoff** | None |
+| **Benchmark** | none — the layer that dominates the profile is the one with no confidence interval |
+
 - `FileSystem::commit` (`.../fs.rs:331`) allocates via `RkyvSupport::serialize`, then copies the
   bytes a second time into the DMA buffer (`.../fs.rs:350`).
 - `Shard::reply` (`shard.rs:543`) allocates one per response.
@@ -214,12 +566,48 @@ rkyv can serialize into a caller-supplied buffer, so all three could reuse one. 
 interesting one, because the destination buffer it copies into is already there — `prep` hands
 back a `&mut [u8]` sized for the record (`.../fs/stream.rs:519-530`).
 
-### O17. `handle_flushed` runs on every message
+### ~~O17. `handle_flushed` runs on every message~~
 
-`shard.rs:791` calls it unconditionally each loop iteration, and it reaches
-`tables.handle_flushed` → per-table `get_flushed` → `compact_if_needed`
-(`.../persistent/sorted.rs:1097-1116`). So every message pays a pass over every table, including
-every `DataFlushed` wakeup — of which there is one per completed write.
+**Done**, by [F5](../features/flushed-sweep-gate.md). The shard sweeps its tables when a write has
+landed or a log is due to rotate, and not otherwise: **711,638 calls became 21,279** over the same
+workload, and the time in them fell from 1.344 s to 0.453 s summed across twelve shards.
+
+The original entry read:
+
+> | | |
+> | --- | --- |
+> | **Rank** | **A2** — the cheapest entry with evidence behind it |
+> | **Impact** | **Profiled** — 705,886 calls, 1.8 µs each, 11% of wall clock |
+> | **Difficulty** | S — a dirty flag, or gate it on `DataFlushed` having arrived |
+> | **Depends on** | nothing |
+> | **Blocks** | nothing |
+> | **Tradeoff** | Contained — a compaction check is delayed by at most one message |
+> | **Benchmark** | `hotpath` `shard::handle_flushed`; no micro-benchmark |
+>
+> **Why a `hotpath` number is enough here, when the page says it is attribution only.** The
+> [caveat](../operations/performance-baseline.md#profile--where-the-time-goes) is about *durations* —
+> the instrumented binary perturbs them. The **call count** is not perturbed: 705,886 calls against
+> 617,175 queries is a structural fact about the loop, and it is the part of this entry that matters.
+> The 1.8 µs is the soft half of the claim.
+>
+> `shard.rs:844` calls it unconditionally each loop iteration — and `:852` again after the loop — and
+> it reaches
+> `tables.handle_flushed` → per-table `get_flushed` → `compact_if_needed`
+> (`.../persistent/sorted.rs:1097-1116`). So every message pays a pass over every table, including
+> every `DataFlushed` wakeup — of which there is one per completed write.
+
+**It was right about the ranking and about the evidence, and wrong about the tradeoff.** The
+"compaction check is delayed by at most one message" was accepted here and then not paid: rotation
+is driven by bytes *accepted*, and the accepted byte count is two field reads away, so a synchronous
+`compaction_due()` predicate keeps rotation firing on exactly the message it fired on before. That
+mattered more than it looks — `build_pressured_config` forces rotation every few writes on purpose,
+and a gate that let it drift would have changed what four eviction tests exercise while leaving them
+green.
+
+**It also missed half of its own cost.** The `#[instrument]` on `handle_flushed` created an INFO span
+per call, and unlike everything else the profile attributes, *that* cost is in the uninstrumented
+binary too. It is removed. The same reasoning applies to two more spans on hot paths and is filed as
+[O25](#o25-two-instrument-spans-remain-on-per-query-paths).
 
 ---
 
@@ -257,6 +645,16 @@ trade — see [Recovery](../storage/recovery.md#limitations).
 
 ### O22. Recovery loads the partitions it scanned one await at a time
 
+| | |
+| --- | --- |
+| **Rank** | **B1** as a passenger on O8; **Tier D** on its own |
+| **Impact** | Argued — one serial await, one `dup` and one `close` per scanned partition |
+| **Difficulty** | S once O8 exists — it is the same grouping applied to a second loop |
+| **Depends on** | O8 |
+| **Blocks** | nothing |
+| **Tradeoff** | None |
+| **Benchmark** | none; startup is not measured at all |
+
 `FileSystem::load_scanned` (`.../storage/fs.rs`) walks the key set the prescan built and awaits
 one load per key:
 
@@ -291,6 +689,20 @@ small — an interrupted compaction is rare and the active log usually names few
 
 ### O8. Partitions are read one at a time, each with its own `dup` and `close`
 
+| | |
+| --- | --- |
+| **Rank** | **B1**, after O9 and carrying O22 |
+| **Impact** | Argued — but O(partitions changed), and [O16](#o16-compaction-shares-the-shards-executor) means it lands on query serving |
+| **Difficulty** | L — grouping by archive plus concurrent reads, in two loops and in recovery |
+| **Depends on** | **O9 first** — otherwise the grouping is built inside a walk O9 deletes |
+| **Blocks** | O22 |
+| **Tradeoff** | Contained — concurrency against a `RefCell` borrow that is [already held across awaits](known-issues.md#35-a-refcell-borrow-is-held-across-three-awaits-in-the-compactor) |
+| **Benchmark** | none; compaction is not measured at all |
+
+Worth taking with [item 35](known-issues.md#35-a-refcell-borrow-is-held-across-three-awaits-in-the-compactor)
+rather than around it — this is the loop that holds the borrow, and issuing the reads concurrently
+is exactly the change that would turn that latent defect into a live one.
+
 ```rust
 for partition in self.changes.keys() {
     if let Some(entry) = self.map.to_archive.borrow().get(partition) {
@@ -312,6 +724,20 @@ glommio's read APIs can issue them concurrently rather than one await at a time.
 [item 35](known-issues.md#35-a-refcell-borrow-is-held-across-three-awaits-in-the-compactor).)
 
 ### O9. Every intent log rotation walks the entire on-disk partition set
+
+| | |
+| --- | --- |
+| **Rank** | **B1** — the head of Tier B, and the entry that ages worst |
+| **Impact** | Argued — but **O(total partitions on disk) per rotation**, regardless of how few changed |
+| **Difficulty** | M — maintain a per-archive used-byte total in `set_partition` and `remove_partition` |
+| **Depends on** | nothing |
+| **Blocks** | O8, O21 |
+| **Tradeoff** | Contained — an incremental total is state that can drift from the truth it summarises |
+| **Benchmark** | none; compaction is not measured at all |
+
+Ranked first in its tier because it is one of the two entries whose cost grows with how long the
+database has existed rather than with how hard it is being used. Everything else on this page gets
+worse under load; this gets worse while idle.
 
 `compact_if_needed` queues a `CompactionJob::Archives` on every rotation
 (`.../fs.rs:385-394`), and that job calls `sort_by_load` (`.../fs/map.rs:516-548`), which iterates
@@ -339,6 +765,16 @@ would replace the whole scan, and archive sizes are already known to the writer.
 
 ### O10. `SerializedMap::save` snapshots by cloning
 
+| | |
+| --- | --- |
+| **Rank** | **B3** — a contained cleanup |
+| **Impact** | Argued — a full copy of the archive map per serialization |
+| **Difficulty** | S — serialize from the borrow rather than from a copy of it |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | Contained — the clone is what keeps the borrow short, so removing it holds a `RefCell` open across serialization. Compare [item 35](known-issues.md#35-a-refcell-borrow-is-held-across-three-awaits-in-the-compactor) before doing it |
+| **Benchmark** | none |
+
 ```rust
 all_archives: map.all_archives.borrow().clone(),
 to_archive: map.to_archive.borrow().clone(),
@@ -349,6 +785,19 @@ to_archive: map.to_archive.borrow().clone(),
 `:494-499`).
 
 ### O16. Compaction shares the shard's executor
+
+| | |
+| --- | --- |
+| **Rank** | **Tier D — not an actionable entry.** It is a consequence of thread-per-core |
+| **Impact** | Argued — and it is what makes O8 and O9 foreground costs rather than background ones |
+| **Difficulty** | n/a — changing it means giving up the design |
+| **Depends on** | nothing |
+| **Blocks** | nothing. It **raises** O8 and O9 |
+| **Tradeoff** | The design itself: no cross-core locking, in exchange for compaction competing with queries |
+| **Benchmark** | none |
+
+Kept in the queue as a rank of its own because it changes how two other entries should be read, and
+a reader who skips it will under-rate them.
 
 The compactor and the loader are both spawned onto `medium_priority` on the same glommio executor
 as the query loop (`.../fs.rs:164-167`, `:486-488`). A long `compact_archives` competes directly
@@ -361,6 +810,20 @@ Note also that `write_partition` iterates `self.loaded`, a `HashMap`
 related partitions get no locality from it.
 
 ### O21. A forced rotation of an empty intent log does the whole rotation anyway
+
+| | |
+| --- | --- |
+| **Rank** | **B3** — but take only the cheap two thirds |
+| **Impact** | Argued — startup cost only, per restart per shard, dominated by the O9 walk behind it |
+| **Difficulty** | S for suppressing the `Archives` job; **L** for skipping the rotation itself |
+| **Depends on** | O9 removes most of what makes this expensive |
+| **Blocks** | nothing |
+| **Tradeoff** | None for the cheap form. **Major** for the full form — the generation counter, `FlushProgress.rotated` and `MarkEvictable` are all keyed off the rotation happening |
+| **Benchmark** | none; startup is not measured |
+
+**The split is the whole entry.** Queue the `Archives` job only when a rotation had changes to
+compact: S, no tradeoff, and it removes the expensive part. Suppressing the rotation is a separate,
+much larger decision that touches generations, and it should not be bundled in.
 
 `compact_if_needed` rotates on `force` without looking at whether the active log holds anything
 (`.../fs.rs:397-440`), and startup always forces one
@@ -380,6 +843,84 @@ compact — is the cheap two thirds of this and does not touch generations at al
 Startup cost only, not per write, which is why it is here rather than in Known Issues.
 
 ---
+
+## The harness itself
+
+### O24. Two benchmarks move with the shape of the binary around them
+
+| | |
+| --- | --- |
+| **Rank** | **Tier B**, unranked inside it — this is a measurement defect, not a cost in Shoal |
+| **Impact** | **Measured** — `codec/access` and `archived/access_and_one_row` moved +9% to +13% across a change that does not touch the function they call |
+| **Difficulty** | M — the fix is a benchmark harness question, not a Shoal one |
+| **Depends on** | nothing |
+| **Blocks** | nothing, but it **widens the noise band** for anything validated against those two ids |
+| **Tradeoff** | None |
+| **Benchmark** | itself |
+
+Found while taking [F4](../features/validated-archives.md), which carried both of these ids forward
+untouched precisely so that they would act as controls.
+
+Both moved together, outside the ±5% band, and a repeat capture put them within 0.7% of the first —
+so the shift is reproducible within a build and meaningless across builds. It is not the change that
+was being measured: nothing in F4 touches `RkyvSupport::access`, and `archived/walk_all`, which calls
+the same function, moved −4% in the opposite direction at the same time.
+
+**Having a third baseline is what identified which run was wrong**, and it is the argument for
+keeping `B1` frozen. The *post*-change build sits +3.5% to +4.1% from B1 — inside the band. It was
+the *pre*-change capture that was the outlier, at 27,835 ns against B1's 29,891 ns for
+`codec/access/4096`. With only a trailing baseline the drift would have looked like a regression the
+change caused.
+
+What the two that moved have in common is that they are dominated by a linear walk over one
+`AlignedVec` built at group setup. `AlignedVec` guarantees 16-byte alignment and nothing about where
+the buffer lands relative to a cache set or a page, so adding a benchmark group ahead of them in the
+binary changes what they are walking over. This is the between-process variation
+[Performance Baseline](../operations/performance-baseline.md#what-the-micro-layer-can-actually-resolve)
+says a confidence interval cannot see, caught in the act.
+
+**Fix direction:** neither obvious nor free. Allocating the buffer at a known page offset would pin
+it, at the cost of measuring an alignment production does not have — a `ReadResult` off a DMA read is
+page aligned, an `AlignedVec` is not, so the honest fix may be to make the benchmark buffers match
+the DMA case rather than to pin them arbitrarily. Until then, treat a movement in
+`codec/access` or `archived/access_and_one_row` of under ~15% as saying nothing.
+
+### O25. Two `#[instrument]` spans remain on per-query paths
+
+| | |
+| --- | --- |
+| **Rank** | **A5** — last in Tier A, because it is the only entry there a profile cannot rank |
+| **Impact** | Argued — 617,175 INFO spans each, per run, in the **uninstrumented** binary |
+| **Difficulty** | S — delete an attribute, or set `level = "trace"` |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | Contained — it is observability, and `reply`'s span is a real parent |
+| **Benchmark** | none — and the point of this entry is that the obvious one does not exist |
+
+Filed while taking [F5](../features/flushed-sweep-gate.md), which removed a third one.
+
+`Shard::handle_query` (`shard.rs`) and `Shard::reply` both carry `#[instrument]`, both default to
+`INFO`, and the subscriber is a `Registry` with a `fmt` layer filtered at `Info` (`server/trace.rs`)
+against a `shoal.yml` that sets `level: Info`. So both callsites are enabled: each call allocates a
+span in the registry's slab, enters, exits and closes it. At 617,175 calls apiece that is 1.2 million
+span lifecycles per run.
+
+**This is the entry the profile is structurally unable to rank**, which is why it is filed rather
+than taken. `hotpath` attributes time to *its own* scopes; a span inside a scope is counted as part
+of that scope's duration and never appears as a row. Worse, the cost is present in the baseline
+binary and absent from nothing — so unlike every other entry on this page, there is no capture in
+`docs/perf/` that contains the number. Settling it needs a purpose-built pair of runs with the
+attributes present and absent, which is a capture nobody has taken.
+
+**The two are not equivalent, and should not be decided together.** `reply`'s span uses
+`parent = &span` to attach a reply to the query that caused it, so it carries the one piece of trace
+structure this path has; deleting it flattens the trace. `handle_query`'s is a plain wrapper around a
+function that is already the top of its own `hotpath` scope. If only one goes, it is `handle_query`'s.
+
+**Fix direction:** `level = "trace"` on both is the conservative form — the callsite survives for a
+debugging session and costs a cached interest check rather than a slab insert. F5 removed its span
+outright instead, but that one had no fields, no children, and wrapped a function that usually did
+nothing. Neither of these is that.
 
 ## Routing and memory
 
@@ -417,13 +958,39 @@ where the `BTreeMap` was not, but that is an argument, not a profile.
 
 ### O14. Fixed thousand-element preallocations on per-call paths
 
+| | |
+| --- | --- |
+| **Rank** | **A4** — near-free, do it whenever the surrounding code is open |
+| **Impact** | Argued — a 1,000-element allocation to hold a handful of entries |
+| **Difficulty** | S |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | None |
+| **Benchmark** | none |
+
 - `evict_data` allocates a `Vec::with_capacity(1000)` per table it touches, to hold however many
-  victims that table has (`shard.rs:693-696`).
-- `write_partition` allocates `to_mark` at 1000 per call (`.../fs/compactor.rs:219`).
+  victims that table has (`shard.rs:748`).
+- `write_partition` allocates `to_mark` at 1000 per call (`.../fs/compactor.rs:299`).
 - ~~The per-record `HashSet` in [O7](#o7-startup-reads-the-same-archive-once-per-update-intent).~~
   Gone — it is allocated once per recovery now.
 
 ### O15. One partition load costs a `dup` and a `close`
+
+| | |
+| --- | --- |
+| **Rank** | **B3** — a contained cleanup, with a second half that is not one |
+| **Impact** | Argued — two syscalls per partition read |
+| **Difficulty** | S for the `dup`/`close`; M for evicting from `loaded_archives` |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | Contained — borrowing the cached handle means the cache's lifetime now bounds the read's |
+| **Benchmark** | none |
+
+**The second paragraph of this entry is not an optimization.** A file descriptor held per archive
+for the life of the process is a resource leak with a hard ceiling behind it, and it gets worse as
+a table accumulates archives. It is filed here because it was found here, but it should be read as
+a defect that has not been filed as one — the reason it has not is that no `EMFILE` has been
+observed, so it is an argument rather than a symptom.
 
 `read_partition_helper` closes the handle the map just handed it (`.../fs/loader.rs:19-28`), even
 though `ArchiveMap` caches open handles in `loaded_archives` specifically so it does not have to
@@ -436,22 +1003,40 @@ per archive for the life of the process.
 
 ---
 
-## Suggested order
+## ~~Suggested order~~ — superseded by [the priority queue](#the-priority-queue)
 
-1. **O3**, then **O1** — both remove work from every read, neither changes an on-disk or wire
-   format. O3 is the smaller change and the larger win; do it first, and read
-   [archive checksums](todos.md#archive-checksums) before dropping validation.
-2. **O4** — retires a real correctness wart
-   ([item 22](known-issues.md#22-size-accounting-inconsistencies)) with the same edit that removes
-   the cost, which makes it the easiest one to justify.
-3. **O9**, then **O8** — the only entries whose cost scales with total data on disk rather than
-   with request rate. Everything else gets worse under load; these get worse just by existing
-   longer.
-4. **O5** and **O14** — near-free, and worth doing whenever the surrounding code is open.
+Kept because it was right about more than it was wrong about, and because what it left out is the
+clearest argument for why the queue above exists. It read:
 
-**O6** has been taken, together with items 11, 12 and 37 as this list said it had to be.
+> 1. **O3**, then **O1** — both remove work from every read, neither changes an on-disk or wire
+>    format. O3 is the smaller change and the larger win; do it first, and read
+>    [archive checksums](todos.md#archive-checksums) before dropping validation.
+> 2. **O4** — retires a real correctness wart
+>    ([item 22](known-issues.md#22-size-accounting-inconsistencies)) with the same edit that removes
+>    the cost, which makes it the easiest one to justify.
+> 3. **O9**, then **O8** — the only entries whose cost scales with total data on disk rather than
+>    with request rate. Everything else gets worse under load; these get worse just by existing
+>    longer.
+> 4. **O5** and **O14** — near-free, and worth doing whenever the surrounding code is open.
+>
+> **O6** has been taken, together with items 11, 12 and 37 as this list said it had to be.
+>
+> **O2** is deliberately not on this list. It is the largest single win available on the read path
+> and also the largest change, because it needs `ResponseAction::Get` to hold something other than
+> `Vec<T>`, which reaches the wire format and the client. It is worth its own design pass rather
+> than a slot in an ordering.
 
-**O2** is deliberately not on this list. It is the largest single win available on the read path
-and also the largest change, because it needs `ResponseAction::Get` to hold something other than
-`Vec<T>`, which reaches the wire format and the client. It is worth its own design pass rather
-than a slot in an ordering.
+**What it got right, and the queue keeps.** O3 first. O9 before O8. O4 justified by the correctness
+fix rather than by the cost. O5 and O14 as near-free. O2 as a design pass rather than a queue slot —
+the queue puts it in Tier C for exactly the stated reason, and only adds that O18 has to go with it.
+
+**What it got wrong.** It paired **O1 with O3**, on the grounds that both remove work from every
+read. That grouping does not survive the evidence: O3 is the one entry a benchmark already settles,
+and O1 is one of five that no benchmark can currently see at all. They belong two tiers apart, and
+the thing that separates them is not size but whether the claim can be checked.
+
+**What it left out is the larger point.** It covered seven entries. It was silent on **O23**, which
+turned out to be the only measured entry on the page; on **O17**, the cheapest change with evidence
+behind it; and on **O13**, which was quietly getting worse the whole time — its quadratic term moved
+onto the resident get path and the entry was never updated. Three of the top four ranks were not on
+the list, which is what a flat catalogue with an ordering bolted to the end will do.

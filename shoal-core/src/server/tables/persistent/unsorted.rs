@@ -39,7 +39,7 @@ use crate::storage::{
     FullArchiveMap, IntentReadSupport, LoaderMsg, Loaders, PendingResponse, RecoveryStats,
     ShouldPrune,
 };
-use crate::tables::partitions::{ArchivedMaybeRow, MaybeLoaded, MaybeRow};
+use crate::tables::partitions::{ArchivedMaybeRow, MaybeLoaded, MaybeRow, ValidatedArchive};
 
 /// The different types of entries in a shoal intent log
 #[derive(Debug, Archive, Serialize, Deserialize)]
@@ -252,10 +252,13 @@ where
     /// compacted generation and not the one we are writing in: the queries we are
     /// about to release can modify this partition, and their intents would land in
     /// an intent log that has not been compacted yet.
+    ///
+    /// This is where an archives bytes are validated, once, so a corrupt archive fails the
+    /// read that produced it rather than the first query that happens to touch it.
     pub async fn load_partition(
         &mut self,
         loaded: LoadedPartition,
-    ) -> Option<(Vec<(QueryMetadata, UnsortedQuery<R>)>, u64)> {
+    ) -> Result<Option<(Vec<(QueryMetadata, UnsortedQuery<R>)>, u64)>, ServerError> {
         // if we have an existing loaded partition then do not use our newly loaded data
         // as that should be older
         match self.partitions.entry(loaded.partition_id) {
@@ -265,10 +268,14 @@ where
                 // than what we read or a tombstone shadowing it, and in both cases
                 // our freshly read data is stale.
                 if let &mut MaybeLoaded::Accessible(_) = entry.get_mut() {
-                    // get the size of our dat
-                    let size = loaded.data.len();
+                    // validate this archive once, here, instead of on every query that reads it
+                    let archive = hotpath::measure_block!("ValidatedArchive::new", {
+                        ValidatedArchive::new(loaded.data)
+                    })?;
+                    // get the size of our data, only once it is known to be good
+                    let size = archive.len();
                     // wrap our raw data so that we can access it only when needed
-                    let wrapped = MaybeLoaded::Accessible(loaded.data);
+                    let wrapped = MaybeLoaded::Accessible(archive);
                     // overwrite our data with newly loaded data
                     entry.insert(wrapped);
                     // increment our memory usage
@@ -281,10 +288,14 @@ where
             }
             // this partition does not have any already loaded data
             hash_map::Entry::Vacant(entry) => {
-                // get the size of our dat
-                let size = loaded.data.len();
+                // validate this archive once, here, instead of on every query that reads it
+                let archive = hotpath::measure_block!("ValidatedArchive::new", {
+                    ValidatedArchive::new(loaded.data)
+                })?;
+                // get the size of our data, only once it is known to be good
+                let size = archive.len();
                 // wrap our raw data so that we can access it only when needed
-                let wrapped = MaybeLoaded::Accessible(loaded.data);
+                let wrapped = MaybeLoaded::Accessible(archive);
                 // insert our newly loaded and wrapped data
                 entry.insert(wrapped);
                 // increment our memory usage
@@ -296,9 +307,10 @@ where
             }
         }
         // get the queries that were blocked on this partition
-        self.blocked
+        Ok(self
+            .blocked
             .remove(&loaded.partition_id)
-            .map(|unblocked| (unblocked, self.flushed_generation))
+            .map(|unblocked| (unblocked, self.flushed_generation)))
     }
 
     /// Block a query on a partition being loaded from disk
@@ -560,7 +572,7 @@ where
                     },
                     MaybeLoaded::Accessible(read) => {
                         // access our data
-                        let access = UnsortedPartition::<R>::access(read).unwrap();
+                        let access = read.archived();
                         // check if this archived row still exists
                         match &access.row {
                             // this partitions row still exists so check any filters
@@ -864,6 +876,13 @@ where
     /// Flush all pending writes to disk
     pub async fn flush(&mut self) -> Result<(), ServerError> {
         self.storage.flush().await
+    }
+
+    /// Check if this tables intent log is due to be rotated
+    ///
+    /// Asked by the shard before it sweeps its tables, so it stays synchronous.
+    pub fn compaction_due(&self) -> bool {
+        self.storage.compaction_due()
     }
 
     /// Get all flushed response actions

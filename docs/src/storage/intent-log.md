@@ -203,13 +203,26 @@ io_uring completions are not ordered, so a later buffer landing before an earlie
 normal case rather than a race. Taking the highest completed offset would advance the
 watermark past data still in flight and acknowledge writes that are not on disk.
 
-`ServerMsg::DataFlushed` still exists but **carries no position** — it is purely a wakeup. The
-shard blocks on its channel, so without a message `handle_flushed` would never run. Keeping
-the position out of it is deliberate: a message observed after a log rotation would otherwise
-apply a stale offset to a fresh file.
+`ServerMsg::DataFlushed` **carries no position** — it is purely a wakeup, and the watermark it
+wakes the shard to read comes from `FlushState` instead. Keeping the position out of it is
+deliberate: a message observed after a log rotation would otherwise apply a stale offset to a
+fresh file.
+
+**Its arrival is load-bearing.** It was once merely convenient — the shard swept its tables after
+every message it handled, so a lost `DataFlushed` would have been covered by the next message of
+any kind. Since [F5](../features/flushed-sweep-gate.md) the shard *only* sweeps on this message (or
+when a log is due to rotate), so the pairing is now a contract: **every advance of `written_pos` or
+`synced_pos` must be followed by a `DataFlushed`.** `write_helper` and `start_sync`'s spawned task
+both send one unconditionally, including on their error paths, and `start_sync`'s recursion is what
+covers the writes that retired while a group commit was already running. The one path that advances
+a watermark without sending — `sync_blocking`'s `mark_synced` — is only safe because both of its
+callers already run inside a sweep that drains. F5's *Invariants to uphold* is the full statement.
 
 IO errors from a background task are recorded in `FlushState` and surfaced by `check_error`
 on the next `flush` or `compact_if_needed`, rather than `unwrap()`ing inside a detached task.
+`compact_if_needed` now runs behind the gate above, which is safe for the same reason: a failed
+write and a failed fdatasync both still send their `DataFlushed`, so the error is never sitting
+behind a gate that nothing will open.
 
 ### Position tracking
 

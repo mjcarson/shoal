@@ -281,12 +281,18 @@ hash_map::Entry::Occupied(mut entry) => {
     }
 }
 hash_map::Entry::Vacant(entry) => {
-    entry.insert(MaybeLoaded::Accessible(loaded.data));
+    entry.insert(MaybeLoaded::Accessible(ValidatedArchive::new(loaded.data)?));
     ...
 }
 ```
 
-`.../persistent/sorted.rs:250-301`
+`.../persistent/sorted.rs`
+
+**The `Vacant` arm is where an archive is validated**, once, and it is the only place it happens
+now ([F4](../features/validated-archives.md)). That is also why `load_partition` returns a
+`Result`: a corrupt archive fails the read that produced it rather than the first query to touch
+it. The `Occupied` arm above still uses the checked `access`, because those bytes are never
+wrapped — that call is the only validation they get.
 
 If nothing is in memory, the raw bytes are installed as `Accessible` — no deserialization. If
 something *is* in memory, the disk copy becomes the base and the in-memory rows (including

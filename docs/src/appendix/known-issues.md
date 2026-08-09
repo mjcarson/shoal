@@ -25,8 +25,11 @@ partly fixed: the open remainder is here and the rest is there. Item 9 was a thi
 until its second half was fixed, and is now on the resolved page alone.
 
 **Baseline as of writing:** `cargo check --workspace --all-targets` passes with warnings;
-`cargo test --workspace` passes — 168 integration tests (one ignored), 194 `shoal-core` unit
-tests, 11 doctests. That is up from 14 and 32 with the addition of SHQL coverage
+`cargo test --workspace` passes — 172 integration tests (one ignored), 199 `shoal-core` unit
+tests, 11 doctests. That is up from 168, 194 and 11 with the config and cpu selection tests
+added by [items 18 and 50](resolved/excluded-cores-typo.md) and the baseline versioning and
+throughput tests added by [F3](../features/performance-harness.md). Before those it was up
+from 14 and 32 with the addition of SHQL coverage
 ([SHQL](../api/shql.md#testing)), the restart and eviction tests added with items 4 and 5, the
 limit and cross-shard coverage added with item 7, the row-order and `IN`/`OR` coverage added
 with items 26 and 39, the sort-key selection coverage added with item 8, the range coverage
@@ -257,12 +260,6 @@ collision to the next binary someone adds.
 All bypass the tracing level filter. Visible in any test run — see the sample output in
 [Observability](../operations/observability.md#debug-output-that-is-not-tracing).
 
-### 18. `exluded_cores` is silently ignored
-
-The checked-in `shoal.yml` sets `exluded_cores`; the struct field is `exclude_cores`
-(`shoal-core/src/server/conf.rs:21`). The `config` crate ignores unknown keys, so core
-exclusion never takes effect. `CLAUDE.md` reproduces the typo.
-
 ### 19. `memory` has no serde default
 
 `shoal-core/src/server/conf.rs:22-24` — the only field in `Resources` without a default. A
@@ -312,6 +309,14 @@ Also `RemoteTracing::Grpc` exports over HTTP (`trace.rs:36-40`), and
   the old `scan` re-added `read.len()` once per update intent, so a partition with *N* updates
   was counted *N* times.
 
+The fix for the first bullet is the one filed as
+[O4](optimizations.md#o4-deep_size_of-is-a-recursive-walk-called-on-every-mutation), ranked **B2**
+there. The mismatched bases exist *because* the size is re-derived at each call site instead of
+being owned by one, so carrying a row's measured size alongside it settles this item and removes a
+recursive walk from every mutation with the same edit. That is why O4 outranks the other write-path
+entries despite the profile saying the write path is waiting on the device — it is bought for a
+correctness fix, and the cost removal is change left over.
+
 ### 23. Client stream and pool rough edges
 
 - `ShoalResultStream::skip(0)` panics: `skip -= 1` precedes the zero check
@@ -337,7 +342,7 @@ The panic that could leave a terminal in raw mode is [fixed](resolved/shoalctl-p
 | --- | --- |
 | `Conf::new("shoal.yml")` | The method is `Conf::from_file` (`conf.rs:269`) |
 | "LRU eviction at 60%" | Eviction triggers when usage exceeds the configured limit exactly; 40% is then freed (`shard.rs:661`, `:557`) |
-| `exluded_cores` | Should be `exclude_cores` |
+| ~~`exluded_cores`~~ | ~~Should be `exclude_cores`~~ — [fixed](resolved/excluded-cores-typo.md), in both files |
 | Lists `EphemeralTable` as a usable table type | It does not satisfy the interface `#[db]` generates calls against |
 
 ### 28. SHQL "Unknown field" names the field it is listing as valid
@@ -491,6 +496,28 @@ no-op at the end of an IO path: if the two ever diverge, nothing here would say 
 **Fix direction:** handle the arm explicitly, even if the body is `// the resident copy is the
 same extent, so keep it and drop what we read`. An `else` that says why is worth more than a
 pattern that quietly does not match.
+
+### 51. A partition that fails to load never releases the queries blocked on it
+
+`.../persistent/sorted.rs` and `.../persistent/unsorted.rs` — `load_partition` builds the loaded
+partition and then, at the end, drains `self.blocked` for the queries that were parked on it. Every
+early exit between those two points leaves those queries parked forever: the client waits on a
+response that no longer has anything to produce it, and the entry in `blocked` is never collected.
+
+Not introduced by [F4](../features/validated-archives.md), and not fixed by it — but F4 is what made
+it worth filing, because it added the first failure that returns rather than panics. Before it the
+only way out of that function was a panic, which took the whole shard with it and made the parked
+queries somebody else's problem. Now a corrupt archive returns `Err`, which propagates up through
+the shard message loop and still ends the shard, so the *symptom* is unchanged today. What changed is
+that the function now has an early exit at all, and the next one added to it may not be fatal.
+
+The same shape is on the recovery path in `FileSystem::load_scanned`, which is less interesting
+because nothing is blocked yet during startup.
+
+**Fix direction:** the parked queries are the load's responsibility whether it succeeded or not.
+Draining `blocked` and answering its entries with the error belongs in the failure path, not only in
+the success one — which needs a query error response that can carry a storage failure, so it is
+larger than it sounds. Worth taking with [item 16](#16-panics-on-the-hot-path).
 
 ### 35. A `RefCell` borrow is held across three awaits in the compactor
 

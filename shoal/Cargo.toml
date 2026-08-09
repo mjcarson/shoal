@@ -11,8 +11,13 @@ path = "src/lib.rs"
 
 [features]
 # enable hotpath profiling
-hotpath = ["hotpath/hotpath"]
+#
+# this must forward to shoal-core, since every instrumentation attribute lives there and
+# enabling only the hotpath crate's own feature builds a profiler with nothing to measure
+hotpath = ["hotpath/hotpath", "shoal-core/hotpath"]
 #hotpath-alloc = ["hotpath/hotpath-alloc"]
+# expose shoal-core internals to the criterion benches in benches/
+bench = ["shoal-core/bench"]
 
 
 [dependencies]
@@ -24,6 +29,8 @@ uuid = { workspace = true }
 glommio = { workspace = true }
 tokio = { workspace = true }
 owo-colors = "4.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 kanal = { workspace = true }
 mimalloc = { workspace = true }
 hotpath = { workspace = true }
@@ -40,3 +47,11 @@ deepsize2 = "0.1"
 core_affinity = "0.8"
 tempfile = "3"
 byte-unit = "5.1"
+criterion = { workspace = true }
+
+# the micro benchmarks reach crate private internals of shoal-core through its `bench`
+# feature, so they cannot be built without it
+[[bench]]
+name = "partitions"
+harness = false
+required-features = ["bench"]

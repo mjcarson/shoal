@@ -112,6 +112,12 @@ where
     /// state shared with its detached IO tasks, which is correct the instant an IO
     /// completes rather than whenever the shard happens to drain its channel. This
     /// message exists purely to wake the shard up so it runs `handle_flushed`.
+    ///
+    /// Its *arrival* is load-bearing: the shard only sweeps its tables for newly
+    /// durable responses when one of these has landed, so every advance of a durable
+    /// watermark has to be followed by one of these. See the invariants on
+    /// `docs/src/features/flushed-sweep-gate.md` before adding a path that moves a
+    /// watermark.
     DataFlushed,
     /// Mark some partitions as evictable
     MarkEvictable {

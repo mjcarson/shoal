@@ -281,6 +281,7 @@ impl FlushState {
 /// * `file` - The intent log file to sync
 /// * `state` - The flush state shared with our writer
 /// * `shard_local_tx` - The channel to wake our shard up on
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 fn start_sync<D: ShoalDatabase>(
     file: Rc<DmaFile>,
     state: Rc<RefCell<FlushState>>,
@@ -342,6 +343,7 @@ fn start_sync<D: ShoalDatabase>(
 /// * `state` - The flush state shared with our writer
 /// * `durability` - How durable a write has to be before it can be acknowledged
 /// * `shard_local_tx` - The channel to tell our shard this write landed on
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 async fn write_helper<D: ShoalDatabase>(
     file: Rc<DmaFile>,
     buff: DmaBuffer,
@@ -415,6 +417,7 @@ impl<D: ShoalDatabase> StreamWriter<D> {
     }
 
     /// If at write-behind capacity, await the oldest pending write
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     async fn flush_oldest_write(&mut self) {
         if self.pending_writes.len() >= self.max_write_behind {
             if let Some(handle) = self.pending_writes.pop_front() {
@@ -465,6 +468,7 @@ impl<D: ShoalDatabase> StreamWriter<D> {
     /// # Arguments
     ///
     /// * `new_usable` - The amount of usable space our next buffer needs
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     async fn write(&mut self, new_usable: usize) -> Result<(), ServerError> {
         // if we have nothing staged then just make sure our buffer is big enough
         if self.buff_pos == 0 {
@@ -516,6 +520,7 @@ impl<D: ShoalDatabase> StreamWriter<D> {
     /// # Arguments
     ///
     /// * `size` - The size to prep for
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub async fn prep(&mut self, size: usize) -> &mut [u8] {
         // if we don't have enough usable space then write our current buffer out
         if self.usable() < size + self.buff_pos {
@@ -534,6 +539,7 @@ impl<D: ShoalDatabase> StreamWriter<D> {
     /// # Arguments
     ///
     /// * `size` - The number of bytes that have been consumed
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub async fn consume(&mut self, size: usize) {
         // increment our buffer position by the amount of data consumed
         self.buff_pos += size;

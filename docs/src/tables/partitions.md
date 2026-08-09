@@ -8,34 +8,35 @@ addressed by partition key first.
 The central type. A partition in memory is in one of two states:
 
 ```rust
-pub enum MaybeLoaded<P: PartitionSupport> {
+pub enum MaybeLoaded<P: PartitionSupport, B = ReadResult> {
     /// A fully loaded partition
     Loaded { partition: P, generation: u64 },
     /// An accessible but not fully loaded partition
-    Accessible(ReadResult),
+    Accessible(ValidatedArchive<P, B>),
 }
 ```
 
-`shoal-core/src/server/tables/partitions.rs:29-34`
+`shoal-core/src/server/tables/partitions.rs`
 
 ```
      read from archive              first mutation
   ─────────────────────▶ Accessible ──────────────▶ Loaded
-                         (raw bytes)                (deserialized)
-                              │                          │
-                              │ filters/reads run        │ evictable only once
-                              │ directly on the archive  │ generation <= flushed
-                              ▼                          ▼
+                    validated once here             (deserialized)
+                         (raw bytes)                      │
+                              │                           │ evictable only once
+                              │ filters/reads run         │ generation <= flushed
+                              │ directly on the archive   │
+                              ▼                           ▼
                           always evictable            eviction
 ```
 
-**`Accessible` is the interesting one.** It holds the raw `ReadResult` straight off disk — no
-deserialization has happened. rkyv lets Shoal read that buffer in place, so a partition can be
-searched, filtered, and answered from without ever being turned into Rust structs:
+**`Accessible` is the interesting one.** It holds the bytes straight off disk — no deserialization
+has happened. rkyv lets Shoal read that buffer in place, so a partition can be searched, filtered,
+and answered from without ever being turned into Rust structs:
 
 ```rust
 MaybeLoaded::Accessible(read) => {
-    let access = SortedPartition::<R>::access(read).unwrap();
+    let access = read.archived();
     for row in access.live_row_values() {
         if params.limit_reached(found) { break; }
         if let Some(filter) = &params.filters {
@@ -59,6 +60,18 @@ with: for a get that named no projection it is the row itself, whose `from_archi
 that projection declared straight out of the archive, so the rest of the row stays where it is
 ([F2](../features/projections.md)). The scan is monomorphised over `P`, so neither case pays for
 the other.
+
+**`read.archived()` used to be `SortedPartition::<R>::access(read).unwrap()`**, and the difference
+is the whole of [F4](../features/validated-archives.md). `access` is rkyv's *checked* entry point:
+it ran `bytecheck` over the entire buffer before the scan above could start, on **every query**, so
+a get naming one row of a 4,096-row partition spent 29.89 µs of 30.43 µs validating rows it was not
+going to look at. The bytes are validated once now, when the read that produced them lands, and
+`Accessible` holds a `ValidatedArchive` that carries that fact rather than a bare buffer. Nothing is
+validated less often in total — a corrupt archive fails the read instead of the query.
+
+The second type parameter is why any of the archived path can be tested at all: a glommio
+`ReadResult` can only come from a live reactor, so before F4 the `Accessible` arm could not be
+constructed outside a running server. It defaults to `ReadResult` and production never names it.
 
 ### The scan lives on the partition
 
@@ -115,7 +128,7 @@ pub fn is_evictable(&self, flushed_generation: u64) -> bool {
 }
 ```
 
-`.../tables/partitions.rs:46-51`
+`.../tables/partitions.rs`
 
 `Accessible` is unconditionally evictable — it is a read-only mirror of bytes already on
 disk, so dropping it loses nothing.
@@ -127,17 +140,21 @@ pub trait PartitionSupport: DeepSizeOf {
     fn size(&self) -> usize { self.deep_size_of() }
 }
 
-impl<P: PartitionSupport> MaybeLoaded<P> {
+impl<P: PartitionSupport, B> MaybeLoaded<P, B> {
     pub fn size(&self) -> usize {
         match self {
             Self::Loaded { partition, .. } => partition.size(),
-            Self::Accessible(read) => read.len(),
+            Self::Accessible(archive) => archive.len(),
         }
     }
 }
 ```
 
-`.../tables/partitions.rs:20-45`
+`.../tables/partitions.rs`
+
+`ValidatedArchive::len` answers from the length recorded when the archive was validated rather
+than from the buffer, which is what keeps this impl block free of the bounds reading an archive
+needs ([F4](../features/validated-archives.md#invariants-to-uphold)).
 
 `deepsize2` walks the structure including heap allocations, so a `String` field counts its
 buffer. Both concrete partitions override `size()` to return a cached field rather than
@@ -358,7 +375,10 @@ memory, it is complete.
 Both partition types implement:
 
 - `PartitionSupport` — sizing (`.../tables/partitions.rs:262-266`, `:546-553`).
-- `RkyvSupport` — `serialize`/`access`/`deserialize` (`.../tables/partitions.rs:257`, `:541`).
+- `RkyvSupport` — `serialize`/`access`/`deserialize` (`.../tables/partitions.rs`). `access` is
+  still the checked entry point, and is still what validates an archive - it is now called once
+  per read from disk, by `ValidatedArchive::new`, rather than once per query
+  ([F4](../features/validated-archives.md)).
 - `IntentReadSupport<T>` — the recovery and compaction hooks: `scan_keys`, `replay`,
   `apply_intents`, `partition_key_and_intent` (`.../server/tables/storage.rs`).
 

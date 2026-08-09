@@ -109,6 +109,12 @@ twice.
 is no shard loop to post a `ServerMsg::Partition` back to. It also skips any key already in the
 partition map, so a copy read from disk can never displace a newer one.
 
+Each partition it reads is validated as it is wrapped, which is where an archive is validated now
+that a query does not validate it ([F4](../features/validated-archives.md)). That makes recovery
+the point at which a corrupt archive is refused, and it is a cost startup did not use to pay — the
+partitions in question are about to be replayed into anyway, so it is close to free, but it is on
+the startup path.
+
 Every log's entries are held in memory as a `Vec<ReadResult>` until phase 3. Replay memory is
 therefore proportional to the total size of all logs, each bounded by `intent_log_size` (default
 10 MiB) per table per shard. That is a change: it used to be the size of the largest single log.
@@ -330,4 +336,5 @@ turns on, and the reason recovery is phased rather than per-log.
 - Durability is only as good as the filesystem underneath. btrfs silently falls back to
   buffered IO for a misaligned O_DIRECT write instead of returning `EINVAL`, so an alignment
   bug in the write path would not surface there — the write-path tests deliberately run
-  against a real filesystem rather than tmpfs for the same reason.
+  against a real filesystem rather than tmpfs for the same reason. Storage has since moved to
+  **XFS**, which returns `EINVAL`, so that class of bug is now loud rather than silent.

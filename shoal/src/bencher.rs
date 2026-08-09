@@ -1,12 +1,24 @@
 //! Benchmarks shoal
 
 use owo_colors::OwoColorize;
+use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use rkyv::{Archive, Deserialize, Serialize};
 use tokio::time::Instant;
+
+/// The schema version of a written baseline
+///
+/// A baseline is only comparable against a run of the same shape. Two earlier baseline files
+/// taught us both halves of that: `.benchmark-old` could not be deserialized at all, which was
+/// loud and harmless, and `.benchmark` *did* load while having been written when the insert
+/// acknowledgement was inert, which was silent and produced a comparison between two different
+/// operations.
+///
+/// Bump this whenever [`BenchResult`] changes shape or whenever what a sample measures
+/// changes. A baseline carrying a different version is rejected rather than compared.
+const BASELINE_VERSION: u32 = 1;
 
 /// Print a benchmark result with colors
 macro_rules! print_bench {
@@ -65,7 +77,7 @@ pub enum BenchOp {
 }
 
 /// The latency distribution for one kind of operation
-#[derive(Debug, Archive, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Stats {
     /// The number of samples this distribution was built from
     count: usize,
@@ -184,14 +196,46 @@ fn percentile(sorted: &[Duration], percentile: f64) -> Duration {
 }
 
 /// A benchmarks past results
-#[derive(Debug, Archive, Serialize, Deserialize)]
+///
+/// This is written as JSON rather than as an rkyv archive. A baseline is a durable record that
+/// has to outlive the build that wrote it and be readable by a human deciding whether two
+/// numbers are comparable, and an unversioned binary archive is neither.
+#[derive(Debug, Serialize, Deserialize)]
 pub struct BenchResult {
+    /// The schema version this result was written with
+    #[serde(default)]
+    version: u32,
+    /// The name this run was captured under, if it was given one
+    #[serde(default)]
+    label: Option<String>,
     /// The latency distribution for insert queries
     insert: Stats,
     /// The latency distribution for get queries
     get: Stats,
     /// The total wall clock time the last run took
     total: Duration,
+    /// The number of rows this run inserted
+    #[serde(default)]
+    inserted: u64,
+    /// The number of rows this run read back
+    #[serde(default)]
+    retrieved: u64,
+}
+
+impl BenchResult {
+    /// Get the rows per second this run sustained over its whole wall clock
+    ///
+    /// This counts every row the run touched, inserted and read, against the wall clock that
+    /// covers CSV parsing and worker spawn as well as the queries. It is a throughput figure
+    /// for the harness as a whole, not a service rate for the server.
+    fn rows_per_sec(&self) -> f64 {
+        // a run that took no measurable time has no meaningful rate
+        let seconds = self.total.as_secs_f64();
+        if seconds <= 0.0 {
+            return 0.0;
+        }
+        (self.inserted + self.retrieved) as f64 / seconds
+    }
 }
 
 /// A bench worker for benching across workers/processes
@@ -241,15 +285,21 @@ pub struct Bencher {
     path: PathBuf,
     /// The last benchmark run
     prior: Option<BenchResult>,
+    /// The number of rows this run inserted
+    inserted: u64,
+    /// The number of rows this run read back
+    retrieved: u64,
+    /// The name this run was captured under, if it was given one
+    label: Option<String>,
 }
 
 impl Bencher {
     /// Create a new bencher and load old results from disk if they exist
     ///
-    /// A baseline that cannot be read is warned about and ignored rather than
-    /// aborting the run. Baselines are unversioned rkyv archives, so one written by
-    /// a build with a different `BenchResult` shape will not deserialize, and losing
-    /// a whole benchmark run to that is not a good trade.
+    /// A baseline that cannot be read is warned about and ignored rather than aborting the
+    /// run, since losing a whole benchmark to a stale file is not a good trade. A baseline
+    /// that reads cleanly but carries a different [`BASELINE_VERSION`] is refused for the
+    /// opposite reason: it would produce a comparison that looks valid and is not.
     ///
     /// # Arguments
     ///
@@ -270,6 +320,9 @@ impl Bencher {
             get_times: Vec::with_capacity(instances),
             path: path.as_ref().to_path_buf(),
             prior,
+            inserted: 0,
+            retrieved: 0,
+            label: None,
         }
     }
 
@@ -280,9 +333,9 @@ impl Bencher {
     /// * `buff` - The raw baseline bytes
     /// * `path` - The path we read those bytes from, for the warning
     fn load_prior(buff: &[u8], path: &Path) -> Option<BenchResult> {
-        // access our archived baseline
-        let archive = match rkyv::access::<ArchivedBenchResult, rkyv::rancor::Error>(buff) {
-            Ok(archive) => archive,
+        // deserialize our baseline
+        let prior = match serde_json::from_slice::<BenchResult>(buff) {
+            Ok(prior) => prior,
             Err(error) => {
                 eprintln!(
                     "warning: ignoring unreadable baseline at {}: {error}",
@@ -291,17 +344,21 @@ impl Bencher {
                 return None;
             }
         };
-        // deserialize our baseline
-        match rkyv::deserialize::<BenchResult, rkyv::rancor::Error>(archive) {
-            Ok(prior) => Some(prior),
-            Err(error) => {
-                eprintln!(
-                    "warning: ignoring unreadable baseline at {}: {error}",
-                    path.display()
-                );
-                None
-            }
+        // refuse a baseline that was written against a different definition of a sample
+        //
+        // this is the dangerous case rather than the loud one. a file that fails to parse
+        // costs a comparison; a file that parses and is not comparable costs a wrong answer.
+        if prior.version != BASELINE_VERSION {
+            eprintln!(
+                "warning: ignoring baseline at {}: it is version {} and this build writes \
+                 version {}, so the two are not comparable",
+                path.display(),
+                prior.version,
+                BASELINE_VERSION
+            );
+            return None;
         }
+        Some(prior)
     }
 
     /// Get a new bench worker
@@ -371,14 +428,40 @@ impl Bencher {
             }
             None => println!("  wall clock: {:.2?}", result.total),
         }
+        // print the throughput this run sustained over that wall clock
+        println!(
+            "  rows/sec: {:.0} ({} inserted, {} read)",
+            result.rows_per_sec(),
+            result.inserted,
+            result.retrieved
+        );
     }
 
-    /// Get our total times and write them to disk if needed
+    /// Record how many rows this run moved
+    ///
+    /// These are counted by the caller rather than derived from the sample counts, because a
+    /// sample is a batch and a batch is many rows.
     ///
     /// # Arguments
     ///
-    /// * `write` - Whether to record this run as the new baseline
-    pub fn finish(&mut self, write: bool) {
+    /// * `inserted` - The number of rows this run inserted
+    /// * `retrieved` - The number of rows this run read back
+    pub fn set_row_counts(&mut self, inserted: u64, retrieved: u64) {
+        self.inserted = inserted;
+        self.retrieved = retrieved;
+    }
+
+    /// Name this run so its recorded result can be identified later
+    ///
+    /// # Arguments
+    ///
+    /// * `label` - The name to record this run under
+    pub fn set_label(&mut self, label: impl Into<String>) {
+        self.label = Some(label.into());
+    }
+
+    /// Summarize this run into a result
+    fn summarize(&mut self) -> BenchResult {
         // get the total amount of time that this benchmark took
         let total = match self.total_timer_end {
             Some(end) => end.duration_since(self.total_timer_start),
@@ -386,21 +469,42 @@ impl Bencher {
             None => self.total_timer_start.elapsed(),
         };
         // build a distribution for each kind of operation
-        let result = BenchResult {
+        BenchResult {
+            version: BASELINE_VERSION,
+            label: self.label.clone(),
             insert: Stats::from_times(&mut self.insert_times),
             get: Stats::from_times(&mut self.get_times),
             total,
-        };
+            inserted: self.inserted,
+            retrieved: self.retrieved,
+        }
+    }
+
+    /// Get our total times and write them to disk if needed
+    ///
+    /// # Arguments
+    ///
+    /// * `write` - Whether to record this run as the new baseline
+    /// * `json` - An extra path to write this run to, whatever `write` says
+    pub fn finish(&mut self, write: bool, json: Option<&Path>) {
+        // summarize every sample we gathered
+        let result = self.summarize();
         // print our results
         self.print(&result);
+        // serialize this run once for whichever of the two destinations want it
+        let encoded =
+            serde_json::to_vec_pretty(&result).expect("Failed to serialize benchmark result");
         // write a new benchmark to disk if requested
         if write {
-            // serialize our latest benchmark
-            let archived = rkyv::to_bytes::<rkyv::rancor::Error>(&result)
-                .expect("Failed to serialize benchmark");
-            // write our archived benchmark to disk
-            std::fs::write(&self.path, archived).expect("Failed to write benchmark to disk");
+            // write our benchmark to disk
+            std::fs::write(&self.path, &encoded).expect("Failed to write benchmark to disk");
             println!("recorded baseline at {}", self.path.display());
+        }
+        // archive this run wherever the caller asked us to, if it asked
+        if let Some(json) = json {
+            // write this run out for whatever is collecting it
+            std::fs::write(json, &encoded).expect("Failed to write benchmark json to disk");
+            println!("wrote run to {}", json.display());
         }
     }
 }
@@ -476,8 +580,8 @@ mod tests {
     fn unreadable_baseline_is_ignored() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("garbage.benchmark");
-        // write bytes that are not a valid archived BenchResult
-        std::fs::write(&path, b"this is not an rkyv archive").unwrap();
+        // write bytes that are not a valid baseline
+        std::fs::write(&path, b"this is not a baseline").unwrap();
         let bencher = Bencher::new(&path, 16);
         assert!(bencher.prior.is_none());
     }
@@ -488,5 +592,77 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let bencher = Bencher::new(dir.path().join("does-not-exist"), 16);
         assert!(bencher.prior.is_none());
+    }
+
+    #[test]
+    /// A baseline written by this build round trips back into a comparison
+    fn a_written_baseline_is_loaded_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("round-trip.benchmark");
+        // record a run as the baseline
+        let mut bencher = Bencher::new(&path, 16);
+        bencher.set_row_counts(100, 25);
+        bencher.set_label("round-trip");
+        bencher.stop_total();
+        bencher.finish(true, None);
+        // a fresh bencher over the same path should pick it up
+        let reloaded = Bencher::new(&path, 16);
+        let prior = reloaded.prior.expect("a freshly written baseline did not load");
+        assert_eq!(prior.version, super::BASELINE_VERSION);
+        assert_eq!(prior.label.as_deref(), Some("round-trip"));
+        assert_eq!(prior.inserted, 100);
+        assert_eq!(prior.retrieved, 25);
+    }
+
+    #[test]
+    /// A baseline from a different schema version is refused rather than compared
+    ///
+    /// This is the case that matters. A file that fails to parse costs a comparison; a file
+    /// that parses cleanly while measuring something else costs a wrong answer, which is what
+    /// the old `.benchmark` did when it was compared against a build whose insert
+    /// acknowledgement was no longer inert.
+    fn a_baseline_from_another_version_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old-version.benchmark");
+        // write a well formed baseline that claims a version we do not write
+        let zeroed = r#"{"count":0,"max":{"secs":0,"nanos":0},"p99":{"secs":0,"nanos":0},
+            "p95":{"secs":0,"nanos":0},"p90":{"secs":0,"nanos":0},"p50":{"secs":0,"nanos":0},
+            "avg":{"secs":0,"nanos":0},"min":{"secs":0,"nanos":0}}"#;
+        let body = format!(
+            r#"{{"version":{},"label":"ancient","insert":{zeroed},"get":{zeroed},
+                "total":{{"secs":1,"nanos":0}},"inserted":1,"retrieved":1}}"#,
+            super::BASELINE_VERSION + 1
+        );
+        std::fs::write(&path, body).unwrap();
+        // it parses, and it is still refused
+        let bencher = Bencher::new(&path, 16);
+        assert!(
+            bencher.prior.is_none(),
+            "a baseline from another version was accepted for comparison"
+        );
+    }
+
+    #[test]
+    /// Throughput is counted from the rows a run moved, not from its sample count
+    fn throughput_counts_rows_not_samples() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut bencher = Bencher::new(dir.path().join("throughput"), 16);
+        // record two seconds of wall clock carrying 3000 rows
+        bencher.set_row_counts(2000, 1000);
+        let mut result = bencher.summarize();
+        result.total = Duration::from_secs(2);
+        // 3000 rows over 2 seconds is 1500 rows a second
+        assert!((result.rows_per_sec() - 1500.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    /// A run that took no measurable time reports no rate rather than dividing by zero
+    fn throughput_of_an_instant_run_is_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut bencher = Bencher::new(dir.path().join("instant"), 16);
+        bencher.set_row_counts(10, 10);
+        let mut result = bencher.summarize();
+        result.total = Duration::ZERO;
+        assert_eq!(result.rows_per_sec(), 0.0);
     }
 }

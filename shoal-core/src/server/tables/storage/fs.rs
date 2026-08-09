@@ -46,7 +46,7 @@ use crate::server::messages::ServerMsg;
 use crate::server::{Conf, ServerError};
 use crate::shared::traits::{PartitionKeySupport, RkyvSupport, ShoalDatabase, TableNameSupport};
 use crate::storage::{ArchiveMapKinds, FilteredFullArchiveMap, FullArchiveMap, LoaderMsg, Loaders};
-use crate::tables::partitions::{MaybeLoaded, PartitionSupport};
+use crate::tables::partitions::{MaybeLoaded, PartitionSupport, ValidatedArchive};
 use loader::FsLoader;
 
 /// Find inactive intent log files for this shard, sorted by generation ascending
@@ -224,7 +224,12 @@ impl<D: ShoalDatabase> FileSystem<D> {
         to_load: HashSet<u64>,
         partitions: &mut HashMap<u64, MaybeLoaded<P>>,
         memory_usage: &mut Arc<RefCell<usize>>,
-    ) -> Result<(), ServerError> {
+    ) -> Result<(), ServerError>
+    where
+        for<'a> <P as Archive>::Archived: CheckBytes<
+            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+        >,
+    {
         // load each partition our intents named
         for partition_key in to_load {
             // never load over a partition we already hold, since ours is the newer copy
@@ -233,10 +238,12 @@ impl<D: ShoalDatabase> FileSystem<D> {
             }
             // get this partitions data
             if let Some(partition_read) = self.load_partition_direct(partition_key).await? {
-                // update the memory usage for this partition
-                *memory_usage.borrow_mut() += partition_read.len();
+                // validate this archive once, here, instead of on every query that reads it
+                let archive = ValidatedArchive::new(partition_read)?;
+                // update the memory usage for this partition, only once it is known to be good
+                *memory_usage.borrow_mut() += archive.len();
                 // wrap this partition as being accessible
-                let wrapped = MaybeLoaded::Accessible(partition_read);
+                let wrapped = MaybeLoaded::Accessible(archive);
                 // load this partition
                 partitions.insert(partition_key, wrapped);
             }
@@ -386,6 +393,19 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
         Ok(self.intent_log2.get_unflushed_pos())
     }
 
+    /// Check if this intent log has grown past the size it rotates at
+    ///
+    /// Rotation is driven by bytes *accepted* rather than bytes durable, so this only
+    /// reads the writers own position counters — no borrow of the shared flush state
+    /// and no await. That is what makes it cheap enough for the shard to ask on every
+    /// message before deciding whether to sweep its tables.
+    fn compaction_due(&self) -> bool {
+        // get the latency sensistive max intent log size
+        let max_size = self.table_conf.latency_sensitive.intent_log_size;
+        // our log is due to rotate once it has accepted more than that
+        self.intent_log2.get_unflushed_pos() > max_size
+    }
+
     /// Set our intent log to be compact if its needed
     ///
     /// Returns how far this tables intent log has been made durable
@@ -400,10 +420,8 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
     ) -> Result<FlushProgress, ServerError> {
         // surface any error our background write tasks hit
         self.intent_log2.check_error()?;
-        // get the latency sensistive max intent log size
-        let max_size = self.table_conf.latency_sensitive.intent_log_size;
         // check if this intent log is too big or if compaction is being forced
-        if force || self.intent_log2.get_unflushed_pos() > max_size {
+        if force || self.compaction_due() {
             // get our base intent path
             let mut new_path = self.table_conf.get_intent_path(R::name());
             // build the file name to rename our current intent log too
@@ -471,7 +489,12 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
         generation: u64,
         partitions: &mut HashMap<u64, MaybeLoaded<P>>,
         memory_usage: &mut Arc<RefCell<usize>>,
-    ) -> Result<RecoveryStats, ServerError> {
+    ) -> Result<RecoveryStats, ServerError>
+    where
+        for<'a> <P as Archive>::Archived: CheckBytes<
+            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+        >,
+    {
         // start with nothing discarded
         let mut stats = RecoveryStats::default();
         // get this tables settings

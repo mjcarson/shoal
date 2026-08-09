@@ -39,7 +39,7 @@ use crate::storage::{
     FullArchiveMap, IntentReadSupport, LoaderMsg, Loaders, PendingResponse, RecoveryStats,
     ShouldPrune, StorageSupport,
 };
-use crate::tables::partitions::{MaybeLoaded, MaybeRow, PartitionSupport};
+use crate::tables::partitions::{MaybeLoaded, MaybeRow, PartitionSupport, ValidatedArchive};
 
 /// Apply an update to a partition during recovery and count it if it was dropped
 ///
@@ -172,6 +172,7 @@ where
     recovery: RecoveryStats,
 }
 
+#[cfg_attr(feature = "hotpath", hotpath::measure_all)]
 impl<R: ShoalSortedTable + 'static, S: StorageSupport, N: TableNameSupport>
     PersistentSortedTable<R, S, N>
 where
@@ -306,10 +307,13 @@ where
     /// compacted generation and not the one we are writing in: the queries we are
     /// about to release can modify this partition, and their intents would land in
     /// an intent log that has not been compacted yet.
+    ///
+    /// This is where an archives bytes are validated, once, so a corrupt archive fails the
+    /// read that produced it rather than the first query that happens to touch it.
     pub async fn load_partition(
         &mut self,
         loaded: LoadedPartition,
-    ) -> Option<(Vec<(QueryMetadata, SortedQuery<R>)>, u64)> {
+    ) -> Result<Option<(Vec<(QueryMetadata, SortedQuery<R>)>, u64)>, ServerError> {
         // overlay any existing loaded partition data on this newly loaded partition
         match self.partitions.entry(loaded.partition_id) {
             hash_map::Entry::Occupied(mut entry) => {
@@ -337,10 +341,14 @@ where
             }
             // this partition does not have any already loaded data
             hash_map::Entry::Vacant(entry) => {
-                // get the size of our dat
-                let size = loaded.data.len();
+                // validate this archive once, here, instead of on every query that reads it
+                let archive = hotpath::measure_block!("ValidatedArchive::new", {
+                    ValidatedArchive::new(loaded.data)
+                })?;
+                // get the size of our data, which is only charged once it is known to be good
+                let size = archive.len();
                 // wrap our raw data so that we can access it only when needed
-                let wrapped = MaybeLoaded::Accessible(loaded.data);
+                let wrapped = MaybeLoaded::Accessible(archive);
                 // insert our newly loaded and wrapped data
                 entry.insert(wrapped);
                 // increment our memory usage
@@ -352,9 +360,10 @@ where
             }
         }
         // get the queries that were blocked on this partition
-        self.blocked
+        Ok(self
+            .blocked
             .remove(&loaded.partition_id)
-            .map(|unblocked| (unblocked, self.flushed_generation))
+            .map(|unblocked| (unblocked, self.flushed_generation)))
     }
 
     /// Cast and handle a serialized query
@@ -425,7 +434,7 @@ where
             }
             MaybeLoaded::Accessible(read) => {
                 // convert this read to a accessible partition
-                let accessable = SortedPartition::<R>::access(&read).unwrap();
+                let accessable = read.archived();
                 // deserialize our accessible partition
                 let mut partition = SortedPartition::<R>::deserialize(accessable).unwrap();
                 // insert this new row into our loaded partition
@@ -756,7 +765,7 @@ where
                     // this partition is loaded from disk but not deserialized
                     MaybeLoaded::Accessible(read) => {
                         // access this partitions data
-                        let accessible = SortedPartition::<R>::access(&read).unwrap();
+                        let accessible = read.archived();
                         // deserialize our partition so we can modify it
                         let mut partition = SortedPartition::<R>::deserialize(accessible).unwrap();
                         // since this partition is accessible it must have been the full partition from disk
@@ -928,7 +937,7 @@ where
                     // this partition is loaded from disk but not deserialized
                     MaybeLoaded::Accessible(read) => {
                         // access this partitions data
-                        let accessible = SortedPartition::<R>::access(&read).unwrap();
+                        let accessible = read.archived();
                         // deserialize our partition so we can update it
                         let mut partition = SortedPartition::<R>::deserialize(accessible).unwrap();
                         // try to update this partitions data
@@ -1095,6 +1104,13 @@ where
         self.storage.flush().await
     }
 
+    /// Check if this tables intent log is due to be rotated
+    ///
+    /// Asked by the shard before it sweeps its tables, so it stays synchronous.
+    pub fn compaction_due(&self) -> bool {
+        self.storage.compaction_due()
+    }
+
     /// Get all flushed response actions
     ///
     /// # Arguments
@@ -1214,7 +1230,7 @@ where
                     }
                     MaybeLoaded::Accessible(read) => {
                         // access this partitions data
-                        let accessible = SortedPartition::<T>::access(&read).unwrap();
+                        let accessible = read.archived();
                         // deserialize our partition so we can insert this row
                         let mut partition = SortedPartition::<T>::deserialize(accessible).unwrap();
                         // partitions that come from reads never have to go back to disk
@@ -1260,7 +1276,7 @@ where
                     }
                     MaybeLoaded::Accessible(read) => {
                         // access this partitions data
-                        let accessible = SortedPartition::<T>::access(&read).unwrap();
+                        let accessible = read.archived();
                         // deserialize our partition so we can tombstone this row
                         let mut partition = SortedPartition::<T>::deserialize(accessible).unwrap();
                         // partitions that come from reads never have to go back to disk
@@ -1300,7 +1316,7 @@ where
                     }
                     MaybeLoaded::Accessible(read) => {
                         // access this partitions data
-                        let accessible = SortedPartition::<T>::access(&read).unwrap();
+                        let accessible = read.archived();
                         // deserialize our partition so we can update this row
                         let mut partition = SortedPartition::<T>::deserialize(accessible).unwrap();
                         // partitions that come from reads never have to go back to disk

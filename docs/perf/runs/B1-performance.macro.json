@@ -1,0 +1,81 @@
+{
+  "version": 1,
+  "label": "B1-performance",
+  "insert": {
+    "count": 447251,
+    "max": {
+      "secs": 0,
+      "nanos": 345054114
+    },
+    "p99": {
+      "secs": 0,
+      "nanos": 262276419
+    },
+    "p95": {
+      "secs": 0,
+      "nanos": 211896908
+    },
+    "p90": {
+      "secs": 0,
+      "nanos": 183252813
+    },
+    "p50": {
+      "secs": 0,
+      "nanos": 49719647
+    },
+    "avg": {
+      "secs": 0,
+      "nanos": 68688869
+    },
+    "min": {
+      "secs": 0,
+      "nanos": 423562
+    }
+  },
+  "get": {
+    "count": 99999,
+    "max": {
+      "secs": 0,
+      "nanos": 1068095
+    },
+    "p99": {
+      "secs": 0,
+      "nanos": 649013
+    },
+    "p95": {
+      "secs": 0,
+      "nanos": 467134
+    },
+    "p90": {
+      "secs": 0,
+      "nanos": 374517
+    },
+    "p50": {
+      "secs": 0,
+      "nanos": 128667
+    },
+    "avg": {
+      "secs": 0,
+      "nanos": 179545
+    },
+    "min": {
+      "secs": 0,
+      "nanos": 21411
+    }
+  },
+  "total": {
+    "secs": 1,
+    "nanos": 801525357
+  },
+  "inserted": 447251,
+  "retrieved": 99999,
+  "runs": 5,
+  "wall_clock_ns": [
+    1699666659,
+    1776631523,
+    1801525357,
+    1817563321,
+    1877581761
+  ],
+  "spread_pct": 10.467646762258457
+}

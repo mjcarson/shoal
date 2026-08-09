@@ -297,11 +297,100 @@ deliberately an `INFO` field rather than a warning, because
 would fire on healthy runs. Once item 22 is closed, non zero drift becomes an invariant violation
 and should say so at `WARN`. Doing it before then trains people to ignore it.
 
+### Benchmark coverage the harness does not have
+
+[F3](../features/performance-harness.md) built three measurement layers and left four gaps in
+them, and [F5](../features/flushed-sweep-gate.md) found a fifth. Each was deliberate, and each is
+worth more than most of what is above it on this page, because the harness decides what evidence
+any future optimization can produce.
+
+**A micro-benchmark of the storage write path.** This is the important one. `write_helper`
+dominates the profile at 32.6 ms per call, five orders of magnitude above the partition insert
+it persists ([Performance Baseline](../operations/performance-baseline.md)) — and it is the one
+layer with no confidence interval around it, so any change to it can only be judged by a
+measurement whose spread is 10.5%. It was not built because timing `StreamWriter::write` and
+`start_sync` means driving a glommio `LocalExecutor` from inside criterion's sampling loop,
+through `Criterion::iter_custom`. If that proves unworkable, a standalone binary emitting the
+same JSON shape is an acceptable substitute.
+
+**An `Async` vs `Fsync` capture.** The single comparison that would isolate the cost of the
+durability barrier, on a config change alone, with no code change. It is cheap. It has not been
+run.
+
+**`wire_codec` and `routing` benches.** `rkyv` round trips over `Queries` and `ResponseKinds`,
+and `Ring::find_shard` / `split_by_shard`. Between them they are what O1, O18, O19 and O20 are
+about, and none of those four can currently be adjudicated at all
+([Optimizations](optimizations.md#which-entries-a-benchmark-can-currently-adjudicate)).
+
+**A table-layer bench, over `PersistentSortedTable::get`.** The gap that was not known to be a gap.
+The micro layer stops at `SortedPartition`, so everything between a query arriving at a table and
+reaching a partition is unmeasured: the `partitions` and `blocked` map lookups, `to_blocked`,
+`PendingGet`'s slot bookkeeping, and the replay path a get takes when it parks on a disk read.
+`optimizations.md` listed **O5**, **O12** and **O13** as adjudicable by `partition_sorted/*` and
+`seek_bytes/*`; none of those benches builds a table at all, so all three were uncovered while
+appearing covered. O13 is the reason this matters rather than a bookkeeping point — its quadratic
+term migrated from the blocked path onto the resident get path, widening as it went, and no
+benchmark was positioned to notice. What is needed is a get over *n* partition keys, *n* varying,
+against both a resident table and one whose partitions have to be read, so the O(n²) term is
+visible as a curve rather than argued from the source.
+
+The obstacle is that a `PersistentSortedTable` needs a storage backend and a loader channel, so
+this benchmark needs a glommio `LocalExecutor` inside criterion — the same `iter_custom` problem
+the write-path benchmark above has, and a reason to solve it once for both.
+
+**Half of this closed on the way past.** [F4](../features/validated-archives.md) gave `MaybeLoaded`
+a defaulted buffer parameter, which made the enum constructible outside a running server for the
+first time, and `partition_sorted/maybe_loaded/*` now measures the real `get` and `exists` on both
+arms. That is one layer below where O5, O12 and O13 live, so **it does not adjudicate any of them** —
+but it does mean the boundary this gap describes moved from `SortedPartition` up to
+`PersistentSortedTable`, and that the remaining obstacle really is the executor and nothing else.
+It also settled the shape the eventual bench should have: a control that the change cannot reach and
+a null on the other arm of the same dispatch, which is what caught
+[O24](optimizations.md#o24-two-benchmarks-move-with-the-shape-of-the-binary-around-them).
+
+**A fifth gap, added by [F5](../features/flushed-sweep-gate.md): the shard loop is unreachable from
+a test.** `Shard` has no `#[cfg(test)]` module, and constructing one takes a live glommio reactor, a
+ring, a channel mesh and a storage backend, so the loop's control flow — flush-when-idle, the
+flushed sweep gate, the eviction trigger — is only ever exercised end to end through a real server.
+F5 could pin the two *premises* its gate rests on as unit tests, but not the gate. That is why its
+integration coverage catches a broken gate by hanging rather than by failing an assertion, which is
+the worst way to learn something is wrong. This is the same executor-inside-criterion obstacle as
+the two benchmarks above, arriving from the test side instead, and it is a third reason to solve it
+once.
+
+**Per-query macro timing.** `--per-query` was specified and not built. The macro harness still
+takes one `Instant` per batch and copies it across every query in it, so there is no per-query
+service time. The batch-level default has to stay whatever happens, because the recorded spread
+figures were measured that way.
+
+**Multi-capture comparison.** `scripts/compare.sh` takes one capture per side. It needs to take
+several, because one cannot be trusted: across four identical repeats `get_key/4096` moved 22%
+and reported its outlying value with a ±0.2% confidence interval
+([Performance Baseline](../operations/performance-baseline.md#what-the-micro-layer-can-actually-resolve)).
+The protocol therefore requires a confirming repeat, and the tool cannot express it — the
+confirmation is a manual step today, which means it is a step that will be skipped. Taking
+`--against` several times per side and comparing observed ranges rather than point estimates
+would fix it, and would also give a real per-benchmark noise band instead of the two duration
+tiers, which are themselves only an approximation fitted to four repeats.
+
+Two smaller things: the macro layer needs a 65 MB dataset that is not in the repository and that
+no script fetches, so a clean checkout cannot reproduce that layer at all; and `client.rs` has
+neither `tracing` spans nor `hotpath` scopes, so the share of measured latency that is the
+harness's own is unknown.
+
 ### Archive checksums
 
 Intent log records and the map snapshot are checksummed; archive payloads are not. Corruption
-there is caught only if rkyv validation happens to reject it, and several call sites
-`.unwrap()` that result.
+there is caught only if rkyv validation happens to reject it.
+
+~~and several call sites `.unwrap()` that result.~~ Not any more.
+[F4](../features/validated-archives.md) moved that validation to the one place a partition arrives
+from disk and made it a `Result` there, so the thirteen `.unwrap()`s it used to be spread across are
+gone. **That makes this entry more valuable rather than less**, for two reasons. Validation now
+happens exactly once per read, so it is the single point where a checksum would belong beside it;
+and it is the only thing standing between a corrupt archive and an unchecked read, which is now a
+statement about one function rather than about thirteen call sites. The `access_unchecked`-everywhere
+form of [O3](optimizations.md), which F4 deliberately did not take, is still gated on this.
 
 ### Quarantining a damaged intent log
 

@@ -364,7 +364,7 @@ and `load_partition`, which contains the ordering subtlety described in
 [Query Execution](../tables/query-execution.md#resumption):
 
 ```rust
-if let Some((unblocked, generation)) = self.#field_ident.load_partition(loaded_kinds.loaded).await {
+if let Some((unblocked, generation)) = self.#field_ident.load_partition(loaded_kinds.loaded).await? {
     let mark_evict_msg = ServerMsg::MarkEvictable { generation, table, partitions: vec![id] };
     for (meta, unwrapped) in unblocked {
         shard_local_tx.send(ServerMsg::Query { meta, query: #query_ident::#variant_ident(unwrapped) }).await.unwrap();

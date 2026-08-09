@@ -72,6 +72,21 @@ pub struct Args {
     /// Record this run as the new baseline
     #[clap(long, default_value_t = false)]
     pub write_baseline: bool,
+    /// Archive this run's result as json at this path
+    ///
+    /// This is what `scripts/bench.sh` collects. Unlike `--write-baseline` it never touches
+    /// the file this run was compared against.
+    #[clap(long)]
+    pub json: Option<PathBuf>,
+    /// The name to record this run under
+    #[clap(long)]
+    pub label: Option<String>,
+    /// Insert and read this many rows before the bencher starts collecting samples
+    ///
+    /// Without this the first batches of a run carry connection establishment and cold
+    /// partition faults, and they land in the distribution alongside the steady state.
+    #[clap(long, default_value_t = 0)]
+    pub warmup: usize,
     /// The shoal config to start the server with
     #[clap(long, default_value = "shoal.yml")]
     pub conf: PathBuf,
@@ -645,6 +660,51 @@ impl MovieController {
         }
     }
 
+    /// Move some rows through the system before any of them are measured
+    ///
+    /// The first batches of a run carry connection establishment, an empty connection pool,
+    /// an allocator that has not reached steady state, and partitions that have never been
+    /// faulted in. Those costs are real but they are paid once, and leaving them in the
+    /// distribution puts them in the tail of every percentile the run reports.
+    ///
+    /// The rows this inserts are left in place on purpose. Reading them back is what makes
+    /// the measured pass a steady state measurement rather than another cold one.
+    ///
+    /// # Arguments
+    ///
+    /// * `args` - The benchmark settings for this run
+    async fn warmup(&mut self, args: &Args) {
+        // nothing to do if this run was not asked to warm up
+        if args.warmup == 0 {
+            return;
+        }
+        println!("warming up with {} rows", args.warmup);
+        // the samples this phase gathers are dropped with this bencher
+        let bencher = Bencher::new(&args.baseline, args.warmup);
+        // spawn a set of workers to carry the warmup
+        self.spawn(&bencher, args).await;
+        // note where our counters are so we can wait for just this phase
+        let inserted_before = self.inserted.load(Ordering::SeqCst);
+        // insert our warmup rows
+        let expected = self.upload(&args.dataset, Some(args.warmup)).await;
+        // wait for every warmup insert to be acknowledged before reading any back
+        Self::await_phase(&self.inserted, inserted_before + expected, "warmup inserts").await;
+        // read those same rows back so the read path is warm too
+        self.verify(&args.dataset, Some(args.warmup)).await;
+        // tell our workers to stop
+        self.movies_tx.send(MovieMsg::Shutdown).await.unwrap();
+        // swap our tasks out with a default set
+        let tasks = std::mem::take(&mut self.tasks);
+        // wait for the warmup workers to finish, dropping every sample they took
+        drop(tasks.join_all().await);
+        // pop the last shutdown message
+        self.movies_rx.recv().await.unwrap();
+        // reset our counters so the measured run reports only its own rows
+        self.inserted.store(0, Ordering::SeqCst);
+        self.retrieved.store(0, Ordering::SeqCst);
+        println!("warmup complete");
+    }
+
     /// Upload data to shoal
     ///
     /// # Arguments
@@ -774,6 +834,8 @@ impl MovieController {
     ///
     /// * `args` - The benchmark settings for this run
     pub async fn start(&mut self, args: &Args) {
+        // move some rows before we start measuring, if we were asked to
+        self.warmup(args).await;
         // loop over our reads/writes as many times as we were asked to
         for i in 0..args.iterations {
             println!("\n\n $$$$ {i} $$$$");
@@ -804,8 +866,21 @@ impl MovieController {
             let bench_workers = tasks.join_all().await;
             // merge our workers back into our main bencher
             bencher.merge_workers(bench_workers);
+            // tell the bencher how many rows this run moved so it can report throughput
+            bencher.set_row_counts(
+                self.inserted.load(Ordering::Relaxed) as u64,
+                self.retrieved.load(Ordering::Relaxed) as u64,
+            );
+            // name this run if it was given a label
+            if let Some(label) = &args.label {
+                bencher.set_label(label);
+            }
             // log our benchmark results, recording a new baseline if asked to
-            bencher.finish(args.write_baseline);
+            //
+            // only the last iteration is archived, since each one overwrites the last and a
+            // multi iteration run is asking about the steady state rather than the first pass
+            let json = (i + 1 == args.iterations).then_some(args.json.as_deref()).flatten();
+            bencher.finish(args.write_baseline, json);
             // pop the last shutdown message
             self.movies_rx.recv().await.unwrap();
             // print how many movies were inserted/retrieved
@@ -850,7 +925,23 @@ async fn read_csv(args: Args) {
     controller.close().await;
 }
 
-#[hotpath::main]
+/// Run the benchmark
+///
+/// The `hotpath` attribute is feature gated because it is not free even when the
+/// instrumentation it collects is compiled out: it installs a collector thread and prints a
+/// report on exit. A hotpath build is an attribution run and its latency numbers are not
+/// comparable to a build without it, which is why the two are never captured together.
+///
+/// The report is emitted as JSON so `scripts/bench.sh` can archive it next to the run's other
+/// artifacts. See `docs/src/operations/benchmarking.md`.
+///
+/// `limit = 0` means report every scope. The default is 15, which silently truncates the
+/// report to the fifteen costliest scopes — a profile that is missing entries without saying
+/// so is worse than no profile, because the absence reads as "this code was never called".
+#[cfg_attr(
+    feature = "hotpath",
+    hotpath::main(percentiles = [50, 90, 95, 99], format = "json", limit = 0)
+)]
 fn main() {
     // parse our benchmark settings
     let args = Args::parse();

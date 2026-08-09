@@ -146,7 +146,10 @@ concurrently, which was not available while `scan` discovered keys one record at
 here took that opening; it is filed as
 [O22](../optimizations.md#o22-recovery-loads-the-partitions-it-scanned-one-await-at-a-time),
 to be done alongside [O8](../optimizations.md#o8-partitions-are-read-one-at-a-time-each-with-its-own-dup-and-close)
-since it is the same work on the compaction path.
+since it is the same work on the compaction path. The
+[priority queue](../optimizations.md#the-priority-queue) makes that conditional rather than a
+preference: O22 rides along with O8 at rank **B1**, behind O9, and on its own it is declined —
+startup path, and the key set is normally small.
 
 **`load_scanned` is where a partition enters the memory counter in archive bytes**, and replay
 converts it to a form the counter is read back in deep size from. That mismatch is a bullet on

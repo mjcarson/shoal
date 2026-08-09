@@ -62,11 +62,18 @@ following a query:
 | `Shard::handle_query` | `shard.rs:505-511` |
 | `PersistentTable::handle` | `.../persistent/sorted.rs:301` |
 | `PersistentTable::{insert,get,exists,delete,update}` | `.../persistent/sorted.rs:328`, `:386`, `:533`, `:666`, `:825` |
-| `Shard::handle_flushed` | `shard.rs:539` |
 | `Shard::reply` | `shard.rs:479` |
 | `FileSystemCompactor::*` | `.../fs/compactor.rs:98`, `:129`, `:153`, `:193`, `:209`, `:278`, `:314` |
 | `FileSystem::read_intents` | `.../fs.rs:428-431` |
 | `loader::read_partition` | `.../fs/loader.rs:31` |
+
+**`Shard::handle_flushed` used to be on this list and deliberately is not any more.** It ran once
+per message the shard handled and was a parent to nothing — `Shard::reply` attaches itself to the
+query's own span rather than to the ambient one — so the span was 711,638 registry slab inserts per
+run saying "I ran". [F5](../features/flushed-sweep-gate.md) removed it. Two more spans on per-query
+paths are filed as [O25](../appendix/optimizations.md#o25-two-instrument-spans-remain-on-per-query-paths)
+for the same reason, and are **not** removed: `reply`'s is real trace structure, and neither is on a
+path that usually does nothing.
 
 Spans are propagated **manually across channel hops**, which is the part worth understanding.
 An asynchronous message queue breaks tracing's implicit parenting, so `QueryMetadata` carries
@@ -187,40 +194,74 @@ See [Known Issues](../appendix/known-issues.md#17-leftover-debug-printlns).
 
 ## hotpath
 
-A sampling profiler enabled by a feature flag:
+A profiler enabled by a feature flag. See
+[Benchmarking](benchmarking.md#profile) for how to run one and
+[F3](../features/performance-harness.md) for why it is kept apart from the other measurements.
 
 ```bash
-cargo build --features hotpath
+cargo build --release --example tmdb --features hotpath
 ```
 
-Attributes are already scattered through the hot path and become no-ops without the feature:
+> Until recently this command produced an **empty profile**. `shoal`'s `hotpath` feature
+> enabled `hotpath/hotpath` but not `shoal-core/hotpath`, and every attribute lives in
+> `shoal-core` — so the collector was installed with nothing to report, and the empty table
+> read as "this code is cheap". The feature now forwards.
+
+Attributes are scattered through the hot path and become no-ops without the feature:
 
 ```rust
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 async fn handle_query(...)
 ```
 
-`shard.rs:511`
+`shard.rs:612`
 
 ```rust
 #[cfg_attr(feature = "hotpath", hotpath::measure_all)]
 impl<D: ShoalDatabase> FileSystem<D> { ... }
 ```
 
-`.../fs.rs:72`
+`.../fs.rs:108`
 
-`measure_all` covers every method in the impl block. Instrumented today:
+`measure_all` covers every method in the impl block. `measure_block!` is used where a plain
+attribute would not do: hotpath names a scope `module_path!() + fn_name`, so four different
+`get` methods in `partitions.rs` would silently sum into one bucket. Those carry explicit
+labels instead.
+
+Instrumented today. A `tmdb` run reports **57** of these, because hotpath only emits a scope that
+was actually entered and that workload never evicts a partition — `ValidatedArchive::new`,
+`MaybeLoaded::get_archived` and the rest of the archived read path do not appear in a profile of it
+at all. That is a fact about the workload rather than about the instrumentation, and it is why the
+macro layer [could not adjudicate F4](../features/validated-archives.md#performance):
 
 | Scope | Location |
 | --- | --- |
-| `ShoalPool::start`, `shard::start` | `server.rs:61`, `shard.rs:676` |
-| `Shard::{handle_client, reply, handle_query, handle_flushed, evict_data}` | `shard.rs:457`, `:480`, `:511`, `:540`, `:553` |
-| `Shard::shutdown_tasks` | `shard.rs:206` |
-| `FileSystem` (all methods) | `.../fs.rs:72`, `:212` |
-| `PersistentUnsortedTable` (all methods) | `.../persistent/unsorted.rs:110` |
+| `ShoalPool::start`, `shard::start` | `server.rs:65`, `shard.rs:861` |
+| `Shard::{handle_client, reply, handle_query, handle_flushed, evict_data}` | `shard.rs:558`, `:581`, `:612`, `:720`, `:733` |
+| `Shard::shutdown_tasks` | `shard.rs:208` |
+| `FileSystem` (all methods) | `.../fs.rs:108`, `:248` |
+| `PersistentUnsortedTable` (all methods) | `.../persistent/unsorted.rs:123` |
+| `PersistentSortedTable` (all methods) | `.../persistent/sorted.rs:175` |
+| `SortedPartition::{insert, get, collect_rows}` | `.../partitions.rs`, labelled blocks |
+| `MaybeLoaded::{get_archived, seek_archived, collect_archived}`, `SeekBytes::new` | `.../partitions.rs`, labelled blocks |
+| `ValidatedArchive::new` | `.../persistent/sorted.rs`, `.../persistent/unsorted.rs`, labelled blocks — one per partition read off disk ([F4](../features/validated-archives.md)) |
+| `StreamWriter::{write, prep, consume, flush_oldest_write}`, `write_helper`, `start_sync` | `.../fs/stream.rs` |
+| `FileSystemCompactor` (all methods except `start`) | `.../fs/compactor.rs:140` |
+| `loader::{read_partition, read_partition_helper}` | `.../fs/loader.rs:19`, `:32` |
 
-Note `PersistentSortedTable` is **not** instrumented, so a `hotpath` profile of a sorted
-workload misses the table layer entirely.
+Two things about reading the report:
+
+**Long-lived loops report their lifetime, not their cost.** `FileSystemCompactor::start` runs
+for as long as the shard does; measured, it reported ~24× the run length and swamped every real
+entry. It carries `#[hotpath::skip]`. Instrument another such loop and it will need the same.
+
+**Set `limit = 0`.** The default is 15, which truncates the report to the fifteen costliest
+scopes *without saying so* — the first run of this instrumentation appeared to show that
+`SortedPartition::insert` was never called.
+
+Not instrumented, deliberately: `PendingGets::{resume, park}`. Both are a single map operation,
+and the guard would cost more than the work it measured. What is wanted there is how long a get
+sits parked, which is a span between events rather than a function duration.
 
 The workspace also has `cargo-flamegraph` available, and a `profile.json.gz` and
 `shoal_looper.sh` at the repo root suggest ad-hoc profiling workflows that are not documented.
@@ -231,7 +272,8 @@ For running Shoal anywhere real, the gaps are:
 
 - **No metrics.** No Prometheus endpoint, no histograms, and no counters other than the recovery
   ones, which are emitted as an event rather than exposed. Filed in
-  [TODOs](../appendix/todos.md#observability).
+  [TODOs](../appendix/todos.md#observability). The throughput figure the benchmark harness
+  reports is computed by the *client*, not by the server, and is not available at runtime.
 - **No health or readiness endpoint.** Liveness can only be inferred by connecting.
 - **No introspection.** No way to ask a running server for its shard count, table list,
   resident bytes, LRU depth, or compaction backlog.
@@ -256,7 +298,11 @@ instrumentation away, so the hot path pays nothing in a default release build.
 - The remote exporter ignores the configured level.
 - `RemoteTracing::Grpc` uses HTTP.
 - `trace::setup` is never called by the library.
-- `PersistentSortedTable` is not `hotpath`-instrumented.
+- ~~`PersistentSortedTable` is not `hotpath`-instrumented.~~ It is now, along with the partition
+  layer, the stream writer, the compactor and the loader — see the table above.
+- `partitions.rs` and `client.rs` still have **no `tracing` spans at all**, so the hottest CPU
+  code and the whole client path are invisible to a trace even though `hotpath` now covers the
+  first of them.
 - ~~Corruption and truncation are warnings with no counters.~~ Counted and summarized per shard
   now, but only as an event — nothing scrapes it, and nothing aggregates across shards.
 - Because `trace::setup` is never called by the library, none of these events reach a test. The

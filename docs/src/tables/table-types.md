@@ -192,6 +192,7 @@ Both persistent tables implement the same informal interface, called by generate
 | `handle` | `ShoalDatabase::handle` | Execute one query |
 | `load_partition` | `ShoalDatabase::load_partition` | Install a faulted-in partition, return unblocked queries |
 | `flush` | `ShoalDatabase::flush` | Push staged intent bytes toward disk |
+| `compaction_due` | `ShoalDatabase::compaction_due` | Answer whether this log has grown past its rotation size — synchronous, so the shard can ask per message |
 | `get_flushed` | `ShoalDatabase::handle_flushed` | Compact if needed; release acknowledgeable responses |
 | `mark_evictable` | `ServerMsg::MarkEvictable` | Offer partitions to the LRU |
 | `evict` | Shard memory pressure | Drop partitions |

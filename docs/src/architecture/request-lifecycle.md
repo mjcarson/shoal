@@ -252,15 +252,24 @@ At the bottom of every iteration of the shard loop:
 if self.shard_local_rx.is_empty() {
     self.tables.flush().await?;
 }
-// check for any flushed response to handle
-self.handle_flushed().await?;
+// sweep our tables only when that sweep could do something
+if self.data_flushed || self.tables.compaction_due() {
+    // check for any flushed response to handle
+    self.handle_flushed().await?;
+}
 // check if we need to evict any data
 if *self.memory_usage.borrow() > self.conf.resources.memory {
     self.evict_data().await?;
 }
 ```
 
-`shoal-core/src/server/shard.rs:654-664`
+`shoal-core/src/server/shard.rs`
+
+**The sweep is gated, the flush is not.** `handle_flushed` used to run unconditionally here and
+`data_flushed` did not exist; [F5](../features/flushed-sweep-gate.md) put it behind the two
+conditions that are the only things which can make it do work — a write landing, and a log growing
+past the size it rotates at. `tables.flush()` above it stays unconditional, because going idle is
+exactly when the partial buffer has to go out.
 
 **Flush-when-idle is the core write optimisation.** Under load the queue is never empty, so
 writes accumulate in the `StreamWriter`'s DMA buffer and go out in full-buffer batches. When
@@ -269,8 +278,10 @@ stall. Batching is free and adaptive; no timer is involved.
 
 The completion path is asynchronous. `StreamWriter::write` spawns a detached task
 (`.../fs/stream.rs:189-194`) which, on completion, posts `ServerMsg::DataFlushed` back to the
-shard (`.../fs/stream.rs:109-115`). That updates the table's watermark
-(`shard.rs:534-536`), and `handle_flushed` then pops every pending response at or below it:
+shard (`.../fs/stream.rs:109-115`). The watermark itself lives in `FlushState` and is advanced by
+the completion rather than by the message, so the message is only a wakeup — but since F5 it is a
+*required* one, because it is what opens the gate above. `handle_flushed` then pops every pending
+response at or below the watermark:
 
 ```rust
 self.tables.handle_flushed(&mut self.flushed).await?;

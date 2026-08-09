@@ -282,6 +282,12 @@ pub(super) struct Shard<D: ShoalDatabase> {
         Span,
         <D::ClientType as QuerySupport>::ResponseKinds,
     )>,
+    /// Whether a write has landed since the last time we swept our tables
+    ///
+    /// A durable watermark only ever advances behind a completed IO, and every
+    /// completed IO sends a [`ServerMsg::DataFlushed`], so no pending response can
+    /// become releasable until one of those messages has arrived.
+    data_flushed: bool,
     /// The latency sensitive task queue
     high_priority: TaskQueueHandle,
     /// The medium priority task queue
@@ -380,6 +386,7 @@ where
             shard_local_rx,
             loader_channels,
             flushed: Vec::with_capacity(1000),
+            data_flushed: false,
             high_priority,
             _medium_priority: medium_priority,
             tasks: Vec::with_capacity(100),
@@ -716,9 +723,16 @@ where
     }
 
     /// Get all flushed messages and send their response back
-    #[instrument(name = "Shard::handle_flushed", skip(self))]
+    ///
+    /// This is deliberately not inside a `tracing` span. It used to be, and the span was
+    /// created once per message the shard handled — 711,638 times in the profiled run —
+    /// on a path that almost always has nothing to do. `Shard::reply` parents itself off
+    /// the query's own span rather than off this one, so nothing is orphaned by its
+    /// absence.
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     async fn handle_flushed(&mut self) -> Result<(), ServerError> {
+        // consume our wakeup signal now that we are acting on it
+        self.data_flushed = false;
         // get all flushed query responses
         self.tables.handle_flushed(&mut self.flushed).await?;
         // pop all of our flushed responses
@@ -818,8 +832,9 @@ where
                         .await?
                 }
                 // Inform a table that some of its data has been flushed to storage
-                // this is only a wakeup, the work happens in handle_flushed below
-                ServerMsg::DataFlushed => (),
+                // this carries no position, it only tells us a durable watermark may
+                // have moved, so the work happens in handle_flushed below
+                ServerMsg::DataFlushed => self.data_flushed = true,
                 // Mark some partitions as evictable
                 ServerMsg::MarkEvictable {
                     generation,
@@ -840,8 +855,16 @@ where
             if self.shard_local_rx.is_empty() {
                 self.tables.flush().await?;
             }
-            // check for any flushed response to handle
-            self.handle_flushed().await?;
+            // sweep our tables only when that sweep could do something
+            //
+            // a response can only be released once a write has landed, and every landed
+            // write sends us a DataFlushed; a rotation is only due once a log has grown
+            // past its size, which the tables can answer without touching storage. If
+            // neither holds then the sweep would walk every table to learn nothing
+            if self.data_flushed || self.tables.compaction_due() {
+                // check for any flushed response to handle
+                self.handle_flushed().await?;
+            }
             // check if we need to evict any data
             if *self.memory_usage.borrow() > self.conf.resources.memory {
                 // try to evict our least recently used data
@@ -849,6 +872,9 @@ where
             }
         }
         // check for any flushed response to handle
+        //
+        // unconditional on purpose, unlike the call in the loop: shutdown has to drain
+        // whatever is still pending whether or not a wakeup happened to arrive for it
         self.handle_flushed().await?;
         // shudown our tables
         self.tables.shutdown().await?;

@@ -150,7 +150,11 @@ are all still paid on every restart of a table nobody wrote to — and that last
 [O9](../optimizations.md#o9-every-intent-log-rotation-walks-the-entire-on-disk-partition-set)'s
 walk of the whole on-disk partition set. Filed as
 [O21](../optimizations.md#o21-a-forced-rotation-of-an-empty-intent-log-does-the-whole-rotation-anyway),
-with why suppressing the rotation is a larger change than suppressing its cleanup.
+with why suppressing the rotation is a larger change than suppressing its cleanup. The
+[priority queue](../optimizations.md#the-priority-queue) ranks O21 at **B3** and splits it: queueing
+the `Archives` job only when a rotation had changes to compact is small and removes the expensive
+part, while suppressing the rotation itself is keyed to the generation counter and is a separate
+decision. O9 itself sits at **B1**, which also shrinks what is left of this.
 
 **The compactor still cannot distinguish a log it read nothing from because it was empty from one
 that was zero length on disk.** `truncated` covers damage, not the difference between "no records

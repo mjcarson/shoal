@@ -137,6 +137,7 @@ pub struct FileSystemCompactor<T: IntentReadSupport<R>, R: PartitionKeySupport, 
     row_kind: PhantomData<R>,
 }
 
+#[cfg_attr(feature = "hotpath", hotpath::measure_all)]
 impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
     FileSystemCompactor<T, R, S>
 {
@@ -661,6 +662,12 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
     }
 
     /// Start this compactor
+    ///
+    /// This is skipped by the profiler. It is a task that runs for as long as the shard does,
+    /// so measuring it reports the process lifetime rather than any work, and at roughly 24x
+    /// the run length it swamps every real entry in the report. The compaction work itself is
+    /// measured through `compact_intent`, `compact_archives` and their callees.
+    #[cfg_attr(feature = "hotpath", hotpath::skip)]
     pub async fn start(mut self) -> Result<(), ServerError>
     where
         <T as Archive>::Archived: rkyv::Deserialize<T, Strategy<Pool, rkyv::rancor::Error>>,

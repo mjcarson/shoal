@@ -13,7 +13,8 @@ use rkyv::util::AlignedVec;
 use rkyv::with::Skip;
 use rkyv::{Archive, Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::ops::Bound;
+use std::marker::PhantomData;
+use std::ops::{Bound, Deref};
 
 use crate::shared::queries::{
     SortRange, SortSelect, SortedExists, SortedGet, SortedUpdate, UnsortedGet, UnsortedUpdate,
@@ -28,21 +29,162 @@ pub trait PartitionSupport: DeepSizeOf {
     }
 }
 
+/// A buffer of archived bytes that never move and never change
+///
+/// An archive is read where it lies rather than copied out, so whatever holds those bytes
+/// has to keep handing back the same ones. A partition read off disk is always a glommio
+/// [`ReadResult`]; an [`AlignedVec`] is what a sort key archived for a seek lives in, and
+/// what a test or a benchmark builds a partition archive in, since a `ReadResult` can only
+/// come from a live reactor.
+///
+/// # Safety
+///
+/// `deref` must return the same base pointer and the same length on every call for the
+/// life of the value, and the bytes behind it must never change.
+pub unsafe trait StableBytes: Deref<Target = [u8]> {}
+
+// SAFETY: a `ReadResult` holds its pointer and length in fields that are only ever read
+// through `&self`, and the DMA buffer behind them is never written to after the read
+// completes, so every deref yields the same bytes.
+unsafe impl StableBytes for ReadResult {}
+
+// SAFETY: an `AlignedVec` only moves its buffer through `&mut self`, and a
+// `ValidatedArchive` never hands one out, so every deref yields the same bytes.
+//
+// This is what a sort key archived for a seek is held in - see `SeekBytes` - and it is also
+// how a test or a benchmark builds a partition archive, since a `ReadResult` needs a reactor.
+unsafe impl StableBytes for AlignedVec {}
+
+/// An archive whose bytes were validated when they were read, and are not validated again
+///
+/// `rkyv::access` is the checked entry point: it runs `bytecheck` over the whole buffer
+/// before it will hand back a reference into it, which is O(bytes) and has to happen before
+/// anything can be sought. Holding the *reference* it returns is not possible - it borrows
+/// from the buffer beside it, which is self referential - so the archive of a partition used
+/// to be re-validated by every query that touched it, and a get naming one row paid for the
+/// size of the partition it landed in.
+///
+/// This holds the bytes and the *fact* that they were validated instead. [`Self::new`] is the
+/// only way to build one and it validates; [`Self::archived`] then reads without validating.
+/// Nothing is validated less often in total - a corrupt archive is still caught, at the read
+/// that produced it rather than at every query afterwards.
+///
+/// See [F4](../../../../docs/src/features/validated-archives.md).
+pub struct ValidatedArchive<P, B = ReadResult> {
+    /// The archived bytes, validated exactly once by [`Self::new`]
+    ///
+    /// Private, and never handed out by reference or by `&mut`. That is what makes the
+    /// unchecked read in [`Self::archived`] sound, so it must stay that way.
+    raw: B,
+    /// The number of bytes validation saw, and what memory accounting charges for
+    len: usize,
+    /// The offset of the archives root, computed from the length validation saw
+    ///
+    /// Pinned here rather than recomputed per read so that the length can play no part in
+    /// the safety argument: a root position derived once from validated bytes cannot drift.
+    root_pos: usize,
+    /// The type these bytes are an archive of
+    kind: PhantomData<fn() -> P>,
+}
+
+impl<P, B: StableBytes> ValidatedArchive<P, B> {
+    /// Validate a buffer of archived bytes, once
+    ///
+    /// This is the only constructor, which is the invariant everything else here rests on.
+    /// It is also where a misaligned buffer is caught - the unchecked read below only
+    /// `debug_assert!`s alignment, so in a release build nothing else would.
+    ///
+    /// # Arguments
+    ///
+    /// * `raw` - The archived bytes to validate
+    pub fn new(raw: B) -> Result<Self, rkyv::rancor::Error>
+    where
+        P: RkyvSupport,
+        for<'a> <P as Archive>::Archived:
+            CheckBytes<Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>>,
+    {
+        // validate every byte of this archive, which is the only time it is validated
+        P::access(&raw)?;
+        // record what validation saw so no later read has to derive it again
+        let len = raw.len();
+        let root_pos = rkyv::api::root_position::<<P as Archive>::Archived>(len);
+        Ok(ValidatedArchive {
+            raw,
+            len,
+            root_pos,
+            kind: PhantomData,
+        })
+    }
+
+    /// Read this archive without validating it again
+    ///
+    /// # Safety
+    ///
+    /// This is safe because [`Self::new`] already validated these exact bytes and nothing
+    /// can have changed them since. `rkyv::access` is `check_pos_with_context` followed by
+    /// `access_pos_unchecked` on the same buffer and the same position, so this is the second
+    /// half of a call that already succeeded. Three things keep that true, and all three are
+    /// things to preserve rather than facts to rely on blindly:
+    ///
+    /// * `new` is the only constructor, so a `ValidatedArchive` that exists was validated.
+    /// * `raw` is private and is never exposed by reference or by `&mut`, so the bytes behind
+    ///   it are the bytes validation saw.
+    /// * [`StableBytes`] requires every deref to yield that same pointer and length.
+    pub fn archived(&self) -> &<P as Archive>::Archived
+    where
+        P: Archive,
+    {
+        // SAFETY: see the note above - these bytes passed `bytecheck` in `new`, they are
+        // immutable for the life of this value, and `root_pos` came from the length that
+        // validation saw
+        unsafe {
+            rkyv::api::access_pos_unchecked::<<P as Archive>::Archived>(&self.raw, self.root_pos)
+        }
+    }
+}
+
+impl<P, B> ValidatedArchive<P, B> {
+    /// Get the number of archived bytes this holds
+    ///
+    /// Deliberately answered from the length recorded at construction rather than from the
+    /// buffer, so that this needs none of the bounds reading the archive does.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+}
+
+/// Print what an archive is rather than what is in it
+///
+/// Derived `Debug` would bound `P` and `B` on `Debug` and would print every byte of the
+/// buffer, which is not useful for a partition sized archive.
+impl<P, B> std::fmt::Debug for ValidatedArchive<P, B> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ValidatedArchive")
+            .field("len", &self.len)
+            .finish()
+    }
+}
+
 /// A partition that may be fully loaded into memory or accesible as an archive
+///
+/// The buffer an archive is held in is a type parameter rather than a [`ReadResult`]
+/// because a `ReadResult` can only come from a real DMA read - its constructors are
+/// private to glommio - which left this whole arm unreachable from a test or a benchmark.
+/// Production never names `B`, since it defaults to the type the loader produces.
 #[derive(Debug)]
-pub enum MaybeLoaded<P: PartitionSupport> {
+pub enum MaybeLoaded<P: PartitionSupport, B = ReadResult> {
     /// A fully loaded partition
     Loaded { partition: P, generation: u64 },
     /// An accessible but not fully loaded partition
-    Accessible(ReadResult),
+    Accessible(ValidatedArchive<P, B>),
 }
 
-impl<P: PartitionSupport> MaybeLoaded<P> {
+impl<P: PartitionSupport, B> MaybeLoaded<P, B> {
     /// Get this partitions size
     pub fn size(&self) -> usize {
         match self {
             Self::Loaded { partition, .. } => partition.size(),
-            Self::Accessible(read) => read.len(),
+            Self::Accessible(archive) => archive.len(),
         }
     }
 
@@ -173,7 +315,7 @@ impl<R: ShoalUnsortedTable> UnsortedPartition<R> {
     }
 }
 
-impl<R: ShoalUnsortedTable> MaybeLoaded<UnsortedPartition<R>>
+impl<R: ShoalUnsortedTable, B: StableBytes> MaybeLoaded<UnsortedPartition<R>, B>
 where
     for<'a> <R as Archive>::Archived:
         CheckBytes<Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>>,
@@ -201,7 +343,7 @@ where
             MaybeLoaded::Loaded { partition, .. } => partition.get(params, found),
             MaybeLoaded::Accessible(read) => {
                 // access our data
-                let access = UnsortedPartition::<R>::access(read).unwrap();
+                let access = read.archived();
                 // a deleted row has no data to return
                 let ArchivedMaybeRow::Row(archived) = &access.row else {
                     return false;
@@ -230,7 +372,7 @@ where
             MaybeLoaded::Loaded { partition, .. } => partition.is_tombstoned(),
             MaybeLoaded::Accessible(read) => {
                 // access our data
-                let access = UnsortedPartition::<R>::access(read).unwrap();
+                let access = read.archived();
                 // check if this archived row is a tombstone
                 matches!(access.row, ArchivedMaybeRow::Tombstone)
             }
@@ -256,7 +398,7 @@ where
             }
             MaybeLoaded::Accessible(read) => {
                 // access our data
-                let access = UnsortedPartition::<R>::access(read).unwrap();
+                let access = read.archived();
                 // deserialize our row
                 let mut loaded = UnsortedPartition::<R>::deserialize(&access).unwrap();
                 // update this rows data
@@ -273,7 +415,7 @@ where
             MaybeLoaded::Loaded { partition, .. } => Ok(partition),
             MaybeLoaded::Accessible(read) => {
                 // access our data
-                let access = UnsortedPartition::<R>::access(&read)?;
+                let access = read.archived();
                 // deserialize our row
                 UnsortedPartition::<R>::deserialize(&access)
             }
@@ -332,31 +474,33 @@ impl<T: ShoalSortedTable> SortedPartition<T> {
     ///
     /// * `row` - The row to insert
     pub fn insert(&mut self, row: T) -> (isize, ResponseAction<T>) {
-        // get this rows sort key
-        let sort_key = row.get_sort();
-        // calculate the size of our new row
-        let row_size = row.deep_size_of();
-        // add this row wrapped in MaybeRow::Row
-        let diff = match self.rows.insert(sort_key, MaybeRow::Row(row)) {
-            // we replaced an existing row so find the delta in size
-            Some(MaybeRow::Row(replaced)) => {
-                // calculate our old rows size
-                let old_size = replaced.deep_size_of();
-                // calculate the diff in sizes
-                row_size.cast_signed() - old_size.cast_signed()
-            }
-            // this row was deleted and is now back, so it is no longer a tombstone
-            Some(MaybeRow::Tombstone) => {
-                self.tombstones -= 1;
-                row_size.cast_signed()
-            }
-            // this is a brand new row
-            None => row_size.cast_signed(),
-        };
-        // adjust this partitions size correctly
-        self.size = self.size.saturating_add_signed(diff);
-        // respond that we inserted a row
-        (diff, ResponseAction::Insert(true))
+        hotpath::measure_block!("SortedPartition::insert", {
+            // get this rows sort key
+            let sort_key = row.get_sort();
+            // calculate the size of our new row
+            let row_size = row.deep_size_of();
+            // add this row wrapped in MaybeRow::Row
+            let diff = match self.rows.insert(sort_key, MaybeRow::Row(row)) {
+                // we replaced an existing row so find the delta in size
+                Some(MaybeRow::Row(replaced)) => {
+                    // calculate our old rows size
+                    let old_size = replaced.deep_size_of();
+                    // calculate the diff in sizes
+                    row_size.cast_signed() - old_size.cast_signed()
+                }
+                // this row was deleted and is now back, so it is no longer a tombstone
+                Some(MaybeRow::Tombstone) => {
+                    self.tombstones -= 1;
+                    row_size.cast_signed()
+                }
+                // this is a brand new row
+                None => row_size.cast_signed(),
+            };
+            // adjust this partitions size correctly
+            self.size = self.size.saturating_add_signed(diff);
+            // respond that we inserted a row
+            (diff, ResponseAction::Insert(true))
+        })
     }
 
     /// Seek a live row in this partition by its sort key
@@ -419,26 +563,28 @@ impl<T: ShoalSortedTable> SortedPartition<T> {
     ) where
         T: 'a,
     {
-        // visit the rows this get selected until we hold as many as it asked for
-        for row in rows {
-            // stop scanning once we hold every row this get asked for
-            if params.limit_reached(found) {
-                break;
-            }
-            // skip any rows that don't match our filter
-            if let Some(filter) = &params.filters {
-                // check if this row should be filtered out
-                if !T::is_filtered(filter, row) {
-                    // skip this row since it doesn't match our filter
-                    continue;
+        hotpath::measure_block!("SortedPartition::collect_rows", {
+            // visit the rows this get selected until we hold as many as it asked for
+            for row in rows {
+                // stop scanning once we hold every row this get asked for
+                if params.limit_reached(found) {
+                    break;
                 }
+                // skip any rows that don't match our filter
+                if let Some(filter) = &params.filters {
+                    // check if this row should be filtered out
+                    if !T::is_filtered(filter, row) {
+                        // skip this row since it doesn't match our filter
+                        continue;
+                    }
+                }
+                // project this row into the shape this get asked to be answered with
+                //
+                // an unprojected get asks for the whole row, whose projection is a clone, so this
+                // is what it has always done
+                found.push(P::from_row(row));
             }
-            // project this row into the shape this get asked to be answered with
-            //
-            // an unprojected get asks for the whole row, whose projection is a clone, so this
-            // is what it has always done
-            found.push(P::from_row(row));
-        }
+        })
     }
 
     /// Check whether any of the rows a scan visited survives an exists filters
@@ -485,24 +631,26 @@ impl<T: ShoalSortedTable> SortedPartition<T> {
     /// * `params` - The parameters to use to get the rows
     /// * `found` - The vector to push the data to return
     pub fn get<P: ShoalProjection<Row = T>>(&self, params: &SortedGet<T>, found: &mut Vec<P>) {
-        // visit the rows this get selected, however it chose to select them
-        match &params.sort_select {
-            // this get asked for the whole partition, so walk it (tombstones are skipped)
-            SortSelect::All => Self::collect_rows(params, self.live_row_values(), found),
-            // this get named its rows, so seek each of them instead of walking to it
-            SortSelect::Keys(keys) => {
-                let rows = keys.iter().filter_map(|sort_key| self.live_row(sort_key));
-                Self::collect_rows(params, rows, found);
-            }
-            // this get bounded its rows, so seek to the lower bound and walk to the upper one
-            SortSelect::Range(range) => {
-                // a range that cannot contain a key holds no rows, and would panic the seek
-                if range.is_empty() {
-                    return;
+        hotpath::measure_block!("SortedPartition::get", {
+            // visit the rows this get selected, however it chose to select them
+            match &params.sort_select {
+                // this get asked for the whole partition, so walk it (tombstones are skipped)
+                SortSelect::All => Self::collect_rows(params, self.live_row_values(), found),
+                // this get named its rows, so seek each of them instead of walking to it
+                SortSelect::Keys(keys) => {
+                    let rows = keys.iter().filter_map(|sort_key| self.live_row(sort_key));
+                    Self::collect_rows(params, rows, found);
                 }
-                Self::collect_rows(params, self.live_rows_in_range(range), found);
+                // this get bounded its rows, so seek to the lower bound and walk to the upper one
+                SortSelect::Range(range) => {
+                    // a range that cannot contain a key holds no rows, and would panic the seek
+                    if range.is_empty() {
+                        return;
+                    }
+                    Self::collect_rows(params, self.live_rows_in_range(range), found);
+                }
             }
-        }
+        })
     }
 
     /// Check if any of the rows this exists selected are in this partition
@@ -731,42 +879,79 @@ where
 /// same for every partition of one query, so they are built at most once per execution and
 /// only when a partition of it is actually being read in place - a resident partition is
 /// sought with the key exactly as it stands, and pays nothing for this.
-#[derive(Debug, Default)]
-pub struct SeekBytes {
+///
+/// They are held as [`ValidatedArchive`]s rather than as raw bytes for the same reason a
+/// partition is: a seek used to validate the key it was looking for once per key per
+/// partition, and it is the same bytes every time.
+#[derive(Debug)]
+pub struct SeekBytes<S> {
     /// The archived form of each sort key that was named, in the order they were named
-    keys: Vec<AlignedVec>,
+    keys: Vec<ValidatedArchive<S, AlignedVec>>,
     /// The archived form of the value a ranges lower bound holds, if it holds one
-    start: Option<AlignedVec>,
+    start: Option<ValidatedArchive<S, AlignedVec>>,
     /// The archived form of the value a ranges upper bound holds, if it holds one
-    end: Option<AlignedVec>,
+    end: Option<ValidatedArchive<S, AlignedVec>>,
 }
 
-impl SeekBytes {
-    /// Archive the keys and bounds a selection named
+/// A selection of every row names nothing to seek with
+///
+/// Written out rather than derived because a derive would require the sort key itself to
+/// be `Default`, which nothing else here asks of it.
+impl<S> Default for SeekBytes<S> {
+    fn default() -> Self {
+        SeekBytes {
+            keys: Vec::new(),
+            start: None,
+            end: None,
+        }
+    }
+}
+
+impl<S: RkyvSupport> SeekBytes<S>
+where
+    for<'a> <S as Archive>::Archived:
+        CheckBytes<Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>>,
+{
+    /// Archive the keys and bounds a selection named, and validate them once
     ///
     /// A selection of every row names neither, so this is empty for it.
     ///
     /// # Arguments
     ///
     /// * `select` - The selection whose keys and bounds to archive
-    pub fn new<S: RkyvSupport>(select: &SortSelect<S>) -> Self {
-        // archive whichever of a set of keys or a pair of bounds this selection named
-        match select {
-            // a selection of every row names no key to seek with
-            SortSelect::All => SeekBytes::default(),
-            // a set of keys is archived one key at a time, in the order they were named
-            SortSelect::Keys(keys) => SeekBytes {
-                keys: keys.iter().map(|key| <S as RkyvSupport>::serialize(key)).collect(),
-                start: None,
-                end: None,
-            },
-            // a range only has a value to archive at an end that bounds something
-            SortSelect::Range(range) => SeekBytes {
-                keys: Vec::new(),
-                start: Self::bound_bytes(&range.start),
-                end: Self::bound_bytes(&range.end),
-            },
-        }
+    pub fn new(select: &SortSelect<S>) -> Self {
+        hotpath::measure_block!("SeekBytes::new", {
+            // archive whichever of a set of keys or a pair of bounds this selection named
+            match select {
+                // a selection of every row names no key to seek with
+                SortSelect::All => SeekBytes::default(),
+                // a set of keys is archived one key at a time, in the order they were named
+                SortSelect::Keys(keys) => SeekBytes {
+                    keys: keys.iter().map(|key| Self::archive_key(key)).collect(),
+                    start: None,
+                    end: None,
+                },
+                // a range only has a value to archive at an end that bounds something
+                SortSelect::Range(range) => SeekBytes {
+                    keys: Vec::new(),
+                    start: Self::bound_bytes(&range.start),
+                    end: Self::bound_bytes(&range.end),
+                },
+            }
+        })
+    }
+
+    /// Archive one sort key and validate it, once for the whole query
+    ///
+    /// The unwrap cannot fire on bytes this process serialized a line earlier - it is the
+    /// price of holding the validated form rather than re-validating at every seek.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The sort key to archive
+    fn archive_key(key: &S) -> ValidatedArchive<S, AlignedVec> {
+        ValidatedArchive::new(<S as RkyvSupport>::serialize(key))
+            .expect("a sort key we just archived failed validation")
     }
 
     /// Archive the value one end of a range holds, if it holds one
@@ -774,33 +959,33 @@ impl SeekBytes {
     /// # Arguments
     ///
     /// * `bound` - The end of the range to archive
-    fn bound_bytes<S: RkyvSupport>(bound: &Bound<S>) -> Option<AlignedVec> {
+    fn bound_bytes(bound: &Bound<S>) -> Option<ValidatedArchive<S, AlignedVec>> {
         // an unbounded end holds no value to compare an archives keys against
         match bound {
-            Bound::Included(key) | Bound::Excluded(key) => {
-                Some(<S as RkyvSupport>::serialize(key))
-            }
+            Bound::Included(key) | Bound::Excluded(key) => Some(Self::archive_key(key)),
             Bound::Unbounded => None,
         }
     }
+}
 
+impl<S> SeekBytes<S> {
     /// Iterate over the archived form of each sort key that was named
-    fn keys(&self) -> impl Iterator<Item = &AlignedVec> {
+    fn keys(&self) -> impl Iterator<Item = &ValidatedArchive<S, AlignedVec>> {
         self.keys.iter()
     }
 
     /// Get the archived form of the value a ranges lower bound holds
-    fn start(&self) -> Option<&AlignedVec> {
+    fn start(&self) -> Option<&ValidatedArchive<S, AlignedVec>> {
         self.start.as_ref()
     }
 
     /// Get the archived form of the value a ranges upper bound holds
-    fn end(&self) -> Option<&AlignedVec> {
+    fn end(&self) -> Option<&ValidatedArchive<S, AlignedVec>> {
         self.end.as_ref()
     }
 }
 
-impl<R: ShoalSortedTable> MaybeLoaded<SortedPartition<R>>
+impl<R: ShoalSortedTable, B: StableBytes> MaybeLoaded<SortedPartition<R>, B>
 where
     <<R as ShoalSortedTable>::Sort as Archive>::Archived: Ord,
     <R as Archive>::Archived: rkyv::Deserialize<R, Strategy<Pool, rkyv::rancor::Error>>,
@@ -826,17 +1011,19 @@ where
     /// * `raw` - The archived form of the sort key of the row to seek
     fn seek_archived<'a>(
         access: &'a ArchivedSortedPartition<R>,
-        raw: &AlignedVec,
+        raw: &ValidatedArchive<R::Sort, AlignedVec>,
     ) -> Option<&'a <R as Archive>::Archived> {
-        // access the archived form of our key so it can be compared against the archives
-        let wanted = <R::Sort as RkyvSupport>::access(raw).unwrap();
-        // seek this key in the archive, where a tombstone is a row that was deleted
-        match access.rows.get(wanted) {
-            // this archive holds the row we were looking for
-            Some(ArchivedMaybeRow::Row(row)) => Some(row),
-            // this archive either never held this row or holds a tombstone of it
-            Some(ArchivedMaybeRow::Tombstone) | None => None,
-        }
+        hotpath::measure_block!("MaybeLoaded::seek_archived", {
+            // read the archived form of our key, which was validated when it was built
+            let wanted = raw.archived();
+            // seek this key in the archive, where a tombstone is a row that was deleted
+            match access.rows.get(wanted) {
+                // this archive holds the row we were looking for
+                Some(ArchivedMaybeRow::Row(row)) => Some(row),
+                // this archive either never held this row or holds a tombstone of it
+                Some(ArchivedMaybeRow::Tombstone) | None => None,
+            }
+        })
     }
 
     /// Put one end of a range in the form an archives keys are in
@@ -851,14 +1038,14 @@ where
     /// * `raw` - The archived form of the value that end holds, if it holds one
     fn archived_bound<'a>(
         bound: &Bound<R::Sort>,
-        raw: Option<&'a AlignedVec>,
+        raw: Option<&'a ValidatedArchive<R::Sort, AlignedVec>>,
     ) -> Bound<&'a <<R as ShoalSortedTable>::Sort as Archive>::Archived> {
         // an end with no value cannot bound anything
         let Some(raw) = raw else {
             return Bound::Unbounded;
         };
-        // access the archived form of this ends value and keep whether it includes it
-        let wanted = <R::Sort as RkyvSupport>::access(raw).unwrap();
+        // read the archived form of this ends value, validated when it was built
+        let wanted = raw.archived();
         match bound {
             Bound::Included(_) => Bound::Included(wanted),
             Bound::Excluded(_) => Bound::Excluded(wanted),
@@ -883,26 +1070,28 @@ where
         I: Iterator<Item = &'a <R as Archive>::Archived>,
         <R as Archive>::Archived: 'a,
     {
-        // visit the rows this get selected until we hold as many as it asked for
-        for row in rows {
-            // stop scanning once we hold every row this get asked for
-            if params.limit_reached(found) {
-                break;
-            }
-            // skip any rows that don't match our filter
-            if let Some(filter) = &params.filters {
-                // check if this row should be filtered out
-                if !R::is_filtered_archived(filter, row) {
-                    // skip this row since it doesn't match our filter
-                    continue;
+        hotpath::measure_block!("MaybeLoaded::collect_archived", {
+            // visit the rows this get selected until we hold as many as it asked for
+            for row in rows {
+                // stop scanning once we hold every row this get asked for
+                if params.limit_reached(found) {
+                    break;
                 }
+                // skip any rows that don't match our filter
+                if let Some(filter) = &params.filters {
+                    // check if this row should be filtered out
+                    if !R::is_filtered_archived(filter, row) {
+                        // skip this row since it doesn't match our filter
+                        continue;
+                    }
+                }
+                // read the fields this get asked for straight out of the archive
+                //
+                // an unprojected get asks for the whole row, whose projection is the deserialize
+                // this has always done, and a projected one copies only the fields it named
+                found.push(P::from_archived(row));
             }
-            // read the fields this get asked for straight out of the archive
-            //
-            // an unprojected get asks for the whole row, whose projection is the deserialize
-            // this has always done, and a projected one copies only the fields it named
-            found.push(P::from_archived(row));
-        }
+        })
     }
 
     /// Check whether any of the archived rows a scan visited survives an exists filters
@@ -950,16 +1139,20 @@ where
     pub fn get<P: ShoalProjection<Row = R>>(
         &self,
         params: &SortedGet<R>,
-        seek: &mut Option<SeekBytes>,
+        seek: &mut Option<SeekBytes<R::Sort>>,
         found: &mut Vec<P>,
     ) {
         // scan our rows however this partition happens to be held
         match self {
             // this partition is already in memory so scan it directly
             MaybeLoaded::Loaded { partition, .. } => partition.get(params, found),
-            MaybeLoaded::Accessible(read) => {
+            // this partition is only on disk, so read it where it lies
+            //
+            // only this arm is measured. the loaded arm above is already counted by
+            // SortedPartition::get, and measuring both here would double count it.
+            MaybeLoaded::Accessible(read) => hotpath::measure_block!("MaybeLoaded::get_archived", {
                 // this partition came from disk so access it in place
-                let access = SortedPartition::<R>::access(read).unwrap();
+                let access = read.archived();
                 // put this gets keys in the form this archives keys are in, once per query
                 let seek = seek.get_or_insert_with(|| SeekBytes::new(&params.sort_select));
                 // visit the rows this get selected, however it chose to select them
@@ -985,7 +1178,7 @@ where
                         Self::collect_archived(params, rows, found);
                     }
                 }
-            }
+            }),
         }
     }
 
@@ -999,14 +1192,14 @@ where
     ///
     /// * `params` - The parameters to use to check for rows
     /// * `seek` - The archived keys of this exists, built the first time one is needed
-    pub fn exists(&self, params: &SortedExists<R>, seek: &mut Option<SeekBytes>) -> bool {
+    pub fn exists(&self, params: &SortedExists<R>, seek: &mut Option<SeekBytes<R::Sort>>) -> bool {
         // check our rows however this partition happens to be held
         match self {
             // this partition is already in memory so check it directly
             MaybeLoaded::Loaded { partition, .. } => partition.exists(params),
             MaybeLoaded::Accessible(read) => {
                 // this partition came from disk so access it in place
-                let access = SortedPartition::<R>::access(read).unwrap();
+                let access = read.archived();
                 // put this exists keys in the form this archives keys are in, once per query
                 let seek = seek.get_or_insert_with(|| SeekBytes::new(&params.sort_select));
                 // visit the rows this exists selected, however it chose to select them
@@ -1050,7 +1243,7 @@ where
     fn archived_rows_in_range<'a>(
         access: &'a ArchivedSortedPartition<R>,
         range: &SortRange<R::Sort>,
-        seek: &SeekBytes,
+        seek: &SeekBytes<R::Sort>,
     ) -> impl Iterator<Item = &'a <R as Archive>::Archived> {
         // put both ends of this range in the form this archives keys are in
         let bounds = (
@@ -1084,18 +1277,19 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{MaybeRow, SortedPartition, UnsortedPartition};
+    use super::{MaybeLoaded, MaybeRow, SortedPartition, UnsortedPartition, ValidatedArchive};
     use crate::server::tables::persistent::sorted::replay_update;
     use crate::server::tables::persistent::unsorted::UnsortedIntents;
     use crate::shared::queries::parser::{FieldRole, TypeValidator};
     use crate::shared::queries::{SortRange, SortSelect, SortedExists, SortedGet, SortedUpdate};
-    use crate::shared::queries::UnsortedUpdate;
+    use crate::shared::queries::{UnsortedGet, UnsortedUpdate};
     use crate::shared::traits::{
         PartitionKeySupport, RkyvSupport, ShoalProjection, ShoalSortedTable, ShoalTableSupport,
         ShoalUnsortedTable, TableSchemaSupport,
     };
     use crate::storage::{IntentReadSupport, RecoveryStats, ShouldPrune};
     use deepsize2::DeepSizeOf;
+    use rkyv::util::AlignedVec;
     use rkyv::{Archive, Deserialize, Serialize};
     use std::collections::HashMap;
     use std::ops::Bound;
@@ -2240,4 +2434,359 @@ mod tests {
         assert_eq!(projection.partition_key, "partition");
     }
 
+    /// Hold a partition the way an evicted one is held after it is read back
+    ///
+    /// The buffer is an [`AlignedVec`] rather than the glommio `ReadResult` a real read
+    /// produces, because a `ReadResult` can only come from a live reactor. That is why
+    /// [`MaybeLoaded`] carries its buffer as a type parameter: without it none of the tests
+    /// below could exist, and the archived arm of every scan was unreachable from here.
+    ///
+    /// # Arguments
+    ///
+    /// * `sort_keys` - The sort keys to build rows for
+    fn accessible(sort_keys: &[&str]) -> MaybeLoaded<SortedPartition<TestRow>, AlignedVec> {
+        // archive the partition the way a compaction would have written it
+        let raw = <SortedPartition<TestRow> as RkyvSupport>::serialize(&partition_of(sort_keys));
+        // hold it as an archive rather than as rows, validated the way a load validates it
+        MaybeLoaded::Accessible(ValidatedArchive::new(raw).unwrap())
+    }
+
+    /// Archive a partition the way a compaction would have written it
+    ///
+    /// # Arguments
+    ///
+    /// * `sort_keys` - The sort keys to build rows for
+    fn archived_of(sort_keys: &[&str]) -> AlignedVec {
+        <SortedPartition<TestRow> as RkyvSupport>::serialize(&partition_of(sort_keys))
+    }
+
+    /// Copy an archive, keeping its alignment, so a test can damage it
+    ///
+    /// A plain `Vec<u8>` would not do - the unchecked read alignment checks in a debug build
+    /// and the validator rejects a misaligned buffer, so a corruption test built on one would
+    /// pass for the wrong reason.
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - The bytes to copy
+    fn aligned_copy(bytes: &[u8]) -> AlignedVec {
+        let mut copy = AlignedVec::new();
+        copy.extend_from_slice(bytes);
+        copy
+    }
+
+    #[test]
+    /// A truncated archive is rejected rather than held as a validated one
+    ///
+    /// Truncation rather than a flipped byte, because a flip usually lands in a payload the
+    /// validator has no opinion about and would pass - which would make this test green for
+    /// a reason that has nothing to do with validation running.
+    fn new_rejects_a_truncated_archive() {
+        // archive a partition and take a byte off the end of it
+        let raw = archived_of(&["a", "b", "c"]);
+        let truncated = aligned_copy(&raw[..raw.len() - 1]);
+        // the bytes no longer describe a partition, so there is no validated form of them
+        assert!(ValidatedArchive::<SortedPartition<TestRow>, _>::new(truncated).is_err());
+        // and the archive it came from is still fine
+        assert!(ValidatedArchive::<SortedPartition<TestRow>, _>::new(raw).is_ok());
+    }
+
+    #[test]
+    /// An archive whose root has been overwritten is rejected
+    ///
+    /// This is the corruption that matters most, since the root is what an unchecked read
+    /// would follow straight into a bad pointer.
+    fn new_rejects_a_corrupt_root_pointer() {
+        // archive a partition and zero the region its root sits in
+        let raw = archived_of(&["a", "b", "c"]);
+        let mut corrupt = aligned_copy(&raw);
+        let len = corrupt.len();
+        for byte in &mut corrupt[len - 8..] {
+            *byte = 0xff;
+        }
+        // a root that points nowhere is caught before anything can follow it
+        assert!(ValidatedArchive::<SortedPartition<TestRow>, _>::new(corrupt).is_err());
+    }
+
+    #[test]
+    /// A validated archive reads back exactly what a checked access returns
+    ///
+    /// This is the test for the whole unchecked read: `archived` claims to be the second
+    /// half of the `access` it replaced, and this is what says so. If rkyv ever changes
+    /// where a root sits, this breaks rather than the read quietly returning nonsense.
+    fn archived_is_the_same_reference_access_returns() {
+        // archive a partition and hold it as a validated one
+        let raw = archived_of(&["a", "b", "c"]);
+        let checked = <SortedPartition<TestRow> as RkyvSupport>::access(&raw).unwrap() as *const _;
+        let validated = ValidatedArchive::<SortedPartition<TestRow>, _>::new(raw).unwrap();
+        // both routes land on the same place in the same bytes
+        assert!(std::ptr::eq(validated.archived() as *const _, checked));
+        // and the archive reports the bytes it was built from
+        assert_eq!(validated.archived().rows.len(), 3);
+    }
+
+    /// Hold the same rows in memory, which is the other way a partition can be held
+    ///
+    /// # Arguments
+    ///
+    /// * `sort_keys` - The sort keys to build rows for
+    fn resident(sort_keys: &[&str]) -> MaybeLoaded<SortedPartition<TestRow>, AlignedVec> {
+        MaybeLoaded::Loaded {
+            partition: partition_of(sort_keys),
+            generation: 0,
+        }
+    }
+
+    /// Name the rows a scan returned, in the order it returned them
+    ///
+    /// # Arguments
+    ///
+    /// * `found` - The rows a scan returned
+    fn sort_keys_of(found: &[TestRow]) -> Vec<&str> {
+        found.iter().map(|row| row.sort_key.as_str()).collect()
+    }
+
+    /// Run a get against a partition however it happens to be held
+    ///
+    /// # Arguments
+    ///
+    /// * `partition` - The partition to scan
+    /// * `get` - The get to run against it
+    fn archived_get(
+        partition: &MaybeLoaded<SortedPartition<TestRow>, AlignedVec>,
+        get: &SortedGet<TestRow>,
+    ) -> Vec<TestRow> {
+        // a seek is built once per execution rather than once per partition
+        let mut seek = None;
+        let mut found = Vec::new();
+        partition.get(get, &mut seek, &mut found);
+        found
+    }
+
+    #[test]
+    /// A get selecting every row walks a whole archive
+    fn an_accessible_get_returns_every_row() {
+        // hold a partition as the archive an evicted one is
+        let partition = accessible(&["a", "b", "c"]);
+        // ask for all of it
+        let found = archived_get(&partition, &get_with_limit(None));
+        // every row came back, in sort order
+        assert_eq!(sort_keys_of(&found), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    /// A named sort key is sought in an archive rather than walked to
+    fn an_accessible_get_seeks_a_named_sort_key() {
+        let partition = accessible(&["a", "b", "c"]);
+        // a key this archive holds comes back on its own
+        let found = archived_get(&partition, &get_with_sort_keys(&["b"], None));
+        assert_eq!(sort_keys_of(&found), vec!["b"]);
+        // a key it does not hold finds nothing rather than the nearest row
+        let missing = archived_get(&partition, &get_with_sort_keys(&["z"], None));
+        assert!(missing.is_empty());
+    }
+
+    #[test]
+    /// A range bounds the rows an archived scan visits
+    fn an_accessible_get_bounds_a_range() {
+        let partition = accessible(&["a", "b", "c", "d", "e"]);
+        // an exclusive lower bound skips its own key and an inclusive upper keeps its
+        let range = range_of(Bound::Excluded("b"), Bound::Included("d"));
+        let found = archived_get(&partition, &get_with_range(range, None));
+        assert_eq!(sort_keys_of(&found), vec!["c", "d"]);
+        // a range that cannot hold a key returns nothing rather than panicking the seek
+        let inverted = range_of(Bound::Included("d"), Bound::Excluded("b"));
+        let none = archived_get(&partition, &get_with_range(inverted, None));
+        assert!(none.is_empty());
+    }
+
+    #[test]
+    /// A limit is shared across the archived partitions of one get
+    fn an_accessible_get_shares_its_limit() {
+        // two archived partitions, scanned into the same answer
+        let first = accessible(&["a", "b"]);
+        let second = accessible(&["c", "d"]);
+        let get = get_with_limit(Some(3));
+        let mut seek = None;
+        let mut found = Vec::new();
+        first.get(&get, &mut seek, &mut found);
+        second.get(&get, &mut seek, &mut found);
+        // the second partition contributed only what was left of the limit
+        assert_eq!(sort_keys_of(&found), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    /// An archived partition answers every selection the way a resident one does
+    ///
+    /// This is the contract the archived path is actually held to: which of the two ways a
+    /// partition happens to be held is an implementation detail of eviction, and a query
+    /// cannot be allowed to notice it. Every other test here checks one arm; this one checks
+    /// that the arms agree.
+    fn an_accessible_and_a_loaded_partition_agree() {
+        let sort_keys = ["a", "b", "c", "d", "e"];
+        let archived = accessible(&sort_keys);
+        let loaded = resident(&sort_keys);
+        // every way a get can select rows, run against both
+        let gets = [
+            get_with_limit(None),
+            get_with_limit(Some(2)),
+            get_with_sort_keys(&["b", "d"], None),
+            get_with_sort_keys(&["z"], None),
+            get_with_range(range_of(Bound::Included("b"), Bound::Excluded("d")), None),
+            get_with_range(range_of(Bound::Unbounded, Bound::Unbounded), None),
+        ];
+        for get in &gets {
+            assert_eq!(
+                sort_keys_of(&archived_get(&archived, get)),
+                sort_keys_of(&archived_get(&loaded, get)),
+            );
+        }
+        // and every way an exists can ask about them
+        let checks = [
+            exists_with_sort_keys(&["c"]),
+            exists_with_sort_keys(&["z"]),
+            exists_with_range(range_of(Bound::Included("b"), Bound::Excluded("d"))),
+            exists_with_range(range_of(Bound::Included("y"), Bound::Excluded("z"))),
+        ];
+        for check in &checks {
+            let mut archived_seek = None;
+            let mut loaded_seek = None;
+            assert_eq!(
+                archived.exists(check, &mut archived_seek),
+                loaded.exists(check, &mut loaded_seek),
+            );
+        }
+    }
+
+    #[test]
+    /// An exists answers from an archive without deserializing anything
+    fn an_accessible_exists_answers_for_a_named_key() {
+        let partition = accessible(&["a", "b", "c"]);
+        // a key this archive holds is there
+        let mut seek = None;
+        assert!(partition.exists(&exists_with_sort_keys(&["b"]), &mut seek));
+        // one it does not hold is not
+        let mut seek = None;
+        assert!(!partition.exists(&exists_with_sort_keys(&["z"]), &mut seek));
+        // and a range past the end of it holds nothing
+        let mut seek = None;
+        let past_the_end = exists_with_range(range_of(Bound::Included("y"), Bound::Unbounded));
+        assert!(!partition.exists(&past_the_end, &mut seek));
+    }
+
+    #[test]
+    /// A projected get reads its fields straight out of an archive
+    fn a_projected_accessible_get_returns_the_projection() {
+        let partition = accessible(&["a", "b", "c"]);
+        // ask to be answered with the keys alone rather than with whole rows
+        let mut seek = None;
+        let mut found: Vec<SortKeyOnly> = Vec::new();
+        partition.get(&projected(get_with_limit(None)), &mut seek, &mut found);
+        // every row was projected, and the projection kept its keys
+        let sort_keys = found
+            .iter()
+            .map(|row| row.sort_key.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(sort_keys, vec!["a", "b", "c"]);
+        assert_eq!(found[0].partition_key, "partition");
+    }
+
+    #[test]
+    /// An archived partition is charged for the bytes it holds
+    ///
+    /// This is what the memory counter is incremented by when a partition is read off disk,
+    /// so it has to be the length of the buffer rather than the size of the rows in it.
+    fn an_accessible_partition_reports_its_byte_size() {
+        // archive a partition and hold it both ways
+        let raw = <SortedPartition<TestRow> as RkyvSupport>::serialize(&partition_of(&["a", "b"]));
+        let len = raw.len();
+        let partition: MaybeLoaded<SortedPartition<TestRow>, AlignedVec> =
+            MaybeLoaded::Accessible(ValidatedArchive::new(raw).unwrap());
+        // an archive costs what it takes up, not what it would take up as rows
+        assert_eq!(partition.size(), len);
+        // and it can always be evicted, since dropping it loses nothing
+        assert!(partition.is_evictable(0));
+    }
+
+    /// Hold an unsorted partition as the archive an evicted one is
+    ///
+    /// # Arguments
+    ///
+    /// * `partition` - The partition to archive
+    fn unsorted_accessible(
+        partition: &UnsortedPartition<TestRow>,
+    ) -> MaybeLoaded<UnsortedPartition<TestRow>, AlignedVec> {
+        let raw = <UnsortedPartition<TestRow> as RkyvSupport>::serialize(partition);
+        MaybeLoaded::Accessible(ValidatedArchive::new(raw).unwrap())
+    }
+
+    /// Build a get for an unsorted partition
+    ///
+    /// # Arguments
+    ///
+    /// * `limit` - The limit to place on this get if it has one
+    fn unsorted_get(limit: Option<usize>) -> UnsortedGet<TestRow> {
+        UnsortedGet {
+            partition_keys: vec![0],
+            filters: None,
+            limit,
+            projection: TestProjectionKind::Full,
+        }
+    }
+
+    #[test]
+    /// An archived unsorted partition returns the one row it holds
+    fn an_accessible_unsorted_get_returns_its_row() {
+        // hold a one row partition as an archive
+        let partition = unsorted_accessible(&UnsortedPartition::new(0, TestRow::new("a")));
+        // ask for it
+        let mut found: Vec<TestRow> = Vec::new();
+        assert!(partition.get(&unsorted_get(None), &mut found));
+        assert_eq!(sort_keys_of(&found), vec!["a"]);
+    }
+
+    #[test]
+    /// An archived tombstone is still a tombstone, and answers no get
+    fn an_accessible_unsorted_tombstone_is_tombstoned() {
+        // hold the tombstone of a deleted partition as an archive
+        let partition = unsorted_accessible(&UnsortedPartition::tombstone(0));
+        assert!(partition.is_tombstoned());
+        // a deleted row has nothing to return
+        let mut found: Vec<TestRow> = Vec::new();
+        assert!(!partition.get(&unsorted_get(None), &mut found));
+        assert!(found.is_empty());
+        // and a live one is not a tombstone
+        let live = unsorted_accessible(&UnsortedPartition::new(0, TestRow::new("a")));
+        assert!(!live.is_tombstoned());
+    }
+
+    #[test]
+    /// Updating an archived unsorted partition deserializes it for the caller to swap in
+    fn an_accessible_unsorted_update_deserializes() {
+        // hold a one row partition as an archive
+        let mut partition = unsorted_accessible(&UnsortedPartition::new(0, TestRow::new("a")));
+        // update it, which an archive cannot be done in place
+        let updated = partition
+            .update(&UnsortedUpdate {
+                partition_key: 0,
+                update: "updated".to_owned(),
+            })
+            .expect("an archived partition has to be deserialized to be updated");
+        // the row that came back carries the update
+        let MaybeRow::Row(row) = &updated.row else {
+            panic!("our row was replaced by a tombstone");
+        };
+        assert_eq!(row.data, "updated");
+        // and an already loaded partition is updated in place instead
+        let mut loaded = MaybeLoaded::<UnsortedPartition<TestRow>, AlignedVec>::Loaded {
+            partition: UnsortedPartition::new(0, TestRow::new("a")),
+            generation: 0,
+        };
+        assert!(loaded
+            .update(&UnsortedUpdate {
+                partition_key: 0,
+                update: "updated".to_owned(),
+            })
+            .is_none());
+    }
 }

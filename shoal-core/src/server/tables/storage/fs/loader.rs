@@ -16,6 +16,7 @@ use crate::storage::{FilteredFullArchiveMap, LoaderMsg};
 
 /// Help read a partition from disk
 #[instrument(name = "loader::read_partition_helper", skip_all, err(Debug))]
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub async fn read_partition_helper(
     archive: DmaFile,
     entry: ArchiveEntry,
@@ -29,6 +30,7 @@ pub async fn read_partition_helper(
 
 /// Read a partition from disk
 #[instrument(name = "loader::read_partition", skip_all, err(Debug))]
+#[cfg_attr(feature = "hotpath", hotpath::measure)]
 async fn read_partition<D: ShoalDatabase>(
     table: D::TableNames,
     partition_id: u64,

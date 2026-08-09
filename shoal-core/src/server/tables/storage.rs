@@ -389,6 +389,13 @@ pub trait StorageSupport: Sized {
     #[allow(async_fn_in_trait)]
     async fn commit<D: RkyvSupport>(&mut self, data: &D) -> Result<u64, ServerError>;
 
+    /// Check if this intent log has grown past the size it rotates at
+    ///
+    /// This is the synchronous half of [`StorageSupport::compact_if_needed`], split out
+    /// so a caller can ask whether a rotation is due without paying for the async sweep
+    /// that performs one. It has to stay cheap enough to call on every message.
+    fn compaction_due(&self) -> bool;
+
     /// Set our intent log to be compact if its needed
     ///
     /// Returns how far this tables intent log has been made durable
@@ -423,7 +430,13 @@ pub trait StorageSupport: Sized {
         generation: u64,
         partitions: &mut HashMap<u64, MaybeLoaded<T>>,
         memory_usage: &mut Arc<RefCell<usize>>,
-    ) -> Result<RecoveryStats, ServerError>;
+    ) -> Result<RecoveryStats, ServerError>
+    where
+        // a partition read during recovery is validated as it is wrapped, so this is where
+        // the bound that used to sit on each individual read now lives
+        for<'a> <T as Archive>::Archived: CheckBytes<
+            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+        >;
 
     /// Get the type of loader this storage kind requires
     fn loader_kind() -> Loaders;
@@ -517,6 +530,41 @@ mod tests {
         pending.get(1024, &mut flushed);
         assert_eq!(flushed.len(), 2);
         // the third comes out once our watermark reaches it
+        pending.get(1536, &mut flushed);
+        assert_eq!(flushed.len(), 3);
+    }
+
+    #[test]
+    /// Staging more responses never makes anything releasable on its own
+    ///
+    /// This is what lets the shard skip its flushed sweep on a write message. A write
+    /// query parks its response above the current watermark and nothing else, so the
+    /// only event that can turn a pending response into a releasable one is the
+    /// watermark moving — which only ever happens behind a completed IO, and every
+    /// completed IO sends a `DataFlushed`. If staging could release, gating the sweep
+    /// on that message would strand responses until the next unrelated wakeup.
+    fn staging_a_response_releases_nothing() {
+        let mut pending = queue_at(&[512]);
+        let mut flushed = Vec::new();
+        // our first entry is not covered by the watermark it was staged against
+        pending.get(0, &mut flushed);
+        assert!(flushed.is_empty());
+        // parking three more writes behind it changes nothing about that
+        for (index, pos) in [1024, 1536, 2048].into_iter().enumerate() {
+            let meta = QueryMetadata {
+                client: Uuid::new_v4(),
+                id: Uuid::new_v4(),
+                index,
+                end: false,
+                gather: None,
+                span: Span::none(),
+            };
+            pending.add(meta, pos, ResponseAction::Insert(true));
+            // the watermark has not moved, so neither has what is releasable
+            pending.get(0, &mut flushed);
+            assert!(flushed.is_empty());
+        }
+        // only advancing the watermark releases anything
         pending.get(1536, &mut flushed);
         assert_eq!(flushed.len(), 3);
     }

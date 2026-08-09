@@ -12,6 +12,7 @@ use std::hash::Hasher;
 use std::path::PathBuf;
 use tempfile::TempDir;
 
+use super::conf::Durability;
 use super::reader::IntentLogReader;
 use super::stream::{align_up, pad_region, FlushState, PAD_SENTINEL, PAD_SENTINEL_SIZE};
 
@@ -326,6 +327,34 @@ fn watermark_is_monotonic() {
     }
     // once everything has landed our watermark should cover the whole queue
     assert_eq!(state.written_pos(), 128 * 512);
+}
+
+#[test]
+/// Submitting a write moves neither watermark until it completes
+///
+/// This is the premise the shard's flushed sweep gate rests on. The shard skips the
+/// sweep unless a `DataFlushed` has arrived, which is only sound because staging a
+/// record cannot make it durable — a response committed at position P is always parked
+/// above both watermarks until the IO carrying it retires, and retiring is what sends
+/// the message. If submission ever advanced a watermark, the gate would sit on
+/// releasable responses until some unrelated write happened to wake the shard.
+fn submitting_a_write_does_not_advance_a_watermark() {
+    let mut state = FlushState::default();
+    // submit a write covering [0, 512) the way `StreamWriter::write` does
+    state.on_start(512);
+    // neither durability level considers any of it durable yet
+    assert_eq!(state.durable_pos(Durability::Async), 0);
+    assert_eq!(state.durable_pos(Durability::Fsync), 0);
+    // the kernel accepting the write is enough for Async but not for Fsync
+    state.on_complete(512);
+    assert_eq!(state.durable_pos(Durability::Async), 512);
+    assert_eq!(state.durable_pos(Durability::Fsync), 0);
+    // submitting more behind it still moves nothing
+    state.on_start(1024);
+    assert_eq!(state.durable_pos(Durability::Async), 512);
+    // only the fdatasync landing advances the synced watermark
+    state.mark_synced(512);
+    assert_eq!(state.durable_pos(Durability::Fsync), 512);
 }
 
 #[test]

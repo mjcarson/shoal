@@ -51,6 +51,11 @@ fsync. It is honest about what it gives up.
   both.
 - **Rotation fsyncs on both sides of the rename**, or a crash can leave a sealed log that the
   filesystem has not committed to its new name.
+- **Every advance of either watermark must be followed by a `ServerMsg::DataFlushed`.** Added by
+  [F5](../../features/flushed-sweep-gate.md), which is what made this a requirement rather than a
+  courtesy: the shard used to look for newly durable responses after every message it handled, so a
+  missing wakeup was covered by the next message of any kind. It now only looks when one of these
+  arrives. A watermark that moves silently is a response that is durable and never acknowledged.
 
 ## Tests
 
@@ -65,3 +70,5 @@ re-execs the test binary as a child, waits for the child to report an acknowledg
 - [The Intent Log](../../storage/intent-log.md) — the design that replaced this
 - [Storage Overview](../../storage/overview.md#durability-model)
 - [Recovery](../../storage/recovery.md)
+- [F5. The flushed sweep runs on a wakeup, not on every message](../../features/flushed-sweep-gate.md)
+  — which turned the wakeup into a contract

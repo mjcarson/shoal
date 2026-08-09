@@ -67,10 +67,16 @@ posts them back as `ServerMsg::Partition`. Must only ever hold its own shard's c
 *unsafe Send invariant*.
 
 **MaybeLoaded** — The enum wrapping every resident partition: either `Loaded` or `Accessible`.
-The seam where lazy deserialization lives.
+The seam where lazy deserialization lives. Its buffer is a defaulted type parameter, which is what
+makes the `Accessible` arm reachable from a test — see *ValidatedArchive*.
 
 **MaybeRow** — Either a `Row` or a `Tombstone`. Sorted partitions store these rather than rows
 directly.
+
+**ValidatedArchive** — What `MaybeLoaded::Accessible` holds: a partition's archived bytes plus the
+fact that they were validated when the read that produced them landed. Its only constructor
+validates and its accessor does not, so a query seeks an evicted partition rather than re-running
+rkyv's validator over the whole buffer first ([F4](../features/validated-archives.md)).
 
 **Partition** — The unit of storage, caching, eviction, and IO, addressed by a `u64` partition
 key. A sorted partition holds a `BTreeMap` of rows; an unsorted partition holds exactly one

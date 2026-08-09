@@ -197,7 +197,7 @@ SHQL cannot name one at all ([item 42](../appendix/known-issues.md#42-shql-canno
   archives only the *value* an end holds and carries `Included`/`Excluded`/`Unbounded` over as it
   stands. Archiving the `Bound` itself would work and is a wire format change for nothing.
 - **`SeekBytes` is built at most once per execution, and only when an archive is scanned.** It is
-  threaded as `&mut Option<SeekBytes>` for that reason. Building it eagerly makes every all-resident
+  threaded as `&mut Option<SeekBytes<S>>` for that reason. Building it eagerly makes every all-resident
   get pay for serialization it never uses, which is the regression this shape exists to avoid.
 
 ## Performance
@@ -206,7 +206,7 @@ SHQL cannot name one at all ([item 42](../appendix/known-issues.md#42-shql-canno
 | --- | --- | --- |
 | A page of a resident partition of *n* rows | `O(n)` visits, every row cloned or filtered | `O(log n)` seek plus the page |
 | A page of an archived partition | `O(n)` visits, `O(n)` filter evaluations | `O(log n)` descent plus the page |
-| Archiving a get's wanted keys, *k* keys over *p* archived partitions | *k × p* serializations and validations | *k* serializations, *p* validations — **O19 closed** |
+| Archiving a get's wanted keys, *k* keys over *p* archived partitions | *k × p* serializations and validations | *k* serializations, ~~*p* validations~~ *k* validations — **O19 closed**, and the validations followed it in [F4](validated-archives.md) |
 | Archiving a get's wanted keys, every partition resident | *0* | *0*, unchanged |
 | Reading a cold partition | whole partition | whole partition, **unchanged** |
 

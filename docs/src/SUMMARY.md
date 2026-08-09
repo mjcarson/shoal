@@ -40,6 +40,7 @@
 
 - [Observability](operations/observability.md)
 - [Benchmarking](operations/benchmarking.md)
+- [Performance Baseline](operations/performance-baseline.md)
 - [shoalctl](operations/shoalctl.md)
 
 # Features
@@ -47,6 +48,9 @@
 - [Delivered Features](features/delivered-features.md)
   - [F1. Sort-key range predicates](features/sort-key-ranges.md)
   - [F2. Projections on get queries](features/projections.md)
+  - [F3. A three layer performance harness](features/performance-harness.md)
+  - [F4. Archives are validated once, not once per read](features/validated-archives.md)
+  - [F5. The flushed sweep runs on a wakeup, not on every message](features/flushed-sweep-gate.md)
 
 # Appendix
 
@@ -64,6 +68,7 @@
   - [11, 12, 37. The ring panicked on an empty lookup and never smoothed load](appendix/resolved/tablet-ring.md)
   - [13. Eviction logging can underflow](appendix/resolved/eviction-log-underflow.md)
   - [14. Empty rotated intent logs were never deleted](appendix/resolved/empty-rotated-logs.md)
+  - [18, 50. Core exclusion was ignored and shard placement was random](appendix/resolved/excluded-cores-typo.md)
   - [20. The storage tests were entirely commented out](appendix/resolved/storage-tests.md)
   - [24. A bad query could leave the terminal in raw mode](appendix/resolved/shoalctl-panic.md)
   - [26, 39. A multi-partition get answered in an arbitrary order](appendix/resolved/partition-order.md)

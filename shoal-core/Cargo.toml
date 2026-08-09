@@ -13,6 +13,9 @@ server = ["glommio"]
 hotpath = ["hotpath/hotpath"]
 # Enables SHQL autocompletion support for clients
 shql-complete = ["dep:nucleo-matcher"]
+# Re-exports crate private internals so the benches in shoal/benches can reach them.
+# This is not a supported API and carries no stability promise.
+bench = []
 
 [dependencies]
 clap = { version = "4.2", features = ["derive"] }

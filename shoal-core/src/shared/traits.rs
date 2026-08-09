@@ -386,6 +386,13 @@ pub trait ShoalDatabase: 'static + Sized {
     #[cfg(feature = "server")]
     async fn flush(&mut self) -> Result<(), ServerError>;
 
+    /// Check if any of our tables intent logs are due to be rotated
+    ///
+    /// The shard asks this on every message it handles, so it is deliberately
+    /// synchronous — it only reads position counters and never touches storage.
+    #[cfg(feature = "server")]
+    fn compaction_due(&self) -> bool;
+
     /// Get all flushed messages and send their response back
     ///
     /// # Arguments

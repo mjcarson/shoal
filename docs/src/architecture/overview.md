@@ -121,13 +121,20 @@ pub enum ServerMsg<D: ShoalDatabase> {
     Client { peer: Uuid, data: BytesMut },
     Query { meta: QueryMetadata, query: <D::ClientType as QuerySupport>::QueryKinds },
     Partition(LoadedPartitionKinds<D>),
-    DataFlushed { table: D::TableNames, flushed: u64 },
+    Gathered { meta: QueryMetadata, response: <D::ClientType as QuerySupport>::ResponseKinds },
+    DataFlushed,
     MarkEvictable { generation: u64, table: D::TableNames, partitions: Vec<u64> },
     Shutdown,
 }
 ```
 
-`shoal-core/src/server/messages.rs:55-94`
+`shoal-core/src/server/messages.rs`
+
+`DataFlushed` carries no payload on purpose — a position observed after a log rotation would apply
+a stale offset to a fresh file, so the shard reads the watermark out of shared state instead. Since
+[F5](../features/flushed-sweep-gate.md) the message's *arrival* is what tells the shard to go and
+read it, which makes this the one variant whose delivery is a correctness requirement rather than a
+convenience.
 
 The shard's whole event loop is a `match` on this enum
 (`shoal-core/src/server/shard.rs:611-665`). If you want to understand what a shard can do,

@@ -142,12 +142,14 @@ gives up the monomorphised inner loop, and produces bytes rather than a `Vec<P>`
 hashing each row's partition key. This would lift the requirement that a projection carry its
 partition key, and would also drop `sort_by_cached_key` from every multi-partition get. It changes
 the response shape and `FromShoal::retrieve`'s signature, so it is filed as
-[O22](../appendix/optimizations.md) rather than done here.
+[O18](../appendix/optimizations.md#o18-the-gathered-reorder-rehashes-every-rows-partition-key)
+rather than done here — ranked in Tier C, to be taken together with O2 since both change the same
+`ResponseAction::Get` shape.
 
 **Dropping the partition key requirement by having the shard tag the rows.** Same idea, smaller: the
 shard already knows which partition each batch came from, since `PendingGet` holds one slot per
 partition key in query order. Rejected for the same reason — it is a change to the response shape,
-and it belongs with O22.
+and it belongs with O18.
 
 ## Limitations
 
