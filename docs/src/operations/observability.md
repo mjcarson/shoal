@@ -32,9 +32,9 @@ pub fn setup(conf: &Conf) -> Option<SdkTracerProvider> {
 
 `shoal-core/src/server/trace.rs:74-90`
 
-`setup` is **not called by `ShoalPool::start`** — the application must call it. The bundled
-example does not, so `cargo run --example tmdb` produces no structured logs at all. Nothing
-warns about this.
+`setup` is **not called by `ShoalPool::start`** — the application must call it. Neither the
+bundled example nor the benchmark workloads do, so `cargo run --example tmdb` and a
+`shoal-workload` run both produce no structured logs at all. Nothing warns about this.
 
 Two details worth knowing:
 
@@ -199,7 +199,7 @@ A profiler enabled by a feature flag. See
 [F3](../features/performance-harness.md) for why it is kept apart from the other measurements.
 
 ```bash
-cargo build --release --example tmdb --features hotpath
+cargo build --release --bin shoal-workload --features hotpath
 ```
 
 > Until recently this command produced an **empty profile**. `shoal`'s `hotpath` feature
@@ -228,8 +228,8 @@ attribute would not do: hotpath names a scope `module_path!() + fn_name`, so fou
 `get` methods in `partitions.rs` would silently sum into one bucket. Those carry explicit
 labels instead.
 
-Instrumented today. A `tmdb` run reports **57** of these, because hotpath only emits a scope that
-was actually entered and that workload never evicts a partition — `ValidatedArchive::new`,
+Instrumented today. A `tmdb` run reported **57** of these, because hotpath only emits a scope that
+was actually entered and that workload never evicted a partition — `ValidatedArchive::new`,
 `MaybeLoaded::get_archived` and the rest of the archived read path do not appear in a profile of it
 at all. That is a fact about the workload rather than about the instrumentation, and it is why the
 macro layer [could not adjudicate F4](../features/validated-archives.md#performance):

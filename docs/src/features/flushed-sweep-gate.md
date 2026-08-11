@@ -197,7 +197,8 @@ This is the section to read before changing `tables/storage/fs/stream.rs`.
 
 ## Performance
 
-Captured by `scripts/bench.sh`, `o17-after` against the `o3-after-repeat` capture that preceded it,
+Captured by `scripts/bench.sh` — the shell harness [F7](bench-runner.md) replaced with
+`shoal-bench` — `o17-after` against the `o3-after-repeat` capture that preceded it,
 on the hardware in [Performance Baseline](../operations/performance-baseline.md).
 
 **The result is the call count, and it was the one thing the profile could adjudicate on its own:**

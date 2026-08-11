@@ -13,3 +13,7 @@ create-missing = false
 default-theme = "navy"
 preferred-dark-theme = "navy"
 git-repository-url = "https://github.com/mjcarson/shoal"
+# Themes the generated charts on operations/benchmark-results.md. Those charts are drawn by
+# plotters, which emits fixed colours, so they are drawn in sentinel colours that this stylesheet
+# maps onto the book's own theme variables. Without it every chart is drawn in raw sentinel red.
+additional-css = ["theme/charts.css"]

@@ -1,13 +1,16 @@
 # Benchmarking
 
-How to run a benchmark. The numbers themselves, and the hardware they came from, are in
-[Performance Baseline](performance-baseline.md); the design of the harness is
-[F3](../features/performance-harness.md).
+How to run a benchmark. The numbers themselves are on
+[Benchmark Results](benchmark-results.md), which is generated from the captures this page tells
+you how to take; the frozen `B1` capture and the hardware it came from are in
+[Performance Baseline](performance-baseline.md). The design of the harness is
+[F3](../features/performance-harness.md), and of the tool that drives it,
+[F7](../features/bench-runner.md).
 
 Most of the work in benchmarking Shoal is not running the harness. It is making sure the two
 runs you are holding up against each other differ in exactly one thing.
 
-## The three layers
+## The four layers
 
 They answer different questions and they interfere with each other, so they are captured
 separately and never mixed.
@@ -15,13 +18,21 @@ separately and never mixed.
 | Layer | Question | Spread | How to run it |
 | --- | --- | --- | --- |
 | Micro (criterion) | did this function get faster | 5–9% by duration; repeat to confirm | `cargo bench -p shoal --features bench` |
-| Macro (`tmdb`) | did the system get faster end to end | ~11% whole-system — take a median | `./target/release/examples/tmdb ...` |
-| Profile (`hotpath`) | where does the time go | perturbs the run | a separate `--features hotpath` build |
+| Macro (workloads) | did one path through the system get faster | ~11% whole-system — take a median | `shoal-bench run --layer macro` |
+| Profile (`hotpath`) | which scopes cost the most | perturbs the run | a separate `--features hotpath` build |
+| Stages ([F6](../features/stage-breakdown.md)) | where did one query's latency go | perturbs the run | a separate `--features stage-profile` build |
 
-**A `hotpath` build never produces a latency or throughput number.** It installs a collector
-and takes two timestamps around every instrumented scope. Its wall clock is not comparable to
-an uninstrumented build's, and quoting one as a result is the easiest way to be confidently
-wrong.
+**Neither instrumented build ever produces a latency or throughput number.** `hotpath` installs
+a collector and takes two timestamps around every instrumented scope; a stage build takes about
+ten clock readings per query. Neither wall clock is comparable to an uninstrumented build's, and
+quoting one as a result is the easiest way to be confidently wrong.
+
+**The two attribution layers answer different questions**, which is why both exist. `hotpath`
+ranks *scopes* across the whole run — good for "what is this process spending itself on". The
+stage profile follows one *query* and reports the breakdown grouped by the total latency of the
+queries being asked about — which is what attributes a tail, because the queries at p99 are not
+waiting on the same thing as the queries at p50. The macro layer's own section below explains why
+its per-batch timestamp cannot answer that.
 
 ## Prerequisites
 
@@ -31,7 +42,6 @@ wrong.
 - `shoal.yml` at the repo root. It is committed and it *is* the benchmark configuration —
   changing it invalidates the recorded baseline.
 - A writable storage directory at whatever `shoal.yml` points at, `/opt/shoal` by default.
-- `jq`, used by the collection scripts.
 - **The CPU governor set to `performance`.** This is a precondition of the recorded baseline and
   the one precondition that lives outside the repository:
 
@@ -44,31 +54,80 @@ wrong.
   ([what the governor changed](performance-baseline.md#what-the-governor-changed)). It is
   required so that a capture matches the environment the baseline was taken in, not because it
   is faster.
-- **The dataset, which is not in the repository and which no script fetches.** The macro
+- ~~**The dataset, which is not in the repository and which no script fetches.** The macro
   harness expects a CSV shaped like `TMDB_movie_dataset_v11_first_100k.csv` (99,999 rows) and
-  defaults to `/home/mcarson/datasets/`. Point `--dataset` wherever yours lives. The micro
-  layer needs none of this.
+  defaults to `/home/mcarson/datasets/`.~~ **Nothing, since
+  [F8](../features/purpose-built-workloads.md).** Every workload builds its own rows from
+  `--seed`, so a clean checkout reproduces the macro layer with nothing fetched. The same seed
+  produces byte-identical data on any machine, which is why two captures differ by machine noise
+  rather than by what they happened to load.
 
 ## The one command path
 
 ```bash
-scripts/bench.sh <label> [--limit N] [--runs N] [--skip-hotpath]
+cargo run -p shoal-bench --release -- run --label <label>
 ```
 
-It does four things, and writes three artifacts into `docs/perf/runs/`:
+Everything below assumes `shoal-bench` is on your path or that you prefix it with
+`cargo run -p shoal-bench --release --`. Building it takes a few seconds and it depends on
+nothing else in the workspace, so it never rebuilds because the database changed.
+
+It does five things, and writes five files into `docs/perf/runs/`:
 
 1. Builds release without instrumentation.
 2. Clears `target/criterion` and runs the micro-benchmarks →
    `<label>.micro.json`. The clear matters: criterion keeps a directory per benchmark id
    indefinitely, so a renamed or deleted benchmark keeps reporting its last result into every
    later capture, and a stale number looks exactly like a fresh one.
-3. Runs the macro benchmark `--runs` times (5 by default), wiping storage before each, and
-   keeps the **median** → `<label>.macro.json`.
-4. Rebuilds *with* `--features hotpath`, runs once → `<label>.hotpath.json`, then rebuilds
-   without it so a later manual run does not silently measure the instrumented binary.
+3. Runs **each workload** `--runs` times (5 by default), wiping storage before each, and keeps
+   each workload's **own median** → `<label>.macro.json`. Per workload matters: a hiccup during
+   one workload's fourth run says nothing about which run of a different workload deserves to be
+   kept, so folding them together would let one workload's outlier choose every other workload's
+   reported result.
+4. Rebuilds *with* `--features hotpath` and runs once → `<label>.hotpath.json`.
+5. Rebuilds *with* `--features stage-profile` and runs once → `<label>.stages.json`, printing
+   the join counts. Then rebuilds without any instrumentation, so a later manual run does not
+   silently measure a profiling binary. That last rebuild happens **even when a phase fails**,
+   which is why it is not one of the numbered phases.
 
-Expect roughly ten minutes at the default settings. `--limit 20000 --runs 2 --skip-hotpath`
-turns that into about one, which is what you want while iterating.
+Alongside them it writes `<label>.meta.json`, which is what lets a committed number say later
+whether it still describes the current code: the commit, whether the tree was dirty, a content
+hash of the sources each layer measures, and the machine, governor and toolchain it ran on.
+
+A full capture is now fifteen workloads times five runs, so it is substantially longer than the
+five runs it replaced — budget the better part of an hour rather than thirteen minutes.
+`--scale smoke --runs 2` cuts the data two orders of magnitude and is what you want while
+iterating on a workload; the scale is recorded in the artifact, and a `smoke` capture is never
+compared against a `full` one.
+
+**It refuses a dirty tree.** A measurement of bytes that exist in no commit cannot be located in
+history afterwards, so `run` stops unless you pass `--allow-dirty` — and records that you did.
+
+**Read the join counts.** The stage step prints `joined`, `server only`, `client only` and
+`duplicates`. A report whose `joined` is far below the query count is not a report about that
+run — `shoal-bench` refuses one below half — and a non-zero `duplicates` means a query was
+answered twice, which is [known issue 52](../appendix/known-issues.md) rather than a rounding
+detail.
+
+## Running a subset
+
+Filtering works the way `cargo test` does. A positional argument is a substring of a benchmark's
+identifier, any of them matching selects it, and `--exact` switches to equality:
+
+```bash
+shoal-bench list                       # every benchmark, 59 micro plus one per other layer
+shoal-bench list get_key               # what a filter would select
+shoal-bench run --label o28 get_key    # capture only those
+shoal-bench run --label o28 --layer micro   # or a whole layer
+```
+
+The micro list is **discovered** from criterion rather than written down, so a benchmark added to
+`shoal/benches/partitions.rs` is selectable immediately. A filter that matches nothing is an
+error, not an empty capture.
+
+A filtered capture is recorded as `partial`. It cannot be promoted to a baseline — a baseline
+missing benchmarks silently narrows every comparison taken against it afterwards — and any
+comparison involving one says so before it prints a table.
 
 ## Running each layer by hand
 
@@ -101,7 +160,7 @@ samples were inside one process, and everything that differs between two process
 to it. Repeating an identical build four times, one benchmark moved **22%** — and reported its
 outlying value with a **±0.2%** interval, tighter than any of the runs it disagreed with.
 
-`scripts/compare.sh` applies a band tiered by benchmark duration, because the noise is
+`shoal-bench compare` applies a band tiered by benchmark duration, because the noise is
 proportionally worse the faster the benchmark: **±9% below 1 µs, ±5% above**. And **a single
 capture is not evidence** — confirm any apparent win by repeating the whole capture; two
 captures agreeing is the evidence. See
@@ -109,50 +168,62 @@ captures agreeing is the evidence. See
 
 Criterion's own `--save-baseline` / `--baseline` work and are useful mid-session, but they live
 in `target/criterion`, which is not committed and does not survive `cargo clean` —
-`scripts/collect-micro.sh` produces the durable record.
+`shoal-bench run` folds them into the durable record. It also ignores anything in there written
+before the capture started, so a benchmark you ran by hand an hour ago cannot leak into one.
 
 ### Macro
 
 ```bash
-cargo build --release --example tmdb
+cargo build --release --bin shoal-workload
 sudo rm -rf /opt/shoal/*
-./target/release/examples/tmdb --conf shoal.yml --no-wait --warmup 5000 \
+./target/release/shoal-workload run --id macro/insert_unsorted \
     --label my-run --json docs/perf/runs/my-run.macro.json
 ```
 
+`shoal-workload list` prints every workload this build carries, with the timing mode and a line
+saying what each one isolates.
+
 | Flag | Default | What it does |
 | --- | --- | --- |
-| `--workers <N>` | 5 | Client worker tasks, all pulling from one shared job channel |
-| `--batch <N>` | 100 | Queries buffered before a batch is sent |
-| `--in-flight <N>` | 4096 | Per-worker cap on outstanding queries |
-| `--iterations <N>` | 1 | Repeats of the insert + verify cycle |
-| `--warmup <N>` | 0 | Rows moved through before sampling starts |
-| `--dataset <PATH>` | see above | The CSV to load |
-| `--limit <N>` | none | Only load this many rows |
-| `--baseline <PATH>` | `.benchmark` | The prior run to diff against |
-| `--write-baseline` | off | Record this run as the new baseline |
-| `--json <PATH>` | none | Archive this run's result, without touching `--baseline` |
+| `--id <ID>` | required | Which workload to run. An unknown one lists what does exist |
+| `--conf <PATH>` | `shoal.yml` | The base config. Each workload gets its own subdirectory under the configured storage root |
+| `--json <PATH>` | required | Where to write what this run measured |
+| `--seed <N>` | 42 | The seed every row derives from. The same seed produces byte-identical data on any machine |
+| `--scale <smoke\|full>` | `full` | How much data to build. `smoke` is two orders of magnitude smaller, proves a workload runs, and measures nothing |
+| `--port <N>` | 12000 | The port this workload's server binds |
 | `--label <NAME>` | none | Name recorded inside the result |
-| `--conf <PATH>` | `shoal.yml` | The config to start the server with |
-| `--addr <ADDR>` | `127.0.0.1:12000` | Where the client connects |
-| `--client-cores <LIST>` | `28,29,30,31` | Cores to pin the client's tokio workers to |
-| `--no-wait` | off | Exit when finished instead of waiting on stdin |
+| `--stage-json <PATH>` | none | Write a stage breakdown. Needs `--features stage-profile`; a build without it refuses **before starting a server** rather than writing an empty file |
+| `--stage-sample <N>` | 1 | Keep one record in every `N`. Taken on the query index, so both halves keep the same queries. `4` keeps the record volume manageable on a full run |
 
-Without `--no-wait` the harness blocks on a newline at the end so you can inspect the server.
-`shoal_looper.sh` at the repo root does not pass it, so run 1 of that loop hangs forever.
+There is no `--dataset` and no `--limit`: a workload builds its own rows. There is no `--no-wait`
+either, because nothing blocks on stdin any more.
 
-`--in-flight` must be more than four times `--batch`; the harness exits with status 2 if it is
-not. That floor is not arbitrary — see [below](#the---in-flight-floor).
+**The batch and in-flight settings are no longer flags.** They are constants of the driver
+(`BATCH` 100, `IN_FLIGHT` 4096) because they define what a `per_batch` sample *is*, and a
+benchmark whose measurement changes with a command-line flag is not a benchmark. The floor
+relating them is asserted in code — see [below](#the---in-flight-floor).
+
+**Read the timing mode before reading a percentile.** A `per_batch` workload saturates and takes
+one timestamp per batch, so every query in it is charged for the ones ahead of it; its percentiles
+are batch completion times and the number worth quoting is its wall clock. A `per_query` workload
+runs at a bounded concurrency with each query stamped on its own, so its percentiles are service
+times and its wall clock is *not* a throughput figure. The two are never comparable, in either
+direction.
 
 ### Profile
 
 ```bash
-cargo build --release --example tmdb --features hotpath
+cargo build --release --bin shoal-workload --features hotpath
 sudo rm -rf /opt/shoal/*
-./target/release/examples/tmdb --conf shoal.yml --no-wait 2>/dev/null | tail -1 > profile.json
-jq -r '.output | to_entries | sort_by(-.value.total)
-       | .[] | "\(.value.calls)\t\(.value.total)\t\(.key)"' profile.json
+./target/release/shoal-workload run --id macro/insert_unsorted \
+    --json /dev/null 2>/dev/null | tail -1 > profile.json
 ```
+
+Or `shoal-bench run --label <label> --layer hotpath`, which does the same and stores the result
+where the results page can read it. Rank the scopes by `total`, never by the `percent_total`
+`hotpath` reports: that field is not normalised across concurrent scopes, and the committed `B1`
+profile puts one scope at over 12,000%
+([known issue 53](../appendix/known-issues.md)).
 
 The profile is the last line of stdout; everything before it is the run's own output. It
 reports every scope — `limit = 0` — because the default of 15 silently truncates, and a profile
@@ -166,22 +237,31 @@ every real entry.
 ## Comparing runs
 
 ```bash
-scripts/compare.sh docs/perf/runs/<label>.micro.json \
-    --against docs/perf/baselines/B1-performance.json \
-    --against docs/perf/baselines/trailing.json
+shoal-bench compare <label>
 ```
 
-Two baselines, always:
+With no `--against`, that compares against both baselines, which is always what you want:
 
-- **`B1-performance.json`** is frozen and never overwritten. It says what has been gained in total.
-- **`trailing.json`** is the last accepted run. It says what *this* change did.
+- **`B1-performance`** is frozen and never overwritten. It says what has been gained in total.
+  `shoal-bench promote` refuses to write it, with no flag to override.
+- **`trailing`** is the last accepted run. It says what *this* change did.
 
-Either alone misleads. Against B0 only, a fresh regression hides inside an earlier win; against
-the trailing baseline only, a series of individually "neutral" changes drifts a long way from
-where it started. Rows whose change is smaller than the run's own confidence interval are
-marked `(within noise)` — the band is ±9% below 1 µs and ±5% above, and `--noise-pct` overrides
-both tiers with one flat value — and are not results. Benchmarks present on one side and not the other
-are called out rather than dropped.
+Either alone misleads. Against the frozen baseline only, a fresh regression hides inside an
+earlier win; against the trailing baseline only, a series of individually "neutral" changes drifts
+a long way from where it started. Rows whose change is smaller than the band are marked
+`(within noise)` — ±9% below 1 µs and ±5% above, with `--noise-pct` overriding both tiers — and
+are not results. Benchmarks present on one side and not the other are called out rather than
+dropped.
+
+The **macro layer is compared too**, which the shell scripts this replaced could not do. Its band
+is not a percentage: each side has an observed interval across its runs, and a difference is a
+result only when the two intervals are **disjoint**. A fixed percentage would be wrong here — the
+frozen baseline spread 10.5% across five identical runs, wider than most changes worth making.
+Percentiles captured before `runs_detail` existed have no interval and are reported as
+`no error bar` rather than screened.
+
+`--fail-on-regression` exits 3 when anything moves outside its band in the slower direction, and
+`--format json` prints the whole comparison for something else to read.
 
 **Repeat the capture before accepting anything.** The band screens most benchmarks correctly
 and does not catch every case — see the `get_key/4096` example on the baseline page.
@@ -193,27 +273,62 @@ code and that the change cannot reach — `partition_sorted/codec/*` and `archiv
 controls for anything about how a partition is held. A *null* is the other arm of the same
 dispatch: `maybe_loaded/loaded_get_key` runs the resident arm of the enum whose archived arm is
 being changed. When a control moves, the run is telling you something about the machine or the
-binary and not about the change — F4's controls moved 9–13%, reproducibly, and the third baseline
+binary and not about the change — F4's controls moved 9-13%, reproducibly, and the third baseline
 is what showed the *pre*-change capture was the outlier. See
 [O24](../appendix/optimizations.md#o24-two-benchmarks-move-with-the-shape-of-the-binary-around-them).
 
 When a change is accepted, promote it:
 
 ```bash
-cp docs/perf/runs/<label>.micro.json docs/perf/baselines/trailing.json
+shoal-bench promote <label>
 ```
 
-and add a row to [Performance Baseline](performance-baseline.md) carrying **both** deltas.
+which refuses a partial capture, refuses one that no longer describes the current code, and
+copies the capture's provenance alongside the baseline so a later comparison can say where it
+came from. Then add a row to [Performance Baseline](performance-baseline.md) carrying **both**
+deltas.
+
+## What has been captured, and whether it still holds
+
+```bash
+shoal-bench status
+```
+
+One line per capture and layer, saying whether it is `fresh` (taken at this commit on a clean
+tree), `unaffected` (the commit moved but nothing that layer measures did), `stale` (that layer's
+sources changed since), `uncommitted` (the measured bytes are in no commit), or `no provenance`
+(captured before `shoal-bench` recorded any).
+
+The digests can only ever narrow `stale` to `unaffected`, never widen anything to `fresh`, because
+the list of sources each layer measures lives in `docs/perf/sources.json` and is maintained by
+hand. A path missing from it produces a capture wrongly called *unaffected* — which still shows
+the commit distance — and never one wrongly called fresh.
+
+## The results page
+
+```bash
+shoal-bench render          # regenerate docs/src/operations/benchmark-results.md
+shoal-bench render --check  # fail if the committed page is out of date, writing nothing
+```
+
+[Benchmark Results](benchmark-results.md) is generated from the committed artifacts and is
+committed itself, because `create-missing = false` means the book will not build without it and
+because regenerating it needs this machine. `--check` is what says whether it is current; it fails
+after any commit, because the page states which commit it was rendered against and every staleness
+verdict on it is relative to that commit.
 
 ## Getting a number you can trust
 
 1. **Wipe the storage directory between runs.** Inserting over a populated store changes
    partition faulting, archive map size, and when compaction fires. A directory left over from
    a prior run is a hidden variable.
-2. **Hold the config fixed:** same `cores`, `memory`, `buffer_size`, `write_behind`, dataset.
-3. **Warm up.** `--warmup 5000` moves connection setup, an empty pool, and cold partition
-   faults out of the distribution. The rows it inserts stay behind on purpose — that is what
-   makes the measured pass a steady state rather than a second cold start.
+2. **Hold the config fixed:** same `cores`, `memory`, `buffer_size`, `write_behind`, and the same
+   `--seed` and `--scale`. All five are recorded per workload in the artifact, so a capture taken
+   under a different one is visibly rather than silently incomparable.
+3. **Warm up.** Every workload discards its first few percent of samples, for the same reason:
+   connection setup, an empty pool and cold partition faults belong to starting up rather than to
+   the steady state. The warmup is a property of the workload rather than a flag, so it cannot be
+   set to a value that leaves nothing to measure — a test asserts that for each of them.
 4. **Sweep `--in-flight` until throughput plateaus, then leave it there.** That plateau is your
    evidence the client is not the bottleneck.
 5. **Change exactly one variable per comparison.**
@@ -247,6 +362,13 @@ so worker scheduling delay is folded into every sample.
 computed against it. It is a throughput figure for the harness as a whole, not a service rate
 for the server.
 
+**The stage layer is what separates these.** Everything above is a property of *this* timestamp,
+not of the server. A stage profile stamps each query at nineteen points and reports the breakdown
+of the queries at each latency rank, so the queueing that dominates a p50 shows up as
+`exec_queue` and `shard_queue_in` rather than being folded into a single number.
+[F6](../features/stage-breakdown.md) has the stage list and the first capture. Its own caveats
+apply: four of its stages are batch level, and it needs an in-process server to join its halves.
+
 **Insert and get are separate distributions.** A get is roughly 20× faster at the median, so
 pooling them made `p99` report where the boundary between two distributions landed.
 
@@ -256,8 +378,14 @@ pooling them made `p99` report where the boundary between two distributions land
 
 ### The `--in-flight` floor
 
-A worker buffers queries until it has `--batch` of them, sends the batch, and blocks once
-`--in-flight` are outstanding. If those two numbers are close, the worker sends a batch,
+Since [F8](../features/purpose-built-workloads.md) these are constants of the per-batch driver
+rather than flags — `BATCH` 100 and `IN_FLIGHT` 4096 — because they define what a `per_batch`
+sample *is*. The relationship between them still matters and is asserted in a test rather than
+enforced at the command line. The measurements in this section were taken with the old flags and
+are kept because the effect they show is a property of the pipeline, not of the harness.
+
+The driver buffers queries until it has `BATCH` of them, sends the batch, and stops topping up
+once `IN_FLIGHT` are outstanding. If those two numbers are close, the driver sends a batch,
 immediately hits the cap, and cannot build the next one until nearly the whole batch has come
 back. The pipeline empties on every cycle.
 
@@ -265,7 +393,7 @@ That bubble is close to free when acknowledgement is instant. It is not free onc
 on an `fdatasync`: the tail of every batch pays full latency while the worker sits idle, and
 **group commit cannot amortise across a barrier that drains the pipeline**. You would be
 measuring the client's stall and attributing it to the server. The floor makes that
-configuration unreachable from the command line.
+configuration unreachable.
 
 ### Latency that is just the queue you asked for
 
@@ -281,8 +409,10 @@ Sweeping `--in-flight` on btrfs at `--limit 20000`, before the XFS migration:
 
 Latency scales almost linearly with concurrency while wall clock does not move. The server is
 already saturated at the lowest permitted setting and everything above it is queueing delay —
-textbook Little's Law past the knee. **Do not read the extra latency at high `--in-flight` as a
-regression.** Pick a setting near the bottom of the valid range and hold it.
+textbook Little's Law past the knee. **Do not read the extra latency at high concurrency as a
+regression.** This is also why the `per_query` workloads run at a concurrency of 8 or 16 rather
+than at saturation: past the knee, every extra sample of latency is queueing delay and a
+percentile stops describing what one query cost.
 
 ### The spread
 

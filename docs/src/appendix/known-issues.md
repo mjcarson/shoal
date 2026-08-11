@@ -20,13 +20,18 @@ test suite does and does not reach is in [Test Coverage](test-coverage.md).
 Defects that have been fixed move to [Resolved Issues](resolved-issues.md), one page each,
 carrying the reasoning and the invariants the fix depends on. Item numbers are shared between
 the two pages and never reused, so a number appears on exactly one of them — which is why this
-list starts at 15 and skips 26, 31, 39, 44, 45, and 48. The exceptions are items 20 and 24, which were only
+list starts at 15 and skips 26, 31, 39, 44, 45, and 48, and why item 55 is the newest. The exceptions are items 20 and 24, which were only
 partly fixed: the open remainder is here and the rest is there. Item 9 was a third exception
 until its second half was fixed, and is now on the resolved page alone.
 
 **Baseline as of writing:** `cargo check --workspace --all-targets` passes with warnings;
-`cargo test --workspace` passes — 172 integration tests (one ignored), 199 `shoal-core` unit
-tests, 11 doctests. That is up from 168, 194 and 11 with the config and cpu selection tests
+`cargo test --workspace` passes — 410 integration tests (one ignored), 219 `shoal-core` unit
+tests, 21 doctests, plus 8 more behind `--features stage-profile` that a default run does not
+reach ([Test Coverage](test-coverage.md)). That is up from 359, 219 and 16 with
+[F8](../features/purpose-built-workloads.md), whose count moved in **both** directions — it
+deleted a comparison engine along with its tests and moved others between crates, which that page
+accounts for line by line. Before that it was up from 172, 215 and 11 with the stamp and
+offset tests added by [F6](../features/stage-breakdown.md). Before that it was up from 168, 194 and 11 with the config and cpu selection tests
 added by [items 18 and 50](resolved/excluded-cores-typo.md) and the baseline versioning and
 throughput tests added by [F3](../features/performance-harness.md). Before those it was up
 from 14 and 32 with the addition of SHQL coverage
@@ -698,6 +703,115 @@ failure. Any change touching loader construction should be read against this.
    never told. They are cheap together, since a `ClientGone` broadcast is what both want.
 7. **Items 43 and 46** — the two remaining holes in the storage marker. Worth doing together,
    since both are changes to what `StorageMeta::claim` looks at before it writes.
+
+### 52. A resident hit in `exists` answers a query a blocked clone will answer again
+
+`PersistentSortedTable::exists` (`.../persistent/sorted.rs`) walks the partition keys an exists
+named. A key whose partition has to be read from disk pushes a clone of the whole query into
+`self.blocked` and moves on:
+
+```rust
+if will_load {
+    // add this query to the list of ones waiting on this partition
+    let entry = self.blocked.entry(*partition_key).or_default();
+    let blocked_exists = exists_query.to_blocked(*partition_key);
+    entry.push((meta.clone(), SortedQuery::Exists(blocked_exists)));
+    blocked.push(*partition_key);
+    continue;
+}
+```
+
+A *later* key in the same loop that is resident and does hold a matching row returns straight
+away:
+
+```rust
+if partition.exists(exists_query, &mut seek) {
+    return Some((meta.client, meta.id, meta.stamps, response));
+}
+```
+
+That early return never reaches the `self.pending_exists.insert` at the bottom of the loop, and
+it does not remove the clone from `self.blocked`. When the partition finishes loading the clone
+is replayed and answers the same `(id, index)` a second time. The client is owed exactly one
+response per query, and an unordered stream will surface both.
+
+Only reachable when one exists names partitions on the same shard where at least one is
+evicted and a *later* one is resident and matching — the order matters, since a resident hit
+before the blocked key would have returned before the clone was ever parked.
+`PersistentUnsortedTable::exists` has no such path: it names one partition and has one exit.
+
+**Established by reading the source**, while building [F6](../features/stage-breakdown.md).
+The stage report counts these as `join.duplicates` rather than folding them into a bucket, so
+a run that hits this says so — but nothing yet reproduces it.
+
+
+### 53. `hotpath`'s `percent_total` is meaningless for a concurrent scope
+
+`docs/perf/runs/*.hotpath.json`, every capture
+
+`hotpath` reports a `percent_total` per scope, and it is not a percentage of anything a reader
+would take it for. It is not normalised across scopes that ran at the same time on different
+shards, so twelve shards each spending most of a run inside a scope sum to far more than the run
+did. The committed `B1-performance.hotpath.json` reports:
+
+```
+shoal_core::server::tables::storage::fs::stream::write_helper   percent_total: 1253041
+shoal_core::server::shard::handle_query                         percent_total: 6245
+```
+
+Those are 12,530% and 62%, of a run that was 100% of itself.
+
+The field is harmless as long as nothing reads it, and the trap is that it looks exactly like the
+number anybody would reach for first. `total` — nanoseconds summed across every shard that entered
+the scope — is the field to rank by, and it needs saying that it is a sum across shards rather
+than a share of the wall clock, which is why the chart's axis on
+[Benchmark Results](../operations/benchmark-results.md) says so.
+
+**Established by reading the committed artifacts**, while building
+[F7](../features/bench-runner.md). `shoal-bench` never plots or tabulates the field, and
+`render::chart::hotpath_scopes::tests::the_unnormalised_percentage_is_never_drawn` pins that.
+Fixing it properly is upstream in `hotpath`, or means dividing by the shard count that actually
+touched each scope — which the profile does not record.
+
+### 54. `#[shoal::db]` needs three crates the caller has never heard of
+
+`shoal-derive/src/lib.rs`, every generated `#[shoal::db]` and `#[derive(Shoal*Table)]`
+
+The generated code names `glommio`, `uuid` and `deepsize2` by path. A crate that writes a schema
+therefore has to declare all three as its own dependencies, even though it mentions none of them
+and has no reason to know they exist. The failure is at least loud — `cannot find module or crate
+glommio in this scope`, pointing at the `#[shoal::db]` attribute — but it points at the macro
+rather than at the manifest, and nothing in [Derive Macros](../api/derive-macros.md) says a word
+about it.
+
+Nothing had noticed because nothing had ever tried. Every schema in this repository lived inside
+`shoal` — the `tmdb` example, the integration tests — and `shoal` already depends on all three, so
+the requirement was invisible from the only place it was ever exercised. Writing the
+[F8](../features/purpose-built-workloads.md) workload schema in `shoal-bench` was the first time a
+schema was defined outside that crate, and it failed on all three in turn.
+
+**Established by reproducing it**, while building F8. The fix is for the macros to emit
+`::shoal::...` paths through re-exports the facade already controls, which is a `shoal-derive`
+change and would make the requirement disappear rather than need documenting. Until then
+`shoal-bench/Cargo.toml` carries the three with a comment pointing here.
+
+### 55. A get that found nothing is reported as a query that failed
+
+`shoal-core/src/client.rs`, `Shoal::send_one`
+
+`send_one` calls `suceeded` on the response and turns a get that matched no rows into
+`Err(QueryDidNotSucceed)`. "The row is not there" and "the query did not work" are different
+answers, and a caller that wants the first has no way to ask for it through `send_one` — it has to
+drop to `send` and drain the stream itself, or use `exists`, which only answers a yes-or-no.
+
+This is a usability defect rather than a correctness one, and it bites in a specific way: any code
+that probes with a get treats an empty table as a broken server. The F8 readiness probe did exactly
+that and timed out for thirty seconds against a server that was answering every query correctly,
+until it was changed to use `exists`.
+
+**Established by reproducing it**, while building F8. `QuerySuceededOpts` already exists as the
+knob that decides what counts as success, so the fix is plausibly to let `send_one` take one rather
+than always using the default.
 
 Everything that has been fixed, and why it was fixed the way it was, is in
 [Resolved Issues](resolved-issues.md). The SHQL parser has gained test coverage at both stages

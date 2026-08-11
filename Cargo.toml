@@ -1,8 +1,9 @@
 [workspace]
 resolver = "2"
 
-members = [ 
+members = [
     "shoal",
+    "shoal-bench",
     "shoal-core",
     "shoal-derive",
     "shoalctl",

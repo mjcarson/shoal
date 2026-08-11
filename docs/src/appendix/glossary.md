@@ -22,6 +22,12 @@ all. Persisted as a checksummed snapshot plus its own intent log. See
 rather than compacted in place, to avoid invalidating entries written earlier in the same
 compaction pass.
 
+**Batch timing** (`per_batch`) — A benchmark sample taken once per batch of queries and charged
+to every query in it, so each is charged for the ones ahead of it. What a saturating workload
+produces, and what **every** macro percentile recorded before
+[F8](../features/purpose-built-workloads.md) is. Never comparable with a *service time*; the
+artifact records which one a number is. Contrast **Service time**.
+
 **Blocked query** — A query parked in `blocked: HashMap<u64, Vec<...>>` waiting for a
 partition to be read from disk. Re-injected as a fresh `ServerMsg::Query` when the read
 completes, rather than being resumed as a suspended future. See
@@ -33,6 +39,11 @@ an archive". Set on creation, cleared once the full archive copy has been merged
 **Compaction** — Two distinct operations sharing one background task. *Intent compaction*
 folds a sealed intent log into archives. *Archive compaction* reclaims space from archives
 whose live fraction has dropped below 50%. See [Compaction](../storage/compaction.md).
+
+**Control and null** — A pair of benchmarks differing in exactly one axis, one of which the
+change under test cannot reach. The shape [F4](../features/validated-archives.md) settled on and
+that caught [O24](optimizations.md). `macro/get_resident` and `macro/get_archived` are one; the two
+arms of the fanout curve are another.
 
 **Coordinator** — A *role*, not a component. The shard whose TCP listener accepted a client's
 connection routes that client's queries to their owning shards. Any shard can be a
@@ -114,6 +125,12 @@ ownership is recorded for. 4096 of them, assigned to shards round robin. Ownersh
 per tablet rather than derived from a hash, which is what would let a tablet be moved between
 shards. See [Partitioning](../architecture/partitioning.md#the-tablet-map).
 
+**Service time** (`per_query`) — A benchmark sample covering one query and nothing else, taken by
+running at a bounded concurrency with one query outstanding per slot. What the `per_query`
+workloads [F8](../features/purpose-built-workloads.md) added produce, and the first such numbers
+this repository has recorded. Costs throughput to measure, so a `per_query` workload's wall clock
+is *not* a throughput figure. Contrast **Batch timing**.
+
 **Shard** — One glommio executor pinned to one core, owning a slice of every table, its own
 intent logs, archives, and background tasks. Named `Shard-N`, where N comes from a startup
 counter, not the core id. Shard names become filenames, which is why shard count is part of
@@ -185,3 +202,10 @@ than mistaking it for the end of the log. See
 | Sorted | Supports ordered scans and range queries | Rows are stored ordered, but no read predicate uses the order |
 | Distributed | Multiple nodes | Multiple shards in one process |
 | `sync` | Force to stable storage | On `StreamWriter`, issues a background write and returns. `sync_blocking` is the real one — but on glommio's `DmaStreamWriter`, `sync` *does* fsync |
+
+**Workload** — One purpose-built benchmark in `shoal-bench`, isolating one path through the
+engine: it generates its own rows from a seed, drives a server it owns, and writes one block of
+the macro artifact. Its identifier — `macro/get_archived`, `macro/fanout/evicted/64` — is the key
+every comparison joins on, so **renaming one orphans every capture taken before the rename**. Not
+to be confused with the *macro layer*, which is the set of all of them. See
+[F8](../features/purpose-built-workloads.md).

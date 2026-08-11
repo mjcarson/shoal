@@ -40,12 +40,24 @@ and interfere with each other.
 | Layer | Question it answers | Spread | Artifact |
 | --- | --- | --- | --- |
 | Criterion micro-benchmarks | did this function get faster | 5–9% by duration, per benchmark | `docs/perf/runs/<label>.micro.json` |
-| The `tmdb` macro benchmark | did the system get faster end to end | ~11% whole-system; median of several runs | `docs/perf/runs/<label>.macro.json` |
-| A `hotpath` profile | where does the time actually go | perturbs the run | `docs/perf/runs/<label>.hotpath.json` |
+| ~~The `tmdb` macro benchmark~~ Purpose-built workloads since [F8](purpose-built-workloads.md) | did **one path through** the system get faster | ~11% whole-system; median of several runs, per workload | `docs/perf/runs/<label>.macro.json` |
+| A `hotpath` profile | which scopes cost the most | perturbs the run | `docs/perf/runs/<label>.hotpath.json` |
 
-`scripts/bench.sh <label>` captures all three. `scripts/compare.sh` diffs a run against
-baselines. [Benchmarking](../operations/benchmarking.md) is the runbook; [Performance
-Baseline](../operations/performance-baseline.md) is the recorded result.
+~~`scripts/bench.sh <label>` captures all three.~~ A fourth layer was added by
+[F6](stage-breakdown.md) — a per query stage breakdown, `docs/perf/runs/<label>.stages.json`,
+from its own `--features stage-profile` build. ~~`bench.sh` now captures four.~~ The three shell
+scripts were replaced by the `shoal-bench` crate in [F7](bench-runner.md); `shoal-bench run
+--label <label>` captures all four, and can capture a subset of them.
+The claim below that this page's `hotpath` layer answers "where does the time actually go" was
+too strong for what it does: it ranks scopes over a whole run, which cannot say what the queries
+at p99 were waiting on. That is F6's question, and it needed a different instrument.
+
+~~`scripts/bench.sh <label>` captures all four. `scripts/compare.sh` diffs a run against
+baselines.~~ Both are now `shoal-bench` — see [F7](bench-runner.md), which also gave every capture
+a record of the tree it was taken from and made the results a generated page.
+[Benchmarking](../operations/benchmarking.md) is the runbook;
+[Benchmark Results](../operations/benchmark-results.md) is the current result and
+[Performance Baseline](../operations/performance-baseline.md) is the frozen one.
 
 **Two baselines, not one.** Each optimization is judged against both
 `docs/perf/baselines/B1-performance.json`, which is frozen, and `docs/perf/baselines/trailing.json`,
@@ -166,18 +178,22 @@ and `hotpath` cannot express it.
   data alignment, ASLR, thermal state — is invisible to an interval computed inside one
   process, so a tight interval is not evidence of anything. (The CPU governor is *not* on that
   list: it was suspected and then measured, and it makes no detectable difference.)
-  `scripts/compare.sh` applies a duration-tiered band as a screen — ±9% below 1 µs, ±5% above,
+  `shoal-bench compare` applies a duration-tiered band as a screen — ±9% below 1 µs, ±5% above,
   because a fixed-cost perturbation is a large fraction of a 25 ns benchmark and a rounding
   error in a 200 µs one — and **a single capture is not sufficient to accept a result**: the
   protocol requires a confirming repeat.
-- **`compare.sh` takes one capture per side.** It cannot use the repeats that the point above
-  makes necessary, so the confirmation is currently a manual step.
+- **The comparison takes one capture per side.** It cannot use the repeats that the point above
+  makes necessary, so the confirmation is still a manual step. ~~It also could not compare the
+  macro layer at all.~~ [F7](bench-runner.md) closed the second half of that: a macro comparison
+  is judged on whether two observed intervals are disjoint. The micro half remains open, in
+  [TODOs](../appendix/todos.md#benchmark-coverage-the-harness-does-not-have).
 
 ## Invariants to uphold
 
 - **A `hotpath` build never produces a baseline number.** It installs a collector and takes two
-  timestamps around every instrumented scope. `scripts/bench.sh` builds twice for this reason,
-  and rebuilds without the feature at the end so a stray manual run afterwards does not
+  timestamps around every instrumented scope. ~~`scripts/bench.sh`~~ `shoal-bench run` builds
+  separately for this reason, and rebuilds without the feature at the end — **including when a
+  phase fails**, which the script could not guarantee — so a stray manual run afterwards does not
   silently measure the instrumented binary.
 - **`docs/perf/baselines/B1-performance.json` is never overwritten.** It is the fixed point
   every later number is quoted against. It replaced `B0-powersave.json` only because the
@@ -226,13 +242,27 @@ a cold single row get pays for the size of the partition it landed in, and it is
 | `conf::tests::excluded_cores_leave_the_cpuset` | An excluded core can be scheduled on again |
 | `conf::tests::cpu_selection_is_deterministic` | Shard placement goes back to depending on the hash seed, and two runs of one binary stop being comparable |
 | `conf::tests::cpu_selection_fills_physical_cores_first` | Two shards share a physical core while another sits idle |
-| `bencher::tests::a_written_baseline_is_loaded_back` | A baseline written by this build stops being readable by it |
-| `bencher::tests::a_baseline_from_another_version_is_refused` | An incomparable baseline is compared against silently — the failure that made `.benchmark` misleading |
-| `bencher::tests::throughput_counts_rows_not_samples` | Throughput is computed from batches instead of rows |
-| `bencher::tests::throughput_of_an_instant_run_is_zero` | A run with no measurable duration divides by zero |
+| ~~`bencher::tests::a_written_baseline_is_loaded_back`~~ | — |
+| ~~`bencher::tests::a_baseline_from_another_version_is_refused`~~ | — |
+| ~~`bencher::tests::throughput_counts_rows_not_samples`~~ | — |
+| ~~`bencher::tests::throughput_of_an_instant_run_is_zero`~~ | — |
+
+**The four struck-through tests were deleted by
+[F8](purpose-built-workloads.md), along with the code they covered.** They pinned
+`shoal::bencher`'s baseline file: loading a prior result, refusing one from another schema version,
+and computing throughput. That was a second comparison engine, and `shoal-bench` has owned
+comparison since [F7](bench-runner.md) — two engines can only disagree, and only one of them is
+read. `shoal::bencher` no longer exists; its percentile and summary statistics moved to
+`shoal-bench`'s workload harness and are still tested there.
+
+The lesson those tests encoded did not go with them. **A file that parses and is not comparable
+costs a wrong answer, where one that fails to parse costs only a comparison** — which is exactly
+why F8's macro artifact dispatches on its version field rather than letting serde guess, and why a
+capture that shares no workload with its baseline says so instead of printing an empty table.
 
 The benches themselves are not tests and are not run by `cargo test`. `cargo check --workspace
---all-targets` compiles them; `scripts/bench.sh` runs them.
+--all-targets` compiles them; ~~`scripts/bench.sh`~~ `shoal-bench run` runs them. What
+`shoal-bench` itself is tested by is on [F7](bench-runner.md#tests).
 
 ## Related
 

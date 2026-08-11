@@ -1,6 +1,6 @@
 //! The file system storage module for shoal
 
-use conf::FileSystemTableConf;
+use conf::{Durability, FileSystemTableConf};
 use futures::stream::FuturesUnordered;
 use futures::{AsyncWriteExt, StreamExt};
 use glommio::io::{DmaStreamWriter, DmaStreamWriterBuilder, OpenOptions, ReadResult};
@@ -38,11 +38,12 @@ pub use map::ArchiveMap;
 use reader::IntentLogReader;
 use stream::StreamWriter;
 
-use super::{
-    CompactionJob, FlushProgress, IntentReadSupport, RecoveryStats, StorageSupport,
-};
+use super::{CompactionJob, FlushProgress, IntentReadSupport, RecoveryStats, StorageSupport};
 use crate::server::conf::TableSettings;
 use crate::server::messages::ServerMsg;
+use crate::server::stage_profile::StageDurability;
+#[cfg(feature = "stage-profile")]
+use crate::server::stage_profile::StageStamps;
 use crate::server::{Conf, ServerError};
 use crate::shared::traits::{PartitionKeySupport, RkyvSupport, ShoalDatabase, TableNameSupport};
 use crate::storage::{ArchiveMapKinds, FilteredFullArchiveMap, FullArchiveMap, LoaderMsg, Loaders};
@@ -55,10 +56,7 @@ use loader::FsLoader;
 ///
 /// * `intent_dir` - The intent log directory to scan
 /// * `shard_name` - The name of the shard to find inactive logs for
-pub fn find_inactive_intent_logs(
-    intent_dir: &PathBuf,
-    shard_name: &str,
-) -> Vec<(u64, PathBuf)> {
+pub fn find_inactive_intent_logs(intent_dir: &PathBuf, shard_name: &str) -> Vec<(u64, PathBuf)> {
     let prefix = format!("{shard_name}-inactive-");
     let mut inactive_logs: Vec<(u64, PathBuf)> = Vec::new();
     // use std::fs::read_dir since this only runs during startup recovery
@@ -309,13 +307,12 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
         // add our shard name
         intent_path.push(format!("{shard_name}-active"));
         // build the writer for this shards intent log
-        let intent_log2 =
-            StreamWriter::builder(&intent_path, shard_local_tx.clone())
-                .buffer_size(table_conf.latency_sensitive.buffer_size)
-                .write_behind(table_conf.latency_sensitive.write_behind)
-                .durability(table_conf.latency_sensitive.durability)
-                .build()
-                .await?;
+        let intent_log2 = StreamWriter::builder(&intent_path, shard_local_tx.clone())
+            .buffer_size(table_conf.latency_sensitive.buffer_size)
+            .write_behind(table_conf.latency_sensitive.write_behind)
+            .durability(table_conf.latency_sensitive.durability)
+            .build()
+            .await?;
         // build the channel to our compactor
         let (intent_tx, intent_rx) = kanal::unbounded_async();
         // get this shards shared archive map
@@ -391,6 +388,27 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
         // return the offset one past this record, which is the position it will be
         // durable at once our writers watermark reaches it
         Ok(self.intent_log2.get_unflushed_pos())
+    }
+
+    /// Fill in the durability stages for responses that have just been released
+    ///
+    /// # Arguments
+    ///
+    /// * `stamps` - The stamps to fill in, each already carrying its commit offset
+    #[cfg(feature = "stage-profile")]
+    fn fill_durability(&self, stamps: &mut StageStamps) {
+        // the writer owns the timeline these stages are looked up in
+        self.intent_log2.fill_durability(stamps);
+    }
+
+    /// Get how this storage engine makes a committed intent durable
+    fn durability(&self) -> StageDurability {
+        // report what this tables intent log was actually configured with, since a report
+        // that assumed the default would invent an fdatasync stage for a table that has none
+        match self.table_conf.latency_sensitive.durability {
+            Durability::Fsync => StageDurability::Fsync,
+            Durability::Async => StageDurability::Async,
+        }
     }
 
     /// Check if this intent log has grown past the size it rotates at

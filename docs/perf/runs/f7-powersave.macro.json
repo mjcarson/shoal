@@ -1,0 +1,408 @@
+{
+  "version": 1,
+  "label": "f7-powersave",
+  "insert": {
+    "count": 447251,
+    "max": {
+      "secs": 0,
+      "nanos": 339132214
+    },
+    "p99": {
+      "secs": 0,
+      "nanos": 274393028
+    },
+    "p95": {
+      "secs": 0,
+      "nanos": 223911456
+    },
+    "p90": {
+      "secs": 0,
+      "nanos": 184772324
+    },
+    "p50": {
+      "secs": 0,
+      "nanos": 44915860
+    },
+    "avg": {
+      "secs": 0,
+      "nanos": 69771813
+    },
+    "min": {
+      "secs": 0,
+      "nanos": 382954
+    }
+  },
+  "get": {
+    "count": 99999,
+    "max": {
+      "secs": 0,
+      "nanos": 733495
+    },
+    "p99": {
+      "secs": 0,
+      "nanos": 239389
+    },
+    "p95": {
+      "secs": 0,
+      "nanos": 143695
+    },
+    "p90": {
+      "secs": 0,
+      "nanos": 119449
+    },
+    "p50": {
+      "secs": 0,
+      "nanos": 73120
+    },
+    "avg": {
+      "secs": 0,
+      "nanos": 81853
+    },
+    "min": {
+      "secs": 0,
+      "nanos": 19958
+    }
+  },
+  "total": {
+    "secs": 1,
+    "nanos": 852147566
+  },
+  "inserted": 447251,
+  "retrieved": 99999,
+  "runs": 5,
+  "wall_clock_ns": [
+    1806566222,
+    1849540963,
+    1852147566,
+    1921138850,
+    1932848943
+  ],
+  "spread_pct": 6.990207137837209,
+  "runs_detail": [
+    {
+      "wall_clock_ns": 1806566222,
+      "insert": {
+        "count": 447251,
+        "max": {
+          "secs": 0,
+          "nanos": 367934233
+        },
+        "p99": {
+          "secs": 0,
+          "nanos": 269977839
+        },
+        "p95": {
+          "secs": 0,
+          "nanos": 220097960
+        },
+        "p90": {
+          "secs": 0,
+          "nanos": 183500177
+        },
+        "p50": {
+          "secs": 0,
+          "nanos": 40631221
+        },
+        "avg": {
+          "secs": 0,
+          "nanos": 67462515
+        },
+        "min": {
+          "secs": 0,
+          "nanos": 707265
+        }
+      },
+      "get": {
+        "count": 99999,
+        "max": {
+          "secs": 0,
+          "nanos": 537500
+        },
+        "p99": {
+          "secs": 0,
+          "nanos": 298401
+        },
+        "p95": {
+          "secs": 0,
+          "nanos": 219340
+        },
+        "p90": {
+          "secs": 0,
+          "nanos": 181488
+        },
+        "p50": {
+          "secs": 0,
+          "nanos": 88961
+        },
+        "avg": {
+          "secs": 0,
+          "nanos": 105109
+        },
+        "min": {
+          "secs": 0,
+          "nanos": 20660
+        }
+      }
+    },
+    {
+      "wall_clock_ns": 1849540963,
+      "insert": {
+        "count": 447251,
+        "max": {
+          "secs": 0,
+          "nanos": 356481662
+        },
+        "p99": {
+          "secs": 0,
+          "nanos": 256576716
+        },
+        "p95": {
+          "secs": 0,
+          "nanos": 216962874
+        },
+        "p90": {
+          "secs": 0,
+          "nanos": 181027229
+        },
+        "p50": {
+          "secs": 0,
+          "nanos": 52109080
+        },
+        "avg": {
+          "secs": 0,
+          "nanos": 69147960
+        },
+        "min": {
+          "secs": 0,
+          "nanos": 580833
+        }
+      },
+      "get": {
+        "count": 99999,
+        "max": {
+          "secs": 0,
+          "nanos": 600681
+        },
+        "p99": {
+          "secs": 0,
+          "nanos": 307619
+        },
+        "p95": {
+          "secs": 0,
+          "nanos": 218349
+        },
+        "p90": {
+          "secs": 0,
+          "nanos": 176748
+        },
+        "p50": {
+          "secs": 0,
+          "nanos": 80224
+        },
+        "avg": {
+          "secs": 0,
+          "nanos": 98742
+        },
+        "min": {
+          "secs": 0,
+          "nanos": 19948
+        }
+      }
+    },
+    {
+      "wall_clock_ns": 1932848943,
+      "insert": {
+        "count": 447251,
+        "max": {
+          "secs": 0,
+          "nanos": 350913385
+        },
+        "p99": {
+          "secs": 0,
+          "nanos": 279598742
+        },
+        "p95": {
+          "secs": 0,
+          "nanos": 224751767
+        },
+        "p90": {
+          "secs": 0,
+          "nanos": 189895409
+        },
+        "p50": {
+          "secs": 0,
+          "nanos": 54001685
+        },
+        "avg": {
+          "secs": 0,
+          "nanos": 73853839
+        },
+        "min": {
+          "secs": 0,
+          "nanos": 541147
+        }
+      },
+      "get": {
+        "count": 99999,
+        "max": {
+          "secs": 0,
+          "nanos": 851611
+        },
+        "p99": {
+          "secs": 0,
+          "nanos": 568199
+        },
+        "p95": {
+          "secs": 0,
+          "nanos": 380569
+        },
+        "p90": {
+          "secs": 0,
+          "nanos": 293212
+        },
+        "p50": {
+          "secs": 0,
+          "nanos": 92407
+        },
+        "avg": {
+          "secs": 0,
+          "nanos": 137020
+        },
+        "min": {
+          "secs": 0,
+          "nanos": 19286
+        }
+      }
+    },
+    {
+      "wall_clock_ns": 1921138850,
+      "insert": {
+        "count": 447251,
+        "max": {
+          "secs": 0,
+          "nanos": 333919218
+        },
+        "p99": {
+          "secs": 0,
+          "nanos": 262324899
+        },
+        "p95": {
+          "secs": 0,
+          "nanos": 217618251
+        },
+        "p90": {
+          "secs": 0,
+          "nanos": 188052879
+        },
+        "p50": {
+          "secs": 0,
+          "nanos": 50490259
+        },
+        "avg": {
+          "secs": 0,
+          "nanos": 73650790
+        },
+        "min": {
+          "secs": 0,
+          "nanos": 855089
+        }
+      },
+      "get": {
+        "count": 99999,
+        "max": {
+          "secs": 0,
+          "nanos": 927426
+        },
+        "p99": {
+          "secs": 0,
+          "nanos": 274516
+        },
+        "p95": {
+          "secs": 0,
+          "nanos": 196386
+        },
+        "p90": {
+          "secs": 0,
+          "nanos": 161109
+        },
+        "p50": {
+          "secs": 0,
+          "nanos": 83339
+        },
+        "avg": {
+          "secs": 0,
+          "nanos": 97472
+        },
+        "min": {
+          "secs": 0,
+          "nanos": 20399
+        }
+      }
+    },
+    {
+      "wall_clock_ns": 1852147566,
+      "insert": {
+        "count": 447251,
+        "max": {
+          "secs": 0,
+          "nanos": 339132214
+        },
+        "p99": {
+          "secs": 0,
+          "nanos": 274393028
+        },
+        "p95": {
+          "secs": 0,
+          "nanos": 223911456
+        },
+        "p90": {
+          "secs": 0,
+          "nanos": 184772324
+        },
+        "p50": {
+          "secs": 0,
+          "nanos": 44915860
+        },
+        "avg": {
+          "secs": 0,
+          "nanos": 69771813
+        },
+        "min": {
+          "secs": 0,
+          "nanos": 382954
+        }
+      },
+      "get": {
+        "count": 99999,
+        "max": {
+          "secs": 0,
+          "nanos": 733495
+        },
+        "p99": {
+          "secs": 0,
+          "nanos": 239389
+        },
+        "p95": {
+          "secs": 0,
+          "nanos": 143695
+        },
+        "p90": {
+          "secs": 0,
+          "nanos": 119449
+        },
+        "p50": {
+          "secs": 0,
+          "nanos": 73120
+        },
+        "avg": {
+          "secs": 0,
+          "nanos": 81853
+        },
+        "min": {
+          "secs": 0,
+          "nanos": 19958
+        }
+      }
+    }
+  ]
+}

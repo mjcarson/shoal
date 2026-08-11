@@ -3,8 +3,35 @@
 What the test suite reaches, what it does not, and the one place where it is unsound.
 
 **Established by running it.** `cargo check --workspace --all-targets` passes with warnings and
-`cargo test --workspace` passes: **172 integration tests** (one ignored), **215 `shoal-core` unit
-tests**, **11 doctests**. That is up from 172, 213, and 11 with the two tests
+`cargo test --workspace` passes: **410 integration tests** (one ignored), **219 `shoal-core` unit
+tests**, **21 doctests**. That is up from 359, 219, and 16 with
+[F8](../features/purpose-built-workloads.md).
+
+**F8's count moved in both directions, which is the only time that has happened.** It added 61
+tests to `shoal-bench` and removed 19 from `shoal`, and the removal is not lost coverage:
+
+- `shoal/src/bencher.rs` had **11**. Five of them — the percentile and summary statistics — moved
+  to `shoal-bench`'s workload harness with the code they test. The other six covered loading a
+  baseline file, refusing one from another schema version, and a throughput figure; all three
+  belonged to a comparison engine that F8 **deleted**, because `shoal-bench` has owned comparison
+  since [F7](../features/bench-runner.md) and a second one that nobody reads can only disagree with the one
+  that counts. Tests for deleted code are not coverage.
+- `shoal/src/stages.rs` had **8**, and they were the eight a default run could not reach. They
+  moved with the module into `shoal-bench` and are still feature-gated — but the command that runs
+  them is now `cargo test -p shoal-bench --features stage-profile` rather than
+  `cargo test -p shoal --features stage-profile`, which is the crate a person working on the
+  harness already runs. **That is a change of address, not a fix**: a default
+  `cargo test --workspace` still does not run them, and still would not notice if they broke.
+
+Before F8 it was up from 172, 219, and 11 with the 187 tests and 5 doctests
+[F7](../features/bench-runner.md) added — the whole of `shoal-bench`, which is testable in a way
+the three bash scripts it replaced were not. Before those it was up from 172, 215, and 11 with the
+four stamp and offset tests
+[F6](../features/stage-breakdown.md) added — and F6 also added **eight tests that a default run
+does not reach**, because the stage report is behind the `stage-profile` feature. They run under
+`cargo test -p shoal-bench --features stage-profile` (`-p shoal` until
+[F8](../features/purpose-built-workloads.md) moved the module), and nothing in the default
+workspace run would notice if they broke. Before those it was up from 172, 213, and 11 with the two tests
 [F5](../features/flushed-sweep-gate.md) added to pin the premises its gate rests on — that staging a
 response cannot release one, and that submitting a write moves neither watermark. It is up from
 172, 199, and 11 with the fourteen archived-partition
@@ -51,7 +78,12 @@ are in [Optimizations](optimizations.md).
 | `shql.rs` | 53 | SHQL parsing and binding against a real schema, including range binding and the role refusals, projection binding and its two refusals, plus completion suggestions |
 | `storage_meta.rs` | 2 | that a storage directory restarts under the shard count that wrote it and refuses a changed one, end to end through a real server |
 | `completion.rs` (`shoalctl`) | 34 | the completion menu, key handling, query wrapping, and rendering, including the projection slot; and the error box, the underline under the part of a query that failed to parse, the cases where that underline is refused as misleading, and that an error never becomes part of the query it describes |
-| `lib.rs` (`shoal`) | 11 | the bencher's percentile and summary statistics; baseline file handling, including that a baseline from another schema version is refused rather than compared; and that throughput counts rows rather than batches |
+| `lib.rs` (`shoal`) | 0 | ~~the bencher's percentile and summary statistics; baseline file handling…~~ `shoal` is a facade with no code of its own since [F8](../features/purpose-built-workloads.md), so it has nothing to unit test. See the note above for where the eleven went |
+| `lib.rs` (`shoal-bench`) | 232 | the benchmark runner ([F7](../features/bench-runner.md)): artifact parsing; the registry and its `cargo test` style filtering, including that a partial selection becomes an anchored alternation criterion cannot mis-match; the noise band, including that the tier comes from the baseline so a change cannot pick the band that judges it; the macro layer's interval comparison; the staleness verdict matrix, including that a source digest can only narrow a verdict and never promote one to fresh; the capture plan, including that the uninstrumented rebuild is not inside a phase that a failure could truncate; the wipe guard; the six charts, including that no colour escapes the themed palette and no coordinate comes out `NaN`; and the hand-rolled date conversion over a whole 400-year Gregorian cycle. Since [F8](../features/purpose-built-workloads.md) also the workloads: that the declared id list cannot drift from the registered workloads, that two workloads cannot share a storage directory, that a seed is reproducible and its named streams independent, that each control-and-null pair differs in residency and nothing else, that the fanout curve names distinct partitions and pins its shard count, that each workload's median is picked from its own runs, and that a workload present on only one side of a comparison is named rather than dropped |
+| `committed_artifacts.rs` (`shoal-bench`) | 9 | that every artifact committed under `docs/perf/` still parses, that the frozen and trailing baselines differ by exactly the 24 `maybe_loaded` ids, that every pre-[F8](../features/purpose-built-workloads.md) macro capture still lifts to the single `macro/tmdb` workload with what it recorded intact, and that a field added to the version 1 shape fails a test naming it rather than being silently dropped. The drift alarm now applies to version 1 only: version 2 is written by the workloads in this crate out of these very structs, so there is no mirror left to drift |
+| `css_sync.rs` (`shoal-bench`) | 4 | that every chart colour sentinel has a `fill` and a `stroke` rule in `docs/theme/charts.css` and every rule there matches a sentinel — a sentinel with no rule is drawn literally, bright red on a navy page — and that the stylesheet is still registered in `book.toml` |
+| `chart_geometry.rs` (`shoal-bench`) | 4 | that no chart drawn from the real artifacts puts two labels on top of each other or draws outside its canvas. plotters is built without a font backend and estimates text extents, so this is the failure that no other test can see |
+| `stages.rs` (`shoal-bench`) | 8, **feature gated** | the stage report: that a bucket's stage means reconcile with its total, that a bucket is a window rather than one record, that an unreached stage is not reported as an instant one, that a write reports its four durability stages, that every record is accounted for as joined, one-sided or duplicate, that a stage the size of a clock read is marked rather than reported, that a batch level cost is labelled, and that a report from another schema version is refused. **Only built with `--features stage-profile`** — a default `cargo test --workspace` does not run any of them. Run them with `cargo test -p shoal-bench --features stage-profile` |
 
 The restart, eviction, and `SIGKILL` tests are the valuable ones: they are the only tests that
 exercise durability end to end, and they exist because
@@ -128,13 +160,15 @@ partition is touched in three different generations.
 ### Anything that is only reported through `tracing`
 
 `ShoalPool::start` does not initialize a subscriber — `trace::setup` is called by the example
-binary, not by the server (`shoal/examples/tmdb.rs`). No integration test can therefore observe
+binary, not by the server — and since [F8](../features/purpose-built-workloads.md) neither the
+example nor the benchmark workloads call it either. No integration test can therefore observe
 any event the server emits, and none tries.
 
 That is what the per-shard recovery summary added by
 [item 9](resolved/orphaned-update-intents.md) runs into: the counting that feeds it is unit
 tested from four directions, but the event itself — its level, its fields, and that it fires once
-per shard — was verified by hand against the `tmdb` example and has no automated coverage. The
+per shard — was verified by hand against the `tmdb` example, which no longer exists in that
+form, and has no automated coverage. The
 same is true of the compaction summary and every eviction event.
 
 Closing this needs a subscriber a test can install and read back. The obstacle is that a

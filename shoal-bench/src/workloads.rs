@@ -1,0 +1,109 @@
+//! The purpose built benchmarks, and the one list of them
+//!
+//! Everything here links `shoal`, which is why it sits behind the `workloads` feature and why it
+//! is compiled into a second binary rather than into the runner. See `shoal-bench/Cargo.toml`.
+//!
+//! # Why these live in this crate at all
+//!
+//! The workload they replace was `shoal/examples/tmdb.rs`, which was an example and a load
+//! generator at once and was not very good at being either. Moving the load generator here buys
+//! two things that a benchmark kept anywhere else does not have:
+//!
+//! - **It cannot go stale.** These are a workspace member's targets, so
+//!   `cargo check --workspace --all-targets` compiles every one of them against the real engine
+//!   API. A query that stops being expressible is a compile error, not a benchmark that quietly
+//!   measures something else.
+//! - **There is no mirror to keep.** The artifact these write is
+//!   [`crate::model::macro_layer`]'s own structs, so the writer and the reader cannot disagree.
+//!   The version 1 artifact was a hand kept copy of a struct in another crate, with a catch-all
+//!   field and a test over every committed file to notice when the copy drifted.
+//!
+//! # Adding one
+//!
+//! Write the workload, add it to [`all`], and add its identifier to [`crate::workload_ids::IDS`].
+//! A test asserts those two agree, so forgetting the second is a test failure rather than a
+//! workload that is never run.
+
+pub mod fanout;
+pub mod harness;
+pub mod insert_unsorted;
+pub mod keyed_get;
+pub mod schema;
+// only a build with the feature has any stage records to report on. the artifact it writes is
+// modelled in `crate::model::stages`, which is always compiled, because the runner has to read a
+// committed report whether or not this build could have produced one.
+#[cfg(feature = "stage-profile")]
+pub mod stages;
+pub mod workload;
+
+use workload::Workload;
+
+/// Every workload, in the order a capture runs them
+///
+/// A plain list rather than a registry built by a macro or by `inventory`: it is the single place
+/// a reviewer looks to see what exists, and it needs no dependency that the workspace lockfile
+/// does not already carry.
+///
+/// The order is deliberate and runs from the cheapest and most repeatable to the most expensive:
+/// the write path first, since every read workload seeds itself through it, then the keyed get
+/// pair, then the fanout curve, which is twelve workloads and the longest phase of a capture.
+pub fn all() -> Vec<Box<dyn Workload>> {
+    let mut built: Vec<Box<dyn Workload>> = vec![
+        Box::new(insert_unsorted::InsertUnsorted),
+        Box::new(keyed_get::KeyedGet {
+            residency: keyed_get::Residency::Resident,
+        }),
+        Box::new(keyed_get::KeyedGet {
+            residency: keyed_get::Residency::Archived,
+        }),
+    ];
+    // the curve mints its own identifiers, one per arm per key count
+    built.extend(
+        fanout::Fanout::all()
+            .into_iter()
+            .map(|workload| Box::new(workload) as Box<dyn Workload>),
+    );
+    built
+}
+
+/// The workload with an identifier, if there is one
+///
+/// # Arguments
+///
+/// * `id` - The identifier to look for
+pub fn find(id: &str) -> Option<Box<dyn Workload>> {
+    // a linear scan over a handful of workloads, which is not worth a map
+    all().into_iter().find(|workload| workload.id() == id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{all, find};
+
+    /// Every registered workload can be found by the identifier it reports
+    #[test]
+    fn every_workload_is_findable_by_its_id() {
+        for workload in all() {
+            let found = find(workload.id()).expect("a registered workload was not findable");
+            assert_eq!(found.id(), workload.id());
+        }
+    }
+
+    /// An unknown identifier finds nothing rather than falling back to something
+    #[test]
+    fn an_unknown_id_finds_nothing() {
+        assert!(find("macro/does_not_exist").is_none());
+    }
+
+    /// Every workload says what it is for, since `list` prints it
+    #[test]
+    fn every_workload_has_a_summary() {
+        for workload in all() {
+            assert!(
+                !workload.summary().is_empty(),
+                "{} has no summary",
+                workload.id()
+            );
+        }
+    }
+}

@@ -33,6 +33,7 @@ use uuid::Uuid;
 
 use super::messages::{QueryMetadata, ServerMsg};
 use super::ring::Ring;
+use super::stage_profile::{self, StageStamps, Stamp};
 use super::{Comms, Conf, ServerError};
 use crate::{
     shared::{
@@ -68,23 +69,28 @@ async fn client_rx_relay<S: ShoalDatabase>(
         let mut data = BytesMut::zeroed(len);
         // wait for messages from our client
         tcp_rx.read_exact(&mut data).await.unwrap();
+        // start this bundles clock now that all of its bytes are here
+        //
+        // every stage offset a query in this bundle records is measured from here, since
+        // this is the first moment we know the bundle exists
+        let base = Stamp::now();
         // forward our clients message
         kanal_tx
-            .send(ServerMsg::Client { peer, data })
+            .send(ServerMsg::Client { peer, data, base })
             .await
             .unwrap();
     }
 }
 
 async fn client_tx_relay<S: ShoalDatabase>(
-    client_rx: AsyncReceiver<(Uuid, Span, AlignedVec)>,
+    client_rx: AsyncReceiver<(Uuid, Span, StageStamps, AlignedVec)>,
     mut tcp_tx: WriteHalf<TcpStream>,
 ) {
     // loop over messages to send back to our client
     loop {
         // try to get a message from our channel
-        let (query_id, span, archived) = match client_rx.recv().await {
-            Ok((query_id, span, archived)) => (query_id, span, archived),
+        let (query_id, span, mut stamps, archived) = match client_rx.recv().await {
+            Ok(msg) => msg,
             // if this channel was closed then stop our task
             // this should only happen exit/shutdown or when our client shutsdown
             Err(_) => break,
@@ -108,6 +114,13 @@ async fn client_tx_relay<S: ShoalDatabase>(
                 Err(error) => panic!("Ahhh error?: {error:#?}"),
             }
         }
+        // record that this responses last byte is now the sockets problem
+        stamps.mark_socket_written();
+        // hand this queries journey to the profile
+        //
+        // this is the last moment the server knows anything about the query, so it is the
+        // only place a record can be emitted with every server side stage filled in
+        stage_profile::emit(query_id, stamps);
         // drop our span since we are done writting
         drop(span_guard);
     }
@@ -230,6 +243,12 @@ struct Gather<D: ShoalDatabase> {
     client: Uuid,
     /// The span context for this query
     span: Span,
+    /// When this query reached each stage on the shard that split it
+    ///
+    /// The shares each carry their own stamps and each become their own record, flagged as
+    /// shares. This is the one the client actually waited on, so it is the one whose stages
+    /// describe the latency the client saw.
+    stamps: StageStamps,
     /// How many shards have not yet sent us their share
     outstanding: usize,
     /// The most rows this query asked for, if it set a limit
@@ -257,7 +276,7 @@ pub(super) struct Shard<D: ShoalDatabase> {
     /// The full archive map for all tables
     table_map: FullArchiveMap<D::TableNames>,
     /// A map of channels to send responses to our client relays over
-    client_map: HashMap<Uuid, AsyncSender<(Uuid, Span, AlignedVec)>>,
+    client_map: HashMap<Uuid, AsyncSender<(Uuid, Span, StageStamps, AlignedVec)>>,
     /// The queries we split across several shards and are collecting the shares of
     ///
     /// Keyed by (query id, index), the pair that uniquely identifies one query within
@@ -280,6 +299,7 @@ pub(super) struct Shard<D: ShoalDatabase> {
         Uuid,
         Uuid,
         Span,
+        StageStamps,
         <D::ClientType as QuerySupport>::ResponseKinds,
     )>,
     /// Whether a write has landed since the last time we swept our tables
@@ -493,11 +513,18 @@ where
         &mut self,
         client: Uuid,
         queries: Queries<D::ClientType>,
+        stamps: StageStamps,
     ) -> Result<(), ServerError> {
         // an empty bundle has no last query, and nothing to send either way
         let Some(last_offset) = queries.queries.len().checked_sub(1) else {
             return Ok(());
         };
+        // remember how many queries this bundle held
+        //
+        // a queries position in its batch is uninterpretable without this beside it, since
+        // position four means something very different in a batch of five than in one of five
+        // hundred
+        let batch_len = queries.queries.len();
         // initialize a vec to store the per shard queries we find
         let mut found = Vec::with_capacity(3);
         // get the absolute index for the last query in this bundle
@@ -514,8 +541,17 @@ where
             let index = index + queries.base_index;
             // check if this is the last query or not
             let end = index == end_index;
+            // give this query its own copy of the bundles stamps to carry from here on
+            let mut stamps = stamps;
+            // note where in its batch this query sat, since a query near the tail of a
+            // bundle waits on every query ahead of it and that is not a server side cost
+            stamps.set_batch(index - queries.base_index, batch_len);
+            // remember the index this query answers under, which is half of a records key
+            stamps.set_index(index);
             // split this query into the per shard queries that answer it
             kind.split_by_shard(&self.ring, &mut found);
+            // record that this query is leaving us for the shards that own its partitions
+            stamps.mark_routed();
             // a query answered by one shard alone is replied to directly, so only a
             // query we actually split needs its shares collected back here
             let gather = if found.len() > 1 {
@@ -524,6 +560,7 @@ where
                 let gather = Gather {
                     client,
                     span: Span::current(),
+                    stamps,
                     outstanding: found.len(),
                     limit: kind.limit(),
                     // remember the order this query named its partitions in, since the
@@ -537,11 +574,24 @@ where
             } else {
                 None
             };
+            // note whether the copy each shard carries is a share of a query we split
+            //
+            // a split query produces one of these per shard plus the one client visible
+            // record the gather emits, so a report that counted them all would multiply
+            // count it. The copy we kept in the gather above is deliberately not flagged.
+            let mut share_stamps = stamps;
+            share_stamps.set_share_of_gathered(gather.is_some());
             // send each narrowed query to the shard that owns its partitions
             for (shard_info, query) in found.drain(..) {
                 // build the metadata for this query
-                let meta =
-                    QueryMetadata::new(client, queries.id, index, end, gather.clone());
+                let meta = QueryMetadata::new(
+                    client,
+                    queries.id,
+                    index,
+                    end,
+                    gather.clone(),
+                    share_stamps,
+                );
                 // build the mssage to send
                 let msg = ServerMsg::Query { meta, query };
                 // send this to correct shard
@@ -563,19 +613,33 @@ where
         err(Debug)
     )]
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    async fn handle_client<'a>(&mut self, peer: Uuid, data: BytesMut) -> Result<(), ServerError>
+    async fn handle_client<'a>(
+        &mut self,
+        peer: Uuid,
+        data: BytesMut,
+        base: Stamp,
+    ) -> Result<(), ServerError>
     where
         for<'b> <<<D as ShoalDatabase>::ClientType as QuerySupport>::QueryKinds as Archive>::Archived:
             CheckBytes<
                 Strategy<Validator<ArchiveValidator<'b>, SharedValidator>, rkyv::rancor::Error>,
             >,
     {
+        // start this bundles stamps from when its last byte came off the socket
+        let mut stamps = StageStamps::new(base);
+        // record that we have dequeued this bundle, which closes the ingress queue stage
+        stamps.mark_bundle_dequeued();
         // load our arhived query from buffer
         let archived = Queries::access(&data)?;
         // deserialize our queries
         let queries = <Queries<D::ClientType> as RkyvSupport>::deserialize(archived)?;
+        // record that this bundle is now a set of queries rather than a buffer
+        //
+        // this stage is paid once per bundle and charged to every query in it, so the
+        // report has to label it as a batch level cost rather than a per query one
+        stamps.mark_decoded();
         // send each query to the correct shard
-        self.send_to_shard(peer, queries).await
+        self.send_to_shard(peer, queries, stamps).await
     }
 
     /// Send a respones back to the client
@@ -584,6 +648,7 @@ where
     ///
     /// * `addr` - The address to send this reply too
     /// * `response` - The response to send
+    /// * `stamps` - When this query reached each stage so far, and its index
     #[instrument(name = "Shard::reply", parent = &span, skip_all, err(Debug))]
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     async fn reply(
@@ -591,13 +656,23 @@ where
         client: Uuid,
         query_id: Uuid,
         span: Span,
+        mut stamps: StageStamps,
         response: <D::ClientType as QuerySupport>::ResponseKinds,
     ) -> Result<(), ServerError> {
         // archive our response
         let archived = rkyv::to_bytes::<_>(&response)?;
+        // record what serializing this response cost
+        //
+        // this is a whole row through rkyv rather than a queue hop, so it is one of the few
+        // stages on the get path large enough to be worth measuring on its own
+        stamps.mark_replied();
         // get this clients channel to send replies over
         match self.client_map.get(&client) {
-            Some(client_tx) => client_tx.send((query_id, span, archived)).await?,
+            Some(client_tx) => {
+                // note that this response is now the relays problem rather than ours
+                stamps.mark_queued_to_client();
+                client_tx.send((query_id, span, stamps, archived)).await?;
+            }
             None => panic!("{} Missing client channel? {client}", self.info.name),
         }
         Ok(())
@@ -619,7 +694,7 @@ where
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     async fn handle_query(
         &mut self,
-        meta: QueryMetadata,
+        mut meta: QueryMetadata,
         query: <D::ClientType as QuerySupport>::QueryKinds,
     ) -> Result<(), ServerError>
     where
@@ -630,14 +705,31 @@ where
     {
         // copy our span for it we reply
         let span = meta.span.clone();
-        // keep a copy of our metadata, since handling this query consumes it and a
-        // share of a split query has to travel back with the metadata it came from
-        let gathered_meta = meta.clone();
+        // keep a copy of our metadata only if this query was actually split
+        //
+        // a share of a split query has to travel back with the metadata it came from, but
+        // this used to be cloned for every query whether or not one was ever needed, which
+        // paid for a gather on the overwhelming majority that never have one. See O26.
+        let gathered_meta = meta.gather.is_some().then(|| meta.clone());
+        // record that this shard now has this query in hand, closing the routing queue stage
+        meta.stamps.mark_exec_dequeued();
         // try to handle this query
-        if let Some((addr, query_id, response)) = self.tables.handle(meta, query).await {
+        if let Some((addr, query_id, mut stamps, response)) = self.tables.handle(meta, query).await
+        {
+            // record that this queries synchronous work is finished
+            //
+            // a query that parks on the intent log returns nothing here and stamps its own
+            // `exec_done` when its commit returns, so this only covers the ones we can
+            // answer in a single pass
+            stamps.mark_exec_done();
             // a share of a query someone else split goes back to them, not to the client
-            match gathered_meta.gather.clone() {
-                Some(contact) => {
+            match gathered_meta {
+                Some(gathered_meta) => {
+                    // this query was split, so we know it named a shard to collect its shares
+                    let contact = gathered_meta
+                        .gather
+                        .clone()
+                        .expect("A gathered query always names the shard collecting it");
                     // build the message carrying our share of this queries answer
                     let msg = ServerMsg::Gathered {
                         meta: gathered_meta,
@@ -647,7 +739,7 @@ where
                     self.comms.send(&contact, msg).await?;
                 }
                 // this query was ours alone to answer
-                None => self.reply(addr, query_id, span, response).await?,
+                None => self.reply(addr, query_id, span, stamps, response).await?,
             }
         }
         Ok(())
@@ -718,8 +810,15 @@ where
         if let Some(limit) = gather.limit {
             merged.truncate(limit);
         }
+        // record that the work behind this query is finished
+        //
+        // for a split query that is the moment the last share landed and was merged, since
+        // nothing before then could have answered the client
+        let mut stamps = gather.stamps;
+        stamps.mark_exec_done();
         // send our merged response back to the client
-        self.reply(gather.client, meta.id, gather.span, merged).await
+        self.reply(gather.client, meta.id, gather.span, stamps, merged)
+            .await
     }
 
     /// Get all flushed messages and send their response back
@@ -736,9 +835,9 @@ where
         // get all flushed query responses
         self.tables.handle_flushed(&mut self.flushed).await?;
         // pop all of our flushed responses
-        while let Some((client, query_id, span, response)) = self.flushed.pop() {
+        while let Some((client, query_id, span, stamps, response)) = self.flushed.pop() {
             // send our responses
-            self.reply(client, query_id, span, response).await?;
+            self.reply(client, query_id, span, stamps, response).await?;
         }
         Ok(())
     }
@@ -818,7 +917,9 @@ where
                     }
                 }
                 // Handle this client query
-                ServerMsg::Client { peer, data } => self.handle_client(peer, data).await?,
+                ServerMsg::Client { peer, data, base } => {
+                    self.handle_client(peer, data, base).await?
+                }
                 // handle this query from the user
                 ServerMsg::Query { meta, query } => self.handle_query(meta, query).await?,
                 // collect this shards share of a query we split across shards
@@ -848,6 +949,12 @@ where
                         // signal this loader to shutdown
                         loader_tx.send(LoaderMsg::Shutdown).await?;
                     }
+                    // hand this threads buffered stage records over before it goes away
+                    //
+                    // records are handed over in batches as the run proceeds, so this only
+                    // covers the tail sitting below that batch size. Without it the last
+                    // few thousand queries of a run would be missing from the profile.
+                    stage_profile::flush();
                     break;
                 }
             }

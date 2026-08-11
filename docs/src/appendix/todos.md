@@ -304,6 +304,9 @@ them, and [F5](../features/flushed-sweep-gate.md) found a fifth. Each was delibe
 worth more than most of what is above it on this page, because the harness decides what evidence
 any future optimization can produce.
 
+[F8](../features/purpose-built-workloads.md) closed several of these and narrowed another. What it
+did **not** close is marked below; what it added instead is at the end of this section.
+
 **A micro-benchmark of the storage write path.** This is the important one. `write_helper`
 dominates the profile at 32.6 ms per call, five orders of magnitude above the partition insert
 it persists ([Performance Baseline](../operations/performance-baseline.md)) — and it is the one
@@ -313,14 +316,31 @@ measurement whose spread is 10.5%. It was not built because timing `StreamWriter
 through `Criterion::iter_custom`. If that proves unworkable, a standalone binary emitting the
 same JSON shape is an acceptable substitute.
 
+**Still open, and the substitute now exists.** [F8](../features/purpose-built-workloads.md) built
+that standalone binary — `shoal-workload` — and gave `ServerNeed` a `None` arm precisely so a
+workload can drive engine internals inside its own `LocalExecutor` with no server at all. Nothing
+uses that arm yet. Writing `micro/write_path` against it is now a matter of writing the workload
+rather than of solving the executor problem.
+
 **An `Async` vs `Fsync` capture.** The single comparison that would isolate the cost of the
 durability barrier, on a config change alone, with no code change. It is cheap. It has not been
-run.
+run. [F8](../features/purpose-built-workloads.md) made it nearly free to build — `ConfOverrides`
+already carries per-workload configuration and `insert_unsorted` is the arm it would pair against
+— and deliberately did not build it, to keep the first workload set reviewable. It is the cheapest
+remaining item on this page.
 
 **`wire_codec` and `routing` benches.** `rkyv` round trips over `Queries` and `ResponseKinds`,
 and `Ring::find_shard` / `split_by_shard`. Between them they are what O1, O18, O19 and O20 are
 about, and none of those four can currently be adjudicated at all
 ([Optimizations](optimizations.md#which-entries-a-benchmark-can-currently-adjudicate)).
+
+**Correction, filed while building [F8](../features/purpose-built-workloads.md).** These were
+listed here, under the heading about macro coverage, as though they needed the workload harness.
+They do not. An `rkyv` round trip and `Ring::find_shard` are pure CPU over plain data and need no
+server, no executor and no storage backend — they belong beside `shoal/benches/partitions.rs` in
+the **micro** layer, where they would get criterion's sampling and a confidence interval instead of
+a wall clock with an 11% spread. They were not built there because nobody had noticed they could
+be. Nothing blocks them.
 
 **A table-layer bench, over `PersistentSortedTable::get`.** The gap that was not known to be a gap.
 The micro layer stops at `SortedPartition`, so everything between a query arriving at a table and
@@ -337,6 +357,20 @@ visible as a curve rather than argued from the source.
 The obstacle is that a `PersistentSortedTable` needs a storage backend and a loader channel, so
 this benchmark needs a glommio `LocalExecutor` inside criterion — the same `iter_custom` problem
 the write-path benchmark above has, and a reason to solve it once for both.
+
+**Half answered from above, and the criterion half is still open.**
+[F8](../features/purpose-built-workloads.md) built `macro/fanout/{resident,evicted}/n` across
+*n* ∈ {1, 2, 4, 16, 64, 256}: a get over *n* partition keys, both arms, exactly the shape this
+item asks for. It needed no executor inside criterion, because driving
+`PersistentSortedTable::get` through a live server and a real client does not need one — the
+obstacle is real from below and absent from above.
+
+It is **not** the benchmark this item asks for and does not close it. Every fanout sample includes
+the wire, the routing, `split_by_shard`, the response merge and the client, so a number from it is
+not a cost of `PersistentSortedTable::get`; it is a cost of a query that reaches one. What it can
+do is answer the *question* O13 poses, since a quadratic term bends the curve against a flat
+control at *n* = 1 whatever constant overhead sits on top. What remains here is the isolated,
+criterion-sampled version — and that still wants the executor.
 
 **Half of this closed on the way past.** [F4](../features/validated-archives.md) gave `MaybeLoaded`
 a defaulted buffer parameter, which made the enum constructible outside a running server for the
@@ -358,12 +392,18 @@ the worst way to learn something is wrong. This is the same executor-inside-crit
 the two benchmarks above, arriving from the test side instead, and it is a third reason to solve it
 once.
 
-**Per-query macro timing.** `--per-query` was specified and not built. The macro harness still
+~~**Per-query macro timing.** `--per-query` was specified and not built. The macro harness still
 takes one `Instant` per batch and copies it across every query in it, so there is no per-query
-service time. The batch-level default has to stay whatever happens, because the recorded spread
-figures were measured that way.
+service time.~~ **Done.** [F8](../features/purpose-built-workloads.md) added a second driver: a
+`per_query` workload runs at a bounded concurrency with one query per slot, so send-to-response is
+that query's service time. Both drivers exist on purpose — saturating is still the only way to
+measure throughput, and stamping each query *under* saturation measures queueing rather than
+service. Which of the two a number came from is recorded per workload in the artifact, and a
+comparison never joins one to the other. The batch-level numbers were kept for exactly the reason
+this item gave: the recorded spread figures were measured that way.
 
-**Multi-capture comparison.** `scripts/compare.sh` takes one capture per side. It needs to take
+**Multi-capture comparison, on the micro layer.** ~~`scripts/compare.sh` takes one capture per
+side.~~ `shoal-bench compare` still does, for the micro layer. It needs to take
 several, because one cannot be trusted: across four identical repeats `get_key/4096` moved 22%
 and reported its outlying value with a ±0.2% confidence interval
 ([Performance Baseline](../operations/performance-baseline.md#what-the-micro-layer-can-actually-resolve)).
@@ -373,10 +413,91 @@ confirmation is a manual step today, which means it is a step that will be skipp
 would fix it, and would also give a real per-benchmark noise band instead of the two duration
 tiers, which are themselves only an approximation fitted to four repeats.
 
-Two smaller things: the macro layer needs a 65 MB dataset that is not in the repository and that
-no script fetches, so a clean checkout cannot reproduce that layer at all; and `client.rs` has
-neither `tracing` spans nor `hotpath` scopes, so the share of measured latency that is the
+~~The same is true of the macro layer.~~ **Done for the macro layer.** [F7](../features/bench-runner.md)
+made every macro capture keep each run's own distribution, and a macro comparison is judged on
+whether the two observed intervals are disjoint rather than on a percentage. What remains is the
+micro half above. Note the asymmetry is not an oversight: the macro layer already ran five times
+per capture and only threw the runs away, whereas making the micro layer do the same means
+running criterion several times over, which costs minutes rather than seconds.
+
+**Provenance drift in `docs/perf/sources.json`.** [F7](../features/bench-runner.md) decides whether
+a capture still describes the current code by hashing the sources each layer measures, and the
+list of those sources is maintained by hand. It will drift. The design makes drifting safe in one
+direction only — a missing path yields a capture wrongly called *unaffected*, never one wrongly
+called *fresh* — but a `--strict-stale` mode that treats any commit move as stale regardless of
+digests would give a way to distrust the list deliberately.
+
+~~Two smaller things: the macro layer needs a 65 MB dataset that is not in the repository and that
+no script fetches, so a clean checkout cannot reproduce that layer at all;~~ **the dataset is
+gone** — every workload generates its rows from `--seed`, so a clean checkout reproduces the macro
+layer with nothing fetched ([F8](../features/purpose-built-workloads.md)). Still open: `client.rs`
+has neither `tracing` spans nor `hotpath` scopes, so the share of measured latency that is the
 harness's own is unknown.
+
+### What F8 left undone
+
+Workloads were specified and deliberately not built, to keep the first set reviewable. **Five of
+them are one file each against an existing trait**, and the harness already carries everything they
+need:
+
+- **`sort_select/{all,keys,range}`** — the three arms of `SortSelect`.
+  [F1](../features/sort-key-ranges.md) shipped with no benchmark at all and this is what would
+  give it one.
+- **`projection/{full,projected}`** — a narrow projection against a whole wide row. Same for
+  [F2](../features/projections.md); the `ItemKeys` projection already exists in the workload
+  schema for it.
+- **`transport/{send_one,send_batched,stream,stream_unordered}`** — the four client transport
+  modes over an identical query mix. This is also the only thing that could say how much of a
+  measured latency is the harness's own, which is the open item above.
+- **`durability/{fsync,async}`** — see the `Async` vs `Fsync` item above.
+- **`mutate/{update,delete,exists}`** — entirely unmeasured today.
+
+**Two need something that does not exist yet**, and are not one file each:
+
+- **`compaction`** needs a way to force a compaction and observe it from a client, which means a
+  server-side counter first. Its wall clock would otherwise be dominated by the write path it is
+  trying to isolate.
+- **`recovery`** needs a second `ShoalPool::start` in one process — which is the thing
+  [F8](../features/purpose-built-workloads.md) deliberately avoided, since glommio pins its shards
+  at start and there is no supported way to undo that — or the two-process crash-test shape in
+  `shoal/tests/utils.rs`. The `RestartAfterSeed` arm restarts *between* phases, in separate
+  process lifetimes, which is not the same thing.
+
+**A readiness signal in `ShoalPool::start`.** F8 replaced the five-second sleep with a probe that
+retries a real query until one is answered, which is correct but is still the client working
+around a missing server facility. `ShoalPool::start` spawns its shard threads and returns without
+joining them, so there is no moment at which the pool knows every shard has bound. Giving it that
+moment would remove the probe, and a readiness endpoint needs exactly the same thing — as does the
+pool-wide recovery summary described earlier on this page.
+
+**The evicted fanout arms warm up as they run.** A restart empties memory, but the first query to
+touch a partition faults it back in and it stays there. The fanout arms read 4,096 partitions
+repeatedly, so at *n* = 256 a full run touches each about fifteen times and roughly 93% of its
+reads hit something already resident. The consequence is visible in `f8-powersave`: the evicted
+arms' medians converge on the resident arms' as *n* rises while their p99s separate by up to 11×.
+The cold reads are in the tail rather than the middle. Fixing it means either many more partitions
+— which makes the seed phase dominate the run — or evicting between queries, which measures
+eviction as well as reading. Neither is obviously right, which is why neither was done.
+
+**Confirming the O13 curve.** `macro/fanout` was built to make O13's quadratic term visible and
+the first full capture does not establish it — see
+[Optimizations](optimizations.md#which-entries-a-benchmark-can-currently-adjudicate). What is
+needed is a capture on a `performance` governor and a committed tree, and a second one confirming
+it, which is the protocol this repository already requires of the micro layer. Until then O13
+remains argued from the source.
+
+**A frozen macro reference.** `docs/perf/baselines/B1-performance.json` is the frozen *micro*
+baseline and is unaffected by F8. There is no frozen macro reference for the new workloads:
+`f8-powersave` was taken on a `powersave` governor and a dirty tree, so it is a first capture
+rather than a baseline. Establishing one means a `performance`-governor run on a committed tree,
+committed as `B2-workloads`. Note `promote` cannot enforce this — it only knows about micro
+baselines — so it is a convention rather than a mechanism.
+
+**A sorted table cannot have an integer sort key.** `RkyvSupport` is implemented for `String` and
+for nothing else, so `#[shoal(sort)] at: u64` does not compile. The F8 workload schema works
+around it with zero-padded decimal strings, which is what makes lexicographic order agree with
+numeric order for a range scan. This is a missing impl rather than a design decision: nothing about
+the sort path requires the key to be a string, and every sorted table in the wild will hit it.
 
 ### Archive checksums
 

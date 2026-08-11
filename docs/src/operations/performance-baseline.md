@@ -1,5 +1,12 @@
 # Performance Baseline
 
+> This page records **`B1` and what was learned from it**: what the frozen capture measured, what
+> the governor experiment found, what the micro layer can resolve, and the history of accepted
+> changes. Its numbers are pinned to `B1` on purpose and are not updated.
+>
+> The **current** numbers, and which of them are stale, are on
+> [Benchmark Results](benchmark-results.md), which is generated from the committed artifacts.
+
 What Shoal currently does, on known hardware, so that a later change can be shown to have
 helped rather than argued to have. [Benchmarking](benchmarking.md) is how to run one;
 [F3](../features/performance-harness.md) is why the harness has the shape it does.
@@ -56,17 +63,43 @@ to 28–31. `durability` is at its default of `Fsync`.
 
 ## B1 — the frozen baseline
 
-Captured 2026-08-09 by `scripts/bench.sh B1-performance`, under the `performance` governor.
-Frozen at `docs/perf/baselines/B1-performance.json`; the raw run is in `docs/perf/runs/`.
+Captured 2026-08-09 by ~~`scripts/bench.sh B1-performance`~~ — the shell harness that
+[F7](../features/bench-runner.md) replaced with `shoal-bench run --label B1-performance` — under
+the `performance` governor. Frozen at `docs/perf/baselines/B1-performance.json`; the raw run is in
+`docs/perf/runs/`. It predates provenance recording, so it carries no `.meta.json` and is reported
+as having **no provenance** on [Benchmark Results](benchmark-results.md); the hardware section
+above is the only record of what it ran on.
 
 The earlier `powersave` capture is kept as `B0-powersave.*` — not as a superseded baseline but
 as the other half of a controlled comparison. Nothing in the source tree changed between the
 two, so the governor is the only variable.
 
-### End to end
+### End to end — retired
+
+> **These numbers have no successor, and that is deliberate.**
+>
+> They were produced by the `tmdb` example over a 99,999-row CSV that was never in this
+> repository and that no script fetched, so no clean checkout can reproduce them. When
+> [F8](../features/purpose-built-workloads.md) replaced that workload with fifteen purpose-built
+> ones, the macro half of this baseline was retired rather than replaced.
+>
+> **No replacement was built on purpose.** A workload merely *shaped* like `tmdb` would produce
+> numbers that look comparable to these and are not: the dataset is gone, the row was TMDB's
+> twenty-four-field shape, the fan-out was `keywords.len() + 1` per movie, and the timing was per
+> batch. That is the failure mode the old `BASELINE_VERSION` comment described — a file that
+> parses and is not comparable costs a wrong answer, where one that fails to parse costs only a
+> comparison.
+>
+> They are kept, and the capture is still committed and still readable. It is lifted on read into
+> a workload named `macro/tmdb`, so the seven captures from this era still chart and still compare
+> **against each other**. A capture taken after F8 shares no workload with them, and
+> `shoal-bench compare` says so rather than printing an empty table.
+>
+> **The micro half of B1 below is unaffected.** It never touched the `tmdb` workload, and remains
+> the frozen baseline.
 
 The `tmdb` example over the full 99,999-row dataset, `--warmup 5000`, storage wiped before each
-run, median of 5.
+run, median of 5. Last reproducible at `f7-powersave`; retired at F8.
 
 | | |
 | --- | --- |
@@ -82,7 +115,9 @@ run, median of 5.
 
 Read these with [what is actually measured](benchmarking.md#what-is-actually-measured) in mind —
 timing is per batch, so `min` is roughly the true service time and `p50` is dominated by
-queueing inside the batch.
+queueing inside the batch. Every macro percentile recorded before F8 is like this. The
+`per_query` workloads F8 added are the first in this repository to report a service time
+directly, and are marked as such in the artifact so the two can never be joined.
 
 The 10.5% spread is worth noting on its own. The previously recorded figure was **±30%**, at a
 fifth of the scale. Three things changed: the run is 5× longer, there is a warmup phase, and
@@ -246,7 +281,7 @@ on:
 That shape makes sense: a fixed-cost perturbation — a cache line landing differently, a branch
 predictor entry, a page boundary — is a large fraction of a 25 ns benchmark and a rounding error
 in a 200 µs one. A single global threshold is therefore either too loose for the slow
-benchmarks or too tight for the fast ones, so `scripts/compare.sh` applies a tiered band:
+benchmarks or too tight for the fast ones, so `shoal-bench compare` applies a tiered band:
 
 - **±9%** below 1 µs
 - **±5%** at or above 1 µs
@@ -276,8 +311,10 @@ the macro layer — not because the number is smaller, but because it is per ben
 here names the function that moved; an 11% movement end to end names nothing.
 
 Four repeats per governor remains a thin basis for a number this load-bearing. Characterising it
-properly, and teaching `compare.sh` to take several captures per side rather than one, is filed
-in [TODOs](../appendix/todos.md#benchmark-coverage-the-harness-does-not-have).
+properly, and teaching the comparison to take several captures per side rather than one, is filed
+in [TODOs](../appendix/todos.md#benchmark-coverage-the-harness-does-not-have). `shoal-bench` closed
+the macro half of that — a macro comparison is now judged on whether two observed intervals are
+disjoint — and left the micro half open.
 
 The eight captures behind this section are kept in `docs/perf/repeats/`, four per governor, so
 the claim can be recomputed rather than taken on trust.
@@ -353,9 +390,8 @@ that change alone did. See [the comparison protocol](benchmarking.md#comparing-r
 ## Reproducing this
 
 ```bash
-scripts/bench.sh B1-performance
-scripts/compare.sh docs/perf/runs/B1-performance.micro.json \
-    --against docs/perf/baselines/B1-performance.json
+shoal-bench run --label B1-performance
+shoal-bench compare B1-performance --against docs/perf/baselines/B1-performance.json
 ```
 
 `docs/perf/baselines/B1-performance.json` is never overwritten. If a capture on the same tree
@@ -374,9 +410,17 @@ precondition that lives outside the repository.
   cost of the durability barrier `write_helper` spends its time in. Filed in
   [TODOs](../appendix/todos.md).
 - **No storage write path micro-benchmark.** The layer that dominates the profile is the one
-  layer with no confidence interval around it.
-- **No client-side profile.** `client.rs` has neither `tracing` spans nor `hotpath` scopes, so
-  the share of measured latency that is the harness's own is unknown.
+  layer with no confidence interval around it. [F6](../features/stage-breakdown.md) now splits
+  that layer four ways at run scale — `durable_staged`, `durable_write`, `durable_sync_wait`,
+  `durable_sync` — which says where the time goes but still carries the macro layer's spread
+  rather than a criterion interval.
+- ~~**No client-side profile.** `client.rs` has neither `tracing` spans nor `hotpath` scopes, so
+  the share of measured latency that is the harness's own is unknown.~~ Replaced by
+  [F6](../features/stage-breakdown.md), which stamps the client's serialize, pool acquire, socket
+  write and response arrival and joins them against the server's stages. A first capture put the
+  client's own share of an 80 µs get at about 3.3 µs across `client_serialize`, `client_pool` and
+  `client_write`. The stage layer only joins its halves when the server is in-process, so this is
+  answered for `tmdb` and still open for a remote client.
 - **The governor comparison is one capture per side on the macro and profile layers.** The micro
   layer has repeats behind it; the macro layer does not, so "−0.7%" is a difference between two
   medians of five and not a characterised effect. It is well inside the spread either way.

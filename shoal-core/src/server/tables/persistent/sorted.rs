@@ -24,6 +24,7 @@ use tracing::{event, instrument, Level, Span};
 use uuid::Uuid;
 
 use crate::server::messages::{LoadedPartition, QueryMetadata, ServerMsg};
+use crate::server::stage_profile::{StageOp, StageStamps};
 use crate::server::tables::partitions::SortedPartition;
 use crate::server::tables::persistent::{adjust_memory_usage, eviction_totals, PendingGets};
 use crate::server::Conf;
@@ -159,7 +160,7 @@ where
     /// partitions it has yet to hear about.
     pending_exists: HashMap<(Uuid, usize), Vec<u64>>,
     /// The responses for queries that have been flushed to disk
-    flushed: Vec<(Uuid, Uuid, Span, Response<R>)>,
+    flushed: Vec<(Uuid, Uuid, Span, StageStamps, Response<R>)>,
     /// The channel to send loader jobs on
     loader_tx: AsyncSender<LoaderMsg<N>>,
     /// A map of queries blocked on partitions being loaded from disk
@@ -375,9 +376,24 @@ where
     #[instrument(name = "PersistentTable::handle", skip(self, query))]
     pub async fn handle<P: ShoalProjection<Row = R>>(
         &mut self,
-        meta: QueryMetadata,
+        mut meta: QueryMetadata,
         query: SortedQuery<R>,
-    ) -> Option<(Uuid, Uuid, Response<P>)> {
+    ) -> Option<(Uuid, Uuid, StageStamps, Response<P>)> {
+        // tag this record with what kind of query it came from
+        //
+        // this is the only layer that knows for certain which op ran, and the kinds are kept
+        // apart because pooling them makes a percentile report where the boundary between
+        // two distributions landed rather than anything about either one
+        meta.stamps.set_op(match &query {
+            SortedQuery::Insert { .. } => StageOp::Insert,
+            SortedQuery::Get(_) => StageOp::Get,
+            SortedQuery::Delete { .. } => StageOp::Delete,
+            SortedQuery::Update(_) => StageOp::Update,
+            SortedQuery::Exists(_) => StageOp::Exists,
+        });
+        // note how this tables intent log is made durable, since a table acknowledging on a
+        // landed write has no fdatasync stage and a report showing one would be fiction
+        meta.stamps.set_durability(self.storage.durability());
         // execute the correct query type
         match query {
             // insert a row into this partition
@@ -400,13 +416,23 @@ where
     /// * `meta` - The metadata about this insert query
     /// * `row` - The row to insert
     #[instrument(name = "PersistentTable::insert", skip_all)]
-    async fn insert<P>(&mut self, meta: QueryMetadata, row: R) -> Option<(Uuid, Uuid, Response<P>)> {
+    async fn insert<P>(
+        &mut self,
+        mut meta: QueryMetadata,
+        row: R,
+    ) -> Option<(Uuid, Uuid, StageStamps, Response<P>)> {
         // get our partition key
         let key = row.get_partition_key();
         // wrap our row in an insert intent
         let intent = SortedIntents::Insert(row);
         // persist this new row to storage
         let pos = self.storage.commit(&intent).await.unwrap();
+        // record that this writes synchronous work is finished
+        //
+        // a write returns nothing to the shard, so it stamps this itself rather than having
+        // `handle_query` do it. Everything `commit` blocked on - the write behind
+        // backpressure in particular - lands in this stage rather than in a durability one.
+        meta.stamps.mark_exec_done();
         // extract our row from our intent
         let row = match intent {
             SortedIntents::Insert(row) => row,
@@ -470,7 +496,7 @@ where
         &mut self,
         meta: QueryMetadata,
         get: &SortedGet<R>,
-    ) -> Option<(Uuid, Uuid, Response<P>)> {
+    ) -> Option<(Uuid, Uuid, StageStamps, Response<P>)> {
         // pick this get up where its last execution left off, or start it fresh
         //
         // a get blocked on a partition is replayed once that partition has been read, so the
@@ -567,7 +593,7 @@ where
             data: action,
             end: meta.end,
         };
-        Some((meta.client, meta.id, response))
+        Some((meta.client, meta.id, meta.stamps, response))
     }
 
     /// Check if data exists in some partitions
@@ -590,7 +616,7 @@ where
         &mut self,
         meta: QueryMetadata,
         exists_query: &SortedExists<R>,
-    ) -> Option<(Uuid, Uuid, Response<P>)> {
+    ) -> Option<(Uuid, Uuid, StageStamps, Response<P>)> {
         // pick up the partitions this exists is still waiting on, or start it fresh
         let mut blocked = match self.pending_exists.remove(&(meta.id, meta.index)) {
             // carry on with the partitions this exists has yet to read
@@ -653,7 +679,7 @@ where
                             data: ResponseAction::Exists(true),
                             end: meta.end,
                         };
-                        return Some((meta.client, meta.id, response));
+                        return Some((meta.client, meta.id, meta.stamps, response));
                     }
                 }
             }
@@ -671,7 +697,7 @@ where
             data: ResponseAction::Exists(false),
             end: meta.end,
         };
-        Some((meta.client, meta.id, response))
+        Some((meta.client, meta.id, meta.stamps, response))
     }
 
     /// Delete a row from this table
@@ -688,10 +714,10 @@ where
     #[instrument(name = "PersistentTable::delete", skip_all)]
     async fn delete<P>(
         &mut self,
-        meta: QueryMetadata,
+        mut meta: QueryMetadata,
         key: u64,
         sort: R::Sort,
-    ) -> Option<(Uuid, Uuid, Response<P>)> {
+    ) -> Option<(Uuid, Uuid, StageStamps, Response<P>)> {
         // get the partition we want to delete from
         match self.partitions.get_mut(&key) {
             Some(maybe_loaded) => {
@@ -708,6 +734,12 @@ where
                             let intent = SortedIntents::<R>::delete(key, sort);
                             // commit it to the intent to the intent log
                             let pos = self.storage.commit(&intent).await.unwrap();
+                            // record that this writes synchronous work is finished
+                            //
+                            // a write returns nothing to the shard, so it stamps this itself rather than having
+                            // `handle_query` do it. Everything `commit` blocked on - the write behind
+                            // backpressure in particular - lands in this stage rather than in a durability one.
+                            meta.stamps.mark_exec_done();
                             // we were able to delete data
                             let action = ResponseAction::Delete(true);
                             // add this to the pending query until its commit is flushed
@@ -760,7 +792,7 @@ where
                             data: ResponseAction::Delete(false),
                             end: meta.end,
                         };
-                        Some((meta.client, meta.id, response))
+                        Some((meta.client, meta.id, meta.stamps, response))
                     }
                     // this partition is loaded from disk but not deserialized
                     MaybeLoaded::Accessible(read) => {
@@ -777,6 +809,12 @@ where
                             let intent = SortedIntents::<R>::delete(key, sort);
                             // commit it to the intent to the intent log
                             let pos = self.storage.commit(&intent).await.unwrap();
+                            // record that this writes synchronous work is finished
+                            //
+                            // a write returns nothing to the shard, so it stamps this itself rather than having
+                            // `handle_query` do it. Everything `commit` blocked on - the write behind
+                            // backpressure in particular - lands in this stage rather than in a durability one.
+                            meta.stamps.mark_exec_done();
                             // we were able to delete data
                             let action = ResponseAction::Delete(true);
                             // add this to the pending query until its commit is flushed
@@ -807,7 +845,7 @@ where
                                 data: ResponseAction::Delete(false),
                                 end: meta.end,
                             };
-                            Some((meta.client, meta.id, response))
+                            Some((meta.client, meta.id, meta.stamps, response))
                         }
                     }
                 }
@@ -845,7 +883,7 @@ where
                         data: ResponseAction::Delete(false),
                         end: meta.end,
                     };
-                    Some((meta.client, meta.id, response))
+                    Some((meta.client, meta.id, meta.stamps, response))
                 }
             }
         }
@@ -864,9 +902,9 @@ where
     #[instrument(name = "PersistentTable::update", skip_all)]
     async fn update<P>(
         &mut self,
-        meta: QueryMetadata,
+        mut meta: QueryMetadata,
         update: SortedUpdate<R>,
-    ) -> Option<(Uuid, Uuid, Response<P>)> {
+    ) -> Option<(Uuid, Uuid, StageStamps, Response<P>)> {
         // get the partition we want to update
         match self.partitions.get_mut(&update.partition_key) {
             Some(maybe_loaded) => {
@@ -885,6 +923,12 @@ where
                             let intent = SortedIntents::<R>::update(update);
                             // commit this intent to storage
                             let pos = self.storage.commit(&intent).await.unwrap();
+                            // record that this writes synchronous work is finished
+                            //
+                            // a write returns nothing to the shard, so it stamps this itself rather than having
+                            // `handle_query` do it. Everything `commit` blocked on - the write behind
+                            // backpressure in particular - lands in this stage rather than in a durability one.
+                            meta.stamps.mark_exec_done();
                             // we were able to update data
                             let action = ResponseAction::Update(true);
                             // add this to our pending queries until its commit is flushed
@@ -932,7 +976,7 @@ where
                             data: ResponseAction::Update(false),
                             end: meta.end,
                         };
-                        Some((meta.client, meta.id, response))
+                        Some((meta.client, meta.id, meta.stamps, response))
                     }
                     // this partition is loaded from disk but not deserialized
                     MaybeLoaded::Accessible(read) => {
@@ -948,6 +992,12 @@ where
                             let intent = SortedIntents::<R>::update(update);
                             // commit this intent to storage
                             let pos = self.storage.commit(&intent).await.unwrap();
+                            // record that this writes synchronous work is finished
+                            //
+                            // a write returns nothing to the shard, so it stamps this itself rather than having
+                            // `handle_query` do it. Everything `commit` blocked on - the write behind
+                            // backpressure in particular - lands in this stage rather than in a durability one.
+                            meta.stamps.mark_exec_done();
                             // we were able to update data
                             let action = ResponseAction::Update(true);
                             // add this to our pending queries until its commit is flushed
@@ -978,7 +1028,7 @@ where
                                 data: ResponseAction::Update(false),
                                 end: meta.end,
                             };
-                            Some((meta.client, meta.id, response))
+                            Some((meta.client, meta.id, meta.stamps, response))
                         }
                     }
                 }
@@ -1011,7 +1061,7 @@ where
                         end: meta.end,
                     };
                     // wait for this partition to get loaded
-                    Some((meta.client, meta.id, response))
+                    Some((meta.client, meta.id, meta.stamps, response))
                 }
             }
         }
@@ -1118,7 +1168,7 @@ where
     /// * `flushed` - The flushed actions to return
     pub async fn get_flushed(
         &mut self,
-    ) -> Result<&mut Vec<(Uuid, Uuid, Span, Response<R>)>, ServerError> {
+    ) -> Result<&mut Vec<(Uuid, Uuid, Span, StageStamps, Response<R>)>, ServerError> {
         // check if our current intent log should be compacted
         let progress = self.storage.compact_if_needed::<R>(false).await?;
         // update our current generation
@@ -1132,6 +1182,15 @@ where
         } else {
             // get all of the responses whose data has been flushed to disk
             self.pending.get(progress.durable_pos, &mut self.flushed);
+        }
+        // fill in the durability phases for everything we just released
+        //
+        // these are intervals of the intent log rather than properties of a query, so they
+        // are looked up by the offset each response parked at. `self.flushed` is drained by
+        // the shard on every sweep, so everything in it now is newly released.
+        #[cfg(feature = "stage-profile")]
+        for (_, _, _, stamps, _) in self.flushed.iter_mut() {
+            self.storage.fill_durability(stamps);
         }
         // return a ref to our flushed responses
         Ok(&mut self.flushed)

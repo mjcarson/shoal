@@ -353,6 +353,7 @@ pub trait ShoalDatabase: 'static + Sized {
     ) -> Option<(
         Uuid,
         Uuid,
+        crate::server::stage_profile::StageStamps,
         <Self::ClientType as QuerySupport>::ResponseKinds,
     )>;
 
@@ -406,6 +407,7 @@ pub trait ShoalDatabase: 'static + Sized {
             Uuid,
             Uuid,
             tracing::Span,
+            crate::server::stage_profile::StageStamps,
             <Self::ClientType as QuerySupport>::ResponseKinds,
         )>,
     ) -> Result<(), ServerError>;

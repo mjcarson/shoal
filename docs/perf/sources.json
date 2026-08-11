@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "note": [
+    "Which sources each measurement layer is considered to measure.",
+    "",
+    "shoal-bench hashes these to decide whether a committed capture still describes the current",
+    "code. A path may be a file or a directory; a directory means every .rs file beneath it,",
+    "walked and sorted.",
+    "",
+    "This list is a hand maintained approximation and it will drift. The staleness rule is built",
+    "so that drifting is safe in one direction only: the commit hash is checked first and catches",
+    "every change coarsely, and these digests can only ever narrow a 'stale' verdict to",
+    "'unaffected'. They can never turn 'stale' into 'fresh'. A path missing from this file",
+    "therefore produces a capture wrongly reported as unaffected by a change, never one wrongly",
+    "reported as fresh - and an unaffected verdict still shows how many commits have landed since.",
+    "",
+    "Adding a path here changes the manifest hash, which is recorded in every capture taken",
+    "afterwards, so the change is visible rather than silent.",
+    "",
+    "F8 moved the workloads out of shoal/examples/tmdb.rs and into shoal-bench/src/workloads, and the stage report builder out of shoal/src/stages.rs into the same place. The three workload layers point at that directory now. This changes the manifest hash, so every capture taken before F8 is correctly reported as no longer describing the current macro layer - which is true, and is not something to engineer around."
+  ],
+  "layers": {
+    "micro": [
+      "shoal/benches/partitions.rs",
+      "shoal-core/src/server/tables/partitions.rs",
+      "shoal-core/src/server/tables/partitions"
+    ],
+    "macro": [
+      "shoal-bench/src/workloads",
+      "shoal-core/src/server.rs",
+      "shoal-core/src/server",
+      "shoal-core/src/client.rs",
+      "shoal-core/src/client",
+      "shoal-core/src/shared.rs",
+      "shoal-core/src/shared"
+    ],
+    "hotpath": [
+      "shoal-bench/src/workloads",
+      "shoal-core/src/server.rs",
+      "shoal-core/src/server"
+    ],
+    "stages": [
+      "shoal-bench/src/workloads",
+      "shoal-core/src/server/stage_profile.rs",
+      "shoal-core/src/server.rs",
+      "shoal-core/src/server"
+    ]
+  }
+}

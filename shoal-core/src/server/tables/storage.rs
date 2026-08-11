@@ -21,6 +21,7 @@ pub mod fs;
 pub use fs::FileSystem;
 
 use crate::server::messages::{QueryMetadata, ServerMsg};
+use crate::server::stage_profile::{StageDurability, StageStamps};
 use crate::server::{Conf, ServerError};
 use crate::shared::responses::{Response, ResponseAction};
 use crate::shared::traits::{PartitionKeySupport, RkyvSupport, ShoalDatabase, TableNameSupport};
@@ -79,9 +80,17 @@ impl<T> PendingResponse<T> {
     /// # Arguments
     ///
     /// * `flushed` - The vec to write our released responses too
-    pub fn drain_all(&mut self, flushed: &mut Vec<(Uuid, Uuid, Span, Response<T>)>) {
+    pub fn drain_all(&mut self, flushed: &mut Vec<(Uuid, Uuid, Span, StageStamps, Response<T>)>) {
         // every pending response is durable so release all of them
-        for (_, meta, data) in self.pending.drain(..) {
+        for (_, mut meta, data) in self.pending.drain(..) {
+            // note that this response came out on a rotation rather than on a watermark
+            //
+            // a rotation fdatasynced the old log and threw its durability windows away with
+            // it, so these records carry no durability stages at all. Flagging them keeps
+            // them a separate population in the profile instead of an interpolated one.
+            meta.stamps.set_rotated(true);
+            // record when this response was released back to the shard
+            meta.stamps.mark_released();
             // build the response for this query
             let response = Response {
                 id: meta.id,
@@ -90,7 +99,7 @@ impl<T> PendingResponse<T> {
                 end: meta.end,
             };
             // add this action to our flushed vec
-            flushed.push((meta.client, meta.id, meta.span, response));
+            flushed.push((meta.client, meta.id, meta.span, meta.stamps, response));
         }
     }
 
@@ -100,7 +109,11 @@ impl<T> PendingResponse<T> {
     ///
     /// * `flushed_pos` - The position that all data below is durable at
     /// * `flushed` - The vec to write our released responses too
-    pub fn get(&mut self, flushed_pos: u64, flushed: &mut Vec<(Uuid, Uuid, Span, Response<T>)>) {
+    pub fn get(
+        &mut self,
+        flushed_pos: u64,
+        flushed: &mut Vec<(Uuid, Uuid, Span, StageStamps, Response<T>)>,
+    ) {
         // keep popping response actions until we find one that isn't yet flushed
         // or we have no more response actions to check
         while !self.pending.is_empty() {
@@ -112,7 +125,15 @@ impl<T> PendingResponse<T> {
             // if this action has been flushed to disk then pop it
             if is_flushed {
                 // pop this flushed action
-                if let Some((_, meta, data)) = self.pending.pop_front() {
+                if let Some((pos, mut meta, data)) = self.pending.pop_front() {
+                    // remember the offset this query became durable at
+                    //
+                    // the durability phases are intervals of the log rather than properties
+                    // of a query, so this offset is the only thing that can match a released
+                    // response back to the write that carried it
+                    meta.stamps.set_commit_pos(pos);
+                    // record when this response was released back to the shard
+                    meta.stamps.mark_released();
                     // build the response for this query
                     let response = Response {
                         id: meta.id,
@@ -121,7 +142,7 @@ impl<T> PendingResponse<T> {
                         end: meta.end,
                     };
                     // add this action to our flushed vec
-                    flushed.push((meta.client, meta.id, meta.span, response));
+                    flushed.push((meta.client, meta.id, meta.span, meta.stamps, response));
                 }
             } else {
                 // we don't have any flushed data yet
@@ -389,6 +410,25 @@ pub trait StorageSupport: Sized {
     #[allow(async_fn_in_trait)]
     async fn commit<D: RkyvSupport>(&mut self, data: &D) -> Result<u64, ServerError>;
 
+    /// Get how this storage engine makes a committed intent durable
+    ///
+    /// A stage record carries this rather than letting a report assume the default, since
+    /// an engine acknowledging on a landed write has no fdatasync stage at all and showing
+    /// one for it would be fiction.
+    fn durability(&self) -> StageDurability;
+
+    /// Fill in the durability stages for a response that has just been released
+    ///
+    /// The phases between a commit returning and its response coming back are intervals of
+    /// the intent log rather than properties of a query, so they are looked up here by the
+    /// offset the response parked at instead of being stamped as they happen.
+    ///
+    /// # Arguments
+    ///
+    /// * `stamps` - The stamps to fill in, already carrying their commit offset
+    #[cfg(feature = "stage-profile")]
+    fn fill_durability(&self, stamps: &mut StageStamps);
+
     /// Check if this intent log has grown past the size it rotates at
     ///
     /// This is the synchronous half of [`StorageSupport::compact_if_needed`], split out
@@ -479,6 +519,7 @@ pub trait StorageSupport: Sized {
 #[cfg(test)]
 mod tests {
     use super::{PendingResponse, QueryMetadata, RecoveryStats};
+    use crate::server::stage_profile::{StageStamps, Stamp};
     use crate::shared::responses::ResponseAction;
     use tracing::Span;
     use uuid::Uuid;
@@ -502,6 +543,9 @@ mod tests {
                 // only ever holds the responses to writes
                 gather: None,
                 span: Span::none(),
+                // these entries are built by hand rather than routed, so they carry stamps
+                // based at now rather than at a socket read
+                stamps: StageStamps::new(Stamp::now()),
             };
             pending.add(meta, *pos, ResponseAction::Insert(true));
         }
@@ -558,6 +602,9 @@ mod tests {
                 end: false,
                 gather: None,
                 span: Span::none(),
+                // these entries are built by hand rather than routed, so they carry stamps
+                // based at now rather than at a socket read
+                stamps: StageStamps::new(Stamp::now()),
             };
             pending.add(meta, pos, ResponseAction::Insert(true));
             // the watermark has not moved, so neither has what is releasable

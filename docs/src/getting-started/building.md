@@ -59,6 +59,9 @@ are only instantiated once a concrete schema exists. Build an example or the tes
 # build the bundled example
 cargo build --example tmdb
 
+# build the benchmark workloads, which are the other thing that instantiates a schema
+cargo build --release --bin shoal-workload
+
 # release build, which is what you want for any measurement
 cargo build --release
 
@@ -102,7 +105,7 @@ machine's core count and to ports already in use.
 | `shoal-core` | `shql-complete` | SHQL autocompletion support for clients. |
 
 ```bash
-cargo build --release --example tmdb --features hotpath   # a profiling build
+cargo build --release --bin shoal-workload --features hotpath   # a profiling build
 cargo bench -p shoal --features bench                     # the micro benchmarks
 ```
 
@@ -111,15 +114,19 @@ See [Observability](../operations/observability.md) for what `hotpath` reports a
 
 ## Running the example
 
-The `tmdb` example is both a demo and the benchmark harness. It starts a server in-process, so
-it needs a config and a TMDB CSV dataset:
+~~The `tmdb` example is both a demo and the benchmark harness.~~ Since
+[F8](../features/purpose-built-workloads.md) it is only a demo, and it needs **nothing set up**:
 
 ```bash
-cargo run --example tmdb --release -- --limit 20000 --no-wait
+cargo run --example tmdb
 ```
 
-It takes a full CLI — `--help` lists every flag. See [Benchmarking](../operations/benchmarking.md)
-for what the numbers mean and how to get a result worth comparing.
+No config, no dataset, no flags. It starts a server against a temporary directory under
+`target/`, writes a dozen movies, and reads them back four ways — a keyed get, a projection, a
+filter, and the same query written in SHQL.
+
+The benchmark harness it used to be is now fifteen purpose-built workloads in `shoal-bench`. See
+[Benchmarking](../operations/benchmarking.md) for how to run them and what the numbers mean.
 
 Note that the checked-in `shoal.yml` points storage at `/opt/shoal`, which must exist and be
 writable. It is also the benchmark configuration, so changing it invalidates the recorded

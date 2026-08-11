@@ -1,0 +1,118 @@
+[package]
+name = "shoal-bench"
+version = "0.1.0"
+edition = "2024"
+description = "Executes Shoal's benchmarks, stores the results with their provenance, compares them against a baseline, and renders the book's benchmark results page"
+# there are two binaries here, and `cargo run -p shoal-bench` has to keep meaning the runner. the
+# other one is spawned by the runner and by nobody else.
+default-run = "shoal-bench"
+
+[lib]
+name = "shoal_bench"
+path = "src/lib.rs"
+
+# The runner, which plans a capture, judges it and renders the book's page. Never links the engine.
+[[bin]]
+name = "shoal-bench"
+path = "src/main.rs"
+
+# The measured process, which is the only thing here that links `shoal`.
+#
+# This is a second binary rather than a subcommand of the first because the two instrumented
+# layers are built with a feature that changes the code being measured. `hotpath` has to annotate
+# a `main`, so running a workload inside the runner would mean rebuilding the tool that is
+# currently executing and then reporting its own argument parsing and chart rendering as scopes.
+# Building `--bin shoal-workload --features hotpath` leaves `target/release/shoal-bench` alone.
+[[bin]]
+name = "shoal-workload"
+path = "src/workload_main.rs"
+required-features = ["workloads"]
+
+# The workloads link `shoal`, and the runner must not.
+#
+# `workloads` is on by default so that `cargo check --workspace --all-targets` compiles every
+# workload against the real engine API - a workload that stops describing the code is then a
+# compile error rather than a benchmark that quietly measures nothing. An optional-off feature
+# would not be enabled by `--all-targets` and would let them rot silently.
+#
+# The feature exists at all so `--no-default-features` still builds the runner with no glommio,
+# rkyv or mimalloc. That is the half that judges a change, and it has to be buildable while the
+# engine is mid-refactor and will not compile. `compare`, `status`, `render` and `promote` need
+# nothing from `shoal`; only `list` and `run` do.
+[features]
+default = ["workloads"]
+workloads = [
+    "dep:shoal",
+    "dep:shoal-core",
+    "dep:tokio",
+    "dep:kanal",
+    "dep:rkyv",
+    "dep:deepsize2",
+    "dep:uuid",
+    "dep:glommio",
+    "dep:mimalloc",
+]
+# attribute time to scopes. must forward to `shoal`, which forwards to `shoal-core`, since every
+# instrumentation attribute lives there
+hotpath = ["workloads", "shoal/hotpath", "dep:hotpath"]
+# record where each query spent its time, stage by stage
+stage-profile = ["workloads", "shoal/stage-profile"]
+
+# Every dependency below is already resolved in the workspace lockfile, so adding this crate
+# downloads nothing. Keep it that way: `cargo tree -p shoal-bench --no-default-features` should
+# never introduce a package that some other member did not already pull in, and should never
+# mention glommio.
+[dependencies]
+# the established CLI style in this workspace, see shoal/examples/tmdb.rs
+clap = { version = "4.2", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+# every artifact this tool reads or writes is json
+serde_json = "1"
+# only used to find the storage path in shoal.yml. that path is what gets wiped between runs, so
+# it is parsed rather than scraped with a regex the way bench.sh did it
+serde_yaml = "0.9"
+anyhow = "1"
+# There is no date dependency here on purpose. `chrono` is not in the workspace lockfile, and
+# `time` - which is - pulls `time-macros` in behind the `formatting` feature it would be needed
+# for, which is not. The whole of what this tool wants from a date library is one civil-date
+# conversion, so `src/clock.rs` does it in forty tested lines and the lockfile stays untouched.
+# content hashes of the sources each measurement layer covers
+sha2 = "0.10"
+hex = "0.4"
+# walking target/criterion and the source lists in docs/perf/sources.json
+walkdir = "2.5"
+# Charts. `default-features = false` is mandatory: the default set pulls chrono, ttf, image and
+# bitmap_backend, none of which are in the lockfile. Every feature enabled here is dep-free
+# except `svg_backend`, which pulls plotters-svg - already present via criterion's html_reports.
+plotters = { version = "0.3.7", default-features = false, features = [
+    "svg_backend",
+    "line_series",
+    "area_series",
+    "point_series",
+    "errorbar",
+] }
+
+# Everything below is the measured half, and is optional so the runner can be built without it.
+# `shoal` is the facade the workloads drive; the rest is what driving a client needs.
+shoal = { version = "0.1.0", path = "../shoal", optional = true }
+# the facade does not re-export the config leaf types a workload has to name, such as `TraceLevel`
+# and `Durability`. `shoal/examples/tmdb.rs` reaches past it the same way for `trace::setup`.
+shoal-core = { version = "0.1.0", path = "../shoal-core", optional = true }
+tokio = { workspace = true, optional = true }
+kanal = { workspace = true, optional = true }
+rkyv = { workspace = true, optional = true }
+hotpath = { workspace = true, optional = true }
+# All three are named by paths the derive macros generate, so a schema does not compile without
+# them even though nothing here mentions any of them by hand. The `tmdb` example never had to
+# declare them because it is compiled inside `shoal`, which already depends on all three - which
+# is also why nothing had noticed that `#[shoal::db]` is not usable from outside this workspace
+# without them. Filed in docs/src/appendix/known-issues.md.
+deepsize2 = { version = "0.1", optional = true }
+uuid = { workspace = true, optional = true }
+glommio = { workspace = true, optional = true }
+# the server half of a workload runs on glommio, and the client half needs an allocator that
+# matches the one the server was measured with
+mimalloc = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile = "3"

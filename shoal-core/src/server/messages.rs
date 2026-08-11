@@ -8,6 +8,7 @@ use tracing::Span;
 use uuid::Uuid;
 
 use super::shard::{ShardContact, ShardInfo};
+use super::stage_profile::{StageStamps, Stamp};
 use crate::shared::traits::{QuerySupport, ShoalDatabase};
 
 /// The metadata about a query from a client
@@ -30,6 +31,11 @@ pub struct QueryMetadata {
     pub gather: Option<ShardContact>,
     /// The span context for this query
     pub span: Span,
+    /// When this query reached each stage of its journey through shoal
+    ///
+    /// A zero sized type unless the `stage-profile` feature is on, which is what lets this
+    /// ride along in the response tuples without a `#[cfg]` at every site that builds one.
+    pub stamps: StageStamps,
 }
 
 impl QueryMetadata {
@@ -42,12 +48,14 @@ impl QueryMetadata {
     /// * `index` - The index for this query in a bundle of queries
     /// * `end` - Whether this is the last query in a bundle or not
     /// * `gather` - The shard collecting this queries responses if it was split
+    /// * `stamps` - The stage timings for the bundle this query arrived in
     pub fn new(
         client: Uuid,
         id: Uuid,
         index: usize,
         end: bool,
         gather: Option<ShardContact>,
+        stamps: StageStamps,
     ) -> Self {
         QueryMetadata {
             client,
@@ -56,7 +64,39 @@ impl QueryMetadata {
             end,
             gather,
             span: Span::current(),
+            stamps,
         }
+    }
+
+    /// Create query metadata that is not being profiled
+    ///
+    /// Every query the server routes carries the stamps of the bundle it arrived in, so this
+    /// is only for callers that build metadata outside that path — tests, and the replay of a
+    /// query that was parked before the profile existed. The stamps it makes are based at
+    /// now, so a record built from them measures from here rather than from the socket read.
+    ///
+    /// # Arguments
+    ///
+    /// * `client` - The id for this client
+    /// * `id` - The id of this query
+    /// * `index` - The index for this query in a bundle of queries
+    /// * `end` - Whether this is the last query in a bundle or not
+    /// * `gather` - The shard collecting this queries responses if it was split
+    pub fn untimed(
+        client: Uuid,
+        id: Uuid,
+        index: usize,
+        end: bool,
+        gather: Option<ShardContact>,
+    ) -> Self {
+        QueryMetadata::new(
+            client,
+            id,
+            index,
+            end,
+            gather,
+            StageStamps::new(Stamp::now()),
+        )
     }
 }
 
@@ -78,7 +118,7 @@ where
         /// This clients id
         client: Uuid,
         /// The channel to send responses for this client on
-        client_tx: AsyncSender<(Uuid, Span, AlignedVec)>,
+        client_tx: AsyncSender<(Uuid, Span, StageStamps, AlignedVec)>,
     },
     /// A message from a client
     Client {
@@ -86,6 +126,11 @@ where
         peer: Uuid,
         /// The raw data for our request
         data: BytesMut,
+        /// When the last byte of this request came off the socket
+        ///
+        /// Every stage offset a query in this bundle records is measured from here, since
+        /// this is the first moment the server knows the bundle exists.
+        base: Stamp,
     },
     /// A query to execute
     Query {
@@ -133,9 +178,10 @@ impl<D: ShoalDatabase> Clone for ServerMsg<D> {
     fn clone(&self) -> Self {
         match self {
             ServerMsg::Join(info) => ServerMsg::Join(info.clone()),
-            ServerMsg::Client { peer, data } => ServerMsg::Client {
-                peer: peer.clone(),
+            ServerMsg::Client { peer, data, base } => ServerMsg::Client {
+                peer: *peer,
                 data: data.clone(),
+                base: *base,
             },
             ServerMsg::NewClient { client, client_tx } => ServerMsg::NewClient {
                 client: client.clone(),

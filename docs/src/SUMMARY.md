@@ -40,6 +40,7 @@
 
 - [Observability](operations/observability.md)
 - [Benchmarking](operations/benchmarking.md)
+- [Benchmark Results](operations/benchmark-results.md)
 - [Performance Baseline](operations/performance-baseline.md)
 - [shoalctl](operations/shoalctl.md)
 
@@ -51,6 +52,9 @@
   - [F3. A three layer performance harness](features/performance-harness.md)
   - [F4. Archives are validated once, not once per read](features/validated-archives.md)
   - [F5. The flushed sweep runs on a wakeup, not on every message](features/flushed-sweep-gate.md)
+  - [F6. A per query stage breakdown](features/stage-breakdown.md)
+  - [F7. A benchmark runner that renders its own results](features/bench-runner.md)
+  - [F8. Purpose-built workloads, in the crate that judges them](features/purpose-built-workloads.md)
 
 # Appendix
 

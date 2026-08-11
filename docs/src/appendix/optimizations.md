@@ -15,7 +15,8 @@ rather than by observed benefit. What has changed is that there is now somewhere
 them. [F3](../features/performance-harness.md) built a harness that can resolve a few percent,
 [Performance Baseline](../operations/performance-baseline.md) records what the system currently
 does, and the `hotpath` feature — which until then was wired up in a way that produced an empty
-profile — reports 57 scopes on a `tmdb` run.
+profile — reported 57 scopes on a `tmdb` run, which was the workload the figure was taken
+from before [F8](../features/purpose-built-workloads.md) retired it.
 
 So the rule is now stronger rather than weaker. **An entry is not acted on until a benchmark
 exists that would show the difference**, and the entry says which one. An entry with no such
@@ -148,12 +149,13 @@ come out as a code block.
 
 | Entry | Benchmark that would show it |
 | --- | --- |
-| O1, O18, O19 | none yet — a `wire_codec` bench over `Queries` and `ResponseKinds` is unbuilt ([TODOs](todos.md)) |
+| O1, O18, O19 | none yet — a `wire_codec` bench over `Queries` and `ResponseKinds` is unbuilt. It belongs in the **micro** layer, not the macro one ([TODOs](todos.md#benchmark-coverage-the-harness-does-not-have)) |
 | O2 | `partition_sorted/maybe_loaded/get_all` and `archived/walk_all`, with `get_all` for the resident twin |
 | ~~O3, O23~~ | `partition_sorted/maybe_loaded/get_key` and `exists_key`, against `codec/access` — **settled**, see [F4](../features/validated-archives.md#performance) |
-| O5, O12, O13 | **none yet** — a bench over `PersistentSortedTable::get` is unbuilt ([TODOs](todos.md#benchmark-coverage-the-harness-does-not-have)). `maybe_loaded/*` reaches `MaybeLoaded`, one layer below where all three live |
-| O20 | none yet — a `routing` bench over `Ring::find_shard` and `split_by_shard` is unbuilt |
-| O21 | `hotpath` `fs::commit` and `stream::prep` only; no micro-benchmark of the write path exists |
+| O5, O12 | **none yet** — an isolated bench over `PersistentSortedTable::get` is still unbuilt ([TODOs](todos.md#benchmark-coverage-the-harness-does-not-have)). `maybe_loaded/*` reaches `MaybeLoaded`, one layer below where both live |
+| O13 | ~~none yet~~ `macro/fanout/{resident,evicted}/n` since [F8](../features/purpose-built-workloads.md) — **the question, not the isolated cost**. See the note below |
+| O20 | none yet — a `routing` bench over `Ring::find_shard` and `split_by_shard` is unbuilt, and likewise belongs in the micro layer |
+| O21 | `hotpath` `fs::commit` and `stream::prep` only; no micro-benchmark of the write path exists, though [F8](../features/purpose-built-workloads.md) built the standalone binary that would host one |
 
 > This table previously claimed that `partition_sorted/insert` and `get_key` adjudicated **O5**,
 > and that `seek_bytes/*` adjudicated **O12** and **O13**. ~~It was wrong about all three.~~ Those
@@ -163,6 +165,31 @@ come out as a code block.
 > `shared/queries/sorted.rs`, none of which those benches reach. `seek_bytes/new` measures
 > `SeekBytes::new` and nothing around it. **The three cheapest entries on this page were the three
 > whose evidence was furthest away**, and the table said the opposite.
+
+> **What F8 changed, and what it did not.**
+> [F8](../features/purpose-built-workloads.md) built `macro/fanout/{resident,evicted}/n` over
+> *n* ∈ {1, 2, 4, 16, 64, 256} — a get over *n* partition keys against both a resident table and
+> one that has to be read. That is the shape [TODOs](todos.md) asked for, and it needed no glommio
+> executor inside criterion, because driving `PersistentSortedTable::get` through a live server
+> does not need one.
+>
+> It adjudicates **O13's question** and not **O13's cost**. Every sample includes the wire, the
+> routing, `split_by_shard`, the response merge and the client, so the absolute number is not a
+> cost of the table method. But a quadratic per-partition term bends the curve against a flat
+> control at *n* = 1 whatever constant overhead sits on top of it.
+>
+> **The first full capture does not settle it.** `f8-powersave` puts the median below the chord at
+> both *n* = 16 and *n* = 64, which is the right sign, but the marginal cost between adjacent
+> points — 0.91, 0.64, 1.11, 0.83, 1.12 µs — does not rise monotonically and is consistent with
+> noise around a straight line. A smoke-scale run had suggested a clean rise off forty samples and
+> did not survive contact with the full one, which is worth recording as a caution about reading
+> smoke runs rather than as evidence about O13.
+>
+> **O5 and O12 are not touched**: neither is about how cost scales with the partition count, so
+> neither shows up as a bend.
+>
+> The isolated, criterion-sampled bench remains unbuilt and remains the thing that would settle
+> all three.
 
 ---
 
@@ -354,7 +381,7 @@ cheaper of the two selections to copy — but the filters dominate either way.
 | **Depends on** | nothing |
 | **Blocks** | nothing |
 | **Tradeoff** | None |
-| **Benchmark** | none — needs the table-layer bench |
+| **Benchmark** | ~~none — needs the table-layer bench~~ `macro/fanout/{resident,evicted}/n` since [F8](../features/purpose-built-workloads.md), which shows the curve bend but not the isolated cost — see [the table above](#which-entries-a-benchmark-can-currently-adjudicate) |
 
 **This entry was filed against code that has since moved, and it came out broader.** It used to
 read:
@@ -1034,6 +1061,51 @@ the queue puts it in Tier C for exactly the stated reason, and only adds that O1
 read. That grouping does not survive the evidence: O3 is the one entry a benchmark already settles,
 and O1 is one of five that no benchmark can currently see at all. They belong two tiers apart, and
 the thing that separates them is not size but whether the claim can be checked.
+
+### O26. `handle_query` cloned a `QueryMetadata` for a gather almost no query has
+
+| | |
+| --- | --- |
+| **Rank** | **B** — measured as free, taken because it was free, not because it was ranked |
+| **Impact** | One `QueryMetadata` clone per query removed — 617,175 per baseline run |
+| **Difficulty** | S — one line, already taken |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | None — the clone was only ever read on a path that checked the same condition |
+| **Benchmark** | none of its own; folded into no F6 number, see below |
+
+Filed and taken while building [F6](../features/stage-breakdown.md).
+
+`Shard::handle_query` (`shard.rs`) cloned the whole `QueryMetadata` before handing it to the
+tables:
+
+```rust
+// keep a copy of our metadata, since handling this query consumes it and a
+// share of a split query has to travel back with the metadata it came from
+let gathered_meta = meta.clone();
+```
+
+The copy is read in exactly one arm — the one taken when `meta.gather` is `Some`, meaning the
+query was split across shards. Every other query paid for a clone of a `Uuid`, a `Uuid`, a
+`usize`, a `bool`, an `Option<ShardContact>` and a `Span` and then dropped it. In the `tmdb`
+workload **no query is ever split**: `MovieGet::new(vec![movie.id])` names one partition, so
+`found.len() == 1` and `gather` is `None` for all 617,175 of them.
+
+It is now cloned only when there is something to clone it for:
+
+```rust
+let gathered_meta = meta.gather.is_some().then(|| meta.clone());
+```
+
+F6 made this worth doing rather than merely tidy: [`StageStamps`](../features/stage-breakdown.md)
+rides on `QueryMetadata`, so under a profiling build the clone got bigger, and a stage profile
+that pays for its own instrumentation on a path it is measuring is the thing to avoid.
+
+**Deliberately not measured as part of F6's capture.** An F6 run is a `stage-profile` build,
+whose absolute latencies are not comparable to a shipping one, so folding a shipping-build
+optimization into that capture would produce a number that means nothing. It needs its own
+before-and-after macro capture against the frozen baseline, which has not been taken.
+
 
 **What it left out is the larger point.** It covered seven entries. It was silent on **O23**, which
 turned out to be the only measured entry on the page; on **O17**, the cheapest change with evidence

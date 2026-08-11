@@ -142,7 +142,7 @@ answer as a union — the defect being fixed.
   defect exactly.
 - **Whatever a get answers with can name the partition it came from.** The reorder hashes each
   returned row's partition key and looks it up in the ranks the query named. That was free while a
-  response could only hold whole rows; since [F2](../features/projections.md) it is a constraint on
+  response could only hold whole rows; since [F2](../../features/projections.md) it is a constraint on
   what a projection is allowed to leave out, and it is why a projection has to carry its table's
   partition key. [O18](../optimizations.md#o18-the-gathered-reorder-rehashes-every-rows-partition-key)
   would remove the requirement by carrying the grouping instead.

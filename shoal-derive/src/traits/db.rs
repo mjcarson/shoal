@@ -1,10 +1,9 @@
 //! Generate the traits and code required for a database in Shoal
 
-use quote::{quote, format_ident};
-use syn::{Ident, FieldsNamed};
+use quote::{format_ident, quote};
+use syn::{FieldsNamed, Ident};
 
 use crate::utils;
-
 
 /// Extend a token stream with a `ShoalDatabase` implementation for a database struct
 ///
@@ -72,55 +71,59 @@ pub fn add(
         }
     });
     // build our handle query arms
-    let handle_arms = fields.named.iter().zip(projections).map(|(field, declared)| {
-        // get our field ident and type
-        let field_ident = field.ident.as_ref().unwrap();
-        // get the variant name from the inner type
-        let variant_ident = utils::extract_inner_table_ident(&field.ty)
-            .expect("Failed to extract inner table ident");
-        // build the name of this tables projection enum
-        let projection_ident = format_ident!("{}Projection", variant_ident);
-        // build one arm per projection, each picking up the row type it answers with
-        //
-        // the table is generic in what it builds, so this match is the only place a
-        // projection costs anything at runtime, and it runs once per query rather than
-        // once per row
-        let projection_arms = declared.iter().map(|projection| {
-            quote! {
-                #projection_ident::#projection => {
-                    match self.#field_ident.handle::<#projection>(meta, query).await {
-                        Some((client, query_id, response)) => {
-                            let wrapped = #response_ident::#projection(response);
-                            Some((client, query_id, wrapped))
-                        }
-                        None => None,
-                    }
-                }
-            }
-        });
-        // build our handle query arm for this field
-        quote! {
-            #query_ident::#variant_ident(query) => {
-                // a get can ask to be answered with a subset of each rows fields, which
-                // decides the row type this table builds and the variant it answers in
-                match query.projection() {
-                    #(#projection_arms)*
-                    // a get that named no projection, and every query that is not a get,
-                    // answers with whole rows
-                    _ => {
-                        match self.#field_ident.handle::<#variant_ident>(meta, query).await {
-                            Some((client, query_id, response)) => {
-                                // wrap our response with the right table kind
-                                let wrapped = #response_ident::#variant_ident(response);
-                                Some((client, query_id, wrapped))
+    let handle_arms = fields
+        .named
+        .iter()
+        .zip(projections)
+        .map(|(field, declared)| {
+            // get our field ident and type
+            let field_ident = field.ident.as_ref().unwrap();
+            // get the variant name from the inner type
+            let variant_ident = utils::extract_inner_table_ident(&field.ty)
+                .expect("Failed to extract inner table ident");
+            // build the name of this tables projection enum
+            let projection_ident = format_ident!("{}Projection", variant_ident);
+            // build one arm per projection, each picking up the row type it answers with
+            //
+            // the table is generic in what it builds, so this match is the only place a
+            // projection costs anything at runtime, and it runs once per query rather than
+            // once per row
+            let projection_arms = declared.iter().map(|projection| {
+                quote! {
+                    #projection_ident::#projection => {
+                        match self.#field_ident.handle::<#projection>(meta, query).await {
+                            Some((client, query_id, stamps, response)) => {
+                                let wrapped = #response_ident::#projection(response);
+                                Some((client, query_id, stamps, wrapped))
                             }
                             None => None,
                         }
                     }
                 }
-            },
-        }
-    });
+            });
+            // build our handle query arm for this field
+            quote! {
+                #query_ident::#variant_ident(query) => {
+                    // a get can ask to be answered with a subset of each rows fields, which
+                    // decides the row type this table builds and the variant it answers in
+                    match query.projection() {
+                        #(#projection_arms)*
+                        // a get that named no projection, and every query that is not a get,
+                        // answers with whole rows
+                        _ => {
+                            match self.#field_ident.handle::<#variant_ident>(meta, query).await {
+                                Some((client, query_id, stamps, response)) => {
+                                    // wrap our response with the right table kind
+                                    let wrapped = #response_ident::#variant_ident(response);
+                                    Some((client, query_id, stamps, wrapped))
+                                }
+                                None => None,
+                            }
+                        }
+                    }
+                },
+            }
+        });
     // build our mark evictable partitions arms
     let mark_evictable_arms = fields
         .named
@@ -140,13 +143,13 @@ pub fn add(
         .iter()
         .zip(variants)
         .map(|(field, variant_ident)| {
-        // get our field ident and type
-        let field_ident = field.ident.as_ref().unwrap();
-        // build our evict partition arm for this table
-        quote! {
-            #table_names_ident::#variant_ident=> self.#field_ident.evict(victims),
-        }
-    });
+            // get our field ident and type
+            let field_ident = field.ident.as_ref().unwrap();
+            // build our evict partition arm for this table
+            quote! {
+                #table_names_ident::#variant_ident=> self.#field_ident.evict(victims),
+            }
+        });
     // build our flush arms
     let flush_arms = fields.named.iter().map(|field| {
         // get our field ident and type
@@ -182,7 +185,7 @@ pub fn add(
             // wrap and add our specific queries
             let wrapped = specific
                 .drain(..)
-                .map(|(client, query_id, span, resp)| (client, query_id, span, #response_ident::#variant_ident(resp)));
+                .map(|(client, query_id, span, stamps, resp)| (client, query_id, span, stamps, #response_ident::#variant_ident(resp)));
             // extend our response list with our wrapped queries
             flushed.extend(wrapped);
         }
@@ -304,6 +307,7 @@ pub fn add(
             ) -> Option<(
                 uuid::Uuid,
                 uuid::Uuid,
+                shoal_core::server::stage_profile::StageStamps,
                 <Self::ClientType as shoal_core::shared::traits::QuerySupport>::ResponseKinds,
             )> {
                 // match on the right query and execute it
@@ -327,7 +331,7 @@ pub fn add(
             ) {
                 match table_name {
                     #(#mark_evictable_arms)*
-                }    
+                }
             }
 
 
@@ -340,7 +344,7 @@ pub fn add(
             fn evict(&mut self, table_name: Self::TableNames, victims: Vec<u64>) {
                 match table_name {
                     #(#evict_arms)*
-                }    
+                }
             }
 
             /// Flush any in flight writes to disk
@@ -367,6 +371,7 @@ pub fn add(
                     uuid::Uuid,
                     uuid::Uuid,
                     shoal_core::tracing::Span,
+                    shoal_core::server::stage_profile::StageStamps,
                     <Self::ClientType as shoal_core::shared::traits::QuerySupport>::ResponseKinds,
                 )>,
             ) -> Result<(), shoal_core::server::ServerError> {
@@ -385,7 +390,7 @@ pub fn add(
                 };
                 Ok(())
             }
-            
+
 
             /// Shutdown this table and flush any data to disk if needed
             async fn shutdown(mut self) -> Result<(), shoal_core::server::ServerError> {

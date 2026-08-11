@@ -16,6 +16,11 @@ shql-complete = ["dep:nucleo-matcher"]
 # Re-exports crate private internals so the benches in shoal/benches can reach them.
 # This is not a supported API and carries no stability promise.
 bench = []
+# record where each query spent its time, stage by stage
+#
+# a build with this on is an attribution build - its absolute latencies are not comparable
+# to a build without it, the same rule that already applies to `hotpath`
+stage-profile = []
 
 [dependencies]
 clap = { version = "4.2", features = ["derive"] }

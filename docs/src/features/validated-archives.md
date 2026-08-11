@@ -185,7 +185,8 @@ This is the section to read before changing `ValidatedArchive`.
 
 ## Performance
 
-Measured by `scripts/bench.sh`, `o3-before` against `o3-after`, on the hardware in
+Measured by `scripts/bench.sh` — the shell harness [F7](bench-runner.md) replaced with
+`shoal-bench` — `o3-before` against `o3-after`, on the hardware in
 [Performance Baseline](../operations/performance-baseline.md). Both captures were taken in the same
 session under the same settings, so the pair is the result; comparisons against the frozen `B1`
 baseline carry an environment difference as well.

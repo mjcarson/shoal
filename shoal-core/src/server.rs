@@ -19,6 +19,7 @@ pub mod messages;
 pub mod meta;
 pub mod ring;
 pub mod shard;
+pub mod stage_profile;
 pub mod tables;
 pub mod trace;
 

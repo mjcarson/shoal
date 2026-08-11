@@ -26,7 +26,7 @@ use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 pub mod errors;
-mod messages;
+pub mod messages;
 
 use super::shared::queries::Queries;
 use crate::shared::responses::ResponseActionNames;
@@ -34,7 +34,7 @@ use crate::shared::traits::{
     ExistsQuery, QuerySupport, RkyvSupport, ShoalQuerySupport, ShoalResponseSupport,
 };
 pub use errors::{Errors, ShqlParseError};
-use messages::ClientMsg;
+use messages::{BatchStamps, ClientMsg, ClientStamps};
 
 // Connection manager for bb8
 #[derive(Clone)]
@@ -525,8 +525,13 @@ impl TcpProxy {
             // resize our aligned vec
             aligned_buff.resize(len, 0);
             self.reader.read_exact(&mut aligned_buff).await?;
+            // note when this responses last byte arrived
+            //
+            // the servers own record ends when it hands these bytes to its socket, so this
+            // is what closes the loop on the wire time between the two
+            let stamps = ClientStamps::arrived_now();
             // wrap our response in a client message
-            let wrapped = ClientMsg::Response(aligned_buff);
+            let wrapped = ClientMsg::Response(aligned_buff, stamps);
             // get the channel for this query
             match self.channel_map.pin_owned().get(&query_id) {
                 // send our response to the right shoal stream
@@ -712,6 +717,8 @@ pub struct ShoalResponse<S: QuerySupport> {
     _buff: AlignedVec,
     /// The archived type backed by this vec
     archived: *const <S::ResponseKinds as Archive>::Archived,
+    /// When this response arrived on the client side
+    stamps: ClientStamps,
     /// The type of data this is a response for
     phantom: PhantomData<S>,
 }
@@ -743,7 +750,7 @@ where
 }
 
 impl<S: QuerySupport> ShoalResponse<S> {
-    pub(super) fn new(buff: AlignedVec) -> Result<Self, Errors>
+    pub(super) fn new(buff: AlignedVec, stamps: ClientStamps) -> Result<Self, Errors>
     where
         for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived: CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
@@ -756,13 +763,24 @@ impl<S: QuerySupport> ShoalResponse<S> {
         Ok(ShoalResponse {
             _buff: buff,
             archived: const_archived,
+            stamps,
             phantom: PhantomData,
         })
     }
 
-    /// Get the inner aligned vec
-    pub(super) fn inner(self) -> AlignedVec {
-        self._buff
+    /// Get the inner aligned vec and the stamps that came with it
+    ///
+    /// Both halves are handed back together on purpose. The reorder buffer takes a response
+    /// apart and puts it back together, and a version of this that returned only the buffer
+    /// would silently drop the stamps on every out of order response.
+    pub(super) fn inner(self) -> (AlignedVec, ClientStamps) {
+        (self._buff, self.stamps)
+    }
+
+    /// Get when this response arrived on the client side
+    #[must_use]
+    pub fn stamps(&self) -> ClientStamps {
+        self.stamps
     }
 
     /// Get whether this is the last response in a response stream
@@ -890,9 +908,9 @@ where
                         // handle the different client messages
                         match msg {
                             // get this responses message
-                            ClientMsg::Response(response) => {
+                            ClientMsg::Response(response, stamps) => {
                                 // wrap our response so we don't have to keep repaying access costs
-                                let response = ShoalResponse::<S>::new(response)?;
+                                let response = ShoalResponse::<S>::new(response, stamps)?;
                                 // only bother to check our server sent end of stream if our queries are bounded
                                 let end = if self.unbounded_queries {
                                     // we have unbounded queries so set end to false
@@ -914,9 +932,9 @@ where
             // handle the different client messages
             match msg {
                 // get this responses message
-                ClientMsg::Response(response) => {
+                ClientMsg::Response(response, stamps) => {
                     // wrap our response so we don't have to keep repaying access costs
-                    let response = ShoalResponse::<S>::new(response)?;
+                    let response = ShoalResponse::<S>::new(response, stamps)?;
                     // get the index for this message
                     let index = response.get_index();
                     // if this is the next row then return it
@@ -935,7 +953,12 @@ where
                         return Ok((end, Some(response)));
                     }
                     // rewrap our response in a client message
-                    let rewrapped = ClientMsg::Response(response.inner());
+                    //
+                    // the stamps come back apart with the buffer here, so a response that has
+                    // to wait in the reorder buffer keeps the arrival time it was read with
+                    // rather than picking up a new one when it is finally returned
+                    let (buff, stamps) = response.inner();
+                    let rewrapped = ClientMsg::Response(buff, stamps);
                     // push this into our pending responses and wait for the next response
                     self.pending.insert(index, rewrapped);
                 }
@@ -1142,9 +1165,9 @@ where
         loop {
             // wait for the next message to return
             match response_rx.recv().await? {
-                ClientMsg::Response(archived) => {
+                ClientMsg::Response(archived, stamps) => {
                     // wrap our response so we don't have to keep repaying access costs
-                    let response = ShoalResponse::<S>::new(archived)?;
+                    let response = ShoalResponse::<S>::new(archived, stamps)?;
                     // get the index for this message
                     let index = response.get_index();
                     // if this is our next index then increment next as far as we can
@@ -1267,7 +1290,14 @@ impl<Q: QuerySupport> ShoalQueryStream<Q> {
     /// # Arguments
     ///
     /// * `queries` - The queries to send
-    pub async fn send(&mut self, mut queries: Queries<Q>) -> Result<(), Errors> {
+    ///
+    /// Returns what this send cost, broken into serialize, pool acquire, and socket write.
+    /// Those are batch level costs shared by every query in the bundle, and are a zero sized
+    /// type unless the `stage-profile` feature is on, so a caller that ignores them pays
+    /// nothing for them.
+    pub async fn send(&mut self, mut queries: Queries<Q>) -> Result<BatchStamps, Errors> {
+        // start timing this bundle
+        let mut stamps = BatchStamps::entered_now();
         // override our query id
         // TODO make it so we don't need to do this
         queries.id = self.id;
@@ -1275,12 +1305,18 @@ impl<Q: QuerySupport> ShoalQueryStream<Q> {
         queries.base_index = self.base_index;
         // archive our queries
         let archived = rkyv::to_bytes::<_>(&queries)?;
+        // record what serializing this bundle cost
+        stamps.mark_serialized();
         // get the size of the archive we are sending to the client
         let len = archived.len().to_le_bytes();
         // get a connection from our connection pool and send our query
         let mut conn = self.pool.get().await.map_err(|e| {
             Errors::ConnectionPool(format!("failed to get connection from pool: {e}"))
         })?;
+        // record what waiting on the connection pool cost
+        //
+        // this is where client side backpressure shows up once enough queries are in flight
+        stamps.mark_pooled();
         // build our vectored byte slices to send
         let mut bufs = &mut [IoSlice::new(&len), IoSlice::new(&archived)][..];
         // keep sending our data until all of this archive has been sent
@@ -1298,10 +1334,12 @@ impl<Q: QuerySupport> ShoalQueryStream<Q> {
                 n => IoSlice::advance_slices(&mut bufs, n),
             }
         }
+        // record that this bundle is now the sockets problem
+        stamps.mark_written();
         // increment the number of queries sent and our base index
         self.queries_sent += 1;
         self.base_index += queries.queries.len();
-        Ok(())
+        Ok(stamps)
     }
 
     /// Close this query stream

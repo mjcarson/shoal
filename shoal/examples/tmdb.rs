@@ -1,1009 +1,358 @@
-//! A shoal example on TMDB data
-
-use clap::Parser;
-use core_affinity::{set_for_current, CoreId};
-use shoal::bencher::{BenchOp, BenchWorker, Bencher};
-use shoal::client::{QuerySuceededOpts, ShoalQueryStream, ShoalUnorderedResultStream};
-use shoal::shared::queries::Queries;
-use shoal::shared::responses::ResponseActionNames;
-use shoal::shared::traits::QuerySupport;
-use shoal::{
-    Conf, FileSystem, PersistentSortedTable, PersistentUnsortedTable, Shoal, ShoalPool,
-    ShoalProjection, ShoalResponse, ShoalSortedTable, ShoalUnsortedTable,
-};
+//! A tour of Shoal, in one file that runs with no setup
+//!
+//! ```sh
+//! cargo run --example tmdb
+//! ```
+//!
+//! No config file, no dataset, no flags. The example starts a server against a temporary
+//! directory, writes a dozen movies into it, and reads them back four different ways.
+//!
+//! # What it shows, in the order it shows it
+//!
+//! 1. **Two table types.** [`Movie`] is unsorted - one row per partition, keyed by its id.
+//!    [`MovieByKeyword`] is sorted - many rows per partition, ordered by a sort key within it.
+//! 2. **A projection.** [`MovieSummary`] names three fields of a movie, and a get answered with it
+//!    reads only those fields out of the archive instead of every field of every row.
+//! 3. **A filter.** A get can narrow itself to rows whose field is in a set.
+//! 4. **SHQL.** The same query, written as text and parsed.
+//!
+//! # What it used to be
+//!
+//! This example was 1,247 lines, and most of them were a benchmark harness: an eighteen flag
+//! command line, a worker pool with an in flight gate, latency histograms, baseline comparison,
+//! core pinning, and both halves of two profiling instrumentations. It also needed a 65 MB CSV at
+//! a hard coded absolute path that was not in this repository and that no script fetched, so a
+//! clean checkout could not run it at all.
+//!
+//! All of that now lives in `shoal-bench` as purpose built workloads, which measure the paths
+//! through the engine one at a time instead of measuring all of them at once. See
+//! `docs/src/features/purpose-built-workloads.md`.
 
 use deepsize2::DeepSizeOf;
-use futures::stream::StreamExt;
-use kanal::{AsyncReceiver, AsyncSender};
-use mimalloc::MiMalloc;
 use rkyv::{Archive, Deserialize, Serialize};
-use std::collections::HashMap;
-use std::hash::Hash;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
-use tokio::fs::File;
-use tokio::net::ToSocketAddrs;
-use tokio::task::JoinSet;
-use tokio::time::Instant;
+use shoal::shared::queries::Queries;
+use shoal::{
+    Conf, Errors, FileSystem, PersistentSortedTable, PersistentUnsortedTable, Shoal, ShoalPool,
+    ShoalProjection, ShoalSortedTable, ShoalUnsortedTable,
+};
+use shoal_core::server::conf::{DefaultStorageSettings, Networking, Resources, Storage, TraceLevel};
+use shoal_core::server::tables::storage::fs::conf::{
+    FileSystemLatencyWriterConf, FileSystemTableConf, FileSystemThroughputWriterConf,
+};
 
-/// Which phase of the benchmark we are streaming rows for
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Phase {
-    /// Insert every row of the dataset
-    Insert,
-    /// Read back every row of the dataset
-    Verify,
-}
-
-/// Benchmark Shoal against the TMDB dataset
+/// A movie, stored one per partition
 ///
-/// See `docs/src/operations/benchmarking.md` for how to get a comparable result.
-#[derive(Parser, Debug, Clone)]
-#[command(author, version, about)]
-pub struct Args {
-    /// The number of client workers to run
-    #[clap(long, default_value_t = 5)]
-    pub workers: u8,
-    /// The number of queries to buffer before sending a batch
-    #[clap(long, default_value_t = 100)]
-    pub batch: usize,
-    /// The maximum queries each worker may have in flight at once
-    ///
-    /// This must be well above `--batch` or the worker drains its pipeline between
-    /// batches and the measurement reports that stall as server latency.
-    #[clap(long, default_value_t = 4096)]
-    pub in_flight: usize,
-    /// The number of times to repeat the upload and verify cycle
-    #[clap(long, default_value_t = 1)]
-    pub iterations: usize,
-    /// The TMDB csv dataset to load
-    #[clap(
-        long,
-        default_value = "/home/mcarson/datasets/TMDB_movie_dataset_v11_first_100k.csv"
-    )]
-    pub dataset: PathBuf,
-    /// Only load this many rows from the dataset
-    #[clap(long)]
-    pub limit: Option<usize>,
-    /// The baseline file to compare this run against
-    #[clap(long, default_value = ".benchmark")]
-    pub baseline: PathBuf,
-    /// Record this run as the new baseline
-    #[clap(long, default_value_t = false)]
-    pub write_baseline: bool,
-    /// Archive this run's result as json at this path
-    ///
-    /// This is what `scripts/bench.sh` collects. Unlike `--write-baseline` it never touches
-    /// the file this run was compared against.
-    #[clap(long)]
-    pub json: Option<PathBuf>,
-    /// The name to record this run under
-    #[clap(long)]
-    pub label: Option<String>,
-    /// Insert and read this many rows before the bencher starts collecting samples
-    ///
-    /// Without this the first batches of a run carry connection establishment and cold
-    /// partition faults, and they land in the distribution alongside the steady state.
-    #[clap(long, default_value_t = 0)]
-    pub warmup: usize,
-    /// The shoal config to start the server with
-    #[clap(long, default_value = "shoal.yml")]
-    pub conf: PathBuf,
-    /// The address to connect to
-    #[clap(long, default_value = "127.0.0.1:12000")]
-    pub addr: String,
-    /// The cores to pin the client's tokio workers to
-    ///
-    /// These must not share a physical core with any shard. On an SMT part the
-    /// sibling of a busy core is not a free core.
-    #[clap(long, value_delimiter = ',', default_values_t = [28usize, 29, 30, 31])]
-    pub client_cores: Vec<usize>,
-    /// Exit when the benchmark finishes instead of waiting for a newline
-    #[clap(long, default_value_t = false)]
-    pub no_wait: bool,
-}
-
-impl Args {
-    /// Check that these arguments can produce a meaningful measurement
-    fn validate(&self) -> Result<(), String> {
-        // a worker blocks once it hits its in flight limit and cannot buffer the next
-        // batch until it drops back under, so a limit near the batch size empties the
-        // pipeline every cycle and we end up timing our own stalls
-        if self.in_flight <= self.batch * 4 {
-            return Err(format!(
-                "--in-flight ({}) must be more than 4x --batch ({}), otherwise the client \
-                 drains its pipeline between batches and measures its own stalls",
-                self.in_flight, self.batch
-            ));
-        }
-        // we need at least one worker to send anything
-        if self.workers == 0 {
-            return Err("--workers must be at least 1".to_string());
-        }
-        // a batch of nothing never gets sent
-        if self.batch == 0 {
-            return Err("--batch must be at least 1".to_string());
-        }
-        Ok(())
-    }
-}
-
-/// Deserialize a comma-space separated string into a Vec<String>
-fn deserialize_comma_separated<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let s: String = serde::Deserialize::deserialize(deserializer)?;
-    if s.is_empty() {
-        Ok(Vec::new())
-    } else {
-        Ok(s.split(", ").map(|s| s.to_string()).collect())
-    }
-}
-
-#[global_allocator]
-static GLOBAL: MiMalloc = MiMalloc;
-
+/// `#[shoal(partition)]` is the only required attribute: it names the field a row is placed and
+/// found by. `#[shoal(filter)]` makes a field something a get can narrow on, and
+/// `#[shoal(update)]` makes one something an update can change.
 #[derive(
-    Debug,
-    Archive,
-    Serialize,
-    Deserialize,
-    Clone,
-    ShoalUnsortedTable,
-    serde::Deserialize,
-    serde::Serialize,
-    PartialEq,
-    DeepSizeOf,
+    Debug, Clone, PartialEq, Archive, Serialize, Deserialize, ShoalUnsortedTable, DeepSizeOf,
 )]
 #[rkyv(derive(Debug))]
 #[shoal_table(db = "Tmdb")]
 pub struct Movie {
-    /// The id for this movie
+    /// The id this movie is partitioned by
     #[shoal(partition)]
     pub id: u64,
-    /// The name of this move
+    /// The title, which a get can filter on
     #[shoal(filter)]
     pub title: String,
-    /// The vote average
-    pub vote_average: f64,
-    /// The total number of votes
-    pub vote_count: u64,
-    /// The status of this movie
-    pub status: String,
-    /// The Date this movie was release
-    pub release_date: String,
-    /// The total revenue this movie made
-    pub revenue: u64,
-    /// The runtime for this movie in minutes
-    pub runtime: u64,
-    /// Whether this is an adult movie
-    pub adult: bool,
-    /// The path to this movies backdrop on tmdb
-    pub backdrop_path: String,
-    /// The budget for this movie
-    pub budget: u64,
-    /// The url to this movies homepage
-    pub homepage: String,
-    /// The imdb id for this movie
-    pub imdb_id: String,
-    /// The original language for this movie
-    pub original_language: String,
-    /// The original title for this movie
-    pub original_title: String,
-    /// The overview for this movie
+    /// The year it came out, which a get can filter on
+    #[shoal(filter)]
+    pub year: u64,
+    /// A one line summary, which an update can change
     #[shoal(update)]
-    pub overview: String,
-    /// The popularity of this movie
-    pub popularity: f64,
-    /// The path to this movies poster on tmdb
-    pub poster_path: String,
-    /// The tagline for this movie
     pub tagline: String,
-    /// The genres for this movie
-    #[serde(deserialize_with = "deserialize_comma_separated")]
-    pub genres: Vec<String>,
-    /// The production companies for this movie
-    #[serde(deserialize_with = "deserialize_comma_separated")]
-    pub production_companies: Vec<String>,
-    /// The countries this movie was produced in
-    #[serde(deserialize_with = "deserialize_comma_separated")]
-    pub production_countries: Vec<String>,
-    /// The languages spoken in this movie
-    #[serde(deserialize_with = "deserialize_comma_separated")]
-    pub spoken_languages: Vec<String>,
-    /// The keywords for this movie
-    #[serde(deserialize_with = "deserialize_comma_separated")]
-    pub keywords: Vec<String>,
+    /// Its average rating out of ten
+    pub vote_average: f64,
 }
 
-#[derive(
-    Debug,
-    Archive,
-    Serialize,
-    Deserialize,
-    Clone,
-    ShoalSortedTable,
-    serde::Deserialize,
-    serde::Serialize,
-    PartialEq,
-    DeepSizeOf,
-)]
+/// A movie listed under one of its keywords, stored many per partition
+///
+/// A sorted table adds `#[shoal(sort)]`, which orders the rows *within* a partition. That is what
+/// makes "every movie tagged `alien`, in title order" a range of a single partition rather than a
+/// scan of the whole table.
+#[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize, ShoalSortedTable, DeepSizeOf)]
 #[rkyv(derive(Debug))]
 #[shoal_table(db = "Tmdb")]
 pub struct MovieByKeyword {
-    /// The keyword for this movie
+    /// The keyword this row is partitioned by
     #[shoal(partition)]
     pub keyword: String,
-    /// The name of this movie
+    /// The title, which rows are ordered by within a keyword
     #[shoal(sort)]
     pub title: String,
 }
 
-/// A projection of a movie holding just enough to list one
+/// Three fields of a movie, for listing them
 ///
-/// A movie is a wide row, most of it strings, and listing them needs three fields of it. This
-/// is what a get asks to be answered with instead, so the rest of each row is never copied out
-/// of the archive it was read from.
-#[derive(Debug, Archive, Serialize, Deserialize, Clone, ShoalProjection, PartialEq)]
+/// A movie is a wide row and listing one needs very little of it. A get answered with a projection
+/// copies only the fields named here out of the archive it read, instead of deserializing every
+/// field of every row and throwing most of them away.
+#[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize, ShoalProjection, DeepSizeOf)]
 #[rkyv(derive(Debug))]
 #[shoal_projection(table = "Movie")]
 pub struct MovieSummary {
-    /// The id of this movie, which is the partition it was in
+    /// The id this movie was partitioned by
     #[shoal(partition)]
     pub id: u64,
-    /// The name of this movie
+    /// The title
     pub title: String,
-    /// The vote average for this movie
+    /// The rating
     pub vote_average: f64,
 }
 
-/// The tables we are adding to to shoal
+/// The database
+///
+/// `#[shoal::db]` reads this struct and generates the client type, the query enum and the response
+/// enum for it. `#[shoal(projections(...))]` registers which projections a table can be read with.
 #[shoal::db]
 pub struct Tmdb {
-    /// A basic key value table
+    /// Movies, one per partition
     #[shoal(projections(MovieSummary))]
     pub movie: PersistentUnsortedTable<Movie, FileSystem>,
-    /// A sorted table of movies by keywords
+    /// Movies by keyword, many per partition
     pub movie_by_keyword: PersistentSortedTable<MovieByKeyword, FileSystem>,
 }
 
-pub enum MovieMsg {
-    /// Insert a movie into shoal
-    Insert(Movie),
-    /// Verify a movies data in shoal
-    Verify(Movie),
-    /// Shutdown this worker
-    Shutdown,
+/// The movies this example writes, with the keywords each is listed under
+const MOVIES: [(u64, &str, u64, &str, f64, &[&str]); 12] = [
+    (78, "Blade Runner", 1982, "Man has made his match... now it's his problem.", 8.1, &["android", "dystopia", "noir"]),
+    (348, "Alien", 1979, "In space no one can hear you scream.", 8.2, &["alien", "space", "horror"]),
+    (679, "Aliens", 1986, "This time it's war.", 7.9, &["alien", "space", "war"]),
+    (218, "The Terminator", 1984, "Your future is in his hands.", 7.7, &["android", "time-travel"]),
+    (280, "Terminator 2", 1991, "It's nothing personal.", 8.1, &["android", "time-travel"]),
+    (62, "2001: A Space Odyssey", 1968, "An epic drama of adventure and exploration.", 8.1, &["space", "ai"]),
+    (1892, "Return of the Jedi", 1983, "The Empire falls.", 7.9, &["space", "war"]),
+    (11, "Star Wars", 1977, "A long time ago in a galaxy far, far away...", 8.2, &["space", "war"]),
+    (601, "E.T.", 1982, "He is afraid. He is alone. He is three million light years from home.", 7.5, &["alien", "family"]),
+    (813, "Close Encounters", 1977, "We are not alone.", 7.4, &["alien", "ufo"]),
+    (152, "Star Trek: The Motion Picture", 1979, "The human adventure is just beginning.", 6.4, &["space", "alien"]),
+    (105, "Back to the Future", 1985, "He was never in time for his classes...", 8.3, &["time-travel", "comedy"]),
+];
+
+/// Builds a config that stores its data in a temporary directory
+///
+/// A real deployment loads this from `shoal.yml` with `Conf::from_file`. Building it in code is
+/// what lets this example run with nothing set up.
+///
+/// # Arguments
+///
+/// * `dir` - The directory to store this server's data in
+fn config(dir: &std::path::Path) -> Conf {
+    // two shards is enough to show partitions being routed without asking for a whole machine
+    Conf::default()
+        .resources(
+            Resources::default()
+                .cores(2)
+                .memory("256MiB")
+                .expect("256MiB is a valid memory size"),
+        )
+        .networking(Networking::default().port(12345))
+        .tracing(shoal_core::server::conf::Tracing::default().level(TraceLevel::Warn))
+        .storage(
+            Storage::default().default_settings(
+                DefaultStorageSettings::default().filesystem(
+                    FileSystemTableConf::default()
+                        .latency_sensitive(FileSystemLatencyWriterConf::default().path(dir))
+                        .throughput_sensitive(FileSystemThroughputWriterConf::default().path(dir)),
+                ),
+            ),
+        )
 }
 
-/// The messages from a response streamer to a worker
-pub enum WorkerMsg<Q: QuerySupport> {
-    /// A Response from a shoal query
-    Response(ShoalResponse<Q>),
-    /// All responses have been received for this worker
-    AllResponsesReceived,
-}
-
-pub async fn response_streamer(
-    movies_tx: AsyncSender<WorkerMsg<TmdbClient>>,
-    mut response_stream: ShoalUnorderedResultStream<TmdbClient>,
-) {
-    // keep getting responses until this stream closes
-    while let Some(response) = response_stream.next().await.unwrap() {
-        // wrap our response in a MovieMsg
-        let wrapped = WorkerMsg::Response(response);
-        // send this response to our main worker
-        movies_tx.send(wrapped).await.unwrap();
-    }
-    // All responses have been recieved for our worker
-    movies_tx
-        .send(WorkerMsg::AllResponsesReceived)
-        .await
-        .unwrap();
-}
-
-pub struct MovieWorker {
-    /// The id for this worker
-    id: u8,
-    /// A shoal client
-    shoal: Arc<Shoal<TmdbClient>>,
-    /// The channel to add movies too
-    movies_tx: AsyncSender<MovieMsg>,
-    /// The channel to receive movies on
-    movies_rx: AsyncReceiver<MovieMsg>,
-    /// Buffered queries to send to shoal
-    buffer: Queries<TmdbClient>,
-    /// The benchmark worker for this worker
-    bencher: BenchWorker,
-    /// A map of timers for benchmarking
-    timers: HashMap<usize, Instant>,
-    /// The number of queries to buffer before sending a batch
-    batch: usize,
-    /// The maximum queries this worker may have in flight at once
-    max_in_flight: usize,
-    /// Count the number of rows inserted
-    inserted: Arc<AtomicUsize>,
-    /// Count the number of rows retrieved
-    retrieved: Arc<AtomicUsize>,
-}
-
-impl MovieWorker {
-    /// Create a new Movie worker
-    ///
-    /// # Arguments
-    ///
-    /// * `shoal` - A client for shoal
-    /// * `movies_rx` - A channel to receive movies on
-    /// * `bencher` - The benchmark worker to use
-    /// * `args` - The benchmark settings for this run
-    /// * `inserted` - The shared count of inserted rows
-    /// * `retrieved` - The shared count of retrieved rows
-    pub async fn new(
-        id: u8,
-        shoal: Arc<Shoal<TmdbClient>>,
-        movies_tx: &AsyncSender<MovieMsg>,
-        movies_rx: &AsyncReceiver<MovieMsg>,
-        bencher: BenchWorker,
-        args: &Args,
-        inserted: &Arc<AtomicUsize>,
-        retrieved: &Arc<AtomicUsize>,
-    ) -> Self {
-        // get a default query object
-        let buffer = shoal.query();
-        // create our movie worker
-        MovieWorker {
+/// Writes every movie, and a row per keyword for each of them
+///
+/// Both tables are written in one batch. A `Queries` bundle may mix tables and query kinds freely;
+/// the server routes each one to whichever shard owns its partition.
+///
+/// # Arguments
+///
+/// * `client` - The client to write with
+async fn write_movies(client: &Shoal<TmdbClient>) -> Result<(), Errors> {
+    // one bundle for everything, since a batch costs one round trip however much is in it
+    let mut batch: Queries<TmdbClient> = client.query();
+    for (id, title, year, tagline, vote_average, keywords) in MOVIES {
+        // a row converts straight into a query, so inserting is just adding the row itself
+        batch.add_mut(Movie {
             id,
-            shoal,
-            movies_tx: movies_tx.clone(),
-            movies_rx: movies_rx.clone(),
-            buffer,
-            bencher,
-            // size this to hold every query we can have outstanding at once
-            timers: HashMap::with_capacity(args.in_flight),
-            batch: args.batch,
-            max_in_flight: args.in_flight,
-            inserted: inserted.clone(),
-            retrieved: retrieved.clone(),
+            title: title.to_string(),
+            year,
+            tagline: tagline.to_string(),
+            vote_average,
+        });
+        // and one row per keyword, into the sorted table
+        for keyword in keywords {
+            batch.add_mut(MovieByKeyword {
+                keyword: (*keyword).to_string(),
+                title: title.to_string(),
+            });
         }
     }
-
-    fn verify_response(&mut self, response: ShoalResponse<TmdbClient>) {
-        // get this responses index
-        let index = response.get_index();
-        // get the kind of query that we are verifying
-        let kind = response.kind();
-        // record how long this query took against the operation it was
-        //
-        // inserts and gets are tracked separately because they are different
-        // operations, and a percentile over both pooled together just reports
-        // where the boundary between the two distributions falls
-        if let Some(timer) = self.timers.remove(&index) {
-            // work out which distribution this sample belongs in
-            let op = match kind {
-                ResponseActionNames::Insert => Some(BenchOp::Insert),
-                ResponseActionNames::Get => Some(BenchOp::Get),
-                // we only time the two operations this benchmark drives
-                _ => None,
-            };
-            // add this timer to our benchmark
-            if let Some(op) = op {
-                self.bencher.add_timer(op, timer);
-            }
-        }
-        // check if this query failed or not
-        match response.suceeded(QuerySuceededOpts::default()) {
-            Ok(()) => match kind {
-                ResponseActionNames::Insert => {
-                    self.inserted.fetch_add(1, Ordering::SeqCst);
-                }
-                ResponseActionNames::Get => {
-                    // get the movie info from this query
-                    match response.access::<Movie>().unwrap() {
-                        // increment our movie count
-                        Some(movies) => {
-                            self.retrieved.fetch_add(movies.len(), Ordering::SeqCst);
-                        }
-                        None => println!("Missing movie!"),
-                    }
-                }
-                _ => (),
-            },
-            Err(error) => panic!("Error: {error:#?}"),
-        }
+    // drain the responses, which is what makes the writes durable before we read them back
+    let mut written = 0;
+    let mut responses = client.send(batch).await?;
+    while responses.next().await?.is_some() {
+        written += 1;
     }
-
-    /// Send our buffered queries to shoal and start timing them
-    ///
-    /// Returns how many queries were sent so the caller can track them as in flight.
-    /// Every batch goes through here, including the last one, so the tail of a run
-    /// is measured like the rest of it.
-    ///
-    /// # Arguments
-    ///
-    /// * `stream_tx` - The query stream to send our batch on
-    async fn send_batch(&mut self, stream_tx: &mut ShoalQueryStream<TmdbClient>) -> usize {
-        // swap our full query buffer with a new one
-        let queries = std::mem::take(&mut self.buffer);
-        // get how many queries we are about to send
-        let sent = queries.queries.len();
-        // get the current time
-        //
-        // this is one timestamp for the whole batch, so every query in it is charged
-        // for the ones ahead of it. see the benchmarking docs before reading too much
-        // into an individual percentile
-        let timer = Instant::now();
-        // get our current query index
-        let mut index = stream_tx.base_index;
-        // setup timers for all of our movies
-        for _ in &queries.queries {
-            // add a timer for this movie
-            self.timers.insert(index, timer);
-            index += 1;
-        }
-        // send our buffered queries
-        stream_tx.send(queries).await.unwrap();
-        sent
-    }
-
-    pub async fn stream_start(mut self) -> BenchWorker {
-        // get a new stream to send results over
-        let (mut stream_tx, stream_rx) = self.shoal.stream_unordered().unwrap();
-        // create a queue just for this worker
-        let (worker_tx, worker_rx) = kanal::unbounded_async();
-        // stream any results to our workers message queue
-        let handle = tokio::spawn(response_streamer(worker_tx, stream_rx));
-        // track how many queries are currently in flight
-        let mut in_flight: usize = 0;
-        // keep looping until we have no more movies to send
-        'outer: loop {
-            // first check for any messages from our response streamer
-            loop {
-                match worker_rx.try_recv().unwrap() {
-                    Some(WorkerMsg::Response(response)) => {
-                        // decrement our in_flight count
-                        // saturate rather than wrap: a query that yields more than
-                        // one response would otherwise underflow this to usize::MAX
-                        // and permanently satisfy the gate below, deadlocking us
-                        in_flight = in_flight.saturating_sub(1);
-                        self.verify_response(response)
-                    }
-                    // all responses should have been processed so break
-                    Some(WorkerMsg::AllResponsesReceived) => break 'outer,
-                    // nothing from our response streamer yet
-                    None => break,
-                }
-            }
-            // if we are at our in flight limit then wait for a query to complete
-            //
-            // this is a high water mark, not a drain: we resume as soon as we are
-            // one query under the limit, so the pipeline stays full. gating near the
-            // batch size instead would empty it every cycle and the idle time would
-            // show up as server latency
-            if in_flight >= self.max_in_flight {
-                // wait for a response from any currently in flight_queries
-                match worker_rx.recv().await.unwrap() {
-                    WorkerMsg::Response(response) => {
-                        // decrement our in_flight count
-                        // saturate rather than wrap: a query that yields more than
-                        // one response would otherwise underflow this to usize::MAX
-                        // and permanently satisfy the gate below, deadlocking us
-                        in_flight = in_flight.saturating_sub(1);
-                        // verify this movie
-                        self.verify_response(response);
-                        // restart our loop from the top
-                        continue;
-                    }
-                    // all responses should have been processed so break
-                    WorkerMsg::AllResponsesReceived => break 'outer,
-                }
-            }
-            // try to claim the next job without blocking
-            //
-            // parking on this channel would stop us draining responses entirely, so
-            // when the producer runs dry we fall back to whichever channel can still
-            // make progress instead
-            let job = match self.movies_rx.try_recv().unwrap() {
-                // we claimed a job so handle it below
-                Some(job) => job,
-                // no work is queued for us right now
-                None => {
-                    // flush any partial batch rather than stranding it until shutdown
-                    if !self.buffer.is_empty() {
-                        in_flight += self.send_batch(&mut stream_tx).await;
-                        continue;
-                    }
-                    // nothing is buffered, so drain responses while we have any outstanding
-                    if in_flight > 0 {
-                        match worker_rx.recv().await.unwrap() {
-                            WorkerMsg::Response(response) => {
-                                // decrement our in_flight count
-                                in_flight = in_flight.saturating_sub(1);
-                                // verify this response
-                                self.verify_response(response);
-                                // restart our loop from the top
-                                continue;
-                            }
-                            // all responses should have been processed so break
-                            WorkerMsg::AllResponsesReceived => break 'outer,
-                        }
-                    }
-                    // nothing buffered and nothing outstanding so its safe to park here
-                    self.movies_rx.recv().await.unwrap()
-                }
-            };
-            // handle this movie
-            match job {
-                // insert this movie into shoal into our buffer
-                MovieMsg::Insert(movie) => {
-                    // add the keyword inserts to our query buffer
-                    for keyword in &movie.keywords {
-                        // build the movie by keyword row to inserts
-                        let by_keyword = MovieByKeyword {
-                            title: movie.title.clone(),
-                            keyword: keyword.clone(),
-                        };
-                        // add this insert to our buffer
-                        self.buffer.add_mut(by_keyword);
-                    }
-                    // add the full movie to our query buffer
-                    self.buffer.add_mut(movie)
-                }
-                // add the query to get this movie to our query buffer
-                MovieMsg::Verify(movie) => self.buffer.add_mut(MovieGet::new(vec![movie.id])),
-                // all commands have been sent so this worker can shutdown once everything
-                // has been processed
-                MovieMsg::Shutdown => {
-                    // send any remaining buffered queries
-                    //
-                    // this goes through the same helper as every other batch so the
-                    // tail is timed like the rest of the run. we don't track these as
-                    // in flight because we stop gating on that the moment we break out
-                    // and just drain whatever is left
-                    if !self.buffer.is_empty() {
-                        self.send_batch(&mut stream_tx).await;
-                    }
-                    // emit this shutdown order for our other workers
-                    self.movies_tx.send(MovieMsg::Shutdown).await.unwrap();
-                    // shutdown our query stream
-                    stream_tx.close().await.unwrap();
-                    // we only need to process worker responses now
-                    break;
-                }
-            }
-            // once we have buffered a full batch send it to shoal
-            //
-            // one movie can add several queries because of MovieByKeyword fan out,
-            // so a batch is at least this many queries and usually more
-            if self.buffer.len() >= self.batch {
-                in_flight += self.send_batch(&mut stream_tx).await;
-            }
-        }
-        // keep processing our worker responses until there are no more
-        loop {
-            // first check for any messages from our response streamer
-            match worker_rx.recv().await.unwrap() {
-                // handle this response
-                WorkerMsg::Response(response) => self.verify_response(response),
-                // all responses should have been processed so break
-                WorkerMsg::AllResponsesReceived => break,
-            }
-        }
-        // loop and just handle responses since our
-        // wait for our response streamer to exit
-        handle.await.unwrap();
-        // return our bench worker
-        self.bencher
-    }
+    println!("wrote {written} rows\n");
+    Ok(())
 }
 
-pub struct MovieController {
-    /// A shoal client
-    shoal: Arc<Shoal<TmdbClient>>,
-    /// The channel to add movies too
-    movies_tx: AsyncSender<MovieMsg>,
-    /// The channel to receive movies on
-    movies_rx: AsyncReceiver<MovieMsg>,
-    /// The tasks for this controllers workers
-    tasks: JoinSet<BenchWorker>,
-    /// Count the number of rows inserted
-    inserted: Arc<AtomicUsize>,
-    /// Count the number of rows retrieved
-    retrieved: Arc<AtomicUsize>,
-}
-
-impl MovieController {
-    /// Create a default movie controller
-    async fn new<A: ToSocketAddrs>(addr: A) -> Self {
-        // build a client for Shoal
-        let shoal = Shoal::<TmdbClient>::new(addr).await.unwrap();
-        // instance a large but bounded channel
-        let (movies_tx, movies_rx) = kanal::unbounded_async();
-        // create our controller
-        MovieController {
-            shoal: Arc::new(shoal),
-            movies_tx,
-            movies_rx,
-            tasks: JoinSet::default(),
-            inserted: Arc::new(AtomicUsize::new(0)),
-            retrieved: Arc::new(AtomicUsize::new(0)),
-        }
-    }
-}
-
-impl MovieController {
-    /// Spawn workers for this controller
-    ///
-    /// # Arguments
-    ///
-    /// * `bencher` - The bencher to build worker collectors from
-    /// * `args` - The benchmark settings for this run
-    async fn spawn(&mut self, bencher: &Bencher, args: &Args) {
-        for i in 0..args.workers {
-            // get a new bench worker
-            let bench_worker = bencher.worker(10000);
-            // create a new worker
-            let worker = MovieWorker::new(
-                i,
-                self.shoal.clone(),
-                &self.movies_tx,
-                &self.movies_rx,
-                bench_worker,
-                args,
-                &self.inserted,
-                &self.retrieved,
-            )
-            .await;
-            // spawn this worker
-            self.tasks.spawn(worker.stream_start());
-        }
-    }
-
-    /// Move some rows through the system before any of them are measured
-    ///
-    /// The first batches of a run carry connection establishment, an empty connection pool,
-    /// an allocator that has not reached steady state, and partitions that have never been
-    /// faulted in. Those costs are real but they are paid once, and leaving them in the
-    /// distribution puts them in the tail of every percentile the run reports.
-    ///
-    /// The rows this inserts are left in place on purpose. Reading them back is what makes
-    /// the measured pass a steady state measurement rather than another cold one.
-    ///
-    /// # Arguments
-    ///
-    /// * `args` - The benchmark settings for this run
-    async fn warmup(&mut self, args: &Args) {
-        // nothing to do if this run was not asked to warm up
-        if args.warmup == 0 {
-            return;
-        }
-        println!("warming up with {} rows", args.warmup);
-        // the samples this phase gathers are dropped with this bencher
-        let bencher = Bencher::new(&args.baseline, args.warmup);
-        // spawn a set of workers to carry the warmup
-        self.spawn(&bencher, args).await;
-        // note where our counters are so we can wait for just this phase
-        let inserted_before = self.inserted.load(Ordering::SeqCst);
-        // insert our warmup rows
-        let expected = self.upload(&args.dataset, Some(args.warmup)).await;
-        // wait for every warmup insert to be acknowledged before reading any back
-        Self::await_phase(&self.inserted, inserted_before + expected, "warmup inserts").await;
-        // read those same rows back so the read path is warm too
-        self.verify(&args.dataset, Some(args.warmup)).await;
-        // tell our workers to stop
-        self.movies_tx.send(MovieMsg::Shutdown).await.unwrap();
-        // swap our tasks out with a default set
-        let tasks = std::mem::take(&mut self.tasks);
-        // wait for the warmup workers to finish, dropping every sample they took
-        drop(tasks.join_all().await);
-        // pop the last shutdown message
-        self.movies_rx.recv().await.unwrap();
-        // reset our counters so the measured run reports only its own rows
-        self.inserted.store(0, Ordering::SeqCst);
-        self.retrieved.store(0, Ordering::SeqCst);
-        println!("warmup complete");
-    }
-
-    /// Upload data to shoal
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - The dataset to read movies from
-    /// * `limit` - Only upload this many movies if set
-    async fn upload<P: AsRef<Path>>(&mut self, path: P, limit: Option<usize>) -> usize {
-        // stream our dataset into our workers as insert jobs
-        self.stream_dataset(path, limit, Phase::Insert).await
-    }
-
-    /// verify data in shoal
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - The dataset to read movies from
-    /// * `limit` - Only verify this many movies if set
-    async fn verify<P: AsRef<Path>>(&mut self, path: P, limit: Option<usize>) -> usize {
-        // stream our dataset into our workers as verify jobs
-        self.stream_dataset(path, limit, Phase::Verify).await
-    }
-
-    /// Stream our dataset into our workers as jobs
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - The dataset to read movies from
-    /// * `limit` - Only stream this many movies if set
-    /// * `phase` - Which phase of the benchmark we are streaming for
-    async fn stream_dataset<P: AsRef<Path>>(
-        &mut self,
-        path: P,
-        limit: Option<usize>,
-        phase: Phase,
-    ) -> usize {
-        // open a handle to our tmdb dataset
-        let file = File::open(path).await.unwrap();
-        // wrap our file in a csv reader
-        let mut reader = csv_async::AsyncDeserializer::from_reader(file);
-        // set the type we are going to deserialize
-        let mut typed_reader = reader.deserialize::<Movie>();
-        // track how many movies we have streamed so we can honor our limit
-        let mut streamed = 0;
-        // track how many responses these jobs should produce, so our caller can wait
-        // for the phase to finish before starting the next one
-        let mut expected = 0;
-        // read movies until we run out or hit our limit
-        while let Some(row) = typed_reader.next().await {
-            // stop at the first row we cannot deserialize
-            //
-            // this truncates the run rather than skipping the row, so a dataset with
-            // a bad row part way through silently benchmarks only its clean prefix
-            let movie = match row {
-                Ok(movie) => movie,
-                Err(error) => {
-                    eprintln!("warning: stopping at unreadable csv row {streamed}: {error}");
-                    break;
-                }
-            };
-            // work out how many responses this movie will produce and wrap it as a job
-            let job = match phase {
-                // an insert fans out into one row per keyword plus the movie itself
-                Phase::Insert => {
-                    expected += movie.keywords.len() + 1;
-                    MovieMsg::Insert(movie)
-                }
-                // a verify is a single get for the movie
-                Phase::Verify => {
-                    expected += 1;
-                    MovieMsg::Verify(movie)
-                }
-            };
-            // add our movie to our channel
-            self.movies_tx.send(job).await.unwrap();
-            streamed += 1;
-            // stop once we have streamed as many movies as we were asked for
-            if Some(streamed) == limit {
-                break;
-            }
-        }
-        expected
-    }
-
-    /// Wait for a counter to reach a target before moving on to the next phase
-    ///
-    /// `upload` only queues work, it does not wait for it. Without this barrier a
-    /// worker can send a verify for a movie that another worker has not inserted
-    /// yet, and that get correctly reports no match. The old in flight limit hid
-    /// this by draining the pipeline after every batch, which is not something a
-    /// benchmark should rely on for correctness.
-    ///
-    /// # Arguments
-    ///
-    /// * `counter` - The counter to watch
-    /// * `target` - The value to wait for
-    /// * `label` - What we are waiting on, for the timeout message
-    async fn await_phase(counter: &AtomicUsize, target: usize, label: &str) {
-        // remember where we started so we can tell whether we are still making progress
-        let mut last = counter.load(Ordering::SeqCst);
-        let mut stalled = 0;
-        // wait for our counter to catch up to our target
-        while counter.load(Ordering::SeqCst) < target {
-            // give our workers a moment to make progress
-            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
-            // check whether anything moved
-            let current = counter.load(Ordering::SeqCst);
-            if current == last {
-                stalled += 1;
-                // bail out rather than hanging forever if we stop making progress
-                if stalled > 30_000 {
-                    panic!(
-                        "timed out waiting for {label}: stuck at {current}/{target}, \
-                         a response was probably dropped"
-                    );
-                }
-            } else {
-                last = current;
-                stalled = 0;
-            }
-        }
-    }
-
-    /// Start streaming jobs to our workers
-    /// Start streaming jobs to our workers
-    ///
-    /// # Arguments
-    ///
-    /// * `args` - The benchmark settings for this run
-    pub async fn start(&mut self, args: &Args) {
-        // move some rows before we start measuring, if we were asked to
-        self.warmup(args).await;
-        // loop over our reads/writes as many times as we were asked to
-        for i in 0..args.iterations {
-            println!("\n\n $$$$ {i} $$$$");
-            // create a new bencher
-            let mut bencher = Bencher::new(&args.baseline, 10000);
-            // spawn our workers
-            self.spawn(&bencher, args).await;
-            // note where our counters are so we can wait for just this iteration
-            let inserted_before = self.inserted.load(Ordering::SeqCst);
-            // upload our tmdb data
-            let expected_inserts = self.upload(&args.dataset, args.limit).await;
-            // wait for every insert to be acknowledged before we read anything back
-            Self::await_phase(
-                &self.inserted,
-                inserted_before + expected_inserts,
-                "inserts",
-            )
-            .await;
-            println!("--------------");
-            // verify our tmdb data
-            self.verify(&args.dataset, args.limit).await;
-            println!("DONE?");
-            // emit that workers should shutdown once all movie info has been streamed to shoal
-            self.movies_tx.send(MovieMsg::Shutdown).await.unwrap();
-            // swap our task with with a default one
-            let tasks = std::mem::take(&mut self.tasks);
-            // wait for all workers to complete
-            let bench_workers = tasks.join_all().await;
-            // merge our workers back into our main bencher
-            bencher.merge_workers(bench_workers);
-            // tell the bencher how many rows this run moved so it can report throughput
-            bencher.set_row_counts(
-                self.inserted.load(Ordering::Relaxed) as u64,
-                self.retrieved.load(Ordering::Relaxed) as u64,
-            );
-            // name this run if it was given a label
-            if let Some(label) = &args.label {
-                bencher.set_label(label);
-            }
-            // log our benchmark results, recording a new baseline if asked to
-            //
-            // only the last iteration is archived, since each one overwrites the last and a
-            // multi iteration run is asking about the steady state rather than the first pass
-            let json = (i + 1 == args.iterations).then_some(args.json.as_deref()).flatten();
-            bencher.finish(args.write_baseline, json);
-            // pop the last shutdown message
-            self.movies_rx.recv().await.unwrap();
-            // print how many movies were inserted/retrieved
-            println!("Inserted: {}", self.inserted.load(Ordering::Relaxed));
-            println!("Retrieved: {}", self.retrieved.load(Ordering::Relaxed));
-        }
-        // query this db manually
-        let query = self
-            .shoal
-            .query()
-            .parse("select * from MovieByKeyword where keyword = 'alien'")
-            .unwrap();
-        // try to execute this query
-        let mut response = self.shoal.send(query).await.unwrap();
-        // keep getting rows in response
-        while let Some(row) = response.next().await.unwrap() {
-            // access this rows data
-            match row.access::<MovieByKeyword>().unwrap() {
-                Some(row) => (), //println!("row: {row:#?}"),
-                None => println!("missing row?"),
-            }
-        }
-    }
-
-    /// Shutdown our controller and its workers
-    async fn close(mut self) {
-        println!("CLOSING {} tasks", self.tasks.len());
-        while let Some(Err(error)) = self.tasks.join_next().await {
-            println!("ERROR: {error:#?}");
-        }
-    }
-}
-
-async fn read_csv(args: Args) {
-    // start ou controller
-    let mut controller = MovieController::new(args.addr.as_str()).await;
-    // sleep for 5s
-    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-    // start streaming movies to shoal with multiple workers
-    controller.start(&args).await;
-    // shutdown our controller
-    controller.close().await;
-}
-
-/// Run the benchmark
+/// Reads one movie back by its id
 ///
-/// The `hotpath` attribute is feature gated because it is not free even when the
-/// instrumentation it collects is compiled out: it installs a collector thread and prints a
-/// report on exit. A hotpath build is an attribution run and its latency numbers are not
-/// comparable to a build without it, which is why the two are never captured together.
+/// # Arguments
 ///
-/// The report is emitted as JSON so `scripts/bench.sh` can archive it next to the run's other
-/// artifacts. See `docs/src/operations/benchmarking.md`.
-///
-/// `limit = 0` means report every scope. The default is 15, which silently truncates the
-/// report to the fifteen costliest scopes — a profile that is missing entries without saying
-/// so is worse than no profile, because the absence reads as "this code was never called".
-#[cfg_attr(
-    feature = "hotpath",
-    hotpath::main(percentiles = [50, 90, 95, 99], format = "json", limit = 0)
-)]
-fn main() {
-    // parse our benchmark settings
-    let args = Args::parse();
-    // make sure these settings can produce a meaningful measurement
-    if let Err(error) = args.validate() {
-        eprintln!("error: {error}");
-        std::process::exit(2);
+/// * `client` - The client to read with
+async fn read_one(client: &Shoal<TmdbClient>) -> Result<(), Errors> {
+    println!("-- a whole row, by partition key --");
+    // a get names the partition keys it wants
+    let response = client.send_one(MovieGet::new(vec![348])).await?;
+    // `access` reads the rows straight out of the archive that came off the wire, with no
+    // deserialization at all
+    if let Some(rows) = response.access::<Movie>()? {
+        for movie in rows.iter() {
+            println!("  {} ({}) - {}", movie.title, movie.year, movie.tagline);
+        }
     }
-    // load our config
-    let conf = Conf::from_file(args.conf.to_str().expect("config path is not valid utf8"))
-        .expect("Failed to load config");
-    println!("conf -> {conf:#?}");
-    // setup tracing/telemetry
-    let provider = shoal_core::server::trace::setup(&conf);
-    // start Shoal
-    let pool = ShoalPool::<Tmdb>::start(conf).unwrap();
-    // sleep for 5s
-    std::thread::sleep(std::time::Duration::from_secs(5));
-    // Reserve specific cores for the client's tokio runtime
+    println!();
+    Ok(())
+}
+
+/// Reads several movies back as a projection
+///
+/// # Arguments
+///
+/// * `client` - The client to read with
+async fn read_projected(client: &Shoal<TmdbClient>) -> Result<(), Errors> {
+    println!("-- three fields of four rows, as a projection --");
+    // `.projection::<T>()` asks the server to answer with `T` instead of the whole row
+    let response = client
+        .send_one(MovieGet::new(vec![11, 62, 105, 348]).projection::<MovieSummary>())
+        .await?;
+    if let Some(rows) = response.access::<MovieSummary>()? {
+        for movie in rows.iter() {
+            println!("  {:<24} {:.1}", movie.title, movie.vote_average);
+        }
+    }
+    println!();
+    Ok(())
+}
+
+/// Reads movies filtered to a set of years
+///
+/// # Arguments
+///
+/// * `client` - The client to read with
+async fn read_filtered(client: &Shoal<TmdbClient>) -> Result<(), Errors> {
+    println!("-- only the rows from 1982, out of six partitions --");
+    // a filter is a membership test, one set per filterable field, so `= 1982` and
+    // `IN (1982, 1979)` are the same shape. a field left `None` is not filtered on at all.
+    let filter = MovieFilter {
+        year: Some(vec![1982]),
+        ..Default::default()
+    };
+    let response = client
+        .send_one(MovieGet::new(vec![78, 348, 601, 813, 11, 105]).filters(filter))
+        .await?;
+    if let Some(rows) = response.access::<Movie>()? {
+        for movie in rows.iter() {
+            println!("  {} ({})", movie.title, movie.year);
+        }
+    }
+    println!();
+    Ok(())
+}
+
+/// Reads a sorted partition back with a query written as text
+///
+/// # Arguments
+///
+/// * `client` - The client to read with
+async fn read_with_shql(client: &Shoal<TmdbClient>) -> Result<(), Errors> {
+    println!("-- every movie tagged 'alien', in title order, via SHQL --");
+    // the same query the typed builders make, parsed from text
+    let query = client
+        .query()
+        .parse("select * from MovieByKeyword where keyword = 'alien'")?;
+    let mut response = client.send(query).await?;
+    while let Some(row) = response.next().await? {
+        if let Some(rows) = row.access::<MovieByKeyword>()? {
+            // a sorted table returns its rows in sort key order, which here is by title
+            for tagged in rows.iter() {
+                println!("  {}", tagged.title);
+            }
+        }
+    }
+    println!();
+    Ok(())
+}
+
+/// Starts a server, writes some movies, and reads them back four ways
+#[tokio::main]
+async fn main() -> Result<(), Errors> {
+    // a temporary directory under `target/`, not `/tmp`
     //
-    // These must not share a *physical* core with any shard. On an SMT part the
-    // sibling of a busy core is not a free core, and shoal's `exclude_cores` filters
-    // on the physical core id, so excluding one there frees both of its threads.
-    // See docs/src/operations/benchmarking.md.
-    let tokio_cores: Vec<CoreId> = args
-        .client_cores
-        .iter()
-        .map(|id| CoreId { id: *id })
-        .collect();
-    // build a runtime that is pinned to specific cores
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(tokio_cores.len())
-        .thread_name("tokio-worker")
-        .enable_all()
-        .on_thread_start(move || {
-            static COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    // glommio silently disables O_DIRECT on tmpfs, and `/tmp` usually is one, so a server rooted
+    // there quietly runs a buffered write path instead of the one it was built for
+    let dir = tempfile::TempDir::new_in(target_dir())
+        .expect("failed to create a temporary directory");
+    let conf = config(dir.path());
+    let addr = format!("127.0.0.1:{}", conf.networking.port);
+    // start one shard per configured core. this returns as soon as the shard threads are spawned,
+    // which is why the client below retries rather than assuming the server is up.
+    let pool = ShoalPool::<Tmdb>::start(conf).expect("failed to start shoal");
+    let client = connect(&addr).await?;
+    println!();
+    // write, then read the same rows back four different ways
+    write_movies(&client).await?;
+    read_one(&client).await?;
+    read_projected(&client).await?;
+    read_filtered(&client).await?;
+    read_with_shql(&client).await?;
+    // stop the shards, which flushes everything still buffered
+    pool.exit().expect("failed to stop shoal");
+    Ok(())
+}
 
-            let idx = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let core = tokio_cores[idx % tokio_cores.len()];
-
-            if !set_for_current(core) {
-                eprintln!("Failed to set affinity for tokio worker {}", idx);
-            } else {
-                println!("Tokio worker {} pinned to core {}", idx, core.id);
+/// Finds a directory on a real filesystem to put this run's data in
+///
+/// Cargo sets `CARGO_TARGET_TMPDIR` for tests and not for examples, so this works it out from
+/// where the binary itself is: `target/debug/examples/tmdb` sits two levels below `target/`, which
+/// is on the same real filesystem as the repository.
+///
+/// It matters which filesystem this lands on. Glommio silently falls back to buffered IO when
+/// `O_DIRECT` is unavailable, which it is on tmpfs, so an example rooted in `/tmp` would run a
+/// different write path from the one a deployment runs and would never say so.
+fn target_dir() -> std::path::PathBuf {
+    // walk up from the binary until a directory called `target` turns up
+    if let Ok(exe) = std::env::current_exe() {
+        for ancestor in exe.ancestors() {
+            if ancestor.file_name().is_some_and(|name| name == "target") {
+                return ancestor.to_path_buf();
             }
-        })
-        .build()
-        .unwrap();
-    // read and insert our csv
-    runtime.block_on(read_csv(args.clone()));
-    // wait for input before exiting unless we were told not to
-    //
-    // looping the benchmark from a script needs --no-wait, otherwise the first run
-    // blocks here forever waiting on a newline
-    if !args.no_wait {
-        let mut input_text = String::new();
-        std::io::stdin()
-            .read_line(&mut input_text) // `read_line` returns a `Result` which needs handling
-            .expect("Failed to read line"); // Handle potential errors
+        }
     }
-    // wait for our db to exit
-    pool.exit().unwrap();
-    // shutdown our tracer
-    shoal_core::server::trace::shutdown(provider);
+    // nothing above the binary looked like a target directory, so fall back to the current
+    // directory, which for `cargo run` is the workspace root
+    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+}
+
+/// Connects to a server, retrying while it finishes starting
+///
+/// # Arguments
+///
+/// * `addr` - The address the server is coming up on
+async fn connect(addr: &str) -> Result<Shoal<TmdbClient>, Errors> {
+    // `ShoalPool::start` spawns its shards and returns without waiting for them to bind, so the
+    // first connection can arrive before the listener does
+    let mut last = None;
+    for _ in 0..200 {
+        match Shoal::<TmdbClient>::new(addr).await {
+            Ok(client) => return Ok(client),
+            Err(error) => last = Some(error),
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    Err(last.expect("the loop ran at least once"))
 }

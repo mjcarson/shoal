@@ -10,6 +10,8 @@ use tracing::instrument;
 
 use super::conf::Durability;
 use crate::server::messages::ServerMsg;
+#[cfg(feature = "stage-profile")]
+use crate::server::stage_profile::{StageStamps, Stamp};
 use crate::server::ServerError;
 use crate::shared::traits::ShoalDatabase;
 
@@ -90,10 +92,7 @@ impl<D: ShoalDatabase> StreamWriterBuilder<D> {
     /// # Arguments
     ///
     /// * `path` - The path this stream writer should write data too when built
-    pub fn new(
-        path: impl Into<PathBuf>,
-        shard_local_tx: AsyncSender<ServerMsg<D>>,
-    ) -> Self {
+    pub fn new(path: impl Into<PathBuf>, shard_local_tx: AsyncSender<ServerMsg<D>>) -> Self {
         StreamWriterBuilder {
             path: path.into(),
             shard_local_tx,
@@ -169,6 +168,40 @@ impl<D: ShoalDatabase> StreamWriterBuilder<D> {
     }
 }
 
+/// How many recent writes a [`FlushState`] keeps timings for
+///
+/// Bounded so a long run does not grow an unbounded timeline. A window has to survive from
+/// the moment its write is submitted until the last response it carries is released, which
+/// is at most a couple of fdatasync round trips, so this is far more headroom than the
+/// invariant needs. Records whose window had already been evicted are flagged and counted
+/// rather than guessed at.
+#[cfg(feature = "stage-profile")]
+const TIMELINE_LEN: usize = 4096;
+
+/// One write and the fdatasync that made it durable
+///
+/// A pending response knows the intent log offset it becomes durable at and nothing else, so
+/// this is what turns that offset back into times. Windows are appended in submission order
+/// and are therefore already sorted by `end_pos`, which is what makes the lookup at release a
+/// binary search rather than a scan.
+#[cfg(feature = "stage-profile")]
+pub struct DurabilityWindow {
+    /// The offset one past the last byte this write covers
+    pub end_pos: u64,
+    /// When this write was handed to io_uring
+    pub submitted: Stamp,
+    /// When this writes completion was observed, if it has landed
+    pub completed: Option<Stamp>,
+    /// When the fdatasync that covers this write claimed its slot
+    ///
+    /// Not the sync issued immediately after this write. [`start_sync`] group commits, so the
+    /// covering sync is the first one whose target reaches `end_pos`, which can be several
+    /// writes later.
+    pub sync_issued: Option<Stamp>,
+    /// When that fdatasync returned
+    pub sync_completed: Option<Stamp>,
+}
+
 /// The write completion state shared between a [`StreamWriter`] and its detached IO tasks
 ///
 /// Buffer writes run as detached tasks that cannot reach `&mut StreamWriter`, and
@@ -178,6 +211,12 @@ impl<D: ShoalDatabase> StreamWriterBuilder<D> {
 pub struct FlushState {
     /// The submitted but not yet retired writes, in submission order
     inflight: VecDeque<(u64, bool)>,
+    /// When each recent write was submitted, landed, and was covered by an fdatasync
+    ///
+    /// Kept apart from `inflight` because a write leaves that queue as soon as it retires,
+    /// while the response it carries is still waiting on the sync that makes it durable.
+    #[cfg(feature = "stage-profile")]
+    timeline: VecDeque<DurabilityWindow>,
     /// The position that all data below has been write_at completed for
     written_pos: u64,
     /// The position that all data below has been fdatasync completed for
@@ -199,6 +238,73 @@ impl FlushState {
     pub fn on_start(&mut self, end: u64) {
         // add this write to our in flight queue in submission order
         self.inflight.push_back((end, false));
+        // open a durability window for this write so the responses it carries can later
+        // find out when it was submitted, landed, and was synced
+        #[cfg(feature = "stage-profile")]
+        {
+            // drop the oldest window if we are at our bound
+            //
+            // a record whose window is gone is flagged rather than interpolated, so the
+            // profile says it does not know instead of inventing a number
+            if self.timeline.len() >= TIMELINE_LEN {
+                self.timeline.pop_front();
+            }
+            self.timeline.push_back(DurabilityWindow {
+                end_pos: end,
+                submitted: Stamp::now(),
+                completed: None,
+                sync_issued: None,
+                sync_completed: None,
+            });
+        }
+    }
+
+    /// Record that a covering fdatasync reached a stage for every write it covers
+    ///
+    /// [`start_sync`] group commits, so one fdatasync makes every write below its target
+    /// durable at once. Stamping only the newest window would attribute the whole group's
+    /// wait to one write and report the rest as having no sync stage at all.
+    ///
+    /// # Arguments
+    ///
+    /// * `target` - The position this fdatasync covers
+    /// * `at` - The stamp to record
+    /// * `pick` - The field of a window to stamp
+    #[cfg(feature = "stage-profile")]
+    fn mark_sync_stage(
+        &mut self,
+        target: u64,
+        at: Stamp,
+        pick: fn(&mut DurabilityWindow) -> &mut Option<Stamp>,
+    ) {
+        // walk every window this sync covers
+        for window in self.timeline.iter_mut() {
+            // windows are in submission order, so the first one past our target ends this
+            if window.end_pos > target {
+                break;
+            }
+            // only the first sync to reach a window covers it, so never overwrite
+            let slot = pick(window);
+            if slot.is_none() {
+                *slot = Some(at);
+            }
+        }
+    }
+
+    /// Look up when the write covering an intent log offset was made durable
+    ///
+    /// Returns `None` when the window has already been evicted, which the caller flags on
+    /// the record rather than filling in.
+    ///
+    /// # Arguments
+    ///
+    /// * `pos` - The offset a response becomes durable at
+    #[cfg(feature = "stage-profile")]
+    pub fn window_for(&self, pos: u64) -> Option<&DurabilityWindow> {
+        // windows are appended in submission order, so they are sorted by end position and
+        // the covering write is the first one that reaches this offset
+        let found = self.timeline.partition_point(|window| window.end_pos < pos);
+        self.timeline.get(found)
     }
 
     /// Retire a completed write and advance our contiguous written watermark
@@ -215,6 +321,15 @@ impl FlushState {
         // find this writes slot and mark it as complete
         if let Some(slot) = self.inflight.iter_mut().find(|(pos, _)| *pos == end) {
             slot.1 = true;
+        }
+        // close out the write half of this writes durability window
+        #[cfg(feature = "stage-profile")]
+        if let Some(window) = self
+            .timeline
+            .iter_mut()
+            .find(|window| window.end_pos == end)
+        {
+            window.completed = Some(Stamp::now());
         }
         // pop completed writes from the front so our watermark stays contiguous
         while matches!(self.inflight.front(), Some((_, true))) {
@@ -297,6 +412,16 @@ fn start_sync<D: ShoalDatabase>(
         }
         // claim the sync slot for our current written watermark
         flush_state.syncing_to = Some(flush_state.written_pos);
+        // note that every write below this watermark is now waiting on this one sync
+        //
+        // this is the moment a group commit forms, so it is what separates "waiting for a
+        // sync to start" from "waiting for a sync to finish"
+        #[cfg(feature = "stage-profile")]
+        {
+            let written_pos = flush_state.written_pos;
+            flush_state
+                .mark_sync_stage(written_pos, Stamp::now(), |window| &mut window.sync_issued);
+        }
         flush_state.written_pos
     };
     // get local copies for our background task
@@ -313,7 +438,13 @@ fn start_sync<D: ShoalDatabase>(
             let mut flush_state = sync_state.borrow_mut();
             // record either our new synced watermark or the error we hit
             match synced {
-                Ok(_) => flush_state.synced_pos = flush_state.synced_pos.max(target),
+                Ok(_) => {
+                    flush_state.synced_pos = flush_state.synced_pos.max(target);
+                    // close out the sync half of every window this one sync covered
+                    #[cfg(feature = "stage-profile")]
+                    flush_state
+                        .mark_sync_stage(target, Stamp::now(), |window| &mut window.sync_completed);
+                }
                 Err(error) => flush_state.record_error(error.into()),
             }
             // release the sync slot
@@ -557,6 +688,42 @@ impl<D: ShoalDatabase> StreamWriter<D> {
     /// correct the instant an IO completes.
     pub fn get_flushed_pos(&mut self) -> u64 {
         self.state.borrow().durable_pos(self.durability)
+    }
+
+    /// Fill in the durability stages for a response that has just been released
+    ///
+    /// The four phases between a commit returning and its response coming back are
+    /// intervals of the intent log rather than properties of a query, so they are looked up
+    /// here by the offset the response parked at instead of being stamped as they happen.
+    ///
+    /// # Arguments
+    ///
+    /// * `stamps` - The stamps to fill in, already carrying their commit offset
+    #[cfg(feature = "stage-profile")]
+    pub fn fill_durability(&self, stamps: &mut StageStamps) {
+        // find the write that carried this response
+        let state = self.state.borrow();
+        let Some(window) = state.window_for(stamps.commit_pos()) else {
+            // this writes window has already aged out of our bounded timeline, so say we do
+            // not know rather than filling in a number we would be guessing at
+            stamps.set_window_missing(true);
+            return;
+        };
+        // record when the write carrying this response was submitted
+        //
+        // the gap between this and `exec_done` is time the query spent staged in the DMA
+        // buffer, unsubmitted, which nothing before this measured
+        stamps.set_write_submitted(window.submitted);
+        // record the rest of the phases, each of which a response may not have reached
+        if let Some(completed) = window.completed {
+            stamps.set_write_completed(completed);
+        }
+        if let Some(issued) = window.sync_issued {
+            stamps.set_sync_issued(issued);
+        }
+        if let Some(synced) = window.sync_completed {
+            stamps.set_sync_completed(synced);
+        }
     }
 
     /// Check if any of our background IO tasks have failed
