@@ -1028,6 +1028,41 @@ The cache has the opposite problem at the other end: nothing evicts from `loaded
 `remove_archive` (`.../fs/map.rs:502-510`), so a table with many archives holds a file descriptor
 per archive for the life of the process.
 
+### O27. An ephemeral write makes a mixed database sweep every table
+
+| | |
+| --- | --- |
+| **Rank** | **Tier B**, last — the cost only exists in a database that mixes table kinds |
+| **Impact** | Argued — one extra walk of every table per shard loop iteration that had an ephemeral write in it |
+| **Difficulty** | S |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | None, but the fix has to preserve [F5](../features/flushed-sweep-gate.md)'s gate exactly |
+| **Benchmark** | none — needs a workload over a schema holding both kinds, which no workload does |
+
+`ShoalDatabase::compaction_due` is generated as an OR across every table
+(`shoal-derive/src/traits/db.rs`), and the shard sweeps when
+`data_flushed || tables.compaction_due()` ([F5](../features/flushed-sweep-gate.md)). An ephemeral
+table answers `true` from the moment a row is inserted until the next sweep releases its response,
+which is correct and necessary — it is the only thing that wakes the shard to answer that insert
+([F9](../features/ephemeral-tables.md#design-choices)). But the sweep it asks for is a sweep of
+*every* table, so a persistent table sharing the database has `get_flushed` called on it — a
+`compact_if_needed`, a pending-response scan — for a wakeup that had nothing to do with it.
+
+An all-ephemeral or all-persistent database pays nothing: in the first case every table genuinely
+had something to release, and in the second nothing changed. The cost is exactly the mixed case,
+and it scales with how many persistent tables share the database with a busy ephemeral one.
+
+The shape of the fix is a sweep that asks each table rather than the database — `handle_flushed`
+already visits every field, so the gate could move to the same place as the visit instead of
+sitting above it. That is a change to F5's mechanism, which is why it is filed rather than taken:
+F5 exists because that sweep used to run unconditionally, and the way to get this wrong is to
+reintroduce that.
+
+**No benchmark would show it today.** Every workload drives one table. A workload over a schema
+holding both kinds is the thing to build first, and it is worth having for its own sake — a mixed
+database is the shape a real use of ephemeral tables has.
+
 ---
 
 ## ~~Suggested order~~ — superseded by [the priority queue](#the-priority-queue)

@@ -153,9 +153,10 @@ and it belongs with O18.
 
 ## Limitations
 
-- **A projection cannot be declared for an ephemeral table.** An `EphemeralTable` cannot be a field
-  of a `#[db]` struct, so there is nowhere to declare one. Ephemeral tables carry an
-  `ShoalProjection<Row = Self>` bound and answer with whole rows only.
+- ~~**A projection cannot be declared for an ephemeral table.** An `EphemeralTable` cannot be a
+  field of a `#[db]` struct, so there is nowhere to declare one.~~ No longer true.
+  [F9](ephemeral-tables.md) made ephemeral tables aliases for the persistent ones, so a projection
+  is declared on an ephemeral field exactly as it is on any other.
 - **A projection has to name its table's partition key**, and to name it in the same field order.
   The type check catches a mismatched key *type*; it cannot catch two `u64` fields swapped.
 - **There is no column list in SHQL.** `SELECT a, b FROM T` is a parse error, not a query.

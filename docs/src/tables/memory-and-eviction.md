@@ -306,3 +306,8 @@ and keeps the eviction path synchronous — at the cost of the generation trap.
   is only measured, not repaired.
 - No metrics beyond two `INFO` events; no way to observe resident bytes, LRU depth, or
   eviction rate other than by reading logs.
+- **An ephemeral table is outside all of this.** Its partitions are never marked evictable, so they
+  never enter the LRU and no eviction pass can choose them, and the memory they hold is not
+  counted toward the limit. That is a safety property — there is no disk to re-read an evicted
+  ephemeral partition from — and it means `resources.memory` does not bound an ephemeral table at
+  all ([F9](../features/ephemeral-tables.md#limitations)).

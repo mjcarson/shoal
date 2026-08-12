@@ -143,6 +143,18 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
             workload.id()
         );
     }
+    // a workload that timed gets but retrieved no rows read an empty table, and its latencies
+    // describe how quickly the server can find nothing
+    //
+    // this catches a real and quiet failure: the driver counts rows by trying each row type the
+    // schema declares, so a schema gaining a row type the driver was not taught about produces a
+    // run with healthy looking percentiles over an answer that was never there
+    if measured.ops.contains_key("get") && measured.counters.get("retrieved").copied() == Some(0) {
+        bail!(
+            "{} timed gets but retrieved no rows, so its samples measure lookups that found nothing",
+            workload.id()
+        );
+    }
     // summarize every operation's samples into the distribution the artifact stores
     let mut ops = BTreeMap::new();
     for (op, samples) in &mut measured.ops {

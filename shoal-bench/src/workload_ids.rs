@@ -39,6 +39,18 @@ pub const IDS: &[&str] = &[
     "macro/fanout/evicted/16",
     "macro/fanout/evicted/64",
     "macro/fanout/evicted/256",
+    // the storage free controls, appended rather than interleaved with the workloads they are
+    // read against. a workload's position in this list decides the port a capture gives it, so
+    // putting `macro/insert_ephemeral` next to `macro/insert_unsorted` where it reads best would
+    // move every workload after it onto a different port.
+    "macro/insert_ephemeral",
+    "macro/get_ephemeral",
+    "macro/fanout/ephemeral/1",
+    "macro/fanout/ephemeral/2",
+    "macro/fanout/ephemeral/4",
+    "macro/fanout/ephemeral/16",
+    "macro/fanout/ephemeral/64",
+    "macro/fanout/ephemeral/256",
 ];
 
 /// Whether an id names a workload this build knows about

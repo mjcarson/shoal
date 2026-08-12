@@ -1,12 +1,23 @@
 # Table Types
 
-Shoal has three table implementations. Two are usable; one is effectively orphaned.
+Shoal has **two** table implementations and four names for them. The ephemeral pair are type
+aliases for the persistent pair with a storage engine that writes nothing
+([F9](../features/ephemeral-tables.md)).
 
 | Type | Partition holds | Persistent | Reachable from `#[db]` |
 | --- | --- | --- | --- |
 | `PersistentSortedTable<R, S, N>` | A `BTreeMap<R::Sort, MaybeRow<R>>` | Yes | Yes |
 | `PersistentUnsortedTable<R, S, N>` | Exactly one row | Yes | Yes |
-| `EphemeralTable<T>` | A `SortedPartition<T>` | No | **No** |
+| `EphemeralSortedTable<R, D, N>` | A `BTreeMap<R::Sort, MaybeRow<R>>` | No | Yes |
+| `EphemeralUnsortedTable<R, D, N>` | Exactly one row | No | Yes |
+
+> ~~`EphemeralTable<T>` is a third implementation and cannot be used in a `#[db]` database.~~
+> Superseded by [F9](../features/ephemeral-tables.md). The old struct held a
+> `BTreeMap<u64, SortedPartition<T>>` directly, had no storage engine and no `MaybeLoaded`, and
+> was unreachable from a database struct for two years. It was deleted rather than integrated:
+> making it reachable meant giving it the twelve methods the `#[db]` macro generates calls
+> against, which is a second implementation of the persistent table's whole interface with
+> nothing but convention keeping the two alike.
 
 ## PersistentSortedTable
 
@@ -149,38 +160,41 @@ reported `false` for anything evicted or not yet faulted in. See
 [Resolved Issues #4](../appendix/resolved/unsorted-disk-consultation.md)
 for what that cost and what fixing it dragged in with it.
 
-## EphemeralTable
+## The ephemeral pair
 
 `shoal-core/src/server/tables/ephemeral.rs`
 
 ```rust
-pub struct EphemeralTable<T: ShoalSortedTable> {
-    pub partitions: BTreeMap<u64, SortedPartition<T>>,
-    memory_usage: usize,
+pub type EphemeralSortedTable<R, D, N> = PersistentSortedTable<R, NoStorage<D>, N>;
+pub type EphemeralUnsortedTable<R, D, N> = PersistentUnsortedTable<R, NoStorage<D>, N>;
+```
+
+Aliases, not implementations. A table is generic over its storage engine, so an in-memory table
+is the same table with `NoStorage` underneath it instead of `FileSystem`
+(`shoal-core/src/server/tables/storage/none.rs`). A schema writes one generic and the `#[db]`
+macro fills the other two in:
+
+```rust
+#[shoal::db]
+pub struct MyDb {
+    pub cache: EphemeralUnsortedTable<Session>,
 }
 ```
 
-`.../ephemeral.rs:16-22`
+Everything above the engine — routing, partitions, filters, sort key selections, ranges,
+projections, SHQL — is shared with the persistent tables and cannot drift from them.
 
-In-memory only. No storage engine, no intent log, no eviction, no `MaybeLoaded` — partitions
-are always fully resident. Its `handle` returns a `Response<T>` directly rather than an
-`Option`, since nothing is ever deferred (`.../ephemeral.rs:47-77`).
+**What is removed:** the intent log write, the durability barrier, compaction, archive reads,
+and eviction. **What is not:** an insert is still wrapped in an intent, still parked in
+`PendingResponse`, and still released on a shard sweep rather than answered inline; partitions
+are still held behind a `MaybeLoaded` that can only ever be the loaded arm. See
+[F9](../features/ephemeral-tables.md) for why, and for the numbers the two halves are worth.
 
-It answers with whole rows only. A projection is declared on the database field holding its table
-and an ephemeral table cannot be one, so the only projection it can be asked for is the identity
-one every row type has of itself — which is what the `ShoalProjection<Row = T>` bound on its impl
-block says ([F2](../features/projections.md#limitations)).
-
-It is exported (`shoal/src/lib.rs`) and documented in the CLAUDE.md table list, but the `#[db]`
-macro's generated `ShoalDatabase` impl calls methods `EphemeralTable` does not have —
-`new(shard_name, table_name, ..., loader_channels, ...)`, `loader_kind`, `spawn_loader`,
-`get_flushed`, `mark_evictable`, `evict`, `load_partition`, `shutdown`
-(`shoal-derive/src/traits/db.rs:22-185`). Putting an `EphemeralTable` in a `#[db]` struct will
-not compile.
-
-It is also `BTreeMap`-keyed on a hash, so its ordering is by hash value — arbitrary.
-
-Treat it as dead code pending either a `#[db]` integration or removal.
+Nothing an ephemeral table holds is ever evicted. A partition can only be evicted after being
+marked evictable, and the only two things that send a `MarkEvictable` are the filesystem
+compactor and the partition load path — neither of which `NoStorage` reaches. That is a safety
+property (an evicted ephemeral partition would be gone rather than re-readable) and a cost:
+memory pressure cannot reclaim ephemeral data.
 
 ## Shared surface
 
@@ -212,7 +226,9 @@ shape and diverge in details, which is exactly how the delete/update asymmetry a
 
 **Tables own their storage engine.** Each table has its own `FileSystem<D>`, hence its own
 intent log, compactor, and archive map. Tables do not interfere with one another, at the cost
-of one background compactor task per table per shard.
+of one background compactor task per table per shard. It is also what makes an ephemeral table
+possible without a second table implementation: the engine is a generic, so a table that stores
+nothing is the same table with a different one ([F9](../features/ephemeral-tables.md)).
 
 **No trait for the table interface.** Generated code calls methods by name. This dodges the
 generic-parameter explosion visible in the `where` clauses (`.../persistent/sorted.rs:118-149`
@@ -224,7 +240,9 @@ implementations agree.
 - A range over a *prefix* of a composite sort key is not expressible, and a range never reduces
   the I/O of a cold partition ([F1](../features/sort-key-ranges.md#limitations)).
 - Unsorted updates and deletes ignore data on disk.
-- `EphemeralTable` cannot be used in a `#[db]` database.
 - No trait unifies the table implementations, so behavioural divergence is silent.
+- An ephemeral table still needs a storage directory. `ShoalPool::start` claims one before any
+  shard is spawned (`shoal-core/src/server.rs:87`), whatever its tables are made of
+  ([F9](../features/ephemeral-tables.md#limitations)).
 - Partition keys are hashes; for unsorted tables a hash collision silently overwrites a row
   ([Partitioning](../architecture/partitioning.md#from-field-values-to-a-partition-key)).

@@ -143,10 +143,38 @@ bytes by offset instead of by type — a different protocol, not an extension of
 and there is nothing that turns `#[shoal(project(id, title))]` into one, or that says "everything
 but `data`". This is only ergonomics, but it is the ergonomics people will ask for first.
 
-**Projections on ephemeral tables.** An `EphemeralTable` cannot be a field of a `#[db]` struct, so
+~~**Projections on ephemeral tables.** An `EphemeralTable` cannot be a field of a `#[db]` struct, so
 there is nowhere to declare a projection for one. It carries an `ShoalProjection<Row = Self>` bound
 and answers with whole rows. Fixing it is the same work as making ephemeral tables usable in a
-database at all ([Table Types](../tables/table-types.md#ephemeraltable)).
+database at all.~~ Done by [F9](../features/ephemeral-tables.md), and by exactly that route: the
+ephemeral tables are aliases for the persistent ones, so they carry the projection support the
+persistent tables already had rather than gaining any of their own. Covered by
+`shoal/tests/ephemeral_sorted_table.rs::projection_returns_only_its_own_fields`.
+
+**A projection on `MemItem`, so the projection read path has an ephemeral control.** `Item`
+declares `ItemKeys` and [F9](../features/ephemeral-tables.md)'s `MemItem` declares nothing, so
+there is no storage-free control for reading a projection the way there now is for reading whole
+rows. It is one struct and one attribute; it was left out because F2 shipped without a projection
+benchmark at all and adding one is a separate piece of work from adding the table it would run on.
+
+**An instrumented run of `macro/insert_ephemeral`.** Its `profiles()` is `false`, so the `hotpath`
+and `stage-profile` layers never run it. Subtracting its profile from `macro/insert_unsorted`'s
+would attribute the storage layer function by function rather than as one wall clock difference.
+Turning it on doubles the two most expensive phases of a capture, which is why it is off; the
+right shape is probably a flag that opts a named workload into the instrumented layers for one
+capture rather than a permanent `true`.
+
+**A fast path through the ephemeral tables.** They are the persistent tables with the disk
+removed, so an insert is still wrapped in an intent, parked in `PendingResponse`, and released on
+a shard sweep rather than answered inline, and every partition is still behind a `MaybeLoaded`
+that can only be the loaded arm. A leaner table was
+[deliberately not built](../features/ephemeral-tables.md#alternatives-rejected) — a second
+implementation of the table interface with no trait keeping it honest is how the unsorted
+delete/update asymmetry happened. The version worth having instead is inside the existing tables,
+guarded on the engine: `commit` could report that its response needs no parking, and the
+`check_disk` probe could be skipped for an engine that never has anything on disk. Both are
+measurable against `macro/insert_ephemeral` and `macro/get_ephemeral`, which is what makes them
+worth attempting at all.
 
 **A projection that leaves out the partition key.** A projection has to carry its table's partition
 key, because the shard collecting the shares of a split get asks each row which partition it came
@@ -533,11 +561,21 @@ finality ([Recovery](../storage/recovery.md#truncation-and-corruption)).
 
 ### Storage engine abstraction
 
-`StorageSupport` (`.../storage.rs:225`) and `Loaders` (`:189-193`) are written as extension
-points but have exactly one implementation. Until a second exists, treat the abstraction as
-unproven — a memory-backed engine for tests would be the natural first user. Note that the
-storage tests deliberately do *not* want this: they run against a real filesystem on purpose,
-because glommio silently disables O_DIRECT on tmpfs and a memory-backed engine would hide
+~~`StorageSupport` and `Loaders` are written as extension points but have exactly one
+implementation. Until a second exists, treat the abstraction as unproven — a memory-backed engine
+for tests would be the natural first user.~~ [F9](../features/ephemeral-tables.md) built that
+second user, and it was indeed the natural one: `NoStorage` is a memory-backed engine, and adding
+it needed one new `Loaders` variant and one guard in the generated loader spawn — the trait itself
+did not have to move.
+
+**What it did not prove.** `NoStorage` answers "nothing" to most of the trait. Every method that
+describes how bytes reach a device — `commit`'s buffering, `read_intents`, `load_partition`,
+`fill_durability` — still has exactly one real implementation, so a second *persisting* engine
+would still be the first thing to exercise them.
+
+The original note's warning stands and is worth repeating: the storage tests deliberately do *not*
+want a memory-backed engine underneath them. They run against a real filesystem on purpose,
+because glommio silently disables O_DIRECT on tmpfs, and running them on `NoStorage` would hide
 exactly the alignment and `fdatasync` behaviour they exist to check.
 
 ### Build and packaging
@@ -567,5 +605,5 @@ Multi-shard routing is no longer on that list; it gained coverage with
 | `client.rs:544-598`, `:1025-1091` | Large commented-out blocks. |
 | `.../fs.rs:74-98` | The previous intent-log writer, commented out. |
 | `shoalctl/src/components/tab.rs:527`, `:537` | `next`/`prev`, never called. |
-| `EphemeralTable` | Cannot be used in a `#[db]` database ([Table Types](../tables/table-types.md#ephemeraltable)). |
+| ~~`EphemeralTable`~~ | ~~Cannot be used in a `#[db]` database.~~ Deleted by [F9](../features/ephemeral-tables.md), which replaced it with aliases over the persistent tables. |
 | `shoal/examples/basic.rs.bak` | A `.bak` file in the source tree. |

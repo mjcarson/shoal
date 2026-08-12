@@ -17,8 +17,10 @@ use tracing::Span;
 use uuid::Uuid;
 
 pub mod fs;
+pub mod none;
 
 pub use fs::FileSystem;
+pub use none::NoStorage;
 
 use crate::server::messages::{QueryMetadata, ServerMsg};
 use crate::server::stage_profile::{StageDurability, StageStamps};
@@ -316,12 +318,20 @@ impl<N: TableNameSupport> FullArchiveMap<N> {
 pub enum Loaders {
     /// A Filesystem loader
     FileSystem,
+    /// No loader at all
+    ///
+    /// A storage engine that never writes has nothing to read back, so it has no loader to
+    /// spawn. This is a variant rather than an `Option` because the shard keys the set of
+    /// loaders it has already spawned on this type, and a table reporting a kind it does not
+    /// actually need would claim that kinds slot without filling it.
+    None,
 }
 
 impl std::fmt::Display for Loaders {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Loaders::FileSystem => write!(f, "FileSystem"),
+            Loaders::None => write!(f, "None"),
         }
     }
 }

@@ -2,14 +2,18 @@
 //!
 //! Several different types of tables exist with different trade offs:
 //!
-//! - Ephemeral
+//! - Persistent, which write every row to an intent log before answering
+//! - Ephemeral, which are the same tables with a storage engine that writes nothing
+//!
+//! The ephemeral pair are aliases rather than their own implementations, so the two kinds cannot
+//! drift apart. See the `ephemeral` module for what that costs and what it buys.
 
 mod ephemeral;
 mod partitions;
 mod persistent;
 pub mod storage;
 
-pub use ephemeral::EphemeralTable;
+pub use ephemeral::{EphemeralSortedTable, EphemeralUnsortedTable};
 pub use persistent::{PersistentSortedTable, PersistentUnsortedTable};
 
 /// Crate private internals, re-exported so the benches in `shoal/benches` can reach them

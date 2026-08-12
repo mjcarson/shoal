@@ -50,8 +50,14 @@ connection routes that client's queries to their owning shards. Any shard can be
 coordinator; there is no coordinator process, despite CPU 0 being reserved and called "the
 coordinator cpu".
 
-**Ephemeral table** — An in-memory-only table type. Present in the codebase but not usable in
-a `#[db]` database.
+**Ephemeral table** — A table that keeps everything in memory and writes nothing to disk.
+`EphemeralSortedTable` and `EphemeralUnsortedTable` are aliases for the persistent tables with a
+`NoStorage` engine underneath, so they are the same tables rather than a separate implementation.
+Nothing they hold is ever evicted, and nothing survives a restart. See
+[F9](../features/ephemeral-tables.md).
+
+**`NoStorage`** — The storage engine that stores nothing. The second implementation of
+`StorageSupport` beside `FileSystem`, and what makes a table ephemeral.
 
 **Evictable** — A partition eligible for eviction. `Accessible` partitions always are;
 `Loaded` partitions only once their generation has been compacted. See

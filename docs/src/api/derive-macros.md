@@ -424,8 +424,11 @@ a trait would have made the divergence a compile error.
   debugging.
 - `#[shoal_table(db = "...")]` is a string that must match a struct name, with no check until
   the generated identifier fails to resolve.
-- `EphemeralTable` does not satisfy the interface the `#[db]` macro generates calls against, so
-  it cannot appear in a database struct ([Table Types](../tables/table-types.md#ephemeraltable)).
+- The `#[db]` macro decides whether a field is a sorted or an unsorted table, and whether it needs
+  a storage generic, by looking for the substrings `"Sorted"`, `"Unsorted"`, `"Persistent"` and
+  `"Ephemeral"` in the type name. A table type named anything else panics during expansion with
+  `Failed to detect table kind`, which is why the ephemeral tables are named the way they are
+  ([F9](../features/ephemeral-tables.md#design-choices)).
 - A projection has to name its table's partition key, and the compile-time check only catches a
   mismatched key *type* — two fields of the same type in the wrong order pass it
   ([F2](../features/projections.md#limitations)).

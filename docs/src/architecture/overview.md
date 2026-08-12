@@ -67,11 +67,13 @@ The two seams worth noticing:
 - **`ShoalDatabase`** (`shoal-core/src/shared/traits.rs:204`) is entirely generated. It is
   how a `QueryKinds` enum variant becomes a call on a concrete table field. Read
   `shoal-derive/src/traits/db.rs` to see it.
-- **`StorageSupport`** (`shoal-core/src/server/tables/storage.rs:225`) is the storage engine
-  abstraction. `FileSystem` is currently its only implementor, and `Loaders` — the enum
-  naming storage engine kinds — has exactly one variant, `FileSystem`
-  (`.../storage.rs:189-193`). The abstraction exists but has never been exercised by a
-  second implementation.
+- **`StorageSupport`** (`shoal-core/src/server/tables/storage.rs`) is the storage engine
+  abstraction. It has two implementors: `FileSystem`, and `NoStorage`, which stores nothing and
+  is what makes a table ephemeral ([F9](../features/ephemeral-tables.md)). `Loaders` — the enum
+  naming storage engine kinds — accordingly has two variants, `FileSystem` and `None`.
+  ~~The abstraction exists but has never been exercised by a second implementation.~~ It has been
+  now, though only by an engine that answers "nothing" to most of the trait: a second *persisting*
+  engine would still exercise parts of it this one does not.
 
 ## Module responsibilities
 
@@ -160,8 +162,9 @@ guarded by a comment rather than by the type system
 
 ## Limitations
 
-- The storage abstraction has one implementation; treat `StorageSupport` as a refactoring
-  aid rather than a proven extension point.
+- The storage abstraction has two implementations, but only one that persists anything, so
+  `StorageSupport` is only partly proven as an extension point
+  ([F9](../features/ephemeral-tables.md)).
 - No prioritisation between message kinds on the shard loop.
 - All channels are unbounded, so there is no backpressure anywhere in the system
   ([Known Issues](../appendix/known-issues.md#15-no-backpressure-anywhere)).

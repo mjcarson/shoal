@@ -94,8 +94,10 @@ Alongside them it writes `<label>.meta.json`, which is what lets a committed num
 whether it still describes the current code: the commit, whether the tree was dirty, a content
 hash of the sources each layer measures, and the machine, governor and toolchain it ran on.
 
-A full capture is now fifteen workloads times five runs, so it is substantially longer than the
-five runs it replaced — budget the better part of an hour rather than thirteen minutes.
+A full capture is now twenty-three workloads times five runs, so it is substantially longer than
+the five runs it replaced — budget an hour or so rather than thirteen minutes. Eight of the
+twenty-three are the storage-free controls [F9](../features/ephemeral-tables.md) added, and they
+are the cheapest of the set: they have no disk to wait on.
 `--scale smoke --runs 2` cuts the data two orders of magnitude and is what you want while
 iterating on a workload; the scale is recorded in the artifact, and a `smoke` capture is never
 compared against a `full` one.

@@ -2,201 +2,59 @@
 //!
 //! This means while they are the fastest when it comes to writes they will
 //! not retain data through restarts.
+//!
+//! # An ephemeral table is not a separate table type
+//!
+//! Both of these are aliases, not structs. A table is generic over the storage engine beneath it,
+//! so an ephemeral table is the same table every persistent database uses with
+//! [`NoStorage`](crate::storage::NoStorage) underneath it instead of
+//! [`FileSystem`](crate::storage::FileSystem). Every layer above the engine — routing, partitions,
+//! filters, projections, the query and response enums the derive macros mint — is shared with the
+//! persistent tables and cannot drift from them.
+//!
+//! That is also what makes an ephemeral benchmark worth reading. `macro/insert_ephemeral` and
+//! `macro/insert_unsorted` differ in the storage engine and in nothing else, so the gap between
+//! them is the storage layer rather than a difference between two implementations that happen to
+//! both be called a table.
+//!
+//! # What an ephemeral table still costs
+//!
+//! Taking the disk away does not take away the machinery built around having one. An insert is
+//! still wrapped in an intent, still parked, and still released on a shard sweep rather than
+//! answered inline, and every partition is still held behind a `MaybeLoaded` that can only ever
+//! be the loaded arm. See `docs/src/features/ephemeral-tables.md`.
+//!
+//! # What it buys
+//!
+//! No intent log write, no fdatasync, no compaction, no archive read — and no eviction. An
+//! ephemeral partition is never marked evictable, because the only two places that send a
+//! `MarkEvictable` are the filesystem compactor and the partition load path, and an ephemeral
+//! table reaches neither. Memory pressure therefore cannot reclaim it, which is a property in
+//! both directions: the data is safe, and it is also the users problem to bound.
 
-use std::collections::BTreeMap;
-use uuid::Uuid;
+use super::persistent::{PersistentSortedTable, PersistentUnsortedTable};
+use super::storage::NoStorage;
 
-use super::partitions::SortedPartition;
-use crate::server::Conf;
-use crate::shared::queries::{SortedExists, SortedGet, SortedQuery, SortedUpdate};
-use crate::shared::responses::{Response, ResponseAction};
-use crate::shared::traits::{ShoalProjection, ShoalSortedTable};
-
-/// A Table that stores all data only in memory
-#[derive(Debug)]
-pub struct EphemeralTable<T: ShoalSortedTable> {
-    /// The rows in this table
-    pub partitions: BTreeMap<u64, SortedPartition<T>>,
-    /// The total size of all data on this shard
-    memory_usage: usize,
-}
-
-impl<T: ShoalSortedTable> Default for EphemeralTable<T> {
-    /// Build a default empty table
-    fn default() -> Self {
-        Self {
-            partitions: BTreeMap::default(),
-            memory_usage: 0,
-        }
-    }
-}
-
-/// An ephemeral table always answers with whole rows
+/// A sorted table that keeps every row in memory and never writes one to disk
 ///
-/// A projection is declared on the database a table belongs to, and an ephemeral table cannot
-/// be a field of one, so the only projection it can be asked for is the identity one every row
-/// type has of itself. That is what this bound says, and it is why the scan below can hand its
-/// partitions a vec of rows.
-impl<T: ShoalSortedTable + ShoalProjection<Row = T>> EphemeralTable<T> {
-    /// Create an ephemeral shoal table
-    ///
-    /// # Arguments
-    ///
-    /// * `conf` - The Shoal config
-    pub fn new(_conf: &Conf) -> Self {
-        Self::default()
-    }
-    /// Cast and handle a serialized query
-    ///
-    /// # Arguments
-    ///
-    /// * `query` - The query to execute
-    pub async fn handle(
-        &mut self,
-        id: Uuid,
-        index: usize,
-        query: SortedQuery<T>,
-        end: bool,
-    ) -> Response<T> {
-        // execute the correct query type
-        let data = match query {
-            // insert a row into this partition
-            SortedQuery::Insert { row, .. } => self.insert(row).await,
-            // get a row from this partition
-            SortedQuery::Get(get) => self.get(&get).await,
-            // delete a row from this partition
-            SortedQuery::Delete { key, sort_key } => self.delete(key, &sort_key).await,
-            // Update a row in a target partition
-            SortedQuery::Update(update) => self.update(update).await,
-            // Check if data exists in a partition
-            SortedQuery::Exists(exists) => self.exists(&exists).await,
-        };
-        // build the response for this query
-        Response {
-            id,
-            index,
-            data,
-            end,
-        }
-    }
+/// # Generics
+///
+/// * `R` - The row type this table holds
+/// * `D` - The database this table is a field of
+/// * `N` - The table name enum for that database
+///
+/// A schema writes this with one generic — `EphemeralSortedTable<MyRow>` — and the `#[shoal::db]`
+/// macro fills the other two in.
+pub type EphemeralSortedTable<R, D, N> = PersistentSortedTable<R, NoStorage<D>, N>;
 
-    /// Insert some data into a partition in this shards table
-    ///
-    /// # Arguments
-    ///
-    /// * `row` - The row to insert
-    async fn insert(&mut self, row: T) -> ResponseAction<T> {
-        // get our partition key
-        let key = row.get_partition_key().clone();
-        // get our partition
-        let partition = self
-            .partitions
-            .entry(key)
-            .or_insert_with(|| SortedPartition::new(key));
-        // insert this row into this partition
-        let (size_diff, action) = partition.insert(row);
-        // adjust our total shards memory usage
-        self.memory_usage = self.memory_usage.saturating_add_signed(size_diff);
-        action
-    }
-
-    /// Get some rows from some partitions
-    ///
-    /// # Arguments
-    ///
-    /// * `get` - The get parameters to use
-    /// * `responses` - The response object to use
-    async fn get(&mut self, get: &SortedGet<T>) -> ResponseAction<T> {
-        // build a vec for the data we found
-        let mut data = Vec::new();
-        // build the sort key
-        for key in &get.partition_keys {
-            // stop once we hold every row this get asked for
-            //
-            // an ephemeral table never blocks on a disk load, so unlike the persistent
-            // table there is no blocked list to keep walking our keys for
-            if get.limit_reached(&data) {
-                break;
-            }
-            // get the partition for this key
-            if let Some(partition) = self.partitions.get(key) {
-                // get rows from this partition
-                partition.get(get, &mut data);
-            }
-        }
-        // add this data to our response
-        if data.is_empty() {
-            // this query did not find data
-            ResponseAction::Get(None)
-        } else {
-            // this query found data
-            ResponseAction::Get(Some(data))
-        }
-    }
-
-    /// Delete a row from this partition
-    ///
-    /// # Arguments
-    ///
-    /// * `key` - The key to the partition to dlete data from
-    /// * `sort` - The sort key to delete
-    async fn delete(&mut self, key: u64, sort: &T::Sort) -> ResponseAction<T> {
-        // get this rows partition
-        let removed = match self.partitions.get_mut(&key) {
-            Some(partition) => {
-                match partition.remove(sort) {
-                    Some((diff, _)) => {
-                        // adjust this shards total memory usage
-                        self.memory_usage = self.memory_usage.saturating_sub(diff);
-                        // return our removed row
-                        true
-                    }
-                    None => false,
-                }
-            }
-            None => false,
-        };
-        ResponseAction::Delete(removed)
-    }
-
-    /// Update a row in this table
-    ///
-    /// # Arguments
-    ///
-    /// * `update` - The update to apply to a row in this table
-    async fn update(&mut self, update: SortedUpdate<T>) -> ResponseAction<T> {
-        // get this rows partition
-        let updated = match self.partitions.get_mut(&update.partition_key) {
-            Some(partition) => match partition.update(&update) {
-                Some(diff) => {
-                    self.memory_usage = self.memory_usage.saturating_add_signed(diff);
-                    true
-                }
-                None => false,
-            },
-            None => false,
-        };
-        ResponseAction::Update(updated)
-    }
-
-    /// Check if data exists in some partitions
-    ///
-    /// # Arguments
-    ///
-    /// * `exists` - The exists parameters to use
-    async fn exists(&mut self, exists: &SortedExists<T>) -> ResponseAction<T> {
-        // check each of the specified partition keys
-        for key in &exists.partition_keys {
-            // get the partition for this key
-            if let Some(partition) = self.partitions.get(key) {
-                // check whether this partition holds any of the rows we were asked about
-                if partition.exists(exists) {
-                    // found a matching row - data exists
-                    return ResponseAction::Exists(true);
-                }
-            }
-        }
-        // no data found in any partition
-        ResponseAction::Exists(false)
-    }
-}
+/// An unsorted table that keeps every row in memory and never writes one to disk
+///
+/// # Generics
+///
+/// * `R` - The row type this table holds
+/// * `D` - The database this table is a field of
+/// * `N` - The table name enum for that database
+///
+/// A schema writes this with one generic — `EphemeralUnsortedTable<MyRow>` — and the
+/// `#[shoal::db]` macro fills the other two in.
+pub type EphemeralUnsortedTable<R, D, N> = PersistentUnsortedTable<R, NoStorage<D>, N>;

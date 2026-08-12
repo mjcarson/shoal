@@ -45,8 +45,14 @@ pub fn add(
         quote! {
             // get the storage engine this table needs
             let needed = self.#field_ident.loader_kind();
-            // only spawn this loader if it has not yet been spawned
-            if !spawned.contains(&needed) {
+            // a table with no storage engine has nothing to read back, so it has no loader
+            //
+            // this is checked before the spawned set rather than after, since a table that
+            // claimed a kind it does not need would mark that kind spawned without spawning
+            // it and starve a table declared after it that does need one
+            let wanted = needed != shoal_core::storage::Loaders::None;
+            // only spawn this loader if it is needed and has not yet been spawned
+            if wanted && !spawned.contains(&needed) {
                 // get the correct load rx channel
                 let (_, loader_rx) = loader_channels
                     .entry(needed.clone())

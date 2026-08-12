@@ -55,6 +55,7 @@
   - [F6. A per query stage breakdown](features/stage-breakdown.md)
   - [F7. A benchmark runner that renders its own results](features/bench-runner.md)
   - [F8. Purpose-built workloads, in the crate that judges them](features/purpose-built-workloads.md)
+  - [F9. Ephemeral tables, and the benchmarks that need them](features/ephemeral-tables.md)
 
 # Appendix
 

@@ -25,7 +25,10 @@
 //! workload that is never run.
 
 pub mod fanout;
+pub mod fanout_ephemeral;
+pub mod get_ephemeral;
 pub mod harness;
+pub mod insert_ephemeral;
 pub mod insert_unsorted;
 pub mod keyed_get;
 pub mod schema;
@@ -47,6 +50,11 @@ use workload::Workload;
 /// The order is deliberate and runs from the cheapest and most repeatable to the most expensive:
 /// the write path first, since every read workload seeds itself through it, then the keyed get
 /// pair, then the fanout curve, which is twelve workloads and the longest phase of a capture.
+///
+/// The ephemeral workloads come last, after every workload they are a control for. That is not
+/// about cost — they are the cheapest things here, having no disk to wait on — but about
+/// identifiers: a workload's position in this list decides the port a capture gives it, so
+/// appending is what keeps every workload declared before them on the port it has always had.
 pub fn all() -> Vec<Box<dyn Workload>> {
     let mut built: Vec<Box<dyn Workload>> = vec![
         Box::new(insert_unsorted::InsertUnsorted),
@@ -60,6 +68,14 @@ pub fn all() -> Vec<Box<dyn Workload>> {
     // the curve mints its own identifiers, one per arm per key count
     built.extend(
         fanout::Fanout::all()
+            .into_iter()
+            .map(|workload| Box::new(workload) as Box<dyn Workload>),
+    );
+    // the storage free controls, each paired with the workload above it that it is read against
+    built.push(Box::new(insert_ephemeral::InsertEphemeral));
+    built.push(Box::new(get_ephemeral::GetEphemeral));
+    built.extend(
+        fanout_ephemeral::FanoutEphemeral::all()
             .into_iter()
             .map(|workload| Box::new(workload) as Box<dyn Workload>),
     );

@@ -21,8 +21,8 @@
 use deepsize2::DeepSizeOf;
 use rkyv::{Archive, Deserialize, Serialize};
 use shoal::{
-    FileSystem, PersistentSortedTable, PersistentUnsortedTable, ShoalProjection, ShoalSortedTable,
-    ShoalUnsortedTable,
+    EphemeralSortedTable, EphemeralUnsortedTable, FileSystem, PersistentSortedTable,
+    PersistentUnsortedTable, ShoalProjection, ShoalSortedTable, ShoalUnsortedTable,
 };
 
 /// A row in the unsorted table, one per partition
@@ -89,7 +89,57 @@ pub struct ItemKeys {
     pub bucket: u64,
 }
 
+/// A row in the ephemeral unsorted table
+///
+/// Field for field identical to [`Item`], and deliberately so. The ephemeral workloads are
+/// controls for the persistent ones, so the pair has to differ in the storage engine and in
+/// nothing else - a wider or narrower row here would put the row shape into a gap that is
+/// supposed to be the storage layer alone. A separate row type is needed rather than sharing
+/// `Item` because a row type names the table it belongs to.
+#[derive(Debug, Archive, Serialize, Deserialize, Clone, ShoalUnsortedTable, PartialEq, DeepSizeOf)]
+#[rkyv(derive(Debug))]
+#[shoal_table(db = "Bench")]
+pub struct MemItem {
+    /// The key this row is partitioned by
+    #[shoal(partition)]
+    pub id: u64,
+    /// A field a get can filter on
+    #[shoal(filter)]
+    pub bucket: u64,
+    /// A field an update can change
+    #[shoal(update)]
+    pub label: String,
+    /// The payload, whose width the scale sets
+    pub payload: String,
+}
+
+/// A row in the ephemeral sorted table
+///
+/// Field for field identical to [`Event`], for the reason given on [`MemItem`]. Its sort keys are
+/// built by the same [`sort_key`] and carry the same padding.
+#[derive(Debug, Archive, Serialize, Deserialize, Clone, ShoalSortedTable, PartialEq, DeepSizeOf)]
+#[rkyv(derive(Debug))]
+#[shoal_table(db = "Bench")]
+pub struct MemEvent {
+    /// The key this row is partitioned by
+    #[shoal(partition)]
+    pub stream: u64,
+    /// The key rows are sorted by within a partition
+    #[shoal(sort)]
+    pub at: String,
+    /// A field a get can filter on
+    #[shoal(filter)]
+    pub kind: u64,
+    /// The payload, whose width the scale sets
+    pub payload: String,
+}
+
 /// The database every workload drives
+///
+/// The two ephemeral tables are the same tables as the two above them with a storage engine that
+/// writes nothing, which is what lets a workload over one be read against the matching workload
+/// over the other. A table costs nothing until something writes to it, so a workload driving only
+/// the persistent pair is unaffected by their being here.
 #[shoal::db]
 pub struct Bench {
     /// One row per partition, which is the write path's subject
@@ -97,6 +147,10 @@ pub struct Bench {
     pub item: PersistentUnsortedTable<Item, FileSystem>,
     /// Many rows per partition, which is the read path's subject
     pub event: PersistentSortedTable<Event, FileSystem>,
+    /// [`Item`]'s table with the storage layer taken out from under it
+    pub mem_item: EphemeralUnsortedTable<MemItem>,
+    /// [`Event`]'s table with the storage layer taken out from under it
+    pub mem_event: EphemeralSortedTable<MemEvent>,
 }
 
 /// How many characters an [`Event`] sort key is padded to

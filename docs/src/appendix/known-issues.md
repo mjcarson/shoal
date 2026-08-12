@@ -25,9 +25,10 @@ partly fixed: the open remainder is here and the rest is there. Item 9 was a thi
 until its second half was fixed, and is now on the resolved page alone.
 
 **Baseline as of writing:** `cargo check --workspace --all-targets` passes with warnings;
-`cargo test --workspace` passes — 410 integration tests (one ignored), 219 `shoal-core` unit
+`cargo test --workspace` passes — 452 integration tests (one ignored), 225 `shoal-core` unit
 tests, 21 doctests, plus 8 more behind `--features stage-profile` that a default run does not
-reach ([Test Coverage](test-coverage.md)). That is up from 359, 219 and 16 with
+reach ([Test Coverage](test-coverage.md)). That is up from 410, 219 and 21 with
+[F9](../features/ephemeral-tables.md), and before that from 359, 219 and 16 with
 [F8](../features/purpose-built-workloads.md), whose count moved in **both** directions — it
 deleted a comparison engine along with its tests and moved others between crates, which that page
 accounts for line by line. Before that it was up from 172, 215 and 11 with the stamp and
@@ -348,7 +349,7 @@ The panic that could leave a terminal in raw mode is [fixed](resolved/shoalctl-p
 | `Conf::new("shoal.yml")` | The method is `Conf::from_file` (`conf.rs:269`) |
 | "LRU eviction at 60%" | Eviction triggers when usage exceeds the configured limit exactly; 40% is then freed (`shard.rs:661`, `:557`) |
 | ~~`exluded_cores`~~ | ~~Should be `exclude_cores`~~ — [fixed](resolved/excluded-cores-typo.md), in both files |
-| Lists `EphemeralTable` as a usable table type | It does not satisfy the interface `#[db]` generates calls against |
+| ~~Lists `EphemeralTable` as a usable table type~~ | ~~It does not satisfy the interface `#[db]` generates calls against~~ — [fixed](../features/ephemeral-tables.md) by making it usable rather than by changing the claim; the type is now `EphemeralSortedTable` / `EphemeralUnsortedTable` and both files say so |
 
 ### 28. SHQL "Unknown field" names the field it is listing as valid
 

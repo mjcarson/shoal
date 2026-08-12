@@ -170,10 +170,31 @@ pub fn take_projections(fields: &mut syn::FieldsNamed) -> Vec<Vec<Ident>> {
     declared
 }
 
-/// Rewrite table fields to add `<StructName>` to storage types and append `{StructName}TableNames`.
+/// Rewrite table fields to name the database they belong to and the table name enum it mints
 ///
-/// Transforms `PersistentUnsortedTable<Movie, FileSystem>` into
-/// `PersistentUnsortedTable<Movie, FileSystem<Tmdb>, TmdbTableNames>`.
+/// Every table is generic over its row, its storage engine and its databases table name enum, but
+/// a schema only writes the parts of that a person could reasonably be asked to write. This fills
+/// in the rest.
+///
+/// A persistent table names its storage engine and the engine is given the database:
+///
+/// ```text
+/// PersistentUnsortedTable<Movie, FileSystem>
+///     -> PersistentUnsortedTable<Movie, FileSystem<Tmdb>, TmdbTableNames>
+/// ```
+///
+/// An ephemeral table names no engine at all, because there is only one engine it could mean, so
+/// the database is pushed as a new generic rather than folded into one already there:
+///
+/// ```text
+/// EphemeralUnsortedTable<Movie>
+///     -> EphemeralUnsortedTable<Movie, Tmdb, TmdbTableNames>
+/// ```
+///
+/// # Arguments
+///
+/// * `fields` - The named fields of the database struct
+/// * `struct_ident` - The name of the database struct
 pub fn rewrite_table_fields(fields: &mut syn::FieldsNamed, struct_ident: &Ident) {
     let table_names_ident = format_ident!("{}TableNames", struct_ident);
     for field in fields.named.iter_mut() {
@@ -181,13 +202,24 @@ pub fn rewrite_table_fields(fields: &mut syn::FieldsNamed, struct_ident: &Ident)
         if let syn::Type::Path(type_path) = ty {
             if let Some(segment) = type_path.path.segments.first_mut() {
                 let type_name = segment.ident.to_string();
-                // Only rewrite Persistent table types
-                if !type_name.contains("Persistent") {
+                // an ephemeral table is written without a storage engine, so its database
+                // generic has to be pushed instead of wrapped around one already there
+                let ephemeral = type_name.contains("Ephemeral");
+                // Only rewrite table types
+                if !ephemeral && !type_name.contains("Persistent") {
                     continue;
                 }
                 if let syn::PathArguments::AngleBracketed(args) = &mut segment.arguments {
-                    // Add <StructName> generic to the storage type (2nd arg)
-                    if let Some(syn::GenericArgument::Type(storage_ty)) = args.args.iter_mut().nth(1) {
+                    if ephemeral {
+                        // push the database as the 2nd arg, which is the engines own generic
+                        if args.args.len() == 1 {
+                            args.args
+                                .push(syn::GenericArgument::Type(syn::parse_quote!(#struct_ident)));
+                        }
+                    } else if let Some(syn::GenericArgument::Type(storage_ty)) =
+                        args.args.iter_mut().nth(1)
+                    {
+                        // Add <StructName> generic to the storage type (2nd arg)
                         if let syn::Type::Path(storage_path) = storage_ty {
                             if let Some(storage_seg) = storage_path.path.segments.last_mut() {
                                 // Only add the generic if there isn't one already

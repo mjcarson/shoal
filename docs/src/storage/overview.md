@@ -3,7 +3,9 @@
 Persistence in Shoal is built from three on-disk structures per table, per shard. Everything
 in this section describes `FileSystem<D>`
 (`shoal-core/src/server/tables/storage/fs.rs`), which is the only implementation of the
-`StorageSupport` trait.
+`StorageSupport` trait that persists anything. The other, `NoStorage`, is the absence of every
+structure described here and is what makes a table ephemeral
+([F9](../features/ephemeral-tables.md)).
 
 ## The three structures
 
@@ -244,7 +246,9 @@ block another on IO. The cost is that shard count is baked into the layout
   misaligned O_DIRECT write where ext4 and XFS return `EINVAL`, so a bug in the write path's
   alignment could hide there and **cannot hide on XFS** — the same misalignment now fails the
   write outright.
-- One storage engine; `Loaders` has a single variant (`.../storage.rs:189-193`).
+- One *persisting* storage engine. `NoStorage` is the second implementor and answers "nothing"
+  to most of the trait, so the parts of `StorageSupport` that describe how bytes reach a device
+  still have exactly one user ([F9](../features/ephemeral-tables.md)).
 - No checksums on archive data — only on intent log records and the map snapshot. A corrupt
   archive extent is detected only if rkyv validation happens to fail.
 - No way to rebuild a lost archive map by scanning archives, despite the size prefixes being

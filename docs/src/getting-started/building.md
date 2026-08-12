@@ -125,7 +125,8 @@ No config, no dataset, no flags. It starts a server against a temporary director
 `target/`, writes a dozen movies, and reads them back four ways — a keyed get, a projection, a
 filter, and the same query written in SHQL.
 
-The benchmark harness it used to be is now fifteen purpose-built workloads in `shoal-bench`. See
+The benchmark harness it used to be is now twenty-three purpose-built workloads in `shoal-bench`.
+See
 [Benchmarking](../operations/benchmarking.md) for how to run them and what the numbers mean.
 
 Note that the checked-in `shoal.yml` points storage at `/opt/shoal`, which must exist and be

@@ -179,12 +179,7 @@ where
             ResponseActionNames::Insert => measured.count("inserted", 1),
             ResponseActionNames::Get => {
                 // a get answers with the rows it found, which is what to count
-                let rows = response
-                    .access::<crate::workloads::schema::Item>()
-                    .ok()
-                    .flatten()
-                    .map_or(0, |rows| rows.len() as u64);
-                measured.count("retrieved", rows);
+                measured.count("retrieved", rows_in(&response));
             }
             _ => {}
         }
@@ -289,12 +284,22 @@ where
 ///
 /// * `response` - The response to count
 fn rows_in(response: &shoal::ShoalResponse<BenchClient>) -> u64 {
-    // a response holds one table's rows, and a workload reads one table, so whichever of the two
+    // a response holds one table's rows, and a workload reads one table, so whichever of these
     // accesses succeeds is the one this response is
+    //
+    // every row type the schema declares has to be listed here. A row type that is missing does
+    // not fail - it counts zero, so the workload reports having retrieved nothing while its
+    // latencies look perfectly healthy, which reads like a workload that queried an empty table.
     if let Ok(Some(rows)) = response.access::<crate::workloads::schema::Event>() {
         return rows.len() as u64;
     }
     if let Ok(Some(rows)) = response.access::<crate::workloads::schema::Item>() {
+        return rows.len() as u64;
+    }
+    if let Ok(Some(rows)) = response.access::<crate::workloads::schema::MemEvent>() {
+        return rows.len() as u64;
+    }
+    if let Ok(Some(rows)) = response.access::<crate::workloads::schema::MemItem>() {
         return rows.len() as u64;
     }
     0
