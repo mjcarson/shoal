@@ -231,3 +231,57 @@ pub fn build_crash_config(path: &std::path::Path, port: u16) -> Conf {
             ),
         )
 }
+
+/// A guard that makes a tables archive directory unreadable while it is alive
+///
+/// This is how a partition read is made to fail on demand. The archives live in their own
+/// directory, apart from the intent logs and the archive map, so taking the permissions off
+/// it fails the open of an archive without touching the map that says which archive a
+/// partition is in - which is exactly the shape of a real IO failure, and the only shape a
+/// test can produce without a fault injection hook in the storage engine.
+///
+/// The permissions are restored when this is dropped, so the temp dir can still be cleaned
+/// up if the test panics part way through.
+pub struct UnreadableArchives {
+    /// The archive directory whose permissions were taken away
+    path: std::path::PathBuf,
+    /// The permissions to put back
+    original: std::fs::Permissions,
+}
+
+impl UnreadableArchives {
+    /// Take the permissions off a tables archive directory
+    ///
+    /// Returns `None` when the archives cannot be made unreadable, which is the case when
+    /// the tests are running as root - root traverses a directory whatever its mode says,
+    /// so there would be no failure to observe.
+    ///
+    /// # Arguments
+    ///
+    /// * `temp_dir` - The temp dir this servers data lives in
+    /// * `table_name` - The name of the table whose archives to hide
+    pub fn new(temp_dir: &TempDir, table_name: &str) -> Option<Self> {
+        use std::os::unix::fs::PermissionsExt;
+        // build the path to this tables archives
+        let path = temp_dir.path().join(table_name).join("archives");
+        // remember the permissions we are about to take away
+        let original = std::fs::metadata(&path).ok()?.permissions();
+        // take every permission off this directory so opening an archive in it fails
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).ok()?;
+        // check that this actually made the archives unreadable, which it does not for root
+        if std::fs::read_dir(&path).is_ok() {
+            // put the permissions back, since they are doing nothing
+            std::fs::set_permissions(&path, original).ok()?;
+            return None;
+        }
+        Some(UnreadableArchives { path, original })
+    }
+}
+
+impl Drop for UnreadableArchives {
+    /// Put the archive directorys permissions back
+    fn drop(&mut self) {
+        // restore the permissions so the temp dir can be cleaned up
+        let _ = std::fs::set_permissions(&self.path, self.original.clone());
+    }
+}

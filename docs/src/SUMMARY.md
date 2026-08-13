@@ -73,6 +73,7 @@
   - [11, 12, 37. The ring panicked on an empty lookup and never smoothed load](appendix/resolved/tablet-ring.md)
   - [13. Eviction logging can underflow](appendix/resolved/eviction-log-underflow.md)
   - [14. Empty rotated intent logs were never deleted](appendix/resolved/empty-rotated-logs.md)
+  - [16, 51. A partition read that failed panicked its shard and stranded its queries](appendix/resolved/partition-load-failure.md)
   - [18, 50. Core exclusion was ignored and shard placement was random](appendix/resolved/excluded-cores-typo.md)
   - [20. The storage tests were entirely commented out](appendix/resolved/storage-tests.md)
   - [24. A bad query could leave the terminal in raw mode](appendix/resolved/shoalctl-panic.md)

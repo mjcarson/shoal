@@ -314,6 +314,41 @@ where
             .map(|unblocked| (unblocked, self.flushed_generation)))
     }
 
+    /// Release the queries parked on a partition that could not be read
+    ///
+    /// A load completing is the only thing that drains `blocked`, so without this a failed
+    /// read leaves every query it was carrying parked forever and their clients waiting on
+    /// responses that nothing will ever produce.
+    ///
+    /// Each released query is marked to answer without that read, because the entry it failed
+    /// on is still in the archive map for every failure except a pruned partition - so a replay
+    /// that consulted disk again would park on the same failure and never terminate.
+    ///
+    /// # Arguments
+    ///
+    /// * `partition_id` - The partition that could not be read
+    #[instrument(name = "PersistentTable::fail_partition", skip(self))]
+    pub fn fail_partition(
+        &mut self,
+        partition_id: u64,
+    ) -> Option<Vec<(QueryMetadata, UnsortedQuery<R>)>> {
+        // take the queries that were parked on this partition
+        let mut blocked = self.blocked.remove(&partition_id)?;
+        // log how many queries this failure released
+        event!(
+            Level::WARN,
+            msg = "Releasing queries parked on a partition that could not be read",
+            table = %self.table_name,
+            partition_id,
+            released = blocked.len(),
+        );
+        // mark each of them to answer without the read that just failed
+        for (meta, _) in &mut blocked {
+            meta.skip_disk = Some(partition_id);
+        }
+        Some(blocked)
+    }
+
     /// Block a query on a partition being loaded from disk
     ///
     /// Returns true if this query was parked and false if this partition has no
@@ -337,6 +372,11 @@ where
             // park this query behind the load we have already requested
             entry.push((meta.clone(), query));
             return true;
+        }
+        // a query released by a failed load answers without the read that just failed,
+        // since asking for it again would only park this query on the same failure
+        if meta.skip_disk == Some(partition_key) {
+            return false;
         }
         // try to load this partition from disk if it exists
         let will_load = self

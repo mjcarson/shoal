@@ -235,6 +235,36 @@ pub fn add(
             }
         }
     });
+    // build our fail partition arms
+    let fail_partition_arms = fields
+        .named
+        .iter()
+        .zip(variants)
+        .map(|(field, variant_ident)| {
+        // get our field ident
+        let field_ident = field.ident.as_ref().unwrap();
+        // build our fail partition arm for this field
+        quote! {
+            #table_names_ident::#variant_ident => {
+                // take the queries that were parked on this partition, if there were any
+                if let Some(released) = self.#field_ident.fail_partition(partition_id) {
+                    // replay each of them, marked to answer without the read that failed
+                    //
+                    // no mark evictable message follows this one, unlike a load that
+                    // succeeded: nothing was read, so nothing entered this tables partitions
+                    // and nothing was taken out of the lru that has to be put back
+                    for (meta, unwrapped) in released {
+                        // wrap our query
+                        let query = #query_ident::#variant_ident(unwrapped);
+                        // build our shard message
+                        let query_msg = shoal_core::server::messages::ServerMsg::Query { meta, query };
+                        // send this message
+                        shard_local_tx.send(query_msg).await?;
+                    }
+                }
+            }
+        }
+    });
     // build our shutdown arms
     let shutdown_arms = fields.named.iter().map(|field| {
         // get our field ident and type
@@ -397,6 +427,18 @@ pub fn add(
                 Ok(())
             }
 
+            /// Release the queries waiting on a partition that could not be read
+            async fn fail_partition(
+                &mut self,
+                table: Self::TableNames,
+                partition_id: u64,
+                shard_local_tx: &kanal::AsyncSender<shoal_core::server::messages::ServerMsg<Self>>,
+            ) -> Result<(), shoal_core::server::ServerError> {
+                match table {
+                    #(#fail_partition_arms)*
+                };
+                Ok(())
+            }
 
             /// Shutdown this table and flush any data to disk if needed
             async fn shutdown(mut self) -> Result<(), shoal_core::server::ServerError> {

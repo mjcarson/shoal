@@ -19,9 +19,16 @@ use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
 use super::compactor::{classify_tail, TailLoss};
+use super::loader::{classify, LoadFailure};
 use super::reader::IntentLogReader;
 use super::stream::PAD_SENTINEL;
 use super::find_inactive_intent_logs;
+use crate::server::{ServerError, ShoalError};
+
+/// The errno for running out of file descriptors
+///
+/// Spelled out rather than pulled from `libc`, which this crate does not depend on.
+const EMFILE: i32 = 24;
 
 /// Create a temp dir on a filesystem that supports direct IO
 ///
@@ -474,3 +481,60 @@ fn map_corrupt_hash() {
     });
 }
 
+
+/// A partition pruned out from under a read is absent, not an error
+///
+/// This is the time-of-check-to-time-of-use race `FileSystem::load_partition` allows on
+/// purpose. Classifying it as retryable would spin on a partition that no longer exists.
+#[test]
+fn a_pruned_partition_is_classified_absent() {
+    // build the error a read of a pruned partition fails with
+    let error = ServerError::Shoal(ShoalError::PartitionNotFound { partition_id: 7 });
+    // it names a partition that is in no archive, so there is nothing to read
+    assert_eq!(classify(&error), LoadFailure::Absent);
+}
+
+/// A table missing from the archive map is never retried
+///
+/// The map is built once when the loader is spawned, so a name missing from it is missing
+/// for the life of the process and retrying it only spins.
+#[test]
+fn a_missing_table_map_is_not_retried() {
+    // build the error a read against an unknown table fails with
+    let error = ServerError::Shoal(ShoalError::TableMapMissing);
+    // this cannot come good on its own
+    assert_eq!(classify(&error), LoadFailure::Fatal);
+}
+
+/// An archive that could not be opened is worth trying again
+///
+/// Every read in flight holds a duplicated file handle and nothing bounds how many there
+/// are, so a shortage that other reads will give back is the realistic failure here.
+#[test]
+fn an_archive_open_failure_is_retryable() {
+    // build the error a read whose archive could not be opened fails with
+    // EMFILE is the one worth naming: every read in flight holds a duplicated handle
+    let error = ServerError::IO(std::io::Error::from_raw_os_error(EMFILE));
+    // another read finishing may free the descriptor this one needed
+    assert_eq!(classify(&error), LoadFailure::Retryable);
+    // the enhanced form glommio reports for a named file classifies the same way
+    let enhanced = ServerError::GlommioIO {
+        source: std::io::Error::from_raw_os_error(EMFILE),
+        op: "Opening",
+        path: None,
+        fd: None,
+    };
+    assert_eq!(classify(&enhanced), LoadFailure::Retryable);
+}
+
+/// An error nothing recognises is given up on rather than retried forever
+///
+/// A new error class defaulting to retryable would turn a permanent failure into a loop that
+/// never reports anything, which is the failure mode this whole path exists to remove.
+#[test]
+fn an_unrecognised_error_is_fatal() {
+    // build an error that has nothing to do with reading a partition
+    let error = ServerError::Shoal(ShoalError::NoShards);
+    // an error we cannot reason about is not assumed to be transient
+    assert_eq!(classify(&error), LoadFailure::Fatal);
+}

@@ -149,11 +149,18 @@ None => {
 }
 ```
 
-`block_on_load` is shared by all four unsorted operations. It parks the query on `blocked` and
-returns `true`, or returns `false` when the archive map has no entry for the key — which is
-the only case where "the row does not exist" is a truthful answer. It also queues behind an
-existing `blocked` entry rather than requesting a second read of a partition already in
-flight.
+`block_on_load` is shared by all four unsorted operations, and the sorted table has one of its
+own. It parks the query on `blocked` and returns `true`, or returns `false` when the archive map
+has no entry for the key — which is the case where "the row does not exist" is a truthful answer.
+It also queues behind an existing `blocked` entry rather than requesting a second read of a
+partition already in flight.
+
+It returns `false` in one other case, where that answer is *not* truthful: a query released by a
+read that failed carries `meta.skip_disk` for the partition it failed on, and answers from what
+is resident rather than asking for the same read again
+([Resolved #16, 51](../appendix/resolved/partition-load-failure.md)). That is the knowing trade —
+a short answer instead of a query parked forever — and it is why a failed read is logged at
+`ERROR` on the server.
 
 This asymmetry used to be a real one: unsorted `delete` and `update` consulted memory only and
 reported `false` for anything evicted or not yet faulted in. See

@@ -122,6 +122,11 @@ Driven by `ServerMsg::MarkEvictable`, sent by the compactor after it writes and 
 of partitions ([Compaction](../storage/compaction.md#6-mark-evictable)), and by the
 `load_partition` path once blocked queries have been queued.
 
+**A read that failed sends none.** `fail_partition` releases the same queries `load_partition`
+would have, but nothing was read: no partition entered `partitions` and none came out of the LRU
+that has to be put back, and a read that never happened has no generation to advance
+`flushed_generation` with ([Resolved #16, 51](../appendix/resolved/partition-load-failure.md)).
+
 **Which generation is passed matters more than it looks.** The compactor's message carries the
 generation of the log it has just sealed *and compacted*, so `gen <= flushed` genuinely means
 "already in an archive". The load path has no such generation to hand — it is releasing queries

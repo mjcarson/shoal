@@ -65,7 +65,9 @@ following a query:
 | `Shard::reply` | `shard.rs:479` |
 | `FileSystemCompactor::*` | `.../fs/compactor.rs:98`, `:129`, `:153`, `:193`, `:209`, `:278`, `:314` |
 | `FileSystem::read_intents` | `.../fs.rs:428-431` |
-| `loader::read_partition` | `.../fs/loader.rs:31` |
+| `loader::read_partition` | `.../fs/loader.rs`, one per partition read, whether it succeeds or fails |
+| `PersistentTable::block_on_load` | `.../persistent/sorted.rs`, `.../persistent/unsorted.rs` — one per query parked on a read |
+| `PersistentTable::fail_partition` | `.../persistent/sorted.rs`, `.../persistent/unsorted.rs` — one per read that gave up |
 
 **`Shard::handle_flushed` used to be on this list and deliberately is not any more.** It ran once
 per message the shard handled and was a parent to nothing — `Shard::reply` attaches itself to the

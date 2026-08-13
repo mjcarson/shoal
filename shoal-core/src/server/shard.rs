@@ -932,6 +932,15 @@ where
                         .load_partition(loaded, &self.shard_local_tx)
                         .await?
                 }
+                // this partition could not be read, so release the queries waiting on it
+                ServerMsg::PartitionLoadFailed {
+                    table,
+                    partition_id,
+                } => {
+                    self.tables
+                        .fail_partition(table, partition_id, &self.shard_local_tx)
+                        .await?
+                }
                 // Inform a table that some of its data has been flushed to storage
                 // this carries no position, it only tells us a durable watermark may
                 // have moved, so the work happens in handle_flushed below

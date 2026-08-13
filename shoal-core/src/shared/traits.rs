@@ -420,6 +420,25 @@ pub trait ShoalDatabase: 'static + Sized {
         shard_local_tx: &AsyncSender<ServerMsg<Self>>,
     ) -> Result<(), ServerError>;
 
+    /// Release the queries waiting on a partition that could not be read
+    ///
+    /// This is the other half of [`ShoalDatabase::load_partition`]: between them they cover
+    /// every outcome a partition read can have, and a read whose outcome reaches neither
+    /// leaves its queries parked for the life of the process.
+    ///
+    /// # Arguments
+    ///
+    /// * `table` - The table the partition that could not be read belongs to
+    /// * `partition_id` - The partition that could not be read
+    /// * `shard_local_tx` - The channel to replay the released queries on
+    #[allow(async_fn_in_trait)]
+    async fn fail_partition(
+        &mut self,
+        table: Self::TableNames,
+        partition_id: u64,
+        shard_local_tx: &AsyncSender<ServerMsg<Self>>,
+    ) -> Result<(), ServerError>;
+
     /// Shutdown this table and flush any data to disk if needed
     #[allow(async_fn_in_trait)]
     #[cfg(feature = "server")]

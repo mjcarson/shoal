@@ -287,36 +287,22 @@ impl<N: TableNameSupport> From<&FullArchiveMap<N>> for FilteredFullArchiveMap<N,
 }
 
 impl<N: TableNameSupport> FilteredFullArchiveMap<N, ArchiveMap> {
-    /// Get an archive for a specific table and partition
+    /// Get the archive map for a single table
+    ///
+    /// The handle is cloned out rather than borrowed, so a caller that goes on to await
+    /// against it is not holding a `RefCell` borrow of this map while it does.
     ///
     /// # Arguments
     ///
-    /// * `table_name` - The name of the table this partition is for
-    /// * `archive_uuid` - The id of the archive to get
-    pub async fn get_archive(
-        &self,
-        table_name: N,
-        partition_id: u64,
-    ) -> Result<(ArchiveEntry, DmaFile), ServerError> {
-        // get this tables archive map
+    /// * `table_name` - The name of the table to get the archive map of
+    pub fn get_table_map(&self, table_name: N) -> Result<Arc<ArchiveMap>, ServerError> {
+        // get this tables archive map, cloning the handle so the borrow ends here
         match self.map.borrow().get(&table_name) {
-            Some(table_map) => {
-                // get the location of this partitions data in the archives
-                let entry = match table_map.find_partition(partition_id) {
-                    Some(entry) => entry,
-                    None => {
-                        return Err(ServerError::Shoal(ShoalError::PartitionNotFound {
-                            partition_id,
-                        }))
-                    }
-                };
-                // get the archive for this partition
-                let archive = table_map.get_archive(&entry.archive).await?;
-                Ok((entry, archive))
-            }
-            None => return Err(ServerError::Shoal(ShoalError::TableMapMissing)),
+            Some(table_map) => Ok(table_map.clone()),
+            None => Err(ServerError::Shoal(ShoalError::TableMapMissing)),
         }
     }
+
 }
 
 /// A map of archives for the file system storage engine

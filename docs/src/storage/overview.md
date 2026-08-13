@@ -154,6 +154,13 @@ match self.map.find_partition(partition_id) {
 
 A get for a partition that has never been written costs one hash lookup and no IO.
 
+The check is deliberately made against the map rather than against the archive the read will
+open, which allows a race: the compactor can prune the entry between this `Some(_)` and the read
+running. That race is the reason a read reports its own outcome rather than only its data — a
+pruned partition is reported as absent, and the queries parked on it are released and answer
+correctly by finding nothing
+([Resolved #16, 51](../appendix/resolved/partition-load-failure.md)).
+
 ## Durability model
 
 1. A write serializes its intent and appends it to the log. `commit` returns the log offset

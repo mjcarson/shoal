@@ -3,8 +3,11 @@
 What the test suite reaches, what it does not, and the one place where it is unsound.
 
 **Established by running it.** `cargo check --workspace --all-targets` passes with warnings and
-`cargo test --workspace` passes: **452 integration tests** (one ignored), **225 `shoal-core` unit
-tests**, **21 doctests**. That is up from 410, 219, and 21 with
+`cargo test --workspace` passes: **454 integration tests** (one ignored), **229 `shoal-core` unit
+tests**, **21 doctests**. That is up from 452, 225, and 21 with
+[Resolved #16, 51](resolved/partition-load-failure.md) — one integration test per persistent table
+over a partition read that cannot be done, and four unit tests over how a read failure is
+classified. Before that it was up from 410, 219, and 21 with
 [F9](../features/ephemeral-tables.md) — two new integration binaries over the ephemeral tables, six
 unit tests over the storage engine that makes them ephemeral, and fifteen in `shoal-bench` over the
 eight workloads they made possible. Before that it was up from 359, 219, and 16 with
@@ -76,8 +79,8 @@ are in [Optimizations](optimizations.md).
 
 | Binary | Count | What it reaches |
 | --- | --- | --- |
-| `persistent_sorted_table.rs` | 57, one ignored | insert; `exists` true and false; delete; delete after restart; delete surviving restart; delete and update when the partition is not resident; delete and writes surviving eviction; update; update intent replay; multi-log recovery; empty rotated log cleanup; acknowledgement surviving `SIGKILL`; five limit tests; two cross-shard tests; five row-order tests; six sort-key selection tests; two sort-key `exists` tests; six range tests including the archived seek and the memory/disk span; the paging walk; two range `exists` tests; three end-to-end SHQL tests; nine projection tests including the archived scan, the blocked disk read, the cross-partition order, and a projected and an unprojected get in one batch |
-| `persistent_unsorted_table.rs` | 15 | insert; delete; update; delete and update when not resident; delete surviving eviction; insert after delete when not resident; zero limit; three multi-partition tests; three projection tests |
+| `persistent_sorted_table.rs` | 58, one ignored | insert; `exists` true and false; delete; delete after restart; delete surviving restart; delete and update when the partition is not resident; delete and writes surviving eviction; update; update intent replay; multi-log recovery; empty rotated log cleanup; acknowledgement surviving `SIGKILL`; five limit tests; two cross-shard tests; five row-order tests; six sort-key selection tests; two sort-key `exists` tests; six range tests including the archived seek and the memory/disk span; the paging walk; two range `exists` tests; three end-to-end SHQL tests; nine projection tests including the archived scan, the blocked disk read, the cross-partition order, and a projected and an unprojected get in one batch; and a get whose archive cannot be opened, which is the only test that reaches the loader's failure path ([Resolved #16, 51](resolved/partition-load-failure.md)) |
+| `persistent_unsorted_table.rs` | 16 | insert; delete; update; delete and update when not resident; delete surviving eviction; insert after delete when not resident; zero limit; three multi-partition tests; three projection tests; and the unsorted twin of the unreadable-archive test, because the two tables park and release blocked queries through different code |
 | `ephemeral_sorted_table.rs` | 15 | the sorted read and write paths with no storage engine beneath them ([F9](../features/ephemeral-tables.md)): insert; `exists` true and false; delete; update; a limit; cross-shard row order; named sort-key selection; a range and its bounds; a range `exists`; an end-to-end SHQL range; a projection. Plus the three that are about the table rather than about sorted tables — that nothing is written to the storage directory, that nothing survives a restart, and that memory pressure evicts none of it |
 | `ephemeral_unsorted_table.rs` | 12 | the same for the unsorted table, over a schema that also holds a persistent one and declares the ephemeral table **first** — which is what pins that a persistent table declared after an ephemeral one still gets its loader spawned, and therefore can still read a partition off disk |
 | `shql.rs` | 53 | SHQL parsing and binding against a real schema, including range binding and the role refusals, projection binding and its two refusals, plus completion suggestions |
@@ -101,7 +104,7 @@ exercise durability end to end, and they exist because
 | --- | --- | --- |
 | `shared/queries/parser/tests.rs` | 59 | the SHQL grammar, including `IN` lists, `OR` folding, each range operator, the folding and refusals around a range, and the projection slot with its offsets |
 | `shared/queries/parser/complete/tests.rs` | 27 | completion suggestion generation, including the range operator tokens and a projection standing where the star does |
-| `.../storage/fs/tests.rs` | 21 | the intent log reader against real files, including which tail shapes are damage and which are how a healthy log ends, and what a compaction is about to throw away with the log it deletes |
+| `.../storage/fs/tests.rs` | 25 | the intent log reader against real files, including which tail shapes are damage and which are how a healthy log ends, and what a compaction is about to throw away with the log it deletes; and how a failed partition read is classified — which of the three classes is retried, and that an unrecognised error is given up on rather than retried forever ([Resolved #16, 51](resolved/partition-load-failure.md)) |
 | `.../storage/fs/stream_tests.rs` | 14 | `StreamWriter` alignment, padding, and watermarks, including that submitting a write advances neither watermark in either durability mode — the premise [F5](../features/flushed-sweep-gate.md)'s sweep gate rests on |
 | `tables/partitions.rs` | 59 | tombstone bookkeeping, limits, sort-key selection and range selection on `get` and `exists`, the empty-range guard, `merge_from_disk` sizing, the recovery counting that separates a correctly dropped update from a lost one, and the projected scan across all three selections; plus the archived arm of all of those — that a truncated or root-corrupted archive is refused, that the unchecked read lands on the same reference the checked one does, and that an archived partition answers every selection identically to a resident one holding the same rows ([F4](../features/validated-archives.md)) |
 | `shared/queries.rs` | 10 | sort-key normalization, and `SortRange` emptiness and containment |
@@ -247,8 +250,8 @@ line (`conf.rs:111`) from each binary in turn:
 
 | Binary | Ports bound |
 | --- | --- |
-| `persistent_sorted_table` | 13000-13085, plus 13900 and 13901 |
-| `persistent_unsorted_table` | 13000-13024 |
+| `persistent_sorted_table` | 13000-13100, plus 13900 and 13901 |
+| `persistent_unsorted_table` | 13000-13031 |
 
 Both ranges have grown since they were first measured — 13034 and 13021 — because every test that
 restarts a server binds another port. Re-measure them with `-- --nocapture` rather than trusting

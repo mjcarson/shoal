@@ -353,14 +353,19 @@ Every sorted read consults it before answering:
 ```rust
 MaybeLoaded::Loaded { partition, .. } => {
     if partition.check_disk {
-        let will_load = self.storage.load_partition(self.table_name, *partition_key, &self.loader_tx).await.unwrap();
-        if will_load { /* park the query and wait */ continue; }
+        // parks this query and returns true if this partition has to be read first
+        if self.block_on_load(*partition_key, &meta, blocked_query).await { continue; }
     }
     for row in partition.live_row_values() { ... }
 }
 ```
 
-`.../persistent/sorted.rs:428-470`
+`.../persistent/sorted.rs`, the get path
+
+**A read that fails leaves `check_disk` true.** Setting it false there would say memory holds
+everything, about a partition that was never read — which is why the flag is deliberately left
+alone when a read gives up, and why a later query tries the archive again
+([Resolved #16, 51](../appendix/resolved/partition-load-failure.md#invariants-to-uphold)).
 
 Without it, an insert into a partition that also exists on disk would make subsequent reads
 return only the newly inserted rows. `load_partition` on the storage engine is cheap when

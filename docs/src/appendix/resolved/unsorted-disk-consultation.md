@@ -54,6 +54,10 @@ tombstone. A query now queues behind an existing `blocked` entry
 - **Only one loader request may be in flight per partition.** Beyond the wasted read, a late
   arrival taking the `Vacant` arm reinstalls the archive copy over whatever memory holds,
   including a tombstone.
+- **`block_on_load` is now also where a released query is stopped from re-requesting a read that
+  failed**, so its `false` return has two meanings rather than one: the partition is not on disk,
+  or this query has already been told the read of it failed
+  ([Resolved #16, 51](partition-load-failure.md)).
 
 ## Tests
 

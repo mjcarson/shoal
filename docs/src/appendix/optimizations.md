@@ -1019,6 +1019,12 @@ a table accumulates archives. It is filed here because it was found here, but it
 a defect that has not been filed as one — the reason it has not is that no `EMFILE` has been
 observed, so it is an argument rather than a symptom.
 
+It is no longer only an argument about the future, though. `EMFILE` is the failure the loader's
+retry classification exists for: an archive that cannot be opened is the one error class worth
+attempting again, precisely because the descriptor another read is holding may come back
+([Resolved #16, 51](resolved/partition-load-failure.md#the-fix)). Doing this optimization would
+narrow what that retry is for.
+
 `read_partition_helper` closes the handle the map just handed it (`.../fs/loader.rs:19-28`), even
 though `ArchiveMap` caches open handles in `loaded_archives` specifically so it does not have to
 reopen (`.../fs/map.rs:332`, `:455-475`). Borrowing the cached handle rather than duplicating it

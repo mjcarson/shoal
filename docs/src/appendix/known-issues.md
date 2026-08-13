@@ -20,14 +20,17 @@ test suite does and does not reach is in [Test Coverage](test-coverage.md).
 Defects that have been fixed move to [Resolved Issues](resolved-issues.md), one page each,
 carrying the reasoning and the invariants the fix depends on. Item numbers are shared between
 the two pages and never reused, so a number appears on exactly one of them — which is why this
-list starts at 15 and skips 26, 31, 39, 44, 45, and 48, and why item 55 is the newest. The exceptions are items 20 and 24, which were only
-partly fixed: the open remainder is here and the rest is there. Item 9 was a third exception
+list starts at 15 and skips 26, 31, 39, 44, 45, and 48, and why item 57 is the newest. The exceptions are items 16, 20, 24 and 51, which were only
+partly fixed: the open remainder is here and the rest is there. Item 9 was a fifth exception
 until its second half was fixed, and is now on the resolved page alone.
 
 **Baseline as of writing:** `cargo check --workspace --all-targets` passes with warnings;
-`cargo test --workspace` passes — 452 integration tests (one ignored), 225 `shoal-core` unit
+`cargo test --workspace` passes — 454 integration tests (one ignored), 229 `shoal-core` unit
 tests, 21 doctests, plus 8 more behind `--features stage-profile` that a default run does not
-reach ([Test Coverage](test-coverage.md)). That is up from 410, 219 and 21 with
+reach ([Test Coverage](test-coverage.md)). That is up from 452, 225 and 21 with
+[Resolved #16, 51](resolved/partition-load-failure.md) — two integration tests over a partition
+read that fails and four unit tests over how a read failure is classified. Before that it was up
+from 410, 219 and 21 with
 [F9](../features/ephemeral-tables.md), and before that from 359, 219 and 16 with
 [F8](../features/purpose-built-workloads.md), whose count moved in **both** directions — it
 deleted a comparison engine along with its tests and moved others between crates, which that page
@@ -95,22 +98,12 @@ bounds in-flight writes only.
 | `shard.rs:623` | Client UUID collision |
 | `comms.rs:53`, `:72` | Unknown shard contact |
 | `.../fs/stream.rs:108`, `:115` | WAL write or notification failure |
-| `.../fs/loader.rs:138`, `:158` | Any loader task error |
 | `shared/traits.rs:54` | rkyv serialization failure |
 | `.../persistent/sorted.rs:245`, `:355`, `:453`, `:599`, `:734`, `:890` | Corrupt archive data |
 
-There is also a live `todo!()`:
-
-```rust
-if let Err(_) = self.spawn_task(table_name, partition_id).await {
-    todo!("Add back onto loader channel");
-}
-```
-
-`.../fs/loader.rs:126-129`
-
-A partition load that fails to spawn panics the loader. Any query blocked on that partition
-then waits forever, since there is no timeout ([item 15](#15-no-backpressure-anywhere)).
+**The loader's three are gone.** A `todo!()` on the partition read path and the two `panic!`s
+that fired on any loader task error have been replaced by a failure the shard is told about:
+[Resolved #16, 51](resolved/partition-load-failure.md). The rest of this item is open.
 
 ### 27. SHQL cannot express a string containing a single quote
 
@@ -165,10 +158,14 @@ A `Gather` is inserted when a query is split across shards (`shard.rs:470-480`) 
 when `outstanding` reaches zero (`shard.rs:643-651`). Nothing else ever removes one.
 
 A shard that never sends its share leaves the entry resident forever and the client waiting
-forever. That is not hypothetical: a partition load that fails to spawn hits the `todo!()` in
-`.../fs/loader.rs:126-129` and panics the loader, stranding every query blocked on it
-([item 16](#16-panics-on-the-hot-path)), and there is no timeout anywhere to break the wait
-([TODOs](todos.md#timeouts)).
+forever, and there is no timeout anywhere to break the wait ([TODOs](todos.md#timeouts)).
+
+~~That is not hypothetical: a partition load that fails to spawn hits the `todo!()` in the
+loader and panics it, stranding every query blocked on it.~~ That route is closed — a partition
+read that fails now releases the queries parked on it
+([Resolved #16, 51](resolved/partition-load-failure.md)). What remains is the general defect:
+nothing bounds how long a `Gather` waits for a share, so any *other* way a shard can fail to
+send one leaks it just as permanently.
 
 Client disconnect does not clear them either, so this compounds with
 [item 32](#32-a-disconnected-client-is-never-cleaned-up-anywhere).
@@ -503,27 +500,33 @@ no-op at the end of an IO path: if the two ever diverge, nothing here would say 
 same extent, so keep it and drop what we read`. An `else` that says why is worth more than a
 pattern that quietly does not match.
 
-### 51. A partition that fails to load never releases the queries blocked on it
+### 51. A partition load that fails *inside* `load_partition` still never releases its queries
+
+**The larger half of this is [fixed](resolved/partition-load-failure.md).** A read that fails
+before it reaches the table — the archive could not be opened, or the partition was pruned out
+from under it — now reports itself, and the queries parked on it are released and replayed. What
+follows is the remainder.
 
 `.../persistent/sorted.rs` and `.../persistent/unsorted.rs` — `load_partition` builds the loaded
 partition and then, at the end, drains `self.blocked` for the queries that were parked on it. Every
-early exit between those two points leaves those queries parked forever: the client waits on a
+early exit between those two points still leaves those queries parked forever: the client waits on a
 response that no longer has anything to produce it, and the entry in `blocked` is never collected.
 
+There is one such exit today, `ValidatedArchive::new` on a corrupt archive. It returns `Err`, which
+propagates up through the shard message loop and ends the shard, so the *symptom* of that particular
+one is hidden behind a bigger failure. The defect is that the function has early exits at all and the
+next one added to it may not be fatal.
+
 Not introduced by [F4](../features/validated-archives.md), and not fixed by it — but F4 is what made
-it worth filing, because it added the first failure that returns rather than panics. Before it the
-only way out of that function was a panic, which took the whole shard with it and made the parked
-queries somebody else's problem. Now a corrupt archive returns `Err`, which propagates up through
-the shard message loop and still ends the shard, so the *symptom* is unchanged today. What changed is
-that the function now has an early exit at all, and the next one added to it may not be fatal.
+it worth filing, because it added the first failure that returns rather than panics.
 
 The same shape is on the recovery path in `FileSystem::load_scanned`, which is less interesting
 because nothing is blocked yet during startup.
 
-**Fix direction:** the parked queries are the load's responsibility whether it succeeded or not.
-Draining `blocked` and answering its entries with the error belongs in the failure path, not only in
-the success one — which needs a query error response that can carry a storage failure, so it is
-larger than it sounds. Worth taking with [item 16](#16-panics-on-the-hot-path).
+**Fix direction:** `fail_partition` is already there and already does the releasing, so this is now
+just a matter of routing `load_partition`'s own errors into it rather than out of the function.
+Answering those queries with something better than "found nothing" needs a query error response that
+can carry a storage failure ([item 56](#56-a-response-cannot-say-that-a-read-failed)).
 
 ### 35. A `RefCell` borrow is held across three awaits in the compactor
 
@@ -813,6 +816,54 @@ until it was changed to use `exists`.
 **Established by reproducing it**, while building F8. `QuerySuceededOpts` already exists as the
 knob that decides what counts as success, so the fix is plausibly to let `send_one` take one rather
 than always using the default.
+
+### 56. A response cannot say that a read failed
+
+`ResponseAction` (`shoal-core/src/shared/responses.rs:28-39`) has five variants and none of them
+carries an error. A get answers `Get(None)`, and that one answer has to stand for both "this
+partition holds no such row" and "the copy on disk could not be read".
+
+That gap is what decides the shape of every storage failure that reaches a query. A read that
+gives up now releases the queries parked on it and they answer from what is resident
+([Resolved #16, 51](resolved/partition-load-failure.md)) — which is the right thing to do with
+them and still reports a short answer as a complete one. The alternative, ending the shard, is
+worse: it turns one unreadable archive into an outage.
+
+The cost is bounded by how visible the failure is elsewhere: the loader logs every give-up at
+`ERROR` naming the table, the partition and the errno. So the server knows. The client does not.
+
+**Fix direction:** a `ResponseAction::Error` variant, which is a wire format change and reaches
+the gather/merge path (`responses.rs:51-70`), the client, and every site that builds a response.
+This is also what [item 51](#51-a-partition-load-that-fails-inside-load_partition-still-never-releases-its-queries)
+needs to answer its parked queries with something truthful, and what
+[item 55](#55-a-get-that-found-nothing-is-reported-as-a-query-that-failed) needs to stop
+conflating an empty result with a failure — the three want the same variant.
+
+### 57. A missing archive is created empty rather than reported
+
+```rust
+let file = OpenOptions::new()
+    .create(true)
+    .read(true)
+    .write(true)
+    .dma_open(&path)
+```
+
+`.../fs/map.rs:461-470`, `ArchiveMap::get_archive`
+
+A read whose archive is not on disk does not fail. `create(true)` makes an empty one, `read_at`
+against it comes back short, and the failure surfaces later as a validation error on bytes that
+were never written — which ends the shard (`.../persistent/sorted.rs:349-352`) rather than
+naming the missing file. A stray zero-byte archive is left behind each time.
+
+This is reachable: the compactor deletes archives it has rewritten (`.../fs/compactor.rs:604`)
+after re-pointing their entries, so a read holding an entry from before that re-point looks for
+a file that is gone.
+
+**Fix direction:** `get_archive` has two callers with opposite needs — the writer wants the file
+created, a read wants to know it is missing. Split them, and let the read path return an error
+naming the archive. That error then classifies as `Fatal` and takes the same release path the
+loader already has, so the queries waiting on it are answered instead of the shard dying.
 
 Everything that has been fixed, and why it was fixed the way it was, is in
 [Resolved Issues](resolved-issues.md). The SHQL parser has gained test coverage at both stages

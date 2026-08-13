@@ -195,30 +195,25 @@ and the coordinator's reorder gives the cross-shard one. See
 ## Blocking on a disk read
 
 ```rust
-let will_load = if self.blocked.contains_key(partition_key) {
-    // a load is already in flight for this partition so queue
-    // behind it instead of reading the same data again
-    true
-} else {
-    self.storage
-        .load_partition(self.table_name, *partition_key, &self.loader_tx)
-        .await
-        .unwrap()
-};
-if will_load {
-    let entry = self.blocked.entry(*partition_key).or_default();
-    let blocked_get = get.to_blocked(*partition_key);
-    entry.push((meta.clone(), SortedQuery::Get(blocked_get)));
-    blocked.push(*partition_key);
+// build a query for just this blocked partition
+let blocked_get = SortedQuery::Get(get.to_blocked(*partition_key));
+// park this get if this partition has to be read from disk first
+if self.block_on_load(*partition_key, &meta, blocked_get).await {
+    // leave this slot empty for the replay to fill
     continue;
 }
 ```
 
-`.../persistent/sorted.rs:428-470`
+`.../persistent/sorted.rs`, the get path
 
-`load_partition` returns whether a read was started
-([Storage Overview](../storage/overview.md#the-archive-map)) — `false` means the archive map
-has no entry, so the partition does not exist and the loop moves on with no IO.
+`block_on_load` answers whether this query was parked. It returns `false` — meaning the caller
+should answer now — in two cases, and they are different in kind:
+
+- the archive map has no entry for the key, so the partition does not exist and there is no IO
+  to do ([Storage Overview](../storage/overview.md#the-archive-map));
+- this query is a replay released by a read that *failed*, and is carrying `meta.skip_disk` for
+  this partition. Asking for that read again would park it on the same failure without end
+  ([Resolved #16, 51](../appendix/resolved/partition-load-failure.md)).
 
 `to_blocked` narrows the query to the single partition being waited on
 (`shared/queries/sorted.rs:91-98`), so when it resumes it does not redo work already
@@ -227,10 +222,12 @@ accumulated in `pending_data`.
 Note the query is parked under `blocked[partition_key]`, keyed by partition rather than by
 query. Several queries waiting on the same partition share one entry and are all released by
 one read — and, because a non-empty entry means a read is already in flight, they no longer
-each ask the loader for it. Unsorted tables express the same rule as a helper,
-`block_on_load` (`.../persistent/unsorted.rs:300-337`); sorted tables inline it at each of
-their eight blocking sites because the surrounding match already holds a borrow of
-`self.partitions`.
+each ask the loader for it.
+
+**Both table kinds express this as one `block_on_load`.** The sorted table used to inline it at
+each of its blocking sites, on the reasoning that the surrounding match already held a borrow of
+`self.partitions`; six copies of a rule is how half of it gets updated, which is what a single
+`skip_disk` check spread over six sites would have been.
 
 ### Resumption
 
@@ -436,8 +433,12 @@ synchronisation mechanism. Simple, and dependent on nothing reordering that queu
 - A projection changes what is deserialized, not what is read: a cold partition is read whole
   either way, the same caveat a range carries
   ([F2](../features/projections.md#limitations)).
-- No timeout on blocked queries. If a `ServerMsg::Partition` never arrives — a loader error,
-  for instance, which hits a `todo!()` (`.../fs/loader.rs:128`) — the query is parked
-  forever, with no way for the client to learn that.
+- No timeout on blocked queries. A read that *fails* now releases the queries parked on it
+  ([Resolved #16, 51](../appendix/resolved/partition-load-failure.md)), so the loader is no
+  longer a way to reach this. A read that neither completes nor fails still parks them forever,
+  with no way for the client to learn that.
+- A read that failed is answered exactly as an empty partition is. The server logs the failure at
+  `ERROR`; the response has no variant that can carry one
+  ([item 56](../appendix/known-issues.md#56-a-response-cannot-say-that-a-read-failed)).
 - `pending_data` and `blocked` are unbounded.
 - Memory accounting corrupts on the partition-shrinks path.

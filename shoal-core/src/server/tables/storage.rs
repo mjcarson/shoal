@@ -556,6 +556,8 @@ mod tests {
                 // these entries are built by hand rather than routed, so they carry stamps
                 // based at now rather than at a socket read
                 stamps: StageStamps::new(Stamp::now()),
+                // nothing here replays a query, so no read is ever exempted
+                skip_disk: None,
             };
             pending.add(meta, *pos, ResponseAction::Insert(true));
         }
@@ -615,6 +617,8 @@ mod tests {
                 // these entries are built by hand rather than routed, so they carry stamps
                 // based at now rather than at a socket read
                 stamps: StageStamps::new(Stamp::now()),
+                // nothing here replays a query, so no read is ever exempted
+                skip_disk: None,
             };
             pending.add(meta, pos, ResponseAction::Insert(true));
             // the watermark has not moved, so neither has what is releasable

@@ -36,6 +36,15 @@ pub struct QueryMetadata {
     /// A zero sized type unless the `stage-profile` feature is on, which is what lets this
     /// ride along in the response tuples without a `#[cfg]` at every site that builds one.
     pub stamps: StageStamps,
+    /// A partition this execution must answer without reading from disk
+    ///
+    /// Set only when a load for that partition failed, so the replay that failure releases
+    /// answers from what is resident instead of asking for the same read that just failed.
+    /// It has to travel with the query rather than sit on the table, because a failed load
+    /// releases several queries at once and each of them consumes the exemption separately.
+    ///
+    /// This is server side state on a server side struct - it never reaches a client.
+    pub skip_disk: Option<u64>,
 }
 
 impl QueryMetadata {
@@ -65,6 +74,9 @@ impl QueryMetadata {
             gather,
             span: Span::current(),
             stamps,
+            // a query starts out with no reason to skip a read, since only a load that has
+            // already failed can give it one
+            skip_disk: None,
         }
     }
 
@@ -151,6 +163,20 @@ where
     },
     /// A partition loaded from disk. This can never be sent across threads!
     Partition(LoadedPartitionKinds<D>),
+    /// A partition that could not be loaded from disk
+    ///
+    /// A load completing is the only thing that drains a tables `blocked` map, so a load that
+    /// fails has to say so rather than simply not arriving - otherwise every query parked on
+    /// that partition waits for a message that will never be sent, and so does its client.
+    ///
+    /// This carries no error. The loader is where the context is richest, so it logs what went
+    /// wrong; what the shard needs is only which partition to release.
+    PartitionLoadFailed {
+        /// The table the partition that could not be read belongs to
+        table: D::TableNames,
+        /// The partition that could not be read
+        partition_id: u64,
+    },
     /// Some data has been flushed to storage
     ///
     /// This carries no position. The writer tracks its own durable watermark in
@@ -197,6 +223,13 @@ impl<D: ShoalDatabase> Clone for ServerMsg<D> {
                 panic!("A gathered response is only ever sent to one shard")
             }
             ServerMsg::Partition(loaded) => ServerMsg::Partition(loaded.clone()),
+            ServerMsg::PartitionLoadFailed {
+                table,
+                partition_id,
+            } => ServerMsg::PartitionLoadFailed {
+                table: *table,
+                partition_id: *partition_id,
+            },
             ServerMsg::DataFlushed => ServerMsg::DataFlushed,
             ServerMsg::MarkEvictable {
                 generation,

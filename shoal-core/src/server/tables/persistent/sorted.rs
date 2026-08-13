@@ -367,6 +367,88 @@ where
             .map(|unblocked| (unblocked, self.flushed_generation)))
     }
 
+    /// Release the queries parked on a partition that could not be read
+    ///
+    /// A load completing is the only thing that drains `blocked`, so without this a failed
+    /// read leaves every query it was carrying parked forever and their clients waiting on
+    /// responses that nothing will ever produce.
+    ///
+    /// Each released query is marked to answer without that read, because the entry it failed
+    /// on is still in the archive map for every failure except a pruned partition - so a replay
+    /// that consulted disk again would park on the same failure and never terminate.
+    ///
+    /// # Arguments
+    ///
+    /// * `partition_id` - The partition that could not be read
+    #[instrument(name = "PersistentTable::fail_partition", skip(self))]
+    pub fn fail_partition(
+        &mut self,
+        partition_id: u64,
+    ) -> Option<Vec<(QueryMetadata, SortedQuery<R>)>> {
+        // take the queries that were parked on this partition
+        let mut blocked = self.blocked.remove(&partition_id)?;
+        // log how many queries this failure released
+        event!(
+            Level::WARN,
+            msg = "Releasing queries parked on a partition that could not be read",
+            table = %self.table_name,
+            partition_id,
+            released = blocked.len(),
+        );
+        // mark each of them to answer without the read that just failed
+        for (meta, _) in &mut blocked {
+            meta.skip_disk = Some(partition_id);
+        }
+        Some(blocked)
+    }
+
+    /// Block a query on a partition being loaded from disk
+    ///
+    /// Returns true if this query was parked and false if this partition has no
+    /// data on disk to wait for, in which case the caller should answer now.
+    ///
+    /// # Arguments
+    ///
+    /// * `partition_key` - The key of the partition this query needs
+    /// * `meta` - The metadata for the query to park
+    /// * `query` - The query to replay once this partition has been loaded
+    #[instrument(name = "PersistentTable::block_on_load", skip_all)]
+    async fn block_on_load(
+        &mut self,
+        partition_key: u64,
+        meta: &QueryMetadata,
+        query: SortedQuery<R>,
+    ) -> bool {
+        // if this partition already has blocked queries then a load is in flight
+        // for it, so queue behind that load rather than requesting it again
+        if let Some(entry) = self.blocked.get_mut(&partition_key) {
+            // park this query behind the load we have already requested
+            entry.push((meta.clone(), query));
+            return true;
+        }
+        // a query released by a failed load answers without the read that just failed,
+        // since asking for it again would only park this query on the same failure
+        if meta.skip_disk == Some(partition_key) {
+            return false;
+        }
+        // try to load this partition from disk if it exists
+        let will_load = self
+            .storage
+            .load_partition(self.table_name, partition_key, &self.loader_tx)
+            .await
+            .unwrap();
+        // if this partition has no data on disk then there is nothing to wait for
+        if !will_load {
+            return false;
+        }
+        // park this query until its partition has been loaded from disk
+        self.blocked
+            .entry(partition_key)
+            .or_default()
+            .push((meta.clone(), query));
+        true
+    }
+
     /// Cast and handle a serialized query
     ///
     /// # Arguments
@@ -531,25 +613,12 @@ where
             };
             // read this partition from disk if it might hold rows we do not have
             if check_disk {
-                // try to load this partition from disk if it exists
-                let will_load = if self.blocked.contains_key(partition_key) {
-                    // a load is already in flight for this partition so queue behind it
-                    // instead of reading the same data again
-                    true
-                } else {
-                    self.storage
-                        .load_partition(self.table_name, *partition_key, &self.loader_tx)
-                        .await
-                        .unwrap()
-                };
+                // build a query for just this blocked partition
+                let blocked_get = SortedQuery::Get(get.to_blocked(*partition_key));
+                // park this get if this partition has to be read from disk first
+                //
                 // a partition being read fills its own slot when this get is replayed for it
-                if will_load {
-                    // add this query to the list of ones waiting on this partition
-                    let entry = self.blocked.entry(*partition_key).or_default();
-                    // build a query for just this blocked partition
-                    let blocked_get = get.to_blocked(*partition_key);
-                    // add our blocked query and its metadata to this partitions blocked list
-                    entry.push((meta.clone(), SortedQuery::Get(blocked_get)));
+                if self.block_on_load(*partition_key, &meta, blocked_get).await {
                     // leave this slot empty for the replay to fill
                     continue;
                 }
@@ -640,25 +709,15 @@ where
             };
             // read this partition from disk if it might hold rows we do not have
             if check_disk {
-                // try to load this partition from disk if it exists
-                let will_load = if self.blocked.contains_key(partition_key) {
-                    // a load is already in flight for this partition so queue behind it
-                    // instead of reading the same data again
-                    true
-                } else {
-                    self.storage
-                        .load_partition(self.table_name, *partition_key, &self.loader_tx)
-                        .await
-                        .unwrap()
-                };
+                // build a query for just this blocked partition
+                let blocked_exists = SortedQuery::Exists(exists_query.to_blocked(*partition_key));
+                // park this exists if this partition has to be read from disk first
+                //
                 // a partition being read is answered about when this exists is replayed for it
-                if will_load {
-                    // add this query to the list of ones waiting on this partition
-                    let entry = self.blocked.entry(*partition_key).or_default();
-                    // build a query for just this blocked partition
-                    let blocked_exists = exists_query.to_blocked(*partition_key);
-                    // add our blocked query and its metadata to this partitions blocked list
-                    entry.push((meta.clone(), SortedQuery::Exists(blocked_exists)));
+                if self
+                    .block_on_load(*partition_key, &meta, blocked_exists)
+                    .await
+                {
                     // remember that we are still waiting on this partition
                     blocked.push(*partition_key);
                     continue;
@@ -758,29 +817,13 @@ where
                             return None;
                         } else if partition.check_disk {
                             // we couldn't find the row to delete but it may be on on disk
-                            let will_load = if self.blocked.contains_key(&key) {
-                                // a load is already in flight for this partition so queue
-                                // behind it instead of reading the same data again
-                                true
-                            } else {
-                                self.storage
-                                    .load_partition(self.table_name, key, &self.loader_tx)
-                                    .await
-                                    .unwrap()
+                            let blocked_delete = SortedQuery::Delete {
+                                key,
+                                sort_key: sort,
                             };
-                            // check if this partition has any on disk data to load
-                            if will_load {
-                                // this partition has on disk data so block this query
-                                // until its loaded and then retry
-                                let entry = self.blocked.entry(key).or_default();
-                                // add this query to our blocked queries
-                                entry.push((
-                                    meta,
-                                    SortedQuery::Delete {
-                                        key,
-                                        sort_key: sort,
-                                    },
-                                ));
+                            // park this delete if this partition has to be read from disk
+                            // first, so it can be retried once we hold the archived copy
+                            if self.block_on_load(key, &meta, blocked_delete).await {
                                 // theres nothing to respond with yet
                                 return None;
                             }
@@ -852,28 +895,12 @@ where
             }
             None => {
                 // we don't have this partition loaded so try to load it
-                let will_load = if self.blocked.contains_key(&key) {
-                    // a load is already in flight for this partition so queue behind it
-                    // instead of reading the same data again
-                    true
-                } else {
-                    self.storage
-                        .load_partition(self.table_name, key, &self.loader_tx)
-                        .await
-                        .unwrap()
+                let blocked_delete = SortedQuery::Delete {
+                    key,
+                    sort_key: sort,
                 };
                 // this partition exists and is being loaded
-                if will_load {
-                    // get an entry to this partitions blocked queries
-                    let entry = self.blocked.entry(key).or_default();
-                    // add this to our blocked queries
-                    entry.push((
-                        meta,
-                        SortedQuery::Delete {
-                            key,
-                            sort_key: sort,
-                        },
-                    ));
+                if self.block_on_load(key, &meta, blocked_delete).await {
                     None
                 } else {
                     // build the failed delete response
@@ -945,26 +972,12 @@ where
                             return None;
                         } else if partition.check_disk {
                             // we don't have this partition loaded so try to load it from disk
-                            let will_load = if self.blocked.contains_key(&update.partition_key) {
-                                // a load is already in flight for this partition so queue
-                                // behind it instead of reading the same data again
-                                true
-                            } else {
-                                self.storage
-                                    .load_partition(
-                                        self.table_name,
-                                        update.partition_key,
-                                        &self.loader_tx,
-                                    )
-                                    .await
-                                    .unwrap()
-                            };
-                            // if we are going to load it from disk add this query to our blocked queries
-                            if will_load {
-                                // get an entry to this partitions blocked queries
-                                let entry = self.blocked.entry(update.partition_key).or_default();
-                                // add this to our blocked queries
-                                entry.push((meta, SortedQuery::Update(update)));
+                            let partition_key = update.partition_key;
+                            // park this update if this partition has to be read from disk first
+                            if self
+                                .block_on_load(partition_key, &meta, SortedQuery::Update(update))
+                                .await
+                            {
                                 // wait for this partition to get loaded
                                 return None;
                             }
@@ -1035,22 +1048,12 @@ where
             }
             None => {
                 // we don't have this partition loaded so try to load it
-                let will_load = if self.blocked.contains_key(&update.partition_key) {
-                    // a load is already in flight for this partition so queue behind it
-                    // instead of reading the same data again
-                    true
-                } else {
-                    self.storage
-                        .load_partition(self.table_name, update.partition_key, &self.loader_tx)
-                        .await
-                        .unwrap()
-                };
+                let partition_key = update.partition_key;
                 // this partition exists and is being loaded
-                if will_load {
-                    // get an entry to this partitions blocked queries
-                    let entry = self.blocked.entry(update.partition_key).or_default();
-                    // add this to our blocked queries
-                    entry.push((meta, SortedQuery::Update(update)));
+                if self
+                    .block_on_load(partition_key, &meta, SortedQuery::Update(update))
+                    .await
+                {
                     None
                 } else {
                     // Partition doesn't exist - update fails

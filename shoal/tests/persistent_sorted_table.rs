@@ -2429,3 +2429,87 @@ async fn shql_star_still_asks_for_whole_rows() -> Result<(), TestError> {
     pool.exit()?;
     Ok(())
 }
+
+/// A get whose partition cannot be read is answered instead of hanging forever
+///
+/// A load completing is the only thing that drains a tables `blocked` map, so a read that
+/// fails has to report that it failed. Before it did, the loader hit a `todo!()` and panicked
+/// its shard, and this get waited on a response nothing was left to produce.
+///
+/// The second half is what stops the fix livelocking. The released get is replayed, and the
+/// archive entry it failed on is still in the map, so a replay that consulted disk again
+/// would park on the same failure and be released again without end. The timeout is what
+/// catches that: a livelock and a hang look the same from here.
+///
+/// Skipped when the archives cannot be made unreadable, which is the case under root.
+#[tokio::test]
+async fn a_get_whose_partition_cannot_be_read_does_not_hang() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = utils::test_dir();
+    // start a shoal server whose intent log rotates every few writes, so our rows reach an
+    // archive rather than sitting in a log that the next startup would replay into memory
+    let (client, pool) =
+        utils::start_with_conf::<TestDb>(utils::build_pressured_config(&temp_dir)).await?;
+    // build a test partition to insert
+    let test_data = TestRecord::new("partition_key", "sort_key", "woot");
+    // send this query
+    client.send_one(test_data.clone()).await?;
+    // write enough rows after it to rotate the intent log and compact it into an archive
+    for index in 0..64 {
+        // build a row in its own partition so this fills the log rather than one partition
+        let filler = TestRecord::new(
+            format!("filler_{index}"),
+            "sort_key".to_string(),
+            "x".repeat(256),
+        );
+        client.send_one(filler).await?;
+    }
+    // shut this server down, which flushes and compacts our rows into an archive
+    pool.exit()?;
+    // wait for threads to fully clean up and port to be released
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    // start the server again, so nothing is resident and every get has to read from disk
+    let (client, pool) = utils::start::<TestDb>(&temp_dir).await?;
+    // take the permissions off our archives so the read of this partition fails
+    let Some(hidden) = utils::UnreadableArchives::new(&temp_dir, "TestRecord") else {
+        // we are running as root, so there is no failure to observe
+        pool.exit()?;
+        return Ok(());
+    };
+    // get the row we inserted, which cannot be read now
+    let get = TestRecordGet::new(vec![test_data.partition_key.clone()]);
+    // this has to come back, and what it comes back with matters less than that it does
+    let answered = tokio::time::timeout(Duration::from_secs(20), client.send_one(get)).await;
+    // an elapsed timeout is the failure this test exists to catch
+    assert!(
+        answered.is_ok(),
+        "a get whose partition could not be read never came back"
+    );
+    // this get could not read the only copy of the row, so it finds nothing
+    //
+    // that is the limitation this fix knowingly carries: a read that failed is reported to
+    // the client the same way an empty partition is, because a response cannot yet say that
+    // a read failed
+    assert!(matches!(
+        answered.expect("timed out"),
+        Err(shoal_core::client::Errors::QueryDidNotSucceed {
+            kind: shoal_core::shared::responses::ResponseActionNames::Get,
+            ..
+        })
+    ));
+    // put the archives back
+    drop(hidden);
+    // a later get reads from disk again, since a failed read must not convince this table
+    // that what it holds in memory is all there is
+    let get = TestRecordGet::new(vec![test_data.partition_key.clone()]);
+    let response = client.send_one(get).await?;
+    // access our response
+    let access = response.access::<TestRecord>()?.unwrap().first().unwrap();
+    // deserialize our test record
+    let record = TestRecord::deserialize(access).unwrap();
+    // the row was readable all along, and is found once its archive can be opened again
+    assert_eq!(test_data, record);
+    // Shutdown server
+    pool.exit()?;
+    Ok(())
+}

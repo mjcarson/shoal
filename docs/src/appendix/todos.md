@@ -9,7 +9,7 @@ entry has the detail.
 
 ## In-code TODOs
 
-Ten `TODO` comments and one live `todo!()` outside `target/`. The two struck-through rows below
+Seven `TODO` comments and no live `todo!()` outside `target/`. The five struck-through rows below
 have been done and are kept for their links.
 
 ### Storage
@@ -19,9 +19,9 @@ have been done and are kept for their links.
 | ~~`.../fs/compactor.rs:201`~~ | ~~`does anything else need to be done to remove this partition from archive maps?`~~ | **Done.** The answer was yes. `MapIntent::Remove` was added, the prune path logs it and drops the entry from `to_archive` after the sync: [Resolved Issues #5](resolved/resurrected-deletes.md). |
 | `.../fs/compactor.rs:343` | `make size configurable` | Move `MIN_ARCHIVE_COMPACTABLE` and the hardcoded 50% utilisation threshold into `FileSystemTableConf`. |
 | `.../fs/map.rs:351` | `make issue about SerializedMap not needing to track active` | `SerializedMap` does not persist the active archive id, so every restart mints a new one and orphans the previous active archive until compaction reclaims it. Either persist it or document the churn as intended. |
-| `.../fs/loader.rs:128` | `todo!("Add back onto loader channel")` | A live `todo!()`. A load request that fails to spawn should be requeued rather than panicking the loader — which currently strands every query blocked on that partition forever. |
-| `.../fs/loader.rs:137` | `handle this error` | Loader task errors `panic!` during shutdown drain. |
-| `.../fs/loader.rs:157` | `do something with this error` | Same, on the steady-state path. |
+| ~~`.../fs/loader.rs:128`~~ | ~~`todo!("Add back onto loader channel")`~~ | **Done**, and not by requeueing. The answer was that a read has to report how it went whether it succeeded or not, because a load completing is the only thing that releases the queries parked on it: [Resolved Issues #16, 51](resolved/partition-load-failure.md). |
+| ~~`.../fs/loader.rs:137`~~ | ~~`handle this error`~~ | **Done.** A read task can no longer fail — it reports every outcome to its shard itself, so the shutdown drain has no error to decide about. Same page. |
+| ~~`.../fs/loader.rs:157`~~ | ~~`do something with this error`~~ | **Done.** Same, on the steady-state path. Same page. |
 
 ### Server
 
@@ -286,7 +286,13 @@ coordinator, or reject the client — which requires the error channel above.
 
 Nothing anywhere has a deadline: no query timeout on the client, no timeout on a blocked
 query waiting for a partition, and no timeout on the connection pool beyond the initial
-connect. A partition load that never completes parks its queries permanently.
+connect.
+
+~~A partition load that never completes parks its queries permanently.~~ A partition read that
+*fails* now releases them ([Resolved Issues #16, 51](resolved/partition-load-failure.md)). One
+that neither completes nor fails still parks them permanently, and that is what a deadline here
+would cover — the difference matters, because the first was a bug in the read path and the
+second is the absence of a deadline.
 
 ### Archive map reconstruction
 

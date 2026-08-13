@@ -194,8 +194,12 @@ unsafe impl<D: ShoalDatabase> Send for Comms<D> where D::TableNames: Send {}
 **This is the single most important invariant in the codebase, and it is enforced only by
 convention.** The rule: a `ServerMsg::Partition` may only ever be sent on a shard's own
 `shard_local_tx`. It is upheld because `FsLoader` is constructed with a clone of its shard's
-sender and no other (`.../fs/loader.rs:70-85`), and `read_partition` sends to that one
-channel (`.../fs/loader.rs:48`).
+sender and no other, and `read_partition` sends to that one channel.
+
+`ServerMsg::PartitionLoadFailed` travels the same sender and so is covered by the same reasoning
+([Resolved #16, 51](../appendix/resolved/partition-load-failure.md)). It carries no `ReadResult`,
+so it would be safe to send across threads — but it is kept shard local anyway, because the value
+of this rule is that it has no exceptions to remember.
 
 If a future change gives a loader, compactor, or any task a sender belonging to a different
 shard, `Partition` messages become cross-thread and the program has undefined behaviour with
