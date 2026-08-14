@@ -2513,3 +2513,89 @@ async fn a_get_whose_partition_cannot_be_read_does_not_hang() -> Result<(), Test
     pool.exit()?;
     Ok(())
 }
+
+/// A get whose archive is not on disk is answered rather than ending its shard
+///
+/// This is the other way an archive read can fail, and it used to fail much later and much
+/// worse than an archive that cannot be opened. `get_archive` opened with `create(true)`, so a
+/// missing archive was created empty, the read of it came back short, and the failure surfaced
+/// as a validation error on bytes nobody wrote - which propagated out of `load_partition` and
+/// ended the shard, leaving this get with nothing to answer it.
+///
+/// The stray empty archive is asserted on separately, because it outlives the read that made
+/// it: the archive entry still points at that name, so every later read of the partition finds
+/// the empty file and fails the same way.
+#[tokio::test]
+async fn a_get_whose_archive_is_missing_does_not_end_its_shard() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = utils::test_dir();
+    // start a shoal server whose intent log rotates every few writes, so our rows reach an
+    // archive rather than sitting in a log that the next startup would replay into memory
+    let (client, pool) =
+        utils::start_with_conf::<TestDb>(utils::build_pressured_config(&temp_dir)).await?;
+    // build a test partition to insert
+    let test_data = TestRecord::new("partition_key", "sort_key", "woot");
+    // send this query
+    client.send_one(test_data.clone()).await?;
+    // write enough rows after it to rotate the intent log and compact it into an archive
+    for index in 0..64 {
+        // build a row in its own partition so this fills the log rather than one partition
+        let filler = TestRecord::new(
+            format!("filler_{index}"),
+            "sort_key".to_string(),
+            "x".repeat(256),
+        );
+        client.send_one(filler).await?;
+    }
+    // shut this server down, which flushes and compacts our rows into an archive
+    pool.exit()?;
+    // wait for threads to fully clean up and port to be released
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    // start the server again, so nothing is resident and every get has to read from disk
+    let (client, pool) = utils::start::<TestDb>(&temp_dir).await?;
+    // take our archives off disk while the map still points at them, which is what a read
+    // holding an entry from before a compaction re-pointed it sees
+    let missing = utils::MissingArchives::new(&temp_dir, "TestRecord");
+    // get the row we inserted, whose archive is no longer there
+    let get = TestRecordGet::new(vec![test_data.partition_key.clone()]);
+    // this has to come back, and what it comes back with matters less than that it does
+    let answered = tokio::time::timeout(Duration::from_secs(20), client.send_one(get)).await;
+    // an elapsed timeout is the failure this test exists to catch - the shard is gone
+    assert!(
+        answered.is_ok(),
+        "a get whose archive was missing never came back"
+    );
+    // this get could not read the only copy of the row, so it finds nothing
+    //
+    // that is the limitation this fix knowingly carries: a read that failed is reported to
+    // the client the same way an empty partition is, because a response cannot yet say that
+    // a read failed
+    assert!(matches!(
+        answered.expect("timed out"),
+        Err(shoal_core::client::Errors::QueryDidNotSucceed {
+            kind: shoal_core::shared::responses::ResponseActionNames::Get,
+            ..
+        })
+    ));
+    // the read must not have made the archive it could not find
+    assert!(
+        missing.recreated().is_empty(),
+        "a missing archive was created empty rather than reported: {:?}",
+        missing.recreated()
+    );
+    // put the archives back
+    drop(missing);
+    // a later get reads from disk again, since a failed read must not convince this table
+    // that what it holds in memory is all there is
+    let get = TestRecordGet::new(vec![test_data.partition_key.clone()]);
+    let response = client.send_one(get).await?;
+    // access our response
+    let access = response.access::<TestRecord>()?.unwrap().first().unwrap();
+    // deserialize our test record
+    let record = TestRecord::deserialize(access).unwrap();
+    // the row was there all along, and is found once its archive is back where it belongs
+    assert_eq!(test_data, record);
+    // Shutdown server
+    pool.exit()?;
+    Ok(())
+}

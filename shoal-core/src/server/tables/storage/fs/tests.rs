@@ -18,8 +18,14 @@ use std::hash::Hasher;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
+use uuid::Uuid;
+
 use super::compactor::{classify_tail, TailLoss};
+use super::conf::{
+    FileSystemLatencyWriterConf, FileSystemTableConf, FileSystemThroughputWriterConf,
+};
 use super::loader::{classify, LoadFailure};
+use super::map::ArchiveMap;
 use super::reader::IntentLogReader;
 use super::stream::PAD_SENTINEL;
 use super::find_inactive_intent_logs;
@@ -537,4 +543,64 @@ fn an_unrecognised_error_is_fatal() {
     let error = ServerError::Shoal(ShoalError::NoShards);
     // an error we cannot reason about is not assumed to be transient
     assert_eq!(classify(&error), LoadFailure::Fatal);
+}
+
+/// An archive that is not on disk is never retried
+///
+/// This has to stay out of the `IO`/`GlommioIO` arm, which is the arm the errno alone would
+/// put it in. An archive that is missing is missing for good, and every query parked behind
+/// the read would wait out all three attempts to arrive at the same answer.
+#[test]
+fn a_missing_archive_is_not_retried() {
+    // build the error a read whose archive is not on disk fails with
+    let error = ServerError::Shoal(ShoalError::ArchiveMissing {
+        archive: Uuid::nil(),
+        path: PathBuf::from("/does/not/exist"),
+    });
+    // no amount of trying puts a deleted file back
+    assert_eq!(classify(&error), LoadFailure::Fatal);
+}
+
+/// A read of an archive that is not on disk is reported rather than creating one
+///
+/// This used to open with `create(true)`, so the read found an empty file it had just made,
+/// came back short, and failed much later as a validation error over bytes nobody wrote -
+/// which could not name the archive that had gone missing, and left the empty one behind for
+/// every later read of the same partition to find.
+#[test]
+fn a_missing_archive_is_reported_not_created() {
+    LocalExecutor::default().run(async {
+        let temp_dir = test_dir();
+        // build a config that keeps both halves of this tables storage in our temp dir
+        let conf = FileSystemTableConf::builder()
+            .latency_sensitive(FileSystemLatencyWriterConf::default().path(temp_dir.path()))
+            .throughput_sensitive(FileSystemThroughputWriterConf::default().path(temp_dir.path()));
+        // make the directories an archive map expects to find
+        conf.setup_paths("TestRecord").await.unwrap();
+        // load an archive map over them, which is empty since nothing has been written
+        let map = ArchiveMap::new("shard-0", "TestRecord", &conf).await.unwrap();
+        // name an archive that was never written, which is what an entry left behind by a
+        // compaction that deleted the archive it re-pointed away from looks like
+        let missing = Uuid::new_v4();
+        // build the path that archive would live at
+        let path = conf.get_archive_path("TestRecord").join(missing.to_string());
+        // read it, which has to fail
+        let error = map
+            .get_archive(&missing)
+            .await
+            .expect_err("a missing archive was opened");
+        // the failure names the archive rather than being an errno from somewhere
+        match error {
+            ServerError::Shoal(ShoalError::ArchiveMissing { archive, .. }) => {
+                assert_eq!(archive, missing);
+            }
+            other => panic!("Expected ArchiveMissing error, got: {other:?}"),
+        }
+        // and nothing was left behind at the name it looked for
+        assert!(
+            !path.exists(),
+            "a missing archive was created at {}",
+            path.display()
+        );
+    });
 }

@@ -36,6 +36,13 @@ Defects are in [Known Issues](known-issues.md); several entries below share a ro
 and say so. An entry that has been done is struck through and kept, with what replaced it, for the
 same reason a resolved issue keeps its page.
 
+**Every citation on this page was re-resolved against the tree in August 2026**
+([Review](review-2026-08.md)) and most had drifted. Two things that sweep is worth knowing about:
+the quoted *original* text of a struck-through entry keeps its **original** line numbers, which now
+point at unrelated live code — O6's and O17's are called out where they appear — and O2's code
+snippets were still showing the pre-[F2](../features/projections.md) lines that the paragraph below
+them said had changed.
+
 ## How these are ranked
 
 Every open entry carries a scorecard under its heading, and [the priority queue](#the-priority-queue)
@@ -81,7 +88,7 @@ this page opens with. Ordered inside each tier.
 | ~~**A1**~~ | ~~[**O3** + **O23**](#o3-every-archived-read-is-fully-validated-inside-a-tracing-span)~~ — **done**, by [F4](../features/validated-archives.md) | Measured — 29.89 µs of a 30.43 µs cold single-row get | M | — | Contained | it was, and it was |
 | ~~**A2**~~ | ~~[**O17**](#o17-handle_flushed-runs-on-every-message)~~ — **done**, by [F5](../features/flushed-sweep-gate.md) | Profiled — 711,638 calls became 21,279 | S | — | Contained | it was, on the profile alone |
 | **A3** | [**O13**](#o13-a-multi-partition-get-is-quadratic-in-the-partitions-it-names) (+ [**O12**](#o12-to_blocked-clones-the-whole-filter-set-per-blocked-partition) beside it) — the quadratic multi-partition get | Asymptotic — O(n²) in a caller-set n | S | — | None | no — still needs a bench over `PersistentSortedTable::get` |
-| **A4** | [**O5**](#o5-the-hottest-maps-use-siphash), [**O14**](#o14-fixed-thousand-element-preallocations-on-per-call-paths) — hasher and allocation sizes | Argued | S | — | None | no — needs a table-layer bench |
+| **A4** | [**O5**](#o5-the-hottest-maps-use-siphash), [**O14**](#o14-fixed-thousand-element-preallocations-on-per-call-paths), [**O28**](#o28-the-client-takes-two-guards-on-its-response-map-for-every-query-it-sends) — hasher, allocation sizes, and a doubled map guard | Argued | S | — | None | no — needs a table-layer bench, and O28 needs the client measured at all |
 | **A5** | [**O25**](#o25-two-instrument-spans-remain-on-per-query-paths) — two `#[instrument]` spans on per-query paths | Argued — but the cost is in the *uninstrumented* binary | S | — | Contained | no — needs a with/without capture |
 
 **A3 is now the head of the queue**, and it is the first one there that a profile cannot settle: it
@@ -214,19 +221,25 @@ let archived = Queries::access(&data)?;
 let queries = <Queries<D::ClientType> as RkyvSupport>::deserialize(archived)?;
 ```
 
-`shard.rs:520-522`
+`shard.rs:633-635`
 
 Every `String`, `Vec`, and filter in every query of the bundle is allocated and copied out of a
 buffer that already holds them in a readable layout. This branch is named for making *responses*
 zero-copy; the request half was not converted.
 
 The machinery for it already exists and is unused: `ShoalDatabase::unarchive_queries`
-(`shared/traits.rs:307-311`) returns `&ArchivedQueries` via `access_unchecked` and has no callers.
+(`shared/traits.rs:341-345`) returns `&ArchivedQueries` via `access_unchecked` and has no callers.
 
 The obstacle is real, though, and worth stating: `send_to_shard` consumes the queries by value
-(`shard.rs:458`) and `ServerMsg::Query` carries an owned `QueryKinds` (`messages.rs:91-96`), so
+(`shard.rs:512`) and `ServerMsg::Query` carries an owned `QueryKinds` (`messages.rs:148-153`), so
 this is not a call-site swap. It needs the archived form to survive as far as the shard that
 executes the query, which means the `BytesMut` has to travel with it.
+
+**Sequencing, filed while writing [Direction](../direction/overview.md).** This is not a format
+change and does not need [D2](../direction/framing.md) — but D2 *is* a format change, it rewrites
+both read loops, and it is the point at which the server's `BytesMut::zeroed(len)` gets replaced
+anyway. Taking this in the same pass costs one visit to that code instead of two, and the
+`wire_codec` bench both are blocked on is the same bench.
 
 ### O2. Every returned row is copied at least twice
 
@@ -240,35 +253,43 @@ executes the query, which means the `BytesMut` has to travel with it.
 | **Tradeoff** | **Major** — a wire-format break, and `FromShoal::retrieve`'s signature with it |
 | **Benchmark** | `partition_sorted/archived/walk_all` and `get_all` bound the copies; nothing covers the wire half |
 
-`SortedPartition::get` deep-clones out of the `BTreeMap`:
+`SortedPartition::get` copies out of the `BTreeMap`:
 
 ```rust
-found.push(row.clone());
+found.push(P::from_row(row));
 ```
 
-`tables/partitions.rs:374`
+`tables/partitions.rs:585`, and `:293` for unsorted
 
-The archive path is worse — it materializes an owned row from bytes per row
-(`tables/partitions.rs:609`, and `:203` for unsorted):
+The archive path is worse — it materializes an owned value from bytes per row
+(`tables/partitions.rs:1092`, and `:363` for unsorted):
 
 ```rust
-let loaded = R::deserialize(row).unwrap();
-found.push(loaded);
+found.push(P::from_archived(archived));
 ```
 
-Then `Shard::reply` serializes the whole `Vec<T>` back into bytes (`shard.rs:543`). A read served
+Then `Shard::reply` serializes the whole `Vec<T>` back into bytes (`shard.rs:663`). A read served
 from an `Accessible` partition therefore goes **bytes → owned rows → bytes**, and a read served
 from memory goes **rows → cloned rows → bytes**.
 
 The response type is what forces it: `ResponseAction::Get(Option<Vec<T>>)`
 (`shared/responses.rs:31`) can only hold owned rows.
 
-**Narrowed, not closed, by [F2](../features/projections.md).** Both lines above are now
-`P::from_row(row)` and `P::from_archived(row)`, where `P` is what the get asked to be answered with.
-A get that named a projection copies only the fields that projection declared, so the archive path
-materializes a smaller owned value and the wire carries less. A get that named none still copies the
-whole row twice — the identity projection is exactly the two lines above — so the shape of this
-entry is unchanged and only its magnitude moved.
+**Narrowed, not closed, by [F2](../features/projections.md).** The two lines above used to read
+`found.push(row.clone())` and `let loaded = R::deserialize(row).unwrap(); found.push(loaded)`;
+they are now `P::from_row` and `P::from_archived`, where `P` is what the get asked to be answered
+with. A get that named a projection copies only the fields that projection declared, so the archive
+path materializes a smaller owned value and the wire carries less. A get that named none still
+copies the whole row twice — the identity projection is exactly the two lines above — so the shape
+of this entry is unchanged and only its magnitude moved.
+
+**A third entry now wants the same flag day.** This and O18 already had to land together to avoid
+paying the wire break twice ([dependency edges](#dependency-edges)); [D2](../direction/framing.md)
+is a third break, and the argument is identical. **The expensive part of a wire-format change is
+the flag day, and it is paid per break rather than per field** — so if D2 is taken first and these
+two later, the cost is two. Whether they can realistically be designed together is the open
+question, since D2 is a header change and these are a payload change; but the sequencing decision
+should be made deliberately rather than by whichever is picked up first.
 
 ### ~~O3. Every archived read is fully validated, inside a tracing span~~
 
@@ -336,16 +357,16 @@ where a span belongs.
 | **Benchmark** | none — the `partition_sorted/*` benches never build a `PersistentSortedTable` |
 
 `partitions: HashMap<u64, MaybeLoaded<..>>` and `blocked: HashMap<u64, ..>`
-(`.../persistent/sorted.rs:166`, `:237`, `:256`; `unsorted.rs:94`, `:112`, `:183`, `:200`) all use
-std's default hasher. `partitions` is looked up at least once per query.
+(`.../persistent/sorted.rs:142`, `:167`, `:238`, `:257`; `.../persistent/unsorted.rs:95`, `:113`,
+`:184`, `:201`) all use std's default hasher. `partitions` is looked up at least once per query.
 
 Two more have joined them since this was filed, and both are keyed by `(Uuid, usize)` rather than
 by a `u64` — sixteen bytes of SipHash instead of eight: `PendingGets::parked`
-(`.../tables/persistent.rs:137`) and `pending_exists` (`.../persistent/sorted.rs:160`). They are
+(`.../tables/persistent.rs:137`) and `pending_exists` (`.../persistent/sorted.rs:161`). They are
 touched only by a query that parked on a disk read, which is the path that is already waiting, so
 they are the less interesting half of the entry.
 
-The LRU sitting beside them already uses `BuildHasherDefault<GxHasher>` (`shard.rs:294`, `:348`),
+The LRU sitting beside them already uses `BuildHasherDefault<GxHasher>` (`shard.rs:320`, and `shared/traits.rs:307`),
 and `gxhash` is already a dependency, so this is a type annotation rather than a change.
 
 ### O12. `to_blocked` clones the whole filter set per blocked partition
@@ -360,16 +381,16 @@ and `gxhash` is already a dependency, so this is a type annotation rather than a
 | **Tradeoff** | None |
 | **Benchmark** | none — needs the table-layer bench |
 
-`SortedGet::to_blocked` (`shared/queries/sorted.rs:445`) calls `for_partitions` (`:422-435`), which
+`SortedGet::to_blocked` (`shared/queries/sorted.rs:445`) calls `for_partitions` (`:422-443`), which
 clones `sort_select` and `filters` into the narrowed query, and `get` calls it once for every
-partition that has to be read from disk (`.../persistent/sorted.rs:516`). A get across 100 cold
+partition that has to be read from disk (`.../persistent/sorted.rs:617`). A get across 100 cold
 partitions makes 100 copies of the same filters and the same selection, all of which are then held
 in `blocked` until the loads land. A range clones two bounds rather than a key set, so it is the
 cheaper of the two selections to copy — but the filters dominate either way.
 
-`SortedExists::to_blocked` (`:516`, calling `:496-506`) and the unsorted twin
+`SortedExists::to_blocked` (`:516`, calling `:496-514`) and the unsorted twin
 (`shared/queries/unsorted.rs:165`, `:207`) have the same shape, reached from
-`.../persistent/sorted.rs:625` and `unsorted.rs:492`.
+`.../persistent/sorted.rs:713` and `.../persistent/unsorted.rs:570`.
 
 ### O13. A multi-partition get is quadratic in the partitions it names
 
@@ -384,7 +405,8 @@ cheaper of the two selections to copy — but the filters dominate either way.
 | **Benchmark** | ~~none — needs the table-layer bench~~ `macro/fanout/{resident,evicted}/n` since [F8](../features/purpose-built-workloads.md), which shows the curve bend but not the isolated cost — see [the table above](#which-entries-a-benchmark-can-currently-adjudicate) |
 
 **This entry was filed against code that has since moved, and it came out broader.** It used to
-read:
+read — and, like every quoted original on this page, **its line numbers point at code that is no
+longer there**:
 
 > ### ~~O13. `blocked.retain(..)` runs inside the per-key loop~~
 >
@@ -399,7 +421,7 @@ all. What is left, and what was found in its place:
 | --- | --- | --- |
 | `PendingGet::rank` — `keys.iter().position(..)` (`.../tables/persistent.rs:58`) | scan of every key the get named | **every** multi-partition get |
 | `PendingGet::filled_before` — walks `slots[..rank]` (`:93`) | scan of every slot before this one | every multi-partition get **with a limit** |
-| `blocked.retain(..)` (`.../persistent/sorted.rs:634`) | scan of the keys still outstanding | an `exists` replayed after a disk read |
+| `blocked.retain(..)` (`.../persistent/sorted.rs:727`) | scan of the keys still outstanding | an `exists` replayed after a disk read |
 
 So the quadratic term did not go away when [items 26 and 39](resolved/partition-order.md)
 introduced slot-based gathering — it moved from the blocked list into `PendingGet`, and **widened
@@ -474,7 +496,7 @@ than more attractive — see [F1](../features/sort-key-ranges.md#invariants-to-u
 | **Tradeoff** | **Major** — wire format, shared with O2 |
 | **Benchmark** | none — `wire_codec` is unbuilt |
 
-`ResponseAction::order_by_partitions` (`shared/responses.rs`) sorts the merged rows of a split
+`ResponseAction::order_by_partitions` (`shared/responses.rs:109`) sorts the merged rows of a split
 query by where their partition was named. A `Response` carries rows and nothing else, so the only
 way to ask a row which partition it came from is to hash its partition key again:
 
@@ -561,11 +583,11 @@ sites on the write path:
 
 | Where | Calls per operation |
 | --- | --- |
-| `SortedPartition::insert` (`tables/partitions.rs:322`, `:328`) | Two — the new row and the one it replaced |
-| `SortedPartition::update` (`:501`, `:505`) | Two — before and after |
-| `SortedPartition::remove` (`:400`), `tombstone` (`:423`) | One |
-| `UnsortedPartition::new` (`:82`), `update` (`:160`) | One |
-| `merge_from_disk` (`:462-469`) | Every live row in the merged result |
+| `SortedPartition::insert` (`tables/partitions.rs:481`, `:487`) | Two — the new row and the one it replaced |
+| `SortedPartition::update` (`:809`, `:813`) | Two — before and after |
+| `SortedPartition::remove` (`:708`), `tombstone` (`:731`) | One |
+| `UnsortedPartition::new` (`:228`), `update` (`:313`) | One — and `update`'s is a walk of the whole partition, not of the row |
+| `merge_from_disk` (`:774`) | Every live row in the merged result |
 
 Carrying a row's measured size alongside it would make all of these O(1). It would also settle
 [item 22](known-issues.md#22-size-accounting-inconsistencies) — the mismatched bases between
@@ -584,14 +606,17 @@ instead of being owned by one.
 | **Tradeoff** | None |
 | **Benchmark** | none — the layer that dominates the profile is the one with no confidence interval |
 
-- `FileSystem::commit` (`.../fs.rs:331`) allocates via `RkyvSupport::serialize`, then copies the
-  bytes a second time into the DMA buffer (`.../fs.rs:350`).
-- `Shard::reply` (`shard.rs:543`) allocates one per response.
-- `write_map_intent!` (`.../fs/compactor.rs:44`) allocates one per archive entry written.
+- `FileSystem::commit` (`.../fs.rs:366`) allocates via `RkyvSupport::serialize`, then copies the
+  bytes a second time into the DMA buffer (`.../fs.rs:385`).
+- `Shard::reply` (`shard.rs:663`) allocates one per response.
+- `Shoal::send` (`shoal-core/src/client.rs:211`) allocates one per bundle on the **client** side,
+  which this entry never mentioned and which is on the same round trip.
+- `write_map_intent!` (`.../fs/compactor.rs:85`) allocates one per archive entry written, and
+  `write_partition` (`:305`) allocates one per partition.
 
 rkyv can serialize into a caller-supplied buffer, so all three could reuse one. `commit` is the
 interesting one, because the destination buffer it copies into is already there — `prep` hands
-back a `&mut [u8]` sized for the record (`.../fs/stream.rs:519-530`).
+back a `&mut [u8]` sized for the record (`.../fs/stream.rs:655-672`).
 
 ### ~~O17. `handle_flushed` runs on every message~~
 
@@ -620,7 +645,10 @@ The original entry read:
 > `shard.rs:844` calls it unconditionally each loop iteration — and `:852` again after the loop — and
 > it reaches
 > `tables.handle_flushed` → per-table `get_flushed` → `compact_if_needed`
-> (`.../persistent/sorted.rs:1097-1116`). So every message pays a pass over every table, including
+> (`.../persistent/sorted.rs:1097-1116`).
+>
+> *(Those line numbers are the pre-F5 ones. The gate is now `shard.rs:980-983` and
+> `get_flushed` is `.../persistent/sorted.rs:1172`.)* So every message pays a pass over every table, including
 > every `DataFlushed` wakeup — of which there is one per completed write.
 
 **It was right about the ranking and about the evidence, and wrong about the tradeoff.** The
@@ -737,12 +765,12 @@ for partition in self.changes.keys() {
         let read = handle.read_at(entry.offset, entry.size).await?;
 ```
 
-`.../fs/compactor.rs:178-194`
+`.../fs/compactor.rs:230-241`
 
 Serially awaited, one read per partition, with no grouping by archive file and no coalescing of
 entries that happen to be adjacent in the same archive. `get_archive` returns a `dup` of a cached
-handle (`.../fs/map.rs:455-475`) and the caller closes it, so each read also costs a `dup`/`close`
-pair. `compact_archives` (`:396-414`) has the same shape.
+handle (`.../fs/map.rs:481-509`) and the caller closes it, so each read also costs a `dup`/`close`
+pair. `compact_archives` (`:443-500`) has the same shape.
 
 Grouping `changes` by `entry.archive` before reading would let one handle serve many reads, and
 glommio's read APIs can issue them concurrently rather than one await at a time.
@@ -767,7 +795,7 @@ database has existed rather than with how hard it is being used. Everything else
 worse under load; this gets worse while idle.
 
 `compact_if_needed` queues a `CompactionJob::Archives` on every rotation
-(`.../fs.rs:385-394`), and that job calls `sort_by_load` (`.../fs/map.rs:516-548`), which iterates
+(`.../fs.rs:460-461`), and that job calls `sort_by_load` (`.../fs/map.rs:551-585`), which iterates
 all of `to_archive` and **copies every `ArchiveEntry`** into a fresh
 `HashMap<Uuid, Vec<ArchiveEntry>>`:
 
@@ -783,9 +811,9 @@ for (_, archive_entry) in self.to_archive.borrow().iter() {
 The cost is O(total partitions on disk) per rotation, regardless of how few of them changed.
 
 `compact_archives` then opens **every** candidate archive with `DmaFile::open`
-(`.../fs/compactor.rs:359`) — bypassing the handle cache in `loaded_archives` that
+(`.../fs/compactor.rs:460`) — bypassing the handle cache in `loaded_archives` that
 `get_archive` maintains — purely to call `file_size()`, and closes it again for the ones it skips
-on the 50% utilization test (`:363-369`).
+on the 50% utilization test (`:462-478`).
 
 Maintaining a per-archive used-byte total incrementally in `set_partition` and `remove_partition`
 would replace the whole scan, and archive sizes are already known to the writer.
@@ -807,9 +835,10 @@ all_archives: map.all_archives.borrow().clone(),
 to_archive: map.to_archive.borrow().clone(),
 ```
 
-`.../fs/map.rs:205-206` — a full copy of the archive map before every serialization, and
-`compact_map` runs whenever the map intent log passes 1 MiB (`.../fs/compactor.rs:269-274`,
-`:494-499`).
+`.../fs/map.rs:205-206`, inside `SerializedMap::save` (`:202`) — a full copy of the archive map
+before every serialization. Both `HashSet` and `HashMap` are also rebuilt at
+`with_capacity(1000)` (`:194-195`), so the copy allocates for a thousand entries whether or not
+there are that many.
 
 ### O16. Compaction shares the shard's executor
 
@@ -827,13 +856,13 @@ Kept in the queue as a rank of its own because it changes how two other entries 
 a reader who skips it will under-rate them.
 
 The compactor and the loader are both spawned onto `medium_priority` on the same glommio executor
-as the query loop (`.../fs.rs:164-167`, `:486-488`). A long `compact_archives` competes directly
+as the query loop (`.../fs.rs:164-167`, `:594`). A long `compact_archives` competes directly
 with query serving, and the task queue's share (`Shares::Static(500)` against the high priority
-queue's 1000, `shard.rs:320-330`) is the only lever over it. That is a deliberate design — it is
+queue's 1000, `shard.rs:356-366`) is the only lever over it. That is a deliberate design — it is
 what thread-per-core buys — but it means O8 and O9 are not merely background costs.
 
 Note also that `write_partition` iterates `self.loaded`, a `HashMap`
-(`.../fs/compactor.rs:223`), so partitions land in the archive in hash order and reads of
+(`.../fs/compactor.rs:303`), so partitions land in the archive in hash order and reads of
 related partitions get no locality from it.
 
 ### O21. A forced rotation of an empty intent log does the whole rotation anyway
@@ -853,8 +882,8 @@ compact: S, no tradeoff, and it removes the expensive part. Suppressing the rota
 much larger decision that touches generations, and it should not be bundled in.
 
 `compact_if_needed` rotates on `force` without looking at whether the active log holds anything
-(`.../fs.rs:397-440`), and startup always forces one
-(`.../tables/persistent/sorted.rs:218`). A table nobody wrote to therefore pays, per restart per
+(`.../fs.rs:435-475`), and startup always forces one
+(`.../tables/persistent/sorted.rs:274`). A table nobody wrote to therefore pays, per restart per
 shard, a rename, a fresh file for the new active log, a `CompactionJob::IntentLog` that reads a
 zero length file, the `glommio::io::remove` that now deletes it
 ([item 14](resolved/empty-rotated-logs.md)), and a `CompactionJob::Archives` behind it — which is
@@ -926,7 +955,7 @@ the DMA case rather than to pin them arbitrarily. Until then, treat a movement i
 
 Filed while taking [F5](../features/flushed-sweep-gate.md), which removed a third one.
 
-`Shard::handle_query` (`shard.rs`) and `Shard::reply` both carry `#[instrument]`, both default to
+`Shard::handle_query` (`shard.rs:688-693`) and `Shard::reply` (`:652`) both carry `#[instrument]`, both default to
 `INFO`, and the subscriber is a `Registry` with a `fmt` layer filtered at `Info` (`server/trace.rs`)
 against a `shoal.yml` that sets `level: Info`. So both callsites are enabled: each call allocates a
 span in the registry's slab, enters, exits and closes it. At 617,175 calls apiece that is 1.2 million
@@ -957,7 +986,8 @@ nothing. Neither of these is that.
 map: `find_shard` is now a shift and two indexed loads into a 4096-entry `Vec<u16>` — 8 KiB,
 against a 16,000-entry `BTreeMap` — and there is no search at all.
 
-The original entry read:
+The original entry read — **its line numbers describe code that no longer exists**, and `ring.rs`
+today is the tablet map (`Ring::new` at `:72`, `find_shard` at `:140`, `TABLET_BITS` at `:25`):
 
 > `ring.rs:26-44` builds it, `ring.rs:51-68` searches it, and `find_shard` runs once per partition
 > key per query. At 16 shards that is a 16,000-entry `BTreeMap` — pointer-chasing, one allocation
@@ -996,8 +1026,13 @@ where the `BTreeMap` was not, but that is an argument, not a profile.
 | **Benchmark** | none |
 
 - `evict_data` allocates a `Vec::with_capacity(1000)` per table it touches, to hold however many
-  victims that table has (`shard.rs:748`).
+  victims that table has (`shard.rs:861`), plus a `HashMap::with_capacity(10)` per call (`:852`) —
+  and it is called on **every message** while a shard is over its memory limit, including when it
+  can free nothing at all ([item 59](known-issues.md#59-a-shard-that-cannot-free-anything-keeps-trying-on-every-message-in-silence)).
 - `write_partition` allocates `to_mark` at 1000 per call (`.../fs/compactor.rs:299`).
+- `SerializedMap::save` rebuilds both halves of the map at 1000 per serialization
+  (`.../fs/map.rs:194-195`), which is [O10](#o10-serializedmapsave-snapshots-by-cloning)'s clone
+  seen from the allocation side.
 - ~~The per-record `HashSet` in [O7](#o7-startup-reads-the-same-archive-once-per-update-intent).~~
   Gone — it is allocated once per recovery now.
 
@@ -1025,14 +1060,21 @@ attempting again, precisely because the descriptor another read is holding may c
 ([Resolved #16, 51](resolved/partition-load-failure.md#the-fix)). Doing this optimization would
 narrow what that retry is for.
 
-`read_partition_helper` closes the handle the map just handed it (`.../fs/loader.rs:19-28`), even
+`read_partition_helper` closes the handle the map just handed it (`.../fs/loader.rs:92-94`), even
 though `ArchiveMap` caches open handles in `loaded_archives` specifically so it does not have to
-reopen (`.../fs/map.rs:332`, `:455-475`). Borrowing the cached handle rather than duplicating it
+reopen (`.../fs/map.rs:338`, `:481-509`). Borrowing the cached handle rather than duplicating it
 would remove both syscalls from every partition read.
 
+**The retry loop multiplies it.** A read is now attempted up to `MAX_LOAD_ATTEMPTS` times
+(`.../fs/loader.rs:25`, three), so a `Retryable` failure pays the `dup`/`close` pair once per
+attempt. That is the right behaviour and it is worth noticing here, because the descriptor
+shortage the retry exists to ride out is the one this entry's second paragraph is about — the
+retry is treating a symptom that borrowing the cached handle would reduce the incidence of.
+
 The cache has the opposite problem at the other end: nothing evicts from `loaded_archives` except
-`remove_archive` (`.../fs/map.rs:502-510`), so a table with many archives holds a file descriptor
-per archive for the life of the process.
+`remove_archive` (`.../fs/map.rs:538-548`) and the shutdown drain (`:615`), so a table with many
+archives holds a file descriptor per archive for the life of the process. It is preallocated for a
+thousand of them (`:382`), which is the shape of the expectation.
 
 ### O27. An ephemeral write makes a mixed database sweep every table
 
@@ -1068,6 +1110,65 @@ reintroduce that.
 **No benchmark would show it today.** Every workload drives one table. A workload over a schema
 holding both kinds is the thing to build first, and it is worth having for its own sake — a mixed
 database is the shape a real use of ephemeral tables has.
+
+---
+
+## The client
+
+### O28. The client takes two guards on its response map for every query it sends
+
+| | |
+| --- | --- |
+| **Rank** | **A4**, beside O5 and O14 — near-free, and on a path whose cost nobody has measured |
+| **Impact** | Argued — two `papaya` guard acquisitions per query where one would do, plus one owned guard per response |
+| **Difficulty** | S — a single `pin()` held across the check and the insert |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | None |
+| **Benchmark** | none, and **none can exist yet** — `client.rs` has no `tracing` spans and no `hotpath` scopes at all |
+
+`Shoal::track_response` registers a query's response channel by asking whether an id is taken and
+then inserting under it:
+
+```rust
+if self.channel_map.pin().get(&*query_id).is_none() {
+    // insert this id
+    self.channel_map.pin().insert(*query_id, tx.clone());
+```
+
+`shoal-core/src/client.rs:195-197`
+
+`channel_map` is a `papaya::HashMap`, where `pin()` acquires a guard into the collector's epoch.
+Two calls means two guards for one logical operation, and the pair is not atomic either — which
+does not matter here, since a single-threaded caller cannot race itself for an id it just
+generated, but does mean the two-call shape is buying nothing.
+
+The other side pays a heavier one: `TcpProxy` uses `pin_owned()` once per response arriving
+(`:536`), and an owned guard is the variant that allocates rather than borrowing the caller's.
+
+**Why this is filed at all, given how small it is.** It is on the one layer of the system that has
+no instrumentation whatsoever. `docs/src/appendix/todos.md` records that "`client.rs` has neither
+`tracing` spans nor `hotpath` scopes, so the share of measured latency that is the harness's own is
+unknown" — every macro number in
+[Benchmark Results](../operations/benchmark-results.md) includes this code and none of them can
+attribute anything to it. That makes a client-side entry worth *recording* even when it is too
+small to act on, because the total it belongs to has never been bounded.
+
+**Established by reading the source**, during the [August 2026 review](review-2026-08.md).
+
+**Fix direction:** hold one guard — `let map = self.channel_map.pin();` — across the check and the
+insert. `papaya` also has an `entry`-shaped API that expresses "insert if absent" in one operation,
+which is what this loop actually wants. Neither should be taken before
+`transport/{send_one,send_batched,stream,stream_unordered}`
+([TODOs](todos.md#what-f8-left-undone)) exists, which is the workload that would give the client
+half a number at all.
+
+**That workload is now blocking more than this entry.** The [Direction](../direction/overview.md)
+chapter is nine design pages about the client, and its step 0 — before any of them — is exactly
+what this entry asks for: spans and `hotpath` scopes in `client.rs`, plus the `transport/*`
+workloads ([D6](../direction/connection-pool.md#how-it-would-be-measured)). The instrumentation was
+worth doing when the only thing it could adjudicate was two `papaya` guards. It is worth
+considerably more now.
 
 ---
 
@@ -1117,7 +1218,7 @@ the thing that separates them is not size but whether the claim can be checked.
 
 Filed and taken while building [F6](../features/stage-breakdown.md).
 
-`Shard::handle_query` (`shard.rs`) cloned the whole `QueryMetadata` before handing it to the
+`Shard::handle_query` (`shard.rs:695`) cloned the whole `QueryMetadata` before handing it to the
 tables:
 
 ```rust

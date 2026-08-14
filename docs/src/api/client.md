@@ -179,16 +179,54 @@ streaming tests — the flag was simply not consulted on that path. It is
 | `ShoalResultStream` | Strict index order | `BTreeMap<usize, ClientMsg>` of early arrivals |
 | `ShoalUnorderedResultStream` | As they arrive | `BTreeSet<usize>` of seen indices, for completion only |
 
-Ordered reassembly (`client.rs:881-953`): if the head of `pending` is `next_index`, pop and
-return it; otherwise wait for the next message, return it if it is `next_index`, else stash it.
+Ordered reassembly (`shoal-core/src/client.rs:880-978`): if the head of `pending` is `next_index`,
+pop and return it; otherwise wait for the next message, return it if it is `next_index`, else stash
+it.
 
 The unordered stream returns everything immediately and tracks `next_index` only to know when
-the stream is complete (`client.rs:1150-1174`) — it advances `next_index` past every
+the stream is complete (`client.rs:1160-1210`) — it advances `next_index` past every
 contiguous run of seen indices so it can recognise the end.
 
 **Memory:** an ordered stream holds every out-of-order response until the gap fills. One slow
 partition blocks the stream and buffers everything behind it. The unordered stream exists
 precisely to avoid that, at the cost of ordering.
+
+### The reorder buffers
+
+This is the only client state that spans responses, it is the part most likely to be wrong, and it
+has [no test at all](../appendix/test-coverage.md#the-streaming-client-apis). So what makes it
+sound is worth writing down separately from what it does — three facts hold it up, and none of them
+is local to the code that depends on them.
+
+**One query index yields exactly one response.** `pending` is a `BTreeMap<usize, ClientMsg>` keyed
+by the response's index, and `insert` on a `BTreeMap` overwrites. That would silently drop a
+response if two ever shared an index. They cannot: `ResponseAction` (`shared/responses.rs:28-39`)
+has no variant that a query answers more than once — a get answers `Get(Option<Vec<T>>)` with every
+row it found, not a row at a time — and the shard replies once per query it handles
+(`shard.rs:717-744`), merging the shares of a split query before replying rather than forwarding
+each (`:765-822`). **Anything that makes a query answer twice breaks the reorder buffer, not just
+the caller's row count.** That is the sharp end of
+[item 52](../appendix/known-issues.md#52-a-resident-hit-in-exists-answers-a-query-a-blocked-clone-will-answer-again),
+which is a path where one does.
+
+**`End` cannot collide with a response.** The terminator shares the same map:
+`self.pending.insert(index, ClientMsg::End(index))`. It is safe because
+`ShoalQueryStream::close` posts `ClientMsg::End(self.base_index)` (`client.rs:1348`) *after*
+`base_index` has been advanced past every query sent (`:1341`), so its index is always one past the
+last response index rather than equal to one.
+
+**A stashed response keeps its own arrival time.** `wait_for_next_response` takes a stashed
+`ShoalResponse` back apart into its buffer and its stamps before re-wrapping it (`:960-961`), so a
+response that waited in the buffer is not re-stamped when it finally comes out. A stage profile
+would otherwise attribute the wait to the server.
+
+**What is *not* upheld: releasing the slot.** The `channel_map` entry and the pooled channel pair
+are released inside the `if end` arm of `next` (`:1032-1039`), and neither stream type implements
+`Drop`. A stream abandoned before its last response — or one whose `next` returns `Err` — leaves
+both behind, permanently
+([item 60](../appendix/known-issues.md#60-a-result-stream-that-is-not-drained-to-the-end-leaks-its-slot-in-the-client)).
+`send_one` and `exists` avoid it only because a single-query bundle's one response *is* the end of
+its stream.
 
 ## ShoalResponse
 
@@ -306,15 +344,53 @@ response side; requests are fully deserialized server-side
 ([Request Lifecycle](../architecture/request-lifecycle.md#3-coordinating-fan-out)) despite the
 branch name.
 
+**What these choices cost later.** Two of them are load-bearing for work that has not been done.
+The flat pool of interchangeable connections is what
+[D7](../direction/shard-aware-routing.md#what-it-breaks) would have to give up to route a query to
+the shard that owns its tablet. And the zero-copy read is the property
+[D4](../direction/encryption.md#the-options) has to work around, because
+the conventional way to add TLS decrypts into a buffer the TLS library owns and copies from there —
+which is correct, measurably slower, and would not be caught by anything in this repository.
+
 ## Limitations
 
-- Health checks do not detect a dead peer.
-- No retry, no reconnect logic above bb8, and no request timeout anywhere.
+Most of this list is one page: [D6](../direction/connection-pool.md) designs a pool with deadlines,
+a health check that works, a builder, an endpoint list, and a `Drop` — the pieces are small
+individually and four of them wait on a message type the wire format does not have
+([D2](../direction/framing.md)).
+
+- Health checks do not detect a dead peer
+  ([D6](../direction/connection-pool.md#health-checks-that-work)).
+- No retry, no reconnect logic above bb8, and no request timeout anywhere
+  ([D6](../direction/connection-pool.md#deadlines), and
+  [retries](../direction/connection-pool.md#retries), which are only safe for `Get` and `Exists`).
 - Ordered streams buffer unboundedly behind a gap.
+- Only one endpoint is ever known — `Shoal::new` takes the first address `lookup_host` returns
+  (`client.rs:130`), so there is no failover
+  ([D6](../direction/connection-pool.md#a-builder)).
 - No server-side error channel, so failures arrive as closed connections
-  ([Wire Protocol](../architecture/wire-protocol.md#limitations)).
+  ([Wire Protocol](../architecture/wire-protocol.md#limitations),
+  [D2](../direction/framing.md#the-error-channel)).
+- **No authentication and no encryption**, so anything that can reach the port can read and write
+  any table ([D3](../direction/authentication.md), [D4](../direction/encryption.md)).
+- **A query's response type is not checked at compile time.** `access::<T>()` takes the row type
+  from the caller and a wrong one fails at runtime with `Errors::WrongType("Wrong Type!")`, which
+  names neither type ([D8](../direction/typed-queries.md)).
+- **The client links glommio**, and therefore io_uring, whether or not it will ever start a server —
+  the `server` feature that appears to make it optional does not work
+  ([item 54](../appendix/known-issues.md#54-shoaldb-needs-three-crates-the-caller-has-never-heard-of),
+  [D5](../direction/runtimes.md)).
 - `ShoalResultStream::skip(0)` panics with an integer underflow
-  (`client.rs:979-986`) — the decrement precedes the zero check.
+  (`client.rs:1001-1008`) — the decrement precedes the zero check.
+- **A stream that is not drained to its end leaks its slot in `channel_map` and its pooled channel
+  pair**, because the release is inside `next`'s `if end` arm and neither stream type implements
+  `Drop` ([item 60](../appendix/known-issues.md#60-a-result-stream-that-is-not-drained-to-the-end-leaks-its-slot-in-the-client)).
+  Responses the server later sends for that query are then delivered into an unbounded channel with
+  no reader.
 - `Shoal::send` archives the bundle before the id is finalised.
-- Two large blocks of commented-out code remain (`client.rs:544-598`, `:1025-1091`).
+- Two large blocks of commented-out code remain (`client.rs:549-603`, `:1048-1114`).
 - `suceeded` and `QuerySuceededOpts` are misspelled in the public API.
+- **Nothing measures any of this.** `client.rs` carries no `tracing` spans and no `hotpath` scopes,
+  so every macro benchmark number includes the client and none can attribute anything to it
+  ([TODOs](../appendix/todos.md#benchmark-coverage-the-harness-does-not-have)). The
+  `transport/*` workloads that would give it a number are unbuilt.

@@ -6,6 +6,7 @@ use std::num::TryFromIntError;
 use std::os::fd::RawFd;
 use std::path::PathBuf;
 use std::time::Duration;
+use uuid::Uuid;
 
 /// Any errors tht can be encountered when running Shoal
 #[derive(Debug)]
@@ -199,6 +200,14 @@ pub enum ShoalError {
     TruncatedIntentLog,
     /// A partition was not found in the archive map (corrupt or missing map entry)
     PartitionNotFound { partition_id: u64 },
+    /// An archive a partition entry points at is not on disk
+    ///
+    /// The archive map is what says which archive holds a partition, and the compactor
+    /// deletes an archive once it has rewritten what was still live in it - so a read
+    /// holding an entry from before that re-point looks for a file that is gone. Naming
+    /// the archive is the whole point of this variant: creating the file instead makes
+    /// the failure surface much later, as a validation error on bytes nobody wrote.
+    ArchiveMissing { archive: Uuid, path: PathBuf },
     /// A table was not found in the archive map (corrupt or missing map)
     TableMapMissing,
     /// This node has no shards, so nothing could own any data

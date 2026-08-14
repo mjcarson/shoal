@@ -285,3 +285,96 @@ impl Drop for UnreadableArchives {
         let _ = std::fs::set_permissions(&self.path, self.original.clone());
     }
 }
+
+/// A guard that moves a tables archive files out of the way while it is alive
+///
+/// This is a different failure to [`UnreadableArchives`] and has to be made a different way.
+/// That guard leaves the archives where they are and refuses the open, which is an IO error.
+/// This one leaves the archive directory perfectly readable and takes the files out of it, so
+/// the open of a named archive finds nothing - which is what a read holding an archive entry
+/// from before a compaction re-pointed it sees, since the compactor deletes an archive once it
+/// has rewritten what was still live in it.
+///
+/// Unlike [`UnreadableArchives`] this works as root, because it changes what is on disk rather
+/// than who may look at it.
+///
+/// The files are moved back when this is dropped, so a test that panics part way through still
+/// leaves a temp dir that can be cleaned up.
+pub struct MissingArchives {
+    /// The archive directory the files were taken out of
+    archives: std::path::PathBuf,
+    /// The directory the files were moved into
+    hidden: std::path::PathBuf,
+    /// The file names that were moved, so they can be moved back
+    moved: Vec<std::ffi::OsString>,
+}
+
+impl MissingArchives {
+    /// Move every archive file of a table out of its archive directory
+    ///
+    /// Only regular files are moved - the archive directory also holds an `intents`
+    /// subdirectory, and moving that would break the map rather than the archives.
+    ///
+    /// # Arguments
+    ///
+    /// * `temp_dir` - The temp dir this servers data lives in
+    /// * `table_name` - The name of the table whose archives to take away
+    pub fn new(temp_dir: &TempDir, table_name: &str) -> Self {
+        // build the path to this tables archives
+        let archives = temp_dir.path().join(table_name).join("archives");
+        // build a directory beside it to move the archives into
+        let hidden = temp_dir.path().join(table_name).join("archives-hidden");
+        // make the directory we are about to move the archives into
+        std::fs::create_dir_all(&hidden).expect("Failed to create the hidden archive dir");
+        // track every file we move so it can be moved back
+        let mut moved = Vec::new();
+        // crawl over everything in this tables archive directory
+        for entry in std::fs::read_dir(&archives).expect("Failed to read the archive dir") {
+            // get this entry
+            let entry = entry.expect("Failed to read an archive dir entry");
+            // skip anything that is not a regular file, since intents live in here too
+            if !entry.file_type().expect("Failed to stat an archive").is_file() {
+                continue;
+            }
+            // get this archives name
+            let name = entry.file_name();
+            // move this archive out of the directory a read will look in
+            std::fs::rename(entry.path(), hidden.join(&name)).expect("Failed to hide an archive");
+            // remember it so it can be moved back
+            moved.push(name);
+        }
+        MissingArchives {
+            archives,
+            hidden,
+            moved,
+        }
+    }
+
+    /// Check whether any of the archives that were moved away has come back
+    ///
+    /// A read that creates the archive it could not find leaves an empty file behind at the
+    /// name it looked for, so a name reappearing here is that stray archive.
+    pub fn recreated(&self) -> Vec<std::path::PathBuf> {
+        // collect every name we moved away that now exists again
+        self.moved
+            .iter()
+            .map(|name| self.archives.join(name))
+            .filter(|path| path.exists())
+            .collect()
+    }
+}
+
+impl Drop for MissingArchives {
+    /// Put the archive files back
+    fn drop(&mut self) {
+        // move every archive we took away back to where a read looks for it
+        for name in &self.moved {
+            // a stray archive created in its place has to go, or the rename fails
+            let _ = std::fs::remove_file(self.archives.join(name));
+            // move this archive back
+            let _ = std::fs::rename(self.hidden.join(name), self.archives.join(name));
+        }
+        // drop the directory we borrowed, which is empty again now
+        let _ = std::fs::remove_dir(&self.hidden);
+    }
+}

@@ -305,6 +305,26 @@ impl<N: TableNameSupport> FilteredFullArchiveMap<N, ArchiveMap> {
 
 }
 
+/// Check whether a failed open means the file was not there
+///
+/// Glommio reports the same errno in two shapes depending on whether it had a path to attach
+/// to it, and an open by path can come back as either, so both have to be unwrapped to the
+/// `std::io::Error` underneath before its kind means anything.
+///
+/// # Arguments
+///
+/// * `error` - The error an open failed with
+fn is_not_found(error: &GlommioError<()>) -> bool {
+    // unwrap whichever shape this error came back in and ask what its errno was
+    match error {
+        GlommioError::IoError(source) | GlommioError::EnhancedIoError { source, .. } => {
+            source.kind() == std::io::ErrorKind::NotFound
+        }
+        // every other glommio error is about something other than the file not being there
+        _ => false,
+    }
+}
+
 /// A map of archives for the file system storage engine
 #[derive(Debug)]
 pub struct ArchiveMap {
@@ -437,7 +457,26 @@ impl ArchiveMap {
         self.to_archive.borrow_mut().remove(&id);
     }
 
-    /// Get a handle to an archive if it exists
+    /// Get a handle to an archive that already exists
+    ///
+    /// This never creates the archive it is asked for. Every caller of this is a read, and a
+    /// read whose archive is not on disk has to hear so: creating an empty one instead makes
+    /// the read come back short and the failure surface later as a validation error on bytes
+    /// nobody wrote, which cannot name the file that went missing. Creating an archive is
+    /// [`ArchiveMap::get_active_writer`]'s job and only ever happens for the active one.
+    ///
+    /// The handle is opened for writing as well as reading even though this is a read path,
+    /// because [`ArchiveMap::get_active_writer`] serves the active archive out of the same
+    /// `loaded_archives` cache this one fills. A read only handle cached here for the active
+    /// id would be duplicated into a stream writer that cannot write.
+    ///
+    /// # Arguments
+    ///
+    /// * `archive_id` - The id of the archive to get a handle to
+    //
+    // deliberately not instrumented: this runs on every partition read, including the ones
+    // that hit the handle cache, and a span there costs a registry slab insert per read to
+    // say what `loader::read_partition`'s span already covers
     pub async fn get_archive(&self, archive_id: &Uuid) -> Result<DmaFile, ServerError> {
         // check if this archive is in our archive map
         if let Some(archive) = self.loaded_archives.borrow().get(archive_id) {
@@ -448,13 +487,24 @@ impl ArchiveMap {
         let mut path = self.conf.get_archive_path(&self.table_name);
         // add our active id
         path.push(archive_id.to_string());
-        // open this file
-        let file = OpenOptions::new()
-            .create(true)
+        // open this file, which must already be there
+        let file = match OpenOptions::new()
             .read(true)
             .write(true)
             .dma_open(&path)
-            .await?;
+            .await
+        {
+            Ok(file) => file,
+            // this archive is not on disk, so say which one instead of making an empty one
+            Err(error) if is_not_found(&error) => {
+                return Err(ServerError::Shoal(ShoalError::ArchiveMissing {
+                    archive: *archive_id,
+                    path,
+                }))
+            }
+            // any other failure to open is reported as the IO error it is
+            Err(error) => return Err(error.into()),
+        };
         // clone this file handle and place it in our archive map
         self.add_archive(*archive_id, file.dup()?);
         Ok(file)

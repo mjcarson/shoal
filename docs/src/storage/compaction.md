@@ -337,7 +337,7 @@ report of *what the removal discarded* behind in one branch, which is
 
 ## Archive compaction
 
-`compact_archives` (`.../fs/compactor.rs:342-512`) reclaims space from archives whose live
+`compact_archives` (`.../fs/compactor.rs:443-500`) reclaims space from archives whose live
 fraction has dropped.
 
 ```rust
@@ -369,7 +369,7 @@ The rules:
 - **Never compact the active archive in place.** If it qualifies, mint a new active uuid and
   swap the writer instead. The comment explains why: compacting it "can lead to dangling
   partitions if we have already compacted data to the prior active archive in this
-  compaction" (`.../fs/compactor.rs:361-363`). Entries written to it earlier *in this same
+  compaction" (`.../fs/compactor.rs:488-491`). Entries written to it earlier *in this same
   pass* would be invalidated.
 - **`MIN_ARCHIVE_COMPACTABLE` guards the active archive** from rotating while it is still
   small — otherwise a lightly used table would churn through uuids.
@@ -382,20 +382,48 @@ The rules:
   `.../fs/compactor.rs:31-33` — the comment says 100 MiB; the value is 10 MiB.
 
 - **Empty archives are deleted outright**, unless active — an empty active archive might just
-  not have been written to yet (`.../fs/compactor.rs:412-418`).
+  not have been written to yet (`.../fs/compactor.rs:541-546`).
 
 Live entries are copied into the active archive with the same size-prefix framing, their
 `ArchiveEntry` is updated to the new location, and a `MapIntent::Entry` is logged
-(`.../fs/compactor.rs:369-387`). Only after both writers sync are entries published and old
-archives removed from the map, and only then are the files unlinked
-(`.../fs/compactor.rs:449-483`).
+(`.../fs/compactor.rs:497-535`). Only after both writers sync (`:576-577`) are entries published
+and old archives removed from the map, and only then are the files unlinked.
 
 That ordering is the crash-safe one: new copy on disk → map repointed → old file deleted. A
 crash anywhere leaves the map pointing at data that still exists.
 
+### None of the above has ever run in a test
+
+This section describes the only component in Shoal that **rewrites committed data**, and the whole
+of it is unexercised. `MIN_ARCHIVE_COMPACTABLE` is 10 MiB and no test writes near that, so
+`compact_archives` returns without doing work in every run of the suite
+([Test Coverage](../appendix/test-coverage.md#compaction-and-archive-rotation)). Specifically
+untested:
+
+| What | Why it matters |
+| --- | --- |
+| The 50% utilisation decision | The one branch that decides whether committed bytes get rewritten at all |
+| Copying live entries into the active archive | The rewrite itself, including the size-prefix framing it re-emits |
+| Active-archive rotation | Mints a new uuid and swaps the writer mid-pass, which is the trickiest ordering here |
+| Archive deletion | The step that makes a crash-safety mistake permanent |
+| `sort_by_load` | Decides what is even considered, and is [O9](../appendix/optimizations.md#o9-every-intent-log-rotation-walks-the-entire-on-disk-partition-set)'s full walk |
+
+`build_pressured_config` (`shoal/tests/utils.rs`) shrinks the *intent log* to 4 KiB so generations
+advance quickly, which is what the eviction tests need. Archives are a separate threshold and
+nothing shrinks it — making `MIN_ARCHIVE_COMPACTABLE` configurable is an open
+[TODO](../appendix/todos.md#storage) and is the cheapest way in.
+
+**Read this against the failure that did surface.** A read whose archive was not on disk used to
+create an empty one and fail much later as corruption
+([Resolved #57](../appendix/resolved/missing-archive.md)). The way an entry comes to point at an
+archive that is gone is *this* code — the compactor deletes an archive once it has rewritten what
+was live in it — so the one defect that has been observed in this area was observed from the read
+side, by a test that never ran a compaction. That is the shape of the gap: the consequences are
+reachable from tests, the cause is not.
+
 ## Shutdown
 
-`shutdown` (`.../fs/compactor.rs:488-534`) flushes and closes the archive writer, then checks
+`shutdown` (`.../fs/compactor.rs:616-665`) flushes and closes the archive writer, then checks
 whether the active archive ended up empty — by asking the filesystem for its size rather than
 trusting the writer position, "to ensure we don't delete any archives with data"
 (`.../fs/compactor.rs:497-499`). If empty, it is logged as deleted and unlinked. Then the map

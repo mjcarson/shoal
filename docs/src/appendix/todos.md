@@ -9,16 +9,20 @@ entry has the detail.
 
 ## In-code TODOs
 
-Seven `TODO` comments and no live `todo!()` outside `target/`. The five struck-through rows below
-have been done and are kept for their links.
+**Eight** `TODO` comments and no live `todo!()` outside `target/`. The five struck-through rows
+below have been done and are kept for their links.
+
+This said "seven" until the [August 2026 review](review-2026-08.md) counted them; eight rows were
+listed below it the whole time. Every citation in the tables was re-resolved in the same sweep and
+all eight had drifted.
 
 ### Storage
 
 | Location | TODO | What finishing it involves |
 | --- | --- | --- |
 | ~~`.../fs/compactor.rs:201`~~ | ~~`does anything else need to be done to remove this partition from archive maps?`~~ | **Done.** The answer was yes. `MapIntent::Remove` was added, the prune path logs it and drops the entry from `to_archive` after the sync: [Resolved Issues #5](resolved/resurrected-deletes.md). |
-| `.../fs/compactor.rs:343` | `make size configurable` | Move `MIN_ARCHIVE_COMPACTABLE` and the hardcoded 50% utilisation threshold into `FileSystemTableConf`. |
-| `.../fs/map.rs:351` | `make issue about SerializedMap not needing to track active` | `SerializedMap` does not persist the active archive id, so every restart mints a new one and orphans the previous active archive until compaction reclaims it. Either persist it or document the churn as intended. |
+| `.../fs/compactor.rs:471` | `make size configurable` | Move `MIN_ARCHIVE_COMPACTABLE` and the hardcoded 50% utilisation threshold into `FileSystemTableConf`. |
+| `.../fs/map.rs:368` | `make issue about SerializedMap not needing to track active` | `SerializedMap` does not persist the active archive id, so every restart mints a new one and orphans the previous active archive until compaction reclaims it. Either persist it or document the churn as intended. |
 | ~~`.../fs/loader.rs:128`~~ | ~~`todo!("Add back onto loader channel")`~~ | **Done**, and not by requeueing. The answer was that a read has to report how it went whether it succeeded or not, because a load completing is the only thing that releases the queries parked on it: [Resolved Issues #16, 51](resolved/partition-load-failure.md). |
 | ~~`.../fs/loader.rs:137`~~ | ~~`handle this error`~~ | **Done.** A read task can no longer fail — it reports every outcome to its shard itself, so the shutdown drain has no error to decide about. Same page. |
 | ~~`.../fs/loader.rs:157`~~ | ~~`do something with this error`~~ | **Done.** Same, on the steady-state path. Same page. |
@@ -27,22 +31,28 @@ have been done and are kept for their links.
 
 | Location | TODO | What finishing it involves |
 | --- | --- | --- |
-| `shard.rs:60` | `do something with this error` | `client_rx_relay` panics on any non-EOF socket error. Should tear down the one connection. |
-| `shard.rs:126` | `detect collisions?` | Client UUIDs are generated without checking `client_map`; a collision panics at `shard.rs:623`. The client does exactly this check for query ids (`client.rs:192-203`) and could be copied. |
-| `shard.rs:132` | `do this with a task queue?` | Per-client relay tasks run on the executor's default queue, so client IO is unprioritised relative to background writes. |
+| `shard.rs:63` | `do something with this error` | `client_rx_relay` panics on any non-EOF socket error. Should tear down the one connection. |
+| `shard.rs:141` | `detect collisions?` | Client UUIDs are generated without checking `client_map`; a collision panics at `shard.rs:916`. The client does exactly this check for query ids (`client.rs:193-203`) and could be copied. |
+| `shard.rs:147` | `do this with a task queue?` | Per-client relay tasks run on the executor's default queue, so client IO is unprioritised relative to background writes. |
 | ~~`.../persistent/unsorted.rs:867`~~ | ~~`handling a partition missing`~~ | **Done.** The startup-path `panic!` is a `warn!` and a skipped intent now. See [Resolved Issues #9](resolved/orphaned-update-intents.md). |
 
 ### Client and UI
 
 | Location | TODO | What finishing it involves |
 | --- | --- | --- |
-| `client.rs:82` | `implement a ping/pong type request?` | `is_valid` calls `peer_addr()`, which cannot detect a dead peer. Needs a protocol-level ping, which needs a message-type field the wire format does not have. |
-| `client.rs:1272` | `make it so we don't need to do this` | `ShoalQueryStream::send` overwrites `queries.id` on every bundle. The stream's id should be set at construction. |
-| `shoalctl/src/app.rs:436` | `Handle insert mode for editing rows` | Insert mode edits the query bar only; result rows are read-only. Writing would also need SHQL to parse mutations. |
+| `client.rs:82` | `implement a ping/pong type request?` | `is_valid` calls `peer_addr()`, which cannot detect a dead peer. Needs a protocol-level ping, which needs a message-type field the wire format does not have — [D2](../direction/framing.md#message-types) is that field, and [D6](../direction/connection-pool.md#health-checks-that-work) is where it gets used. |
+| `client.rs:1302` | `make it so we don't need to do this` | `ShoalQueryStream::send` overwrites `queries.id` on every bundle. The stream's id should be set at construction. |
+| `shoalctl/src/app.rs:465` | `Handle insert mode for editing rows` | Insert mode edits the query bar only; result rows are read-only. Writing would also need SHQL to parse mutations. |
 
 ## Larger unbuilt work
 
 Implied by the code's shape but not present.
+
+**Where the client half of this now lives.** Six of the entries below are about the client or the
+wire it speaks, and they have grown a design rather than staying sketches. That design is the
+[Direction](../direction/overview.md) chapter, which says how each would be built, what it would
+cost, and in what order — this page still records *that* they are unbuilt, and each entry points
+at the page that now carries the *how*. Nothing there is built either.
 
 ### Distribution
 
@@ -55,9 +65,9 @@ pub enum ShardContact {
 }
 ```
 
-`shoal-core/src/server/shard.rs:167-172`
+`shoal-core/src/server/shard.rs:183-187`
 
-The `match` in `Comms::send` (`comms.rs:46-56`) has one arm. Everything above it — the tablet
+The `match` in `Comms::send` (`comms.rs:46-58`) has one arm. Everything above it — the tablet
 map, `ShardInfo`, the `Join` broadcast — is already shaped for a multi-node cluster; the transport
 and membership are missing. Adding a `Remote` variant is the seam.
 
@@ -77,6 +87,11 @@ knowing before starting:
 
 Also needed for a real cluster: replication (there is exactly one copy of every partition),
 membership and failure detection, and rebalancing.
+
+The *client* half of this is now designed separately.
+[D7](../direction/shard-aware-routing.md) covers routing a query to the shard that owns its tablet
+from the client rather than from a coordinator, which is a prerequisite for multi-node routing and
+not a substitute for it — the transport and membership work above is unchanged by it.
 
 ### Rebalancing
 
@@ -103,6 +118,12 @@ and migrating twice. The tablet id — the name that makes it expressible — no
 
 Still needed on top of both: a way to discover files belonging to shards that no longer exist,
 and a rebalancer that decides *when* to move a tablet rather than merely how.
+
+A third piece appears once the map is editable, and it is on the client side:
+[D7](../direction/shard-aware-routing.md#5-staleness-which-is-what-makes-it-safe) — any client
+holding a copy of the map holds a stale one during a move, so the map has to carry a version and
+a query routed against a stale one has to be forwarded rather than refused. That is a constraint on
+how rebalancing is built, not a consequence of it, which is why it is worth knowing before starting.
 
 ### Sort-key range predicates — built
 
@@ -271,10 +292,15 @@ want, so it is worth building once rather than twice.
 ### An error channel in the protocol
 
 `ResponseAction` can express only booleans and rows
-(`shared/responses.rs:26-38`). A server-side failure has nowhere to go, which is why the
+(`shared/responses.rs:27-39`). A server-side failure has nowhere to go, which is why the
 server is full of `panic!`s — there is no way to say "that query failed" to a client. Adding
 an error variant would unlock replacing most hot-path panics with recoverable errors
 ([Known Issues #16](known-issues.md#16-panics-on-the-hot-path)).
+
+The design for it is [D2](../direction/framing.md#the-error-channel), which folds it into a
+framing change that also carries a version, a message type, and a bounded length — because a
+frame-level `Error` and a `ResponseAction::Error` want the same flag day, and items 51, 55, and 56
+all want the same variant.
 
 ### Backpressure
 
@@ -282,11 +308,22 @@ Every channel is unbounded ([Known Issues #15](known-issues.md#15-no-backpressur
 Bounding them requires deciding what to do when a shard is saturated — shed load, block the
 coordinator, or reject the client — which requires the error channel above.
 
+Sequenced accordingly in [D6](../direction/connection-pool.md#bounded-channels), behind
+[D2](../direction/framing.md#the-error-channel).
+
 ### Timeouts
 
 Nothing anywhere has a deadline: no query timeout on the client, no timeout on a blocked
 query waiting for a partition, and no timeout on the connection pool beyond the initial
 connect.
+
+The client half is designed in [D6](../direction/connection-pool.md#deadlines), which adds one
+thing this entry does not: **a deadline without a way to cancel converts a slow query into a
+leak.** A client that gives up has to tell the server, or the server keeps working and writes into
+a channel with no reader — the same failure as
+[item 60](known-issues.md#60-a-result-stream-that-is-not-drained-to-the-end-leaks-its-slot-in-the-client),
+reached from the other side. That needs a `Cancel` message type, which is
+[D2](../direction/framing.md) again.
 
 ~~A partition load that never completes parks its queries permanently.~~ A partition read that
 *fails* now releases them ([Resolved Issues #16, 51](resolved/partition-load-failure.md)). One
@@ -294,10 +331,44 @@ that neither completes nor fails still parks them permanently, and that is what 
 would cover — the difference matters, because the first was a bug in the read path and the
 second is the absence of a deadline.
 
+### An idempotency key, so a write can be retried
+
+A client cannot retry a write. `Get` and `Exists` are idempotent and `Insert`, `Update`, and
+`Delete` are not (`shared/responses.rs:27-39`), so a bundle lost to a dead socket can only be
+replayed if the server can recognise a repeat. That needs a per-query key the server remembers for
+long enough to answer the second copy with the first one's answer — a server feature, and the only
+thing standing between [D6](../direction/connection-pool.md#retries) and retrying anything rather
+than only reads.
+
+Worth knowing before designing it: [FoundationDB](../direction/prior-art.md#foundationdb) does not
+solve this, it sidesteps it — it retries the *transaction*, so the request-level question never
+arises. Shoal has no transaction to retry, so it has to answer the question directly.
+
+### An in-process client for a colocated application
+
+The one genuinely compelling non-tokio client is an application already running on glommio that
+wants to query a Shoal server in the same process. Serving it with a glommio TCP client is the
+wrong shape ([D5](../direction/runtimes.md#recommendation)): the right one hands a `Queries` bundle
+straight to the local shard's channel and skips the socket, the framing, and both serializations.
+
+It is a different feature from runtime portability and is filed separately so that portability is
+not built to serve a case it serves badly. It is also the only path in this repository that could
+answer what the wire actually costs, by being the same query with the wire removed.
+
+### Per-table authorization
+
+[D3](../direction/authentication.md) gives a connection a principal and deliberately stops there.
+What that principal may read or write is a server-side catalog problem — somewhere to store grants,
+a check on the query path, and a way to express them in SHQL — and none of it is client design.
+
+Filed rather than sketched, because a design written before there is any notion of a principal
+would be a design for nothing. It is the thing authentication exists to enable, so it should be
+picked up immediately after, not much later.
+
 ### Archive map reconstruction
 
 Archives write a size prefix before each partition specifically so a map could be rebuilt by
-scanning — the comment says so (`.../fs/compactor.rs:220-221`). No such path exists, so
+scanning — the comment says so (`.../fs/compactor.rs:306-310`). No such path exists, so
 `ShoalError::MapCorruption` is fatal even though every byte of data is intact.
 
 ### Observability
@@ -375,6 +446,15 @@ server, no executor and no storage backend — they belong beside `shoal/benches
 the **micro** layer, where they would get criterion's sampling and a confidence interval instead of
 a wall clock with an 11% spread. They were not built there because nobody had noticed they could
 be. Nothing blocks them.
+
+**Second correction, filed while writing [Direction](../direction/overview.md).** These two, plus
+the `transport/*` workloads below and client-side `tracing` spans, are step 0 of that whole chapter
+— **nine design pages, and not one of them can be adjudicated until they exist**. `wire_codec` is
+what would catch a [D2](../direction/framing.md) header that accidentally unaligned the payload;
+the plaintext-versus-TLS pair [D4](../direction/encryption.md) needs is a *precondition* rather than
+a follow-up; and `routing` is a hard dependency of [D7](../direction/shard-aware-routing.md), whose
+whole value rests on a hop nobody has measured. That raises what these are worth considerably
+above what this entry claimed when it was filed against four `O` numbers.
 
 **A table-layer bench, over `PersistentSortedTable::get`.** The gap that was not known to be a gap.
 The micro layer stops at `SortedPartition`, so everything between a query arriving at a table and
@@ -482,7 +562,9 @@ need:
   schema for it.
 - **`transport/{send_one,send_batched,stream,stream_unordered}`** — the four client transport
   modes over an identical query mix. This is also the only thing that could say how much of a
-  measured latency is the harness's own, which is the open item above.
+  measured latency is the harness's own, which is the open item above, **and it is what every page
+  of [Direction](../direction/overview.md) is blocked on** — the client is the one layer of this
+  system whose total has never been bounded.
 - **`durability/{fsync,async}`** — see the `Async` vs `Fsync` item above.
 - **`mutate/{update,delete,exists}`** — entirely unmeasured today.
 
@@ -538,6 +620,12 @@ the sort path requires the key to be a string, and every sorted table in the wil
 Intent log records and the map snapshot are checksummed; archive payloads are not. Corruption
 there is caught only if rkyv validation happens to reject it.
 
+One class of thing that used to arrive here is no longer corruption at all. An archive that was
+not on disk was created empty and read short, so validation was where "this file is missing"
+surfaced, wearing the costume of a bad payload. That now fails at the open with an error naming
+the archive ([Resolved #57](resolved/missing-archive.md)), which is worth knowing before reading a
+validation failure as evidence of on-disk damage.
+
 ~~and several call sites `.unwrap()` that result.~~ Not any more.
 [F4](../features/validated-archives.md) moved that validation to the one place a partition arrives
 from disk and made it a `Result` there, so the thirteen `.unwrap()`s it used to be spread across are
@@ -591,6 +679,31 @@ exactly the alignment and `fdatasync` behaviour they exist to check.
 - The `../glommio` path dependency makes the build non-reproducible from this repository
   alone and blocks publishing.
 - No CI configuration in the repository.
+- The workspace is split across two editions — `shoal`, `shoal-core` and `shoal-derive` are 2021;
+  `shoal-bench` and `shoalctl` are 2024. That is not a problem in itself, but
+  [item 35](known-issues.md#35-a-refcell-borrow-is-held-across-three-awaits-in-the-compactor) turns
+  correct for free under 2024's temporary scoping, so bumping `shoal-core` would silently change a
+  latent defect into a non-defect. Whoever bumps it should read that item first and delete it
+  deliberately rather than discover it was fixed.
+
+### Documentation
+
+Two things that no test, and no build, will ever notice.
+
+**Nothing checks the links.** `docs/src/` holds about 1,175 internal links and anchors.
+`mdbook build` verifies that a file exists — `create-missing = false` in `book.toml` — and says
+nothing about a `#fragment` that names a heading which has since been reworded. The
+[August 2026 review](review-2026-08.md) resolved all of them by hand and found four broken,
+three of which were anchors. A `mdbook-linkcheck` backend, or thirty lines of script in CI, closes
+this permanently; it is filed rather than done because there is no CI to put it in, which is the
+item above.
+
+**Nothing checks `CLAUDE.md`.** It names APIs it does not exercise and is read before every change,
+which is the worst combination available; four of its claims had gone stale by the time anyone
+looked ([Resolved #25](resolved/claude-md-drift.md)). The cheapest real improvement is not a
+checker but a deletion: its usage sketch restates what `shoal/examples/tmdb.rs` already does
+correctly and is compiled, so shrinking the sketch to a pointer removes the only part of the file
+that can name a function.
 
 ### Tests
 
@@ -608,8 +721,8 @@ Multi-shard routing is no longer on that list; it gained coverage with
 | Location | Status |
 | --- | --- |
 | `server/cursor.rs`, `server/response.rs` | Not in the module tree; reference removed APIs. |
-| `client.rs:544-598`, `:1025-1091` | Large commented-out blocks. |
-| `.../fs.rs:74-98` | The previous intent-log writer, commented out. |
-| `shoalctl/src/components/tab.rs:527`, `:537` | `next`/`prev`, never called. |
+| `shoal-core/src/client.rs:549-603`, `:1048-1114` | Large commented-out blocks. |
+| ~~`.../fs.rs:74-98`~~ | ~~The previous intent-log writer, commented out.~~ **Gone** — the block is no longer in the file. |
+| `shoalctl/src/components/tab.rs:548`, `:558` | `next`/`prev`, never called — the compiler warns about them on every build. |
 | ~~`EphemeralTable`~~ | ~~Cannot be used in a `#[db]` database.~~ Deleted by [F9](../features/ephemeral-tables.md), which replaced it with aliases over the persistent tables. |
 | `shoal/examples/basic.rs.bak` | A `.bak` file in the source tree. |

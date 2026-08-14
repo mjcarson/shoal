@@ -43,6 +43,12 @@ database") oversell the current state:
   partitions can be reached ([Query Execution](tables/query-execution.md)).
 - **No rebalancing.** Shard count is baked into the on-disk file layout. Changing it between
   restarts is refused at startup ([Partitioning and the Tablet Map](architecture/partitioning.md)).
+- **No authentication and no encryption.** Anything that can reach the port can read and write any
+  table ([Wire Protocol](architecture/wire-protocol.md#limitations)).
+
+What it would take to close the last of those, and five other things the client cannot do, is
+designed in [Direction](direction/overview.md) — which is a design record, not a roadmap. Nothing
+in it is built.
 
 Shoal is best understood as a fast single-node partitioned key-value store with a
 persistence layer, on top of which distribution has not yet been built.
@@ -100,6 +106,11 @@ If you are new to the codebase, read in this order:
 5. [Known Issues](appendix/known-issues.md) — before you trust anything, and
    [Resolved Issues](appendix/resolved-issues.md) before you change anything: each page there
    ends with the invariants its fix depends on.
+
+If what you are about to change is the client or the wire it speaks, read
+[Direction](direction/overview.md) first. It is the only forward-looking part of this book, and it
+exists because the six things most often asked of the client all land on the same missing eight
+bytes of frame header.
 
 The single most informative file in the repository is
 `shoal-derive/src/traits/db.rs`, which generates the `ShoalDatabase` impl that dispatches

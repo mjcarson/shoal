@@ -432,7 +432,7 @@ This is the measurement that made the micro layer necessary: no amount of statis
 [Optimizations](../appendix/optimizations.md) claims less than that.
 
 At full scale with a warmup and deterministic shard placement it is now **10.5%**
-([Performance Baseline](performance-baseline.md#end-to-end)), which is better and is still not
+([Performance Baseline](performance-baseline.md#end-to-end--retired)), which is better and is still not
 enough to adjudicate most of that backlog.
 
 > Both tables above were taken on **btrfs**, on 4 shards, before the storage filesystem moved

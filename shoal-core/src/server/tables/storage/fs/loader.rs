@@ -63,6 +63,14 @@ pub(super) fn classify(error: &ServerError) -> LoadFailure {
         // the compactor pruned this partition out from under the read, so there is nothing
         // left to read and never will be
         ServerError::Shoal(ShoalError::PartitionNotFound { .. }) => LoadFailure::Absent,
+        // an archive that is not on disk will not be on disk on the next attempt either, and
+        // this is not `Absent` - the map still points a partition at that archive, so unlike
+        // a pruned partition a replay would park on the same failure rather than answer
+        //
+        // this reaches the same class the catch all below would give it, and is spelled out
+        // because falling into the `IO` arm above instead would stall every query parked
+        // behind this read for three attempts to arrive at the same answer
+        ServerError::Shoal(ShoalError::ArchiveMissing { .. }) => LoadFailure::Fatal,
         // an archive that could not be opened may open next time, since the realistic cause
         // is a shortage of file descriptors that other reads will give back
         ServerError::IO(_) | ServerError::GlommioIO { .. } => LoadFailure::Retryable,

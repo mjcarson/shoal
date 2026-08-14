@@ -101,6 +101,10 @@ without standing up a schema:
 | `IO` / `GlommioIO` | `Retryable` | Three attempts, 2 ms apart, then given up on at `ERROR`. |
 | anything else | `Fatal` | Given up on at `ERROR` without retrying. |
 
+`classify` has since gained one more arm. An archive that is not on disk reports
+`ShoalError::ArchiveMissing` and is `Fatal` explicitly, because by errno alone it is an ENOENT and
+would land in the `IO` row above ([Resolved #57](missing-archive.md)).
+
 **Every outcome reaches the shard.** A new `ServerMsg::PartitionLoadFailed { table, partition_id }`
 is what a read sends when it gives up, and `read_partition` cannot return without sending one
 message or the other. It carries no error — the loader logs that, where the context is richest;
@@ -184,9 +188,12 @@ log is what stops it being silent.
 - [Item 56](../known-issues.md#56-a-response-cannot-say-that-a-read-failed): a read that failed is
   reported to the client exactly as an empty partition is. The server logs it; the client cannot
   tell.
-- [Item 57](../known-issues.md#57-a-missing-archive-is-created-empty-rather-than-reported), found
-  on the way: `get_archive` opens with `create(true)`, so a missing archive is created empty rather
-  than reported, and surfaces later as a validation failure on bytes nobody wrote.
+- ~~Item 57, found on the way: `get_archive` opens with `create(true)`, so a missing archive is
+  created empty rather than reported, and surfaces later as a validation failure on bytes nobody
+  wrote.~~ **Done** — [Resolved #57](missing-archive.md). It turned out to end the shard rather
+  than merely mislead, and it is routed into the `Fatal` class and the release path built here.
+  The filed fix direction was wrong about why: `get_archive` has no caller that wants the file
+  created, so nothing had to be split.
 - Nothing bounds how many reads are in flight, and each holds a duplicated file handle. That is
   what makes `Retryable` worth having, and it is [item 15](../known-issues.md#15-no-backpressure-anywhere).
 
@@ -208,7 +215,7 @@ log is what stops it being silent.
   stranded query is stranded permanently rather than briefly.
 - [Item 33](../known-issues.md#33-collected-split-query-state-has-no-expiry) — this was the
   concrete route by which a `Gather` leaked. That route is closed; the general defect is not.
-- [F4](../features/validated-archives.md) — added the first failure in `load_partition` that
+- [F4](../../features/validated-archives.md) — added the first failure in `load_partition` that
   returns rather than panics, which is what made item 51 worth filing.
-- [F9](../features/ephemeral-tables.md) — ephemeral tables are the same tables over `NoStorage`,
+- [F9](../../features/ephemeral-tables.md) — ephemeral tables are the same tables over `NoStorage`,
   whose `load_partition` always answers `false`, so nothing they hold can ever be parked on a read.

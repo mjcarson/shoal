@@ -57,6 +57,19 @@
   - [F8. Purpose-built workloads, in the crate that judges them](features/purpose-built-workloads.md)
   - [F9. Ephemeral tables, and the benchmarks that need them](features/ephemeral-tables.md)
 
+# Direction
+
+- [Overview](direction/overview.md)
+  - [D1. The transport](direction/transport.md)
+  - [D2. Framing and protocol evolution](direction/framing.md)
+  - [D3. Authentication](direction/authentication.md)
+  - [D4. Encryption in transit](direction/encryption.md)
+  - [D5. Runtime portability](direction/runtimes.md)
+  - [D6. A production connection pool](direction/connection-pool.md)
+  - [D7. Shard-aware routing](direction/shard-aware-routing.md)
+  - [D8. Compile-time guarantees](direction/typed-queries.md)
+  - [D9. Lessons from other databases](direction/prior-art.md)
+
 # Appendix
 
 - [Known Issues](appendix/known-issues.md)
@@ -77,10 +90,13 @@
   - [18, 50. Core exclusion was ignored and shard placement was random](appendix/resolved/excluded-cores-typo.md)
   - [20. The storage tests were entirely commented out](appendix/resolved/storage-tests.md)
   - [24. A bad query could leave the terminal in raw mode](appendix/resolved/shoalctl-panic.md)
+  - [25. `CLAUDE.md` described a Shoal that no longer existed](appendix/resolved/claude-md-drift.md)
   - [26, 39. A multi-partition get answered in an arbitrary order](appendix/resolved/partition-order.md)
   - [31. Multi-log recovery discarded already-replayed intents](appendix/resolved/multi-log-recovery.md)
   - [44. A compaction discarded a damaged log's tail in silence](appendix/resolved/compaction-tail-loss.md)
   - [45. The storage marker's format field was written and never read](appendix/resolved/storage-marker-format.md)
   - [48. A query that does not parse was answered with silence](appendix/resolved/query-error-display.md)
+  - [57. A missing archive was created empty rather than reported](appendix/resolved/missing-archive.md)
 - [TODOs and Unbuilt Work](appendix/todos.md)
+- [Review, August 2026](appendix/review-2026-08.md)
 - [Glossary](appendix/glossary.md)

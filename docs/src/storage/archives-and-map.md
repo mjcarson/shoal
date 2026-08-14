@@ -32,7 +32,7 @@ active archive and repoints the map; the old copy becomes garbage, reclaimed lat
 compaction ([Compaction](compaction.md)).
 
 There is exactly one active archive at a time, in `ArchiveMap::active`
-(`.../fs/map.rs:317`). It is created lazily by `get_active_writer` (`.../fs/map.rs:394-417`),
+(`.../fs/map.rs:334`). It is created lazily by `get_active_writer` (`.../fs/map.rs:411-433`),
 which also registers the new archive in `all_archives`.
 
 Archive payloads carry **no checksum**. Intent log records do, and the map snapshot does, but
@@ -78,12 +78,31 @@ within a thread, `RefCell` for mutation, no atomics.
 
 `loaded_archives` is a cache of open `DmaFile` handles, avoiding an `open` per partition
 fault. It is unbounded — every archive ever touched stays open for the process lifetime, and
-`ArchiveMap::new` preallocates for 1000 (`.../fs/map.rs:365`). File descriptors are only
-released by `remove_archive` (`.../fs/map.rs:473-481`) or `close_all` at shutdown.
+`ArchiveMap::new` preallocates for 1000 (`.../fs/map.rs:382`). File descriptors are only
+released by `remove_archive` (`.../fs/map.rs:538-548`) or the shutdown drain (`:615`).
 
-Handles are handed out with `dup()` (`.../fs/map.rs:428-429`, `:444`) so a caller can `close()`
-its copy without disturbing the cached one — `read_partition_helper` relies on exactly that
-(`.../fs/loader.rs:19-28`).
+**Nothing bounds it, and nothing has hit the ceiling yet.** An archive is only removed when
+compaction reclaims it, so a long-lived table accumulates a descriptor per archive it has ever
+read. `EMFILE` is not hypothetical here — it is the failure the loader's `Retryable`
+classification exists to ride out, precisely because a descriptor another read is holding may come
+back ([Resolved #16, 51](../appendix/resolved/partition-load-failure.md#the-fix)). So the retry
+loop and this cache are two halves of the same unsolved problem, and
+[O15](../appendix/optimizations.md#o15-one-partition-load-costs-a-dup-and-a-close) says so from the
+other side: it is filed as an optimization because no `EMFILE` has been observed, which makes it an
+argument rather than a symptom.
+
+Handles are handed out with `dup()` (`.../fs/map.rs:418`, `:430`, `:484`) so a caller can
+`close()` its copy without disturbing the cached one — `read_partition_helper` relies on exactly
+that (`.../fs/loader.rs:92-94`).
+
+**Two functions fill that cache, and only one of them creates.** `get_active_writer` creates the
+active archive, which is the only archive that is ever created. `get_archive` opens an archive
+that must already be there and reports `ShoalError::ArchiveMissing` when it is not; it used to
+open with `create(true)`, which turned a deleted archive into an empty one and the read of it into
+a corruption failure two hops later ([Resolved #57](../appendix/resolved/missing-archive.md)).
+Because the two share this one cache, `get_archive` still opens for writing as well as reading —
+a read-only handle cached for the active archive id would be duplicated into a writer that cannot
+write.
 
 ## Two persistence mechanisms
 
@@ -283,6 +302,6 @@ between the compactor and the loader.
   (`create_new(true)`), with no startup cleanup.
 - `DeleteArchive` writing is duplicated three times instead of using the macro.
 - `SerializedMap` does not persist `active`; a fresh `Uuid::new_v4()` is chosen on every
-  startup (`.../fs/map.rs:363`), so every restart begins a new active archive and leaves the
+  startup (`.../fs/map.rs:380`), so every restart begins a new active archive and leaves the
   previous one to be reclaimed later. Flagged in-code as
-  `// TODO make issue about SerializedMap not needing to track active` (`.../fs/map.rs:351`).
+  `// TODO make issue about SerializedMap not needing to track active` (`.../fs/map.rs:368`).

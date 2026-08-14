@@ -3,8 +3,21 @@
 What the test suite reaches, what it does not, and the one place where it is unsound.
 
 **Established by running it.** `cargo check --workspace --all-targets` passes with warnings and
-`cargo test --workspace` passes: **454 integration tests** (one ignored), **229 `shoal-core` unit
-tests**, **21 doctests**. That is up from 452, 225, and 21 with
+`cargo test --workspace` passes: **456 integration tests** (one ignored), **231 `shoal-core` unit
+tests**, **21 doctests**.
+
+**Re-run and re-counted in August 2026** ([Review](review-2026-08.md)), binary by binary, and every
+number on this page was already right: 455 integration tests passing plus the one ignored, 231 unit
+tests, and 21 doctests split 10 in `shoal-bench`, 9 in `shoal-core` and 2 in `shoalctl`. That is
+worth recording rather than assuming, because it is the one part of this documentation that is
+cheap to verify and expensive to trust wrongly — the counts are what every other page's "up from"
+chain hangs off. What the same run *did* change is the port table at the bottom of this page, which
+described two colliding test binaries and now describes five.
+
+That is up from 454, 229, and 21 with
+[Resolved #57](resolved/missing-archive.md) — one integration test per persistent table over a read
+whose archive is not on disk, and two unit tests over `get_archive` itself and over how the failure
+it now reports is classified. Before that it was up from 452, 225, and 21 with
 [Resolved #16, 51](resolved/partition-load-failure.md) — one integration test per persistent table
 over a partition read that cannot be done, and four unit tests over how a read failure is
 classified. Before that it was up from 410, 219, and 21 with
@@ -79,8 +92,8 @@ are in [Optimizations](optimizations.md).
 
 | Binary | Count | What it reaches |
 | --- | --- | --- |
-| `persistent_sorted_table.rs` | 58, one ignored | insert; `exists` true and false; delete; delete after restart; delete surviving restart; delete and update when the partition is not resident; delete and writes surviving eviction; update; update intent replay; multi-log recovery; empty rotated log cleanup; acknowledgement surviving `SIGKILL`; five limit tests; two cross-shard tests; five row-order tests; six sort-key selection tests; two sort-key `exists` tests; six range tests including the archived seek and the memory/disk span; the paging walk; two range `exists` tests; three end-to-end SHQL tests; nine projection tests including the archived scan, the blocked disk read, the cross-partition order, and a projected and an unprojected get in one batch; and a get whose archive cannot be opened, which is the only test that reaches the loader's failure path ([Resolved #16, 51](resolved/partition-load-failure.md)) |
-| `persistent_unsorted_table.rs` | 16 | insert; delete; update; delete and update when not resident; delete surviving eviction; insert after delete when not resident; zero limit; three multi-partition tests; three projection tests; and the unsorted twin of the unreadable-archive test, because the two tables park and release blocked queries through different code |
+| `persistent_sorted_table.rs` | 59, one ignored | insert; `exists` true and false; delete; delete after restart; delete surviving restart; delete and update when the partition is not resident; delete and writes surviving eviction; update; update intent replay; multi-log recovery; empty rotated log cleanup; acknowledgement surviving `SIGKILL`; five limit tests; two cross-shard tests; five row-order tests; six sort-key selection tests; two sort-key `exists` tests; six range tests including the archived seek and the memory/disk span; the paging walk; two range `exists` tests; three end-to-end SHQL tests; nine projection tests including the archived scan, the blocked disk read, the cross-partition order, and a projected and an unprojected get in one batch; and the two tests that reach the loader's failure path — a get whose archive cannot be opened ([Resolved #16, 51](resolved/partition-load-failure.md)), and a get whose archive is not on disk at all, which also asserts that the read did not create the archive it could not find ([Resolved #57](resolved/missing-archive.md)) |
+| `persistent_unsorted_table.rs` | 17 | insert; delete; update; delete and update when not resident; delete surviving eviction; insert after delete when not resident; zero limit; three multi-partition tests; three projection tests; and the unsorted twins of the unreadable-archive and missing-archive tests, because the two tables park and release blocked queries through different code |
 | `ephemeral_sorted_table.rs` | 15 | the sorted read and write paths with no storage engine beneath them ([F9](../features/ephemeral-tables.md)): insert; `exists` true and false; delete; update; a limit; cross-shard row order; named sort-key selection; a range and its bounds; a range `exists`; an end-to-end SHQL range; a projection. Plus the three that are about the table rather than about sorted tables — that nothing is written to the storage directory, that nothing survives a restart, and that memory pressure evicts none of it |
 | `ephemeral_unsorted_table.rs` | 12 | the same for the unsorted table, over a schema that also holds a persistent one and declares the ephemeral table **first** — which is what pins that a persistent table declared after an ephemeral one still gets its loader spawned, and therefore can still read a partition off disk |
 | `shql.rs` | 53 | SHQL parsing and binding against a real schema, including range binding and the role refusals, projection binding and its two refusals, plus completion suggestions |
@@ -104,7 +117,7 @@ exercise durability end to end, and they exist because
 | --- | --- | --- |
 | `shared/queries/parser/tests.rs` | 59 | the SHQL grammar, including `IN` lists, `OR` folding, each range operator, the folding and refusals around a range, and the projection slot with its offsets |
 | `shared/queries/parser/complete/tests.rs` | 27 | completion suggestion generation, including the range operator tokens and a projection standing where the star does |
-| `.../storage/fs/tests.rs` | 25 | the intent log reader against real files, including which tail shapes are damage and which are how a healthy log ends, and what a compaction is about to throw away with the log it deletes; and how a failed partition read is classified — which of the three classes is retried, and that an unrecognised error is given up on rather than retried forever ([Resolved #16, 51](resolved/partition-load-failure.md)) |
+| `.../storage/fs/tests.rs` | 27 | the intent log reader against real files, including which tail shapes are damage and which are how a healthy log ends, and what a compaction is about to throw away with the log it deletes; how a failed partition read is classified — which of the three classes is retried, and that an unrecognised error is given up on rather than retried forever ([Resolved #16, 51](resolved/partition-load-failure.md)); and `ArchiveMap::get_archive` over an archive that is not on disk, that it names the archive rather than creating one and that the failure is never retried ([Resolved #57](resolved/missing-archive.md)) |
 | `.../storage/fs/stream_tests.rs` | 14 | `StreamWriter` alignment, padding, and watermarks, including that submitting a write advances neither watermark in either durability mode — the premise [F5](../features/flushed-sweep-gate.md)'s sweep gate rests on |
 | `tables/partitions.rs` | 59 | tombstone bookkeeping, limits, sort-key selection and range selection on `get` and `exists`, the empty-range guard, `merge_from_disk` sizing, the recovery counting that separates a correctly dropped update from a lost one, and the projected scan across all three selections; plus the archived arm of all of those — that a truncated or root-corrupted archive is refused, that the unchecked read lands on the same reference the checked one does, and that an archived partition answers every selection identically to a resident one holding the same rows ([F4](../features/validated-archives.md)) |
 | `shared/queries.rs` | 10 | sort-key normalization, and `SortRange` emptiness and containment |
@@ -185,16 +198,35 @@ subscriber is process-global while these binaries run their tests in parallel th
 ([below](#the-suite-cannot-safely-run-its-binaries-in-parallel)), so captured events would have
 to be attributed to the test that caused them.
 
+**A shard that dies is only reported this way, which is why no test can assert on one.**
+`ShoalPool::exit` logs each shard's join result at `ERROR` and returns `Ok(())` regardless
+([item 58](known-issues.md#58-a-shard-that-dies-is-not-reported-to-whoever-started-the-pool)). So a
+test whose server lost a shard sees it as a query that never came back, and cannot say why — which
+is exactly how [Resolved #57](resolved/missing-archive.md) presented, and why establishing what
+killed the shard needed a temporary `eprintln!` rather than an assertion.
+
 ### The streaming client APIs
 
 `stream()`, `stream_unordered()`, `ShoalResultStream::skip`, and the out-of-order reassembly
-through `pending: BTreeMap` / `BTreeSet` (`client.rs`) have **no test at all**. Every integration
-test goes through `send`, `exec`, `send_one`, or `exists`.
+through `pending: BTreeMap` / `BTreeSet` (`shoal-core/src/client.rs`) have **no test at all**.
+Every integration test goes through `send`, `exec`, `send_one`, or `exists`.
 
 That is where `skip(0)` panicking has been able to sit unnoticed
 ([item 23](known-issues.md#23-client-stream-and-pool-rough-edges)), and the reassembly logic is
 the part of the client most likely to be wrong, since it is the only part that has to hold state
 across responses.
+
+**A second defect surfaced here during the [August 2026 review](review-2026-08.md)**, and it is
+worth reading as evidence about the gap rather than only about the bug: a stream that is not
+drained to its last response never releases its entry in the client's response map, because the
+release lives inside the `if end` arm of `next`
+([item 60](known-issues.md#60-a-result-stream-that-is-not-drained-to-the-end-leaks-its-slot-in-the-client)).
+Every supported way of ending a stream early leaks. It has sat there since the streams were
+written, and no test could have caught it, because no test constructs one.
+
+What the contract of these buffers actually is — and why keying them by response index is sound —
+is now written down in [The Client](../api/client.md#the-reorder-buffers), which is the thing to
+read before writing the tests this section is asking for.
 
 ### Concurrency and the connection pool
 
@@ -246,28 +278,34 @@ fn get_unique_port() -> u16 { PORT_COUNTER.fetch_add(1, Ordering::SeqCst) }
 ```
 
 Cargo runs binaries in parallel, so they all start at 13000 together. Capturing the `listening on`
-line (`conf.rs:111`) from each binary in turn:
+line (`conf.rs:166`) from each binary in turn:
 
 | Binary | Ports bound |
 | --- | --- |
-| `persistent_sorted_table` | 13000-13100, plus 13900 and 13901 |
-| `persistent_unsorted_table` | 13000-13031 |
+| `persistent_sorted_table` | 13000-13102, plus 13900 and 13901 |
+| `persistent_unsorted_table` | 13000-13033 |
+| `ephemeral_sorted_table` | 13000-13015 |
+| `ephemeral_unsorted_table` | 13000-13014 |
+| `storage_meta` | 13000-13002 |
 
-Both ranges have grown since they were first measured — 13034 and 13021 — because every test that
-restarts a server binds another port. Re-measure them with `-- --nocapture` rather than trusting
-the numbers above; the overlap is the point, not the endpoints.
+**It is five binaries now, not two.** This table listed the two persistent ones; the two ephemeral
+binaries arrived with [F9](../features/ephemeral-tables.md) and `storage_meta` was never counted.
+Every range grows with every test that restarts a server — the sorted binary was 13034 when this
+was first measured and 13100 at the last one. Re-measure them with `-- --nocapture` rather than
+trusting the numbers above; the overlap is the point, not the endpoints.
 
-**Every port the unsorted binary binds is also bound by the sorted one.** The second bind does not
-fail: glommio sets `SO_REUSEPORT` on listening sockets, so it succeeds silently and the kernel load
-balances connections between the two servers. A client can be handed a server belonging to a
+**Every port any of the other four binds is also bound by the sorted one.** The second bind does
+not fail: glommio sets `SO_REUSEPORT` on listening sockets, so it succeeds silently and the kernel
+load balances connections between the servers. A client can be handed a server belonging to a
 different test, with a different schema and a different temp dir, and nothing reports it.
 
-`persistent_sorted_table.rs:812` also hardcodes `let port = 13900`, which collides with itself
+`persistent_sorted_table.rs:829` also hardcodes `let port = 13900`, which collides with itself
 across concurrent runs of that one binary.
 
 **This has not been observed to fail.** The full suite was run four times while establishing the
-baseline above and passed every time — the servers simply are not alive on the same port at the
-same instant. Nothing arranges that.
+baseline above, and twice more during the [August 2026 review](review-2026-08.md) that re-measured
+the table; it passed every time — the servers simply are not alive on the same port at the same
+instant. Nothing arranges that.
 
 Binding port 0 and reading back the assigned port would remove the shared namespace entirely,
 which is the only fix that does not just relocate the problem to the next binary someone adds.
