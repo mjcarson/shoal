@@ -259,19 +259,34 @@ inherent function rather than a `TableSchemaSupport` method because the filter t
 
 ```rust
 pub trait TableSchemaSupport {
+    const SCHEMA_FINGERPRINT: u64;
     fn get_field_validator(field_name: &str) -> Option<TypeValidator>;
     fn get_field_role(field_name: &str) -> Option<FieldRole>;
     fn field_names() -> Vec<&'static str>;
 }
 ```
 
-`shoal-core/src/shared/traits.rs:367-377`
+`shoal-core/src/shared/traits.rs`
 
 Reflection for SHQL: given a field name from a `WHERE` clause, is it a partition key, a sort
 key, or a filter, and does the supplied literal deserialize into its type? Validators are
 built with `make_validator::<T>()`, which closes over `serde_json::from_value::<T>`
 (`shoal-core/src/shared/queries/parser.rs:154-160`). This is why table field types must
 implement `serde::DeserializeOwned` for SHQL to work on them.
+
+`SCHEMA_FINGERPRINT` is a different kind of reflection and is the one thing on this trait that
+reaches the wire. It is a `const fn` chain over this table's name and every field's name, declared
+type, archived size and alignment, position, and query roles — folded at compile time, so it costs
+nothing at runtime ([F10](../features/framing-and-protocol-evolution.md)). `ShoalProjection`
+carries one too, and `#[db]` folds all of them into `QuerySupport::SCHEMA_FINGERPRINT`, which the
+two peers exchange when a connection opens.
+
+The constants are **required rather than defaulted** on all three traits. A default of `0` would
+let a hand-written implementation opt out of the only check that catches a peer built from a
+different but structurally similar schema, by doing nothing at all — which is the failure mode the
+fingerprint exists to remove. The three hand-written implementations in
+`shoal-core/src/server/tables/partitions.rs`'s test module each name a distinct placeholder
+constant for exactly this reason.
 
 ## What `#[db]` generates
 
@@ -319,7 +334,7 @@ From `shoal-derive/src/lib.rs:250-262`:
 | `TestDbTableNames` | `traits/table_name.rs` | A `Copy` enum, one variant per table, named after the *row* type. Used as a map key everywhere. |
 | `Display for TestDbTableNames` | `traits/display.rs` | Logging. |
 | `impl ShoalDatabase for TestDb` | `traits/db.rs` | The dispatch layer. |
-| `TestDbClient` | `structs/client.rs` | The client-side `QuerySupport` impl. |
+| `TestDbClient` | `structs/client.rs` | The client-side `QuerySupport` impl, including `SCHEMA_FINGERPRINT` — the fold of every table, row and projection constant, which is what the two peers compare when a connection opens ([F10](../features/framing-and-protocol-evolution.md)). |
 | `TestDbQueryKinds` | `structs/query_kinds.rs` | A wire enum, one variant per table. |
 | `TestDbResponseKinds` | `structs/query_kinds.rs` | A wire enum, one variant per table **and one per projection**, so a projected get answers as its own type ([F2](../features/projections.md#design-choices)). |
 | `{Row}Projection` | `projections.rs` | A unit enum per table naming its projections, with `Full` as the default. |

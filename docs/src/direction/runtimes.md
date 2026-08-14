@@ -92,7 +92,7 @@ runtime owns:
 | --- | --- |
 | `Queries`, `QueryKinds`, `ResponseKinds`, `Response`, `ResponseAction` | `server/`, storage, the shard |
 | `QuerySupport`, `RkyvSupport`, `ShoalQuerySupport`, `ShoalResponseSupport`, `ShoalProjection` | `ShoalDatabase`, and its `TaskQueueHandle` |
-| The [D2](framing.md) framing module | The listener and the relays |
+| The [D2](framing.md) framing module — built as `shoal-core/src/shared/protocol.rs`, depending on `core` and `uuid` alone so it moves unchanged | The listener and the relays |
 | `Shoal<S>` and the client machinery | |
 
 `shoal-core` depends on it. `shoalctl` and `shoal-bench` depend on it and drop glommio. `Ring` and
@@ -133,7 +133,7 @@ the only shipped backend until someone asks for another.**
 | **Impact** | Argued for the abstraction. The split is not a performance change at all — it is a dependency and packaging one |
 | **Difficulty** | M for the split (moving modules and one trait method). L for feature-flagged runtimes. XL for a `Runtime` trait |
 | **Depends on** | nothing |
-| **Blocks** | [D2](framing.md) and [D7](shard-aware-routing.md) only in the sense of where their code should live |
+| **Blocks** | ~~[D2](framing.md) and~~ [D7](shard-aware-routing.md) only in the sense of where their code should live. D2 turned out not to be blocked at all: its module has no runtime dependency to split away from, so it was written where it is and moves later ([F10](../features/framing-and-protocol-evolution.md)) |
 | **Tradeoff** | None for the split. Contained for feature flags — one runtime per binary |
 | **Benchmark** | none needed for the split; nothing measurable changes |
 

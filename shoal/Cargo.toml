@@ -52,3 +52,10 @@ criterion = { workspace = true }
 name = "partitions"
 harness = false
 required-features = ["bench"]
+
+# unlike `partitions`, this reaches nothing crate private - the protocol module is public - so it
+# builds and runs with no features at all, which is what somebody debugging a framing change
+# wants. gating it would make a bare `cargo bench -p shoal` silently skip it
+[[bench]]
+name = "wire"
+harness = false

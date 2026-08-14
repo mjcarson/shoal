@@ -8,12 +8,19 @@ that this part says how it would be built, what it would cost, and what it would
 Six things are wanted from the client eventually: authentication, encryption, portability across
 async runtimes, a pool that survives a production failure, shard-aware routing over the tablet map,
 and a stronger compile-time link between a query and its response. They are usually discussed as
-six independent features. **They are not.** Five of the six land on a wire protocol that has no
+six independent features. **They are not.** Five of the six land on a wire protocol that had no
 message-type field, no version, and no error channel
-([Wire Protocol](../architecture/wire-protocol.md#design-notes)), so the first question each of
-them asks is the same question, and answering it once is most of the work.
+([Wire Protocol](../architecture/wire-protocol.md)), so the first question each of them asks is the
+same question, and answering it once is most of the work.
 
 That is why this is a chapter rather than six entries in `todos.md`.
+
+**D2 has since landed as [F10](../features/framing-and-protocol-evolution.md)**, which is the
+answer to that shared question: a version, a message type, two flag bytes, a bounded length, and a
+handshake carrying a schema fingerprint. The discriminants for `Auth`, `AuthResponse`, `Ping`,
+`Pong`, `Topology`, `GoAway` and `Cancel` are all defined and unwired, so each of the pages below
+now needs a call site rather than a flag day. What it did *not* take is the error channel, so the
+one edge in the table below that still names a missing format is the one D2 left behind.
 
 ## The constraint every page inherits
 
@@ -96,9 +103,9 @@ The book has no mermaid preprocessor, so this is a table
 
 | Edge | Why |
 | --- | --- |
-| D2 → D3, D4, D6, D7 | A handshake, a `Ping`, a `Topology` push, and a `GoAway` are message types, and there is no message-type field to carry one |
+| ~~D2~~ → D3, D4, D6, D7 | A handshake, a `Ping`, a `Topology` push, and a `GoAway` are message types, and there was no message-type field to carry one. **Satisfied** by [F10](../features/framing-and-protocol-evolution.md); all four discriminants exist |
 | D4 → D3 | mTLS makes authentication a byproduct of encryption. Choosing SCRAM instead is only *forced* if D4 is declined, so D4 decides D3 rather than the reverse |
-| D5 → D2, D7 | The crate split has to happen before anything outside `shoal-core` can consume a protocol module or a topology map |
+| D5 → ~~D2~~, D7 | The crate split has to happen before anything outside `shoal-core` can consume a topology map. It turned out **not** to gate the protocol module: that module depends on `core` and `uuid` and nothing else, so it was written inside `shoal-core` and moves to `shoal-proto` unchanged |
 | D6 → D7 | Shard-awareness turns one flat pool into per-shard sub-pools. The pool has to be rebuildable before it can be resharded |
 | D2 ↔ D8 | The strongest compile-time guarantee available — that the peer was built from the same schema — lives in a handshake field, not in the type system |
 | D1 → everything | Only in the sense that declining QUIC is what makes D2 and D4 real work rather than free |

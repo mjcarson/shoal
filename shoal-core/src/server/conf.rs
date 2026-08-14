@@ -9,6 +9,7 @@ use tracing::level_filters::LevelFilter;
 
 use super::tables::storage::fs::conf::FileSystemTableConf;
 use super::ServerError;
+use crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES;
 use crate::utils::{self, IntoStorageSize};
 
 /// The resource settings to use
@@ -127,6 +128,11 @@ fn default_port() -> u16 {
     12000
 }
 
+/// Help serde default the largest frame this server will accept
+fn default_max_frame_bytes() -> u32 {
+    DEFAULT_MAX_FRAME_BYTES
+}
+
 /// The networking settings for Shoal
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Networking {
@@ -136,6 +142,16 @@ pub struct Networking {
     /// The port to bind too
     #[serde(default = "default_port")]
     pub port: u16,
+    /// The largest frame this server will read before it closes the connection that sent it
+    ///
+    /// A frame's length is used as an allocation size before a byte of its body has arrived, so
+    /// without a bound a peer can ask this server to allocate whatever a `u32` can spell. This is
+    /// what turns that into a refused connection.
+    ///
+    /// The client is told this number when it connects, so it can refuse to write a bundle that
+    /// would be rejected rather than discovering it as a closed socket.
+    #[serde(default = "default_max_frame_bytes")]
+    pub max_frame_bytes: u32,
 }
 
 impl Default for Networking {
@@ -144,6 +160,7 @@ impl Default for Networking {
         Networking {
             interface: default_interface(),
             port: default_port(),
+            max_frame_bytes: default_max_frame_bytes(),
         }
     }
 }
@@ -158,6 +175,16 @@ impl Networking {
     /// Set the port to bind to
     pub fn port(mut self, port: u16) -> Self {
         self.port = port;
+        self
+    }
+
+    /// Set the largest frame this server will accept
+    ///
+    /// # Arguments
+    ///
+    /// * `max_frame_bytes` - The largest frame to accept
+    pub fn max_frame_bytes(mut self, max_frame_bytes: u32) -> Self {
+        self.max_frame_bytes = max_frame_bytes;
         self
     }
 
@@ -359,7 +386,7 @@ impl Conf {
 
 #[cfg(test)]
 mod tests {
-    use super::{Conf, Resources};
+    use super::{Conf, Resources, DEFAULT_MAX_FRAME_BYTES};
 
     /// Write a config file into a temp dir and load it
     ///
@@ -493,5 +520,32 @@ mod tests {
             cpus.into_iter().all(|location| location.core != 1 && location.core != 2),
             "an excluded core survived into the cpuset"
         );
+    }
+
+    #[test]
+    /// A config that never mentions the frame bound still gets one
+    ///
+    /// This is what let the frame bound be added without touching `shoal.yml`, which is committed
+    /// and is the config every frozen benchmark was captured against. A required key would have
+    /// invalidated that baseline for a setting nobody has ever needed to change.
+    fn a_config_without_a_frame_bound_gets_the_default() {
+        // load a config that says nothing about networking at all
+        let (_dir, conf) = load("resources:\n  memory: \"4Gi\"\n");
+        let conf = conf.expect("a config with no networking section failed to load");
+        assert_eq!(conf.networking.max_frame_bytes, DEFAULT_MAX_FRAME_BYTES);
+        // and one that sets a port but not a bound gets the same default
+        let (_dir, conf) = load("networking:\n  port: 13000\n");
+        let conf = conf.expect("a config with a partial networking section failed to load");
+        assert_eq!(conf.networking.port, 13000);
+        assert_eq!(conf.networking.max_frame_bytes, DEFAULT_MAX_FRAME_BYTES);
+    }
+
+    #[test]
+    /// A config that names the frame bound overrides the default
+    fn a_config_can_set_its_own_frame_bound() {
+        // load a config that asks for a much smaller bound than the default
+        let (_dir, conf) = load("networking:\n  max_frame_bytes: 4096\n");
+        let conf = conf.expect("a config naming a frame bound failed to load");
+        assert_eq!(conf.networking.max_frame_bytes, 4096);
     }
 }

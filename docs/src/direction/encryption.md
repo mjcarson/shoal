@@ -102,7 +102,7 @@ Configured per listener, defaulting to off.**
 | **Rank** | **B**, ahead of [D3](authentication.md) because it decides it |
 | **Impact** | Argued — and the cost is the one thing on this page that genuinely needs a number before it lands |
 | **Difficulty** | XL — reaches the client's read loop, the server's write path, and the configuration |
-| **Depends on** | [D2](framing.md) for the handshake; [D1](transport.md) having declined QUIC, which would have supplied this |
+| **Depends on** | ~~[D2](framing.md) for the handshake~~ — **satisfied** by [F10](../features/framing-and-protocol-evolution.md); [D1](transport.md) having declined QUIC, which would have supplied this |
 | **Blocks** | [D3](authentication.md)'s mTLS path |
 | **Tradeoff** | Major — AES over every byte, and a read loop that becomes a state machine |
 | **Benchmark** | `transport/*`, unbuilt — and here that is a **blocker**, not a caveat |
@@ -146,8 +146,10 @@ would invalidate every number in the book.
 - **`AlignedVec::with_capacity(len)` sized from the frame length.** The ciphertext is longer than
   the plaintext by the AEAD tag and the record framing, so the length the client reads and the
   buffer it allocates stop being the same number. Getting that wrong is a subtle sizing bug, and it
-  interacts with [item 34](../appendix/known-issues.md#34-the-request-length-prefix-is-unvalidated)'s
-  missing bound.
+  interacts with the frame bound that
+  [item 34](../appendix/resolved/unvalidated-length-prefix.md) added — a ciphertext is longer than
+  the plaintext it carries, so a record that fits under `max_frame_bytes` in one form may not in
+  the other.
 - **Comparability of captures**, unless the per-listener default holds. An encrypted capture and a
   plaintext one are not the same measurement, the same rule that already applies to `hotpath` and
   `stage-profile` builds ([Performance Baseline](../operations/performance-baseline.md)).

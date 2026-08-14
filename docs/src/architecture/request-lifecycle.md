@@ -67,7 +67,7 @@ let client = Uuid::new_v4();                       // TODO: detect collisions?
 let (tcp_rx, tcp_tx) = stream.split();
 let (client_tx, client_rx) = kanal::unbounded_async();
 glommio::spawn_local(client_rx_relay(client, tcp_rx, node_local_tx.clone())).detach();
-glommio::spawn_local(client_tx_relay::<S>(client_rx, tcp_tx)).detach();
+glommio::spawn_local(client_tx_relay::<S>(client_rx, tcp_tx, hello.max_frame_bytes));
 comms.broadcast(&ServerMsg::NewClient { client, client_tx }).await?;
 ```
 
@@ -83,21 +83,31 @@ them on the wire immediately rather than coalesced.
 
 ## 2. Reading the request
 
+Before any of this, the connection shakes hands: the client sends a `Hello` naming the protocol
+version, its schema fingerprint and the largest frame it will accept, and the server answers with
+a `HelloAck` that either agrees or refuses ([Wire Protocol](wire-protocol.md#the-handshake)). Both
+halves run in the per-connection task, before the stream is split, under a deadline.
+
 ```rust
-let mut len_bytes: [u8; 8] = [0; 8];
-tcp_rx.read_exact(&mut len_bytes).await // EOF ⇒ client died, break
-let len = u64::from_le_bytes(len_bytes) as usize;
-let mut data = BytesMut::zeroed(len);
-tcp_rx.read_exact(&mut data).await.unwrap();
-kanal_tx.send(ServerMsg::Client { peer, data }).await.unwrap();
+let mut preamble = [0u8; protocol::REQUEST_PREAMBLE_LEN];
+tcp_rx.read_exact(&mut preamble).await // EOF ⇒ client died, break
+let header = protocol::decode_request(&preamble, max_frame_bytes)?; // else log and break
+let mut data = BytesMut::zeroed(header.body_len());
+tcp_rx.read_exact(&mut data).await // else log and break
+kanal_tx.send(ServerMsg::Client { peer, data, base }).await // else log and break
 ```
 
-`shoal-core/src/server/shard.rs:51-74`
+`client_rx_relay`, `shoal-core/src/server/shard.rs`
 
-Clean EOF is handled; every other socket error is a `panic!`
-(`shard.rs:58-62`). The length prefix is trusted completely — `BytesMut::zeroed(len)`
-allocates whatever the peer asked for, so a malicious or corrupt length is an unbounded
-allocation.
+Clean EOF ends the loop, and so does everything else — a version this build does not speak, a
+message type it does not know, a length past `max_frame_bytes`, a truncated body, or a shard
+channel that has gone. All of them log and `break`, which ends this connection and leaves every
+other client on the shard alone. **None of them panics**, which was not true before
+[F10](../features/framing-and-protocol-evolution.md)
+([Resolved #34](../appendix/resolved/unvalidated-length-prefix.md)).
+
+When this loop ends, the task that owns it cancels the write relay, which drops the other half of
+the split stream and closes the socket.
 
 ## 3. Coordinating: fan-out
 
@@ -318,9 +328,9 @@ let mut bufs = &mut [
 ][..];
 while !bufs.is_empty() {
     match tcp_tx.write_vectored(bufs).await {
-        Ok(0) => panic!("No bytes were written?"),
+        Ok(0) => { /* log and end this connection */ }
         Ok(n) => IoSlice::advance_slices(&mut bufs, n),
-        Err(error) => panic!("Ahhh error?: {error:#?}"),
+        Err(error) => { /* log and end this connection */ }
     }
 }
 ```
@@ -329,15 +339,15 @@ while !bufs.is_empty() {
 
 ## 7. Client demultiplexing
 
-The client runs one `TcpProxy` per pooled connection. Each reads a 24-byte preamble, looks up
-the query id in a shared concurrent map, and forwards the payload:
+The client runs one `TcpProxy` per pooled connection. Each reads a 24-byte preamble — eight bytes
+of header and then the query id — looks that id up in a shared concurrent map, and forwards the
+payload:
 
 ```rust
-let mut preamble: [u8; 24] = [0; 24];
+let mut preamble = [0u8; protocol::RESPONSE_PREAMBLE_LEN];
 self.reader.read_exact(&mut preamble).await
-let query_id = Uuid::from_slice(&preamble[..16])?;
-let len = u64::from_le_bytes(preamble[16..24].try_into()?) as usize;
-let mut aligned_buff = AlignedVec::<16>::with_capacity(len);
+let frame = protocol::decode_response(&preamble, self.max_frame_bytes)?;
+let mut aligned_buff = AlignedVec::<16>::with_capacity(frame.payload_len);
 aligned_buff.resize(len, 0);
 self.reader.read_exact(&mut aligned_buff).await?;
 match self.channel_map.pin_owned().get(&query_id) {
@@ -371,8 +381,13 @@ whole lifecycle including the asynchronous flush.
 ## Limitations
 
 - The request path deserializes and then clones per shard; it is not zero-copy.
-- The length prefix is unvalidated, so a bad length is an unbounded allocation.
-- Socket and channel errors are panics rather than per-connection teardown.
+- ~~The length prefix is unvalidated, so a bad length is an unbounded allocation.~~ Bounded by
+  `max_frame_bytes` since [F10](../features/framing-and-protocol-evolution.md).
+- ~~Socket and channel errors are panics rather than per-connection teardown.~~ Both relays tear
+  down the connection now; the panics elsewhere in the server are
+  [item 16](../appendix/known-issues.md#16-panics-on-the-hot-path).
+- A response too large to frame closes the connection with nothing on the wire saying why
+  ([item 61](../appendix/known-issues.md#61-a-response-too-large-to-frame-closes-a-connection-silently)).
 - `end` is computed incorrectly for streamed bundles, and underflows on empty ones.
 - Reordering the gathered rows rehashes each row's partition key, since a response carries rows
   and not the partition they came from ([Optimizations](../appendix/optimizations.md#o18-the-gathered-reorder-rehashes-every-rows-partition-key)).

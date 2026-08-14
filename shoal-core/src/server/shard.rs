@@ -37,6 +37,7 @@ use super::stage_profile::{self, StageStamps, Stamp};
 use super::{Comms, Conf, ServerError};
 use crate::{
     shared::{
+        protocol::{self, handshake, ProtocolError},
         queries::Queries,
         traits::{
             QuerySupport, RkyvSupport, ShoalDatabase, ShoalQuerySupport, ShoalResponseSupport,
@@ -45,46 +46,84 @@ use crate::{
     storage::{FullArchiveMap, LoaderMsg, Loaders},
 };
 
+/// Relay bundles of queries from one client into this node
+///
+/// Nothing in here panics. Every failure ends this one connection and leaves the shard and every
+/// other client it is serving alone, which is what it means for a relay to be a per connection
+/// task rather than a shared one.
+///
+/// # Arguments
+///
+/// * `peer` - The client this relay is reading from
+/// * `tcp_rx` - The read half of that client's connection
+/// * `kanal_tx` - The channel to forward bundles into this node on
+/// * `max_frame_bytes` - The largest frame this server will accept
 async fn client_rx_relay<S: ShoalDatabase>(
     peer: Uuid,
     mut tcp_rx: ReadHalf<TcpStream>,
     kanal_tx: AsyncSender<ServerMsg<S>>,
+    max_frame_bytes: u32,
 ) {
     // keep waiting for messages until  our tcp socket closes
     loop {
-        // have a buffer for our query_id and for our length
-        let mut len_bytes: [u8; 8] = [0; 8];
-        // try to read the size of the next message from our tcp socket
-        if let Err(error) = tcp_rx.read_exact(&mut len_bytes).await {
+        // have a buffer for the header of the next frame
+        let mut preamble = [0u8; protocol::REQUEST_PREAMBLE_LEN];
+        // try to read the header of the next message from our tcp socket
+        if let Err(error) = tcp_rx.read_exact(&mut preamble).await {
             // if this was an unexpected EOF error then assume the client died
             if error.kind() == std::io::ErrorKind::UnexpectedEof {
                 break;
             }
-            // TODO do something with this error
-            panic!("client_rx_relay: {error:#?}")
+            // any other read error ends this connection and only this connection
+            event!(Level::ERROR, msg = "failed to read a frame header", %peer, ?error);
+            break;
         }
-        // parse the upcoming messages size
-        let len = u64::from_le_bytes(len_bytes) as usize;
+        // check the header before its length is used for anything
+        //
+        // this is what closes the hole where a peer could name its own allocation size, and it
+        // has to happen here rather than after the allocation below
+        let header = match protocol::decode_request(&preamble, max_frame_bytes) {
+            Ok(header) => header,
+            Err(error) => {
+                event!(Level::ERROR, msg = "refused a frame", %peer, %error);
+                break;
+            }
+        };
         // allocate a buffer that is exactly the right size
-        let mut data = BytesMut::zeroed(len);
+        let mut data = BytesMut::zeroed(header.body_len());
         // wait for messages from our client
-        tcp_rx.read_exact(&mut data).await.unwrap();
+        if let Err(error) = tcp_rx.read_exact(&mut data).await {
+            event!(Level::ERROR, msg = "failed to read a frame body", %peer, ?error);
+            break;
+        }
         // start this bundles clock now that all of its bytes are here
         //
         // every stage offset a query in this bundle records is measured from here, since
         // this is the first moment we know the bundle exists
         let base = Stamp::now();
         // forward our clients message
-        kanal_tx
-            .send(ServerMsg::Client { peer, data, base })
-            .await
-            .unwrap();
+        if let Err(error) = kanal_tx.send(ServerMsg::Client { peer, data, base }).await {
+            // this shards channel is gone, so there is nowhere left to put this bundle
+            event!(Level::ERROR, msg = "failed to forward a bundle", %peer, ?error);
+            break;
+        }
     }
 }
 
+/// Relay responses back to one client
+///
+/// Like the read half, nothing in here panics. A write that fails ends this connection and leaves
+/// every other client this shard is serving alone.
+///
+/// # Arguments
+///
+/// * `client_rx` - The channel this node's shards hand responses over
+/// * `tcp_tx` - The write half of this client's connection
+/// * `peer_max_frame_bytes` - The largest frame this client said it would accept
 async fn client_tx_relay<S: ShoalDatabase>(
     client_rx: AsyncReceiver<(Uuid, Span, StageStamps, AlignedVec)>,
     mut tcp_tx: WriteHalf<TcpStream>,
+    peer_max_frame_bytes: u32,
 ) {
     // loop over messages to send back to our client
     loop {
@@ -97,22 +136,49 @@ async fn client_tx_relay<S: ShoalDatabase>(
         };
         // enter our span
         let span_guard = span.enter();
-        // get the size of the archive we are sending to the client
-        let len = archived.len().to_le_bytes();
+        // build the header and query id that go ahead of this response
+        //
+        // a response too large for this client to accept ends the connection with nothing on the
+        // wire to say why, since the protocol has no way to attach an error to a query yet. that
+        // is what the error channel is for, and until it lands this is still strictly better than
+        // a panic that would take the shard and every other client with it
+        let preamble = match protocol::response_preamble(
+            &query_id,
+            archived.len(),
+            peer_max_frame_bytes,
+        ) {
+            Ok(preamble) => preamble,
+            Err(error) => {
+                event!(Level::ERROR, msg = "response too large to frame", %query_id, %error);
+                break;
+            }
+        };
         // build our vectored byte slices to send
-        let mut bufs = &mut [
-            IoSlice::new(query_id.as_bytes()),
-            IoSlice::new(&len),
-            IoSlice::new(&archived),
-        ][..];
+        let mut bufs = &mut [IoSlice::new(&preamble), IoSlice::new(&archived)][..];
         // keep sending our data until all of this archive has been sent
+        //
+        // a short write or a write error here means this client is gone, so this connection ends
+        let mut failed = false;
         while !bufs.is_empty() {
             // send this data back to our client
             match tcp_tx.write_vectored(bufs).await {
-                Ok(0) => panic!("No bytes were written?"),
+                Ok(0) => {
+                    event!(Level::ERROR, msg = "wrote no bytes to a client", %query_id);
+                    failed = true;
+                    break;
+                }
                 Ok(n) => IoSlice::advance_slices(&mut bufs, n),
-                Err(error) => panic!("Ahhh error?: {error:#?}"),
+                Err(error) => {
+                    event!(Level::ERROR, msg = "failed to write a response", %query_id, ?error);
+                    failed = true;
+                    break;
+                }
             }
+        }
+        // stop relaying to a client we could not write to
+        if failed {
+            drop(span_guard);
+            break;
         }
         // record that this responses last byte is now the sockets problem
         stamps.mark_socket_written();
@@ -126,31 +192,207 @@ async fn client_tx_relay<S: ShoalDatabase>(
     }
 }
 
+/// How long a client has to finish its half of the handshake
+///
+/// A peer that connects and then says nothing would otherwise hold a task and a socket forever.
+/// This is generous compared to a handshake that is one 24 byte write and one 24 byte read, and
+/// deliberately so — it is here to bound a stalled peer, not to police a slow one.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The largest handshake frame this server will read
+///
+/// A handshake body is sixteen bytes. Anything claiming more than this is not a peer whose version
+/// we are trying to be careful about, so it is closed without the courtesy of a reply.
+const MAX_HANDSHAKE_BODY: usize = 4096;
+
+/// Read a client's `Hello` and answer it
+///
+/// # Invariants
+///
+/// **The client speaks first.** This reads before it writes, and the client writes before it
+/// reads. If both peers waited to read, every connection would deadlock.
+///
+/// **A refusal is still answered.** The server writes a `HelloAck` naming why before it closes, so
+/// that a mismatched client gets a legible error instead of a reset. That is only possible because
+/// the eight header bytes mean the same thing in every protocol version, which is what lets this
+/// read a version it does not speak and still know how many body bytes to drain.
+///
+/// **The body is drained before the refusal is written.** Closing a socket that still has unread
+/// bytes queued sends a reset, which would discard the very reply this went to the trouble of
+/// composing.
+///
+/// # Arguments
+///
+/// * `stream` - The connection to shake hands over, before it has been split
+/// * `max_frame_bytes` - The largest frame this server will accept
+async fn server_handshake<S: ShoalDatabase>(
+    stream: &mut TcpStream,
+    max_frame_bytes: u32,
+) -> Result<handshake::Hello, ServerError> {
+    // the fingerprint of the schema this server was built from
+    let ours = <S::ClientType as QuerySupport>::SCHEMA_FINGERPRINT;
+    // build the ack we will send if everything about this client checks out
+    let accept = handshake::HelloAck {
+        schema_fingerprint: ours,
+        max_frame_bytes,
+        reason: handshake::RefusalReason::Accepted,
+    };
+    // read the header of whatever this client opened with
+    let mut header_bytes = [0u8; protocol::HEADER_LEN];
+    stream.read_exact(&mut header_bytes).await?;
+    let raw = protocol::RawHeader::decode(&header_bytes);
+    // a frame claiming more than any handshake could need is not worth answering
+    if raw.len as usize > MAX_HANDSHAKE_BODY {
+        return Err(ProtocolError::FrameTooLarge {
+            len: raw.len,
+            max: MAX_HANDSHAKE_BODY as u32,
+        }
+        .into());
+    }
+    // drain the body before we decide anything, so that a refusal can still be written
+    let mut body = vec![0u8; raw.len as usize];
+    stream.read_exact(&mut body).await?;
+    // refuse a version we do not speak, naming ours so the client can say what happened
+    if raw.version != protocol::PROTOCOL_VERSION {
+        // this reply carries our version in its header, which the client can read because the
+        // header layout does not move between versions
+        let refusal = handshake::HelloAck {
+            reason: handshake::RefusalReason::UnsupportedVersion,
+            ..accept
+        };
+        stream.write_all(&refusal.frame(max_frame_bytes)?).await?;
+        stream.flush().await?;
+        return Err(ProtocolError::UnsupportedVersion {
+            got: raw.version,
+            ours: protocol::PROTOCOL_VERSION,
+        }
+        .into());
+    }
+    // a connection that opens with anything but a hello is not one we know how to have
+    let kind = protocol::MessageType::from_byte(raw.kind)?;
+    if kind != protocol::MessageType::Hello {
+        return Err(ProtocolError::UnexpectedMessageType {
+            expected: protocol::MessageType::Hello,
+            got: kind,
+        }
+        .into());
+    }
+    // a hello is a fixed sixteen bytes, so one of any other size is not a hello
+    let body: [u8; handshake::HANDSHAKE_BODY_LEN] =
+        body.try_into().map_err(|_| ProtocolError::BodyTooShort {
+            need: handshake::HANDSHAKE_BODY_LEN,
+            got: raw.len,
+        })?;
+    let hello = handshake::Hello::decode(&body);
+    // refuse a client built from a different schema, naming both fingerprints
+    if hello.schema_fingerprint != ours {
+        let refusal = handshake::HelloAck {
+            reason: handshake::RefusalReason::SchemaMismatch,
+            ..accept
+        };
+        stream.write_all(&refusal.frame(max_frame_bytes)?).await?;
+        stream.flush().await?;
+        return Err(ProtocolError::SchemaMismatch {
+            ours,
+            theirs: hello.schema_fingerprint,
+        }
+        .into());
+    }
+    // this client speaks our protocol and was built from our schema, so let it in
+    stream.write_all(&accept.frame(max_frame_bytes)?).await?;
+    stream.flush().await?;
+    Ok(hello)
+}
+
+/// Accept new clients and start a pair of relays for each one
+///
+/// # Invariants
+///
+/// **The accept loop never waits on a peer.** Everything a connection needs after `accept`
+/// returns — the handshake, the broadcast, both relays — happens in a task of its own. A
+/// handshake done inline would let one client that connects and then says nothing park this loop,
+/// and with a single shard configured that is every subsequent connection to this server.
+///
+/// # Arguments
+///
+/// * `tcp_sock` - The socket to accept clients on
+/// * `comms` - The channels to every shard on this node
+/// * `node_local_tx` - The channel to forward this node's bundles on
+/// * `max_frame_bytes` - The largest frame this server will accept
 #[allow(clippy::future_not_send)]
 async fn client_acceptor<S: ShoalDatabase>(
     tcp_sock: TcpListener,
     comms: Comms<S>,
     node_local_tx: AsyncSender<ServerMsg<S>>,
+    max_frame_bytes: u32,
 ) -> Result<(), ServerError> {
     loop {
         // try to read a single datagram from our udp socket
-        let stream = tcp_sock.accept().await?;
+        let mut stream = tcp_sock.accept().await?;
         // disable nagles algorithm on this socket
         stream.set_nodelay(true)?;
         // generate an id for this peer
         // TODO: detect collisions?
         let client = Uuid::new_v4();
-        // break this stream up into a writer and a reader
-        let (tcp_rx, tcp_tx) = stream.split();
-        // create a channel for all of our shards to give data to send back to clients
-        let (client_tx, client_rx) = kanal::unbounded_async();
+        // hand this connection everything it needs to live on its own
+        let comms = comms.clone();
+        let node_local_tx = node_local_tx.clone();
+        // run this whole connection under one task that owns its lifetime
+        //
+        // the two halves of a split stream keep the stream alive between them, so a read relay
+        // that ends on its own would leave the write relay parked on an empty channel holding a
+        // socket that nobody will ever read from again. owning the write task here is what lets
+        // the end of the read relay actually close the connection
+        //
         // TODO: do this with a task queue?
-        glommio::spawn_local(client_rx_relay(client, tcp_rx, node_local_tx.clone())).detach();
-        glommio::spawn_local(client_tx_relay::<S>(client_rx, tcp_tx)).detach();
-        // build the new client message to broadcast
-        let msg = ServerMsg::NewClient { client, client_tx };
-        // broadcast this client to all shards on this node
-        comms.broadcast(&msg).await?;
+        glommio::spawn_local(async move {
+            // shake hands before this stream is split, under a deadline so a peer that connects
+            // and then stalls cannot hold this task open forever
+            //
+            // the handshake's own result is wrapped rather than converted, so that a peer that
+            // stalled and a peer that was refused stay distinguishable in the log
+            let handshake = glommio::timer::timeout(HANDSHAKE_TIMEOUT, async {
+                Ok(server_handshake::<S>(&mut stream, max_frame_bytes).await)
+            })
+            .await;
+            let hello = match handshake {
+                Ok(Ok(hello)) => hello,
+                Ok(Err(error)) => {
+                    event!(Level::WARN, msg = "refused a client", %client, ?error);
+                    return;
+                }
+                Err(error) => {
+                    event!(Level::WARN, msg = "a client never finished its handshake", %client, ?error);
+                    return;
+                }
+            };
+            // break this stream up into a writer and a reader
+            let (tcp_rx, tcp_tx) = stream.split();
+            // create a channel for all of our shards to give data to send back to clients
+            let (client_tx, client_rx) = kanal::unbounded_async();
+            // tell every shard about this client before anything can send a query on its behalf
+            //
+            // the read relay pushes onto the same channels this broadcast uses, so broadcasting
+            // first is what makes that ordering guaranteed on the local shard rather than
+            // incidental
+            let msg = ServerMsg::NewClient { client, client_tx };
+            if let Err(error) = comms.broadcast(&msg).await {
+                event!(Level::ERROR, msg = "failed to announce a client", %client, ?error);
+                return;
+            }
+            // start writing responses back to this client, bounded by what it said it accepts
+            let tx_task = glommio::spawn_local(client_tx_relay::<S>(
+                client_rx,
+                tcp_tx,
+                hello.max_frame_bytes,
+            ));
+            // read this clients bundles until it goes away or sends something we refuse
+            client_rx_relay(client, tcp_rx, node_local_tx, max_frame_bytes).await;
+            // stop writing to a client that is not reading, which drops the last half of the
+            // stream and closes the socket
+            tx_task.cancel().await;
+        })
+        .detach();
     }
 }
 
@@ -424,7 +666,12 @@ where
         let node_local_tx = self.shard_local_tx.clone();
         // spawn or client listener
         let handle = glommio::spawn_local_into(
-            client_acceptor(tcp_sock, self.comms.clone(), node_local_tx),
+            client_acceptor(
+                tcp_sock,
+                self.comms.clone(),
+                node_local_tx,
+                self.conf.networking.max_frame_bytes,
+            ),
             self.high_priority,
         )?;
         // add this task to our task list

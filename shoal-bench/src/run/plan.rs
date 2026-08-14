@@ -25,6 +25,7 @@
 
 use std::path::PathBuf;
 
+use crate::registry::criterion_list;
 use crate::registry::Layer;
 
 /// Where a step's standard output should go
@@ -379,30 +380,36 @@ pub fn build_plan(inputs: &PlanInputs) -> Plan {
         if !inputs.keep_criterion {
             steps.push(Step::ClearCriterion(inputs.root.join("target/criterion")));
         }
-        // the same invocation bench.sh used, with a filter appended only when the selection is
-        // narrower than the whole registry
-        let mut args = vec![
-            "bench".to_string(),
-            "-p".to_string(),
-            "shoal".to_string(),
-            "--features".to_string(),
-            "bench".to_string(),
-            "--bench".to_string(),
-            "partitions".to_string(),
-            "--".to_string(),
-            "--save-baseline".to_string(),
-            inputs.label.clone(),
-        ];
-        if let Some(filter) = &inputs.criterion_filter {
-            args.push(filter.clone());
+        // one invocation per criterion bench target, each with a filter appended only when the
+        // selection is narrower than the whole registry
+        //
+        // a filter that names ids in only one target still invokes the other, which matches
+        // nothing and exits having measured nothing. that is correct but wasteful, and skipping
+        // it would need ids to carry which target they came from, which they do not
+        for target in &criterion_list::BENCH_TARGETS {
+            let mut args = vec![
+                "bench".to_string(),
+                "-p".to_string(),
+                "shoal".to_string(),
+                "--features".to_string(),
+                "bench".to_string(),
+                "--bench".to_string(),
+                target.name.to_string(),
+                "--".to_string(),
+                "--save-baseline".to_string(),
+                inputs.label.clone(),
+            ];
+            if let Some(filter) = &inputs.criterion_filter {
+                args.push(filter.clone());
+            }
+            steps.push(Step::Command(CommandPlan {
+                program: "cargo".to_string(),
+                args,
+                cwd: inputs.root.clone(),
+                stdout: Stdout::Inherit,
+                env: Vec::new(),
+            }));
         }
-        steps.push(Step::Command(CommandPlan {
-            program: "cargo".to_string(),
-            args,
-            cwd: inputs.root.clone(),
-            stdout: Stdout::Inherit,
-            env: Vec::new(),
-        }));
         steps.push(Step::Collect {
             layer: Layer::Micro,
             into: artifact(inputs, Layer::Micro),

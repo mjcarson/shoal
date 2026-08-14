@@ -168,6 +168,18 @@ pub trait ShoalResponseSupport: std::fmt::Debug + RkyvSupport + Sized + Send {
 }
 
 pub trait QuerySupport: 'static + Sized {
+    /// A hash over every part of this database's schema that can reach the wire
+    ///
+    /// The two peers exchange this when a connection opens and refuse each other if it differs.
+    /// It lives on this trait rather than on `ShoalDatabase` because this is the only trait both
+    /// halves see: the client is generic over it, and the server reaches the identical constant
+    /// through `<D as ShoalDatabase>::ClientType`.
+    ///
+    /// The strongest compile time guarantee available to this system is a runtime handshake
+    /// field. No amount of client side typing helps when the peer was built from a different
+    /// schema, because both sides are individually consistent and only their agreement is wrong.
+    const SCHEMA_FINGERPRINT: u64;
+
     /// The different tables or types of queries we will handle
     type QueryKinds: ShoalQuerySupport;
 
@@ -468,6 +480,14 @@ pub trait PartitionKeySupport: std::fmt::Debug + Clone + RkyvSupport + Sized {
 
 /// Schema information for a table
 pub trait TableSchemaSupport {
+    /// A hash over this table's name, fields, types and the roles they play in a query
+    ///
+    /// This is one input to the `SCHEMA_FINGERPRINT` the two peers exchange when a connection
+    /// opens. It is required rather than defaulted on purpose: a default would let a hand written
+    /// implementation silently opt out of the only check that catches a peer built from a
+    /// different but structurally similar schema.
+    const SCHEMA_FINGERPRINT: u64;
+
     /// Get the type validator for a given field name
     fn get_field_validator(field_name: &str) -> Option<TypeValidator>;
 
@@ -574,6 +594,14 @@ pub trait ShoalProjection:
 {
     /// The table whose rows this projects
     type Row: ShoalTableSupport;
+
+    /// A hash over this projection's name, fields, types and order
+    ///
+    /// A projection reaches the wire because each one adds a variant to the generated response
+    /// kinds enum, and an archived enum's discriminants are wire state. So a projection that was
+    /// added, removed or reshaped has to move the database's fingerprint the same way a table
+    /// does.
+    const SCHEMA_FINGERPRINT: u64;
 
     /// Which of its tables projections this type is
     ///

@@ -1346,6 +1346,9 @@ mod tests {
     }
 
     impl TableSchemaSupport for TestRow {
+        // this row is only ever used in process, so its fingerprint only has to be distinct
+        const SCHEMA_FINGERPRINT: u64 = 0x7e57_0001;
+
         fn get_field_validator(_field_name: &str) -> Option<TypeValidator> {
             None
         }
@@ -1392,6 +1395,9 @@ mod tests {
     /// A whole row is the identity projection of itself
     impl ShoalProjection for TestRow {
         type Row = TestRow;
+
+        // this projection is only ever used in process, so its fingerprint only has to be distinct
+        const SCHEMA_FINGERPRINT: u64 = 0x7e57_0002;
 
         const PROJECTION: TestProjectionKind = TestProjectionKind::Full;
 
@@ -1441,6 +1447,9 @@ mod tests {
 
     impl ShoalProjection for SortKeyOnly {
         type Row = TestRow;
+
+        // this projection is only ever used in process, so its fingerprint only has to be distinct
+        const SCHEMA_FINGERPRINT: u64 = 0x7e57_0003;
 
         const PROJECTION: TestProjectionKind = TestProjectionKind::SortKeyOnly;
 

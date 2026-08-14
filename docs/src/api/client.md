@@ -356,8 +356,21 @@ which is correct, measurably slower, and would not be caught by anything in this
 
 Most of this list is one page: [D6](../direction/connection-pool.md) designs a pool with deadlines,
 a health check that works, a builder, an endpoint list, and a `Drop` — the pieces are small
-individually and four of them wait on a message type the wire format does not have
-([D2](../direction/framing.md)).
+individually and four of them ~~wait on a message type the wire format does not have~~ now need
+only a call site, since `Ping`, `Pong`, `Cancel` and `GoAway` are defined and unwired message types
+([F10](../features/framing-and-protocol-evolution.md)).
+
+**A connection now shakes hands before it is used.** `Shoal::new` opens ten connections and each
+exchanges a `Hello`/`HelloAck` carrying the protocol version, a compile-time fingerprint of the
+schema, and the largest frame each side will accept. A client built from a different schema than
+the server is refused with both fingerprints in the error:
+
+```rust
+Err(Errors::Handshake(ConnectError::Protocol(ProtocolError::SchemaMismatch { ours, theirs })))
+```
+
+Because `bb8` retries a failed connect with backoff until its five second connection timeout
+elapses, and a schema mismatch is permanent, that error takes about five seconds to arrive.
 
 - Health checks do not detect a dead peer
   ([D6](../direction/connection-pool.md#health-checks-that-work)).

@@ -56,6 +56,7 @@
   - [F7. A benchmark runner that renders its own results](features/bench-runner.md)
   - [F8. Purpose-built workloads, in the crate that judges them](features/purpose-built-workloads.md)
   - [F9. Ephemeral tables, and the benchmarks that need them](features/ephemeral-tables.md)
+  - [F10. Framing and protocol evolution](features/framing-and-protocol-evolution.md)
 
 # Direction
 
@@ -93,6 +94,7 @@
   - [25. `CLAUDE.md` described a Shoal that no longer existed](appendix/resolved/claude-md-drift.md)
   - [26, 39. A multi-partition get answered in an arbitrary order](appendix/resolved/partition-order.md)
   - [31. Multi-log recovery discarded already-replayed intents](appendix/resolved/multi-log-recovery.md)
+  - [34. The request length prefix is unvalidated](appendix/resolved/unvalidated-length-prefix.md)
   - [44. A compaction discarded a damaged log's tail in silence](appendix/resolved/compaction-tail-loss.md)
   - [45. The storage marker's format field was written and never read](appendix/resolved/storage-marker-format.md)
   - [48. A query that does not parse was answered with silence](appendix/resolved/query-error-display.md)

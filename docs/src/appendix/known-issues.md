@@ -27,18 +27,23 @@ test suite does and does not reach is in [Test Coverage](test-coverage.md).
 Defects that have been fixed move to [Resolved Issues](resolved-issues.md), one page each,
 carrying the reasoning and the invariants the fix depends on. Item numbers are shared between
 the two pages and never reused, so a number appears on exactly one of them — which is why this
-list starts at 15 and skips 25, 26, 31, 39, 44, 45, 48, and 57, and why item 60 is the newest. The
-exceptions are items 16, 17, 20, 24 and 51, which were only
+list starts at 15 and skips 25, 26, 31, 34, 39, 44, 45, 48, and 57, and why item 61 is the newest.
+The exceptions are items 16, 17, 20, 24 and 51, which were only
 partly fixed: the open remainder is here and the rest is there. Item 9 was one such exception
 until its second half was fixed, and is now on the resolved page alone; item 25 became the second,
 in the other direction — it had one row left open, that row was fixed, and the whole item
 [moved](resolved/claude-md-drift.md).
 
 **Baseline as of writing:** `cargo check --workspace --all-targets` passes with warnings;
-`cargo test --workspace` passes — 456 integration tests (one ignored), 231 `shoal-core` unit
+`cargo test --workspace` passes — 470 integration tests (one ignored), 258 `shoal-core` unit
 tests, 21 doctests, plus 8 more behind `--features stage-profile` that a default run does not
-reach ([Test Coverage](test-coverage.md)). **Re-run and re-counted binary by binary in August
-2026, unchanged** — items 59 and 60 are filed from reading and neither added a test.
+reach ([Test Coverage](test-coverage.md)). That is up from 456, 231 and 21 with
+[F10](../features/framing-and-protocol-evolution.md) — three new integration binaries
+(`framing.rs`, `handshake.rs`, `fingerprint.rs`) carrying 14 tests between them, 23 unit tests over
+the frame codec and the fingerprint, 2 over the client's read path, and 2 over the frame bound's
+config default. Item 61 was filed while writing it, from reading, and added no test of its own.
+Before that it was re-run and re-counted binary by binary in August 2026, unchanged — items 59 and
+60 are filed from reading and neither added a test.
 That is up from 454, 229 and 21 with
 [Resolved #57](resolved/missing-archive.md) — one integration test per persistent table over a
 read whose archive is not on disk, and two unit tests over `get_archive` and how the failure it
@@ -112,9 +117,6 @@ paths:
 
 | Site | Trigger |
 | --- | --- |
-| `shard.rs:64` | Any non-EOF socket error from a client |
-| `shard.rs:71` | Failed read of a request body |
-| `shard.rs:112`, `:114` | Zero-length or failed socket write |
 | `shard.rs:676` | Reply for a client with no channel |
 | `shard.rs:732` | A split query whose `gather` contact is missing — an `.expect` |
 | `shard.rs:916` | Client UUID collision |
@@ -146,6 +148,14 @@ actually be able to answer.
 that fired on any loader task error have been replaced by a failure the shard is told about:
 [Resolved #16, 51](resolved/partition-load-failure.md). The rest of this item is open.
 
+*The two relays' five are gone.* `client_rx_relay` panicked on any non-EOF socket error, on a
+failed read of a request body, and on a failed forward into the shard; `client_tx_relay` panicked
+on both a short write and a write error. All five became a logged `break` with
+[F10](../features/framing-and-protocol-evolution.md), so a frame nobody can read ends one
+connection instead of the shard and every other client it was serving
+([Resolved #34](resolved/unvalidated-length-prefix.md)). These are the sites that were reachable
+by anything a peer could put on a socket, which is what made them the worst ones in the table.
+
 ### 27. SHQL cannot express a string containing a single quote
 
 `string_literal` is `delimited("'", take_till(0.., |c| c == '\''), "'")`
@@ -170,10 +180,9 @@ Nothing removes an entry from `client_map` (`shard.rs:279`, inserted at `:914`),
 has no variant for a client going away. `client_rx_relay` breaks its loop on EOF
 (`shard.rs:58-65`) and tells nobody.
 
-Because `client_acceptor` broadcasts `NewClient` to every shard (`shard.rs:151-153`), every shard
-holds a clone of that client's `client_tx` for as long as the process runs. So the channel never
-closes, `client_tx_relay`'s `recv()` never returns `Err`, and the task never exits
-(`shard.rs:90-97`).
+Because `client_acceptor` broadcasts `NewClient` to every shard, every shard holds a clone of
+that client's `client_tx` for as long as the process runs. So the channel never closes and
+`client_tx_relay`'s `recv()` never returns `Err`.
 
 Per connection that has already gone away, permanently:
 
@@ -181,7 +190,15 @@ Per connection that has already gone away, permanently:
 | --- | --- |
 | One `client_map` entry | Every shard |
 | One `kanal` channel | Every shard holds the sender |
-| One detached glommio task | The accepting shard |
+
+**The socket and the tasks are no longer among them.**
+[F10](../features/framing-and-protocol-evolution.md) put both relays under one per-connection task
+that owns the write task's handle and cancels it when the read relay ends, so a disconnect now
+drops both halves of the split stream and closes the socket. This was found by a test that hung:
+the two halves of a split stream keep the stream alive between them, so a read relay that ended on
+its own left the write relay parked on an empty channel holding a socket nobody would ever read
+from again. What is still leaked is the bookkeeping every *other* shard holds, which is what
+`ClientGone` below is for.
 
 A response that arrives for a dead client is not an error either — it is sent into an unbounded
 channel ([item 15](#15-no-backpressure-anywhere)) that nothing will ever read.
@@ -218,31 +235,6 @@ send one leaks it just as permanently.
 
 Client disconnect does not clear them either, so this compounds with
 [item 32](#32-a-disconnected-client-is-never-cleaned-up-anywhere).
-
-### 34. The request length prefix is unvalidated
-
-```rust
-// parse the upcoming messages size
-let len = u64::from_le_bytes(len_bytes) as usize;
-// allocate a buffer that is exactly the right size
-let mut data = BytesMut::zeroed(len);
-```
-
-`shard.rs:66-69`
-
-The length is taken from the wire and used as an allocation size directly, before a single byte
-of the body has been read. There is no maximum message size in the protocol
-([Wire Protocol](../architecture/wire-protocol.md)), so a corrupt or hostile prefix asks for up to
-`usize::MAX` bytes. The relay also `panic!`s on the read that follows
-([item 16](#16-panics-on-the-hot-path)), so a truncated message takes the shard down rather than
-the connection.
-
-`zeroed` is also pure waste — `read_exact` overwrites every byte of it on the next line.
-
-**Fix direction:** [D2](../direction/framing.md#the-header-itself) narrows the length to a `u32`
-and adds a configured `max_frame_bytes` to check it against. Note why this is filed as a format
-problem rather than a missing bounds check: a bound the protocol *has* is enforceable on both
-sides, where a bound it lacks is a number each peer would have to invent separately.
 
 ### 36. A partial intent log buffer is only written when the shard's channel drains
 
@@ -1122,8 +1114,43 @@ the easy half ([D6](../direction/connection-pool.md#drop-on-both-stream-types)).
 gone, the responses the server is still producing arrive at a proxy that cannot find a channel for
 them, which today returns `Errors::ProtocolError` and kills the read task for that connection
 (`client.rs:536-543`). The pair that is actually correct is `Drop` plus a `Cancel` message telling
-the server to stop, and `Cancel` is a message type the wire format does not have
+the server to stop, and `Cancel` is a message type the wire format **has a discriminant for and no
+wiring behind** since [F10](../features/framing-and-protocol-evolution.md) — so this is no longer
+blocked on a flag day, only on the send and the handler
 ([D2](../direction/framing.md#message-types)).
+
+### 61. A response too large to frame closes a connection silently
+
+```rust
+let preamble = match protocol::response_preamble(&query_id, archived.len(), peer_max_frame_bytes) {
+    Ok(preamble) => preamble,
+    Err(error) => {
+        event!(Level::ERROR, msg = "response too large to frame", %query_id, %error);
+        break;
+    }
+};
+```
+
+`shard.rs`, `client_tx_relay`
+
+A response whose archive is larger than the client said it would accept cannot be written, so the
+write relay logs it and ends the connection. The client sees a closed socket and has no way to
+learn which query was too large, or that size was the reason at all.
+
+This is strictly better than what it replaced — a `panic!` that took the shard and every other
+client on it ([Resolved #34](resolved/unvalidated-length-prefix.md)) — and it is not the fix. It is
+also the *only* one of the four framing failure paths that a well-behaved peer can reach: the other
+three need a peer that wrote something malformed, while this one needs nothing but a get of a large
+partition against a client with a small bound.
+
+**Established by reading the source**, while writing
+[F10](../features/framing-and-protocol-evolution.md). It has not been reproduced; the default bound
+is 64 MiB and no workload or test produces a response within three orders of magnitude of it.
+
+**Fix direction:** [D2](../direction/framing.md#the-error-channel)'s error channel, which is what
+items 51, 55 and 56 all want as well. `ResponseAction::Error` gives this somewhere to go, and the
+frame-level `Error` type gives it somewhere to go when the query id is not trustworthy either.
+Until then the log line is the only record, which is why it names the query id.
 
 Everything that has been fixed, and why it was fixed the way it was, is in
 [Resolved Issues](resolved-issues.md). The SHQL parser has gained test coverage at both stages

@@ -127,6 +127,13 @@ pub(super) fn add(
             /// A row projects its own table
             type Row = #name;
 
+            /// The identity projection of a row fingerprints as the row it is
+            ///
+            /// There is nothing here the table does not already fold in, so borrowing its
+            /// constant is what keeps the two from ever disagreeing about the same fields.
+            const SCHEMA_FINGERPRINT: u64 =
+                <#name as shoal_core::shared::traits::TableSchemaSupport>::SCHEMA_FINGERPRINT;
+
             /// The whole row is the projection a get gets when it names none
             const PROJECTION: #projection_enum = #projection_enum::Full;
 

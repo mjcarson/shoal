@@ -177,7 +177,7 @@ precondition for knowing whether anything above cost anything.
 | **Rank** | **A3** — the largest stability return in the chapter for the least design risk |
 | **Impact** | Argued for the performance of it; the value is correctness under failure, which no benchmark reports |
 | **Difficulty** | L — contained to `client.rs` and the new builder, except for the pieces that need D2's message types |
-| **Depends on** | [D2](framing.md) for `Ping`, `Cancel`, `GoAway`, and the error channel |
+| **Depends on** | ~~[D2](framing.md) for `Ping`, `Cancel`, `GoAway`~~ — **satisfied**, all three are defined and unwired since [F10](../features/framing-and-protocol-evolution.md), so each is a call site rather than a flag day; still [D2](framing.md#the-error-channel) for the error channel, which F10 left out of scope |
 | **Blocks** | [D3](authentication.md) and [D4](encryption.md) need the builder to put credentials and TLS into. [D7](shard-aware-routing.md) needs this pool before it can reshard it |
 | **Tradeoff** | Contained — a deadline turns an indefinite wait into an error, which is a behaviour change callers must handle |
 | **Benchmark** | `transport/*`, unbuilt. **A deadline check on the hot path is the one piece here that could cost something measurable** |

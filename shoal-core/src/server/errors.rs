@@ -8,6 +8,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 use uuid::Uuid;
 
+use crate::shared::protocol::ProtocolError;
+
 /// Any errors tht can be encountered when running Shoal
 #[derive(Debug)]
 pub enum ServerError {
@@ -50,6 +52,19 @@ pub enum ServerError {
     TryFromInt(TryFromIntError),
     /// An error reading or writing json
     SerdeJson(serde_json::Error),
+    /// A frame that could not be written or read
+    Protocol(ProtocolError),
+}
+
+impl From<ProtocolError> for ServerError {
+    /// Convert this error to our error type
+    ///
+    /// # Arguments
+    ///
+    /// * `error` - The error to convert
+    fn from(error: ProtocolError) -> Self {
+        ServerError::Protocol(error)
+    }
 }
 
 // convert all of our external error types to our error type

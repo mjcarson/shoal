@@ -440,11 +440,24 @@ pub fn add(
             }
         }
     });
+    // fold every table, projection and row of this database into one constant
+    //
+    // this is what the two peers compare when a connection opens, so it has to move whenever
+    // anything that can reach the wire moves
+    let variants: Vec<Ident> = tables
+        .iter()
+        .map(|table| table.inner_type.clone())
+        .collect();
+    let schema_fingerprint =
+        crate::traits::fingerprint::db_expr(struct_ident, fields, &variants, projections);
     // add our client struct and query support for the client
     stream.extend(quote! {
         pub struct #client_ident {}
 
         impl shoal_core::shared::traits::QuerySupport for #client_ident {
+            /// A hash over every part of this databases schema that can reach the wire
+            const SCHEMA_FINGERPRINT: u64 = #schema_fingerprint;
+
             /// The different tables or types of queries we will handle
             type QueryKinds = #query_ident;
 

@@ -18,14 +18,38 @@ use serde::{Deserialize, Serialize};
 use crate::store::Store;
 
 /// The schema version of the cached registry
-const CACHE_VERSION: u32 = 1;
-
-/// The file that declares every micro benchmark
 ///
-/// The cache is keyed on this file because every benchmark id comes out of it: the group names,
-/// the function names and the `SIZES` constant that parameterises them are all here. A benchmark
-/// cannot be added, renamed or removed without changing it.
-const BENCH_SOURCE: &str = "shoal/benches/partitions.rs";
+/// Bumped to 2 when the cache started keying on several declaring files rather than one. A v1
+/// cache has a different shape, and rejecting it explicitly is better than relying on the parse
+/// of the wrong shape happening to fail.
+const CACHE_VERSION: u32 = 2;
+
+/// A criterion bench target and the file that declares it
+pub struct BenchTarget {
+    /// The name cargo knows this bench target by
+    pub name: &'static str,
+    /// The file that declares every benchmark in it, relative to the repository root
+    pub source: &'static str,
+}
+
+/// Every criterion bench target in this workspace
+///
+/// The cache is keyed on these files because every benchmark id comes out of them: the group
+/// names, the function names and the size constants that parameterise them are all there. A
+/// benchmark cannot be added, renamed or removed without changing one of them.
+///
+/// Adding a third bench target is one line here. The order is the order the ids come back in, so
+/// appending keeps every existing id where it was.
+pub const BENCH_TARGETS: [BenchTarget; 2] = [
+    BenchTarget {
+        name: "partitions",
+        source: "shoal/benches/partitions.rs",
+    },
+    BenchTarget {
+        name: "wire",
+        source: "shoal/benches/wire.rs",
+    },
+];
 
 /// What the cached list was valid for
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,33 +65,40 @@ struct SourceKey {
 struct CachedList {
     /// The schema version this cache was written with
     version: u32,
-    /// What the declaring file looked like when the list was taken
-    key: SourceKey,
+    /// What each declaring file looked like when the list was taken, in target order
+    key: Vec<SourceKey>,
     /// The benchmark ids, in the order criterion declares them
     ids: Vec<String>,
 }
 
 /// Reads the key the cache is validated against
 ///
+/// One entry per bench target, in target order, so that a change to any declaring file
+/// invalidates the whole list.
+///
 /// # Arguments
 ///
 /// * `store` - The artifact tree, which knows where the repository is
-fn source_key(store: &Store) -> Result<SourceKey> {
-    let path = store.root().join(BENCH_SOURCE);
-    // stat the declaring file, which must exist for there to be any micro benchmarks at all
-    let meta = std::fs::metadata(&path)
-        .with_context(|| format!("stat {} to key the benchmark list cache", path.display()))?;
-    // its modification time, as a plain integer so it can be compared after a round trip
-    let modified_ns = meta
-        .modified()
-        .ok()
-        .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|since| since.as_nanos())
-        .unwrap_or(0);
-    Ok(SourceKey {
-        len: meta.len(),
-        modified_ns,
-    })
+fn source_keys(store: &Store) -> Result<Vec<SourceKey>> {
+    // stat each declaring file, all of which must exist for there to be any micro benchmarks
+    let mut keys = Vec::with_capacity(BENCH_TARGETS.len());
+    for target in &BENCH_TARGETS {
+        let path = store.root().join(target.source);
+        let meta = std::fs::metadata(&path)
+            .with_context(|| format!("stat {} to key the benchmark list cache", path.display()))?;
+        // its modification time, as a plain integer so it can be compared after a round trip
+        let modified_ns = meta
+            .modified()
+            .ok()
+            .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|since| since.as_nanos())
+            .unwrap_or(0);
+        keys.push(SourceKey {
+            len: meta.len(),
+            modified_ns,
+        });
+    }
+    Ok(keys)
 }
 
 /// Where the discovered list is cached
@@ -90,7 +121,7 @@ fn cache_path(store: &Store) -> std::path::PathBuf {
 /// * `store` - The artifact tree, which knows where the repository is
 /// * `refresh` - Whether to rediscover even if the cache still looks valid
 pub fn discover(store: &Store, refresh: bool) -> Result<Vec<String>> {
-    let key = source_key(store)?;
+    let key = source_keys(store)?;
     let cache = cache_path(store);
     // use the cache when it was taken from the same declaring file, unless told not to
     if !refresh && cache.is_file() {
@@ -116,47 +147,54 @@ pub fn discover(store: &Store, refresh: bool) -> Result<Vec<String>> {
     Ok(ids)
 }
 
-/// Runs criterion's `--list` and parses what it prints
+/// Runs criterion's `--list` for every bench target and parses what they print
 ///
 /// # Arguments
 ///
 /// * `store` - The artifact tree, which knows where the repository is
 fn ask_criterion(store: &Store) -> Result<Vec<String>> {
-    // the bench feature is what exposes the crate private internals the benchmarks reach into,
-    // so listing them needs the same feature running them does
-    let mut command = Command::new("cargo");
-    command
-        .current_dir(store.root())
-        .args([
-            "bench",
-            "-p",
-            "shoal",
-            "--features",
-            "bench",
-            "--bench",
-            "partitions",
-            "--",
-            "--list",
-        ])
-        // the list comes back on stdout; cargo's build progress goes to stderr and is left
-        // attached, since discovering the list can mean waiting for a release build
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit());
-    let output = command
-        .output()
-        .context("running `cargo bench -- --list` to discover the micro benchmarks")?;
-    // a failed listing is not an empty list of benchmarks, and must not be treated as one
-    if !output.status.success() {
-        bail!(
-            "`cargo bench -- --list` failed with {}; the micro benchmarks could not be discovered",
-            output.status
-        );
+    // ask each target in turn, concatenating what they say in target order
+    let mut ids = Vec::new();
+    for target in &BENCH_TARGETS {
+        // the bench feature is what exposes the crate private internals some of the benchmarks
+        // reach into, so listing them needs the same feature running them does. a target that
+        // does not need it is unharmed by having it
+        let mut command = Command::new("cargo");
+        command
+            .current_dir(store.root())
+            .args([
+                "bench",
+                "-p",
+                "shoal",
+                "--features",
+                "bench",
+                "--bench",
+                target.name,
+                "--",
+                "--list",
+            ])
+            // the list comes back on stdout; cargo's build progress goes to stderr and is left
+            // attached, since discovering the list can mean waiting for a release build
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit());
+        let output = command.output().with_context(|| {
+            format!("running `cargo bench --bench {} -- --list`", target.name)
+        })?;
+        // a failed listing is not an empty list of benchmarks, and must not be treated as one
+        if !output.status.success() {
+            bail!(
+                "`cargo bench --bench {} -- --list` failed with {}; the micro benchmarks could not be discovered",
+                target.name,
+                output.status
+            );
+        }
+        let text = String::from_utf8(output.stdout).with_context(|| {
+            format!("`cargo bench --bench {} -- --list` printed something that is not utf-8", target.name)
+        })?;
+        ids.extend(parse_list(&text));
     }
-    let text = String::from_utf8(output.stdout)
-        .context("`cargo bench -- --list` printed something that is not utf-8")?;
-    let ids = parse_list(&text);
-    // criterion printing nothing means the bench target registered no benchmarks, which is a
-    // real problem rather than a tree with no micro layer
+    // criterion printing nothing means the bench targets registered no benchmarks at all, which
+    // is a real problem rather than a tree with no micro layer
     if ids.is_empty() {
         bail!("`cargo bench -- --list` listed no benchmarks at all");
     }
@@ -191,19 +229,21 @@ pub fn parse_list(text: &str) -> Vec<String> {
 /// * `store` - The artifact tree, which knows where the repository is
 pub fn cached(store: &Store) -> Option<Vec<String>> {
     // the cache is only usable if it matches the declaring file it was taken from
-    let key = source_key(store).ok()?;
+    let key = source_keys(store).ok()?;
     let cached: CachedList = crate::store::read_json(&cache_path(store)).ok()?;
     (cached.version == CACHE_VERSION && cached.key == key).then_some(cached.ids)
 }
 
-/// Whether a path is the file the micro registry is discovered from
+/// Whether a path is one of the files the micro registry is discovered from
 ///
 /// # Arguments
 ///
 /// * `path` - The path to check, relative to the repository root
 pub fn is_bench_source(path: &Path) -> bool {
-    // compared as a relative path, which is how the source manifest names files
-    path == Path::new(BENCH_SOURCE)
+    // compared as relative paths, which is how the source manifest names files
+    BENCH_TARGETS
+        .iter()
+        .any(|target| path == Path::new(target.source))
 }
 
 #[cfg(test)]

@@ -2,6 +2,7 @@
 
 use uuid::Uuid;
 
+use crate::shared::protocol::ProtocolError;
 use crate::shared::responses::ResponseActionNames;
 
 /// The errors that can be returned from the Shoal client
@@ -41,6 +42,10 @@ pub enum Errors {
     DnsResolution(String),
     /// A wire protocol error
     ProtocolError(String),
+    /// A frame that could not be written or read
+    Protocol(ProtocolError),
+    /// A connection could not be opened, or was refused by the server
+    Handshake(ConnectError),
     /// An error parsing a SHQL query string
     ShqlParse(ShqlParseError),
     /// A shoalctl error
@@ -150,6 +155,89 @@ impl std::error::Error for ShqlParseError {}
 impl From<ShqlParseError> for Errors {
     fn from(error: ShqlParseError) -> Self {
         Errors::ShqlParse(error)
+    }
+}
+
+/// The reasons a connection to a Shoal server cannot be opened
+///
+/// This is what `bb8` hands back out of `Pool::builder().build()`, so it is also what a caller of
+/// `Shoal::new` gets. It is a typed enum rather than a string because the interesting case carries
+/// two numbers a person needs to see: a schema mismatch names both fingerprints, and a caller can
+/// match on it rather than reading it.
+#[derive(Debug)]
+pub enum ConnectError {
+    /// The connection itself failed
+    Io(std::io::Error),
+    /// The server accepted the connection but never finished the handshake
+    ///
+    /// This deadline exists because `bb8`'s connection timeout bounds its retry loop and not the
+    /// connect itself, so without it a server that accepts and then stalls would park
+    /// `Shoal::new` forever.
+    HandshakeTimeout,
+    /// The server refused this connection, or answered with something we could not read
+    Protocol(ProtocolError),
+}
+
+impl std::fmt::Display for ConnectError {
+    /// Write a legible description of this connection error
+    ///
+    /// # Arguments
+    ///
+    /// * `f` - The formatter to write too
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ConnectError::Io(error) => write!(f, "failed to connect: {error}"),
+            ConnectError::HandshakeTimeout => {
+                write!(f, "the server never finished the handshake")
+            }
+            ConnectError::Protocol(error) => write!(f, "{error}"),
+        }
+    }
+}
+
+impl std::error::Error for ConnectError {}
+
+impl From<std::io::Error> for ConnectError {
+    /// Convert this error to our error type
+    ///
+    /// # Arguments
+    ///
+    /// * `error` - The error to convert
+    fn from(error: std::io::Error) -> Self {
+        ConnectError::Io(error)
+    }
+}
+
+impl From<ProtocolError> for ConnectError {
+    /// Convert this error to our error type
+    ///
+    /// # Arguments
+    ///
+    /// * `error` - The error to convert
+    fn from(error: ProtocolError) -> Self {
+        ConnectError::Protocol(error)
+    }
+}
+
+impl From<ConnectError> for Errors {
+    /// Convert this error to our error type
+    ///
+    /// # Arguments
+    ///
+    /// * `error` - The error to convert
+    fn from(error: ConnectError) -> Self {
+        Errors::Handshake(error)
+    }
+}
+
+impl From<ProtocolError> for Errors {
+    /// Convert this error to our error type
+    ///
+    /// # Arguments
+    ///
+    /// * `error` - The error to convert
+    fn from(error: ProtocolError) -> Self {
+        Errors::Protocol(error)
     }
 }
 

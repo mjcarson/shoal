@@ -4,6 +4,8 @@ use quote::quote;
 use std::collections::HashSet;
 use syn::Ident;
 
+use crate::traits::fingerprint;
+
 /// Extend a token stream with a TableSchemaSupport implementation
 ///
 /// # Arguments
@@ -14,6 +16,7 @@ use syn::Ident;
 /// * `partition_fields` - Fields marked as partition keys
 /// * `sort_fields` - Fields marked as sort keys
 /// * `filter_fields` - Fields marked as filter keys
+/// * `update_fields` - Fields marked as updatable
 pub fn add(
     stream: &mut proc_macro2::TokenStream,
     name: &Ident,
@@ -21,6 +24,7 @@ pub fn add(
     partition_fields: &[(syn::Ident, syn::Type)],
     sort_fields: &[(syn::Ident, syn::Type)],
     filter_fields: &[(syn::Ident, syn::Type)],
+    update_fields: &[(syn::Ident, syn::Type)],
 ) {
     // Build field name strings for field_names()
     let field_name_strs: Vec<_> = all_fields
@@ -76,9 +80,24 @@ pub fn add(
         })
         .collect();
 
+    // fold this tables whole shape into the constant the two peers compare in their handshake
+    //
+    // the update fields are mixed in even though they have no query role, because they shape the
+    // generated Update struct and that struct travels inside QueryKinds
+    let schema_fingerprint = fingerprint::row_expr(
+        name,
+        all_fields,
+        partition_fields,
+        sort_fields,
+        filter_fields,
+        update_fields,
+    );
+
     stream.extend(quote! {
         #[automatically_derived]
         impl shoal_core::shared::traits::TableSchemaSupport for #name {
+            const SCHEMA_FINGERPRINT: u64 = #schema_fingerprint;
+
             fn get_field_validator(field_name: &str) -> Option<shoal_core::shared::queries::parser::TypeValidator> {
                 match field_name {
                     #(#validator_arms)*

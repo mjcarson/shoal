@@ -17,13 +17,18 @@
     "Adding a path here changes the manifest hash, which is recorded in every capture taken",
     "afterwards, so the change is visible rather than silent.",
     "",
-    "F8 moved the workloads out of shoal/examples/tmdb.rs and into shoal-bench/src/workloads, and the stage report builder out of shoal/src/stages.rs into the same place. The three workload layers point at that directory now. This changes the manifest hash, so every capture taken before F8 is correctly reported as no longer describing the current macro layer - which is true, and is not something to engineer around."
+    "F8 moved the workloads out of shoal/examples/tmdb.rs and into shoal-bench/src/workloads, and the stage report builder out of shoal/src/stages.rs into the same place. The three workload layers point at that directory now. This changes the manifest hash, so every capture taken before F8 is correctly reported as no longer describing the current macro layer - which is true, and is not something to engineer around.",
+    "",
+    "F10 added shoal/benches/wire.rs and the protocol module it measures to the micro layer. The client is deliberately not listed here: wire.rs exercises the framing, not the client, and shoal-core/src/client.rs is already in the macro layer. This changes the manifest hash, so every micro capture taken before F10 is correctly reported as no longer describing the current micro layer."
   ],
   "layers": {
     "micro": [
       "shoal/benches/partitions.rs",
+      "shoal/benches/wire.rs",
       "shoal-core/src/server/tables/partitions.rs",
-      "shoal-core/src/server/tables/partitions"
+      "shoal-core/src/server/tables/partitions",
+      "shoal-core/src/shared/protocol.rs",
+      "shoal-core/src/shared/protocol"
     ],
     "macro": [
       "shoal-bench/src/workloads",

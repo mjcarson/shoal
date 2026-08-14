@@ -40,7 +40,7 @@ all eight had drifted.
 
 | Location | TODO | What finishing it involves |
 | --- | --- | --- |
-| `client.rs:82` | `implement a ping/pong type request?` | `is_valid` calls `peer_addr()`, which cannot detect a dead peer. Needs a protocol-level ping, which needs a message-type field the wire format does not have — [D2](../direction/framing.md#message-types) is that field, and [D6](../direction/connection-pool.md#health-checks-that-work) is where it gets used. |
+| `client.rs:82` | `implement a ping/pong type request?` | `is_valid` calls `peer_addr()`, which cannot detect a dead peer. ~~Needs a message-type field the wire format does not have~~ — the format has one since [F10](../features/framing-and-protocol-evolution.md), and `Ping` and `Pong` are message types 7 and 8 with nothing behind them. What is left is a send, a handler, and a deadline: [D6](../direction/connection-pool.md#health-checks-that-work). No longer a flag day. |
 | `client.rs:1302` | `make it so we don't need to do this` | `ShoalQueryStream::send` overwrites `queries.id` on every bundle. The stream's id should be set at construction. |
 | `shoalctl/src/app.rs:465` | `Handle insert mode for editing rows` | Insert mode edits the query bar only; result rows are read-only. Writing would also need SHQL to parse mutations. |
 
@@ -297,10 +297,21 @@ server is full of `panic!`s — there is no way to say "that query failed" to a 
 an error variant would unlock replacing most hot-path panics with recoverable errors
 ([Known Issues #16](known-issues.md#16-panics-on-the-hot-path)).
 
-The design for it is [D2](../direction/framing.md#the-error-channel), which folds it into a
+The design for it is [D2](../direction/framing.md#the-error-channel), which folded it into a
 framing change that also carries a version, a message type, and a bounded length — because a
 frame-level `Error` and a `ResponseAction::Error` want the same flag day, and items 51, 55, and 56
 all want the same variant.
+
+**The framing half landed and this did not.** [F10](../features/framing-and-protocol-evolution.md)
+took the header, the handshake and the bound, and left the error channel out of scope. What that
+bought this entry is that it is no longer a flag day: message type 10 is `Error`, flag bit 0 is
+`IS_ERROR`, and both are defined and unconstructed. What it still needs is
+`ResponseAction::Error` — which *is* a format change, and the one place where "fold it into one
+flag day" turned out to be advice that was not taken. The reason is scope rather than
+disagreement: the error channel reaches the shard reply path, the response stream and `send_one`,
+and doing it beside the header would have meant one change nobody could review. It also gained a
+fifth caller in the meantime,
+[item 61](known-issues.md#61-a-response-too-large-to-frame-closes-a-connection-silently).
 
 ### Backpressure
 
@@ -322,8 +333,9 @@ thing this entry does not: **a deadline without a way to cancel converts a slow 
 leak.** A client that gives up has to tell the server, or the server keeps working and writes into
 a channel with no reader — the same failure as
 [item 60](known-issues.md#60-a-result-stream-that-is-not-drained-to-the-end-leaks-its-slot-in-the-client),
-reached from the other side. That needs a `Cancel` message type, which is
-[D2](../direction/framing.md) again.
+reached from the other side. ~~That needs a `Cancel` message type~~ — `Cancel` is message type 12
+since [F10](../features/framing-and-protocol-evolution.md), defined and unwired, so what is left is
+the send and the handler rather than a format change.
 
 ~~A partition load that never completes parks its queries permanently.~~ A partition read that
 *fails* now releases them ([Resolved Issues #16, 51](resolved/partition-load-failure.md)). One
@@ -449,9 +461,14 @@ be. Nothing blocks them.
 
 **Second correction, filed while writing [Direction](../direction/overview.md).** These two, plus
 the `transport/*` workloads below and client-side `tracing` spans, are step 0 of that whole chapter
-— **nine design pages, and not one of them can be adjudicated until they exist**. `wire_codec` is
-what would catch a [D2](../direction/framing.md) header that accidentally unaligned the payload;
-the plaintext-versus-TLS pair [D4](../direction/encryption.md) needs is a *precondition* rather than
+— **nine design pages, and not one of them can be adjudicated until they exist**. ~~`wire_codec` is
+what would catch a [D2](../direction/framing.md) header that accidentally unaligned the payload~~ —
+it is built ([F10](../features/framing-and-protocol-evolution.md)) and that claim about it was
+wrong: a criterion benchmark measures nanoseconds and a misaligned rkyv access is a `bytecheck`
+failure or undefined behaviour, so the alignment guard is a unit test and `wire_codec`'s value is
+the three questions it does answer — what the header costs, what validating an arriving bundle
+costs ([O1](optimizations.md)), and what building a response costs ([O2](optimizations.md)). The
+plaintext-versus-TLS pair [D4](../direction/encryption.md) needs is a *precondition* rather than
 a follow-up; and `routing` is a hard dependency of [D7](../direction/shard-aware-routing.md), whose
 whole value rests on a hop nobody has measured. That raises what these are worth considerably
 above what this entry claimed when it was filed against four `O` numbers.

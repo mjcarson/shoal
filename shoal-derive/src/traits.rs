@@ -4,6 +4,7 @@ use super::utils;
 
 pub mod db;
 pub mod display;
+pub mod fingerprint;
 pub mod from_query;
 pub mod from_shoal;
 pub mod partition_key;

@@ -151,6 +151,19 @@ pub(super) fn derive(ast: &syn::DeriveInput) -> proc_macro2::TokenStream {
     let projection_enum = format_ident!("{}Projection", table_name);
     // start with an empty stream
     let mut output = quote! {};
+    // fold this projections shape into a constant of its own
+    //
+    // a projection matters to the wire because each one adds a variant to the response kinds
+    // enum, and an archived enums discriminants are wire state. only a partition role is legal
+    // here, so the other three role lists are empty
+    let schema_fingerprint = traits::fingerprint::row_expr(
+        name,
+        &all_fields,
+        &partition_fields,
+        &[],
+        &[],
+        &[],
+    );
     // a projection is hashed, formatted and archived exactly the way a row is
     traits::rkyv::add(&mut output, name);
     traits::partition_key::add(&mut output, name, &partition_fields);
@@ -185,6 +198,9 @@ pub(super) fn derive(ast: &syn::DeriveInput) -> proc_macro2::TokenStream {
         impl shoal_core::shared::traits::ShoalProjection for #name {
             /// The table whose rows this projects
             type Row = #table_name;
+
+            /// A hash over this projections name, fields, types and order
+            const SCHEMA_FINGERPRINT: u64 = #schema_fingerprint;
 
             /// Which of its tables projections this type is
             const PROJECTION: <#table_name as shoal_core::shared::traits::ShoalTableSupport>::Projection

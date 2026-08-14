@@ -3,8 +3,13 @@
 What the test suite reaches, what it does not, and the one place where it is unsound.
 
 **Established by running it.** `cargo check --workspace --all-targets` passes with warnings and
-`cargo test --workspace` passes: **456 integration tests** (one ignored), **231 `shoal-core` unit
+`cargo test --workspace` passes: **470 integration tests** (one ignored), **258 `shoal-core` unit
 tests**, **21 doctests**.
+
+That is up from 456, 231, and 21 with [F10](../features/framing-and-protocol-evolution.md) — three
+new integration binaries over the framing, the handshake and the fingerprint, 23 unit tests over
+the frame codec and the fingerprint's mixing function, 2 over the client's read path including the
+alignment guard, and 2 over the frame bound's config default. The doctest count did not move.
 
 **Re-run and re-counted in August 2026** ([Review](review-2026-08.md)), binary by binary, and every
 number on this page was already right: 455 integration tests passing plus the one ignored, 231 unit
@@ -14,7 +19,7 @@ cheap to verify and expensive to trust wrongly — the counts are what every oth
 chain hangs off. What the same run *did* change is the port table at the bottom of this page, which
 described two colliding test binaries and now describes five.
 
-That is up from 454, 229, and 21 with
+Before that it was up from 454, 229, and 21 with
 [Resolved #57](resolved/missing-archive.md) — one integration test per persistent table over a read
 whose archive is not on disk, and two unit tests over `get_archive` itself and over how the failure
 it now reports is classified. Before that it was up from 452, 225, and 21 with
@@ -96,6 +101,9 @@ are in [Optimizations](optimizations.md).
 | `persistent_unsorted_table.rs` | 17 | insert; delete; update; delete and update when not resident; delete surviving eviction; insert after delete when not resident; zero limit; three multi-partition tests; three projection tests; and the unsorted twins of the unreadable-archive and missing-archive tests, because the two tables park and release blocked queries through different code |
 | `ephemeral_sorted_table.rs` | 15 | the sorted read and write paths with no storage engine beneath them ([F9](../features/ephemeral-tables.md)): insert; `exists` true and false; delete; update; a limit; cross-shard row order; named sort-key selection; a range and its bounds; a range `exists`; an end-to-end SHQL range; a projection. Plus the three that are about the table rather than about sorted tables — that nothing is written to the storage directory, that nothing survives a restart, and that memory pressure evicts none of it |
 | `ephemeral_unsorted_table.rs` | 12 | the same for the unsorted table, over a schema that also holds a persistent one and declares the ephemeral table **first** — which is what pins that a persistent table declared after an ephemeral one still gets its loader spawned, and therefore can still read a partition off disk |
+| `framing.rs` | 6 | the framing against a running server ([F10](../features/framing-and-protocol-evolution.md)): four raw sockets sending a hostile length prefix, an unknown message type, a frame that only travels the other way, and a frame from a version that does not exist — each asserting both that its own connection closed **and that a healthy client beside it still answers**, which is the assertion the shard-killing panics used to fail. Plus the two handshake refusals a raw socket can provoke, checking that the reply is a `HelloAck` written in a header the client can read, with the refused flag set and the server's own fingerprint in the body |
+| `handshake.rs` | 2 | two schemas in one binary, differing by one field: that a client built from one cannot open a connection to a server built from the other and gets both fingerprints back, and that a client built from the server's own schema connects to the very same server and can query it — the second being what stops the first passing against a check that refuses everybody |
+| `fingerprint.rs` | 6 | that the compile-time schema fingerprint actually moves when a schema moves: a field added, a row's fields reordered, a projection declared on an otherwise identical table, and that a whole row and its own identity projection agree. No server, so all six run instantly |
 | `shql.rs` | 53 | SHQL parsing and binding against a real schema, including range binding and the role refusals, projection binding and its two refusals, plus completion suggestions |
 | `storage_meta.rs` | 2 | that a storage directory restarts under the shard count that wrote it and refuses a changed one, end to end through a real server |
 | `completion.rs` (`shoalctl`) | 34 | the completion menu, key handling, query wrapping, and rendering, including the projection slot; and the error box, the underline under the part of a query that failed to parse, the cases where that underline is refused as misleading, and that an error never becomes part of the query it describes |
@@ -120,10 +128,12 @@ exercise durability end to end, and they exist because
 | `.../storage/fs/tests.rs` | 27 | the intent log reader against real files, including which tail shapes are damage and which are how a healthy log ends, and what a compaction is about to throw away with the log it deletes; how a failed partition read is classified — which of the three classes is retried, and that an unrecognised error is given up on rather than retried forever ([Resolved #16, 51](resolved/partition-load-failure.md)); and `ArchiveMap::get_archive` over an archive that is not on disk, that it names the archive rather than creating one and that the failure is never retried ([Resolved #57](resolved/missing-archive.md)) |
 | `.../storage/fs/stream_tests.rs` | 14 | `StreamWriter` alignment, padding, and watermarks, including that submitting a write advances neither watermark in either durability mode — the premise [F5](../features/flushed-sweep-gate.md)'s sweep gate rests on |
 | `tables/partitions.rs` | 59 | tombstone bookkeeping, limits, sort-key selection and range selection on `get` and `exists`, the empty-range guard, `merge_from_disk` sizing, the recovery counting that separates a correctly dropped update from a lost one, and the projected scan across all three selections; plus the archived arm of all of those — that a truncated or root-corrupted archive is refused, that the unchecked read lands on the same reference the checked one does, and that an archived partition answers every selection identically to a resident one holding the same rows ([F4](../features/validated-archives.md)) |
+| `shared/protocol/tests.rs` | 23 | the frame format itself ([F10](../features/framing-and-protocol-evolution.md)): that every message type is still written as the byte it has always been written as and that a zeroed buffer is not a valid one, that every flag bit is where it was and an unknown one is round-tripped rather than masked off, that both preambles are the size they were before the header existed, that a version this build does not speak is refused but still readable, that a length past the bound and a payload past a `u32` are both refused before anything allocates or truncates, and that the fingerprint's separator stops two adjacent fields concatenating |
+| `client.rs` | 2 | that a response payload lands at the start of a sixteen byte aligned allocation across seven awkward payload lengths — the guard on the two-read structure the zero-copy response path rests on — and that a frame larger than the client's own bound is refused before it is allocated for |
 | `shared/queries.rs` | 10 | sort-key normalization, and `SortRange` emptiness and containment |
 | `tables/storage.rs` | 7 | `PendingResponse` release against a durable watermark — including that staging a response never releases one, which is why [F5](../features/flushed-sweep-gate.md) can skip its sweep on a write — and `RecoveryStats` merging and cleanliness |
 | `server/ring.rs` | 6 | the tablet map: that an empty one cannot be built, that tablets are split evenly and no shard is starved, that ids come from the high bits so a split stays incremental, and that two independently built maps agree |
-| `server/conf.rs` | 5 | that a misspelled resource key fails the load instead of being dropped, that `exclude_cores` is parsed and removes both threads of a core, and that cpu selection is deterministic and fills distinct physical cores before pairing onto an SMT sibling |
+| `server/conf.rs` | 7 | that a misspelled resource key fails the load instead of being dropped, that `exclude_cores` is parsed and removes both threads of a core, that cpu selection is deterministic and fills distinct physical cores before pairing onto an SMT sibling, and that a config which never mentions `max_frame_bytes` still gets one — which is what let the frame bound be added without touching the committed `shoal.yml` every frozen benchmark was captured against |
 | `server/meta.rs` | 4 | claiming a storage directory, reopening it under the same shard count, refusing a changed one, and refusing a marker whose format this build does not know |
 | `tables/persistent.rs` | 2 | the two pieces of arithmetic on the shard memory counter: that a shrink subtracts instead of wrapping, and that an eviction summarizes itself without underflowing on a drifted counter |
 | `.../storage/none.rs` | 6 | the watermark that stands in for an intent log's positions ([F9](../features/ephemeral-tables.md)): that commits hand out distinct rising positions, that a release covers every one of them, and that a sweep is asked for exactly when a response is parked and not otherwise — the last being the only thing that ever answers an ephemeral insert |
@@ -256,8 +266,13 @@ unsorted-only), so the asymmetry is worth closing.
   No test opens a connection, closes it, and asserts anything was released.
 - **A shard that never answers its share** — [item 33](known-issues.md#33-collected-split-query-state-has-no-expiry).
   The cross-shard tests only cover the happy path.
-- **Malformed wire input** — [item 34](known-issues.md#34-the-request-length-prefix-is-unvalidated).
-  Nothing sends a bad length prefix, a truncated body, or an oversized message.
+- ~~**Malformed wire input**~~ — covered since [F10](../features/framing-and-protocol-evolution.md).
+  `shoal/tests/framing.rs` sends an oversized length prefix, an unknown message type, a frame that
+  only travels the other way, and a frame from a version that does not exist, each from a raw
+  socket beside a healthy client ([Resolved #34](resolved/unvalidated-length-prefix.md)). What is
+  still uncovered is a **truncated body** — a header followed by fewer bytes than it claimed, which
+  parks the relay rather than failing it, because nothing anywhere has a deadline
+  ([TODOs](todos.md#timeouts)).
 - **Composite sort keys** — [item 42](known-issues.md#42-shql-cannot-express-a-composite-sort-key).
   Sort-key selection is covered on both scans and both table forms
   ([item 8](resolved/sort-keys.md)), but every table in the suite has a single-field sort key, so
@@ -287,14 +302,20 @@ line (`conf.rs:166`) from each binary in turn:
 | `ephemeral_sorted_table` | 13000-13015 |
 | `ephemeral_unsorted_table` | 13000-13014 |
 | `storage_meta` | 13000-13002 |
+| `framing` | 13000-13005 |
+| `handshake` | 13000-13001 |
 
-**It is five binaries now, not two.** This table listed the two persistent ones; the two ephemeral
-binaries arrived with [F9](../features/ephemeral-tables.md) and `storage_meta` was never counted.
+**It is seven binaries now, not two.** This table listed the two persistent ones; the two ephemeral
+binaries arrived with [F9](../features/ephemeral-tables.md), `storage_meta` was never counted, and
+`framing` and `handshake` arrived with
+[F10](../features/framing-and-protocol-evolution.md) — which made this worse in a way worth
+naming, because both of them connect raw sockets to a port by number and would be handed a server
+belonging to another binary just as readily as a client would.
 Every range grows with every test that restarts a server — the sorted binary was 13034 when this
 was first measured and 13100 at the last one. Re-measure them with `-- --nocapture` rather than
 trusting the numbers above; the overlap is the point, not the endpoints.
 
-**Every port any of the other four binds is also bound by the sorted one.** The second bind does
+**Every port any of the other six binds is also bound by the sorted one.** The second bind does
 not fail: glommio sets `SO_REUSEPORT` on listening sockets, so it succeeds silently and the kernel
 load balances connections between the servers. A client can be handed a server belonging to a
 different test, with a different schema and a different temp dir, and nothing reports it.

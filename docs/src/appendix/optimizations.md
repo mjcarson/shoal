@@ -209,10 +209,10 @@ come out as a code block.
 | **Rank** | **C1** — blocked on a design pass |
 | **Impact** | Argued — every `String`, `Vec` and filter in a bundle, per request |
 | **Difficulty** | L — the `BytesMut` has to survive as far as the shard that executes the query |
-| **Depends on** | A `wire_codec` bench; `ServerMsg::Query` giving up its owned `QueryKinds` |
+| **Depends on** | ~~A `wire_codec` bench~~ (built, [F10](../features/framing-and-protocol-evolution.md)); `ServerMsg::Query` giving up its owned `QueryKinds` |
 | **Blocks** | nothing |
 | **Tradeoff** | Contained — a lifetime on the query type, not a format change |
-| **Benchmark** | none — `wire_codec` is unbuilt |
+| **Benchmark** | `wire_codec/request/decode`, which runs the validated `access`, the unchecked `access_unchecked` and the full `deserialize` as three separate functions at 1, 10 and 100 queries per bundle — so the gap between the second and the third is what this entry is worth |
 
 ```rust
 // load our arhived query from buffer
@@ -248,10 +248,10 @@ anyway. Taking this in the same pass costs one visit to that code instead of two
 | **Rank** | **C2**, with O18 — the largest read-path win, and the largest change |
 | **Impact** | Argued — two copies per returned row, on every get |
 | **Difficulty** | **XL** — `ResponseAction::Get` reaches the wire format and the client |
-| **Depends on** | O18, which changes the same shape; a `wire_codec` bench |
+| **Depends on** | O18, which changes the same shape; ~~a `wire_codec` bench~~ (built, [F10](../features/framing-and-protocol-evolution.md)) |
 | **Blocks** | O18 |
-| **Tradeoff** | **Major** — a wire-format break, and `FromShoal::retrieve`'s signature with it |
-| **Benchmark** | `partition_sorted/archived/walk_all` and `get_all` bound the copies; nothing covers the wire half |
+| **Tradeoff** | **Major** — a wire-format break, and `FromShoal::retrieve`'s signature with it. **Cheaper than it was**: [F10](../features/framing-and-protocol-evolution.md) put a version byte and a schema fingerprint on the wire, so a format change is now a refused connection naming both sides rather than undefined behaviour |
+| **Benchmark** | `partition_sorted/archived/walk_all` and `get_all` bound the copies; `wire_codec/response/encode` and `/decode` at 16, 256, 1024 and 4096 rows are the wire half, which used to be uncovered |
 
 `SortedPartition::get` copies out of the `BTreeMap`:
 
@@ -1169,6 +1169,43 @@ what this entry asks for: spans and `hotpath` scopes in `client.rs`, plus the `t
 workloads ([D6](../direction/connection-pool.md#how-it-would-be-measured)). The instrumentation was
 worth doing when the only thing it could adjudicate was two `papaya` guards. It is worth
 considerably more now.
+
+## The wire
+
+### O29. A request body is zeroed and then immediately overwritten
+
+| | |
+| --- | --- |
+| **Rank** | **B4** — free bytes on every request, behind a shape change that is not free |
+| **Impact** | Argued — one `memset` of the whole bundle per request, discarded on the next line |
+| **Difficulty** | M — `ServerMsg::Client` has to stop carrying an owned `BytesMut` |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | Contained — a shape change inside the server, no format change |
+| **Benchmark** | none — `wire_codec` measures the codec, not the relay's allocation |
+
+```rust
+// allocate a buffer that is exactly the right size
+let mut data = BytesMut::zeroed(header.body_len());
+// wait for messages from our client
+if let Err(error) = tcp_rx.read_exact(&mut data).await {
+```
+
+`shard.rs`, `client_rx_relay`
+
+`zeroed` writes the whole buffer and `read_exact` overwrites every byte of it on the next line. At
+a hundred queries a bundle that is tens of kibibytes of `memset` per request, for nothing.
+
+[Item 34](resolved/unvalidated-length-prefix.md) named this alongside the unbounded allocation, and
+[F10](../features/framing-and-protocol-evolution.md) fixed the allocation and left the zeroing. It
+is now *bounded* waste, which is the part that item was actually about.
+
+The reason it was left is worth stating, because the fix looks like a one-line swap for
+`BytesMut::with_capacity` plus `unsafe { set_len }` and is not: `ServerMsg::Client` carries the
+`BytesMut` by value across a channel into `handle_client`, so the buffer's initialization state
+becomes a property of a message type that several call sites construct. Doing this with `MaybeUninit`
+or an `unsafe` `set_len` needs the read that fills it to be the only way that message can be built,
+which `server/messages.rs` does not currently guarantee.
 
 ---
 

@@ -30,11 +30,22 @@ use tempfile::TempDir;
 pub enum TestError {
     Server(ServerError),
     Client(Errors),
+    /// A raw socket a test opened alongside a client failed
+    ///
+    /// The framing tests talk to the server without going through a client, so they hit
+    /// `std::io::Error` directly rather than through either of the two above.
+    Io(std::io::Error),
 }
 
 impl From<ServerError> for TestError {
     fn from(e: ServerError) -> Self {
         TestError::Server(e)
+    }
+}
+
+impl From<std::io::Error> for TestError {
+    fn from(e: std::io::Error) -> Self {
+        TestError::Io(e)
     }
 }
 
@@ -333,7 +344,11 @@ impl MissingArchives {
             // get this entry
             let entry = entry.expect("Failed to read an archive dir entry");
             // skip anything that is not a regular file, since intents live in here too
-            if !entry.file_type().expect("Failed to stat an archive").is_file() {
+            if !entry
+                .file_type()
+                .expect("Failed to stat an archive")
+                .is_file()
+            {
                 continue;
             }
             // get this archives name

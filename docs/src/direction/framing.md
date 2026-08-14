@@ -1,5 +1,13 @@
 # D2. Framing and protocol evolution
 
+> **Landed as [F10](../features/framing-and-protocol-evolution.md)**, with the header, the message
+> type table, the handshake, the schema fingerprint and the bounded length. The error channel was
+> left out of scope and is still open. Three things on this page turned out to be wrong against the
+> code, and they are marked inline below — the header costs **zero** bytes rather than eight, the
+> `wire_codec` benchmark cannot catch a misaligned payload, and this page never says what the
+> length field counts. What it was right about is the hard part: the ranking, the reason for doing
+> it before anything ships, and that the fingerprint is the largest safety win in the chapter.
+
 ## Context
 
 This is the keystone of the chapter, and it is the only item here that is a prerequisite for four
@@ -52,7 +60,7 @@ What the format does not carry:
 - **No message type.** The payload type is inferred from the direction of travel.
 - **No maximum size.** The length is used as an allocation size before a byte of the body is read,
   on both sides — `BytesMut::zeroed(len)` at `shard.rs:69`, `AlignedVec::with_capacity(len)` at
-  `client.rs:524` ([item 34](../appendix/known-issues.md#34-the-request-length-prefix-is-unvalidated)).
+  `client.rs:524` ([item 34](../appendix/resolved/unvalidated-length-prefix.md), closed by this).
 - **No error path.** `ResponseAction` has five variants and none of them carries an error
   (`shoal-core/src/shared/responses.rs:26-40`), which is why the server expresses failure as a
   panic.
@@ -90,6 +98,12 @@ things that turn out to need one bit.
 
 The response's 16-byte query id stays where it is, after the header — it is a routing field, not a
 framing field, and only response frames have one.
+
+> **Under-specified: what does `length` count?** This page never says, and it is a real fork — body
+> only versus everything after the header decides whether a peer can skip a frame of a type it does
+> not know. As built it counts **every byte after the header**, including the response's query id,
+> which is what makes both the skip and `decode_response`'s "shorter than its own query id" check
+> possible.
 
 ### What the header must not break
 
@@ -219,10 +233,20 @@ alignment problem QUIC has, and the server side is glommio and cannot use it any
 
 ## What it costs
 
-Eight bytes per frame, in both directions. On the response side that is 8 bytes on top of a
+~~Eight bytes per frame, in both directions. On the response side that is 8 bytes on top of a
 24-byte preamble per response, and a bundle of 100 queries produces 100 responses — so it is 800
 bytes per 100-query bundle, against payloads that carry rows. On the request side it is 8 bytes per
-bundle. Neither is measurable without `wire_codec`, and neither is plausibly material.
+bundle. Neither is measurable without `wire_codec`, and neither is plausibly material.~~
+
+> **Wrong, and by the whole amount. It costs zero bytes.** The old request frame was an 8-byte
+> `u64` length and the new one is the 8-byte header. The old response preamble was 16 bytes of
+> query id plus an 8-byte `u64` length, and the new one is 8 bytes of header plus 16 bytes of query
+> id. Narrowing the length to a `u32` pays for the version, the type and the two flag bytes
+> **exactly**, with nothing left over — this page proposed both halves and never subtracted them.
+> `the_preamble_sizes_are_unchanged` holds it.
+>
+> That also means the frozen performance baseline is not invalidated by frame size, which this page
+> was braced for and did not need to be.
 
 The real cost is the flag day.
 
@@ -240,10 +264,15 @@ and `TcpProxy::start` grows a match where it currently has a straight line.
 
 ## Prerequisites
 
-[D5](runtimes.md)'s crate split, and only for placement: the framing wants to live in a crate that
+~~[D5](runtimes.md)'s crate split, and only for placement: the framing wants to live in a crate that
 does not drag in glommio, so that a client-only consumer can link it. The header can be built
 without the split and moved later, but doing the split first avoids writing it in a module that has
-to move.
+to move.~~
+
+> **Over-stated.** The module as built depends on `core` and `uuid` and nothing else, because there
+> is no I/O in it to need a runtime — each call site is a `read_exact` of a fixed size array, one
+> pure call, and a `read_exact` of the body. It lives at `shoal-core/src/shared/protocol.rs` and
+> moves to `shoal-proto` under D5 unchanged. D5 was not a prerequisite even for placement.
 
 ## How it would be measured
 
@@ -254,9 +283,17 @@ is the one that would adjudicate this, and it is unbuilt. It is the same benchma
 which is an argument for building it once and getting three answers.
 
 The honest position is that this change does not need a benchmark to justify it — 8 bytes against
-a frame that carries rows is not a performance question — but the codec bench should exist before
+a frame that carries rows is not a performance question — ~~but the codec bench should exist before
 the change lands, because it is the only thing that would catch a header that accidentally made the
-payload unaligned.
+payload unaligned.~~
+
+> **Wrong about what the benchmark is for.** A criterion benchmark measures nanoseconds; a
+> misaligned rkyv access is a `bytecheck` failure or undefined behaviour, not a slowdown. The thing
+> that catches it is a unit test asserting the payload buffer is sixteen byte aligned, which is
+> `the_response_payload_lands_on_a_sixteen_byte_boundary`, parameterised over seven awkward payload
+> lengths so that a lucky pass is impossible.
+>
+> `wire_codec` was built anyway, and the paragraph above it is why: one benchmark, three answers.
 
 ## Related
 

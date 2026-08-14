@@ -72,7 +72,7 @@ certificate rotation, which a datacenter already has machinery for.
 | **Rank** | **B** — after D4, which decides most of it |
 | **Impact** | Argued — this is a capability, not a cost |
 | **Difficulty** | L with mTLS (read a certificate subject), XL with SCRAM (a credential store, a multi-round exchange, and an operator surface) |
-| **Depends on** | [D2](framing.md) for the handshake; [D4](encryption.md) if mTLS is the mechanism |
+| **Depends on** | ~~[D2](framing.md) for the handshake~~ — **satisfied**, the handshake and the `Auth`/`AuthResponse` discriminants landed with [F10](../features/framing-and-protocol-evolution.md); [D4](encryption.md) if mTLS is the mechanism |
 | **Blocks** | per-table authorization, quotas, and any audit log worth keeping |
 | **Tradeoff** | Contained — a connection either authenticates or is refused, and the failure is at connect time |
 | **Benchmark** | `transport/*`, unbuilt. The cost is per connection, not per query, so this is the one item here a query benchmark would not see |
