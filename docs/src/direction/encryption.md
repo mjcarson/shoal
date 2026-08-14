@@ -17,8 +17,12 @@ the start rather than an optimization applied later. That choice is what this pa
 
 ## What exists today
 
-Plaintext, in both directions, with no configuration to change it. See
-[D3](authentication.md#what-exists-today) — the two absences are the same absence.
+Plaintext, in both directions, with no configuration to change it. ~~See
+[D3](authentication.md#what-exists-today) — the two absences are the same absence.~~ **They were
+not the same absence**, which is the thing this chapter got most wrong: authentication landed
+without encryption ([F12](../features/authentication.md)), so what is left here is this page alone.
+The practical consequence is that a SCRAM exchange is currently visible on the path — the username
+in clear, and the salt, nonces and proof of an exchange an observer can grind offline.
 
 The read that has to be protected:
 
@@ -99,11 +103,11 @@ Configured per listener, defaulting to off.**
 
 | | |
 | --- | --- |
-| **Rank** | **B**, ahead of [D3](authentication.md) because it decides it |
+| **Rank** | **B**, ~~ahead of [D3](authentication.md) because it decides it~~ — it did not decide it. D3's SCRAM half shipped first and without this. What this decides is whether there is a *second* mechanism, and whether the first one runs in clear |
 | **Impact** | Argued — and the cost is the one thing on this page that genuinely needs a number before it lands |
 | **Difficulty** | XL — reaches the client's read loop, the server's write path, and the configuration |
 | **Depends on** | ~~[D2](framing.md) for the handshake~~ — **satisfied** by [F10](../features/framing-and-protocol-evolution.md); [D1](transport.md) having declined QUIC, which would have supplied this |
-| **Blocks** | [D3](authentication.md)'s mTLS path |
+| **Blocks** | [D3](authentication.md)'s mTLS path, which is all that is left of D3; channel binding for the SCRAM half, which [F12](../features/authentication.md) had to decline; and the re-auth ticket, which is only safe behind this ([TODOs](../appendix/todos.md)) |
 | **Tradeoff** | Major — AES over every byte, and a read loop that becomes a state machine |
 | **Benchmark** | `transport/*`, unbuilt — and here that is a **blocker**, not a caveat |
 
@@ -131,12 +135,18 @@ would invalidate every number in the book.
   that is proportionally worse for small responses.
 - **A handshake per connection**, up to 50 of them (`client.rs:141-142`) — the same cost
   [D3](authentication.md#what-it-costs) accounts for, and the same mitigation: session resumption.
+  **This is now additive rather than hypothetical**: a deployment with authentication on already
+  pays three round trips and a PBKDF2 derivation per connection, and nothing measures either
+  ([O30](../appendix/optimizations.md)).
 - **A read loop that becomes a state machine.** Today it is two `read_exact` calls; with unbuffered
   rustls it is a record-boundary-aware loop. That is where a bug would live, and it is on the path
   with the least test coverage in the client
   ([Test Coverage](../appendix/test-coverage.md)).
 - **A certificate lifecycle**, which is an operational cost rather than a code one, and which
-  [D3](authentication.md) needs anyway if mTLS is taken.
+  [D3](authentication.md) needs anyway if mTLS is taken. Note that
+  [F12](../features/authentication.md) already built the negotiation this would slot into:
+  `AuthMechanism::MutualTls` is defined and refused, and turning it on is a new arm in two matches
+  rather than a new exchange.
 
 ## What it breaks
 

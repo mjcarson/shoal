@@ -93,6 +93,17 @@ pub fn add(
                 #archived_response_ident::#variant_ident(response)=> response.get_exists(),
             }
         });
+    // build our error arms
+    let error_arms = tables
+        .iter()
+        .map(|table| table.variant_ident.clone())
+        // a projected get answers in a variant of its own, which reads the same way
+        .chain(projected.iter().map(|projection| (*projection).clone()))
+        .map(|variant_ident| {
+            quote! {
+                #archived_response_ident::#variant_ident(response)=> response.error(),
+            }
+        });
     // build our table names ident
     let table_names_ident = format_ident!("{}TableNames", struct_ident);
     // build our query_table_name arms
@@ -140,6 +151,9 @@ pub fn add(
                             rkyv::option::ArchivedOption::None => None,
                         }
                     }
+                    // a query that failed has no rows to print, and printing it as an empty
+                    // table would say it found nothing rather than that it did not run
+                    shoal_core::shared::responses::ArchivedResponseAction::Error(_) => None,
                     _ => None,
                 }
             }
@@ -500,6 +514,17 @@ pub fn add(
             fn get_exists(archived: &<Self::ResponseKinds as rkyv::Archive>::Archived) -> Option<bool> {
                 match archived {
                     #(#get_exists_arms)*
+                }
+            }
+
+            /// Get the failure this query answered with, if it failed
+            ///
+            /// # Arguments
+            ///
+            /// * `archived` - The archived response to get the failure from
+            fn error(archived: &<Self::ResponseKinds as rkyv::Archive>::Archived) -> Option<&shoal_core::shared::responses::ArchivedResponseError> {
+                match archived {
+                    #(#error_arms)*
                 }
             }
 

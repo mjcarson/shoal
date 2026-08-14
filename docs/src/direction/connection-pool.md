@@ -54,8 +54,11 @@ not detected ([item 23](../appendix/known-issues.md#23-client-stream-and-pool-ro
 (`client.rs:130`), so there is no failover, no endpoint list, and no round-robin across nodes.
 
 **Nothing is configurable.** Every number above is a literal. There is no builder and no config
-struct — a caller who wants 200 connections, or a 50 ms deadline, or credentials
-([D3](authentication.md)), has nowhere to put them.
+struct — a caller who wants 200 connections, or a 50 ms deadline, has nowhere to put them.
+Credentials ([D3](authentication.md)) turned out to be the exception rather than the example: rather
+than wait for the builder, [F12](../features/authentication.md) added a second constructor,
+`Shoal::with_credentials`. That is fine for one option and is exactly the pressure this page
+describes — a **third** constructor is the point at which it stops being fine.
 
 **A dead socket strands its in-flight queries.** bb8 reconnects transparently on the next call, and
 the new read half is pushed to the proxy. But a query whose response was in flight on the dead
@@ -160,7 +163,9 @@ a reason to do them together rather than to do the easy half now.
 
 [Item 15](../appendix/known-issues.md#15-no-backpressure-anywhere). Bounding requires deciding what
 happens when the bound is hit, and every answer — shed, block, reject — has to be expressible to
-the client, which is [D2](framing.md)'s error channel. Sequenced after it for that reason.
+the client, ~~which is [D2](framing.md)'s error channel. Sequenced after it for that reason.~~
+**That prerequisite is met**: [F11](../features/error-channel.md) landed the error channel and
+reserved `ErrorCode::Shedding` for exactly this. What is left here is the bound and the policy.
 
 ### Instrumentation
 
@@ -170,14 +175,16 @@ precondition for knowing whether anything above cost anything.
 
 ## Recommendation
 
-**Take the whole page, after [D2](framing.md), in the order the pieces are listed.**
+**Take the whole page, ~~after [D2](framing.md)~~, in the order the pieces are listed.** D2 has
+landed in both halves ([F10](../features/framing-and-protocol-evolution.md),
+[F11](../features/error-channel.md)), so every piece here is now a call site.
 
 | | |
 | --- | --- |
 | **Rank** | **A3** — the largest stability return in the chapter for the least design risk |
 | **Impact** | Argued for the performance of it; the value is correctness under failure, which no benchmark reports |
 | **Difficulty** | L — contained to `client.rs` and the new builder, except for the pieces that need D2's message types |
-| **Depends on** | ~~[D2](framing.md) for `Ping`, `Cancel`, `GoAway`~~ — **satisfied**, all three are defined and unwired since [F10](../features/framing-and-protocol-evolution.md), so each is a call site rather than a flag day; still [D2](framing.md#the-error-channel) for the error channel, which F10 left out of scope |
+| **Depends on** | ~~[D2](framing.md) for `Ping`, `Cancel`, `GoAway`~~ — **satisfied**, all three are defined and unwired since [F10](../features/framing-and-protocol-evolution.md), so each is a call site rather than a flag day; ~~still [D2](framing.md#the-error-channel) for the error channel~~ — also satisfied, by [F11](../features/error-channel.md). **Nothing on this page is blocked on the wire format any more** |
 | **Blocks** | [D3](authentication.md) and [D4](encryption.md) need the builder to put credentials and TLS into. [D7](shard-aware-routing.md) needs this pool before it can reshard it |
 | **Tradeoff** | Contained — a deadline turns an indefinite wait into an error, which is a behaviour change callers must handle |
 | **Benchmark** | `transport/*`, unbuilt. **A deadline check on the hot path is the one piece here that could cost something measurable** |

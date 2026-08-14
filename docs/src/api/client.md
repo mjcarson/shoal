@@ -9,6 +9,23 @@ tokio, not glommio, so it is an ordinary async library.
 let client = Shoal::<TestDbClient>::new("127.0.0.1:12000").await?;
 ```
 
+Against a server that requires authentication ([F12](../features/authentication.md)) there is a
+second constructor, which is the only difference at the call site — everything after it is
+identical:
+
+```rust
+let client = Shoal::<TestDbClient>::with_credentials(
+    "127.0.0.1:12000",
+    Credentials::scram("reader", "hunter2"),
+)
+.await?;
+```
+
+`Shoal::new` is `with_credentials` with `Credentials::none()`, and both delegate to one private
+`connect` so that the ten line `where` clause exists once. Credentials given to a server that
+requires nothing are ignored rather than used — the server picks the mechanism, so a client that
+holds them still works against every server that has not turned authentication on.
+
 The type parameter is the generated `*Client` marker implementing `QuerySupport`
 ([Derive Macros](derive-macros.md#step-2-emit-the-supporting-types)), which is what ties the
 client to a specific schema.
@@ -200,9 +217,11 @@ is local to the code that depends on them.
 
 **One query index yields exactly one response.** `pending` is a `BTreeMap<usize, ClientMsg>` keyed
 by the response's index, and `insert` on a `BTreeMap` overwrites. That would silently drop a
-response if two ever shared an index. They cannot: `ResponseAction` (`shared/responses.rs:28-39`)
-has no variant that a query answers more than once — a get answers `Get(Option<Vec<T>>)` with every
-row it found, not a row at a time — and the shard replies once per query it handles
+response if two ever shared an index. They cannot: `ResponseAction` has no variant that a query
+answers more than once — a get answers `Get(Option<Vec<T>>)` with every row it found, not a row at a
+time, and the `Error` variant [F11](../features/error-channel.md) added is applied *in place of*
+whatever a query answered rather than alongside it, at one site per table — and the shard replies
+once per query it handles
 (`shard.rs:717-744`), merging the shares of a split query before replying rather than forwarding
 each (`:765-822`). **Anything that makes a query answer twice breaks the reorder buffer, not just
 the caller's row count.** That is the sharp end of
@@ -362,15 +381,25 @@ only a call site, since `Ping`, `Pong`, `Cancel` and `GoAway` are defined and un
 
 **A connection now shakes hands before it is used.** `Shoal::new` opens ten connections and each
 exchanges a `Hello`/`HelloAck` carrying the protocol version, a compile-time fingerprint of the
-schema, and the largest frame each side will accept. A client built from a different schema than
-the server is refused with both fingerprints in the error:
+schema, the largest frame each side will accept, and — since
+[F12](../features/authentication.md) — which authentication mechanisms the client can do and which
+one the server picked. A client built from a different schema than the server is refused with both
+fingerprints in the error:
 
 ```rust
 Err(Errors::Handshake(ConnectError::Protocol(ProtocolError::SchemaMismatch { ours, theirs })))
 ```
 
 Because `bb8` retries a failed connect with backoff until its five second connection timeout
-elapses, and a schema mismatch is permanent, that error takes about five seconds to arrive.
+elapses, and a schema mismatch is permanent, that error takes about five seconds to arrive. The
+same is true of a refused credential, for the same reason.
+
+**Authentication is per connection, and the pool opens ten.** The credentials live on
+`ShoalConnectionManager`, which is where `bb8` makes a connection, so a connection the pool opens
+to replace a dead one re-authenticates with no code anywhere else. The cost of that is that a cold
+`Shoal::with_credentials` runs ten SCRAM exchanges concurrently, each of them three round trips and
+a PBKDF2 derivation on both ends. Nothing measures it
+([O30](../appendix/optimizations.md), and [F12](../features/authentication.md#performance)).
 
 - Health checks do not detect a dead peer
   ([D6](../direction/connection-pool.md#health-checks-that-work)).
@@ -381,14 +410,27 @@ elapses, and a schema mismatch is permanent, that error takes about five seconds
 - Only one endpoint is ever known — `Shoal::new` takes the first address `lookup_host` returns
   (`client.rs:130`), so there is no failover
   ([D6](../direction/connection-pool.md#a-builder)).
-- No server-side error channel, so failures arrive as closed connections
-  ([Wire Protocol](../architecture/wire-protocol.md#limitations),
-  [D2](../direction/framing.md#the-error-channel)).
-- **No authentication and no encryption**, so anything that can reach the port can read and write
-  any table ([D3](../direction/authentication.md), [D4](../direction/encryption.md)).
+- ~~No server-side error channel, so failures arrive as closed connections.~~ Built as
+  [F11](../features/error-channel.md): a query that failed comes back as
+  `Errors::Server { code, msg, .. }`, and `response.error()` answers it directly. What remains is
+  that a *frame-level* failure names the bundle rather than one query in it, and that `send_one`
+  still treats an empty get as a failure
+  ([item 55](../appendix/known-issues.md#55-a-get-that-found-nothing-is-reported-as-a-query-that-failed)).
+- ~~**No authentication and no encryption**, so anything that can reach the port can read and
+  write any table.~~ Half built as [F12](../features/authentication.md): a client can prove who it
+  is with `with_credentials`, and a server can refuse one that cannot. What remains is that there
+  is no TLS, so the username and the whole exchange are visible on the path
+  ([D4](../direction/encryption.md)); that a principal that authenticated may still read and write
+  any table, because there is no authorization; and that a server with no `auth` section — the
+  default — still requires nothing of anybody.
+- **Credentials cannot be changed on a live client.** They are given to the constructor and held
+  by the pool for the life of the client, so rotating a password means building a new `Shoal`
+  ([D6](../direction/connection-pool.md#a-builder)).
 - **A query's response type is not checked at compile time.** `access::<T>()` takes the row type
   from the caller and a wrong one fails at runtime with `Errors::WrongType("Wrong Type!")`, which
-  names neither type ([D8](../direction/typed-queries.md)).
+  names neither type ([D8](../direction/typed-queries.md)). Since
+  [F11](../features/error-channel.md) a query that *failed* is no longer reported that way — it
+  answers `Errors::Server`, so "you asked for the wrong type" now means only what it says.
 - **The client links glommio**, and therefore io_uring, whether or not it will ever start a server —
   the `server` feature that appears to make it optional does not work
   ([item 54](../appendix/known-issues.md#54-shoaldb-needs-three-crates-the-caller-has-never-heard-of),
@@ -396,8 +438,11 @@ elapses, and a schema mismatch is permanent, that error takes about five seconds
 - `ShoalResultStream::skip(0)` panics with an integer underflow
   (`client.rs:1001-1008`) — the decrement precedes the zero check.
 - **A stream that is not drained to its end leaks its slot in `channel_map` and its pooled channel
-  pair**, because the release is inside `next`'s `if end` arm and neither stream type implements
-  `Drop` ([item 60](../appendix/known-issues.md#60-a-result-stream-that-is-not-drained-to-the-end-leaks-its-slot-in-the-client)).
+  pair**, because neither stream type implements `Drop`
+  ([item 60](../appendix/known-issues.md#60-a-result-stream-that-is-not-drained-to-the-end-leaks-its-slot-in-the-client)).
+  ~~the release is inside `next`'s `if end` arm~~ — [F11](../features/error-channel.md) moved it so
+  that it also runs when `next` returns `Err`, which was one of the three ways to leak. Dropping the
+  stream early and `skip`ping past the end are the other two, and both remain.
   Responses the server later sends for that query are then delivered into an unbounded channel with
   no reader.
 - `Shoal::send` archives the bundle before the id is finalised.

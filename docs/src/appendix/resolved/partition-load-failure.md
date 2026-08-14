@@ -1,7 +1,7 @@
 # 16, 51. A partition read that failed panicked its shard and stranded its queries
 
 *Partial fixes of [item 16](../known-issues.md#16-panics-on-the-hot-path) and
-[item 51](../known-issues.md#51-a-partition-load-that-fails-inside-load_partition-still-never-releases-its-queries).
+[item 51](response-error-channel.md).
 Item 16's other twelve panic sites and item 51's early exits inside `load_partition` are still
 open; both entries say which half is which.*
 
@@ -151,7 +151,7 @@ neither problem.
 
 **`ResponseAction::Error`, so a failed read is reported rather than read as empty.** This is the
 honest answer and it is a wire format change reaching the gather/merge path, the client and every
-site that builds a response. It is filed as [item 56](../known-issues.md#56-a-response-cannot-say-that-a-read-failed),
+site that builds a response. It is filed as [item 56](response-error-channel.md),
 which items 51 and 55 also want.
 
 **Ending the shard on a `Fatal` failure.** It is what a corrupt archive already does, and it turns
@@ -182,12 +182,16 @@ log is what stops it being silent.
 ## Still open
 
 - Item 16's other twelve panic sites, none of them on the storage read path.
-- Item 51's remainder: `load_partition`'s own early exits, which still return `Err` past the
+- ~~Item 51's remainder: `load_partition`'s own early exits, which still return `Err` past the
   drain of `blocked`. `fail_partition` now exists and does the releasing, so this is a matter of
-  routing those errors into it.
-- [Item 56](../known-issues.md#56-a-response-cannot-say-that-a-read-failed): a read that failed is
-  reported to the client exactly as an empty partition is. The server logs it; the client cannot
-  tell.
+  routing those errors into it.~~ **Done** — [Resolved #56, 61](response-error-channel.md), and the
+  filed fix direction was right: the exits route into `fail_partition`, which is what
+  `PartitionLoad::Failed` exists to say to the caller.
+- ~~[Item 56]: a read that failed is reported to the client exactly as an empty partition is. The
+  server logs it; the client cannot tell.~~ **Done** —
+  [Resolved #56, 61](response-error-channel.md). It answers `ResponseAction::Error` carrying a code
+  that says which class of failure it was, which is also what the released queries above now answer
+  with instead of "found nothing".
 - ~~Item 57, found on the way: `get_archive` opens with `create(true)`, so a missing archive is
   created empty rather than reported, and surfaces later as a validation failure on bytes nobody
   wrote.~~ **Done** — [Resolved #57](missing-archive.md). It turned out to end the shard rather

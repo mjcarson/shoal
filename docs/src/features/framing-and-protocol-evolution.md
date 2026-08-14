@@ -179,11 +179,16 @@ reset, which discards the very reply the server went to the trouble of composing
 
 ## Limitations
 
-**A response too large to frame closes the connection with nothing on the wire to say why.** The
+~~**A response too large to frame closes the connection with nothing on the wire to say why.** The
 server logs it and drops the client. This is strictly better than the panic it replaced, which
 took the shard and every other client on it, but it is not the fix — the fix is an error channel,
-which is out of scope here and filed as
-[item 61](../appendix/known-issues.md#61-a-response-too-large-to-frame-closes-a-connection-silently).
+which is out of scope here and filed as item 61.~~
+
+> **Fixed by [F11](error-channel.md).** The relay writes an `Error` frame naming the query and both
+> sizes, and then `continue`s — so the connection keeps serving every other query on it. The type
+> and the flag bit this page reserved are what made that a call site rather than a second flag day,
+> which is the whole argument for reserving them
+> ([Resolved #56, 61](../appendix/resolved/response-error-channel.md)).
 
 **A 64-bit fingerprint can collide.** Two different schemas that hash the same would shake hands
 and exchange archives of mismatched layout — the exact undefined behaviour the fingerprint exists
@@ -192,14 +197,20 @@ alarming: `bytecheck` remains the second line of defence on both paths and catch
 differences even when the fingerprint agrees; the input space is a handful of schemas per
 deployment rather than an adversarial one; and **a hostile peer can trivially forge a
 fingerprint**. This is a mistake detector, not authentication. Authentication is
-[D3](../direction/authentication.md).
+[F12](authentication.md), which runs after this check as a separate exchange.
 
-**Eight of the twelve message types are defined and unwired.** `Ping` and `Pong` exist but
-`is_valid` still calls `peer_addr`; `Cancel` exists but a dropped result stream still leaks its
-slot; `GoAway` exists but nothing drains. Those are their own features, and the point of defining
-the discriminants now is that none of them is a flag day.
+**~~Eight~~ ~~Seven~~ Five of the twelve message types are defined and unwired.** `Ping` and `Pong`
+exist but `is_valid` still calls `peer_addr`; `Cancel` exists but a dropped result stream still
+leaks its slot; `GoAway` exists but nothing drains. Those are their own features, and the point of
+defining the discriminants now is that none of them is a flag day — which [F11](error-channel.md)
+demonstrated by wiring `Error` without one and [F12](authentication.md) demonstrated again by
+wiring `Auth` and `AuthResponse` without one.
 
-**The handshake proves nothing about identity.** Any peer can send any fingerprint. See D3.
+**~~The handshake proves nothing about identity.~~** ~~Any peer can send any fingerprint. See D3.~~
+It still proves nothing about identity, and it no longer has to:
+[F12](authentication.md) spends two of the reserved bytes in these very bodies on negotiating a
+mechanism, and the exchange that follows is what proves identity. A server with no `auth` section
+is exactly as described above.
 
 **`BytesMut::zeroed` still zeroes a buffer that `read_exact` immediately overwrites.** It is now
 *bounded* waste, which is the part item 34 was about, but it is still waste. Removing it needs

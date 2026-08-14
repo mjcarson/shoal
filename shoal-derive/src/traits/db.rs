@@ -211,26 +211,46 @@ pub fn add(
                 let table = loaded_kinds.table;
                 let id = loaded_kinds.loaded.partition_id;
                 // a load is where an archive is validated, so it can fail on a corrupt one
-                if let Some((unblocked, generation)) = self.#field_ident.load_partition(loaded_kinds.loaded).await? {
-                    // build a mark evictable message for this partition so we don't mark this as
-                    // evictable until we have completed all blocked queries to prevent load/reloading
-                    // the same partition over and over again
-                    //
-                    // the generation we get back is the newest one that has been compacted, not the
-                    // one we are writing in, since the queries we are about to release can write to
-                    // this partition and their intents would not be in an archive yet
-                    let mark_evict_msg = shoal_core::server::messages::ServerMsg::MarkEvictable { generation, table, partitions: vec![id] };
-                    // convert our unblocked queries into shard messages
-                    for (meta, unwrapped) in unblocked {
-                        // wrap our query
-                        let query = #query_ident::#variant_ident(unwrapped);
-                        // build our shard message
-                        let query_msg = shoal_core::server::messages::ServerMsg::Query { meta, query};
-                        // send this message
-                        shard_local_tx.send(query_msg).await.unwrap();
+                match self.#field_ident.load_partition(loaded_kinds.loaded).await? {
+                    // nothing was parked on this partition, so there is nobody to release
+                    shoal_core::tables::PartitionLoad::Idle => (),
+                    shoal_core::tables::PartitionLoad::Loaded(unblocked, generation) => {
+                        // build a mark evictable message for this partition so we don't mark this as
+                        // evictable until we have completed all blocked queries to prevent load/reloading
+                        // the same partition over and over again
+                        //
+                        // the generation we get back is the newest one that has been compacted, not the
+                        // one we are writing in, since the queries we are about to release can write to
+                        // this partition and their intents would not be in an archive yet
+                        let mark_evict_msg = shoal_core::server::messages::ServerMsg::MarkEvictable { generation, table, partitions: vec![id] };
+                        // convert our unblocked queries into shard messages
+                        for (meta, unwrapped) in unblocked {
+                            // wrap our query
+                            let query = #query_ident::#variant_ident(unwrapped);
+                            // build our shard message
+                            let query_msg = shoal_core::server::messages::ServerMsg::Query { meta, query};
+                            // send this message
+                            shard_local_tx.send(query_msg).await?;
+                        }
+                        // send our partition is evictable message after this query is finished
+                        shard_local_tx.send(mark_evict_msg).await?;
                     }
-                    // send our partition is evictable message after this query is finished
-                    shard_local_tx.send(mark_evict_msg).await.unwrap();
+                    // this load gave up part way through, so replay what it released carrying
+                    // the failure it released them with
+                    //
+                    // no mark evictable message follows this one, unlike a load that succeeded:
+                    // nothing entered this tables partitions and nothing was taken out of the
+                    // lru that has to be put back
+                    shoal_core::tables::PartitionLoad::Failed(released) => {
+                        for (meta, unwrapped) in released {
+                            // wrap our query
+                            let query = #query_ident::#variant_ident(unwrapped);
+                            // build our shard message
+                            let query_msg = shoal_core::server::messages::ServerMsg::Query { meta, query };
+                            // send this message
+                            shard_local_tx.send(query_msg).await?;
+                        }
+                    }
                 }
             }
         }
@@ -247,7 +267,7 @@ pub fn add(
         quote! {
             #table_names_ident::#variant_ident => {
                 // take the queries that were parked on this partition, if there were any
-                if let Some(released) = self.#field_ident.fail_partition(partition_id) {
+                if let Some(released) = self.#field_ident.fail_partition(partition_id, error.as_ref()) {
                     // replay each of them, marked to answer without the read that failed
                     //
                     // no mark evictable message follows this one, unlike a load that
@@ -432,6 +452,7 @@ pub fn add(
                 &mut self,
                 table: Self::TableNames,
                 partition_id: u64,
+                error: Option<shoal_core::shared::responses::ResponseError>,
                 shard_local_tx: &kanal::AsyncSender<shoal_core::server::messages::ServerMsg<Self>>,
             ) -> Result<(), shoal_core::server::ServerError> {
                 match table {

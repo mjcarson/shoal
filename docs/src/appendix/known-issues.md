@@ -27,21 +27,32 @@ test suite does and does not reach is in [Test Coverage](test-coverage.md).
 Defects that have been fixed move to [Resolved Issues](resolved-issues.md), one page each,
 carrying the reasoning and the invariants the fix depends on. Item numbers are shared between
 the two pages and never reused, so a number appears on exactly one of them — which is why this
-list starts at 15 and skips 25, 26, 31, 34, 39, 44, 45, 48, and 57, and why item 61 is the newest.
-The exceptions are items 16, 17, 20, 24 and 51, which were only
-partly fixed: the open remainder is here and the rest is there. Item 9 was one such exception
-until its second half was fixed, and is now on the resolved page alone; item 25 became the second,
+list starts at 15 and skips 25, 26, 31, 34, 39, 44, 45, 48, 51, 56, 57 and 61, and why item 63 is
+the newest. The exceptions are items 16, 17, 20 and 24, which were only
+partly fixed: the open remainder is here and the rest is there. Items 9 and 51 were each one such
+exception until their second half was fixed, and are now on the resolved page alone; item 25 was one
 in the other direction — it had one row left open, that row was fixed, and the whole item
 [moved](resolved/claude-md-drift.md).
 
 **Baseline as of writing:** `cargo check --workspace --all-targets` passes with warnings;
-`cargo test --workspace` passes — 470 integration tests (one ignored), 258 `shoal-core` unit
-tests, 21 doctests, plus 8 more behind `--features stage-profile` that a default run does not
-reach ([Test Coverage](test-coverage.md)). That is up from 456, 231 and 21 with
+`cargo test --workspace` passes — 482 integration tests (one ignored), 301 `shoal-core` unit
+tests, 24 doctests, plus 8 more behind `--features stage-profile` that a default run does not
+reach ([Test Coverage](test-coverage.md)). That is up from 473, 272 and 21 with
+[F12](../features/authentication.md) — one new integration binary (`auth.rs`) carrying 9 tests, 17
+unit tests over the mechanism and its credential store, 8 over the auth frame codec and the
+handshake's new fields, 4 over the config section, and 3 new doctests. Item 63 was filed while
+writing it, from reading the source. Before that it was 470, 258 and 21 with
+[F11](../features/error-channel.md) — one new integration binary (`errors.rs`) carrying 3 tests,
+7 unit tests over the error codec, 3 over the response payload, and 4 over the client's read path
+and its dead connection sweep. Four existing integration tests changed what they assert rather than
+being added to, which is the signal that the behaviour they pinned is the behaviour that moved.
+Item 62 was filed while writing it, from reproducing it, and its reproduction is not committed —
+the test that found it asserted behaviour F11 does not provide.
+Before that it was 456, 231 and 21 with
 [F10](../features/framing-and-protocol-evolution.md) — three new integration binaries
 (`framing.rs`, `handshake.rs`, `fingerprint.rs`) carrying 14 tests between them, 23 unit tests over
 the frame codec and the fingerprint, 2 over the client's read path, and 2 over the frame bound's
-config default. Item 61 was filed while writing it, from reading, and added no test of its own.
+config default.
 Before that it was re-run and re-counted binary by binary in August 2026, unchanged — items 59 and
 60 are filed from reading and neither added a test.
 That is up from 454, 229 and 21 with
@@ -106,9 +117,11 @@ either. A shard that falls behind grows its queue until the process is killed. `
 The one exception is `StreamWriter`'s `max_write_behind` (`.../fs/stream.rs:553`), which
 bounds in-flight writes only.
 
-**Fix direction:** [D6](../direction/connection-pool.md#bounded-channels), sequenced behind
-[D2](../direction/framing.md#the-error-channel) — bounding a channel means deciding what happens
-when the bound is hit, and every answer has to be sayable to the client.
+**Fix direction:** [D6](../direction/connection-pool.md#bounded-channels), ~~sequenced behind
+[D2](../direction/framing.md#the-error-channel)~~ — the prerequisite is met.
+[F11](../features/error-channel.md) made *shedding* sayable: `ErrorCode::Shedding` is defined, and
+a query the server declined can now be reported as declined rather than as an empty result. What
+remains is the bound itself and the policy that decides when it is hit.
 
 ### 16. Panics on the hot path
 
@@ -117,9 +130,9 @@ paths:
 
 | Site | Trigger |
 | --- | --- |
-| `shard.rs:676` | Reply for a client with no channel |
-| `shard.rs:732` | A split query whose `gather` contact is missing — an `.expect` |
-| `shard.rs:916` | Client UUID collision |
+| `shard.rs:923` | Reply for a client with no channel |
+| `shard.rs:979` | A split query whose `gather` contact is missing — an `.expect` |
+| `shard.rs:1163` | Client UUID collision |
 | `comms.rs:53`, `:72` | Unknown shard contact |
 | `messages.rs:223` | A `Gathered` message asked to be cloned, which only a broadcast does |
 | `.../tables/persistent.rs:185` | A parked get resumed with a different projection |
@@ -128,7 +141,7 @@ paths:
 | `shared/traits.rs:54` | rkyv serialization failure |
 | `.../persistent/sorted.rs:511`, `:795`, `:854`, `:952`, `:1007`; `.../persistent/unsorted.rs:481`, `:722`, `:822` | **An intent-log commit that failed** |
 | `.../persistent/sorted.rs:439`; `.../persistent/unsorted.rs:386` | A `load_partition` that could not ask for a read |
-| `.../persistent/sorted.rs:326`, `:328`, `:547`, `:845`, `:999`, `:1297`, `:1343`, `:1383` | Corrupt archive data |
+| `.../persistent/sorted.rs:547`, `:845`, `:999`, `:1297`, `:1343`, `:1383` | Corrupt archive data |
 
 **Three things about this table are worth more than the sites in it.**
 
@@ -141,12 +154,21 @@ at expansion time rather than at runtime.
 `self.storage.commit(&intent).await.unwrap()`. This entry used to file all of the table sites under
 *corrupt archive data*, which is wrong for these: a full disk, an `EIO`, or a closed intent log
 panics the shard on an ordinary insert. They are the ones with a plausible non-adversarial trigger,
-and the ones an error channel ([item 56](#56-a-response-cannot-say-that-a-read-failed)) would
-actually be able to answer.
+and the ones an error channel ~~would~~ **can** actually answer:
+[F11](../features/error-channel.md) built it, and these eight sites are the largest thing that has
+somewhere to put an error now and does not use it. They are what is left of this item that a client
+would ever see.
 
 *The loader's three are gone.* A `todo!()` on the partition read path and the two `panic!`s
 that fired on any loader task error have been replaced by a failure the shard is told about:
 [Resolved #16, 51](resolved/partition-load-failure.md). The rest of this item is open.
+
+*Two of the corrupt archive sites are gone.* `sorted.rs:326` and `:328` — the `access` and
+`deserialize` on the merge path inside `load_partition` — became a failure that releases the queries
+parked on that read and answers them with `ErrorCode::CorruptArchive`
+([Resolved #56, 61](resolved/response-error-channel.md)). The line numbers above have also been
+corrected: this table had been carrying `shard.rs:676`, `:732` and `:916` since before
+[F10](../features/framing-and-protocol-evolution.md) moved them.
 
 *The two relays' five are gone.* `client_rx_relay` panicked on any non-EOF socket error, on a
 failed read of a request body, and on a failed forward into the shard; `client_tx_relay` panicked
@@ -397,16 +419,18 @@ correctness fix, and the cost removal is change left over.
 
 - `ShoalResultStream::skip(0)` panics: `skip -= 1` precedes the zero check
   (`shoal-core/src/client.rs:1001-1008`).
-- `is_valid` / `has_broken` use `peer_addr()`, which does not probe the peer
-  (`shoal-core/src/client.rs:76-91`, marked TODO).
+- `is_valid` / `has_broken` use `peer_addr()`, which does not probe the peer (still marked TODO).
+  [F11](../features/error-channel.md) narrowed this rather than closing it: both now also refuse a
+  connection whose *read half* has stopped, which is the case they were silently passing. A peer
+  that is gone but whose socket has not been reset still looks healthy, and that needs a `Ping`.
 - `Shoal::send` archives the bundle before `track_response` may regenerate its id
   (`shoal-core/src/client.rs:209-215`).
 - Two large commented-out blocks remain (`shoal-core/src/client.rs:549-603`, `:1048-1114`).
 - `suceeded` / `QuerySuceededOpts` are misspelled in the public API.
 
 **Fix direction:** the health-check half is [D6](../direction/connection-pool.md#health-checks-that-work),
-which needs [D2](../direction/framing.md#message-types)'s `Ping`. The rest are local edits and
-need nothing.
+which needs [D2](../direction/framing.md#message-types)'s `Ping` — a discriminant the wire format
+has and nothing is behind. The rest are local edits and need nothing.
 
 ### 24. shoalctl warnings
 
@@ -579,37 +603,6 @@ no-op at the end of an IO path: if the two ever diverge, nothing here would say 
 **Fix direction:** handle the arm explicitly, even if the body is `// the resident copy is the
 same extent, so keep it and drop what we read`. An `else` that says why is worth more than a
 pattern that quietly does not match.
-
-### 51. A partition load that fails *inside* `load_partition` still never releases its queries
-
-**The larger half of this is [fixed](resolved/partition-load-failure.md).** A read that fails
-before it reaches the table — the archive could not be opened, or the partition was pruned out
-from under it — now reports itself, and the queries parked on it are released and replayed. What
-follows is the remainder.
-
-`.../persistent/sorted.rs:314` and `.../persistent/unsorted.rs:263` — `load_partition` builds the
-loaded partition and then, at the end, drains `self.blocked` for the queries that were parked on it.
-Every early exit between those two points still leaves those queries parked forever: the client waits
-on a response that no longer has anything to produce it, and the entry in `blocked` is never
-collected.
-
-There is one such exit today, `ValidatedArchive::new` (`sorted.rs:347`; `unsorted.rs:274`, `:294`)
-on a corrupt archive. It returns `Err`, which
-propagates up through the shard message loop and ends the shard, so the *symptom* of that particular
-one is hidden behind a bigger failure. The defect is that the function has early exits at all and the
-next one added to it may not be fatal.
-
-Not introduced by [F4](../features/validated-archives.md), and not fixed by it — but F4 is what made
-it worth filing, because it added the first failure that returns rather than panics.
-
-The same shape is on the recovery path in `FileSystem::load_scanned` (`.../storage/fs.rs:220-249`),
-which is less interesting because nothing is blocked yet during startup.
-
-**Fix direction:** `fail_partition` is already there and already does the releasing
-(`sorted.rs:384`, `unsorted.rs:331`), so this is now just a matter of routing `load_partition`'s own
-errors into it rather than out of the function.
-Answering those queries with something better than "found nothing" needs a query error response that
-can carry a storage failure ([item 56](#56-a-response-cannot-say-that-a-read-failed)).
 
 ### 35. A `RefCell` borrow is held across three awaits in the compactor
 
@@ -936,32 +929,11 @@ until it was changed to use `exists`.
 knob that decides what counts as success, so the fix is plausibly to let `send_one` take one rather
 than always using the default.
 
-### 56. A response cannot say that a read failed
-
-`ResponseAction` (`shoal-core/src/shared/responses.rs:28-39`) has five variants and none of them
-carries an error. A get answers `Get(None)`, and that one answer has to stand for both "this
-partition holds no such row" and "the copy on disk could not be read".
-
-That gap is what decides the shape of every storage failure that reaches a query. A read that
-gives up now releases the queries parked on it and they answer from what is resident
-([Resolved #16, 51](resolved/partition-load-failure.md)) — which is the right thing to do with
-them and still reports a short answer as a complete one. The alternative, ending the shard, is
-worse: it turns one unreadable archive into an outage.
-
-The cost is bounded by how visible the failure is elsewhere: the loader logs every give-up at
-`ERROR` naming the table, the partition and the errno. So the server knows. The client does not.
-
-**Fix direction:** a `ResponseAction::Error` variant, which is a wire format change and reaches
-the gather/merge path (`responses.rs:51-70`, and `Response::merge` at `:156`), the client, and
-every site that builds a response.
-This is also what [item 51](#51-a-partition-load-that-fails-inside-load_partition-still-never-releases-its-queries)
-needs to answer its parked queries with something truthful, and what
-[item 55](#55-a-get-that-found-nothing-is-reported-as-a-query-that-failed) needs to stop
-conflating an empty result with a failure — the three want the same variant.
-
-[D2](../direction/framing.md#the-error-channel) is where that lands, folded into one flag day with
-a version byte, a message type, and a bounded length — because the wire break is the expensive
-part and it is paid per break rather than per field.
+**Unblocked, not closed, by [F11](../features/error-channel.md).** "Found nothing" and "failed" are
+now different answers on the wire, and `suceeded` reports the second as `Errors::Server` whatever
+the options say. What is left is the first half: letting `send_one` say that an empty get is
+acceptable. It no longer has to, to tell the two apart — a caller can ask `response.error()`
+directly — but it is still the ergonomic gap this item was filed for.
 
 ### 58. A shard that dies is not reported to whoever started the pool
 
@@ -1080,7 +1052,7 @@ So there are three ways to end a stream without reaching that block:
 | How | What is left behind |
 | --- | --- |
 | Drop the stream before its last response | One `channel_map` entry, and a channel pair that never returns to `channel_queue` |
-| `next()` returns `Err` — a failed `access`, a closed proxy | The same |
+| ~~`next()` returns `Err` — a failed `access`, a closed proxy~~ | ~~The same~~ — fixed by [F11](../features/error-channel.md): both `next()`s now run the release block on the `Err` path as well as the `end` path |
 | `skip()` past the end, or any early `return` in the caller | The same |
 
 The `channel_map` entry is what the proxy looks a response up in (`:536`), so the leak is not only
@@ -1112,45 +1084,76 @@ losing a pooled channel is a missed reuse, not a leak.
 **`Drop` alone fixes the client and leaves the server wrong**, which is worth knowing before taking
 the easy half ([D6](../direction/connection-pool.md#drop-on-both-stream-types)). Once the entry is
 gone, the responses the server is still producing arrive at a proxy that cannot find a channel for
-them, which today returns `Errors::ProtocolError` and kills the read task for that connection
-(`client.rs:536-543`). The pair that is actually correct is `Drop` plus a `Cancel` message telling
+them, ~~which today returns `Errors::ProtocolError` and kills the read task for that connection~~ —
+[F11](../features/error-channel.md) made that a `WARN` and a `continue`, precisely because killing a
+connection over one caller's leak takes every other query on it down too. So the easy half is no
+longer actively harmful, and it is still half. The pair that is actually correct is `Drop` plus a `Cancel` message telling
 the server to stop, and `Cancel` is a message type the wire format **has a discriminant for and no
 wiring behind** since [F10](../features/framing-and-protocol-evolution.md) — so this is no longer
 blocked on a flag day, only on the send and the handler
 ([D2](../direction/framing.md#message-types)).
 
-### 61. A response too large to frame closes a connection silently
+### 62. A server that has exited leaves its client connections open
 
-```rust
-let preamble = match protocol::response_preamble(&query_id, archived.len(), peer_max_frame_bytes) {
-    Ok(preamble) => preamble,
-    Err(error) => {
-        event!(Level::ERROR, msg = "response too large to frame", %query_id, %error);
-        break;
-    }
-};
-```
+`ShoalPool::exit` (`shoal-core/src/server.rs:104-117`) sets `should_shutdown` and joins the shard
+threads. The listener goes with them — a connection attempt to the port is refused afterwards — but
+the sockets of connections that were already **established** are not closed. A client holding one
+sees no `FIN`, so its read loop stays parked in `read_exact` forever and any query written to that
+connection waits for a response no thread is left to produce.
 
-`shard.rs`, `client_tx_relay`
+The per-connection tasks `client_acceptor` spawns hold the `TcpStream`s, and nothing drains or
+cancels them before the executor goes away. When the server runs in the same process as the client —
+which every integration test does — there is no process exit to have the kernel clean up after it
+either.
 
-A response whose archive is larger than the client said it would accept cannot be written, so the
-write relay logs it and ends the connection. The client sees a closed socket and has no way to
-learn which query was too large, or that size was the reason at all.
+**Established by reproducing it**, while building [F11](../features/error-channel.md). A test that
+started a server, called `pool.exit()`, and then sent one query never got an answer; instrumenting
+`TcpProxy::start` showed the read loop had not returned for any of the pool's ten connections, so
+the client-side sweep F11 added had nothing to fire on. Connecting to the port after `exit()`
+returns `ECONNREFUSED`, which is what separates "the listener closed" from "the connections closed".
 
-This is strictly better than what it replaced — a `panic!` that took the shard and every other
-client on it ([Resolved #34](resolved/unvalidated-length-prefix.md)) — and it is not the fix. It is
-also the *only* one of the four framing failure paths that a well-behaved peer can reach: the other
-three need a peer that wrote something malformed, while this one needs nothing but a get of a large
-partition against a client with a small bound.
+This is the server-side twin of the gap F11 closed on the client. F11 made a connection that
+*ends* tell the queries it owed; this is a connection that never ends.
 
-**Established by reading the source**, while writing
-[F10](../features/framing-and-protocol-evolution.md). It has not been reproduced; the default bound
-is 64 MiB and no workload or test produces a response within three orders of magnitude of it.
+**Fix direction:** two halves, and the first is small. `client_acceptor`'s per-connection tasks
+should be held rather than detached, and cancelled on shutdown, so the sockets are dropped before
+the executor is — which turns this into an ordinary EOF that the client already handles.
+The second half is that a client cannot rely on the peer being well behaved about it, so it wants a
+deadline: a `Ping`/`Pong` health check ([item 23](#23-client-stream-and-pool-rough-edges),
+`MessageType::Ping` is reserved and unwired) or a per-query timeout
+([TODOs](todos.md)). Neither is the error channel — F11 gave a failure somewhere to go and cannot
+invent a failure nobody detected.
 
-**Fix direction:** [D2](../direction/framing.md#the-error-channel)'s error channel, which is what
-items 51, 55 and 56 all want as well. `ResponseAction::Error` gives this somewhere to go, and the
-frame-level `Error` type gives it somewhere to go when the query id is not trustworthy either.
-Until then the log line is the only record, which is why it names the query id.
+### 63. Nothing limits how often a peer may guess a password
+
+`server_auth` (`shoal-core/src/server/shard.rs`) runs an exchange for anything that reaches the
+port and completes a handshake, and there is no counter anywhere — not per source address, not per
+username, not per shard. A peer can open a connection, guess, be refused, and open another one, as
+fast as it can complete three round trips.
+
+The asymmetry is what makes it worth filing rather than shrugging at. Each guess costs the
+**server** one PBKDF2-HMAC-SHA-256 at the credential's iteration count — on the order of a
+millisecond of CPU on a shard that is single-threaded and is also serving queries — while costing
+the client a `format!`, because a client that intends to fail does not have to derive anything. A
+peer that sends a syntactically valid proof of the wrong 32 bytes gets the server to do all of the
+work and does none of it.
+
+That makes this two defects wearing one number. It is a **credential** exposure, and it is more
+immediately a **denial of service** one: a few hundred connections a second is a shard spending
+its time on PBKDF2 rather than on the table it owns, without ever authenticating.
+
+**Established by reading the source**, while building
+[F12](../features/authentication.md). Not reproduced, and the reproduction is the interesting part:
+what a working `connect` workload ([O30](optimizations.md)) would have to show is how many refused
+exchanges per second it takes for a resident get's p99 to move.
+
+**Fix direction:** the cheap half is a per-connection cap of one exchange — a peer that fails is
+already closed, so what this really bounds is reconnection, which belongs with a per-source-address
+rate limit and does not exist. The half that removes the asymmetry is to do the derivation
+**after** cheap validation and to bound concurrent in-flight exchanges per shard, so that a flood
+queues rather than compounds. Note the decoy path ([F12](../features/authentication.md)) constrains
+the shape of any fix: whatever is added must cost the same for a user that exists and one that does
+not, or it becomes the enumeration oracle the decoy exists to prevent.
 
 Everything that has been fixed, and why it was fixed the way it was, is in
 [Resolved Issues](resolved-issues.md). The SHQL parser has gained test coverage at both stages

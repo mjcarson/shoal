@@ -47,6 +47,9 @@ argument for the version byte, and it is the strongest evidence in this chapter.
 
 Its authentication is SASL over `AUTHENTICATE` / `AUTH_RESPONSE` / `AUTH_CHALLENGE` /
 `AUTH_SUCCESS`, a multi-round exchange that [D3](authentication.md) should copy rather than invent.
+**It did** — [F12](../features/authentication.md) has the server name the mechanism in its ack and
+repeat `Auth`/`AuthResponse` until it succeeds or refuses, which is this flow with two message
+types instead of four.
 
 Topology discovery is a *pull*: clients read the cluster's own system tables. Scylla replaced that
 with a push, which is less machinery and lower latency to a correct map.
@@ -161,7 +164,8 @@ than re-argued.
 ### Postgres and MongoDB
 
 Both landed on **SCRAM-SHA-256** for password authentication, from different directions and after
-trying other things. It is the boring correct answer, and [D3](authentication.md) should not spend
+trying other things. It is the boring correct answer, [F12](../features/authentication.md) took
+it, and [D3](authentication.md) should not spend
 design effort re-deciding it: the server stores a salted iterated derivation, the client proves
 knowledge without transmitting the password, and the exchange authenticates the server to the client
 as well.
@@ -188,8 +192,8 @@ the evidence for it.
 
 | System | Transport | Framing | Auth | Encryption | Client routing | Typed client |
 | --- | --- | --- | --- | --- | --- | --- |
-| **Shoal, today** | TCP | Length prefix, no version or type | None | None | None | Runtime enum match |
-| **Shoal, proposed** | TCP ([D1](transport.md)) | 8-byte header, versioned ([D2](framing.md)) | mTLS or SCRAM ([D3](authentication.md)) | rustls in place ([D4](encryption.md)) | Tablet map, pushed ([D7](shard-aware-routing.md)) | `Query::Response` ([D8](typed-queries.md)) |
+| **Shoal, today** | TCP | 8-byte header, versioned ([F10](../features/framing-and-protocol-evolution.md)) | SCRAM, optional and off by default ([F12](../features/authentication.md)) | None | None | Runtime enum match |
+| **Shoal, proposed** | TCP ([D1](transport.md)) | 8-byte header, versioned ([D2](framing.md)) — **built** | mTLS *and* SCRAM ([D3](authentication.md)) — SCRAM **built** | rustls in place ([D4](encryption.md)) | Tablet map, pushed ([D7](shard-aware-routing.md)) | `Query::Response` ([D8](typed-queries.md)) |
 | **ScyllaDB** | TCP | CQL, versioned | SASL | TLS | Shard- and token-aware | Generated, per driver |
 | **Cassandra** | TCP | Native protocol, versioned | SASL | TLS | Token-aware, pulled | Generated, per driver |
 | **FoundationDB** | TCP | Custom binary | TLS identity | TLS | In the client library | Layer-dependent |

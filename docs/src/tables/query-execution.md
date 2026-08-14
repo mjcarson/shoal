@@ -433,12 +433,15 @@ synchronisation mechanism. Simple, and dependent on nothing reordering that queu
 - A projection changes what is deserialized, not what is read: a cold partition is read whole
   either way, the same caveat a range carries
   ([F2](../features/projections.md#limitations)).
-- No timeout on blocked queries. A read that *fails* now releases the queries parked on it
-  ([Resolved #16, 51](../appendix/resolved/partition-load-failure.md)), so the loader is no
-  longer a way to reach this. A read that neither completes nor fails still parks them forever,
-  with no way for the client to learn that.
-- A read that failed is answered exactly as an empty partition is. The server logs the failure at
-  `ERROR`; the response has no variant that can carry one
-  ([item 56](../appendix/known-issues.md#56-a-response-cannot-say-that-a-read-failed)).
+- No timeout on blocked queries. A read that *fails* releases the queries parked on it
+  ([Resolved #16, 51](../appendix/resolved/partition-load-failure.md)), and since
+  [F11](../features/error-channel.md) it releases them carrying the failure — including the failures
+  *inside* `load_partition`, which used to return an error that ended the shard and left them parked
+  forever. A read that neither completes nor fails still parks them forever, with no way for the
+  client to learn that.
+- ~~A read that failed is answered exactly as an empty partition is.~~ Since
+  [F11](../features/error-channel.md) it is answered `ResponseAction::Error` with a code saying which
+  class of failure it was, and only a partition the compactor *pruned* still answers as empty —
+  which is correct, because a query replayed against one has found everything there is to find.
 - `pending_data` and `blocked` are unbounded.
 - Memory accounting corrupts on the partition-shrinks path.

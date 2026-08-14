@@ -45,6 +45,8 @@ futures = "0.3"
 # the example builds its config in code and stores it under a temp dir, so it needs no shoal.yml
 tempfile = "3"
 criterion = { workspace = true }
+# the scram_credential example prints the yaml stanza a shoal.yml carries
+serde_yaml = "0.9"
 
 # the micro benchmarks reach crate private internals of shoal-core through its `bench`
 # feature, so they cannot be built without it

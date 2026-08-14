@@ -31,9 +31,19 @@ pub fn add(
                        if let shoal_core::shared::responses::ArchivedResponseAction::Get(rows) = &action.data {
                             return Ok(rows);
                         }
+                        // a query that failed is answered with the failure rather than with
+                        // "you asked for the wrong type", which is what it used to look like
+                        if let shoal_core::shared::responses::ArchivedResponseAction::Error(error) = &action.data {
+                            return Err(shoal_core::client::Errors::Server {
+                                query_id: Some(action.id),
+                                index: Some(action.index.to_native() as usize),
+                                code: error.code(),
+                                msg: error.msg().to_owned(),
+                            });
+                        }
                     }
                     Err(shoal_core::client::Errors::WrongType("Wrong Type!".to_owned()))
-                }                
+                }
             }
         }
     );

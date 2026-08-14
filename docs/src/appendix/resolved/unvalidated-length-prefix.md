@@ -98,10 +98,11 @@ the writer-side check turns a legible error at the caller back into a connection
 
 Two things this fix deliberately did not do:
 
-- **A response too large to frame closes the connection with nothing on the wire to say why.** The
+- ~~**A response too large to frame closes the connection with nothing on the wire to say why.** The
   server logs it and drops the client. Better than the panic, but not the fix — that needs an
-  error channel, filed as
-  [item 61](../known-issues.md#61-a-response-too-large-to-frame-closes-a-connection-silently).
+  error channel, filed as item 61.~~ **Built** —
+  [Resolved #56, 61](response-error-channel.md). The relay writes an `Error` frame naming the query
+  and keeps serving the connection.
 - **`BytesMut::zeroed` still zeroes a buffer `read_exact` immediately overwrites**, now bounded.
   [O29](../optimizations.md#o29-a-request-body-is-zeroed-and-then-immediately-overwritten).
 
@@ -127,6 +128,6 @@ removed five of its sites, all in the two relays, and the table there is still l
 - [Wire Protocol](../../architecture/wire-protocol.md) — the format as built
 - [item 16](../known-issues.md#16-panics-on-the-hot-path) — the panics, five of which went with
   this
-- [item 61](../known-issues.md#61-a-response-too-large-to-frame-closes-a-connection-silently) —
+- [item 61](response-error-channel.md) —
   what is left of the write side
 - [D2. Framing and protocol evolution](../../direction/framing.md) — the design

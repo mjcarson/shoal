@@ -968,6 +968,7 @@ checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
 dependencies = [
  "block-buffer",
  "crypto-common",
+ "subtle",
 ]
 
 [[package]]
@@ -1447,6 +1448,15 @@ name = "hex"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
+
+[[package]]
+name = "hmac"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
+dependencies = [
+ "digest",
+]
 
 [[package]]
 name = "hotpath"
@@ -2455,6 +2465,16 @@ name = "pathdiff"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df94ce210e5bc13cb6651479fa48d14f601d9858cfe0467f43ae157023b938d3"
+
+[[package]]
+name = "pbkdf2"
+version = "0.12.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8ed6a7761f76e3b9f92dfb0a60a6a6477c61024b775147ff0973a02653abaf2"
+dependencies = [
+ "digest",
+ "hmac",
+]
 
 [[package]]
 name = "percent-encoding"
@@ -3471,6 +3491,7 @@ dependencies = [
  "gxhash 3.5.0",
  "kanal",
  "rkyv 0.8.12",
+ "serde_yaml",
  "shoal-core",
  "shoal-derive",
  "tempfile",
@@ -3509,6 +3530,7 @@ name = "shoal-core"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "bb8",
  "byte-unit",
  "bytes",
@@ -3518,6 +3540,7 @@ dependencies = [
  "futures",
  "glommio",
  "gxhash 2.3.1",
+ "hmac",
  "hotpath",
  "intmap",
  "kanal",
@@ -3529,11 +3552,15 @@ dependencies = [
  "opentelemetry-semantic-conventions",
  "opentelemetry_sdk 0.28.0",
  "papaya",
+ "pbkdf2",
+ "rand",
  "rkyv 0.8.12",
  "rkyv-with",
  "serde",
  "serde_json",
  "serde_yaml",
+ "sha2",
+ "subtle",
  "tempfile",
  "tokio",
  "tonic 0.8.3",
@@ -3720,6 +3747,12 @@ dependencies = [
  "quote",
  "syn 2.0.108",
 ]
+
+[[package]]
+name = "subtle"
+version = "2.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "syn"

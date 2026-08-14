@@ -31,7 +31,7 @@ use crate::server::ring::Ring;
 use crate::server::shard::ShardInfo;
 use crate::server::{Conf, ServerError};
 use crate::shared::queries::parser::{FieldInfo, FieldRole, TypeValidator};
-use crate::shared::responses::ResponseActionNames;
+use crate::shared::responses::{ArchivedResponseError, ResponseActionNames, ResponseError};
 use crate::storage::{FullArchiveMap, LoaderMsg, Loaders, RecoveryStats};
 
 pub use sorted::ShoalSortedTable;
@@ -213,6 +213,19 @@ pub trait QuerySupport: 'static + Sized {
     ///
     /// * `archived` - The archived response to get the exists result from
     fn get_exists(archived: &<Self::ResponseKinds as Archive>::Archived) -> Option<bool>;
+
+    /// Get the failure this query answered with, if it failed
+    ///
+    /// This is separate from [`QuerySupport::succeeded`] on purpose. `succeeded` answers "may I
+    /// use this response", which depends on what the caller asked for, while this answers "did
+    /// this query work", which does not.
+    ///
+    /// # Arguments
+    ///
+    /// * `archived` - The archived response to get the failure from
+    fn error(
+        archived: &<Self::ResponseKinds as Archive>::Archived,
+    ) -> Option<&ArchivedResponseError>;
 
     /// Parse a SHQL (Shoal Query Language) string into a query
     ///
@@ -442,12 +455,14 @@ pub trait ShoalDatabase: 'static + Sized {
     ///
     /// * `table` - The table the partition that could not be read belongs to
     /// * `partition_id` - The partition that could not be read
+    /// * `error` - What the released queries should answer with, if this was a failure at all
     /// * `shard_local_tx` - The channel to replay the released queries on
     #[allow(async_fn_in_trait)]
     async fn fail_partition(
         &mut self,
         table: Self::TableNames,
         partition_id: u64,
+        error: Option<ResponseError>,
         shard_local_tx: &AsyncSender<ServerMsg<Self>>,
     ) -> Result<(), ServerError>;
 

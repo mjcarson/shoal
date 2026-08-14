@@ -2,6 +2,8 @@
 
 use rkyv::util::AlignedVec;
 
+use crate::shared::protocol::error::ErrorCode;
+
 #[cfg(feature = "stage-profile")]
 use crate::server::stage_profile::Stamp;
 
@@ -154,6 +156,12 @@ pub enum ClientMsg {
     /// takes — ordered, unordered, and the reorder buffer's re-wrap — carries them without
     /// having to remember to.
     Response(AlignedVec, ClientStamps),
+    /// A failure the server sent for this query instead of a response
+    ///
+    /// This carries no index, unlike a response. It arrives on a frame attached to a query id,
+    /// and a query id names a whole bundle rather than one query in it, so there is no position
+    /// in the stream to place it at — it ends the stream wherever it lands.
+    ServerError(ErrorCode, String, ClientStamps),
     /// A client side message to mark the end of a stream
     End(usize),
 }

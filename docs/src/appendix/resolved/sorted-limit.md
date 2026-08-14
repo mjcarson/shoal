@@ -207,8 +207,13 @@ timeouts anywhere ([item 15](../known-issues.md#15-no-backpressure-anywhere)), s
 existing failure mode rather than a new one, but the gather adds an instance of it.
 
 **`LIMIT 0` is indistinguishable from a miss.** It answers `Get(None)`, which `send_one` reports as
-`QueryDidNotSucceed` — the same thing a get that found nothing reports. Telling them apart needs
-the error channel on `ResponseAction` that [TODOs](../todos.md) already calls for.
+`QueryDidNotSucceed` — the same thing a get that found nothing reports. ~~Telling them apart needs
+the error channel on `ResponseAction` that [TODOs](../todos.md) already calls for.~~ **The error
+channel landed ([F11](../../features/error-channel.md)) and does not close this**, which is worth
+saying because this page expected it to. `LIMIT 0` and an empty get are both queries that *worked*;
+the error channel separates a query that worked from one that did not. What separates these two is
+[item 55](../known-issues.md#55-a-get-that-found-nothing-is-reported-as-a-query-that-failed) —
+`send_one` taking a `QuerySuceededOpts`.
 
 **`SortedExists` still inlines its own dual-arm scans.** This change touched only the get path;
 giving `exists` the same `MaybeLoaded` treatment is a clean follow-up. *Done* — it moved onto

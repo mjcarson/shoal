@@ -13,6 +13,89 @@ use uuid::Uuid;
 pub use sorted::PersistentSortedTable;
 pub use unsorted::PersistentUnsortedTable;
 
+use crate::server::messages::QueryMetadata;
+use crate::server::stage_profile::StageStamps;
+use crate::shared::protocol::error::ErrorCode;
+use crate::shared::responses::{Response, ResponseAction, ResponseError};
+
+/// Replace what a query answered with the failure it was released with, if it was released by one
+///
+/// A query parked on a read that gave up is replayed rather than answered on the spot, because it
+/// may still be parked on *another* partition — answering it here would put a second response at
+/// an index that already has one. Applying the failure where the query finally produces a response
+/// is what keeps it to exactly one, and keeps the `end` flag and the index the ones this query
+/// would have answered with.
+///
+/// A query that produced nothing here is still parked, so it carries its failure onward untouched.
+///
+/// # Arguments
+///
+/// * `answered` - What executing the query produced, if anything
+/// * `failed` - The failure this query was released with, if it was released by one
+pub(crate) fn apply_failure<P>(
+    answered: Option<(Uuid, Uuid, StageStamps, Response<P>)>,
+    failed: Option<ResponseError>,
+) -> Option<(Uuid, Uuid, StageStamps, Response<P>)> {
+    // only a query that produced a response has anything to swap
+    match answered {
+        Some((client, id, stamps, mut response)) => {
+            // a read that gave up is a failure whatever kind of query was waiting on it - a
+            // get that could not read its partition and a delete that could not read the row
+            // it was deleting are both failures, not "found nothing" and "deleted nothing"
+            if let Some(error) = failed {
+                response.data = ResponseAction::Error(error);
+            }
+            Some((client, id, stamps, response))
+        }
+        // this query is still parked somewhere else, so its failure travels on with it
+        None => None,
+    }
+}
+
+/// Build the failure a client is told when an archive could not be read back
+///
+/// What the client is told names the table and the partition and nothing else. The path, the
+/// archive id and the validation error stay in the `ERROR` event the caller emits: with no
+/// authentication yet, the server's filesystem layout is not something to hand to whoever opened
+/// a socket.
+///
+/// # Arguments
+///
+/// * `table` - The table the unreadable partition belongs to
+/// * `partition_id` - The partition that could not be read
+pub(crate) fn corrupt_archive<T: std::fmt::Display>(
+    table: T,
+    partition_id: u64,
+) -> ResponseError {
+    ResponseError::new(
+        ErrorCode::CorruptArchive,
+        format!("partition {partition_id} of {table} could not be read"),
+    )
+}
+
+/// What a partition read left behind for the queries that were parked on it
+///
+/// A read has three outcomes and only two of them used to be expressible. Before this, a load
+/// that failed part way through returned its error out of the function, which meant the queries
+/// parked on that partition were never drained out of `blocked` and their clients waited on
+/// responses that nothing would ever produce.
+#[derive(Debug)]
+pub enum PartitionLoad<Q> {
+    /// Nothing was waiting on this partition
+    Idle,
+    /// The archive is resident now, and these queries can be replayed against it
+    ///
+    /// The generation is the newest compacted one, which is what the caller marks this
+    /// partition evictable at.
+    Loaded(Vec<(QueryMetadata, Q)>, u64),
+    /// The archive could not be made usable, and these queries answer with the failure instead
+    ///
+    /// There is no generation because nothing entered the table and nothing came out of the lru
+    /// that has to be put back, which is the same reason a reported failure sends no
+    /// `MarkEvictable` message either.
+    Failed(Vec<(QueryMetadata, Q)>),
+}
+
 /// The rows one get has found so far, kept in the order its query named its partitions
 ///
 /// A get names its partitions in the order it wants their rows back in, but a partition that

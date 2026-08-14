@@ -43,12 +43,16 @@ database") oversell the current state:
   partitions can be reached ([Query Execution](tables/query-execution.md)).
 - **No rebalancing.** Shard count is baked into the on-disk file layout. Changing it between
   restarts is refused at startup ([Partitioning and the Tablet Map](architecture/partitioning.md)).
-- **No authentication and no encryption.** Anything that can reach the port can read and write any
-  table ([Wire Protocol](architecture/wire-protocol.md#limitations)).
+- **No encryption, and authentication is optional and off by default.** A server can now require
+  SCRAM-SHA-256 and refuse a client that cannot do it ([F12](features/authentication.md)), but the
+  default is still that anything which can reach the port can read and write any table — and even
+  an authenticated connection can, because there is no authorization
+  ([Wire Protocol](architecture/wire-protocol.md#limitations)).
 
-What it would take to close the last of those, and five other things the client cannot do, is
-designed in [Direction](direction/overview.md) — which is a design record, not a roadmap. Nothing
-in it is built.
+What it would take to close the rest of that, and five other things the client cannot do, is
+designed in [Direction](direction/overview.md) — which is a design record, not a roadmap. Two of
+its nine entries have since been built, in whole ([F10](features/framing-and-protocol-evolution.md),
+[F11](features/error-channel.md)) and in half ([F12](features/authentication.md)).
 
 Shoal is best understood as a fast single-node partitioned key-value store with a
 persistence layer, on top of which distribution has not yet been built.

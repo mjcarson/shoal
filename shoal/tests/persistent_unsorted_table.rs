@@ -702,11 +702,15 @@ async fn a_get_whose_partition_cannot_be_read_does_not_hang() -> Result<(), Test
         answered.is_ok(),
         "a get whose partition could not be read never came back"
     );
-    // this get could not read the only copy of the row, so it finds nothing
+    // this get could not read the only copy of the row, so it says so
+    //
+    // before the error channel this came back as `QueryDidNotSucceed { kind: Get }`, which is
+    // also what an empty partition answers with - the client had no way to tell a row that is
+    // not there from a row whose only copy could not be read
     assert!(matches!(
         answered.expect("timed out"),
-        Err(shoal_core::client::Errors::QueryDidNotSucceed {
-            kind: shoal_core::shared::responses::ResponseActionNames::Get,
+        Err(shoal_core::client::Errors::Server {
+            code: shoal_core::shared::protocol::error::ErrorCode::StorageRead,
             ..
         })
     ));
@@ -769,11 +773,14 @@ async fn a_get_whose_archive_is_missing_does_not_end_its_shard() -> Result<(), T
         answered.is_ok(),
         "a get whose archive was missing never came back"
     );
-    // this get could not read the only copy of the row, so it finds nothing
+    // this get could not read the only copy of the row, so it says so
+    //
+    // an archive that is not on disk is a different class from one that could not be opened,
+    // and the two arrive as different codes rather than as one indistinguishable empty answer
     assert!(matches!(
         answered.expect("timed out"),
-        Err(shoal_core::client::Errors::QueryDidNotSucceed {
-            kind: shoal_core::shared::responses::ResponseActionNames::Get,
+        Err(shoal_core::client::Errors::Server {
+            code: shoal_core::shared::protocol::error::ErrorCode::ArchiveMissing,
             ..
         })
     ));

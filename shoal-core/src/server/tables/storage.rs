@@ -558,6 +558,9 @@ mod tests {
                 stamps: StageStamps::new(Stamp::now()),
                 // nothing here replays a query, so no read is ever exempted
                 skip_disk: None,
+                // this metadata is built for a durable write that already ran, so there is no
+                // failed read behind it
+                failed: None,
             };
             pending.add(meta, *pos, ResponseAction::Insert(true));
         }
@@ -619,6 +622,9 @@ mod tests {
                 stamps: StageStamps::new(Stamp::now()),
                 // nothing here replays a query, so no read is ever exempted
                 skip_disk: None,
+                // this metadata is built for a durable write that already ran, so there is no
+                // failed read behind it
+                failed: None,
             };
             pending.add(meta, pos, ResponseAction::Insert(true));
             // the watermark has not moved, so neither has what is releasable

@@ -1,8 +1,8 @@
 # D2. Framing and protocol evolution
 
 > **Landed as [F10](../features/framing-and-protocol-evolution.md)**, with the header, the message
-> type table, the handshake, the schema fingerprint and the bounded length. The error channel was
-> left out of scope and is still open. Three things on this page turned out to be wrong against the
+> type table, the handshake, the schema fingerprint and the bounded length; and as
+> [F11](../features/error-channel.md), which took the error channel F10 had left out of scope. Three things on this page turned out to be wrong against the
 > code, and they are marked inline below — the header costs **zero** bytes rather than eight, the
 > `wire_codec` benchmark cannot catch a misaligned payload, and this page never says what the
 > length field counts. What it was right about is the hard part: the ranking, the reason for doing
@@ -16,9 +16,9 @@ others. Every one of the following is a message the protocol has no way to expre
 | Wanted | Needs a frame that says | For |
 | --- | --- | --- |
 | A pool health check that detects a dead peer | `Ping` / `Pong` | [D6](connection-pool.md), and the `client.rs:82` TODO |
-| A client proving who it is | `Auth` / `AuthResponse` | [D3](authentication.md) |
+| A client proving who it is | `Auth` / `AuthResponse` | [D3](authentication.md) — **built**, [F12](../features/authentication.md) |
 | A client learning which shard owns which tablet | `Topology` | [D7](shard-aware-routing.md) |
-| A server saying a read failed rather than returning nothing | `Error` | [items 51, 55, 56](../appendix/known-issues.md#56-a-response-cannot-say-that-a-read-failed) |
+| A server saying a read failed rather than returning nothing | `Error` | [items 51, 55, 56](../appendix/resolved/response-error-channel.md) |
 | A server draining a connection before it closes | `GoAway` | [item 32](../appendix/known-issues.md#32-a-disconnected-client-is-never-cleaned-up-anywhere) |
 | A client abandoning a query it will never read | `Cancel` | [item 60](../appendix/known-issues.md#60-a-result-stream-that-is-not-drained-to-the-end-leaks-its-slot-in-the-client), and every deadline in D6 |
 
@@ -129,7 +129,7 @@ it. That belongs in the invariants of whatever page describes the built version.
 | Type | Direction | Unblocks |
 | --- | --- | --- |
 | `Hello`, `HelloAck` | both | version and schema agreement, [D3](authentication.md), [D4](encryption.md) |
-| `Auth`, `AuthResponse` | both | [D3](authentication.md) — a multi-round SASL exchange needs both to repeat |
+| `Auth`, `AuthResponse` | both | [D3](authentication.md) — a multi-round SASL exchange needs both to repeat. **Built as [F12](../features/authentication.md)**, and the "needs both to repeat" call was the right one: SCRAM sends two of each |
 | `Queries` | client → server | what the current request frame becomes |
 | `Response` | server → client | what the current response frame becomes |
 | `Ping`, `Pong` | both | [D6](connection-pool.md)'s health check |
@@ -164,15 +164,26 @@ handshake field.**
 
 ### The error channel
 
+> **Landed as [F11](../features/error-channel.md)**, in both halves, and this section was right
+> about the shape. It was wrong about one thing: it assumed items 51, 55 and 56 "want the same
+> variant". Two of them did. **Item 55 turned out not to need it at all** — a get that found nothing
+> is a query that worked, so what it wants is for `send_one` to accept that as success, and no wire
+> change gives it that. Filing it here made it look blocked on a flag day for a year when it was a
+> local edit to one function. It is still open.
+>
+> The other correction is that this section names one variant where the built version has two
+> layers, and the reason is in the third bullet below: the relay that hits item 61 holds an opaque
+> `AlignedVec` and cannot build a `ResponseKinds` at all, which is what the frame-level type is for.
+
 A `ResponseAction::Error` variant, plus the frame-level `Error` type for failures with no query to
 attach to. Three open items want the same variant and none of them can be closed without it:
 
-- [item 51](../appendix/known-issues.md#51-a-partition-load-that-fails-inside-load_partition-still-never-releases-its-queries)
+- [item 51](../appendix/resolved/partition-load-failure.md)
   — a partition load that fails has no way to tell the waiting queries so.
 - [item 55](../appendix/known-issues.md#55-a-get-that-found-nothing-is-reported-as-a-query-that-failed)
   — a get that matched no rows is indistinguishable from a get that failed, so `send_one` reports
   an empty table as a broken server.
-- [item 56](../appendix/known-issues.md#56-a-response-cannot-say-that-a-read-failed) — the general
+- [item 56](../appendix/resolved/response-error-channel.md) — the general
   case.
 
 It is also what makes two other things possible. Most of the server's hot-path panics

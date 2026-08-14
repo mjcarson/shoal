@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 use uuid::Uuid;
 
+use crate::shared::auth::AuthError;
 use crate::shared::protocol::ProtocolError;
 
 /// Any errors tht can be encountered when running Shoal
@@ -54,6 +55,24 @@ pub enum ServerError {
     SerdeJson(serde_json::Error),
     /// A frame that could not be written or read
     Protocol(ProtocolError),
+    /// A client that could not prove who it is
+    ///
+    /// This keeps the distinction the wire deliberately throws away. A client is told only that
+    /// authentication failed, so that a login cannot be used to ask whether an account exists,
+    /// while this server's own log — which nobody untrusted is reading — says which of the several
+    /// failures it actually was.
+    Auth(AuthError),
+}
+
+impl From<AuthError> for ServerError {
+    /// Convert this error to our error type
+    ///
+    /// # Arguments
+    ///
+    /// * `error` - The error to convert
+    fn from(error: AuthError) -> Self {
+        ServerError::Auth(error)
+    }
 }
 
 impl From<ProtocolError> for ServerError {
@@ -241,4 +260,11 @@ pub enum ShoalError {
     /// about the shape it was written in, so an unreadable format has to be refused
     /// before the shard count inside it is trusted.
     StorageFormatMismatch { found: u32, expected: u32 },
+    /// The config file says something this server cannot act on
+    ///
+    /// This is for the checks a type cannot make. A user named in the `auth` section with neither
+    /// a password nor a derived credential is the one that exists today, and it is only reachable
+    /// because the shape that reads correctly out of the `config` crate is two optional fields
+    /// rather than the enum it wants to be.
+    InvalidConfig(String),
 }

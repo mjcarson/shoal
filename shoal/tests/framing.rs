@@ -11,6 +11,7 @@
 
 use deepsize2::DeepSizeOf;
 use rkyv::{Archive, Deserialize, Serialize};
+use shoal_core::shared::protocol::auth::AuthMechanisms;
 use shoal_core::shared::protocol::{self, handshake};
 use shoal_core::shared::traits::QuerySupport;
 use shoal_core::tables::EphemeralSortedTable;
@@ -85,6 +86,7 @@ async fn handshaken(addr: &str) -> Result<TcpStream, TestError> {
     let hello = handshake::Hello {
         schema_fingerprint: TestDbClient::SCHEMA_FINGERPRINT,
         max_frame_bytes: protocol::DEFAULT_MAX_FRAME_BYTES,
+        mechanisms: AuthMechanisms::NONE,
     };
     sock.write_all(
         &hello
@@ -313,6 +315,7 @@ async fn a_hello_of_an_unsupported_version_is_refused_with_an_ack() -> Result<()
     let hello = handshake::Hello {
         schema_fingerprint: TestDbClient::SCHEMA_FINGERPRINT,
         max_frame_bytes: protocol::DEFAULT_MAX_FRAME_BYTES,
+        mechanisms: AuthMechanisms::NONE,
     };
     let mut frame = hello
         .frame(protocol::DEFAULT_MAX_FRAME_BYTES)
@@ -358,6 +361,7 @@ async fn a_hello_naming_a_different_schema_is_refused_with_an_ack() -> Result<()
     let hello = handshake::Hello {
         schema_fingerprint: TestDbClient::SCHEMA_FINGERPRINT ^ 0xffff_ffff_ffff_ffff,
         max_frame_bytes: protocol::DEFAULT_MAX_FRAME_BYTES,
+        mechanisms: AuthMechanisms::NONE,
     };
     hostile
         .write_all(

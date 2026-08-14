@@ -6,12 +6,12 @@ rejected on the way, and — the part that matters when changing this code later
 invariants the fix depends on.
 
 Item numbers are shared with [Known Issues](known-issues.md) and never reused, so a number
-appears on exactly one of the two pages. The exceptions are items 16, 20, 24 and 51, which were
-only partly fixed and appear on both: the fixed half here, the open remainder there. Item 9 was
-one of those exceptions until its second half was fixed, and now appears here alone.
+appears on exactly one of the two pages. The exceptions are items 16, 20 and 24, which were
+only partly fixed and appear on both: the fixed half here, the open remainder there. Items 9 and 51
+were each one of those exceptions until their second half was fixed, and now appear here alone.
 
 Numbers are also grouped when one change closed several items that turned out to share a cause —
-7 and 10, 26 and 39, and 11, 12 and 37 each have one page rather than three.
+7 and 10, 26 and 39, 56 and 61, and 11, 12 and 37 each have one page rather than several.
 
 | # | Issue | What fixed it |
 | --- | --- | --- |
@@ -36,6 +36,7 @@ Numbers are also grouped when one change closed several items that turned out to
 | 44 | [A compaction discarded a damaged log's tail in silence](resolved/compaction-tail-loss.md) | The report moved out of the arm that had nothing to compact and down beside the delete it describes, split into three named outcomes by `classify_tail`, and `truncated_logs` now reaches the compaction path's counters |
 | 45 | [The storage marker's format field was written and never read](resolved/storage-marker-format.md) | `claim` refuses a marker whose `format` it does not know, and refuses on it before reading the shard count out of a layout it cannot interpret |
 | 48 | [A query that does not parse was answered with silence](resolved/query-error-display.md) | The error keeps the span the parser gave it, an `Error` box under the query says what went wrong, and the part of the query it blames is drawn red and underlined — as a style on the cells the query already occupies, never as characters that could be read back as query text |
+| 56, 61 | [A response cannot say that a read failed](resolved/response-error-channel.md) | A `ResponseAction::Error` carrying a pinned code, and a frame level `Error` type for the failures that cannot be a response at all — so a read that could not be made stops arriving as an empty partition, a response too large to frame is answered instead of closing the connection, and a connection whose reader stopped tells the queries it owed rather than leaving them waiting on a channel that never closes |
 | 57 | [A missing archive was created empty rather than reported](resolved/missing-archive.md) | `get_archive` stopped opening with `create(true)` and now reports a `ShoalError::ArchiveMissing` naming the archive and its path, classified `Fatal` so it takes the release path a failed read already had — instead of creating an empty archive whose short read failed much later as corruption, ending the shard and leaving the empty file behind for every later read to find |
 
 ## How a fix gets written down

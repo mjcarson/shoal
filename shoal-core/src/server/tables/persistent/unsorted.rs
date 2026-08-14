@@ -27,11 +27,13 @@ use uuid::Uuid;
 use crate::server::messages::{LoadedPartition, QueryMetadata, ServerMsg};
 use crate::server::stage_profile::{StageOp, StageStamps};
 use crate::server::tables::partitions::UnsortedPartition;
-use crate::server::tables::persistent::{eviction_totals, PendingGets};
+use crate::server::tables::persistent::{
+    apply_failure, corrupt_archive, eviction_totals, PartitionLoad, PendingGets,
+};
 use crate::server::tables::storage::StorageSupport;
 use crate::server::{Conf, ServerError};
 use crate::shared::queries::{UnsortedExists, UnsortedGet, UnsortedQuery, UnsortedUpdate};
-use crate::shared::responses::{Response, ResponseAction};
+use crate::shared::responses::{Response, ResponseAction, ResponseError};
 use crate::shared::traits::{
     RkyvSupport, ShoalDatabase, ShoalProjection, ShoalTableSupport, ShoalUnsortedTable,
     TableNameSupport,
@@ -259,7 +261,9 @@ where
     pub async fn load_partition(
         &mut self,
         loaded: LoadedPartition,
-    ) -> Result<Option<(Vec<(QueryMetadata, UnsortedQuery<R>)>, u64)>, ServerError> {
+    ) -> Result<PartitionLoad<UnsortedQuery<R>>, ServerError> {
+        // remember which partition this is, since the load is consumed below
+        let partition_id = loaded.partition_id;
         // if we have an existing loaded partition then do not use our newly loaded data
         // as that should be older
         match self.partitions.entry(loaded.partition_id) {
@@ -270,9 +274,28 @@ where
                 // our freshly read data is stale.
                 if let &mut MaybeLoaded::Accessible(_) = entry.get_mut() {
                     // validate this archive once, here, instead of on every query that reads it
-                    let archive = hotpath::measure_block!("ValidatedArchive::new", {
+                    let validated = hotpath::measure_block!("ValidatedArchive::new", {
                         ValidatedArchive::new(loaded.data)
-                    })?;
+                    });
+                    // a corrupt archive releases the queries parked on it rather than
+                    // propagating, since an error out of here ends the shard and leaves every
+                    // one of them in `blocked`, which only a completed load ever drains
+                    let archive = match validated {
+                        Ok(archive) => archive,
+                        Err(error) => {
+                            event!(
+                                Level::ERROR,
+                                msg = "A loaded partition failed validation",
+                                table = %self.table_name,
+                                partition_id,
+                                error = ?error,
+                            );
+                            return Ok(PartitionLoad::Failed(
+                                self.fail_partition(partition_id, Some(&corrupt_archive(self.table_name, partition_id)))
+                                    .unwrap_or_default(),
+                            ));
+                        }
+                    };
                     // get the size of our data, only once it is known to be good
                     let size = archive.len();
                     // wrap our raw data so that we can access it only when needed
@@ -290,9 +313,27 @@ where
             // this partition does not have any already loaded data
             hash_map::Entry::Vacant(entry) => {
                 // validate this archive once, here, instead of on every query that reads it
-                let archive = hotpath::measure_block!("ValidatedArchive::new", {
+                let validated = hotpath::measure_block!("ValidatedArchive::new", {
                     ValidatedArchive::new(loaded.data)
-                })?;
+                });
+                // a corrupt archive releases the queries parked on it rather than propagating,
+                // for the same reason the merge path above does
+                let archive = match validated {
+                    Ok(archive) => archive,
+                    Err(error) => {
+                        event!(
+                            Level::ERROR,
+                            msg = "A loaded partition failed validation",
+                            table = %self.table_name,
+                            partition_id,
+                            error = ?error,
+                        );
+                        return Ok(PartitionLoad::Failed(
+                            self.fail_partition(partition_id, Some(&corrupt_archive(self.table_name, partition_id)))
+                                .unwrap_or_default(),
+                        ));
+                    }
+                };
                 // get the size of our data, only once it is known to be good
                 let size = archive.len();
                 // wrap our raw data so that we can access it only when needed
@@ -308,10 +349,10 @@ where
             }
         }
         // get the queries that were blocked on this partition
-        Ok(self
-            .blocked
-            .remove(&loaded.partition_id)
-            .map(|unblocked| (unblocked, self.flushed_generation)))
+        Ok(match self.blocked.remove(&partition_id) {
+            Some(unblocked) => PartitionLoad::Loaded(unblocked, self.flushed_generation),
+            None => PartitionLoad::Idle,
+        })
     }
 
     /// Release the queries parked on a partition that could not be read
@@ -327,10 +368,12 @@ where
     /// # Arguments
     ///
     /// * `partition_id` - The partition that could not be read
-    #[instrument(name = "PersistentTable::fail_partition", skip(self))]
+    /// * `error` - What the released queries should answer with, if this was a failure at all
+    #[instrument(name = "PersistentTable::fail_partition", skip(self, error))]
     pub fn fail_partition(
         &mut self,
         partition_id: u64,
+        error: Option<&ResponseError>,
     ) -> Option<Vec<(QueryMetadata, UnsortedQuery<R>)>> {
         // take the queries that were parked on this partition
         let mut blocked = self.blocked.remove(&partition_id)?;
@@ -345,6 +388,11 @@ where
         // mark each of them to answer without the read that just failed
         for (meta, _) in &mut blocked {
             meta.skip_disk = Some(partition_id);
+            // and to answer with the failure rather than with what they can still see
+            //
+            // a partition that was pruned carries no failure, because a query replayed
+            // against one really has found everything there is to find
+            meta.failed = error.cloned();
         }
         Some(blocked)
     }
@@ -441,8 +489,10 @@ where
         // note how this tables intent log is made durable, since a table acknowledging on a
         // landed write has no fdatasync stage and a report showing one would be fiction
         meta.stamps.set_durability(self.storage.durability());
+        // keep the failure this query was released with, if a read it was parked on gave up
+        let failed = meta.failed.take();
         // execute the correct query type
-        match query {
+        let answered = match query {
             // insert a row into this partition
             UnsortedQuery::Insert { row, .. } => self.insert(meta, row).await,
             // get a row from this partition
@@ -453,7 +503,14 @@ where
             UnsortedQuery::Update(update) => self.update(meta, update).await,
             // check if data exists in this partition
             UnsortedQuery::Exists(exists) => self.exists(meta, &exists).await,
-        }
+        };
+        // swap the answer this execution produced for the failure it was released with
+        //
+        // this is done in one place rather than at every site that builds a response, so the
+        // `end` flag and the index stay exactly what this query would have answered with. a
+        // query still parked on another partition produces nothing here and carries the
+        // failure onward, which is what keeps it to exactly one response per index
+        apply_failure(answered, failed)
     }
 
     /// Insert some data into a partition in this shards table

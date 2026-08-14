@@ -7,6 +7,15 @@
 
 use uuid::Uuid;
 
+use super::auth::{
+    decode_auth_body, decode_auth_response_body, encode_auth, encode_auth_response, payload_len,
+    AuthMechanism, AuthMechanisms, AuthStatus, AUTH_BODY_MIN, MAX_AUTH_FRAME_BODY,
+    MAX_AUTH_PAYLOAD_LEN,
+};
+use super::error::{
+    self, decode_error, decode_error_tail, error_preamble, ErrorCode, ERROR_BODY_MIN,
+    ERROR_PREAMBLE_LEN, MAX_ERROR_MSG_LEN,
+};
 use super::fingerprint::{self, ROLE_FILTER, ROLE_PARTITION, ROLE_SORT, ROLE_UPDATE};
 use super::handshake::{Hello, HelloAck, RefusalReason, HANDSHAKE_BODY_LEN, HANDSHAKE_FRAME_LEN};
 use super::{
@@ -29,6 +38,22 @@ const ALL_TYPES: [MessageType; 12] = [
     MessageType::Error,
     MessageType::GoAway,
     MessageType::Cancel,
+];
+
+/// Every error code this build knows, so a test can walk all of them
+const ALL_CODES: [ErrorCode; 12] = [
+    ErrorCode::Unknown,
+    ErrorCode::Internal,
+    ErrorCode::StorageRead,
+    ErrorCode::ArchiveMissing,
+    ErrorCode::CorruptArchive,
+    ErrorCode::ResponseTooLarge,
+    ErrorCode::RequestTooLarge,
+    ErrorCode::Shedding,
+    ErrorCode::Timeout,
+    ErrorCode::ConnectionLost,
+    ErrorCode::GoingAway,
+    ErrorCode::Unavailable,
 ];
 
 /// A frame bound big enough that no test trips it by accident
@@ -292,6 +317,7 @@ fn a_hello_round_trips() {
     let hello = Hello {
         schema_fingerprint: 0xdead_beef_cafe_f00d,
         max_frame_bytes: 4096,
+        mechanisms: AuthMechanisms::SCRAM_SHA_256,
     };
     assert_eq!(Hello::decode(&hello.encode()), hello);
     // and the whole frame is a header this build can read
@@ -312,11 +338,13 @@ fn a_hello_ack_round_trips() {
         RefusalReason::Accepted,
         RefusalReason::UnsupportedVersion,
         RefusalReason::SchemaMismatch,
+        RefusalReason::NoCommonAuthMechanism,
     ] {
         let ack = HelloAck {
             schema_fingerprint: 0x0102_0304_0506_0708,
             max_frame_bytes: 8192,
             reason,
+            mechanism: Some(AuthMechanism::ScramSha256),
         };
         assert_eq!(HelloAck::decode(&ack.encode()), ack);
         // a refusal is flagged in the header too, so a peer can tell without reading the body
@@ -333,7 +361,7 @@ fn a_hello_ack_round_trips() {
 #[test]
 fn an_unknown_refusal_reason_fails_closed() {
     // a server from the future refusing us for a reason we have never heard of
-    for raw in [3u8, 42, 255] {
+    for raw in [4u8, 42, 255] {
         assert!(!RefusalReason::from_byte(raw).is_accepted());
     }
     // and only a literal zero means accepted
@@ -410,4 +438,368 @@ fn the_separator_stops_concatenation_colliding() {
     let split_late = fingerprint::mix_str(fingerprint::mix_str(fingerprint::SEED, "ab"), "c");
     let split_early = fingerprint::mix_str(fingerprint::mix_str(fingerprint::SEED, "a"), "bc");
     assert_ne!(split_late, split_early);
+}
+
+/// Every error code is written as the number it has always been written as
+///
+/// This is `every_message_type_round_trips_through_its_discriminant` for the other enum that is on
+/// the wire. Inserting a variant without an explicit discriminant would renumber every code after
+/// it, and because a code this build does not recognize decodes as `Unknown` rather than as an
+/// error, nothing else in the suite would notice — a peer would simply start reporting the wrong
+/// class of failure.
+#[test]
+fn every_error_code_round_trips_through_its_discriminant() {
+    // the number each code is pinned to, which may never change
+    let pinned = [
+        (ErrorCode::Unknown, 0u16),
+        (ErrorCode::Internal, 1),
+        (ErrorCode::StorageRead, 10),
+        (ErrorCode::ArchiveMissing, 11),
+        (ErrorCode::CorruptArchive, 12),
+        (ErrorCode::ResponseTooLarge, 20),
+        (ErrorCode::RequestTooLarge, 21),
+        (ErrorCode::Shedding, 30),
+        (ErrorCode::Timeout, 31),
+        (ErrorCode::ConnectionLost, 40),
+        (ErrorCode::GoingAway, 41),
+        (ErrorCode::Unavailable, 50),
+    ];
+    // check both directions for each one
+    for (code, raw) in pinned {
+        assert_eq!(code.as_u16(), raw, "{code} moved off number {raw}");
+        assert_eq!(ErrorCode::from_u16(raw), code);
+    }
+    // and check that the list above did not fall behind the enum
+    assert_eq!(pinned.len(), ALL_CODES.len());
+}
+
+/// A code this build does not know reads as unknown rather than as a decode failure
+///
+/// This is the one place the error channel deliberately fails open. A newer server naming a class
+/// of failure we have never heard of still has a message we can print, and refusing the frame
+/// would throw that message away to make a point.
+#[test]
+fn an_unknown_error_code_reads_as_unknown() {
+    // walk some numbers no variant claims, including the gaps inside the bands
+    for raw in [2u16, 13, 22, 42, 51, 9000, u16::MAX] {
+        assert_eq!(ErrorCode::from_u16(raw), ErrorCode::Unknown);
+    }
+}
+
+/// An error frame round trips, and every field survives byte for byte
+#[test]
+fn an_error_frame_round_trips() {
+    // use a fixed uuid so a byte order slip shows up as a different id rather than as a flake
+    let query_id = Uuid::from_u128(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef);
+    let msg = "the copy of this partition on disk could not be read";
+    let preamble = error_preamble(&query_id, ErrorCode::StorageRead, msg.len(), ROOMY).unwrap();
+    let frame = decode_error(&preamble, ROOMY).unwrap();
+    assert_eq!(frame.query_id, query_id);
+    assert_eq!(frame.code, ErrorCode::StorageRead);
+    assert_eq!(frame.msg_len, msg.len());
+    // the type byte says what this is, and the flag says it too
+    assert_eq!(frame.header.kind, MessageType::Error);
+    assert!(frame.header.flags.contains(Flags::IS_ERROR));
+    // the length counts the query id and the code, so it is twenty more than the message
+    assert_eq!(frame.header.body_len(), msg.len() + ERROR_BODY_MIN);
+    // and the tail parses back to the code and the message it was built from
+    let mut rest = Vec::from(&preamble[HEADER_LEN + QUERY_ID_LEN..]);
+    rest.extend_from_slice(msg.as_bytes());
+    let (code, decoded) = decode_error_tail(&rest).unwrap();
+    assert_eq!(code, ErrorCode::StorageRead);
+    assert_eq!(decoded, msg);
+}
+
+/// An error frame's query id sits exactly where a response frame's does
+///
+/// This is what lets the client read one fixed preamble for every frame a server sends and only
+/// then dispatch on the type. If these two ever disagreed, the client would read part of an error
+/// code as the tail of a uuid, route the frame to a query that does not exist, and report a
+/// missing stream channel for a frame that was perfectly well formed.
+#[test]
+fn an_error_frames_query_id_sits_where_a_responses_does() {
+    // build one of each for the same query
+    let query_id = Uuid::from_u128(0xdead_beef_dead_beef_dead_beef_dead_beef);
+    let response = response_preamble(&query_id, 64, ROOMY).unwrap();
+    let error = error_preamble(&query_id, ErrorCode::Internal, 8, ROOMY).unwrap();
+    // both put the id in the sixteen bytes after the header, and both write it the same way
+    assert_eq!(&response[HEADER_LEN..HEADER_LEN + QUERY_ID_LEN], query_id.as_bytes());
+    assert_eq!(&error[HEADER_LEN..HEADER_LEN + QUERY_ID_LEN], query_id.as_bytes());
+    // so the preamble a client reads is the same size whichever one arrived
+    assert_eq!(RESPONSE_PREAMBLE_LEN, HEADER_LEN + QUERY_ID_LEN);
+    assert!(ERROR_PREAMBLE_LEN > RESPONSE_PREAMBLE_LEN);
+}
+
+/// An error frame that cannot hold its own fixed fields is refused
+#[test]
+fn an_error_frame_shorter_than_its_own_fields_is_refused() {
+    // claim a body that cannot hold the query id and the code every error frame carries
+    for len in 0u32..ERROR_BODY_MIN as u32 {
+        let mut raw = error_preamble(&Uuid::new_v4(), ErrorCode::Internal, 0, ROOMY).unwrap();
+        raw[4..8].copy_from_slice(&len.to_le_bytes());
+        assert!(matches!(
+            decode_error(&raw, ROOMY).unwrap_err(),
+            ProtocolError::BodyTooShort { .. }
+        ));
+    }
+    // and a tail with no room for the code is refused on its own
+    assert!(matches!(
+        decode_error_tail(&[0u8; 3]).unwrap_err(),
+        ProtocolError::BodyTooShort { need: 4, got: 3 }
+    ));
+}
+
+/// A message past the message bound is refused in both directions
+///
+/// The frame bound is 64 mebibytes and the message bound is four kibibytes, so a message can be
+/// far too large while the frame carrying it is comfortably legal. Without this check the error
+/// channel would be an allocation channel that never trips the frame bound at all.
+#[test]
+fn a_message_over_the_message_bound_is_refused() {
+    // a message we are about to write that is over the bound
+    assert_eq!(
+        error_preamble(
+            &Uuid::new_v4(),
+            ErrorCode::Internal,
+            MAX_ERROR_MSG_LEN + 1,
+            ROOMY
+        )
+        .unwrap_err(),
+        ProtocolError::PayloadTooLarge {
+            len: MAX_ERROR_MSG_LEN + 1,
+            max: MAX_ERROR_MSG_LEN as u32,
+        }
+    );
+    // a message a peer claims that is over the bound, sized before anything allocates for it
+    let header = Header::new(
+        MessageType::Error,
+        Flags::IS_ERROR,
+        ERROR_BODY_MIN + MAX_ERROR_MSG_LEN + 1,
+        ROOMY,
+    )
+    .unwrap();
+    assert!(matches!(
+        error::msg_len(header).unwrap_err(),
+        ProtocolError::FrameTooLarge { .. }
+    ));
+    // and a message exactly on the bound is still accepted, in both directions
+    let preamble =
+        error_preamble(&Uuid::new_v4(), ErrorCode::Internal, MAX_ERROR_MSG_LEN, ROOMY).unwrap();
+    assert_eq!(
+        decode_error(&preamble, ROOMY).unwrap().msg_len,
+        MAX_ERROR_MSG_LEN
+    );
+    // a message truncated to the bound lands on a character boundary rather than mid character
+    let wide = "\u{1f420}".repeat(MAX_ERROR_MSG_LEN);
+    let cut = error::truncate_msg(&wide);
+    assert!(cut.len() <= MAX_ERROR_MSG_LEN);
+    assert!(wide.starts_with(cut));
+}
+
+/// A message that is not valid UTF-8 still delivers the code it came with
+///
+/// The code is what a caller branches on and it sits ahead of the message, so a garbled message
+/// must not be allowed to swallow it. Reading lossily also means the readable part of a message
+/// that was truncated mid character still prints.
+#[test]
+fn a_message_that_is_not_utf8_still_delivers_its_code() {
+    // a tail whose code is fine and whose message is a lone continuation byte
+    let mut rest = Vec::from(ErrorCode::CorruptArchive.as_u16().to_le_bytes());
+    rest.extend_from_slice(&[0, 0]);
+    rest.extend_from_slice(b"partition ");
+    rest.push(0xff);
+    let (code, msg) = decode_error_tail(&rest).unwrap();
+    assert_eq!(code, ErrorCode::CorruptArchive);
+    assert!(msg.starts_with("partition "));
+    // the invalid byte became the replacement character rather than ending the decode
+    assert!(msg.contains('\u{fffd}'));
+}
+
+/// Every mechanism this build knows round trips through the byte it is written as
+///
+/// The same test [`MessageType`] and [`ErrorCode`] have, for the same reason: these are on the
+/// wire, so a variant inserted in the middle has to fail here rather than silently renumber a
+/// mechanism a deployed client is already naming.
+#[test]
+fn every_auth_mechanism_round_trips_through_its_discriminant() {
+    // pin the numbers themselves, since a round trip alone would survive renumbering all of them
+    for (mechanism, raw) in [
+        (AuthMechanism::ScramSha256, 1u8),
+        (AuthMechanism::MutualTls, 2),
+    ] {
+        assert_eq!(mechanism.as_byte(), raw);
+        assert_eq!(AuthMechanism::from_byte(raw).unwrap(), mechanism);
+        // and the SASL name a config file spells it with maps back to the same variant
+        assert_eq!(AuthMechanism::from_name(mechanism.name()), Some(mechanism));
+    }
+    // zero is not a mechanism, which is what makes a zeroed buffer decode as none rather than one
+    assert!(matches!(
+        AuthMechanism::from_byte(0).unwrap_err(),
+        ProtocolError::UnknownAuthMechanism(0)
+    ));
+    // and a name nothing knows is not silently dropped
+    assert_eq!(AuthMechanism::from_name("PLAIN"), None);
+}
+
+/// Every status this build knows round trips through the byte it is written as
+#[test]
+fn every_auth_status_round_trips_through_its_discriminant() {
+    for (status, raw) in [
+        (AuthStatus::Challenge, 1u8),
+        (AuthStatus::Success, 2),
+        (AuthStatus::Failed, 3),
+    ] {
+        assert_eq!(status.as_byte(), raw);
+        assert_eq!(AuthStatus::from_byte(raw).unwrap(), status);
+    }
+    // a zeroed buffer must never read as a successful login
+    assert!(matches!(
+        AuthStatus::from_byte(0).unwrap_err(),
+        ProtocolError::UnknownAuthStatus(0)
+    ));
+}
+
+/// A mechanism set answers what it contains, and keeps bits it cannot name
+#[test]
+fn a_mechanism_set_keeps_bits_it_cannot_name() {
+    // bit 9 is a mechanism from a build that does not exist yet
+    let offered = AuthMechanisms::SCRAM_SHA_256.union(AuthMechanisms::from_bits(1 << 9));
+    assert!(offered.contains(AuthMechanisms::SCRAM_SHA_256));
+    assert!(!offered.contains(AuthMechanisms::MUTUAL_TLS));
+    // the unknown bit survived, which is what lets a newer peer spend one without a version bump
+    assert_eq!(offered.bits() & (1 << 9), 1 << 9);
+    // and selection walks the server's preference order rather than the client's bits
+    let both = AuthMechanisms::SCRAM_SHA_256.union(AuthMechanisms::MUTUAL_TLS);
+    assert_eq!(
+        both.first_supported(&[AuthMechanism::MutualTls, AuthMechanism::ScramSha256]),
+        Some(AuthMechanism::MutualTls)
+    );
+    assert_eq!(
+        both.first_supported(&[AuthMechanism::ScramSha256, AuthMechanism::MutualTls]),
+        Some(AuthMechanism::ScramSha256)
+    );
+    // a server that accepts nothing selects nothing, whatever was offered
+    assert_eq!(both.first_supported(&[]), None);
+    assert_eq!(
+        AuthMechanisms::NONE.first_supported(&[AuthMechanism::ScramSha256]),
+        None
+    );
+}
+
+/// An auth frame round trips through the bytes it is written as
+#[test]
+fn an_auth_frame_round_trips() {
+    // a payload with a zero byte in it, since these are opaque bytes rather than text to the codec
+    let payload = b"n,,n=user,r=\0nonce";
+    let frame = encode_auth(AuthMechanism::ScramSha256, payload, ROOMY).unwrap();
+    // the header says what it is and how much follows it
+    let mut header_bytes = [0u8; HEADER_LEN];
+    header_bytes.copy_from_slice(&frame[..HEADER_LEN]);
+    let header = Header::decode(&header_bytes, ROOMY).unwrap();
+    assert_eq!(header.kind, MessageType::Auth);
+    assert_eq!(header.body_len(), AUTH_BODY_MIN + payload.len());
+    assert_eq!(payload_len(header).unwrap(), payload.len());
+    // and the body gives both fields back unchanged
+    let (mechanism, read) = decode_auth_body(&frame[HEADER_LEN..]).unwrap();
+    assert_eq!(mechanism, AuthMechanism::ScramSha256);
+    assert_eq!(read, payload);
+}
+
+/// An auth response round trips, and a refusal is flagged in its header as well as its body
+#[test]
+fn an_auth_response_round_trips() {
+    for status in [AuthStatus::Challenge, AuthStatus::Success, AuthStatus::Failed] {
+        let payload = b"r=abc,s=def,i=4096";
+        let frame = encode_auth_response(status, payload, ROOMY).unwrap();
+        let mut header_bytes = [0u8; HEADER_LEN];
+        header_bytes.copy_from_slice(&frame[..HEADER_LEN]);
+        let header = Header::decode(&header_bytes, ROOMY).unwrap();
+        assert_eq!(header.kind, MessageType::AuthResponse);
+        // a refusal is readable from the header alone, the way a refused handshake is
+        assert_eq!(
+            header.flags.contains(Flags::REFUSED),
+            status == AuthStatus::Failed
+        );
+        let (read_status, read) = decode_auth_response_body(&frame[HEADER_LEN..]).unwrap();
+        assert_eq!(read_status, status);
+        assert_eq!(read, payload);
+    }
+}
+
+/// A payload past the auth bound is refused, on the way out and on the way in
+///
+/// These frames are read from a peer that has proved nothing yet, so the bound that applies is
+/// this one and not the connection's much larger frame bound.
+#[test]
+fn an_auth_payload_past_the_bound_is_refused() {
+    // one byte past what an auth frame will carry, with a frame bound that would allow it
+    let payload = vec![0u8; MAX_AUTH_PAYLOAD_LEN + 1];
+    assert!(matches!(
+        encode_auth(AuthMechanism::ScramSha256, &payload, ROOMY).unwrap_err(),
+        ProtocolError::PayloadTooLarge { .. }
+    ));
+    assert!(matches!(
+        encode_auth_response(AuthStatus::Challenge, &payload, ROOMY).unwrap_err(),
+        ProtocolError::PayloadTooLarge { .. }
+    ));
+    // and a peer that claims one is refused before anything is allocated for it
+    let header = Header::new(
+        MessageType::Auth,
+        Flags::NONE,
+        AUTH_BODY_MIN + MAX_AUTH_PAYLOAD_LEN + 1,
+        ROOMY,
+    )
+    .unwrap();
+    assert!(matches!(
+        payload_len(header).unwrap_err(),
+        ProtocolError::FrameTooLarge { .. }
+    ));
+    // a payload of exactly the bound still fits, which is what `MAX_AUTH_FRAME_BODY` is sized for
+    let payload = vec![0u8; MAX_AUTH_PAYLOAD_LEN];
+    let frame = encode_auth(AuthMechanism::ScramSha256, &payload, ROOMY).unwrap();
+    let mut header_bytes = [0u8; HEADER_LEN];
+    header_bytes.copy_from_slice(&frame[..HEADER_LEN]);
+    let header = Header::decode(&header_bytes, MAX_AUTH_FRAME_BODY).unwrap();
+    assert_eq!(payload_len(header).unwrap(), MAX_AUTH_PAYLOAD_LEN);
+}
+
+/// A body too short to hold an auth frame's fixed part is refused rather than indexed into
+#[test]
+fn an_auth_body_that_is_too_short_is_refused() {
+    for short in 0..AUTH_BODY_MIN {
+        let body = vec![1u8; short];
+        assert!(matches!(
+            decode_auth_body(&body).unwrap_err(),
+            ProtocolError::BodyTooShort { .. }
+        ));
+        assert!(matches!(
+            decode_auth_response_body(&body).unwrap_err(),
+            ProtocolError::BodyTooShort { .. }
+        ));
+    }
+    // a body with the fixed part and nothing else is an empty payload, not an error
+    let (mechanism, payload) = decode_auth_body(&[1, 0, 0, 0]).unwrap();
+    assert_eq!(mechanism, AuthMechanism::ScramSha256);
+    assert!(payload.is_empty());
+}
+
+/// A hello ack naming a mechanism this build cannot do reads as none rather than as that one
+///
+/// This is safe in exactly one direction. The client is the peer that has to *do* the mechanism,
+/// so a name it cannot read leaves it with nothing to send and it refuses the connection itself.
+#[test]
+fn an_unknown_mechanism_in_an_ack_reads_as_none() {
+    let ack = HelloAck {
+        schema_fingerprint: 7,
+        max_frame_bytes: 4096,
+        reason: RefusalReason::Accepted,
+        mechanism: None,
+    };
+    // hand-write a mechanism byte from a build that does not exist yet
+    let mut body = ack.encode();
+    body[13] = 99;
+    assert_eq!(HelloAck::decode(&body).mechanism, None);
+    // and a zero, which is what every server wrote before there was authentication
+    body[13] = 0;
+    assert_eq!(HelloAck::decode(&body).mechanism, None);
 }

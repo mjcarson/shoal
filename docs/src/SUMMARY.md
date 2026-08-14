@@ -57,6 +57,8 @@
   - [F8. Purpose-built workloads, in the crate that judges them](features/purpose-built-workloads.md)
   - [F9. Ephemeral tables, and the benchmarks that need them](features/ephemeral-tables.md)
   - [F10. Framing and protocol evolution](features/framing-and-protocol-evolution.md)
+  - [F11. The error channel](features/error-channel.md)
+  - [F12. Authentication](features/authentication.md)
 
 # Direction
 
@@ -99,6 +101,7 @@
   - [45. The storage marker's format field was written and never read](appendix/resolved/storage-marker-format.md)
   - [48. A query that does not parse was answered with silence](appendix/resolved/query-error-display.md)
   - [57. A missing archive was created empty rather than reported](appendix/resolved/missing-archive.md)
+  - [56, 61. A response cannot say that a read failed](appendix/resolved/response-error-channel.md)
 - [TODOs and Unbuilt Work](appendix/todos.md)
 - [Review, August 2026](appendix/review-2026-08.md)
 - [Glossary](appendix/glossary.md)

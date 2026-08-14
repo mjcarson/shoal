@@ -124,6 +124,7 @@ so they get worse by existing longer rather than under load.
 | --- | --- | --- | --- | --- | --- | --- |
 | **C1** | [**O1**](#o1-queries-are-fully-deserialized-on-arrival) — zero-copy the request half | Argued | L | a `wire_codec` bench; the `BytesMut` reaching the shard | Contained | no |
 | **C2** | [**O2**](#o2-every-returned-row-is-copied-at-least-twice) + [**O18**](#o18-the-gathered-reorder-rehashes-every-rows-partition-key), together | Argued — the largest read-path win available | **XL** | each other; a `wire_codec` bench | **Major** — wire format and the client | no |
+| **C3** | [**O30**](#o30-nothing-can-see-what-a-connection-costs-to-open) — the connect path is unmeasured | **Unknown, and that is the entry** | S for the workload, unknown for whatever it finds | a `connect` workload | — | **no, and that is the point** |
 
 **Tier D — declined, kept with the reason.** A rejected optimization is recorded, not dropped.
 
@@ -163,6 +164,7 @@ come out as a code block.
 | O13 | ~~none yet~~ `macro/fanout/{resident,evicted}/n` since [F8](../features/purpose-built-workloads.md) — **the question, not the isolated cost**. See the note below |
 | O20 | none yet — a `routing` bench over `Ring::find_shard` and `split_by_shard` is unbuilt, and likewise belongs in the micro layer |
 | O21 | `hotpath` `fs::commit` and `stream::prep` only; no micro-benchmark of the write path exists, though [F8](../features/purpose-built-workloads.md) built the standalone binary that would host one |
+| O28, O30 | none — **the client is not instrumented at all**. No `tracing` span, no `hotpath` scope, and no workload that isolates it. O30 is the only entry on this page whose cost is not even bounded by an argument |
 
 > This table previously claimed that `partition_sorted/insert` and `get_key` adjudicated **O5**,
 > and that `seek_bytes/*` adjudicated **O12** and **O13**. ~~It was wrong about all three.~~ Those
@@ -1240,6 +1242,45 @@ the queue puts it in Tier C for exactly the stated reason, and only adds that O1
 read. That grouping does not survive the evidence: O3 is the one entry a benchmark already settles,
 and O1 is one of five that no benchmark can currently see at all. They belong two tiers apart, and
 the thing that separates them is not size but whether the claim can be checked.
+
+### O30. Nothing can see what a connection costs to open
+
+| | |
+| --- | --- |
+| **Rank** | **C3** — not actionable, because there is nothing to act on yet |
+| **Impact** | **Unknown.** Every other entry on this page is at least argued from the source; this one cannot be, because the quantity is a wall clock and no clock is started |
+| **Difficulty** | S to build the workload. Unknown for whatever it then shows |
+| **Depends on** | a `connect` workload in `shoal-bench` |
+| **Blocks** | any judgement about [F12](../features/authentication.md)'s cost, and about [D4](../direction/encryption.md)'s and [D6](../direction/connection-pool.md)'s |
+| **Tradeoff** | — |
+| **Benchmark** | the missing one *is* the entry |
+
+Every macro number in [Benchmark Results](../operations/benchmark-results.md) is measured against an
+already-warm pool. `Shoal::new` runs before the timer starts, so the ten connections it opens, the
+ten handshakes they exchange, and — since [F12](../features/authentication.md) — the ten SCRAM
+exchanges and twenty PBKDF2 derivations that go with them, are all invisible to every capture this
+repository has taken.
+
+That was defensible while a connection was a `TcpStream::connect` and a `set_nodelay`. It is
+becoming less so with each thing added in front of the first query:
+
+| Change | What it added per connection |
+| --- | --- |
+| [F10](../features/framing-and-protocol-evolution.md) | one round trip, two 24 byte frames |
+| [F12](../features/authentication.md) | two more round trips and a PBKDF2 derivation on each end, when a config asks for it |
+| [D4](../direction/encryption.md) | a TLS handshake, when it exists |
+| [D6](../direction/connection-pool.md) | whatever a real health check costs on a connection that is being created |
+
+**What is needed is not a query workload.** The `transport/*` workloads
+[TODOs](todos.md#benchmark-coverage-the-harness-does-not-have) plans would still measure a warm
+pool, because that is what they are for. This wants time to first successful query from a cold
+client, with `min_idle` as a parameter, run against a server with and without an `auth` section —
+the second being a control-and-null pair in the sense [F4](../features/validated-archives.md)
+settled on, where the axis is whether authentication happened at all.
+
+[D3](../direction/authentication.md#how-it-would-be-measured) predicted this and predicted it
+correctly, which is why it is filed here rather than argued: the rule this page opens with does not
+stop applying once something has shipped.
 
 ### O26. `handle_query` cloned a `QueryMetadata` for a gather almost no query has
 

@@ -193,11 +193,14 @@ shard.
 
 ## Still open
 
-- [Item 56](../known-issues.md#56-a-response-cannot-say-that-a-read-failed): the get that could not
-  find its archive is reported to the client exactly as an empty partition is. The server now names
-  the missing file in its log; the client still cannot tell a missing archive from no such row.
-  The integration tests here assert `QueryDidNotSucceed`, which is what that limitation looks like
-  from outside.
+- ~~[Item 56]: the get that could not find its archive is reported to the client exactly as an
+  empty partition is. The server now names the missing file in its log; the client still cannot
+  tell a missing archive from no such row. The integration tests here assert `QueryDidNotSucceed`,
+  which is what that limitation looks like from outside.~~ **Done** —
+  [Resolved #56, 61](response-error-channel.md). Those tests now assert
+  `Errors::Server { code: ErrorCode::ArchiveMissing }`, so the class of failure this page is about
+  is the class the client is told, and it is distinct from the `StorageRead` an unreadable archive
+  gives. That the assertion had to change is the measure of it.
 - `FileSystemCompactor::load_partitions_for_intents` is the third caller, and it now gets the named
   error rather than an rkyv failure over an empty file — but it propagates it out of the compaction
   job rather than handling it. That is an improvement in what the abort *says* and not in whether
@@ -226,8 +229,8 @@ shard.
 
 - [Resolved #16, 51](partition-load-failure.md) — the classification and release path this failure
   is routed into. Item 57 was filed on its "Still open" list, found while writing it.
-- [Item 56](../known-issues.md#56-a-response-cannot-say-that-a-read-failed) — why the released get
-  still cannot say that it failed.
+- [Resolved #56, 61](response-error-channel.md) — the error channel, which is what let the released
+  get finally say that it failed, and with which code.
 - [Archives and the Archive Map](../../storage/archives-and-map.md) and
   [Compaction](../../storage/compaction.md) — where archives are written and when they are
   deleted.

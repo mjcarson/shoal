@@ -13,7 +13,9 @@ use rkyv::validation::shared::SharedValidator;
 use rkyv::validation::Validator;
 use rkyv::{Archive, Deserialize};
 use shoal_core::client::{Errors, Shoal};
-use shoal_core::server::conf::{Conf, DefaultStorageSettings, Networking, Resources, Storage};
+use shoal_core::server::conf::{
+    Auth, Conf, DefaultStorageSettings, Networking, Resources, Storage,
+};
 use shoal_core::server::ServerError;
 use shoal_core::shared::queries::Queries;
 use shoal_core::shared::traits::{QuerySupport, ShoalDatabase};
@@ -145,6 +147,21 @@ pub fn build_single_shard_config(temp_dir: &TempDir) -> Conf {
     // run a single shard so every partition key lands on it
     conf.resources.cores = Some(1);
     conf
+}
+
+/// Create a config for a server that requires one user to authenticate
+///
+/// The password is named rather than a derived credential, so the config derives it at startup —
+/// which is also the path a test wants exercised, since it is the one an operator will use first.
+///
+/// # Arguments
+///
+/// * `temp_dir` - The temp dir to store this servers data in
+/// * `username` - The one user this server will accept
+/// * `password` - The password that user authenticates with
+pub fn build_auth_config(temp_dir: &TempDir, username: &str, password: &str) -> Conf {
+    // start from the default test config and turn authentication on
+    build_config(temp_dir).auth(Auth::default().required(true).user(username, password))
 }
 
 /// Setup and start a default shoal server/config

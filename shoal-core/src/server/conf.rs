@@ -8,7 +8,9 @@ use std::collections::{HashMap, HashSet};
 use tracing::level_filters::LevelFilter;
 
 use super::tables::storage::fs::conf::FileSystemTableConf;
-use super::ServerError;
+use super::{ServerError, ShoalError};
+use crate::shared::auth::{CredentialStore, StoredCredential, DEFAULT_ITERATIONS};
+use crate::shared::protocol::auth::AuthMechanism;
 use crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES;
 use crate::utils::{self, IntoStorageSize};
 
@@ -195,6 +197,195 @@ impl Networking {
     }
 }
 
+/// Help serde default the mechanisms this server accepts
+///
+/// SCRAM is the only mechanism that can be selected today, so listing it is the only useful
+/// default. A deployment that lists nothing and requires authentication refuses every client,
+/// which is a legible failure rather than a silently open port.
+fn default_mechanisms() -> Vec<AuthMechanism> {
+    vec![AuthMechanism::ScramSha256]
+}
+
+/// What a config file says about one user
+///
+/// Two spellings, and the difference between them matters. `password` is derived into a
+/// [`StoredCredential`] when the config is read and the password is dropped, which is convenient
+/// and puts a password in a file. `scram_sha_256` is the derivation itself, which is what a
+/// deployment that does not want a password on disk writes — generate one with
+/// `cargo run --example scram_credential`.
+///
+/// This is two optional fields rather than an enum with two variants, which is what it wants to
+/// be. The `config` crate cannot deserialize an externally tagged enum whose variant carries a
+/// struct — it reports "does not have variant constructor" for the spelling every YAML example
+/// would use — so the shape that reads correctly wins over the shape that models correctly, and
+/// [`UserCredential::to_stored`] carries the check the type would otherwise have made impossible.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(deny_unknown_fields)]
+pub struct UserCredential {
+    /// A password to derive a credential from when this config is read
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+    /// A credential that has already been derived, so no password is on disk
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scram_sha_256: Option<StoredCredential>,
+}
+
+impl UserCredential {
+    /// Turn this into the credential a server actually checks against
+    ///
+    /// A derived credential wins over a password when a config names both, since it is the one
+    /// that says what the deployment meant to store.
+    ///
+    /// # Arguments
+    ///
+    /// * `username` - The name this credential belongs to, for the error if it names nothing
+    /// * `iterations` - The number of PBKDF2 rounds to derive a password with
+    pub fn to_stored(
+        &self,
+        username: &str,
+        iterations: u32,
+    ) -> Result<StoredCredential, ServerError> {
+        // a derivation is what the deployment meant to store, so it is preferred over a password
+        if let Some(stored) = &self.scram_sha_256 {
+            return Ok(stored.clone());
+        }
+        // otherwise derive the password now, so that nothing past this point holds one
+        if let Some(password) = &self.password {
+            return Ok(StoredCredential::from_password(password, iterations));
+        }
+        // a user that named neither is a config that cannot do what it says it does
+        Err(ServerError::Shoal(ShoalError::InvalidConfig(format!(
+            "the user {username} has neither a password nor a derived credential"
+        ))))
+    }
+}
+
+/// The authentication settings for Shoal
+///
+/// # Invariants
+///
+/// **The default is off.** A config with no `auth` section produces a server that requires
+/// nothing, which is every deployment this database has had. Turning it on refuses every client
+/// that has no credentials — including the benchmark harness, which is why the
+/// [frozen baseline](../operations/performance-baseline.md) is only comparable against a server
+/// with this left alone.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct Auth {
+    /// Whether a client has to prove who it is before it can send a query
+    #[serde(default)]
+    pub required: bool,
+    /// The mechanisms this server accepts, strongest first
+    #[serde(
+        default = "default_mechanisms",
+        with = "crate::shared::auth::mechanism_names"
+    )]
+    pub mechanisms: Vec<AuthMechanism>,
+    /// The number of PBKDF2 rounds a password in this file is derived with
+    #[serde(default = "default_iterations")]
+    pub iterations: u32,
+    /// The users this server will accept, by name
+    #[serde(default)]
+    pub users: HashMap<String, UserCredential>,
+}
+
+/// Help serde default the number of rounds a password is derived with
+fn default_iterations() -> u32 {
+    DEFAULT_ITERATIONS
+}
+
+impl Default for Auth {
+    /// Builds a default auth struct
+    ///
+    /// This is written out rather than derived because `serde`'s field defaults only fire while a
+    /// file is being read. A derived `Default` would hand a builder an empty mechanism list, which
+    /// is a server that requires authentication and accepts no way of providing it — the one
+    /// configuration that cannot be talked to and does not look wrong.
+    fn default() -> Self {
+        Auth {
+            required: false,
+            mechanisms: default_mechanisms(),
+            iterations: default_iterations(),
+            users: HashMap::default(),
+        }
+    }
+}
+
+impl Auth {
+    /// Require every client to prove who it is
+    ///
+    /// # Arguments
+    ///
+    /// * `required` - Whether authentication is required
+    pub fn required(mut self, required: bool) -> Self {
+        self.required = required;
+        self
+    }
+
+    /// Set the mechanisms this server accepts
+    ///
+    /// # Arguments
+    ///
+    /// * `mechanisms` - The mechanisms to accept, strongest first
+    pub fn mechanisms(mut self, mechanisms: Vec<AuthMechanism>) -> Self {
+        self.mechanisms = mechanisms;
+        self
+    }
+
+    /// Set the number of PBKDF2 rounds a password in this config is derived with
+    ///
+    /// # Arguments
+    ///
+    /// * `iterations` - The number of rounds to derive with
+    pub fn iterations(mut self, iterations: u32) -> Self {
+        self.iterations = iterations;
+        self
+    }
+
+    /// Add a user with a password, which is derived when this config is turned into a store
+    ///
+    /// # Arguments
+    ///
+    /// * `username` - The name to add
+    /// * `password` - The password to derive a credential from
+    pub fn user<U: Into<String>, P: Into<String>>(mut self, username: U, password: P) -> Self {
+        self.users.insert(
+            username.into(),
+            UserCredential {
+                password: Some(password.into()),
+                scram_sha_256: None,
+            },
+        );
+        self
+    }
+
+    /// Build the store the server checks connections against
+    ///
+    /// Every password in this config is derived here and is not held past this call, which is the
+    /// only reason a `password:` key is an acceptable thing to support at all. That derivation is
+    /// the expensive one PBKDF2 exists to be, so this runs once per shard at startup rather than
+    /// once per connection.
+    ///
+    /// # Errors
+    ///
+    /// Fails if a user in this config named neither a password nor a derived credential.
+    pub fn store(&self) -> Result<CredentialStore, ServerError> {
+        // derive every user this config named, dropping whatever password it named them with
+        let users = self
+            .users
+            .iter()
+            .map(|(name, credential)| {
+                Ok((name.clone(), credential.to_stored(name, self.iterations)?))
+            })
+            .collect::<Result<_, ServerError>>()?;
+        Ok(CredentialStore::new(
+            users,
+            self.mechanisms.clone(),
+            self.required,
+        ))
+    }
+}
+
 /// The settings to apply to each storage engine kinds if no specific table settings set
 #[derive(Serialize, Deserialize, Clone, Default, Debug)]
 pub struct DefaultStorageSettings {
@@ -327,6 +518,9 @@ pub struct Conf {
     /// The networking settings to use
     #[serde(default)]
     pub networking: Networking,
+    /// The authentication settings to use
+    #[serde(default)]
+    pub auth: Auth,
     /// The tracing settings to use
     #[serde(default)]
     pub tracing: Tracing,
@@ -340,6 +534,7 @@ impl Default for Conf {
         Conf {
             resources: Resources::default(),
             networking: Networking::default(),
+            auth: Auth::default(),
             tracing: Tracing::default(),
             storage: Storage::default(),
         }
@@ -371,6 +566,12 @@ impl Conf {
         self
     }
 
+    /// Set the authentication settings
+    pub fn auth(mut self, auth: Auth) -> Self {
+        self.auth = auth;
+        self
+    }
+
     /// Set the tracing settings
     pub fn tracing(mut self, tracing: Tracing) -> Self {
         self.tracing = tracing;
@@ -386,7 +587,7 @@ impl Conf {
 
 #[cfg(test)]
 mod tests {
-    use super::{Conf, Resources, DEFAULT_MAX_FRAME_BYTES};
+    use super::{AuthMechanism, Conf, Resources, DEFAULT_ITERATIONS, DEFAULT_MAX_FRAME_BYTES};
 
     /// Write a config file into a temp dir and load it
     ///
@@ -547,5 +748,90 @@ mod tests {
         let (_dir, conf) = load("networking:\n  max_frame_bytes: 4096\n");
         let conf = conf.expect("a config naming a frame bound failed to load");
         assert_eq!(conf.networking.max_frame_bytes, 4096);
+    }
+
+    #[test]
+    /// A config with no auth section produces a server that requires nothing
+    ///
+    /// This is the case every deployment before authentication was in, and the one the benchmark
+    /// harness and the integration suite are in. A default that required anything would refuse
+    /// every one of them.
+    fn auth_defaults_to_off() {
+        let (_dir, conf) = load("resources:\n  memory: \"4Gi\"\n");
+        let conf = conf.expect("a config with no auth section failed to load");
+        assert!(!conf.auth.required);
+        assert!(conf.auth.users.is_empty());
+        // the store it builds selects nothing, which is what an open server does
+        assert!(!conf
+            .auth
+            .store()
+            .expect("an empty auth section failed to build a store")
+            .is_required());
+        // and the mechanism list still defaults to the one mechanism that works
+        assert_eq!(conf.auth.mechanisms, vec![AuthMechanism::ScramSha256]);
+        assert_eq!(conf.auth.iterations, DEFAULT_ITERATIONS);
+    }
+
+    #[test]
+    /// A user named with a password is derived into a credential when the config is read
+    ///
+    /// The password is not kept anywhere past this point, which is the only reason supporting a
+    /// `password:` key at all is defensible.
+    fn a_password_in_the_config_is_derived() {
+        let (_dir, conf) = load(
+            "resources:\n  memory: \"4Gi\"\nauth:\n  required: true\n  users:\n    reader:\n      password: hunter2\n",
+        );
+        let conf = conf.expect("a config naming a password failed to load");
+        assert!(conf.auth.required);
+        // the store holds a derivation rather than the password
+        let store = conf.auth.store().expect("failed to build a store");
+        assert!(store.is_required());
+        let (credential, known) = store.lookup("reader");
+        assert!(known, "the user this config named was not in its store");
+        assert_eq!(credential.iterations, DEFAULT_ITERATIONS);
+        assert_eq!(credential.stored_key.len(), 32);
+        // and nothing it holds is the password
+        assert!(!credential.stored_key.windows(7).any(|w| w == b"hunter2"));
+    }
+
+    #[test]
+    /// A derived credential can be written in the config instead of a password
+    fn a_derived_credential_in_the_config_loads() {
+        // derive one, spell it the way the file does, and read it back
+        let derived = crate::shared::auth::StoredCredential::from_password("hunter2", 4096);
+        let yaml = serde_yaml::to_string(&derived).expect("failed to write a credential");
+        let indented = yaml
+            .lines()
+            .map(|line| format!("        {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let body = format!(
+            "resources:\n  memory: \"4Gi\"\nauth:\n  required: true\n  users:\n    reader:\n      scram_sha_256:\n{indented}\n"
+        );
+        let (_dir, conf) = load(&body);
+        let conf = conf.expect("a config naming a derived credential failed to load");
+        let (credential, known) = conf
+            .auth
+            .store()
+            .expect("failed to build a store")
+            .lookup("reader");
+        assert!(known);
+        assert_eq!(credential, derived);
+    }
+
+    #[test]
+    /// A mechanism nothing knows is rejected rather than silently dropped
+    ///
+    /// A deployment that misspelled the only mechanism it accepts would otherwise get a server
+    /// that requires authentication and can never grant it, which looks like a broken client.
+    fn an_unknown_mechanism_is_rejected() {
+        let (_dir, conf) = load(
+            "resources:\n  memory: \"4Gi\"\nauth:\n  required: true\n  mechanisms: [\"SCRAM-SHA-1\"]\n",
+        );
+        let error = conf.expect_err("an unknown mechanism was accepted");
+        assert!(
+            error.to_string().contains("SCRAM-SHA-1"),
+            "the error did not name the offending mechanism: {error}"
+        );
     }
 }

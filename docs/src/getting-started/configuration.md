@@ -36,6 +36,21 @@ resources:
 networking:
   interface: "127.0.0.1"             # default
   port: 12000                        # default
+  max_frame_bytes: 67108864          # default; 64 MiB
+
+auth:                                # optional; omitting it requires nothing
+  required: false                    # default
+  mechanisms: ["SCRAM-SHA-256"]      # default; the only one that can be selected today
+  iterations: 4096                   # default; PBKDF2 rounds for a password named below
+  users:
+    reader:
+      password: "hunter2"            # derived at startup, then dropped
+    service:
+      scram_sha_256:                 # what a deployment with no password on disk writes
+        salt: "mreM7hc9ajmfASxDVtMmYA=="
+        iterations: 4096
+        stored_key: "mclPl9SbAkgUFigfCfZXDextXlX9lbyXp2EkZKstVVg="
+        server_key: "1nuhjMmXMbqkuTxZEZzCClfB/wX0AfVCw/pPihZ48Io="
 
 tracing:
   level: Info                        # Trace | Debug | Info | Warn | Error | Off
@@ -98,6 +113,34 @@ works and what it means for which shard receives your query.
 `Networking::to_addr` prints to stdout as a side effect of formatting the address
 (`shoal-core/src/server/conf.rs:111`) — a leftover debug line, so you get a "listening on"
 message per shard.
+
+### auth
+
+**Omitting this block requires nothing of a client**, which is what every deployment before
+[F12](../features/authentication.md) was and what the benchmark config still is — `shoal.yml` in
+the repository root has no `auth` block on purpose, because turning it on would change what the
+[frozen baseline](../operations/performance-baseline.md) measured.
+
+Setting `required: true` refuses every client that cannot do a mechanism this server accepts,
+including one built before authentication existed. A client opts in with
+`Shoal::with_credentials` rather than `Shoal::new` — see [The Client](../api/client.md).
+
+Each user is spelled one of two ways, and the difference is where the password lives:
+
+- **`password:`** is derived into a salted, iterated credential when the config is read, and the
+  password is dropped. The server does not hold it afterwards. The *file* still does.
+- **`scram_sha_256:`** is that derivation written out, so nothing on disk is a password. Generate
+  one with `cargo run --example scram_credential -- <username>`, which reads the password off
+  stdin and prints the block to paste in. A user that names both takes the derivation.
+
+`stored_key` is not a password and cannot be turned back into one, but it **can** be replayed as a
+login by anything that reads it. A config file carrying one wants permissions on it.
+
+A user that names neither is a config error and refuses to start, naming the user.
+
+`iterations` is the PBKDF2 cost, paid by the server once per connection. Raising it raises time to
+first query — the pool opens ten connections before it is idle — rather than the cost of an offline
+guess against a file an attacker has to have stolen first.
 
 ### storage
 
@@ -227,6 +270,7 @@ Conf::default()
             .memory("100MiB")?,
     )
     .networking(Networking::default().port(port))
+    .auth(Auth::default().required(true).user("reader", "hunter2"))
     .storage(
         Storage::default().default_settings(
             DefaultStorageSettings::default().filesystem(
@@ -242,7 +286,8 @@ Conf::default()
     )
 ```
 
-`shoal/tests/utils/utils.rs:19-46`
+`shoal/tests/utils.rs`, `build_config` and `build_auth_config`. The `auth` line is what
+`build_auth_config` adds; every other test omits it and gets a server that requires nothing.
 
 ## ~~The `exluded_cores` typo~~ — fixed
 
@@ -273,7 +318,10 @@ indistinguishable from "the user wanted defaults". For a database where `memory`
 
 ## Limitations
 
-- No config validation and no schema. Unknown keys are dropped silently.
+- No config validation and no schema. Unknown keys are dropped silently, except in `resources`
+  and `auth`, which are `deny_unknown_fields`.
+- Credentials are read once, at startup. There is no way to add, remove or rotate a user without
+  restarting the server.
 - No way to see the effective configuration at runtime; it is not logged at startup.
 - `memory` defaulting to 0 when the `resources` block is absent means an unconfigured Shoal
   runs permanently under memory pressure.

@@ -17,33 +17,98 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::{ErrorKind, IoSlice};
 use std::marker::PhantomData;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpStream, ToSocketAddrs};
 use tokio::task::JoinHandle;
+use tracing::{event, Level};
 use uuid::Uuid;
 
 pub mod errors;
 pub mod messages;
 
 use super::shared::queries::Queries;
-use crate::shared::protocol::{self, handshake, ProtocolError};
-use crate::shared::responses::ResponseActionNames;
+use crate::shared::auth::scram::{ClientStep, ScramClient};
+use crate::shared::auth::{AuthError, Credentials};
+use crate::shared::protocol::auth::{self as proto_auth, AuthMechanism, AuthStatus};
+use crate::shared::protocol::error::{self, ErrorCode};
+use crate::shared::protocol::{self, handshake, MessageType, ProtocolError};
+use crate::shared::responses::{ArchivedResponseError, ResponseActionNames};
 use crate::shared::traits::{
     ExistsQuery, QuerySupport, RkyvSupport, ShoalQuerySupport, ShoalResponseSupport,
 };
 pub use errors::{ConnectError, Errors, ShqlParseError};
 use messages::{BatchStamps, ClientMsg, ClientStamps};
 
+/// The channel a query's responses are routed through, and where they are owed from
+///
+/// The connection is here rather than in a map of its own so that there is exactly one place a
+/// query's routing state lives. A second map would have to be inserted into and removed from in
+/// step with this one, and the failure mode of getting that wrong is a leak that nothing notices.
+#[derive(Clone)]
+struct Waiter {
+    /// The connection this query was written to, if it has been written yet
+    ///
+    /// A query that has been registered but not yet written has no connection to lose, which is
+    /// what makes `None` a meaningful state rather than a placeholder.
+    conn: Option<u64>,
+    /// The channel to hand this query's responses to
+    tx: AsyncSender<ClientMsg>,
+}
+
+/// The write half of a pooled connection, and which connection it is
+///
+/// The identity is what lets a read loop that has died fail the queries that were written to
+/// *its* socket, and only those. The pool holds up to fifty connections and one map of every
+/// query in flight across all of them, so a sweep without an identity to filter on would fail
+/// forty nine other connections worth of healthy queries.
+struct ShoalConnection {
+    /// The write half of this connection
+    writer: OwnedWriteHalf,
+    /// Which connection this is
+    id: u64,
+}
+
+impl std::ops::Deref for ShoalConnection {
+    type Target = OwnedWriteHalf;
+
+    /// Get the write half of this connection
+    fn deref(&self) -> &Self::Target {
+        &self.writer
+    }
+}
+
+impl std::ops::DerefMut for ShoalConnection {
+    /// Get the write half of this connection mutably
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.writer
+    }
+}
+
 // Connection manager for bb8
 #[derive(Clone)]
 struct ShoalConnectionManager {
     /// The shoal server to connect too
     server_addr: SocketAddr,
-    /// The channel to send our read halves to our proxy over
-    proxy_tx: AsyncSender<OwnedReadHalf>,
+    /// The channel to send our read halves to our proxy over, with the connection they came from
+    proxy_tx: AsyncSender<(u64, OwnedReadHalf)>,
+    /// The id to give the next connection this manager opens
+    ///
+    /// Shared with every clone of this manager, since `bb8` clones it and the ids have to be
+    /// unique across the whole pool rather than within one clone of it.
+    next_conn_id: Arc<AtomicU64>,
+    /// The connections whose read half has stopped, which the pool has not discarded yet
+    ///
+    /// A connection is only half broken when its reader dies: the write half still accepts bytes
+    /// into the kernel's buffer, and `peer_addr` still answers, so neither of the pool's health
+    /// checks notices. Without this the pool hands out a socket whose answers nobody is listening
+    /// for, and the query written to it waits forever.
+    ///
+    /// This is self draining. An entry is removed by whichever health check reads it, and reading
+    /// it is what makes the pool throw that connection away.
+    dead_conns: Arc<HashMap<u64, ()>>,
     /// The largest frame the server on the other end of these connections will accept
     ///
     /// This is shared with the client that owns this manager rather than copied into it, since it
@@ -54,6 +119,13 @@ struct ShoalConnectionManager {
     /// This is carried as a value rather than reached through a generic, because the manager is
     /// not generic over the database and does not need to be for this one number.
     schema_fingerprint: u64,
+    /// What this client proves itself with, if the server asks it to
+    ///
+    /// These live on the manager rather than on the client because the manager is where a
+    /// connection is *made*, and `bb8` already treats that as the place a connection becomes
+    /// usable. A connection the pool replaces after a failure re-authenticates with no code
+    /// anywhere else.
+    credentials: Arc<Credentials>,
 }
 
 /// How long a server has to finish its half of the handshake
@@ -71,19 +143,27 @@ impl ShoalConnectionManager {
     ///
     /// * `server_addr` - The address of the server to connect too
     /// * `proxy_tx` - The channel to hand read halves to the proxy over
+    /// * `dead_conns` - Where read loops record that their connection has stopped
     /// * `peer_max_frame_bytes` - Where to record the largest frame the server will accept
     /// * `schema_fingerprint` - The fingerprint of the schema this client was built from
+    /// * `credentials` - What this client proves itself with, if the server asks it to
     pub fn new(
         server_addr: SocketAddr,
-        proxy_tx: AsyncSender<OwnedReadHalf>,
+        proxy_tx: AsyncSender<(u64, OwnedReadHalf)>,
+        dead_conns: &Arc<HashMap<u64, ()>>,
         peer_max_frame_bytes: &Arc<AtomicU32>,
         schema_fingerprint: u64,
+        credentials: Credentials,
     ) -> Self {
         ShoalConnectionManager {
             server_addr,
             proxy_tx,
+            // start at one so that zero is never a connection, and a default can never name one
+            next_conn_id: Arc::new(AtomicU64::new(1)),
+            dead_conns: dead_conns.clone(),
             peer_max_frame_bytes: peer_max_frame_bytes.clone(),
             schema_fingerprint,
+            credentials: Arc::new(credentials),
         }
     }
 
@@ -99,10 +179,11 @@ impl ShoalConnectionManager {
     ///
     /// * `stream` - The connection to shake hands over
     async fn handshake(&self, stream: &mut TcpStream) -> Result<handshake::HelloAck, ConnectError> {
-        // say who we are, and how large a frame we are willing to be sent
+        // say who we are, how large a frame we are willing to be sent, and what we can prove
         let hello = handshake::Hello {
             schema_fingerprint: self.schema_fingerprint,
             max_frame_bytes: protocol::DEFAULT_MAX_FRAME_BYTES,
+            mechanisms: self.credentials.mechanisms(),
         };
         stream
             .write_all(&hello.frame(protocol::DEFAULT_MAX_FRAME_BYTES)?)
@@ -164,13 +245,109 @@ impl ShoalConnectionManager {
             }
             .into());
         }
+        // prove who we are, if this server asked us to
+        //
+        // the server picked one mechanism out of what we offered, so a `None` here is a server
+        // that requires nothing and a name we could not read is one we cannot satisfy
+        if let Some(mechanism) = ack.mechanism {
+            self.authenticate(stream, mechanism, ack.max_frame_bytes)
+                .await?;
+        }
         Ok(ack)
+    }
+
+    /// Prove who this client is with the mechanism the server selected
+    ///
+    /// # Invariants
+    ///
+    /// **This runs before the stream is split**, for the reason the handshake does: everything it
+    /// reads would otherwise be handed to the proxy, which would decode a challenge as a response
+    /// to a query nobody sent.
+    ///
+    /// **The server is checked too.** SCRAM is mutual, and the final message is verified rather
+    /// than assumed — a client that skipped it would prove itself to anything that answered.
+    ///
+    /// # Arguments
+    ///
+    /// * `stream` - The connection to authenticate over, before it has been split
+    /// * `mechanism` - The mechanism the server selected
+    /// * `max_frame_bytes` - The largest frame this server said it will accept
+    async fn authenticate(
+        &self,
+        stream: &mut TcpStream,
+        mechanism: AuthMechanism,
+        max_frame_bytes: u32,
+    ) -> Result<(), ConnectError> {
+        // work out whether we hold anything that can do what this server asked for
+        let (username, password) = match (mechanism, self.credentials.as_ref()) {
+            (AuthMechanism::ScramSha256, Credentials::Scram { username, password }) => {
+                (username, password)
+            }
+            // a server that asked for a mechanism we cannot do, or asked at all when we hold
+            // nothing. the second is reachable even though a server picks from what we offered,
+            // since a `HelloAck` naming a mechanism byte this build cannot read decodes to `None`
+            (mechanism, Credentials::None) => {
+                return Err(AuthError::UnsupportedMechanism(mechanism).into())
+            }
+            (mechanism, _) => return Err(AuthError::UnsupportedMechanism(mechanism).into()),
+        };
+        // run the exchange, answering each challenge until the server accepts or refuses us
+        let mut scram = ScramClient::new(username, password);
+        let mut payload = scram.first()?;
+        loop {
+            // write whatever the mechanism produced, then wait for the server's half
+            let frame = proto_auth::encode_auth(mechanism, &payload, max_frame_bytes)?;
+            stream.write_all(&frame).await?;
+            stream.flush().await?;
+            let (status, answer) = self.read_auth_response(stream).await?;
+            match status {
+                // another round, so let the mechanism answer it
+                AuthStatus::Challenge => {
+                    let ClientStep::Send(next) = scram.step(&answer)?;
+                    payload = next;
+                }
+                // we are in, once the server has proved it holds this credential too
+                AuthStatus::Success => {
+                    scram.finish(&answer)?;
+                    return Ok(());
+                }
+                // the server refused us, and its prose is the same sentence for every cause
+                AuthStatus::Failed => {
+                    return Err(ConnectError::AuthFailed {
+                        msg: String::from_utf8_lossy(&answer).into_owned(),
+                    })
+                }
+            }
+        }
+    }
+
+    /// Read one `AuthResponse` frame from the server
+    ///
+    /// # Arguments
+    ///
+    /// * `stream` - The connection to read from, before it has been split
+    async fn read_auth_response(
+        &self,
+        stream: &mut TcpStream,
+    ) -> Result<(AuthStatus, Vec<u8>), ConnectError> {
+        // read the header first, so that a frame's size is known before anything allocates for it
+        let mut header_bytes = [0u8; protocol::HEADER_LEN];
+        stream.read_exact(&mut header_bytes).await?;
+        let header = protocol::Header::decode(&header_bytes, proto_auth::MAX_AUTH_FRAME_BODY)?
+            .expect(MessageType::AuthResponse)?;
+        // the auth payload bound is far tighter than the frame bound, and it is what applies here
+        let _ = proto_auth::payload_len(header)?;
+        // now that the length has been judged, read the body it named
+        let mut body = vec![0u8; header.body_len()];
+        stream.read_exact(&mut body).await?;
+        let (status, payload) = proto_auth::decode_auth_response_body(&body)?;
+        Ok((status, payload.to_vec()))
     }
 }
 
 #[async_trait::async_trait]
 impl ManageConnection for ShoalConnectionManager {
-    type Connection = OwnedWriteHalf;
+    type Connection = ShoalConnection;
     type Error = ConnectError;
 
     async fn connect(&self) -> Result<Self::Connection, Self::Error> {
@@ -188,30 +365,57 @@ impl ManageConnection for ShoalConnectionManager {
         // remember how large a frame this server is willing to be sent
         self.peer_max_frame_bytes
             .store(ack.max_frame_bytes, Ordering::Relaxed);
+        // claim an id for this connection, so a read loop that dies can say which one it was
+        let id = self.next_conn_id.fetch_add(1, Ordering::Relaxed);
         // split our stream into read and write halves
         let (tcp_rx, tcp_tx) = stream.into_split();
-        // send the read half to our tcp proxy
-        self.proxy_tx.send(tcp_rx).await.map_err(|e| {
+        // send the read half to our tcp proxy, along with which connection it belongs to
+        self.proxy_tx.send((id, tcp_rx)).await.map_err(|e| {
             ConnectError::Io(std::io::Error::new(
                 ErrorKind::Other,
                 format!("failed to send to proxy: {e}"),
             ))
         })?;
-        Ok(tcp_tx)
+        Ok(ShoalConnection {
+            writer: tcp_tx,
+            id,
+        })
     }
 
     /// Check if a connection is still valid
+    ///
+    /// A connection whose read half has stopped is refused here even though its write half is
+    /// still perfectly writable, because a socket nobody is reading the answers off of is not a
+    /// connection this client can use. `peer_addr` cannot see that on its own — it asks the
+    /// kernel about our end of the socket and never touches the wire.
     ///
     /// # Arguments
     ///
     /// * `conn` - The conn to check
     async fn is_valid(&self, conn: &mut Self::Connection) -> Result<(), Self::Error> {
         // TODO implement a ping/pong type request?
+        //
+        // reading this entry is what discards the connection, so it is taken rather than peeked
+        if self.dead_conns.pin().remove(&conn.id).is_some() {
+            return Err(ConnectError::Io(std::io::Error::new(
+                ErrorKind::ConnectionAborted,
+                "this connection's read half has stopped",
+            )));
+        }
         conn.peer_addr()?;
         Ok(())
     }
 
+    /// Check if a connection is broken, without an async context to do it in
+    ///
+    /// # Arguments
+    ///
+    /// * `conn` - The conn to check
     fn has_broken(&self, conn: &mut Self::Connection) -> bool {
+        // a connection whose reader has stopped is broken however writable it still looks
+        if self.dead_conns.pin().remove(&conn.id).is_some() {
+            return true;
+        }
         // Check if connection is broken without async context
         conn.peer_addr().is_err()
     }
@@ -221,13 +425,15 @@ pub struct Shoal<S: QuerySupport> {
     // A pool of tcp connections to send messages over
     pool: bb8::Pool<ShoalConnectionManager>,
     /// A concurrent map of what channel to send streaming results too
-    pub channel_map: Arc<HashMap<Uuid, AsyncSender<ClientMsg>>>,
+    channel_map: Arc<HashMap<Uuid, Waiter>>,
     /// The channel to add unused response streams too
     channel_queue_tx: AsyncSender<(AsyncSender<ClientMsg>, AsyncReceiver<ClientMsg>)>,
     /// A channel of channels to send streaming results over
     channel_queue_rx: AsyncReceiver<(AsyncSender<ClientMsg>, AsyncReceiver<ClientMsg>)>,
     /// Whether this client is shutting down or not
     is_shutting_down: Arc<AtomicBool>,
+    /// The connections whose read half has stopped, which the pool has not discarded yet
+    dead_conns: Arc<HashMap<u64, ()>>,
     /// The largest frame the server will accept, which it tells us when a connection opens
     ///
     /// Every send checks against this before it writes, so that a bundle the server would refuse
@@ -242,10 +448,89 @@ pub struct Shoal<S: QuerySupport> {
 impl<S: QuerySupport> Shoal<S> {
     /// Create a new shoal client
     ///
+    /// This offers no credentials, which is what a server with no `auth` section wants and what
+    /// every client did before there was authentication. Against a server that requires proof this
+    /// fails at connect time with [`ConnectError::AuthRequired`] — use
+    /// [`Shoal::with_credentials`] instead.
+    ///
     /// # Arguments
     ///
-    /// * `socket` - The socket to bind too
+    /// * `addr` - The address of the server to connect too
     pub async fn new<A: ToSocketAddrs>(addr: A) -> Result<Self, Errors>
+    where
+        for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived:
+            rkyv::bytecheck::CheckBytes<
+                Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'a>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            >,
+    {
+        Shoal::connect(addr, Credentials::none()).await
+    }
+
+    /// Create a new shoal client that can prove who it is
+    ///
+    /// The credentials are used on every connection the pool opens, including the ones it opens to
+    /// replace a connection that died, because they live on the connection manager and `bb8`
+    /// already treats making a connection as the place one becomes usable.
+    ///
+    /// # Arguments
+    ///
+    /// * `addr` - The address of the server to connect too
+    /// * `credentials` - What to prove this client's identity with
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # async fn example<S: shoal_core::shared::traits::QuerySupport>() -> Result<(), shoal_core::client::Errors>
+    /// # where for<'a> <<S as shoal_core::shared::traits::QuerySupport>::ResponseKinds as rkyv::Archive>::Archived:
+    /// #     rkyv::bytecheck::CheckBytes<rkyv::rancor::Strategy<rkyv::validation::Validator<
+    /// #         rkyv::validation::archive::ArchiveValidator<'a>,
+    /// #         rkyv::validation::shared::SharedValidator>, rkyv::rancor::Error>> {
+    /// use shoal_core::client::Shoal;
+    /// use shoal_core::shared::auth::Credentials;
+    ///
+    /// let client = Shoal::<S>::with_credentials(
+    ///     "127.0.0.1:12000",
+    ///     Credentials::scram("reader", "hunter2"),
+    /// )
+    /// .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn with_credentials<A: ToSocketAddrs>(
+        addr: A,
+        credentials: Credentials,
+    ) -> Result<Self, Errors>
+    where
+        for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived:
+            rkyv::bytecheck::CheckBytes<
+                Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'a>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            >,
+    {
+        Shoal::connect(addr, credentials).await
+    }
+
+    /// Build a client and its pool
+    ///
+    /// Both public constructors land here rather than one calling the other, so that the ten line
+    /// `where` clause every one of them carries exists once.
+    ///
+    /// # Arguments
+    ///
+    /// * `addr` - The address of the server to connect too
+    /// * `credentials` - What to prove this client's identity with
+    async fn connect<A: ToSocketAddrs>(addr: A, credentials: Credentials) -> Result<Self, Errors>
     where
         for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived:
             rkyv::bytecheck::CheckBytes<
@@ -268,12 +553,16 @@ impl<S: QuerySupport> Shoal<S> {
         let (proxy_tx, proxy_rx) = kanal::unbounded_async();
         // assume the server accepts what we do until it tells us otherwise when we connect
         let peer_max_frame_bytes = Arc::new(AtomicU32::new(protocol::DEFAULT_MAX_FRAME_BYTES));
+        // track which connections have stopped being read, so the pool stops handing them out
+        let dead_conns = Arc::new(HashMap::with_capacity(16));
         // Create a new shoal connection manager
         let manager = ShoalConnectionManager::new(
             addr,
             proxy_tx,
+            &dead_conns,
             &peer_max_frame_bytes,
             S::SCHEMA_FINGERPRINT,
+            credentials,
         );
         // build our connection pool
         let pool = bb8::Pool::builder()
@@ -295,6 +584,7 @@ impl<S: QuerySupport> Shoal<S> {
         let proxy = ShoalTcpProxy::<S::QueryKinds, S::ResponseKinds>::new(
             proxy_rx,
             &channel_map,
+            &dead_conns,
             &is_shutting_down,
         );
         // start our proxy
@@ -306,6 +596,7 @@ impl<S: QuerySupport> Shoal<S> {
             channel_queue_tx,
             channel_queue_rx,
             is_shutting_down,
+            dead_conns,
             peer_max_frame_bytes,
             proxy_handle,
             phantom: PhantomData,
@@ -338,8 +629,14 @@ impl<S: QuerySupport> Shoal<S> {
         loop {
             // check if this id already exists in our channel map
             if self.channel_map.pin().get(&*query_id).is_none() {
-                // insert this id
-                self.channel_map.pin().insert(*query_id, tx.clone());
+                // insert this id, with no connection yet since nothing has been written
+                self.channel_map.pin().insert(
+                    *query_id,
+                    Waiter {
+                        conn: None,
+                        tx: tx.clone(),
+                    },
+                );
                 // we found a unique query id so stop trying to find a new id
                 break;
             }
@@ -381,6 +678,33 @@ impl<S: QuerySupport> Shoal<S> {
                 // consume the data thats already been sent
                 n => IoSlice::advance_slices(&mut bufs, n),
             }
+        }
+        // record which connection this bundle is owed an answer on
+        //
+        // this is done after the write rather than before it, because a bundle that never
+        // reached the socket is not owed anything by that connection
+        self.channel_map.pin().insert(
+            queries.id,
+            Waiter {
+                conn: Some(conn.id),
+                tx: response_tx.clone(),
+            },
+        );
+        // check that this connection did not die between being handed to us and being written to
+        //
+        // the read loop marks itself dead before it fails what it owed, so a sweep that ran
+        // before the line above found nothing to fail. checking after registering is what closes
+        // that window from the other side: one of the two always sees the other
+        if self.dead_conns.pin().contains_key(&conn.id) {
+            // this stream is over before it started, so give its slot straight back
+            self.channel_map.pin().remove(&queries.id);
+            let _ = self.channel_queue_tx.send((response_tx, response_rx)).await;
+            return Err(Errors::Server {
+                query_id: Some(queries.id),
+                index: None,
+                code: ErrorCode::ConnectionLost,
+                msg: "the connection this query was written to had already stopped".to_owned(),
+            });
         }
         // build a new shoal result stream
         let result_stream = ShoalResultStream {
@@ -532,6 +856,18 @@ impl<S: QuerySupport> Shoal<S> {
             .next()
             .await?
             .ok_or(Errors::StreamAlreadyTerminated)?;
+        // a query that failed is a failure rather than a yes or a no
+        //
+        // without this an unreadable partition comes back as "we expected an exists and got an
+        // error", which names the wrong problem entirely
+        if let Some(error) = response.error() {
+            return Err(Errors::Server {
+                query_id: Some(response.get_query_id()),
+                index: Some(response.get_index()),
+                code: error.code(),
+                msg: error.msg().to_owned(),
+            });
+        }
         // extract the exists result
         match response.get_exists() {
             Some(exists) => Ok(exists),
@@ -572,6 +908,7 @@ impl<S: QuerySupport> Shoal<S> {
             queries_sent: 0,
             pool: self.pool.clone(),
             response_tx,
+            channel_map: self.channel_map.clone(),
             data_kind: PhantomData,
             base_index: 0,
             peer_max_frame_bytes: self.peer_max_frame_bytes.clone(),
@@ -606,6 +943,7 @@ impl<S: QuerySupport> Shoal<S> {
             queries_sent: 0,
             pool: self.pool.clone(),
             response_tx,
+            channel_map: self.channel_map.clone(),
             data_kind: PhantomData,
             base_index: 0,
             peer_max_frame_bytes: self.peer_max_frame_bytes.clone(),
@@ -623,11 +961,27 @@ impl<S: QuerySupport> Drop for Shoal<S> {
     }
 }
 
+/// What one frame off a connection turned out to be
+///
+/// The two kinds a server sends share a header and a query id and diverge after that, so they are
+/// read by the same function and told apart here rather than by the caller.
+#[derive(Debug)]
+enum Frame {
+    /// A response to a query, as the aligned bytes of its archive
+    Response(Uuid, AlignedVec<16>),
+    /// A failure, for the query it names or for the connection if that id is nil
+    Error(Uuid, ErrorCode, String),
+}
+
 struct TcpProxy {
     /// The reader to read messages from the shoal server from
     reader: OwnedReadHalf,
+    /// Which connection this is reading, so it can fail the queries written to it and no others
+    conn_id: u64,
     /// A map of channels to send messages to stream readers on
-    channel_map: Arc<HashMap<Uuid, AsyncSender<ClientMsg>>>,
+    channel_map: Arc<HashMap<Uuid, Waiter>>,
+    /// Where to record that this connection has stopped, so the pool stops handing it out
+    dead_conns: Arc<HashMap<u64, ()>>,
     /// Whether shoal or the client is shutting down
     is_shutting_down: Arc<AtomicBool>,
     /// The largest frame this client will read before it refuses the connection
@@ -636,21 +990,33 @@ struct TcpProxy {
 
 impl TcpProxy {
     /// Create a new tcp proxy
+    ///
+    /// # Arguments
+    ///
+    /// * `reader` - The read half of the connection to relay from
+    /// * `conn_id` - Which connection that read half belongs to
+    /// * `channel_map` - A distributed map of channels to relay messages with
+    /// * `dead_conns` - Where to record that this connection has stopped
+    /// * `is_shutting_down` - A flag used to tell the proxy to shutdown
     pub fn new(
         reader: OwnedReadHalf,
-        channel_map: &Arc<HashMap<Uuid, AsyncSender<ClientMsg>>>,
+        conn_id: u64,
+        channel_map: &Arc<HashMap<Uuid, Waiter>>,
+        dead_conns: &Arc<HashMap<u64, ()>>,
         is_shutting_down: &Arc<AtomicBool>,
     ) -> Self {
         // Create a new tcp proxy
         TcpProxy {
             reader,
+            conn_id,
             channel_map: channel_map.clone(),
+            dead_conns: dead_conns.clone(),
             is_shutting_down: is_shutting_down.clone(),
             max_frame_bytes: protocol::DEFAULT_MAX_FRAME_BYTES,
         }
     }
 
-    /// Read a single response frame off of this connection
+    /// Read a single frame off of this connection, of whichever kind it turns out to be
     ///
     /// # Invariants
     ///
@@ -662,10 +1028,17 @@ impl TcpProxy {
     /// sixteen byte aligned, so the zero copy read would end silently.
     /// `the_response_payload_lands_on_a_sixteen_byte_boundary` is the test that catches that.
     ///
+    /// **The type dispatch sits between those two reads, and must stay there.** One fixed size
+    /// preamble is read for every kind of frame a server sends, because both kinds put their query
+    /// id in the same sixteen bytes after the header. Sizing the first read by message type would
+    /// need the type before the read that carries it, and reading the body first would put a
+    /// response payload at the wrong offset.
+    /// `an_error_frame_does_not_disturb_the_response_read` is the test that catches that.
+    ///
     /// **The length is checked against our own frame bound before the allocation happens**, not
     /// after. A decoder that returned the length and left the check to the caller would be one
     /// forgotten call site away from letting a peer name its own allocation size.
-    async fn read_frame(&mut self) -> Result<Option<(Uuid, AlignedVec<16>)>, Errors> {
+    async fn read_frame(&mut self) -> Result<Option<Frame>, Errors> {
         // have a buffer for the header and the query id that follows it
         let mut preamble = [0u8; protocol::RESPONSE_PREAMBLE_LEN];
         // try to read from our tcp socket
@@ -678,58 +1051,193 @@ impl TcpProxy {
             }
             return Err(Errors::IO(error));
         }
-        // check the header and pull the routing fields out of the preamble
-        let frame = protocol::decode_response(&preamble, self.max_frame_bytes)?;
-        // Create an aligned vec to act as a pool of bytes
-        let mut aligned_buff = AlignedVec::<16>::with_capacity(frame.payload_len);
-        // resize our aligned vec
-        aligned_buff.resize(frame.payload_len, 0);
-        self.reader.read_exact(&mut aligned_buff).await?;
-        Ok(Some((frame.query_id, aligned_buff)))
+        // check the header and pull out the fields every frame a server sends carries
+        //
+        // this stops short of deciding what the frame is, because both kinds put their query id
+        // in the same sixteen bytes and only the type byte separates them
+        let frame = protocol::decode_server_frame(&preamble, self.max_frame_bytes)?;
+        // read the rest of this frame according to what it turned out to be
+        match frame.header.kind {
+            MessageType::Response => {
+                // Create an aligned vec to act as a pool of bytes
+                let mut aligned_buff = AlignedVec::<16>::with_capacity(frame.rest_len);
+                // resize our aligned vec
+                aligned_buff.resize(frame.rest_len, 0);
+                self.reader.read_exact(&mut aligned_buff).await?;
+                Ok(Some(Frame::Response(frame.query_id, aligned_buff)))
+            }
+            MessageType::Error => {
+                // size this frame's message before anything allocates for it
+                //
+                // the message bound is far tighter than the frame bound, so a frame that got
+                // past the check above can still be refused here
+                let msg_len = error::msg_len(frame.header)?;
+                // an error body is fixed bytes rather than an archive, so a plain vec is enough
+                // - there is nothing in it with an alignment requirement to protect
+                let mut rest = vec![0u8; msg_len + (error::ERROR_BODY_MIN - protocol::QUERY_ID_LEN)];
+                self.reader.read_exact(&mut rest).await?;
+                // pull the code and the message out of what we read
+                let (code, msg) = error::decode_error_tail(&rest)?;
+                Ok(Some(Frame::Error(frame.query_id, code, msg.into_owned())))
+            }
+            // a server only ever sends these two down a connection, so anything else is a peer
+            // that is out of step with us rather than a frame we can act on
+            got => Err(Errors::Protocol(ProtocolError::UnexpectedMessageType {
+                expected: MessageType::Response,
+                got,
+            })),
+        }
     }
 
-    /// Start relaying messages from this tcp stream
+    /// Tell every query written to this connection that it will not be answered
+    ///
+    /// Without this a caller waiting on a connection that died waits forever. A result stream
+    /// holds a clone of its own sender, so the channel never closes and the receiver never
+    /// observes that nothing is coming — the only way it can learn is to be told.
+    ///
+    /// Only the queries written to *this* connection are failed. The channel map is shared by
+    /// every connection in the pool, so a sweep of all of it would fail up to forty nine other
+    /// connections worth of healthy queries, and would do so on every ordinary idle reap.
+    ///
+    /// # Arguments
+    ///
+    /// * `code` - What class of failure ended this connection
+    /// * `msg` - What to tell the queries that were waiting on it
+    fn fail_waiting(&self, code: ErrorCode, msg: &str) {
+        // say that this connection is finished before failing anything on it
+        //
+        // the order matters. a query written after this sweep has run would otherwise be
+        // registered on a connection nobody is reading and never be failed by anything, so the
+        // mark goes down first and every send checks it after it registers
+        self.dead_conns.pin().insert(self.conn_id, ());
+        // collect the queries this connection owes an answer to before telling any of them
+        //
+        // papaya's guard is bound to the thread that took it, so nothing may be awaited while
+        // it is held. collecting first keeps the guard and the sends strictly apart
+        let waiting: Vec<AsyncSender<ClientMsg>> = self
+            .channel_map
+            .pin()
+            .values()
+            .filter(|waiter| waiter.conn == Some(self.conn_id))
+            .map(|waiter| waiter.tx.clone())
+            .collect();
+        // an idle connection has nobody to tell, but is still marked dead above so that the
+        // pool discards it rather than handing it to the next query
+        if waiting.is_empty() {
+            return;
+        }
+        event!(
+            Level::ERROR,
+            msg = "failing the queries a dead connection owed",
+            conn = self.conn_id,
+            queries = waiting.len(),
+            %code,
+            reason = msg,
+        );
+        // tell each of them, without blocking on any of them
+        //
+        // these channels are unbounded, so a synchronous try_send can only fail if the receiver
+        // is gone - in which case there is nobody left to tell
+        for tx in waiting {
+            let failure = ClientMsg::ServerError(code, msg.to_owned(), ClientStamps::arrived_now());
+            let _ = tx.as_sync().try_send(failure);
+        }
+    }
+
+    /// Start relaying messages from this tcp stream, failing what it owed if it stops
     pub async fn start(mut self) -> Result<(), Errors> {
+        // relay until this connection ends, however it ends
+        let outcome = self.relay().await;
+        // whatever ended it, the queries written to it are never going to be answered
+        //
+        // this runs on every exit path on purpose. a clean shutdown has no waiters left to
+        // fail, and every other way out of the relay loop has some
+        match &outcome {
+            // the server named a reason, so pass that on rather than inventing one
+            Ok(Some((code, msg))) => self.fail_waiting(*code, msg),
+            Ok(None) => {
+                self.fail_waiting(
+                    ErrorCode::ConnectionLost,
+                    "the connection to the server closed",
+                );
+            }
+            Err(error) => self.fail_waiting(
+                ErrorCode::ConnectionLost,
+                &format!("the connection to the server failed: {error}"),
+            ),
+        }
+        // the reason a server gave is for the queries, not for the caller
+        outcome.map(|_| ())
+    }
+
+    /// Relay messages from this tcp stream until it ends
+    ///
+    /// Returns the reason the server gave for ending this connection, if it gave one.
+    async fn relay(&mut self) -> Result<Option<(ErrorCode, String)>, Errors> {
         // keep reading from our tcp socket
         loop {
-            // read the next response frame, or stop if this connection is shutting down
+            // read the next frame, or stop if this connection is shutting down
             //
             // a HelloAck can never reach here, because the handshake completes before this
             // connections read half is handed to the proxy. moving it after the split would
-            // send the ack down this path, where it would decode as a response with a garbage
-            // query id and fall into the missing channel arm below
-            let (query_id, aligned_buff) = match self.read_frame().await? {
+            // send the ack down this path, where it would decode as a frame with a garbage
+            // query id and be dropped by the unknown query arm below
+            let frame = match self.read_frame().await? {
                 Some(frame) => frame,
-                None => return Ok(()),
+                None => return Ok(None),
             };
-            // note when this responses last byte arrived
+            // note when this frames last byte arrived
             //
             // the servers own record ends when it hands these bytes to its socket, so this
             // is what closes the loop on the wire time between the two
             let stamps = ClientStamps::arrived_now();
-            // remember how big this payload was before we hand it off
-            let len = aligned_buff.len();
-            // wrap our response in a client message
-            let wrapped = ClientMsg::Response(aligned_buff, stamps);
+            // work out which query this frame belongs to and what to hand that query
+            let (query_id, wrapped) = match frame {
+                Frame::Response(query_id, aligned_buff) => {
+                    (query_id, ClientMsg::Response(aligned_buff, stamps))
+                }
+                Frame::Error(query_id, code, msg) => {
+                    // a failure with no query to attach it to is about the connection itself,
+                    // so it ends this read loop rather than being routed anywhere
+                    if query_id.is_nil() {
+                        event!(
+                            Level::ERROR,
+                            msg = "the server failed this connection",
+                            %code,
+                            reason = msg,
+                        );
+                        return Ok(Some((code, msg)));
+                    }
+                    (query_id, ClientMsg::ServerError(code, msg, stamps))
+                }
+            };
             // get the channel for this query
             match self.channel_map.pin_owned().get(&query_id) {
-                // send our response to the right shoal stream
-                Some(tx) => tx.send(wrapped).await?,
-                None => {
-                    return Err(Errors::ProtocolError(format!(
-                        "missing stream channel for query {query_id} (len={len})"
-                    )));
-                }
+                // send our message to the right shoal stream
+                Some(waiter) => waiter.tx.send(wrapped).await?,
+                // a frame for a query nobody is waiting on is dropped, and this loop goes on
+                //
+                // that happens when a result stream was dropped before it was drained, which
+                // leaks its slot in the channel map. ending the read loop over it would take
+                // every other query multiplexed on this connection down with it, which is a
+                // far worse answer to one caller's leak than losing the frame is
+                None => event!(
+                    Level::WARN,
+                    msg = "dropped a frame for a query nobody is waiting on",
+                    %query_id,
+                ),
             }
         }
     }
 }
 
 struct ShoalTcpProxy<S: ShoalQuerySupport, R: ShoalResponseSupport> {
-    /// The channel to listen for new tcp readers on
-    proxy_rx: AsyncReceiver<OwnedReadHalf>,
+    /// The channel to listen for new tcp readers on, with the connection each one belongs to
+    proxy_rx: AsyncReceiver<(u64, OwnedReadHalf)>,
     /// A concurrent map of what channel to send streaming results too
-    channel_map: Arc<HashMap<Uuid, AsyncSender<ClientMsg>>>,
+    channel_map: Arc<HashMap<Uuid, Waiter>>,
+    /// Where read loops record that their connection has stopped
+    dead_conns: Arc<HashMap<u64, ()>>,
     /// Whether this client is shutting down
     is_shutting_down: Arc<AtomicBool>,
     /// The database we are getting responses from
@@ -747,14 +1255,16 @@ impl<S: ShoalQuerySupport, R: ShoalResponseSupport + 'static> ShoalTcpProxy<S, R
     /// * `channel_map` - A distributed map of channels to relay messages with
     /// * `shutdown` - A flag used to tell the proxy to shutdown
     pub fn new(
-        proxy_rx: AsyncReceiver<OwnedReadHalf>,
-        channel_map: &Arc<HashMap<Uuid, AsyncSender<ClientMsg>>>,
+        proxy_rx: AsyncReceiver<(u64, OwnedReadHalf)>,
+        channel_map: &Arc<HashMap<Uuid, Waiter>>,
+        dead_conns: &Arc<HashMap<u64, ()>>,
         is_shutting_down: &Arc<AtomicBool>,
     ) -> Self {
         // create our proxy
         ShoalTcpProxy {
             proxy_rx,
             channel_map: channel_map.clone(),
+            dead_conns: dead_conns.clone(),
             is_shutting_down: is_shutting_down.clone(),
             phantom_query: PhantomData,
             phantom_response: PhantomData,
@@ -777,14 +1287,33 @@ impl<S: ShoalQuerySupport, R: ShoalResponseSupport + 'static> ShoalTcpProxy<S, R
         // Wait for new tcp readers to read from
         loop {
             // wait for a new tcp reader to watch
-            let reader = match self.proxy_rx.recv().await {
+            let (conn_id, reader) = match self.proxy_rx.recv().await {
                 Ok(reader) => reader,
                 Err(_) => return,
             };
             // build a new tcp proxy
-            let tcp_proxy = TcpProxy::new(reader, &self.channel_map, &self.is_shutting_down);
-            // spawn a task to watch this tcp reader for results
-            tokio::task::spawn(tcp_proxy.start());
+            let tcp_proxy = TcpProxy::new(
+                reader,
+                conn_id,
+                &self.channel_map,
+                &self.dead_conns,
+                &self.is_shutting_down,
+            );
+            // spawn a task to watch this tcp reader for results, saying so if it gives up
+            //
+            // this handle used to be dropped, which meant every failure in the read loop - a
+            // refused frame, a dead socket, a closed channel - was discarded with nothing
+            // written down anywhere and every caller on that connection left waiting
+            tokio::task::spawn(async move {
+                if let Err(error) = tcp_proxy.start().await {
+                    event!(
+                        Level::ERROR,
+                        msg = "a connection to the server stopped being read",
+                        conn = conn_id,
+                        %error,
+                    );
+                }
+            });
         }
     }
 }
@@ -914,6 +1443,14 @@ impl<S: QuerySupport> ShoalResponse<S> {
         S::ResponseKinds::is_end_of_stream(archived)
     }
 
+    /// Get the id of the query bundle this response belongs to
+    pub fn get_query_id(&self) -> Uuid {
+        // get a refernce to our archived response
+        let archived = unsafe { &*self.archived };
+        // get the id of the bundle this response belongs to
+        S::ResponseKinds::get_query_id(archived)
+    }
+
     /// Get the index for this response
     pub fn get_index(&self) -> usize {
         // get a refernce to our archived response
@@ -961,6 +1498,18 @@ impl<S: QuerySupport> ShoalResponse<S> {
         <S as QuerySupport>::get_exists(archived)
     }
 
+    /// Get the failure this query answered with, if it failed
+    ///
+    /// Returns `Some` only for a query the server could not run. A query that ran and found
+    /// nothing is not a failure and answers `None` here, which is the distinction the whole error
+    /// channel exists to make — before it, both were an empty get.
+    pub fn error(&self) -> Option<&ArchivedResponseError> {
+        // get a reference to our archived data
+        let archived = unsafe { &*self.archived };
+        // get the failure this query answered with, if there was one
+        <S as QuerySupport>::error(archived)
+    }
+
     /// Format this response as column headers and row values
     ///
     /// Returns `Some((headers, rows))` for Get responses with data,
@@ -982,7 +1531,7 @@ pub struct ShoalResultStream<S: QuerySupport> {
     /// the receive side of the response stream channel
     response_rx: Option<AsyncReceiver<ClientMsg>>,
     /// A concurrent map of what channel to send streaming results too
-    channel_map: Arc<HashMap<Uuid, AsyncSender<ClientMsg>>>,
+    channel_map: Arc<HashMap<Uuid, Waiter>>,
     /// The channel to add unused response streams too
     channel_queue_tx: AsyncSender<(AsyncSender<ClientMsg>, AsyncReceiver<ClientMsg>)>,
     /// The next message to be returned
@@ -1045,6 +1594,16 @@ where
                                 // build our shoal response
                                 return Ok((end, Some(response)));
                             }
+                            // a failure ends this stream where it lands, since it names the
+                            // bundle rather than a position in it
+                            ClientMsg::ServerError(code, msg, _) => {
+                                return Err(Errors::Server {
+                                    query_id: Some(self.id),
+                                    index: None,
+                                    code,
+                                    msg,
+                                })
+                            }
                             ClientMsg::End(_) => return Ok((true, None)),
                         };
                     }
@@ -1084,6 +1643,16 @@ where
                     let rewrapped = ClientMsg::Response(buff, stamps);
                     // push this into our pending responses and wait for the next response
                     self.pending.insert(index, rewrapped);
+                }
+                // a failure ends this stream where it lands, since it names the bundle rather
+                // than a position in it - there is no index to buffer it at
+                ClientMsg::ServerError(code, msg, _) => {
+                    return Err(Errors::Server {
+                        query_id: Some(self.id),
+                        index: None,
+                        code,
+                        msg,
+                    })
                 }
                 ClientMsg::End(index) => {
                     // if this is the next row then return it
@@ -1133,6 +1702,21 @@ where
         Ok(())
     }
 
+    /// Give this streams slot in the channel map and its channel pair back
+    ///
+    /// The entry in the channel map is what the proxy routes a response through, so a stream that
+    /// ended without removing it leaves every later response for that id being delivered into a
+    /// channel with no reader.
+    async fn release(&mut self) -> Result<(), Errors> {
+        // remove this stream id from our channel map
+        self.channel_map.pin().remove(&self.id);
+        // take the ends of our channel
+        if let (Some(tx), Some(rx)) = (self.response_tx.take(), self.response_rx.take()) {
+            self.channel_queue_tx.send((tx, rx)).await?;
+        }
+        Ok(())
+    }
+
     /// Get the next response to our query
     pub async fn next(&mut self) -> Result<Option<ShoalResponse<S>>, Errors>
     where
@@ -1150,17 +1734,17 @@ where
         // try to get our receive channels
         if self.response_rx.is_some() {
             // wait for the next response
-            let (end, resp) = self.wait_for_next_response().await?;
-            // if this is the final response then return our channels
-            if end {
-                // remove this stream id from our channel map
-                self.channel_map.pin().remove(&self.id);
-                // take the ends of our channel
-                if let (Some(tx), Some(rx)) = (self.response_tx.take(), self.response_rx.take()) {
-                    self.channel_queue_tx.send((tx, rx)).await?;
-                }
+            let outcome = self.wait_for_next_response().await;
+            // release this stream whichever way that went
+            //
+            // a stream that failed has ended just as surely as one that reached its last
+            // response, so leaving the release to the end arm alone is what made a failed
+            // query leak the channel map entry its responses are routed through
+            if matches!(outcome, Err(_) | Ok((true, _))) {
+                self.release().await?;
             }
-            // return our accessable response
+            // return our accessable response, or the failure that ended this stream
+            let (_, resp) = outcome?;
             Ok(resp)
         } else {
             // this stream has already ended
@@ -1246,7 +1830,7 @@ pub struct ShoalUnorderedResultStream<S: QuerySupport> {
     /// the receive side of the response stream channel
     response_rx: Option<AsyncReceiver<ClientMsg>>,
     /// A concurrent map of what channel to send streaming results too
-    channel_map: Arc<HashMap<Uuid, AsyncSender<ClientMsg>>>,
+    channel_map: Arc<HashMap<Uuid, Waiter>>,
     /// The channel to add unused response streams too
     channel_queue_tx: AsyncSender<(AsyncSender<ClientMsg>, AsyncReceiver<ClientMsg>)>,
     /// The next message to be returned
@@ -1319,6 +1903,16 @@ where
                     // return this response
                     return Ok((is_end, Some(response)));
                 }
+                // a failure ends this stream where it lands, since it names the bundle rather
+                // than a position in it
+                ClientMsg::ServerError(code, msg, _) => {
+                    return Err(Errors::Server {
+                        query_id: Some(self.id),
+                        index: None,
+                        code,
+                        msg,
+                    })
+                }
                 ClientMsg::End(end_index) => {
                     // check if the last return message was the end
                     if self.next_index == end_index {
@@ -1330,6 +1924,21 @@ where
                 }
             }
         }
+    }
+
+    /// Give this streams slot in the channel map and its channel pair back
+    ///
+    /// The entry in the channel map is what the proxy routes a response through, so a stream that
+    /// ended without removing it leaves every later response for that id being delivered into a
+    /// channel with no reader.
+    async fn release(&mut self) -> Result<(), Errors> {
+        // remove this stream id from our channel map
+        self.channel_map.pin().remove(&self.id);
+        // take the ends of our channel
+        if let (Some(tx), Some(rx)) = (self.response_tx.take(), self.response_rx.take()) {
+            self.channel_queue_tx.send((tx, rx)).await?;
+        }
+        Ok(())
     }
 
     /// Get the next available response to our query
@@ -1349,17 +1958,14 @@ where
         // try to get our receive channels
         if self.response_rx.is_some() {
             // wait for the next response
-            let (end, resp) = self.wait_for_next_response().await?;
-            // if this is the final response then return our channels
-            if end {
-                // remove this stream id from our channel map
-                self.channel_map.pin().remove(&self.id);
-                // take the ends of our channel
-                if let (Some(tx), Some(rx)) = (self.response_tx.take(), self.response_rx.take()) {
-                    self.channel_queue_tx.send((tx, rx)).await?;
-                }
+            let outcome = self.wait_for_next_response().await;
+            // release this stream whichever way that went, for the same reason the ordered
+            // stream does - a stream that failed has ended and owes its slot back
+            if matches!(outcome, Err(_) | Ok((true, _))) {
+                self.release().await?;
             }
-            // return our accessable response
+            // return our accessable response, or the failure that ended this stream
+            let (_, resp) = outcome?;
             Ok(resp)
         } else {
             // this stream has already ended
@@ -1381,6 +1987,8 @@ pub struct ShoalQueryStream<Q: QuerySupport> {
     pool: bb8::Pool<ShoalConnectionManager>,
     /// The transmission side of the response stream channel
     response_tx: AsyncSender<ClientMsg>,
+    /// A concurrent map of what channel to send streaming results too
+    channel_map: Arc<HashMap<Uuid, Waiter>>,
     /// The data we are sending queries for
     data_kind: PhantomData<Q>,
     /// The base index to set in queries
@@ -1467,6 +2075,18 @@ impl<Q: QuerySupport> ShoalQueryStream<Q> {
         }
         // record that this bundle is now the sockets problem
         stamps.mark_written();
+        // record which connection this bundle is owed an answer on
+        //
+        // a query stream takes whatever connection the pool hands out per bundle, so this can
+        // move between bundles. it names the most recent one, which is the one the answers we
+        // are still waiting for are coming back over
+        self.channel_map.pin().insert(
+            self.id,
+            Waiter {
+                conn: Some(conn.id),
+                tx: self.response_tx.clone(),
+            },
+        );
         // increment the number of queries sent and our base index
         self.queries_sent += 1;
         self.base_index += queries.queries.len();
@@ -1484,13 +2104,35 @@ impl<Q: QuerySupport> ShoalQueryStream<Q> {
 
 #[cfg(test)]
 mod tests {
-    use super::{protocol, TcpProxy};
+    use super::{error, protocol, ClientMsg, ErrorCode, Frame, TcpProxy, Waiter};
     use papaya::HashMap;
     use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
     use tokio::io::AsyncWriteExt;
     use tokio::net::{TcpListener, TcpStream};
     use uuid::Uuid;
+
+    /// Build the whole of an error frame, preamble and message together
+    ///
+    /// # Arguments
+    ///
+    /// * `query_id` - The query this failure belongs to, or nil for the connection itself
+    /// * `code` - What class of failure this is
+    /// * `msg` - What to say about it
+    fn error_frame(query_id: &Uuid, code: ErrorCode, msg: &str) -> Vec<u8> {
+        // build the preamble that goes ahead of the message
+        let preamble = error::error_preamble(
+            query_id,
+            code,
+            msg.len(),
+            protocol::DEFAULT_MAX_FRAME_BYTES,
+        )
+        .expect("failed to build an error preamble");
+        // lay the message down behind it
+        let mut frame = Vec::from(preamble);
+        frame.extend_from_slice(msg.as_bytes());
+        frame
+    }
 
     /// The payload lengths a response frame is read at
     ///
@@ -1534,14 +2176,19 @@ mod tests {
             let stream = TcpStream::connect(addr).await.expect("failed to connect");
             let (reader, _writer) = stream.into_split();
             let channel_map = Arc::new(HashMap::with_capacity(1));
+            let dead_conns = Arc::new(HashMap::with_capacity(1));
             let is_shutting_down = Arc::new(AtomicBool::new(false));
-            let mut proxy = TcpProxy::new(reader, &channel_map, &is_shutting_down);
-            let (read_id, buff) = proxy
+            let mut proxy = TcpProxy::new(reader, 1, &channel_map, &dead_conns, &is_shutting_down);
+            let frame = proxy
                 .read_frame()
                 .await
                 .expect("failed to read a frame")
                 .expect("the connection closed instead of yielding a frame");
             server.await.expect("the writer task panicked");
+            // a response frame has to read back as one and not as anything else
+            let super::Frame::Response(read_id, buff) = frame else {
+                panic!("a response frame read back as something else for len {len}");
+            };
             // the routing field and the payload both survived
             assert_eq!(read_id, query_id);
             assert_eq!(buff.len(), len, "payload length changed for len {len}");
@@ -1584,8 +2231,9 @@ mod tests {
         let stream = TcpStream::connect(addr).await.expect("failed to connect");
         let (reader, _writer) = stream.into_split();
         let channel_map = Arc::new(HashMap::with_capacity(1));
+        let dead_conns = Arc::new(HashMap::with_capacity(1));
         let is_shutting_down = Arc::new(AtomicBool::new(false));
-        let mut proxy = TcpProxy::new(reader, &channel_map, &is_shutting_down);
+        let mut proxy = TcpProxy::new(reader, 1, &channel_map, &dead_conns, &is_shutting_down);
         let error = proxy
             .read_frame()
             .await
@@ -1598,6 +2246,238 @@ mod tests {
                 super::Errors::Protocol(protocol::ProtocolError::FrameTooLarge { .. })
             ),
             "an oversize frame failed with the wrong error: {error:?}"
+        );
+    }
+
+    /// An error frame ahead of a response leaves the response's payload aligned
+    ///
+    /// The dispatch between the two frame kinds sits between the preamble read and the body read,
+    /// which is exactly where a change could collapse them into one. This walks an error frame
+    /// through first so that the response behind it is read at a socket offset the response path
+    /// never sees on its own, and then asserts the alignment invariant still holds.
+    #[tokio::test]
+    async fn an_error_frame_does_not_disturb_the_response_read() {
+        // walk the same awkward payload lengths, since the offset the error frame leaves behind
+        // interacts with each of them differently
+        for len in PAYLOAD_LENS {
+            // stand up a socket pair, letting the kernel pick the port
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("failed to bind a listener");
+            let addr = listener.local_addr().expect("listener had no address");
+            // build an error frame and a response frame for two different queries
+            let failed_id = Uuid::new_v4();
+            let ok_id = Uuid::new_v4();
+            let payload: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+            let failure = error_frame(&failed_id, ErrorCode::StorageRead, "partition 7 is gone");
+            let preamble =
+                protocol::response_preamble(&ok_id, len, protocol::DEFAULT_MAX_FRAME_BYTES)
+                    .expect("failed to build a response preamble");
+            // write the error frame first and the response behind it
+            let written = payload.clone();
+            let server = tokio::spawn(async move {
+                let (mut sock, _) = listener.accept().await.expect("failed to accept");
+                sock.write_all(&failure).await.expect("failed to write");
+                sock.write_all(&preamble).await.expect("failed to write");
+                sock.write_all(&written).await.expect("failed to write");
+                sock.flush().await.expect("failed to flush");
+            });
+            // read both back through the same path a real connection takes
+            let stream = TcpStream::connect(addr).await.expect("failed to connect");
+            let (reader, _writer) = stream.into_split();
+            let channel_map = Arc::new(HashMap::with_capacity(1));
+            let dead_conns = Arc::new(HashMap::with_capacity(1));
+            let is_shutting_down = Arc::new(AtomicBool::new(false));
+            let mut proxy = TcpProxy::new(reader, 1, &channel_map, &dead_conns, &is_shutting_down);
+            // the error frame reads back whole, naming its query and its code
+            let first = proxy
+                .read_frame()
+                .await
+                .expect("failed to read the error frame")
+                .expect("the connection closed instead of yielding the error frame");
+            let Frame::Error(read_id, code, msg) = first else {
+                panic!("an error frame read back as a response for len {len}");
+            };
+            assert_eq!(read_id, failed_id);
+            assert_eq!(code, ErrorCode::StorageRead);
+            assert_eq!(msg, "partition 7 is gone");
+            // and the response behind it is still exactly what was written
+            let second = proxy
+                .read_frame()
+                .await
+                .expect("failed to read the response frame")
+                .expect("the connection closed instead of yielding the response frame");
+            let Frame::Response(read_id, buff) = second else {
+                panic!("a response frame read back as an error for len {len}");
+            };
+            server.await.expect("the writer task panicked");
+            assert_eq!(read_id, ok_id);
+            assert_eq!(&buff[..], &payload[..], "payload changed for len {len}");
+            // and it still lands on a sixteen byte boundary, which is what the dispatch had to
+            // not break - an empty payload never allocated, so there is nothing to align
+            if len > 0 {
+                assert_eq!(
+                    buff.as_ptr() as usize % 16,
+                    0,
+                    "a payload of {len} bytes behind an error frame lost its alignment"
+                );
+            }
+        }
+    }
+
+    /// An error frame is delivered to the query it names
+    #[tokio::test]
+    async fn an_error_frame_is_delivered_to_the_query_it_names() {
+        // stand up a socket pair
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("failed to bind a listener");
+        let addr = listener.local_addr().expect("listener had no address");
+        // write one error frame for a query we are about to register
+        let query_id = Uuid::new_v4();
+        let frame = error_frame(&query_id, ErrorCode::ArchiveMissing, "archive is gone");
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.expect("failed to accept");
+            sock.write_all(&frame).await.expect("failed to write");
+            sock.flush().await.expect("failed to flush");
+            // hold the socket open so the read loop ends on our frame rather than on EOF
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        });
+        // register a channel for that query, the way sending a bundle would
+        let stream = TcpStream::connect(addr).await.expect("failed to connect");
+        let (reader, _writer) = stream.into_split();
+        let channel_map = Arc::new(HashMap::with_capacity(1));
+        let (tx, rx) = kanal::unbounded_async();
+        channel_map
+            .pin()
+            .insert(query_id, Waiter { conn: Some(1), tx });
+        let dead_conns = Arc::new(HashMap::with_capacity(1));
+        let is_shutting_down = Arc::new(AtomicBool::new(false));
+        let proxy = TcpProxy::new(reader, 1, &channel_map, &dead_conns, &is_shutting_down);
+        tokio::spawn(proxy.start());
+        // the failure arrives on that query's channel, with the code and message it was sent with
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("the failure never arrived")
+            .expect("the channel closed instead of delivering the failure");
+        server.await.expect("the writer task panicked");
+        match msg {
+            ClientMsg::ServerError(code, msg, _) => {
+                assert_eq!(code, ErrorCode::ArchiveMissing);
+                assert_eq!(msg, "archive is gone");
+            }
+            other => panic!("an error frame was delivered as something else: {other:?}"),
+        }
+    }
+
+    /// A frame for a query nobody is waiting on does not end the read loop
+    ///
+    /// A result stream dropped before it was drained leaves its id in the channel map, and every
+    /// response the server still sends for it arrives here with nowhere to go. Ending the loop
+    /// over that would take every other query multiplexed on the same connection down with it.
+    #[tokio::test]
+    async fn an_error_frame_for_an_unknown_query_does_not_end_the_read_loop() {
+        // stand up a socket pair
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("failed to bind a listener");
+        let addr = listener.local_addr().expect("listener had no address");
+        // write a frame for a query nobody knows about, then one for a query somebody does
+        let unknown_id = Uuid::new_v4();
+        let known_id = Uuid::new_v4();
+        let orphan = error_frame(&unknown_id, ErrorCode::StorageRead, "nobody is listening");
+        let wanted = error_frame(&known_id, ErrorCode::Internal, "somebody is");
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.expect("failed to accept");
+            sock.write_all(&orphan).await.expect("failed to write");
+            sock.write_all(&wanted).await.expect("failed to write");
+            sock.flush().await.expect("failed to flush");
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        });
+        // only register the second query
+        let stream = TcpStream::connect(addr).await.expect("failed to connect");
+        let (reader, _writer) = stream.into_split();
+        let channel_map = Arc::new(HashMap::with_capacity(1));
+        let (tx, rx) = kanal::unbounded_async();
+        channel_map
+            .pin()
+            .insert(known_id, Waiter { conn: Some(1), tx });
+        let dead_conns = Arc::new(HashMap::with_capacity(1));
+        let is_shutting_down = Arc::new(AtomicBool::new(false));
+        let proxy = TcpProxy::new(reader, 1, &channel_map, &dead_conns, &is_shutting_down);
+        tokio::spawn(proxy.start());
+        // the second frame still arrives, which it could not do if the first had ended the loop
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("the read loop died on a frame nobody was waiting on")
+            .expect("the channel closed instead of delivering the failure");
+        server.await.expect("the writer task panicked");
+        match msg {
+            ClientMsg::ServerError(code, msg, _) => {
+                assert_eq!(code, ErrorCode::Internal);
+                assert_eq!(msg, "somebody is");
+            }
+            other => panic!("an error frame was delivered as something else: {other:?}"),
+        }
+    }
+
+    /// A connection that dies fails the queries written to it, and only those
+    ///
+    /// A result stream holds a clone of its own sender, so a dropped connection never closes the
+    /// channel a caller is parked on — before the sweep, a query whose connection died waited
+    /// forever with the failure discarded along with the read task's join handle. The second
+    /// query here is the other half of the test: the channel map is shared by the whole pool, so
+    /// a sweep that failed everything would break every healthy connection alongside the dead one.
+    #[tokio::test]
+    async fn a_dead_connection_fails_the_queries_it_owed_and_no_others() {
+        // stand up a socket pair whose server side hangs up without answering
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("failed to bind a listener");
+        let addr = listener.local_addr().expect("listener had no address");
+        let server = tokio::spawn(async move {
+            let (sock, _) = listener.accept().await.expect("failed to accept");
+            drop(sock);
+        });
+        // register one query on the connection that is about to die, and one on another
+        let stream = TcpStream::connect(addr).await.expect("failed to connect");
+        let (reader, _writer) = stream.into_split();
+        let channel_map = Arc::new(HashMap::with_capacity(2));
+        let (doomed_tx, doomed_rx) = kanal::unbounded_async();
+        let (other_tx, other_rx) = kanal::unbounded_async();
+        channel_map.pin().insert(
+            Uuid::new_v4(),
+            Waiter {
+                conn: Some(1),
+                tx: doomed_tx,
+            },
+        );
+        channel_map.pin().insert(
+            Uuid::new_v4(),
+            Waiter {
+                conn: Some(2),
+                tx: other_tx,
+            },
+        );
+        // read that connection until it ends
+        let dead_conns = Arc::new(HashMap::with_capacity(1));
+        let is_shutting_down = Arc::new(AtomicBool::new(false));
+        let proxy = TcpProxy::new(reader, 1, &channel_map, &dead_conns, &is_shutting_down);
+        let _ = proxy.start().await;
+        server.await.expect("the listener task panicked");
+        // the query on the dead connection was told, rather than left waiting
+        let msg = doomed_rx
+            .try_recv()
+            .expect("the channel closed")
+            .expect("a query on a dead connection was not told about it");
+        match msg {
+            ClientMsg::ServerError(code, _, _) => assert_eq!(code, ErrorCode::ConnectionLost),
+            other => panic!("a dead connection delivered something else: {other:?}"),
+        }
+        // and the query on the other connection was left entirely alone
+        assert!(
+            other_rx.try_recv().expect("the channel closed").is_none(),
+            "one dead connection failed a query belonging to another"
         );
     }
 }

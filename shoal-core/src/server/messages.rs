@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 use super::shard::{ShardContact, ShardInfo};
 use super::stage_profile::{StageStamps, Stamp};
+use crate::shared::responses::ResponseError;
 use crate::shared::traits::{QuerySupport, ShoalDatabase};
 
 /// The metadata about a query from a client
@@ -45,6 +46,13 @@ pub struct QueryMetadata {
     ///
     /// This is server side state on a server side struct - it never reaches a client.
     pub skip_disk: Option<u64>,
+    /// The failure this query must answer with instead of the rows it could not read
+    ///
+    /// Set when a read this query was parked on gave up. It travels with the query rather than
+    /// being answered on the spot because the query may still be parked on *another* partition:
+    /// answering here would put a second response at an index that already has one. It is
+    /// applied where this query finally produces a response, which happens exactly once.
+    pub failed: Option<ResponseError>,
 }
 
 impl QueryMetadata {
@@ -77,6 +85,8 @@ impl QueryMetadata {
             // a query starts out with no reason to skip a read, since only a load that has
             // already failed can give it one
             skip_disk: None,
+            // and with nothing to report, since nothing has failed yet
+            failed: None,
         }
     }
 
@@ -169,13 +179,18 @@ where
     /// fails has to say so rather than simply not arriving - otherwise every query parked on
     /// that partition waits for a message that will never be sent, and so does its client.
     ///
-    /// This carries no error. The loader is where the context is richest, so it logs what went
-    /// wrong; what the shard needs is only which partition to release.
+    /// The failure it carries is what the *client* is told, which is deliberately less than
+    /// what is logged: the loader is where the context is richest and it logs the path and the
+    /// errno, while this carries only a class and a line naming the table and partition. A
+    /// pruned partition carries no failure at all, because a partition that really is gone is
+    /// answered correctly by finding nothing.
     PartitionLoadFailed {
         /// The table the partition that could not be read belongs to
         table: D::TableNames,
         /// The partition that could not be read
         partition_id: u64,
+        /// What the queries parked on it should answer with, if this was a failure at all
+        error: Option<ResponseError>,
     },
     /// Some data has been flushed to storage
     ///
@@ -226,7 +241,9 @@ impl<D: ShoalDatabase> Clone for ServerMsg<D> {
             ServerMsg::PartitionLoadFailed {
                 table,
                 partition_id,
+                error,
             } => ServerMsg::PartitionLoadFailed {
+                error: error.clone(),
                 table: *table,
                 partition_id: *partition_id,
             },

@@ -84,9 +84,13 @@ them on the wire immediately rather than coalesced.
 ## 2. Reading the request
 
 Before any of this, the connection shakes hands: the client sends a `Hello` naming the protocol
-version, its schema fingerprint and the largest frame it will accept, and the server answers with
-a `HelloAck` that either agrees or refuses ([Wire Protocol](wire-protocol.md#the-handshake)). Both
-halves run in the per-connection task, before the stream is split, under a deadline.
+version, its schema fingerprint, the largest frame it will accept and the authentication mechanisms
+it can do, and the server answers with a `HelloAck` that either agrees or refuses
+([Wire Protocol](wire-protocol.md#the-handshake)). If that ack named a mechanism — which only
+happens when the server's config asked for one — an
+[authentication exchange](wire-protocol.md#the-authentication-exchange) follows and has to succeed
+before anything below runs ([F12](../features/authentication.md)). All of it runs in the
+per-connection task, before the stream is split, under one deadline.
 
 ```rust
 let mut preamble = [0u8; protocol::REQUEST_PREAMBLE_LEN];
@@ -386,8 +390,10 @@ whole lifecycle including the asynchronous flush.
 - ~~Socket and channel errors are panics rather than per-connection teardown.~~ Both relays tear
   down the connection now; the panics elsewhere in the server are
   [item 16](../appendix/known-issues.md#16-panics-on-the-hot-path).
-- A response too large to frame closes the connection with nothing on the wire saying why
-  ([item 61](../appendix/known-issues.md#61-a-response-too-large-to-frame-closes-a-connection-silently)).
+- ~~A response too large to frame closes the connection with nothing on the wire saying why.~~
+  Fixed by [F11](../features/error-channel.md): the relay writes an `Error` frame naming the query
+  and both sizes, and keeps serving every other query on that connection
+  ([Resolved #56, 61](../appendix/resolved/response-error-channel.md)).
 - `end` is computed incorrectly for streamed bundles, and underflows on empty ones.
 - Reordering the gathered rows rehashes each row's partition key, since a response carries rows
   and not the partition they came from ([Optimizations](../appendix/optimizations.md#o18-the-gathered-reorder-rehashes-every-rows-partition-key)).

@@ -22,6 +22,13 @@ all. Persisted as a checksummed snapshot plus its own intent log. See
 rather than compacted in place, to avoid invalidating entries written earlier in the same
 compaction pass.
 
+**Authentication mechanism** — How a peer proves who it is: `AuthMechanism::ScramSha256`, or
+`MutualTls`, which is defined and refused until there is TLS. A client offers a *set* of them in
+its `Hello` and the server names exactly one in its `HelloAck`, walking its own preference order —
+so the server chooses and the client cannot negotiate itself down to the weaker of two. Zero means
+"none", which is what a server requiring nothing writes and what every peer wrote before
+[F12](../features/authentication.md).
+
 **Batch timing** (`per_batch`) — A benchmark sample taken once per batch of queries and charged
 to every query in it, so each is charged for the ones ahead of it. What a saturating workload
 produces, and what **every** macro percentile recorded before
@@ -39,6 +46,10 @@ an archive". Set on creation, cleared once the full archive copy has been merged
 **Compaction** — Two distinct operations sharing one background task. *Intent compaction*
 folds a sealed intent log into archives. *Archive compaction* reclaims space from archives
 whose live fraction has dropped below 50%. See [Compaction](../storage/compaction.md).
+
+**Connection-level error** — An error frame whose query id is nil. It is about the connection
+rather than about any one query, and it ends the read loop that receives it. Every other error frame
+names the bundle it belongs to.
 
 **Control and null** — A pair of benchmarks differing in exactly one axis, one of which the
 change under test cannot reach. The shape [F4](../features/validated-archives.md) settled on and
@@ -58,6 +69,24 @@ Nothing they hold is ever evicted, and nothing survives a restart. See
 
 **`NoStorage`** — The storage engine that stores nothing. The second implementation of
 `StorageSupport` beside `FileSystem`, and what makes a table ephemeral.
+
+**Decoy credential** — What `CredentialStore::lookup` hands back for a user that does not exist: a
+salt derived from the username and a per-process key, the default iteration count, and two keys no
+password derives to. It exists so that an unknown user and a wrong password fail at the same step,
+in the same words, after the same work — a store that answered "no such user" early would make a
+login a way to enumerate accounts. See [F12](../features/authentication.md).
+
+**Error code** — The class of a failure, as a `u16` with pinned discriminants
+(`protocol::error::ErrorCode`). It rides in both halves of the error channel: in an `Error` frame's
+body, and inside `ResponseAction::Error` as a raw number, because the protocol module holds no rkyv
+and the payload is archived. A code this build does not recognize reads back as `Unknown` rather
+than failing to decode. See [F11](../features/error-channel.md).
+
+**Error frame** — A frame a server sends when a query failed and no response can carry it — in
+practice, when the response itself was too large to frame. Its body is a query id, a code, two
+reserved bytes and a message. The query id sits at exactly the offset a response frame's does, so a
+client reads one preamble for both and dispatches afterwards. Not to be confused with
+`ResponseAction::Error`, which is the same failure attached to a query rather than to a frame.
 
 **Evictable** — A partition eligible for eviction. `Accessible` partitions always are;
 `Loaded` partitions only once their generation has been compacted. See
@@ -95,6 +124,11 @@ fact that they were validated when the read that produced them landed. Its only 
 validates and its accessor does not, so a query seeks an evicted partition rather than re-running
 rkyv's validator over the whole buffer first ([F4](../features/validated-archives.md)).
 
+**Principal** — Who a connection belongs to: a name and the mechanism that proved it, produced by
+a completed authentication exchange. Logged by the connection task and consulted by **nothing** —
+it is what per-table authorization was filed as blocked on, and authorization is still unbuilt.
+See [F12](../features/authentication.md).
+
 **Partition** — The unit of storage, caching, eviction, and IO, addressed by a `u64` partition
 key. A sorted partition holds a `BTreeMap` of rows; an unsorted partition holds exactly one
 row.
@@ -121,6 +155,15 @@ had to discard. Three of its four counters mean data was lost; `updates_after_de
 and exists so the other three can be trusted. Summed across a shard's tables and reported once
 when the shard finishes starting. See
 [Recovery](../storage/recovery.md#what-recovery-discards).
+
+**SCRAM-SHA-256** — The password mechanism, RFC 5802 with RFC 7677's hash. The server stores a
+salt, an iteration count and two derived keys rather than a password; the client proves it knows
+the password without sending it; and the exchange authenticates the *server* to the client as well,
+through a final signature the client checks. Three round trips on top of the handshake.
+
+**Stored credential** — The four fields a server keeps per user: `salt`, `iterations`,
+`stored_key`, `server_key`. None of them is a password and none can be turned back into one.
+`stored_key` **is** still a secret: anything that can read it can replay it as a login.
 
 **Ring** — The tablet map, still named `Ring` in the source. Maps a partition key to the tablet
 holding it, and that tablet to the shard that owns it. Built whole from the shard count before

@@ -15,12 +15,21 @@ same question, and answering it once is most of the work.
 
 That is why this is a chapter rather than six entries in `todos.md`.
 
-**D2 has since landed as [F10](../features/framing-and-protocol-evolution.md)**, which is the
+**D2 has since landed**, in two parts. [F10](../features/framing-and-protocol-evolution.md) is the
 answer to that shared question: a version, a message type, two flag bytes, a bounded length, and a
-handshake carrying a schema fingerprint. The discriminants for `Auth`, `AuthResponse`, `Ping`,
-`Pong`, `Topology`, `GoAway` and `Cancel` are all defined and unwired, so each of the pages below
-now needs a call site rather than a flag day. What it did *not* take is the error channel, so the
-one edge in the table below that still names a missing format is the one D2 left behind.
+handshake carrying a schema fingerprint. [F11](../features/error-channel.md) took the error channel
+F10 had left out of scope, in both the `ResponseAction::Error` half and the frame-level `Error`
+half. The discriminants for `Ping`, `Pong`, `Topology`, `GoAway` and `Cancel` are all still defined
+and unwired, so each of the pages below now needs a call site rather than a flag day, and **no page
+in this chapter is waiting on a wire format any more.**
+
+**D3 has since landed by half**, as [F12](../features/authentication.md): SCRAM-SHA-256 spent the
+`Auth` and `AuthResponse` discriminants and two of the handshake's reserved bytes, and produced the
+`Principal` that per-table authorization was filed as blocked on. The mTLS half is still open and
+still waits on D4. The most useful thing that build says about this chapter is in its own
+[Recommendation](authentication.md#recommendation): the D4 → D3 edge below was **wrong**, and it
+was wrong in a way worth watching for on the other pages — it treated two mechanisms as
+alternatives when they are two entries behind one negotiation step.
 
 ## The constraint every page inherits
 
@@ -88,7 +97,7 @@ since `XL` *means* "reaches the wire format, the on-disk format, or the client".
 | --- | --- | --- |
 | D1 | [The transport](transport.md) | Stay on TCP; QUIC's headline feature is already implemented in userspace and its crypto would end zero-copy |
 | D2 | [Framing and protocol evolution](framing.md) | An 8-byte header with a version, a type, and a bounded length — the keystone, and the flag day worth spending now |
-| D3 | [Authentication](authentication.md) | mTLS identity as the primary, SCRAM-SHA-256 for deployments with no PKI |
+| D3 | [Authentication](authentication.md) | mTLS identity as the primary, SCRAM-SHA-256 for deployments with no PKI. **Half built** — [F12](../features/authentication.md) is the SCRAM half; mTLS waits on D4 |
 | D4 | [Encryption in transit](encryption.md) | rustls decrypting in place into the response buffer, so TLS does not cost the zero-copy path |
 | D5 | [Runtime portability](runtimes.md) | Split the crate first — the client is not tokio-portable, it is *glommio-infected*, and that is the real defect |
 | D6 | [A production connection pool](connection-pool.md) | Deadlines, real health checks, a builder, and a `Drop` — the most stability per unit of design risk |
@@ -104,7 +113,7 @@ The book has no mermaid preprocessor, so this is a table
 | Edge | Why |
 | --- | --- |
 | ~~D2~~ → D3, D4, D6, D7 | A handshake, a `Ping`, a `Topology` push, and a `GoAway` are message types, and there was no message-type field to carry one. **Satisfied** by [F10](../features/framing-and-protocol-evolution.md); all four discriminants exist |
-| D4 → D3 | mTLS makes authentication a byproduct of encryption. Choosing SCRAM instead is only *forced* if D4 is declined, so D4 decides D3 rather than the reverse |
+| ~~D4 → D3~~ | mTLS makes authentication a byproduct of encryption. Choosing SCRAM instead is only *forced* if D4 is declined, so D4 decides D3 rather than the reverse. **This edge was not real.** The two are mechanisms behind one negotiation step rather than alternatives, so D4 adds a mechanism to D3 instead of deciding it — see [F12](../features/authentication.md). What is left is a soft edge in the other direction: D3's *mTLS half* waits on D4 |
 | D5 → ~~D2~~, D7 | The crate split has to happen before anything outside `shoal-core` can consume a topology map. It turned out **not** to gate the protocol module: that module depends on `core` and `uuid` and nothing else, so it was written inside `shoal-core` and moves to `shoal-proto` unchanged |
 | D6 → D7 | Shard-awareness turns one flat pool into per-shard sub-pools. The pool has to be rebuildable before it can be resharded |
 | D2 ↔ D8 | The strongest compile-time guarantee available — that the peer was built from the same schema — lives in a handshake field, not in the type system |
@@ -133,8 +142,10 @@ bounded. It is also the cheapest thing on the list. Nothing below can be judged 
    lands, and it is cheapest now, while the only deployments are tests, benchmarks, and `shoalctl`.
 3. **[D6](connection-pool.md).** Deadlines, health, configuration, `Drop`. The largest stability
    return for the least design risk, and it is where the seam for D7 gets put in.
-4. **[D4](encryption.md), then [D3](authentication.md).** In that order, because the encryption
-   decision is what makes the authentication decision.
+4. ~~**[D4](encryption.md), then [D3](authentication.md).** In that order, because the encryption
+   decision is what makes the authentication decision.~~ **D3's SCRAM half was done first**, out of
+   this order and without D4, because the ordering rested on the edge struck through above. What is
+   left here is **[D4](encryption.md)**, which now also carries D3's remaining half.
 5. **[D8](typed-queries.md).** Entirely additive and parallel to all of the above. Its cheapest
    piece — the sealed bounds trait — could land any time.
 6. **[D7](shard-aware-routing.md).** Last, and only after `routing` says what the hop it removes is

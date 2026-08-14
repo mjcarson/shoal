@@ -1,11 +1,13 @@
 # Wire Protocol
 
 Shoal speaks a framed binary protocol over TCP. Every frame opens with the same eight bytes; a
-connection opens with a handshake that agrees a protocol version and a schema. There is no
-authentication and no encryption.
+connection opens with a handshake that agrees a protocol version, a schema, and — since
+[F12](../features/authentication.md) — optionally an authentication mechanism. There is no
+encryption.
 
-The format lives in one place — `shoal-core/src/shared/protocol.rs`, with `protocol/handshake.rs`
-and `protocol/fingerprint.rs` beside it. It depends on `core` and `uuid` and nothing else, which
+The format lives in one place — `shoal-core/src/shared/protocol.rs`, with `protocol/handshake.rs`,
+`protocol/fingerprint.rs`, `protocol/error.rs` and `protocol/auth.rs` beside it. It depends on
+`core` and `uuid` and nothing else, which
 is deliberate: the server reads with glommio and the client with tokio, and the two share every
 decision in the module and none of the I/O ([F10](../features/framing-and-protocol-evolution.md)).
 
@@ -37,25 +39,28 @@ what makes `decode_response`'s "shorter than its own query id" check possible.
 | --- | --- | --- | --- |
 | `Hello` | 1 | client → server | yes |
 | `HelloAck` | 2 | server → client | yes |
-| `Auth` | 3 | client → server | reserved — [D3](../direction/authentication.md) |
-| `AuthResponse` | 4 | server → client | reserved — [D3](../direction/authentication.md) |
+| `Auth` | 3 | client → server | yes — [F12](../features/authentication.md) |
+| `AuthResponse` | 4 | server → client | yes — [F12](../features/authentication.md) |
 | `Queries` | 5 | client → server | yes |
 | `Response` | 6 | server → client | yes |
 | `Ping` | 7 | both | reserved — [D6](../direction/connection-pool.md) |
 | `Pong` | 8 | both | reserved — [D6](../direction/connection-pool.md) |
 | `Topology` | 9 | server → client | reserved — [D7](../direction/shard-aware-routing.md) |
-| `Error` | 10 | server → client | reserved — the error channel |
+| `Error` | 10 | server → client | yes — [F11](../features/error-channel.md) |
 | `GoAway` | 11 | server → client | reserved — [item 32](../appendix/known-issues.md#32-a-disconnected-client-is-never-cleaned-up-anywhere) |
 | `Cancel` | 12 | client → server | reserved — [item 60](../appendix/known-issues.md#60-a-result-stream-that-is-not-drained-to-the-end-leaks-its-slot-in-the-client) |
 
-Starting at 1 rather than 0 is what stops a zeroed buffer decoding as a valid type. The eight
+Starting at 1 rather than 0 is what stops a zeroed buffer decoding as a valid type. The five
 reserved entries exist so that the features that need them are a call site rather than a second
-flag day.
+flag day — which is what `Auth`, `AuthResponse` and `Error` turned out to be.
 
 `flags` is sixteen bits, four of which are claimed: `IS_ERROR` (1), `STALE_TOPOLOGY` (2), `LAST`
-(4), `REFUSED` (8). Only `REFUSED` is set today, on a `HelloAck` that turns a client away.
-**Unknown bits are preserved, never rejected** — that is the whole mechanism by which the other
-twelve can be spent one at a time without a version bump.
+(4), `REFUSED` (8). Two are set today: `REFUSED`, on a `HelloAck` that turns a client away, and
+`IS_ERROR`, on every `Error` frame. `IS_ERROR` is redundant against the type byte on that frame and
+is set anyway, so that "is this a failure" stays one uniform bit test when a `Response` frame
+carrying an error payload starts setting it too — **the type byte remains authoritative, and the
+flag is never the sole test**. **Unknown bits are preserved, never rejected** — that is the whole
+mechanism by which the other twelve can be spent one at a time without a version bump.
 
 ## Framing
 
@@ -142,9 +147,14 @@ it writes and then reads; the server reads and then writes. If both waited to re
 connection would deadlock and nothing in the frame layout would show it.
 
 ```
-Hello    body, 16 B, client → server : fingerprint u64 LE | max_frame_bytes u32 LE | reserved [u8;4]
-HelloAck body, 16 B, server → client : fingerprint u64 LE | max_frame_bytes u32 LE | reason u8 | reserved [u8;3]
+Hello    body, 16 B, client → server : fingerprint u64 LE | max_frame_bytes u32 LE | mechanisms u16 LE | reserved [u8;2]
+HelloAck body, 16 B, server → client : fingerprint u64 LE | max_frame_bytes u32 LE | reason u8 | mechanism u8 | reserved [u8;2]
 ```
+
+The `mechanisms` and `mechanism` fields were cut out of the reserved tails by
+[F12](../features/authentication.md), not appended to the bodies — both are still 16 bytes and the
+version byte did not move. That is what those bytes were reserved for. Zero means "none" in both,
+which is what an older peer wrote and read.
 
 The bodies are **fixed bytes, not rkyv archives**. The whole purpose of the exchange is to detect
 that the peer's schema — and with it, potentially, its rkyv layout — does not match ours, and
@@ -153,8 +163,8 @@ decoding it with rkyv would make the detector depend on the thing it detects.
 The version is not in the body. It is in the header of every frame, which is why the version byte
 is per frame rather than per connection.
 
-`reason` is 0 for accepted, 1 for an unsupported version, 2 for a schema mismatch. **A refusal is
-still a `HelloAck`**, with `REFUSED` set in the header and the server's own version and fingerprint
+`reason` is 0 for accepted, 1 for an unsupported version, 2 for a schema mismatch, 3 for no
+authentication mechanism in common. **A refusal is still a `HelloAck`**, with `REFUSED` set in the header and the server's own version and fingerprint
 in the body, written before the socket closes — so a client that was turned away learns why rather
 than seeing a reset. The server drains the body it was told about before writing that reply, for a
 TCP reason rather than a protocol one: closing a socket with unread bytes queued sends a reset,
@@ -177,6 +187,33 @@ subsequent connection to a single-shard server.
 The client's half runs under a `tokio::time::timeout`. This is not optional: `bb8`'s connection
 timeout bounds its retry loop and `pool.get()`, not `connect` itself, so without it a server that
 accepts and then stalls would park `Shoal::new` forever.
+
+## The authentication exchange
+
+Only when the `HelloAck` named a mechanism, which only happens when the server's config asked for
+one. It runs between the ack and the split, on both sides, and under the same ten second deadline
+the handshake has — a peer that stalls between its `Hello` and its proof holds exactly as much of
+the server as one that stalls before either.
+
+```
+Auth         body, 4 B + payload, client → server : mechanism u8 | reserved [u8;3] | SASL payload
+AuthResponse body, 4 B + payload, server → client : status u8   | reserved [u8;3] | SASL payload
+```
+
+`status` is 1 for a challenge, 2 for success, 3 for a refusal — and a refusal also sets `REFUSED`
+in the header, so it can be told from a challenge without reading the body. Both start at 1, so a
+zeroed buffer decodes as neither. The payload is opaque to the protocol module: it is RFC 5802's
+message text, and what it means lives in `shared::auth`, which is a separate module so that
+`protocol` keeps its `core`-and-`uuid`-only dependency list.
+
+**These frames carry no query id**, unlike every other frame a server sends a client. They belong
+to the pre-split part of a connection, alongside the handshake, where the reader is
+`ShoalConnectionManager::connect` rather than the response proxy and reads one frame at a time
+knowing which one it asked for.
+
+**The payload bound is `MAX_AUTH_PAYLOAD_LEN`, 4 KiB — not the connection's `max_frame_bytes`.**
+These are the only variable-length frames read from a peer that has proved nothing, and the frame
+bound is 64 MiB by default.
 
 ## The schema fingerprint
 
@@ -203,7 +240,9 @@ defaulted so that a hand-written implementation cannot silently opt out.
 
 **This is a mistake detector, not authentication.** A hostile peer can send whatever fingerprint it
 likes, and a 64-bit hash can collide. `bytecheck` remains the second line of defence on both paths.
-Proving who a peer is needs [D3](../direction/authentication.md).
+Proving who a peer is is [F12](../features/authentication.md), which runs *after* this check and is
+a separate exchange for exactly this reason — the fingerprint says two peers were built from the
+same schema, and says nothing about whether either of them should be talking to the other.
 
 ## Payloads
 
@@ -254,16 +293,40 @@ pub enum ResponseAction<T> {
     Delete(bool),
     Update(bool),
     Exists(bool),
+    Error(ResponseError),
 }
 ```
 
 `shoal-core/src/shared/responses.rs`
 
-Mutations return only a boolean. **There is still no error channel in the protocol**: a failed
-insert and a rejected insert are both `Insert(false)`, and a get that found nothing and a get
-against a nonexistent partition are both `Get(None)`. The frame-level `Error` type and the flag bit
-it would use both exist; nothing constructs either
-([item 56](../appendix/known-issues.md#56-a-response-cannot-say-that-a-read-failed)).
+Mutations return only a boolean, so a failed insert and a rejected insert are both `Insert(false)`.
+~~**There is still no error channel in the protocol**~~ — [F11](../features/error-channel.md) built
+it. A query that *could not run* is `Error(ResponseError { code, msg })`, where the code is a pinned
+`u16` from `protocol::error::ErrorCode`, so a get that found nothing and a get whose partition could
+not be read are no longer the same answer. The variant is appended, never inserted: rkyv derives the
+wire representation from the declaration order.
+
+### The `Error` frame
+
+For a failure with no response to attach it to, the server sends a frame of its own:
+
+```text
+ ┌──────────────────┬──────────┬───────────┬─────────────────────┐
+ │ query id (16 B)  │ code     │ reserved  │ message (UTF-8)     │
+ │                  │ (u16 LE) │  (2 B)    │  len = rest of body │
+ └──────────────────┴──────────┴───────────┴─────────────────────┘
+```
+
+The query id is at exactly the offset a response frame puts one, which is what lets a client read
+one fixed 24-byte preamble for both and dispatch on the type afterwards. A nil id means the frame is
+about the connection rather than about a query. The message is bounded at four kibibytes
+independently of `max_frame_bytes`, so the error channel cannot become an allocation channel while
+staying inside the frame bound, and it is decoded lossily — a garbled message must not be allowed to
+swallow the code in front of it.
+
+This is what `client_tx_relay` sends when a response is too large to frame: it holds an opaque
+`AlignedVec` and cannot build a `ResponseKinds`, and closing the connection was the only other thing
+it could do ([Resolved #56, 61](../appendix/resolved/response-error-channel.md)).
 
 ## Ordering and completion
 
@@ -343,16 +406,20 @@ concatenated, on either direction of the connection. The encoders return stack a
 
 ## Limitations
 
-- **No authentication, no TLS.** Anything that can reach the port can read and write any table, and
-  the handshake proves nothing about who a peer is
-  ([D3](../direction/authentication.md), [D4](../direction/encryption.md)).
-- **No error responses.** `ResponseAction` has five variants and none carries an error
-  ([item 56](../appendix/known-issues.md#56-a-response-cannot-say-that-a-read-failed)). This is what
-  stops a read that failed being distinguishable from a read that found nothing, and it is why a
-  response too large to frame closes a connection with nothing on the wire to say why
-  ([item 61](../appendix/known-issues.md#61-a-response-too-large-to-frame-closes-a-connection-silently)).
-- **Eight message types are defined and unwired.** `Ping`/`Pong`, `Cancel`, `GoAway`, `Topology`,
-  `Auth`/`AuthResponse`, `Error`. Each is now a call site rather than a flag day.
+- ~~**No authentication, no TLS.**~~ Half built as [F12](../features/authentication.md): a server
+  can require SCRAM-SHA-256 and refuse a client that cannot do it, and a connection that completes
+  one carries a `Principal`. **What is left is the larger half.** There is no TLS, so the username
+  and the whole exchange are visible to anything on the path
+  ([D4](../direction/encryption.md)); there is no authorization, so a principal that authenticated
+  can still read and write *any* table; and a server with no `auth` section — which is the default
+  and every deployment today — still lets anything that reaches the port do anything.
+- ~~**No error responses.**~~ Built as [F11](../features/error-channel.md). What is left is that an
+  `Error` **frame** names a bundle rather than one query in it, because a query id is a bundle id —
+  so an oversize response fails a whole result stream. The two reserved bytes after the code are
+  where an index would go.
+- **Five message types are defined and unwired.** `Ping`/`Pong`, `Cancel`, `GoAway`, `Topology`.
+  Each is now a call site rather than a flag day, which is what `Auth`/`AuthResponse` turned out
+  to be.
 - **Little-endian assumed** for every field the protocol owns.
 - **No deadline on a frame** once the handshake is done. A peer that sends a header and then stops
   parks the reader indefinitely ([D6](../direction/connection-pool.md#deadlines)).

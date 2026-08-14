@@ -31,6 +31,8 @@
 
 use uuid::Uuid;
 
+pub mod auth;
+pub mod error;
 pub mod fingerprint;
 pub mod handshake;
 
@@ -235,6 +237,10 @@ pub enum ProtocolError {
     },
     /// The peer sent a message type this build does not know
     UnknownMessageType(u8),
+    /// The peer named an authentication mechanism this build does not know
+    UnknownAuthMechanism(u8),
+    /// The peer named an authentication status this build does not know
+    UnknownAuthStatus(u8),
     /// The peer sent a valid message type, but not the one this frame had to be
     UnexpectedMessageType {
         /// The message type that had to be here
@@ -291,6 +297,12 @@ impl std::fmt::Display for ProtocolError {
             ),
             ProtocolError::UnknownMessageType(raw) => {
                 write!(f, "the peer sent an unknown message type: {raw}")
+            }
+            ProtocolError::UnknownAuthMechanism(raw) => {
+                write!(f, "the peer named an unknown authentication mechanism: {raw}")
+            }
+            ProtocolError::UnknownAuthStatus(raw) => {
+                write!(f, "the peer named an unknown authentication status: {raw}")
             }
             ProtocolError::UnexpectedMessageType { expected, got } => {
                 write!(f, "expected a {expected} frame but got a {got} frame")
@@ -487,6 +499,21 @@ impl Header {
     }
 }
 
+/// The routing fields every frame a server sends a client carries, whatever its type
+///
+/// A server writes two kinds of frame down a connection — a response and an error — and both put
+/// their query id in the same place, so a client can read one fixed size preamble and only then
+/// decide which it is holding. This is what that read decodes to, before its type is judged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServerFrame {
+    /// The header of this frame
+    pub header: Header,
+    /// The query this frame belongs to, or nil if it is about the connection itself
+    pub query_id: Uuid,
+    /// The number of body bytes after the query id
+    pub rest_len: usize,
+}
+
 /// A response frame's header and the routing fields that follow it
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResponseFrame {
@@ -568,6 +595,49 @@ pub const fn decode_request(
     }
 }
 
+/// Read the preamble of any frame a server sends a client, without judging its type
+///
+/// A client reads the same fixed preamble for every frame that arrives and dispatches on the type
+/// afterwards, so this stops one byte short of deciding what the frame is. Everything that is
+/// wrong with a *header* is still an error here — a version we do not speak, a length past our
+/// bound, a type byte that names nothing — because none of those depend on which type it turned
+/// out to be.
+///
+/// # Arguments
+///
+/// * `raw` - The preamble bytes to read
+/// * `max_frame_bytes` - The largest frame we are willing to allocate for
+pub fn decode_server_frame(
+    raw: &[u8; RESPONSE_PREAMBLE_LEN],
+    max_frame_bytes: u32,
+) -> Result<ServerFrame, ProtocolError> {
+    // pull the header out of the front of the preamble and check it
+    let mut header_bytes = [0u8; HEADER_LEN];
+    header_bytes.copy_from_slice(&raw[..HEADER_LEN]);
+    let header = Header::decode(&header_bytes, max_frame_bytes)?;
+    // every frame a server sends carries a query id, so a shorter one cannot be one
+    //
+    // this check is only possible because the length counts everything after the header rather
+    // than just the payload
+    let rest_len = match header.body_len().checked_sub(QUERY_ID_LEN) {
+        Some(rest_len) => rest_len,
+        None => {
+            return Err(ProtocolError::BodyTooShort {
+                need: QUERY_ID_LEN,
+                got: header.len,
+            })
+        }
+    };
+    // the query id sits between the header and whatever the rest of the body is
+    let mut id_bytes = [0u8; QUERY_ID_LEN];
+    id_bytes.copy_from_slice(&raw[HEADER_LEN..]);
+    Ok(ServerFrame {
+        header,
+        query_id: Uuid::from_bytes(id_bytes),
+        rest_len,
+    })
+}
+
 /// Read the preamble of a single response
 ///
 /// # Arguments
@@ -578,29 +648,13 @@ pub fn decode_response(
     raw: &[u8; RESPONSE_PREAMBLE_LEN],
     max_frame_bytes: u32,
 ) -> Result<ResponseFrame, ProtocolError> {
-    // pull the header out of the front of the preamble and check it
-    let mut header_bytes = [0u8; HEADER_LEN];
-    header_bytes.copy_from_slice(&raw[..HEADER_LEN]);
-    let header = Header::decode(&header_bytes, max_frame_bytes)?.expect(MessageType::Response)?;
-    // a response frame always carries a query id, so a shorter one cannot be a response
-    //
-    // this check is only possible because the length counts everything after the header rather
-    // than just the payload
-    let payload_len = match header.body_len().checked_sub(QUERY_ID_LEN) {
-        Some(payload_len) => payload_len,
-        None => {
-            return Err(ProtocolError::BodyTooShort {
-                need: QUERY_ID_LEN,
-                got: header.len,
-            })
-        }
-    };
-    // the query id sits between the header and the payload
-    let mut id_bytes = [0u8; QUERY_ID_LEN];
-    id_bytes.copy_from_slice(&raw[HEADER_LEN..]);
+    // read the fields every server frame has, then check that this one is a response
+    let frame = decode_server_frame(raw, max_frame_bytes)?;
+    let header = frame.header.expect(MessageType::Response)?;
     Ok(ResponseFrame {
         header,
-        query_id: Uuid::from_bytes(id_bytes),
-        payload_len,
+        query_id: frame.query_id,
+        // everything after a response frame's query id is its payload
+        payload_len: frame.rest_len,
     })
 }

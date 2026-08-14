@@ -291,36 +291,41 @@ want, so it is worth building once rather than twice.
 
 ### An error channel in the protocol
 
-`ResponseAction` can express only booleans and rows
-(`shared/responses.rs:27-39`). A server-side failure has nowhere to go, which is why the
-server is full of `panic!`s — there is no way to say "that query failed" to a client. Adding
-an error variant would unlock replacing most hot-path panics with recoverable errors
-([Known Issues #16](known-issues.md#16-panics-on-the-hot-path)).
+> **Landed as [F11](../features/error-channel.md).** What follows is what is left of this entry,
+> and the part of it that was wrong.
 
-The design for it is [D2](../direction/framing.md#the-error-channel), which folded it into a
-framing change that also carries a version, a message type, and a bounded length — because a
-frame-level `Error` and a `ResponseAction::Error` want the same flag day, and items 51, 55, and 56
-all want the same variant.
+`ResponseAction` now carries an `Error(ResponseError)` variant and the frame format constructs its
+reserved `Error` type, so a server-side failure has somewhere to go. This entry claimed that
+"items 51, 55, and 56 all want the same variant". Two of them did.
+[Item 55](known-issues.md#55-a-get-that-found-nothing-is-reported-as-a-query-that-failed) did not:
+a get that found nothing is a query that *worked*, and what it wants is for `send_one` to take a
+`QuerySuceededOpts` rather than always using the default. Filing it here made it look blocked on a
+wire change for a year when it was a local edit to one function.
 
-**The framing half landed and this did not.** [F10](../features/framing-and-protocol-evolution.md)
-took the header, the handshake and the bound, and left the error channel out of scope. What that
-bought this entry is that it is no longer a flag day: message type 10 is `Error`, flag bit 0 is
-`IS_ERROR`, and both are defined and unconstructed. What it still needs is
-`ResponseAction::Error` — which *is* a format change, and the one place where "fold it into one
-flag day" turned out to be advice that was not taken. The reason is scope rather than
-disagreement: the error channel reaches the shard reply path, the response stream and `send_one`,
-and doing it beside the header would have meant one change nobody could review. It also gained a
-fifth caller in the meantime,
-[item 61](known-issues.md#61-a-response-too-large-to-frame-closes-a-connection-silently).
+What this entry still holds:
+
+- **The eight `storage.commit(..).unwrap()` sites.** This entry's original claim — that an error
+  variant "would unlock replacing most hot-path panics with recoverable errors"
+  ([Known Issues #16](known-issues.md#16-panics-on-the-hot-path)) — is now true and untaken. A full
+  disk on an ordinary insert still panics the shard, and it now has somewhere to report instead.
+- **`Flags::IS_ERROR` on a response frame whose payload is an error.** F11 sets it on `Error`
+  frames only. Setting it on responses would mean threading a flag through `client_tx_relay`'s
+  `(Uuid, Span, StageStamps, AlignedVec)` tuple, and so through `ServerMsg::NewClient`,
+  `client_map` and `Shard::reply`, to teach the relay about a payload it exists to treat as opaque.
+  Worth doing when something needs to branch on it without decoding the payload; not before.
+- **An index in the `Error` frame.** Its query id is a bundle id, so a frame-level failure fails a
+  whole result stream rather than the one query in it that failed. The two reserved bytes after the
+  code are where an index would go.
 
 ### Backpressure
 
 Every channel is unbounded ([Known Issues #15](known-issues.md#15-no-backpressure-anywhere)).
 Bounding them requires deciding what to do when a shard is saturated — shed load, block the
-coordinator, or reject the client — which requires the error channel above.
-
-Sequenced accordingly in [D6](../direction/connection-pool.md#bounded-channels), behind
-[D2](../direction/framing.md#the-error-channel).
+coordinator, or reject the client — ~~which requires the error channel above~~. **That
+prerequisite is met.** [F11](../features/error-channel.md) made shedding sayable:
+`ErrorCode::Shedding` is defined and a query the server declined can be reported as declined rather
+than as an empty result. What is left is the bound itself and the policy that decides when it is
+hit, in [D6](../direction/connection-pool.md#bounded-channels).
 
 ### Timeouts
 
@@ -369,13 +374,43 @@ answer what the wire actually costs, by being the same query with the wire remov
 
 ### Per-table authorization
 
-[D3](../direction/authentication.md) gives a connection a principal and deliberately stops there.
+~~[D3](../direction/authentication.md) gives a connection a principal and deliberately stops
+there.~~ **[F12](../features/authentication.md) built the principal**, so this is unblocked rather
+than blocked. A connection that authenticated carries a `Principal` — a name and the mechanism that
+proved it — and **nothing reads it**.
+
 What that principal may read or write is a server-side catalog problem — somewhere to store grants,
 a check on the query path, and a way to express them in SHQL — and none of it is client design.
 
-Filed rather than sketched, because a design written before there is any notion of a principal
-would be a design for nothing. It is the thing authentication exists to enable, so it should be
-picked up immediately after, not much later.
+Filed rather than sketched, because ~~a design written before there is any notion of a principal
+would be a design for nothing~~ that reason has expired and the work has not been done. It is the
+thing authentication exists to enable, so it should be picked up immediately after, not much later.
+
+### The rest of authentication
+
+Four pieces [F12](../features/authentication.md) deliberately did not build, smallest first.
+
+**SASLprep.** RFC 5802 says to normalize a password before deriving from it and the build does not,
+so two clients that disagree about the Unicode normalization of a non-ASCII password derive
+different keys. It costs a dependency (`stringprep`) and is the identity function on ASCII, which
+is every password this database has been given. The place it goes is `ScramClient::new` and
+`StoredCredential::from_password`, and both have to change together or existing credentials stop
+matching.
+
+**Credential reload.** Users are read once, at startup, and derived per shard. Adding, removing or
+rotating one means restarting the server. The awkward part is not re-reading the file, it is that
+each shard holds its own `Rc<CredentialStore>` and nothing exists to hand all of them a new one.
+
+**Rate limiting a login.** Nothing bounds how often a peer may connect and guess, and each guess
+costs the server a PBKDF2 derivation — which is the wrong side of that trade, since the client can
+send a garbage proof without doing one. Also filed in [Known Issues](known-issues.md), because the
+absence is a defect rather than a missing feature.
+
+**A re-auth ticket.** [D3](../direction/authentication.md#what-it-costs) proposes one to collapse
+SCRAM's rounds on the second and subsequent connections of a pool. It is worth having **only behind
+TLS**: a ticket in `Hello` is a bearer token, replayable by anything that sees it, which is exactly
+what the options table rejected a bearer token for. Filed here rather than acted on, and it should
+not be picked up before [D4](../direction/encryption.md).
 
 ### Archive map reconstruction
 

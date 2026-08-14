@@ -1,5 +1,13 @@
 # D3. Authentication
 
+> **Half of this has been built**, as [F12](../features/authentication.md). The SCRAM-SHA-256 half
+> landed with a mechanism-negotiation step in front of it; the mTLS half is still open and is still
+> waiting on [D4](encryption.md). This page is kept as the design record, struck through where the
+> build answered it — the [chapter overview](overview.md#the-d-number) says why a `D` page outlives
+> the `F` page that supersedes it. **The build followed this page closely and got two things wrong
+> about it**, both marked below: the ordering argument in *Recommendation*, and one of the three
+> mitigations in *What it costs*.
+
 ## Context
 
 Anything that can reach the port can read and write any table. That is stated in the
@@ -16,12 +24,17 @@ designing before it is needed rather than after.
 
 ## What exists today
 
-Nothing. A search for authentication-related terms across `shoal-core`, `shoalctl`, and `shoal`
-returns no hits outside the SHQL tokenizer and two comments using the phrase "token ring". The only
-`tls` in the workspace is `tonic`'s `tls-roots` feature, pulled in by the OTLP trace exporter
-(`shoal-core/src/server/trace.rs`) and unrelated to client connections.
+> **As of [F12](../features/authentication.md) this section describes the past.** There is now a
+> `shared::auth` module holding SCRAM-SHA-256 and a credential store, an `auth` section on the
+> config, and a `Shoal::with_credentials` on the client. What follows is what was here when this
+> page was written.
 
-The network configuration has two fields:
+~~Nothing.~~ A search for authentication-related terms across `shoal-core`, `shoalctl`, and `shoal`
+returned no hits outside the SHQL tokenizer and two comments using the phrase "token ring". The
+only `tls` in the workspace is still `tonic`'s `tls-roots` feature, pulled in by the OTLP trace
+exporter (`shoal-core/src/server/trace.rs`) and unrelated to client connections.
+
+The network configuration had two fields:
 
 ```rust
 pub struct Networking {
@@ -34,9 +47,10 @@ pub struct Networking {
 
 `shoal-core/src/server/conf.rs:132-138`, `Networking`
 
-There is also no seam. Authentication is a per-connection fact established before the first query,
-which means a handshake, which means a message type — and the protocol has neither
-([D2](framing.md)).
+~~There is also no seam.~~ Authentication is a per-connection fact established before the first
+query, which means a handshake, which means a message type — and the protocol had neither
+([D2](framing.md)). It has both since [F10](../features/framing-and-protocol-evolution.md), which
+is what unblocked this.
 
 ## The options
 
@@ -71,16 +85,26 @@ certificate rotation, which a datacenter already has machinery for.
 | --- | --- |
 | **Rank** | **B** — after D4, which decides most of it |
 | **Impact** | Argued — this is a capability, not a cost |
-| **Difficulty** | L with mTLS (read a certificate subject), XL with SCRAM (a credential store, a multi-round exchange, and an operator surface) |
+| **Difficulty** | ~~L with mTLS (read a certificate subject), XL with SCRAM~~ — **SCRAM measured L, not XL.** The credential store is one map and a decoy derivation, the multi-round exchange is two state machines with one `step` method each, and the operator surface is a config section and a 60-line example. The estimate was made against building a credential *service*; what it needed was a credential *file* |
 | **Depends on** | ~~[D2](framing.md) for the handshake~~ — **satisfied**, the handshake and the `Auth`/`AuthResponse` discriminants landed with [F10](../features/framing-and-protocol-evolution.md); [D4](encryption.md) if mTLS is the mechanism |
-| **Blocks** | per-table authorization, quotas, and any audit log worth keeping |
-| **Tradeoff** | Contained — a connection either authenticates or is refused, and the failure is at connect time |
-| **Benchmark** | `transport/*`, unbuilt. The cost is per connection, not per query, so this is the one item here a query benchmark would not see |
+| **Blocks** | ~~per-table authorization, quotas, and any audit log worth keeping~~ — **unblocked** by [F12](../features/authentication.md), which produces a `Principal`. None of the three are built |
+| **Tradeoff** | Contained — a connection either authenticates or is refused, and the failure is at connect time. **Held**: the whole of F12 is off unless a config asks for it |
+| **Benchmark** | `transport/*`, unbuilt. The cost is per connection, not per query, so this is the one item here a query benchmark would not see. **Still true after the build** — see [O30](../appendix/optimizations.md) |
 
-The ordering matters and is the reason this page is ranked behind [D4](encryption.md): **the
-encryption decision makes the authentication decision.** Take TLS and mTLS is nearly free. Decline
-TLS and SCRAM becomes mandatory rather than a fallback, because a bearer token on a plaintext link
-is a password on the wire.
+~~The ordering matters and is the reason this page is ranked behind [D4](encryption.md): the
+encryption decision makes the authentication decision.~~
+
+**This was the one thing this page got wrong, and it is worth naming.** The ordering argument
+treats the two mechanisms as alternatives, so that choosing between them requires knowing whether
+there is TLS. They are not alternatives — they are two mechanisms behind one negotiation step, and
+a server can accept both. Once that is seen, the encryption decision does not decide anything about
+SCRAM at all: it decides whether there is a *second* mechanism to prefer over it. The half that
+needs no PKI was buildable the whole time, and D4 became an addition rather than a prerequisite.
+
+What survives of the argument is smaller and still true: **SCRAM over a plaintext link is the
+weaker deployment**, because an observer sees the username and the whole exchange, and a bearer
+token there would be a password on the wire. That is an argument for doing D4, not for having done
+it first.
 
 Copy Cassandra's shape for the SCRAM path. Its native protocol answers a `STARTUP` with
 `AUTHENTICATE` naming the mechanism, then exchanges `AUTH_RESPONSE` / `AUTH_CHALLENGE` until
@@ -109,11 +133,18 @@ order of value:
   connections of the same client, collapsing SCRAM's rounds to one.
 - **Lower `min_idle`**, which [D6](connection-pool.md) makes configurable anyway.
 
+**None of the three were built**, and the second is worse than this page makes it sound. A ticket
+in `Hello` is a bearer token with a shorter lifetime — it is replayable by anything that sees it,
+which on a plaintext link is anything on the path, and it re-introduces exactly the property
+[the options table](#the-options) rejects a bearer token for. It is worth having *behind TLS* and
+is not worth having instead of it. All three are filed in [TODOs](../appendix/todos.md).
+
 There is a compensating gain worth stating. The handshake belongs inside
 `ShoalConnectionManager::connect` (`shoal-core/src/client.rs:63-74`), which is where bb8 already
 re-establishes a connection after one dies. **A reconnect re-authenticates for free**, with no
 code anywhere else, because the pool already treats connection creation as the place where a
-connection becomes usable.
+connection becomes usable. **This held exactly**: the credentials sit on the manager and no
+reconnect path was touched.
 
 ## What it breaks
 
@@ -121,19 +152,30 @@ connection becomes usable.
   the point, but means the setting has to be configurable per listener and default to off until a
   deployment opts in. The same requirement [D4](encryption.md) has, for the same reason: the
   benchmark harness and the integration tests must be able to keep connecting without credentials
-  or the [frozen baseline](../operations/performance-baseline.md) becomes incomparable.
+  or the [frozen baseline](../operations/performance-baseline.md) becomes incomparable. **Built as
+  described**, though the granularity is per server rather than per listener, because there is one
+  listener.
 - **`shoalctl` grows a credential surface** — somewhere to type a password or point at a
-  certificate, and somewhere to store it. Today it takes an address and nothing else.
+  certificate, and somewhere to store it. Today it takes an address and nothing else. **This did
+  not happen, because `shoalctl`'s own binary is a placeholder**: it requires a database type at
+  compile time, so the surface belongs to whatever binary a deployment writes around
+  `shoalctl::run`, and that binary now calls `Shoal::with_credentials`. What was actually needed
+  was somewhere to *generate* a credential, which is `shoal/examples/scram_credential.rs`.
 - **`Shoal::new` grows parameters**, which is [D6](connection-pool.md)'s builder. Adding
   credentials to the current three-argument constructor is what makes the builder overdue rather
-  than optional.
+  than optional. **Deferred rather than done**: `with_credentials` is a second constructor, so
+  fifteen call sites did not have to change, and D6's builder is still the place this argument
+  belongs. A third constructor would be the signal that it is overdue.
 
 ## Prerequisites
 
-[D2](framing.md), for `Hello`, `Auth`, and `AuthResponse`. [D4](encryption.md), if the
-recommendation is taken as written — and note this is the chapter's only *soft* edge: SCRAM over
-plaintext is a coherent deployment and was designed for exactly that, so D3 can ship without D4 if
-the mTLS half is deferred.
+~~[D2](framing.md), for `Hello`, `Auth`, and `AuthResponse`.~~ Satisfied by
+[F10](../features/framing-and-protocol-evolution.md).
+
+~~[D4](encryption.md), if the recommendation is taken as written~~ — and note this is the chapter's
+only *soft* edge: SCRAM over plaintext is a coherent deployment and was designed for exactly that,
+so D3 can ship without D4 if the mTLS half is deferred. **That is what happened.** D4 is still what
+the mTLS half waits on, and is now the only thing left on this page.
 
 ## Out of scope, deliberately
 
@@ -154,8 +196,15 @@ thing to add is not a query workload but a *connect* workload — time to first 
 a cold client — and it is the one measurement in this chapter that the planned `transport/*`
 workloads would still not provide.
 
+**It was built and this is still unmeasured.** The connect workload does not exist, so the cost
+[F12](../features/authentication.md#performance) added is bounded by arithmetic and not by a
+capture. It is filed as [O30](../appendix/optimizations.md), which is the honest place for it:
+this chapter inherits the rule that nothing is acted on until a benchmark would show the
+difference, and that rule does not stop applying once something ships.
+
 ## Related
 
+- [F12. Authentication](../features/authentication.md) — the half of this that was built
 - [D2. Framing and protocol evolution](framing.md) — the handshake this needs
 - [D4. Encryption in transit](encryption.md) — which decides whether this is mTLS or SCRAM
 - [D6. A production connection pool](connection-pool.md) — the builder credentials go into, and the

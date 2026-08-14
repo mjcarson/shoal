@@ -140,10 +140,12 @@ second query onwards, and on any query that touches a partition another query al
 at recovery, rather than at the first query to touch it. Those partitions were about to be replayed
 into anyway, so this is close to free — but it is not free, and it is on the startup path.
 
-**A corrupt archive still takes the shard down**, now at load rather than at query time. The queries
-blocked on that partition are never released either way. That is a pre-existing gap rather than
-something this introduced, and it is filed as
-[item 51](../appendix/known-issues.md#51-a-partition-load-that-fails-inside-load_partition-still-never-releases-its-queries).
+~~**A corrupt archive still takes the shard down**, now at load rather than at query time. The
+queries blocked on that partition are never released either way.~~ That was a pre-existing gap
+rather than something this introduced, and it is now closed:
+[F11](error-channel.md) routes the validation failure into `fail_partition`, so the queries parked
+on that read are released and answered `ErrorCode::CorruptArchive` instead of never hearing anything
+([Resolved #56, 61](../appendix/resolved/response-error-channel.md)).
 
 **`SeekBytes::new` got slower** by one validation per key, because it now validates what it just
 serialized. That is the trade: it is paid once per query instead of once per key per partition. A

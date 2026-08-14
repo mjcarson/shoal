@@ -25,6 +25,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,
 };
+use std::rc::Rc;
 use std::time::Duration;
 use std::{cell::RefCell, hash::BuildHasherDefault};
 use std::{collections::HashMap, io::IoSlice};
@@ -37,7 +38,16 @@ use super::stage_profile::{self, StageStamps, Stamp};
 use super::{Comms, Conf, ServerError};
 use crate::{
     shared::{
-        protocol::{self, handshake, ProtocolError},
+        auth::{
+            scram::{ScramServer, ServerStep},
+            AuthError, CredentialStore, Principal,
+        },
+        protocol::{
+            self,
+            auth::{self as proto_auth, AuthMechanism, AuthStatus},
+            error::{self as proto_error, ErrorCode},
+            handshake, ProtocolError,
+        },
         queries::Queries,
         traits::{
             QuerySupport, RkyvSupport, ShoalDatabase, ShoalQuerySupport, ShoalResponseSupport,
@@ -110,10 +120,75 @@ async fn client_rx_relay<S: ShoalDatabase>(
     }
 }
 
+/// Tell one client that a query failed, without ending the connection it failed on
+///
+/// Returns whether the failure could be written. A client that cannot be told is a client that
+/// cannot be served, so a write that fails here ends this connection the same way a failed
+/// response write does.
+///
+/// This is a frame rather than a response because the relay only ever holds an opaque
+/// `AlignedVec` — it has no idea which variant of the schema's response enum this query belongs
+/// to, and cannot build one. That is the whole reason the protocol carries a frame level error
+/// type alongside the response level one.
+///
+/// # Arguments
+///
+/// * `tcp_tx` - The write half of this client's connection
+/// * `query_id` - The query this failure belongs to, or nil for the connection itself
+/// * `code` - What class of failure this is
+/// * `msg` - What to say about it, which is cut down to what a frame will carry
+/// * `peer_max_frame_bytes` - The largest frame this client said it would accept
+async fn write_error_frame(
+    tcp_tx: &mut WriteHalf<TcpStream>,
+    query_id: &Uuid,
+    code: ErrorCode,
+    msg: &str,
+    peer_max_frame_bytes: u32,
+) -> bool {
+    // cut this message down to what a frame will carry
+    let msg = proto_error::truncate_msg(msg);
+    // build the header and the fixed fields that go ahead of it
+    let preamble = match proto_error::error_preamble(
+        query_id,
+        code,
+        msg.len(),
+        peer_max_frame_bytes,
+    ) {
+        Ok(preamble) => preamble,
+        // a client whose frame bound cannot hold even an empty error frame cannot be told
+        // anything, so there is nothing left to do for it
+        Err(error) => {
+            event!(Level::ERROR, msg = "could not frame an error", %query_id, %error);
+            return false;
+        }
+    };
+    // build our vectored byte slices to send
+    let mut bufs = &mut [IoSlice::new(&preamble), IoSlice::new(msg.as_bytes())][..];
+    // keep sending until all of this failure has been sent
+    while !bufs.is_empty() {
+        match tcp_tx.write_vectored(bufs).await {
+            Ok(0) => {
+                event!(Level::ERROR, msg = "wrote no bytes of an error to a client", %query_id);
+                return false;
+            }
+            Ok(n) => IoSlice::advance_slices(&mut bufs, n),
+            Err(error) => {
+                event!(Level::ERROR, msg = "failed to write an error", %query_id, ?error);
+                return false;
+            }
+        }
+    }
+    true
+}
+
 /// Relay responses back to one client
 ///
 /// Like the read half, nothing in here panics. A write that fails ends this connection and leaves
 /// every other client this shard is serving alone.
+///
+/// A response that cannot be *framed* is different from a write that failed: the socket is fine
+/// and only this one answer is impossible. That is answered with an error frame naming the query,
+/// and this connection keeps serving everything else on it.
 ///
 /// # Arguments
 ///
@@ -138,10 +213,9 @@ async fn client_tx_relay<S: ShoalDatabase>(
         let span_guard = span.enter();
         // build the header and query id that go ahead of this response
         //
-        // a response too large for this client to accept ends the connection with nothing on the
-        // wire to say why, since the protocol has no way to attach an error to a query yet. that
-        // is what the error channel is for, and until it lands this is still strictly better than
-        // a panic that would take the shard and every other client with it
+        // a response too large for this client to accept is answered with a failure naming the
+        // query and both sizes, rather than by closing a connection the client would never
+        // learn the reason for. every other query on this connection is unaffected
         let preamble = match protocol::response_preamble(
             &query_id,
             archived.len(),
@@ -150,7 +224,30 @@ async fn client_tx_relay<S: ShoalDatabase>(
             Ok(preamble) => preamble,
             Err(error) => {
                 event!(Level::ERROR, msg = "response too large to frame", %query_id, %error);
-                break;
+                // say what happened in terms of sizes rather than of internals
+                let told = format!(
+                    "this response is {} bytes, larger than the {peer_max_frame_bytes} byte frame this connection accepts",
+                    archived.len()
+                );
+                // a client we cannot even tell is a client we cannot serve
+                if !write_error_frame(
+                    &mut tcp_tx,
+                    &query_id,
+                    ErrorCode::ResponseTooLarge,
+                    &told,
+                    peer_max_frame_bytes,
+                )
+                .await
+                {
+                    drop(span_guard);
+                    break;
+                }
+                // this query's journey ended here, so hand it to the profile before it is
+                // forgotten - the failure is the last thing this server knows about it
+                stamps.mark_socket_written();
+                stage_profile::emit(query_id, stamps);
+                drop(span_guard);
+                continue;
             }
         };
         // build our vectored byte slices to send
@@ -221,14 +318,20 @@ const MAX_HANDSHAKE_BODY: usize = 4096;
 /// bytes queued sends a reset, which would discard the very reply this went to the trouble of
 /// composing.
 ///
+/// **The mechanism is chosen here and nowhere else.** The client offers a set and this picks one
+/// out of the server's own preference order, so a client cannot talk this server into the weaker
+/// of two mechanisms by offering only that one — it is refused instead.
+///
 /// # Arguments
 ///
 /// * `stream` - The connection to shake hands over, before it has been split
 /// * `max_frame_bytes` - The largest frame this server will accept
+/// * `store` - The users this server will accept, and whether it requires one
 async fn server_handshake<S: ShoalDatabase>(
     stream: &mut TcpStream,
     max_frame_bytes: u32,
-) -> Result<handshake::Hello, ServerError> {
+    store: &CredentialStore,
+) -> Result<(handshake::Hello, Option<AuthMechanism>), ServerError> {
     // the fingerprint of the schema this server was built from
     let ours = <S::ClientType as QuerySupport>::SCHEMA_FINGERPRINT;
     // build the ack we will send if everything about this client checks out
@@ -236,6 +339,8 @@ async fn server_handshake<S: ShoalDatabase>(
         schema_fingerprint: ours,
         max_frame_bytes,
         reason: handshake::RefusalReason::Accepted,
+        // filled in once we have read what this client can do
+        mechanism: None,
     };
     // read the header of whatever this client opened with
     let mut header_bytes = [0u8; protocol::HEADER_LEN];
@@ -298,10 +403,124 @@ async fn server_handshake<S: ShoalDatabase>(
         }
         .into());
     }
+    // work out what this client has to prove, if anything, before we accept it
+    //
+    // a server that requires nothing picks nothing whatever the client offered, so a client with
+    // credentials talking to an open server is let straight in rather than made to use them
+    let mechanism = store.select(hello.mechanisms);
+    if store.is_required() && mechanism.is_none() {
+        // this client cannot do anything we accept, and there is no exchange to have
+        let refusal = handshake::HelloAck {
+            reason: handshake::RefusalReason::NoCommonAuthMechanism,
+            ..accept
+        };
+        stream.write_all(&refusal.frame(max_frame_bytes)?).await?;
+        stream.flush().await?;
+        return Err(AuthError::NoCredentials.into());
+    }
     // this client speaks our protocol and was built from our schema, so let it in
+    let accept = handshake::HelloAck {
+        mechanism,
+        ..accept
+    };
     stream.write_all(&accept.frame(max_frame_bytes)?).await?;
     stream.flush().await?;
-    Ok(hello)
+    Ok((hello, mechanism))
+}
+
+/// Read one `Auth` frame from a client
+///
+/// # Arguments
+///
+/// * `stream` - The connection to read from, before it has been split
+async fn read_auth(
+    stream: &mut TcpStream,
+    selected: AuthMechanism,
+) -> Result<Vec<u8>, ServerError> {
+    // read the header first, so that a frame's size is known before anything allocates for it
+    let mut header_bytes = [0u8; protocol::HEADER_LEN];
+    stream.read_exact(&mut header_bytes).await?;
+    // the auth payload bound is far tighter than the frame bound, and this peer has proved nothing
+    // yet, so it is the one that is applied here
+    let header = protocol::Header::decode(&header_bytes, proto_auth::MAX_AUTH_FRAME_BODY)?
+        .expect(protocol::MessageType::Auth)?;
+    let _ = proto_auth::payload_len(header)?;
+    // now that the length has been judged, read the body it named
+    let mut body = vec![0u8; header.body_len()];
+    stream.read_exact(&mut body).await?;
+    // check the mechanism this frame names is the one we selected, then hand back its payload
+    //
+    // this is checked against what the handshake chose rather than against a constant, so that a
+    // client cannot switch mechanisms mid exchange once there is more than one to switch between
+    let (named, payload) = proto_auth::decode_auth_body(&body)?;
+    if named != selected {
+        return Err(AuthError::UnsupportedMechanism(named).into());
+    }
+    Ok(payload.to_vec())
+}
+
+/// Run an authentication exchange with a client that has been accepted
+///
+/// # Invariants
+///
+/// **A refusal is written before the connection closes**, the same way a `HelloAck` refusal is,
+/// and it carries one sentence for every way a client can fail. Which failure it actually was
+/// stays in this server's log — see [`ServerError::Auth`].
+///
+/// **This runs before the stream is split.** Everything it reads would otherwise be handed to the
+/// relays, which would decode a client's proof as a bundle of queries.
+///
+/// # Arguments
+///
+/// * `stream` - The connection to authenticate over, before it has been split
+/// * `mechanism` - The mechanism this server selected in its `HelloAck`
+/// * `max_frame_bytes` - The largest frame this client said it will accept
+/// * `store` - The users this server will accept
+async fn server_auth(
+    stream: &mut TcpStream,
+    mechanism: AuthMechanism,
+    max_frame_bytes: u32,
+    store: &CredentialStore,
+) -> Result<Principal, ServerError> {
+    // mutual TLS is defined on the wire and cannot be selected, since there is no TLS to read a
+    // certificate off of. this is the arm it becomes when there is
+    if mechanism != AuthMechanism::ScramSha256 {
+        return Err(AuthError::UnsupportedMechanism(mechanism).into());
+    }
+    // run the exchange, answering each message the mechanism produces until it is done
+    let mut scram = ScramServer::new(store);
+    loop {
+        // read whatever this client sent, and let the mechanism decide what it means
+        let payload = read_auth(stream, mechanism).await?;
+        match scram.step(&payload) {
+            // another round, so answer with the challenge and wait for the next proof
+            Ok(ServerStep::Challenge(challenge)) => {
+                let frame =
+                    proto_auth::encode_auth_response(AuthStatus::Challenge, &challenge, max_frame_bytes)?;
+                stream.write_all(&frame).await?;
+                stream.flush().await?;
+            }
+            // this client is who it says it is, and the payload proves this server is too
+            Ok(ServerStep::Success { payload, principal }) => {
+                let frame =
+                    proto_auth::encode_auth_response(AuthStatus::Success, &payload, max_frame_bytes)?;
+                stream.write_all(&frame).await?;
+                stream.flush().await?;
+                return Ok(principal);
+            }
+            // a failure is answered before the socket closes, in one sentence for every cause
+            Err(error) => {
+                let frame = proto_auth::encode_auth_response(
+                    AuthStatus::Failed,
+                    error.wire_msg().as_bytes(),
+                    max_frame_bytes,
+                )?;
+                stream.write_all(&frame).await?;
+                stream.flush().await?;
+                return Err(error.into());
+            }
+        }
+    }
 }
 
 /// Accept new clients and start a pair of relays for each one
@@ -319,12 +538,14 @@ async fn server_handshake<S: ShoalDatabase>(
 /// * `comms` - The channels to every shard on this node
 /// * `node_local_tx` - The channel to forward this node's bundles on
 /// * `max_frame_bytes` - The largest frame this server will accept
+/// * `store` - The users this shard will accept, and whether it requires one
 #[allow(clippy::future_not_send)]
 async fn client_acceptor<S: ShoalDatabase>(
     tcp_sock: TcpListener,
     comms: Comms<S>,
     node_local_tx: AsyncSender<ServerMsg<S>>,
     max_frame_bytes: u32,
+    store: Rc<CredentialStore>,
 ) -> Result<(), ServerError> {
     loop {
         // try to read a single datagram from our udp socket
@@ -337,6 +558,10 @@ async fn client_acceptor<S: ShoalDatabase>(
         // hand this connection everything it needs to live on its own
         let comms = comms.clone();
         let node_local_tx = node_local_tx.clone();
+        // the store is shared by every connection on this shard and is never written to, so it is
+        // reference counted rather than cloned. an `Rc` and not an `Arc` because a shard is a
+        // thread of its own and nothing here crosses one
+        let store = store.clone();
         // run this whole connection under one task that owns its lifetime
         //
         // the two halves of a split stream keep the stream alive between them, so a read relay
@@ -351,12 +576,34 @@ async fn client_acceptor<S: ShoalDatabase>(
             //
             // the handshake's own result is wrapped rather than converted, so that a peer that
             // stalled and a peer that was refused stay distinguishable in the log
+            //
+            // the deadline covers the authentication exchange as well as the handshake, since a
+            // peer that stalls between its `Hello` and its proof is holding exactly as much of
+            // this server as one that stalls before either
             let handshake = glommio::timer::timeout(HANDSHAKE_TIMEOUT, async {
-                Ok(server_handshake::<S>(&mut stream, max_frame_bytes).await)
+                // shake hands first, which is what decides whether there is anything to prove
+                let (hello, mechanism) =
+                    match server_handshake::<S>(&mut stream, max_frame_bytes, &store).await {
+                        Ok(accepted) => accepted,
+                        Err(error) => return Ok(Err(error)),
+                    };
+                // then prove it, if this server asked for anything
+                let principal = match mechanism {
+                    Some(mechanism) => {
+                        match server_auth(&mut stream, mechanism, hello.max_frame_bytes, &store)
+                            .await
+                        {
+                            Ok(principal) => Some(principal),
+                            Err(error) => return Ok(Err(error)),
+                        }
+                    }
+                    None => None,
+                };
+                Ok(Ok((hello, principal)))
             })
             .await;
-            let hello = match handshake {
-                Ok(Ok(hello)) => hello,
+            let (hello, principal) = match handshake {
+                Ok(Ok(accepted)) => accepted,
                 Ok(Err(error)) => {
                     event!(Level::WARN, msg = "refused a client", %client, ?error);
                     return;
@@ -366,6 +613,14 @@ async fn client_acceptor<S: ShoalDatabase>(
                     return;
                 }
             };
+            // say who this connection belongs to, which is the only thing that consults a
+            // principal today - authorization is what it exists for and does not exist yet
+            match &principal {
+                Some(principal) => {
+                    event!(Level::INFO, msg = "authenticated a client", %client, %principal);
+                }
+                None => event!(Level::DEBUG, msg = "accepted a client", %client),
+            }
             // break this stream up into a writer and a reader
             let (tcp_rx, tcp_tx) = stream.split();
             // create a channel for all of our shards to give data to send back to clients
@@ -671,6 +926,9 @@ where
                 self.comms.clone(),
                 node_local_tx,
                 self.conf.networking.max_frame_bytes,
+                // derive every credential this config named once per shard, at startup, rather
+                // than once per connection - a PBKDF2 derivation is the whole point of the cost
+                Rc::new(self.conf.auth.store()?),
             ),
             self.high_priority,
         )?;
@@ -1183,9 +1441,10 @@ where
                 ServerMsg::PartitionLoadFailed {
                     table,
                     partition_id,
+                    error,
                 } => {
                     self.tables
-                        .fail_partition(table, partition_id, &self.shard_local_tx)
+                        .fail_partition(table, partition_id, error, &self.shard_local_tx)
                         .await?
                 }
                 // Inform a table that some of its data has been flushed to storage

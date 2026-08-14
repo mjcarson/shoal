@@ -2,6 +2,8 @@
 
 use uuid::Uuid;
 
+use crate::shared::auth::AuthError;
+use crate::shared::protocol::error::ErrorCode;
 use crate::shared::protocol::ProtocolError;
 use crate::shared::responses::ResponseActionNames;
 
@@ -24,6 +26,23 @@ pub enum Errors {
         kind: ResponseActionNames,
         end: bool,
     },
+    /// The server answered with a failure rather than with a result
+    ///
+    /// This is different from [`Errors::QueryDidNotSucceed`], which says a query worked and found
+    /// nothing. This says it did not work.
+    Server {
+        /// The query bundle this failure belongs to, if it named one
+        query_id: Option<Uuid>,
+        /// Which query in that bundle failed, when the failure arrived with a response
+        ///
+        /// A frame level failure has no index. It is attached to a query id, and a query id names
+        /// a whole bundle, so there is no position in the stream to put it at.
+        index: Option<usize>,
+        /// What class of failure this is
+        code: ErrorCode,
+        /// What the server said about it
+        msg: String,
+    },
     /// Multiple errors in bulk
     BulkErrors(Box<Vec<Errors>>),
     /// An IO error occured
@@ -40,8 +59,6 @@ pub enum Errors {
     ConnectionPool(String),
     /// Failed to resolve a DNS address
     DnsResolution(String),
-    /// A wire protocol error
-    ProtocolError(String),
     /// A frame that could not be written or read
     Protocol(ProtocolError),
     /// A connection could not be opened, or was refused by the server
@@ -176,6 +193,22 @@ pub enum ConnectError {
     HandshakeTimeout,
     /// The server refused this connection, or answered with something we could not read
     Protocol(ProtocolError),
+    /// This client could not do what the server asked of it before it sent a query
+    ///
+    /// This is the connect-time half of authentication: the server wants proof and this client
+    /// either holds nothing, or holds nothing that does the mechanism the server selected. It is
+    /// separate from [`ConnectError::AuthFailed`] because it is a *deployment* mistake — nothing
+    /// crossed the wire that a different password would have fixed.
+    AuthRequired(AuthError),
+    /// The server refused what this client proved
+    ///
+    /// The message is the server's, and it is deliberately the same sentence whether the password
+    /// was wrong or the user does not exist. Reading more into it than that is reading something
+    /// the server refuses to say.
+    AuthFailed {
+        /// What the server said about it
+        msg: String,
+    },
 }
 
 impl std::fmt::Display for ConnectError {
@@ -191,11 +224,30 @@ impl std::fmt::Display for ConnectError {
                 write!(f, "the server never finished the handshake")
             }
             ConnectError::Protocol(error) => write!(f, "{error}"),
+            ConnectError::AuthRequired(error) => write!(f, "{error}"),
+            ConnectError::AuthFailed { msg } => {
+                write!(f, "the server refused this client's credentials: {msg}")
+            }
         }
     }
 }
 
 impl std::error::Error for ConnectError {}
+
+impl From<AuthError> for ConnectError {
+    /// Convert this error to our error type
+    ///
+    /// Everything an [`AuthError`] can be on the client side is something this client got wrong
+    /// before or during the exchange. A server *refusing* it arrives as
+    /// [`ConnectError::AuthFailed`] instead, carrying the server's own words.
+    ///
+    /// # Arguments
+    ///
+    /// * `error` - The error to convert
+    fn from(error: AuthError) -> Self {
+        ConnectError::AuthRequired(error)
+    }
+}
 
 impl From<std::io::Error> for ConnectError {
     /// Convert this error to our error type

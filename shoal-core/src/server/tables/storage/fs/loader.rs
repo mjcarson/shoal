@@ -12,6 +12,8 @@ use tracing::{event, instrument, Level};
 
 use crate::server::messages::{LoadedPartition, LoadedPartitionKinds, ServerMsg};
 use crate::server::{ServerError, ShoalError};
+use crate::shared::protocol::error::ErrorCode;
+use crate::shared::responses::ResponseError;
 use crate::shared::traits::ShoalDatabase;
 use crate::storage::fs::map::ArchiveEntry;
 use crate::storage::fs::ArchiveMap;
@@ -79,6 +81,45 @@ pub(super) fn classify(error: &ServerError) -> LoadFailure {
         // good - so retrying only spins
         _ => LoadFailure::Fatal,
     }
+}
+
+/// Say what a failed partition read should tell the queries it releases, if anything
+///
+/// A pruned partition tells them nothing. The partition really is gone, and a query replayed
+/// against it answers correctly by finding no rows — reporting that as a failure would turn every
+/// ordinary delete into an error. Every other class is a failure the client has to hear about,
+/// because the alternative is an empty answer that looks exactly like a complete one.
+///
+/// What the client is told is deliberately thinner than what is logged. The message names the
+/// table and the partition and not the path or the errno: with no authentication yet, the
+/// server's filesystem layout is not something to hand to whoever opened a socket. The rich
+/// context stays in the `ERROR` event the caller emits.
+///
+/// # Arguments
+///
+/// * `error` - The error a partition read failed with
+/// * `table` - The name of the table that read was for
+/// * `partition_id` - The partition that could not be read
+pub(super) fn client_error<T: std::fmt::Display>(
+    error: &ServerError,
+    table: &T,
+    partition_id: u64,
+) -> Option<ResponseError> {
+    // a partition that was pruned is not a failure, so there is nothing to say about it
+    if classify(error) == LoadFailure::Absent {
+        return None;
+    }
+    // say which class of failure this was, in terms a client can act on
+    let code = match error {
+        ServerError::Shoal(ShoalError::ArchiveMissing { .. }) => ErrorCode::ArchiveMissing,
+        ServerError::IO(_) | ServerError::GlommioIO { .. } => ErrorCode::StorageRead,
+        // everything else is structural, and a client can do nothing but report it
+        _ => ErrorCode::Internal,
+    };
+    Some(ResponseError::new(
+        code,
+        format!("partition {partition_id} of {table} could not be read"),
+    ))
 }
 
 /// Help read a partition from disk
@@ -214,6 +255,9 @@ async fn read_partition<D: ShoalDatabase>(
                 ),
             }
             ServerMsg::PartitionLoadFailed {
+                // say what the queries parked on this read should answer with, which is
+                // nothing at all for a partition that was simply pruned
+                error: client_error(&error, &table, partition_id),
                 table,
                 partition_id,
             }
@@ -320,11 +364,18 @@ impl<D: ShoalDatabase> FsLoader<D> {
     ///
     /// * `table` - The table the partition that could not be read belongs to
     /// * `partition_id` - The partition that could not be read
-    async fn report_failure(&self, table: D::TableNames, partition_id: u64) {
+    /// * `error` - What the queries parked on that partition should answer with
+    async fn report_failure(
+        &self,
+        table: D::TableNames,
+        partition_id: u64,
+        error: Option<ResponseError>,
+    ) {
         // build the failure message for this partition
         let msg = ServerMsg::PartitionLoadFailed {
             table,
             partition_id,
+            error,
         };
         // tell our shard, which can only fail if our shard is already gone
         if let Err(error) = self.shard_local_tx.send(msg).await {
@@ -360,8 +411,13 @@ impl<D: ShoalDatabase> FsLoader<D> {
                             partition_id,
                             error = ?error,
                         );
-                        // release the queries waiting on this partition
-                        self.report_failure(table_name, partition_id).await;
+                        // release the queries waiting on this partition, telling them why
+                        //
+                        // a read that never started is not a partition that is missing, so
+                        // this is always a failure the client hears about
+                        let failure = client_error(&error, &table_name, partition_id);
+                        self.report_failure(table_name, partition_id, failure)
+                            .await;
                     }
                 }
                 // shutdown this loader
