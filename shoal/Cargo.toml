@@ -12,23 +12,34 @@ path = "src/lib.rs"
 # This crate is a facade. It re-exports `shoal-core` and `shoal-derive` and holds no code of its
 # own, so every feature here exists only to forward one.
 [features]
+default = ["server"]
+# Link the engine.
+#
+# Off, this facade is a client and nothing else: no shard, no storage, no glommio, no io_uring.
+# That is what `#[shoal::db(client)]` schemas build against, and what makes `shoalctl` a program
+# that has never heard of a storage engine (F15).
+server = ["dep:shoal-core"]
 # enable hotpath profiling
 #
 # only forwards to shoal-core now. The `hotpath/hotpath` half went with `main`, which moved to
 # `shoal-bench`'s workload binary when the benchmark harness left this crate.
-hotpath = ["shoal-core/hotpath"]
+hotpath = ["server", "shoal-core/hotpath"]
 # expose shoal-core internals to the criterion benches in benches/
-bench = ["shoal-core/bench"]
+bench = ["server", "shoal-core/bench"]
 # record where each query spent its time, stage by stage
 #
-# every stamp is taken in shoal-core; the report that joins them is built in `shoal-bench`.
-stage-profile = ["shoal-core/stage-profile"]
+# every crate holding a stamp has to agree about whether stamps exist, or the client's
+# `ClientStamps` is zero sized while the server's `StageStamps` is not. The report that joins
+# them is built in `shoal-bench`.
+stage-profile = ["shoal-client/stage-profile", "shoal-core?/stage-profile"]
+# SHQL autocompletion, which clients opt into
+shql-complete = ["shoal-proto/shql-complete"]
 
 
 [dependencies]
 shoal-proto = { version = "0.1.0", path = "../shoal-proto" }
 shoal-client = { version = "0.1.0", path = "../shoal-client" }
-shoal-core = { version = "0.1.0", path = "../shoal-core" }
+shoal-core = { version = "0.1.0", path = "../shoal-core", optional = true }
 shoal-derive = { version = "0.1.0", path = "../shoal-derive" }
 # The derive macros no longer name any crate the caller has to declare - they emit `::shoal::`
 # paths and this facade re-exports what they reach for (F15, known issue 54). What is left here is

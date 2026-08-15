@@ -6,9 +6,10 @@ description = "The core parts of Shoal. A batteries not included database."
 license = "MIT"
 
 [features]
-default = ["server"]
-# Enables the server features for Shoal
-server = ["glommio"]
+# There is no `server` feature any more. This crate *is* the server: it holds the shard, the
+# storage engines and `ShoalDatabase`, and none of that is optional. The name now lives on the
+# `shoal` facade, where for the first time it means something real - whether to link this crate
+# at all. Keeping it in both places, meaning two different things, was worse than either.
 # enable hotpath profiling
 hotpath = ["hotpath/hotpath"]
 # Enables SHQL autocompletion support for clients. The parser it turns on lives in the protocol
@@ -32,7 +33,7 @@ serde_json = "1"
 config = "0.13" 
 gxhash = "2.2"
 rkyv = { workspace = true }
-glommio = { workspace = true, optional = true }
+glommio = { workspace = true }
 bytes = "1.5"
 futures = "0.3"
 kanal = { workspace = true }

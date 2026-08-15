@@ -1,11 +1,14 @@
 //! The trait a Shoal database implements to be served
 //!
-//! This is the server half of a schema. Every one of its methods names something only an
-//! engine has - a glommio task queue, the shard's channels, the storage loaders, the server
-//! config - so it lived in `shared/traits.rs` under four `#[cfg(feature = "server")]`
-//! attributes that could never work, because the imports the signatures needed were not
-//! gated with them. It moved here in F15, which is what let the protocol and the client
-//! become crates that do not link an engine at all.
+//! This is the server half of a schema. Every one of its methods names something only an engine
+//! has - a glommio task queue, the shard's channels, the storage loaders, the server config.
+//!
+//! It used to live in `shared/traits.rs`, where nine of its methods carried
+//! `#[cfg(feature = "server")]` and four did not, and where the gating could not have worked
+//! either way: the imports those signatures needed sat at module scope with no `cfg` on them at
+//! all. Turning the feature off produced a build failure rather than a client. It moved here in
+//! F15, and the nine attributes went with it - a trait that only exists in the engine has no use
+//! for a flag saying so.
 //!
 //! A `#[shoal::db(client)]` schema does not implement this, and that is the whole difference
 //! between a client build and a server one.
@@ -83,7 +86,6 @@ pub trait ShoalDatabase: 'static + Sized {
     ///
     /// Tables are built before a shard finishes starting, so this is the whole of
     /// what this shards recovery lost by the time its startup summary is emitted.
-    #[cfg(feature = "server")]
     fn recovery_stats(&self) -> RecoveryStats;
 
     /// Build a default queries bundle
@@ -93,7 +95,6 @@ pub trait ShoalDatabase: 'static + Sized {
     }
 
     /// Deserialize our query types
-    #[cfg(feature = "server")]
     fn unarchive_queries(buff: &[u8]) -> &ArchivedQueries<Self::ClientType> {
         // load an archived type from a slice
         unsafe { rkyv::access_unchecked::<ArchivedQueries<Self::ClientType>>(&buff) }
@@ -101,7 +102,6 @@ pub trait ShoalDatabase: 'static + Sized {
 
     /// Handle messages for different table types
     #[allow(async_fn_in_trait)]
-    #[cfg(feature = "server")]
     async fn handle(
         &mut self,
         meta: QueryMetadata,
@@ -120,7 +120,6 @@ pub trait ShoalDatabase: 'static + Sized {
     /// * `table_name` - The name of the table with the partition to mark as evictable
     /// * `generation` - The generation of data to mark as evictable
     /// * `partitions` - The partitions to mark as evictable
-    #[cfg(feature = "server")]
     fn mark_evictable(
         &mut self,
         table_name: Self::TableNames,
@@ -135,19 +134,16 @@ pub trait ShoalDatabase: 'static + Sized {
     /// * `table_name` - The name of the table to evict data from
     /// * `victims` - The partitions to evict
     #[allow(async_fn_in_trait)]
-    #[cfg(feature = "server")]
     fn evict(&mut self, table_name: Self::TableNames, victims: Vec<u64>);
 
     /// Flush any in flight writes to disk
     #[allow(async_fn_in_trait)]
-    #[cfg(feature = "server")]
     async fn flush(&mut self) -> Result<(), ServerError>;
 
     /// Check if any of our tables intent logs are due to be rotated
     ///
     /// The shard asks this on every message it handles, so it is deliberately
     /// synchronous — it only reads position counters and never touches storage.
-    #[cfg(feature = "server")]
     fn compaction_due(&self) -> bool;
 
     /// Get all flushed messages and send their response back
@@ -156,7 +152,6 @@ pub trait ShoalDatabase: 'static + Sized {
     ///
     /// * `flushed` - The flushed response to send back
     #[allow(async_fn_in_trait)]
-    #[cfg(feature = "server")]
     async fn handle_flushed(
         &mut self,
         flushed: &mut Vec<(
@@ -199,6 +194,5 @@ pub trait ShoalDatabase: 'static + Sized {
 
     /// Shutdown this table and flush any data to disk if needed
     #[allow(async_fn_in_trait)]
-    #[cfg(feature = "server")]
     async fn shutdown(self) -> Result<(), ServerError>;
 }

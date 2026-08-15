@@ -17,23 +17,32 @@
 // than `RkyvSupport` was compiled against. That is the fix for known issue 54: a crate writing a
 // schema used to have to declare `glommio`, `uuid` and `deepsize2` itself, having never heard of
 // any of them.
-pub use shoal_core::{deepsize2, glommio, gxhash, kanal, lru, rkyv, serde_json, tracing, uuid};
+//
+// `gxhash` comes from the engine rather than the protocol on purpose, because it is what hashes
+// every partition key and the two crates would not agree - see known issue 65.
+pub use shoal_proto::{deepsize2, rkyv, serde_json, tracing, uuid};
+#[cfg(feature = "server")]
+pub use shoal_core::{glommio, gxhash, kanal, lru};
 
-// The protocol: what both peers see
+// The protocol: what both peers see. Present whether or not an engine is linked.
 pub use shoal_proto::shared::{self, traits};
 
 // The client. Its error types come from the protocol crate rather than from here, because
-// `QuerySupport` and `shared::responses` both name them
+// `QuerySupport` and `shared::responses` both name them.
 pub use shoal_proto::FromShoal;
 pub use shoal_proto::client::{ChannelError, ConnectError, Errors, QuerySuceededOpts};
-pub use shoal_client::client::{
-    self, Shoal, ShoalResponse, ShoalUnorderedResultStream,
-};
+pub use shoal_client::client::{self, Shoal, ShoalResponse, ShoalUnorderedResultStream};
 
-// The server, and the engine it runs on
+// The server, and the engine it runs on. None of this exists without the `server` feature, which
+// is the whole point: a `#[shoal::db(client)]` schema names its table and storage types in field
+// position only, never in a `use`, so it never reaches for any of these.
+#[cfg(feature = "server")]
 pub use shoal_core::ShoalPool;
+#[cfg(feature = "server")]
 pub use shoal_core::server::{self, Conf, database::ShoalDatabase, routing::ShardRouting};
+#[cfg(feature = "server")]
 pub use shoal_core::storage::{self, FileSystem, NoStorage};
+#[cfg(feature = "server")]
 pub use shoal_core::tables::{
     self, EphemeralSortedTable, EphemeralUnsortedTable, PersistentSortedTable,
     PersistentUnsortedTable,
