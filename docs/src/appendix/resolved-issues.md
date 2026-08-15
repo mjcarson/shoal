@@ -6,12 +6,13 @@ rejected on the way, and — the part that matters when changing this code later
 invariants the fix depends on.
 
 Item numbers are shared with [Known Issues](known-issues.md) and never reused, so a number
-appears on exactly one of the two pages. The exceptions are items 16, 20 and 24, which were
+appears on exactly one of the two pages. The exceptions are items 16, 20, 24 and 54, which were
 only partly fixed and appear on both: the fixed half here, the open remainder there. Items 9 and 51
 were each one of those exceptions until their second half was fixed, and now appear here alone.
 
 Numbers are also grouped when one change closed several items that turned out to share a cause —
-7 and 10, 26 and 39, 56 and 61, and 11, 12 and 37 each have one page rather than several.
+7 and 10, 26 and 39, 56 and 61, 67 and 68, and 11, 12 and 37 each have one page rather than
+several.
 
 | # | Issue | What fixed it |
 | --- | --- | --- |
@@ -28,6 +29,8 @@ Numbers are also grouped when one change closed several items that turned out to
 | 16, 51 | [A partition read that failed panicked its shard and stranded its queries](resolved/partition-load-failure.md) | The read moved into its own task, failures classified by whether reading again could answer differently, and a `PartitionLoadFailed` message so the queries parked on a read are released whether it succeeded or not — each marked to answer without the read that just failed, so the replay cannot ask for it again |
 | 18, 50 | [Core exclusion was silently ignored, and shard placement was random](resolved/excluded-cores-typo.md) | `Resources` became `deny_unknown_fields` so a misspelled key fails the load instead of being dropped; and `Resources::cpus`, which was taking cpus off a `HashSet` in hash-seed order, now sorts by topology and fills distinct physical cores before it pairs onto an SMT sibling |
 | 20 | [The storage tests were entirely commented out](resolved/storage-tests.md) | Rewritten against explicit on-disk fixtures and turned back on |
+| 54 | [`#[shoal::db]` needed crates the caller had never heard of](resolved/macro-emits-three-crates.md) | The macros emit `::shoal::` and nothing else, and the facade re-exports each crate from the one whose trait signatures name it; and [F15](../features/client-server-split.md) removed glommio from a client's graph rather than re-exporting it. `rkyv` and `deepsize2` remain, because a schema writes those derives by hand |
+| 67, 68 | [Chart labels collided, and the scope prefix strip never matched](resolved/chart-labels.md) | Label placement moved out of the loop that draws the curves, so every position is known before any is chosen; and `shorten` strips the prefixes scopes actually carry rather than one no capture has contained |
 | 24 | [A bad query could leave the terminal in raw mode](resolved/shoalctl-panic.md) | The parse error is recorded instead of panicking past `ratatui::restore()`; ~~and rendered~~ — nothing drew it until [item 48](resolved/query-error-display.md) |
 | 25 | [`CLAUDE.md` described a Shoal that no longer existed](resolved/claude-md-drift.md) | The two remaining false claims corrected in the file itself — `Conf::new` became `Conf::from_file`, and "LRU eviction at 60%" became what the shard actually does, which is trigger on the limit being exceeded and then free 40% of current usage |
 | 26, 39 | [A multi-partition get answered in an arbitrary order](resolved/partition-order.md) | `IN` and same-field `OR` replaced an `AND` that meant three different things; rows are slotted per partition on each shard and reordered by the coordinator before the limit is applied |

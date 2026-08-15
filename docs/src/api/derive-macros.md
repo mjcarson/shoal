@@ -406,6 +406,61 @@ This is the cheap shape for anything shard-wide that a table already owns: no ch
 `ShoalDatabase::new`, no new parameter threaded through every table constructor, and nothing to
 keep in sync — a new table field is summed automatically.
 
+## `#[db(client)]`, and what a schema's crate has to declare
+
+A schema describes two things at once: a wire contract, which both peers need, and a database,
+which only a server is. `#[shoal::db(client)]` emits the first and not the second:
+
+```rust
+#[shoal::db(client)]
+pub struct Tmdb {
+    pub movies: PersistentSortedTable<Movie, FileSystem>,
+}
+```
+
+| Emitted by `#[db]` | Also by `#[db(client)]`? |
+| --- | --- |
+| the rewritten struct | **no** |
+| `TableNames`, its `Display`, the `{Row}Projection` enums | yes |
+| `*Client` and its `QuerySupport` impl | yes |
+| `QueryKinds`, `ResponseKinds` and their traits | yes |
+| the query-conversion traits, and `FromShoal` for each projection | yes |
+| the `ShoalDatabase` impl | **no** |
+| the `ShardRouting` impl on `QueryKinds` | **no** |
+
+The two skipped blocks are the only ones naming `::shoal::server::`, `::shoal::storage::`,
+`::shoal::glommio::` or `::shoal::kanal::`, which is what lets a crate writing the client form
+build against `shoal` with `default-features = false` and link no storage engine
+([F15](../features/client-server-split.md)). `shoalctl` is written this way.
+
+**A client schema names its table and storage types in field position only, and never in a
+`use`.** Because the struct is never emitted, `PersistentSortedTable` and `FileSystem` above are
+read for their names by `syn` and discarded — neither reaches type resolution, which is why the
+snippet compiles without importing either. An import *would* fail, because `shoal::tables` and
+`shoal::storage` do not exist without the `server` feature. This is the one asymmetry worth
+knowing about the client form.
+
+There is deliberately no `#[db(server)]`: one meaning gets one spelling, and the bare form is it.
+
+### What the caller declares
+
+Generated code names `::shoal::` and nothing else, so a crate writing a schema declares `shoal`
+and the two derives it writes by hand:
+
+```toml
+[dependencies]
+shoal = { version = "0.1.0" }          # or default-features = false, for a client
+rkyv = "0.8"                            # for #[derive(Archive, Serialize, Deserialize)]
+deepsize2 = "0.1"                       # for #[derive(DeepSizeOf)]
+```
+
+**It used to be worse.** The macros named `glommio`, `uuid` and `kanal` by path, so a schema crate
+had to declare three crates it had never heard of, and failed with `cannot find module or crate
+glommio in this scope` pointing at the attribute rather than at the manifest
+([item 54](../appendix/resolved/macro-emits-three-crates.md)). The remaining two are not macro
+paths — they are derives the author writes — and closing them is
+[still open](../appendix/known-issues.md).
+
 ## Design notes
 
 **The schema is the type system.** There is no catalog, no runtime type information, and no

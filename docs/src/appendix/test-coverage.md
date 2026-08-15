@@ -3,7 +3,31 @@
 What the test suite reaches, what it does not, and the one place where it is unsound.
 
 **Established by running it.** `cargo check --workspace --all-targets` passes with warnings and
-`cargo test --workspace` passes: **498 integration tests** (one ignored), **323 `shoal-core` unit
+`cargo test --workspace` passes: **876 tests**, one ignored.
+
+**[F15](../features/client-server-split.md) moved where they live without changing what they
+cover.** Splitting `shoal-core` into three crates re-attributed 177 unit tests and added 8. The
+total went 868 → 876; nothing was lost, and a reader seeing `shoal-core` drop by more than half
+should read this table rather than assume it was.
+
+| Where | Tests | |
+| --- | --- | --- |
+| `shoal-proto` unit | 171 | the protocol, the SHQL parser, SCRAM, the TLS config — moved out of `shoal-core` |
+| `shoal-core` unit | 146 | the engine: partitions, storage, the shard. Was 323 before the split |
+| `shoal-client` unit | 6 | the client read loop and its error routing — moved out of `shoal-core` |
+| `shoal-bench` unit | 274 | the harness, the workloads, the charts |
+| `shoal` integration | 191 | 13 binaries against a live server, one ignored |
+| `shoalctl` integration | 34 | the completion menu, driven the way the key handler does |
+| `shoal-client-check` integration | 7 | **new.** A schema compiling and running against the client alone |
+| `shoal-bench` integration | 17 | committed artifacts, chart geometry, CSS sync |
+| doctests | 30 | up 1: `shoalctl`'s example moved to `#[shoal::db(client)]` and gained one |
+
+The 8 added are the 7 in `shoal-client-check` and one in `hotpath_scopes`
+(`a_scope_from_any_crate_loses_its_prefix`). The `chart_geometry` count did not move, but
+`stacked_labels_have_room` began failing on real data and now passes for a reason rather than by
+luck ([items 67, 68](resolved/chart-labels.md)).
+
+Before the split it was **498 integration tests** (one ignored), **323 `shoal-core` unit
 tests**, **29 doctests**.
 
 **The encryption sweeps added 15 more** `shoal-bench` unit tests after that — 9 over the forty-eight

@@ -34,6 +34,7 @@ pub trait RkyvSupport: Archive
     + Sized
 {
     /// Archive this type to an aligned vec
+    #[inline]
     fn serialize(&self) -> AlignedVec {
         rkyv::to_bytes::<Error>(self).unwrap()
     }
@@ -61,6 +62,7 @@ pub trait RkyvSupport: Archive
     }
 
     /// Deserialize our archived type
+    #[inline]
     fn deserialize(archived: &<Self as Archive>::Archived) -> Result<Self, rkyv::rancor::Error>
     where
         <Self as Archive>::Archived: rkyv::Deserialize<Self, Strategy<Pool, rkyv::rancor::Error>>,

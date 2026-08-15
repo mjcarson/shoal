@@ -7,7 +7,8 @@ library you compile against your schema.
 ## Compiling it for your schema
 
 ```rust
-#[db]
+// no `use shoal::tables::…` and no `use shoal::storage::…` — see below
+#[shoal::db(client)]
 pub struct Tmdb {
     pub movies: PersistentUnsortedTable<Movie, FileSystem>,
     pub movies_by_keyword: PersistentSortedTable<MoviesByKeyword, FileSystem>,
@@ -19,6 +20,26 @@ async fn main() -> color_eyre::Result<()> {
     shoalctl::run(shoal).await
 }
 ```
+
+```toml
+[dependencies]
+shoal = { version = "0.1.0", default-features = false, features = ["shql-complete"] }
+shoalctl = { version = "0.1.0" }
+rkyv = "0.8"
+deepsize2 = "0.1"
+```
+
+**shoalctl links no storage engine.** It has no shard, no partitions and no storage, and until
+[F15](../features/client-server-split.md) it compiled all three anyway — a terminal UI that pulled
+in glommio, and therefore io_uring, and therefore Linux. `cargo tree -p shoalctl` now contains
+neither glommio nor io_uring, and its manifest has no `shoal-core` line.
+
+That is what `#[shoal::db(client)]` and `default-features = false` are doing above. The schema is
+otherwise identical to a server's, with one asymmetry: **the table and storage types are named in
+field position only and must never be imported.** The macro reads `PersistentUnsortedTable` and
+`FileSystem` for their names and discards them, because it does not emit the struct — so they
+never reach type resolution, while a `use` of either would fail against a `shoal` built without
+its `server` feature.
 
 `shoalctl/examples/tmdbctl.rs` is the worked example; run it with:
 

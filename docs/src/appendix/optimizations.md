@@ -1347,6 +1347,40 @@ Found while reading the first capture that held the sweeps, which is the only wa
 been found — every point of it is correct, the harness did nothing wrong, and the numbers are still
 not readable.
 
+### O32. `Queries::deserialize` costs about nine nanoseconds more than it did
+
+`shoal-core/src/server/shard.rs:1184`, `<Queries<D::ClientType> as RkyvSupport>::deserialize`
+
+The server deserializes the whole request bundle once per client request. Measured before and
+after [F15](../features/client-server-split.md) moved `Queries` and `RkyvSupport` into
+`shoal-proto`:
+
+| `wire_codec/request/decode/deserialize` | before | after |
+| --- | --- | --- |
+| 1 query | 29.52 ns | 38.28 ns (+29.7%) |
+| 10 queries | 400.12 ns | 423.43 ns (+5.8%) |
+| 100 queries | 5.79 µs | 5.89 µs (+1.7%) |
+
+**Measured, and reproduced.** A second capture on the same tree put the one-query case at 38.91 ns,
+so it is not a noisy reading. The cost is roughly constant in absolute terms and dilutes as the
+bundle grows, which is the signature of a fixed per-call overhead rather than a slower loop — the
+shape a function that stopped being inlined leaves.
+
+The obvious cause is not the cause. `RkyvSupport::serialize` and `deserialize` are default trait
+bodies that moved crates, so both were given `#[inline]`; that recovered `encode/serialize/1`
+(70.58 → 64.04 ns, outside the noise band) and moved `deserialize/1` not at all. Whatever this is,
+it is not the trait method's own inlining.
+
+**It does not show up end to end.** The macro layer over the transport and fanout workloads has no
+reproducible movement — see F15's Performance section — and nine nanoseconds against a p50 get of
+roughly 30 µs is about 0.03%. It is filed because it is real and unexplained, not because it is
+urgent.
+
+**Where to start:** compare the generated code for `<Queries<S> as RkyvSupport>::deserialize`
+across the boundary; check whether rkyv's `Pool` allocation is being hoisted differently; and note
+that [item 66](known-issues.md) means there is no LTO to hide any of this, so whatever it is would
+likely vanish under `lto = "thin"` — which is itself worth measuring before chasing this further.
+
 ### O26. `handle_query` cloned a `QueryMetadata` for a gather almost no query has
 
 | | |

@@ -27,17 +27,19 @@ test suite does and does not reach is in [Test Coverage](test-coverage.md).
 Defects that have been fixed move to [Resolved Issues](resolved-issues.md), one page each,
 carrying the reasoning and the invariants the fix depends on. Item numbers are shared between
 the two pages and never reused, so a number appears on exactly one of them — which is why this
-list starts at 15 and skips 25, 26, 31, 34, 39, 44, 45, 48, 51, 56, 57 and 61, and why item 64 is
-the newest. The exceptions are items 16, 17, 20 and 24, which were only
+list starts at 15 and skips 25, 26, 31, 34, 39, 44, 45, 48, 51, 56, 57, 61, 67 and 68, and why
+item 66 is the newest. The exceptions are items 16, 17, 20, 24 and 54, which were only
 partly fixed: the open remainder is here and the rest is there. Items 9 and 51 were each one such
 exception until their second half was fixed, and are now on the resolved page alone; item 25 was one
 in the other direction — it had one row left open, that row was fixed, and the whole item
 [moved](resolved/claude-md-drift.md).
 
 **Baseline as of writing:** `cargo check --workspace --all-targets` passes with warnings;
-`cargo test --workspace` passes — 498 integration tests (one ignored), 323 `shoal-core` unit
-tests, 29 doctests, plus 8 more behind `--features stage-profile` that a default run does not
-reach ([Test Coverage](test-coverage.md)). That is up from 490, 301 and 25 with
+`cargo test --workspace` passes — 876 tests, one ignored, plus 8 more behind
+`--features stage-profile` that a default run does not reach ([Test Coverage](test-coverage.md)).
+That is up from 868 with [F15](../features/client-server-split.md), which also re-attributed 177
+of them: `shoal-core` went from 323 unit tests to 146 as the protocol and the client became crates
+of their own, and none were lost. That is up from 490, 301 and 25 with
 [F14](../features/encryption-in-transit.md) — one new integration binary (`tls.rs`) carrying 8
 tests, 17 unit tests over the TLS configuration and the kernel key material, 5 over the config
 section, and 4 new doctests. The 8 in `tls.rs` and one of the 17 need the `tls` kernel module and
@@ -892,35 +894,44 @@ than a share of the wall clock, which is why the chart's axis on
 Fixing it properly is upstream in `hotpath`, or means dividing by the shard count that actually
 touched each scope — which the profile does not record.
 
-### 54. `#[shoal::db]` needs three crates the caller has never heard of
+### 54. A schema still declares `rkyv` and `deepsize2` itself
 
-`shoal-derive/src/lib.rs`, every generated `#[shoal::db]` and `#[derive(Shoal*Table)]`; the
-worked-around form is `shoal-bench/Cargo.toml:110-112`
+`shoal-proto/src/shared/traits/sorted.rs:10`, `unsorted.rs:10` and `traits.rs`, the `DeepSizeOf`
+supertrait bound; and every schema's own `#[derive(Archive, Serialize, Deserialize)]`
 
-The generated code names `glommio`, `uuid` and `deepsize2` by path. A crate that writes a schema
-therefore has to declare all three as its own dependencies, even though it mentions none of them
-and has no reason to know they exist. The failure is at least loud — `cannot find module or crate
-glommio in this scope`, pointing at the `#[shoal::db]` attribute — but it points at the macro
-rather than at the manifest, and nothing in [Derive Macros](../api/derive-macros.md) says a word
-about it.
+**Mostly fixed — see [Resolved #54](resolved/macro-emits-three-crates.md) for the part that is
+done and why.** The macros no longer name any crate by path: they emit `::shoal::` and the facade
+re-exports what they reach for, and [F15](../features/client-server-split.md) took glommio out of
+a client's dependency graph rather than re-exporting it. `glommio`, `uuid` and `kanal` are gone
+from the manifests that carried them under a comment saying they should not have been there.
 
-Nothing had noticed because nothing had ever tried. Every schema in this repository lived inside
-`shoal` — the `tmdb` example, the integration tests — and `shoal` already depends on all three, so
-the requirement was invisible from the only place it was ever exercised. Writing the
-[F8](../features/purpose-built-workloads.md) workload schema in `shoal-bench` was the first time a
-schema was defined outside that crate, and it failed on all three in turn.
+What remains is not a macro path and could not be fixed by re-pointing one. A schema writes
 
-**Established by reproducing it**, while building F8. The fix is for the macros to emit
-`::shoal::...` paths through re-exports the facade already controls, which is a `shoal-derive`
-change and would make the requirement disappear rather than need documenting. Until then
-`shoal-bench/Cargo.toml` carries the three with a comment pointing here.
+```rust
+use deepsize2::DeepSizeOf;
+use rkyv::{Archive, Deserialize, Serialize};
 
-**A second fix reaches the same place from the other side.** [D5](../direction/runtimes.md) splits
-the client out of `shoal-core` into a crate with no glommio in it at all, which removes one of the
-three rather than re-exporting it — and it is worth doing regardless, because the feature that
-looks like it already does this (`server = ["glommio"]`) does not work: `pub mod server;` and
-`shared/traits.rs`'s glommio import are both unconditional
-(`shoal-core/src/lib.rs:4`, `shoal-core/src/shared/traits.rs:4`).
+#[derive(Debug, Archive, Serialize, Deserialize, Clone, ShoalUnsortedTable, DeepSizeOf)]
+```
+
+by hand, and both derives expand to absolute paths into their own crates, so both have to be
+declared. `deepsize2` is there because `ShoalTableSupport` is bound on `DeepSizeOf` — the server
+sizes a row to charge it against the memory budget — and that bound is visible to a client that
+will never evict anything.
+
+The original filing said the generated code "names `glommio`, `uuid` and `deepsize2` by path".
+That was wrong about `deepsize2`, which no macro has ever emitted; the third name should have been
+`kanal`. Corrected on the resolved page rather than here.
+
+**Established by reproducing it**, while building [F8](../features/purpose-built-workloads.md).
+
+**Fix direction:** two options, both filed in [TODOs](todos.md). Emit the `DeepSizeOf` impl from
+`#[derive(ShoalSortedTable)]` by summing the row's fields, which removes the derive from the
+schema author's hands but hand-rolls an accounting impl the eviction budget depends on being
+right; or take the bound off the client-visible traits and put it where the server needs it.
+`rkyv` is harder and may not be worth closing: a schema's types are rkyv types, and saying so is
+arguably honest rather than leaky. `shoal::rkyv` and `shoal::deepsize2` exist as escape hatches
+meanwhile.
 
 ### 55. A get that found nothing is reported as a query that failed
 
@@ -1192,6 +1203,68 @@ re-resolution pass over every `file:line` in `docs/src/direction/` and `docs/src
 symbol name kept beside each one so the next drift is greppable. The August 2026 review did this
 for the appendix and did not cover the direction chapter, which had just been written and was
 correct at the time.
+
+### 65. Two `gxhash` majors, and partition keys hashed by the one without `deterministic`
+
+`Cargo.toml:16` and `shoal-proto/Cargo.toml`, `shoal-core/Cargo.toml`; the hash itself is
+`shoal-derive/src/traits/partition_key.rs`, `PartitionKeySupport::get_partition_key`
+
+The workspace pins `gxhash = { version = "3", features = ["deterministic"] }`. `shoal-core` and
+`shoal-proto` both pin `"2.2"`, which resolves to 2.3.1, **and neither enables `deterministic`**.
+Every partition key in every schema is hashed by 2.3.1 without that feature; the workspace pin is
+reachable from nothing and its `deterministic` is doing no work anywhere.
+
+Two things are wrong here and they are worth separating. The smaller one is the dead pin. The
+larger one is that **a partition key's hash is a persistence format** — it decides which partition
+a row belongs to and therefore which file it is in — and nothing states which gxhash produces it,
+whether that hash is stable across gxhash versions, or what `deterministic` would change if it
+were turned on. Upgrading gxhash, or enabling that feature, would silently re-hash every key and
+make every persisted dataset unreadable, and there is no test that would notice.
+
+**Established by reading the manifests**, while deciding which crate should re-export gxhash for
+[F15](../features/client-server-split.md). The split made the question live rather than
+theoretical: `shoal-proto` had to own the re-export, because a client hashes its own partition
+keys, and re-exporting the workspace pin would have put two majors in the graph with the facade's
+choice deciding how every key is hashed. It pins the same major the engine does for that reason.
+
+**Fix direction:** pin gxhash once in `[workspace.dependencies]` at the version already in use,
+so the two crates cannot drift; then settle what `deterministic` guarantees and whether this
+system needs it, and write the answer down next to the pin. A test that asserts a known key hashes
+to a known tablet would turn the next accidental change into a failure instead of a data loss.
+
+### 66. The release profile nothing has been reading
+
+`shoalctl/Cargo.toml:28-30`, and the absence of a `[profile.release]` in `Cargo.toml`
+
+`shoalctl` sets `codegen-units = 1` and `lto = true`. Cargo reads `[profile.*]` only from the
+workspace root, so both lines have been ignored for as long as they have existed — cargo says so
+on every build:
+
+```
+warning: profiles for the non root package will be ignored, specify profiles at the workspace root:
+package:   /home/mcarson/projects/shoal/shoalctl/Cargo.toml
+workspace: /home/mcarson/projects/shoal/Cargo.toml
+```
+
+There is no `[profile.release]` at the root either, so **every release build in this workspace —
+the server, `shoal-workload`, and every benchmark capture ever taken — uses the default profile:
+`lto = false`, `codegen-units = 16`.** This is the same class of trap the root manifest already
+records about a `[build]` table being silently ignored there (`Cargo.toml:23-25`).
+
+It is not only a missed optimization. Without LTO, rustc will not inline across a crate boundary
+unless a function is generic, `const`, or carries `#[inline]` — which is why splitting the crate
+in [F15](../features/client-server-split.md) had to add thirty `#[inline]` attributes, and why
+doing so turned out to *improve* the header codec by up to 80%: those calls had always been
+cross-crate from the benches and the client, and had never been inlinable.
+
+**Established by reproducing it** — cargo emits the warning above on every command run in this
+workspace.
+
+**Fix direction:** decide what the release profile should be and put it at the root. Note that
+adding one changes the codegen of every binary and therefore invalidates every stored capture, so
+it needs its own before-and-after and a note on
+[Performance Baseline](../operations/performance-baseline.md). Whether `lto = "thin"` would let
+the thirty `#[inline]` attributes be dropped again is the interesting half of the question.
 
 Everything that has been fixed, and why it was fixed the way it was, is in
 [Resolved Issues](resolved-issues.md). The SHQL parser has gained test coverage at both stages

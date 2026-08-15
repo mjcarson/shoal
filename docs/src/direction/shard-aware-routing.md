@@ -44,15 +44,29 @@ const TABLET_BITS: u32 = 12;
 
 4096 tablets, ownership stored per tablet in a `Vec<u16>` — 8 KiB — rather than derived, precisely
 so a tablet can be moved ([items 11, 12, 37](../appendix/resolved/tablet-ring.md)). And
-`split_by_shard` is already a method on the *client-linked* `QueryKinds`:
+~~`split_by_shard` is already a method on the *client-linked* `QueryKinds`~~:
 
 ```rust
 fn split_by_shard<'a>(&self, ring: &'a Ring, found: &mut Vec<(&'a ShardInfo, Self)>);
 ```
 
-`shoal-core/src/shared/traits.rs:108`, `ShoalQuerySupport::split_by_shard`
+~~`shoal-core/src/shared/traits.rs:108`, `ShoalQuerySupport::split_by_shard`~~
 
-**The routing logic is compiled into every client already. It is simply never called there.**
+~~**The routing logic is compiled into every client already. It is simply never called there.**~~
+
+**No longer true, and it was a defect rather than a head start.** A signature naming `Ring` and
+`ShardInfo` on a trait the client implements is what made a client link the engine, which is what
+[F15](../features/client-server-split.md) was about. The method now lives on `ShardRouting`, a
+server-side extension trait in `shoal-core::server::routing`, implemented for `SortedQuery`,
+`UnsortedQuery` and the generated `QueryKinds`; the bound sits on `ShoalDatabase::ClientType`, so
+only something owning a ring asks for it, and a `#[shoal::db(client)]` schema implements none of it.
+
+**This does not block anything on this page** — it changes what the first step is. Routing is no
+longer *already* in the client, so giving a client a tablet map means moving a trait impl into a
+crate both peers see, rather than leaving a method where it was and starting to call it. The
+signature, the tablet map and the split logic are all unchanged and all still there; only which
+crate they live in moved, and F15 chose the side that made a client buildable rather than the side
+that anticipated this page.
 
 ## What is missing
 

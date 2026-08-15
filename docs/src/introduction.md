@@ -85,18 +85,28 @@ and `cargo test --workspace` passes with 71 integration tests and 94 unit tests.
 
 | Crate | Role |
 | --- | --- |
-| `shoal-core` | Everything of substance: server, shards, storage engines, client, shared traits and query types. |
-| `shoal-derive` | Proc macros. `#[derive(ShoalSortedTable)]`, `#[derive(ShoalUnsortedTable)]`, and the `#[db]` attribute that generates a database's dispatch layer. |
-| `shoal` | The user-facing façade. Re-exports `shoal-core` and `shoal-derive` under one name, plus a benchmarking harness (`bencher`). |
-| `shoalctl` | A terminal UI, generic over a compiled-in schema. |
+| `shoal-proto` | The wire format and everything both peers agree about: queries, responses, the traits a schema implements, SCRAM, the TLS configuration. **Links no async runtime.** |
+| `shoal-client` | The tokio client, its connection pool and its result streams. Links no storage engine. |
+| `shoal-core` | The database: shards, the ring, the storage engines, `ShoalDatabase`. Depends on `shoal-proto`, and never on `shoal-client`. |
+| `shoal-derive` | Proc macros. `#[derive(ShoalSortedTable)]`, `#[derive(ShoalUnsortedTable)]`, and the `#[db]` attribute that generates a database's dispatch layer. Emits `::shoal::` paths and depends on no shoal crate at all. |
+| `shoal` | The user-facing façade over the four. **Everything outside those four names this and nothing else.** `default-features = false` drops the engine and leaves a client. |
+| `shoalctl` | A terminal UI, generic over a compiled-in schema. A client: no glommio, no io_uring. |
+| `shoal-client-check` | Not a library. A schema that compiles against the client alone, which fails to build if a server path creeps back into it. |
+
+That shape is [F15](features/client-server-split.md), and the reason for it is worth one line:
+before it, opening a connection meant compiling a storage engine. `shoal-core` was one crate
+holding both peers, with a `server` feature that looked like it separated them and could not.
 
 Inside `shoal-core` the split is:
 
 | Module | Role |
 | --- | --- |
-| `shared/` | Types on both sides of the wire: queries, responses, and the core traits. |
 | `server/` | Shard lifecycle, the ring, inter-shard messaging, tables, and storage. |
-| `client/` | The async client, connection pool, and result streams. |
+| `server/database.rs` | `ShoalDatabase`, the trait a schema implements to be served. |
+| `server/routing.rs` | `ShardRouting`, which splits a query across the shards that own its partitions. |
+
+`shoal-core::shared` still resolves — it is a re-export of `shoal_proto::shared`, so the engine
+names the wire format the way it always has.
 
 ## Suggested reading order
 

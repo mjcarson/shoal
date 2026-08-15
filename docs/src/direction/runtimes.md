@@ -1,5 +1,13 @@
 # D5. Runtime portability
 
+> **Step 1 is delivered.** The split shipped as
+> [F15](../features/client-server-split.md): `shoal-proto` holds the wire format and links no
+> async runtime, `shoal-client` holds the tokio client, and `shoal --no-default-features` builds a
+> client with no glommio in its graph. **Step 2, the runtime abstraction itself, is not built and
+> still stands at rank C** — this page's recommendation was to leave it there until somebody asks,
+> and nobody has. What follows is the argument as written, with the claims the work overturned
+> struck through rather than deleted.
+
 ## Context
 
 The ask is "support different async runtimes — tokio, glommio, and others". **The problem behind
@@ -46,6 +54,12 @@ query and response types — imports `glommio::TaskQueueHandle` at module scope,
 "server")]`-gated; the imports and the module declarations are not. Turning the feature off does
 not produce a client-only build; it produces a build failure.
 
+**This is no longer the state of the tree.** The feature is gone from `shoal-core`, which *is* the
+server and has no configuration in which it does not need an engine; nine dead `#[cfg]` attributes
+went with it. The name now lives on the `shoal` facade, where it means whether to link `shoal-core`
+at all. One further detail this page did not have: four of `ShoalDatabase`'s methods carried no
+`#[cfg]` either, so the gating was incoherent as well as ineffective ([F15](../features/client-server-split.md)).
+
 The consequence is visible downstream, and somebody already wrote down that it was wrong:
 
 ```toml
@@ -76,10 +90,16 @@ fn split_by_shard<'a>(&self, ring: &'a Ring, found: &mut Vec<(&'a ShardInfo, Sel
 
 `shoal-core/src/shared/traits.rs:108`, `ShoalQuerySupport::split_by_shard`
 
-`Ring` and `ShardInfo` live in `shoal-core::server`. The client's query enum carries a method whose
+~~`Ring` and `ShardInfo` live in `shoal-core::server`. The client's query enum carries a method whose
 signature names the server's routing types — which is why the client cannot be separated from the
 server without moving it, and, separately, why [D7](shard-aware-routing.md) finds the routing logic
-already compiled into every client.
+already compiled into every client.~~
+
+**Resolved the other way round.** Rather than move `Ring` clientward, `split_by_shard` moved off
+the shared trait onto `ShardRouting`, a server-side extension trait in `shoal-core::server::routing`.
+The bound sits on `ShoalDatabase::ClientType`, so only something that owns a ring ever asks for it —
+which is also what makes `#[shoal::db(client)]` work without a second mechanism. D7 can still move
+`Ring` to the client; it now moves a trait impl rather than a trait method.
 
 ## The options
 
@@ -135,7 +155,7 @@ the only shipped backend until someone asks for another.**
 | **Depends on** | nothing |
 | **Blocks** | ~~[D2](framing.md) and~~ [D7](shard-aware-routing.md) only in the sense of where their code should live. D2 turned out not to be blocked at all: its module has no runtime dependency to split away from, so it was written where it is and moves later ([F10](../features/framing-and-protocol-evolution.md)) |
 | **Tradeoff** | None for the split. Contained for feature flags — one runtime per binary |
-| **Benchmark** | none needed for the split; nothing measurable changes |
+| **Benchmark** | ~~none needed for the split; nothing measurable changes~~ **Wrong, and measured.** True at the source level — no algorithm, data structure or allocation changed. False at the codegen level: this workspace has no `[profile.release]` at its root ([item 66](../appendix/known-issues.md)), so every release build is `lto = false`, and a call that was intra-crate becomes a real call unless it is generic, `const`, or `#[inline]`. Captured before and after; see [F15](../features/client-server-split.md)'s Performance section |
 
 The split is recommended **on its own merits and regardless of whether the abstraction is ever
 built**. It closes item 54, deletes three lines from two manifests that somebody already flagged as

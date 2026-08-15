@@ -61,6 +61,7 @@
   - [F12. Authentication](features/authentication.md)
   - [F13. The transport workloads](features/transport-workloads.md)
   - [F14. Encryption in transit](features/encryption-in-transit.md)
+  - [F15. The client is a crate that cannot start a database](features/client-server-split.md)
 
 # Direction
 
@@ -104,6 +105,8 @@
   - [48. A query that does not parse was answered with silence](appendix/resolved/query-error-display.md)
   - [57. A missing archive was created empty rather than reported](appendix/resolved/missing-archive.md)
   - [56, 61. A response cannot say that a read failed](appendix/resolved/response-error-channel.md)
+  - [54. `#[shoal::db]` needed crates the caller had never heard of](appendix/resolved/macro-emits-three-crates.md)
+  - [67, 68. Chart labels collided, and the scope prefix strip never matched](appendix/resolved/chart-labels.md)
 - [TODOs and Unbuilt Work](appendix/todos.md)
 - [Review, August 2026](appendix/review-2026-08.md)
 - [Glossary](appendix/glossary.md)
