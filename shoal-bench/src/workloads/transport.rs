@@ -546,6 +546,7 @@ impl Workload for Transport {
                 // exactly one row
                 keys: rows,
                 concurrency: self.size.concurrency(),
+                clients: None,
             },
             // enough to cover connection establishment before sampling starts
             warmup: (self.size.queries(scale) / 20).min(2_000),

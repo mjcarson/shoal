@@ -147,6 +147,7 @@ impl Workload for KeyedGet {
                 // one row per partition, so the key count is the row count
                 keys: rows,
                 concurrency: CONCURRENCY,
+                clients: None,
             },
             // enough to cover connection establishment before sampling starts
             warmup: (Self::queries(scale) / 20).min(2_000),

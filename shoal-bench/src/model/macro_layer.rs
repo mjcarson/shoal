@@ -93,6 +93,15 @@ pub struct ScaleFacts {
     pub keys: u64,
     /// How many queries the workload kept outstanding at once
     pub concurrency: u32,
+    /// How many independent clients produced that load
+    ///
+    /// `None` means one, which is what every workload but the encryption client sweep uses and
+    /// what every capture taken before that sweep existed did. It is separate from
+    /// [`ScaleFacts::concurrency`] because the two are different axes: eight queries outstanding
+    /// on one client share a connection pool, a response map and a set of TLS handshakes, where
+    /// one query outstanding on each of eight clients has eight of each.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clients: Option<u32>,
 }
 
 /// The server settings a workload ran against
@@ -533,6 +542,7 @@ impl MacroCaptureV1 {
                 row_bytes: 0,
                 keys: self.inserted,
                 concurrency: 0,
+                clients: None,
             },
             // version 1 captures did not record what they ran against
             conf: None,

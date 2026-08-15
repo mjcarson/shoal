@@ -27,6 +27,7 @@
 pub mod fanout;
 pub mod fanout_ephemeral;
 pub mod get_ephemeral;
+pub mod encryption;
 pub mod harness;
 pub mod insert_ephemeral;
 pub mod insert_unsorted;
@@ -84,6 +85,14 @@ pub fn all() -> Vec<Box<dyn Workload>> {
     // workload declared above them keeps the port it has always had
     built.extend(
         transport::Transport::all()
+            .into_iter()
+            .map(|workload| Box::new(workload) as Box<dyn Workload>),
+    );
+    // the encryption sweeps, appended last and for the same reason again. they are the widest
+    // thing here - forty eight arms - and they are what says how the cost of encryption behaves
+    // across row width, load depth and client count rather than merely whether it exists
+    built.extend(
+        encryption::Encryption::all()
             .into_iter()
             .map(|workload| Box::new(workload) as Box<dyn Workload>),
     );

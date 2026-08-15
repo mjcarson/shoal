@@ -324,13 +324,51 @@ where
     F: Fn(u64) -> Q + Send + Sync + 'static,
     Q: Into<crate::workloads::schema::BenchQueryKinds> + Send,
 {
+    // one client, which is what makes this a depth measurement rather than a client one
+    drive_per_query_across(&[client], concurrency, total, warmup, op, build).await
+}
+
+/// Runs queries one at a time per slot, spread across several independent clients
+///
+/// The same measurement [`drive_per_query`] takes, with the slots dealt round robin across a set
+/// of clients rather than all sharing one. That is the difference between *how deep* the load is
+/// and *how many callers* are producing it, and the two are separate axes: one client at a depth
+/// of eight has one connection pool, one set of TLS handshakes and one response map, where eight
+/// clients at a depth of one have eight of each.
+///
+/// **The slot count is the concurrency, not the client count.** Slots are dealt to clients in
+/// turn, so a concurrency below the client count leaves the later clients idle — which is a
+/// legitimate thing to measure, since an idle client has still paid for its pool.
+///
+/// # Arguments
+///
+/// * `clients` - The clients to spread the slots across, in order
+/// * `concurrency` - How many queries may be outstanding at once in total, one per slot
+/// * `total` - How many queries to send in all
+/// * `warmup` - How many to send before sampling starts
+/// * `op` - The operation name to record samples under
+/// * `build` - Builds the query with a given index
+pub async fn drive_per_query_across<F, Q>(
+    clients: &[Arc<Shoal<BenchClient>>],
+    concurrency: u32,
+    total: u64,
+    warmup: u64,
+    op: &str,
+    build: F,
+) -> Result<Measurement>
+where
+    F: Fn(u64) -> Q + Send + Sync + 'static,
+    Q: Into<crate::workloads::schema::BenchQueryKinds> + Send,
+{
+    assert!(!clients.is_empty(), "a run needs at least one client");
     // one shared cursor, so the slots share the work rather than each taking a fixed slice. a
     // fixed slice would let one slow slot leave the others idle at the end of the run.
     let next = Arc::new(AtomicU64::new(0));
     let build = Arc::new(build);
     let mut slots = tokio::task::JoinSet::new();
-    for _ in 0..concurrency.max(1) {
-        let client = client.clone();
+    for slot in 0..concurrency.max(1) {
+        // deal this slot to a client, walking them in turn so the load is spread evenly
+        let client = clients[slot as usize % clients.len()].clone();
         let next = next.clone();
         let build = build.clone();
         let op = op.to_string();

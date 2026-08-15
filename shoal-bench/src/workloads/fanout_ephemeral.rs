@@ -156,6 +156,7 @@ impl Workload for FanoutEphemeral {
                 // is a curve in the partition count rather than in the result size
                 keys: partitions,
                 concurrency: CONCURRENCY,
+                clients: None,
             },
             warmup: (self.queries(scale) / 20).max(10),
         }

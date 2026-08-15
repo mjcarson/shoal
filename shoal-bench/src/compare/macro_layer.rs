@@ -408,6 +408,7 @@ mod tests {
                 row_bytes: 256,
                 keys: 400_000,
                 concurrency: 4096,
+                clients: None,
             },
             conf: None,
             counters,

@@ -88,6 +88,7 @@ impl Workload for InsertEphemeral {
                 row_bytes: ROW_BYTES,
                 keys: rows,
                 concurrency: driver::IN_FLIGHT as u32,
+                clients: None,
             },
             // the same warmup as the workload this mirrors, even though there is no log rotation
             // here for it to cover, so the two discard the same share of their run
