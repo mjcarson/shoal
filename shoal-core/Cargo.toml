@@ -32,20 +32,14 @@ serde_json = "1"
 config = "0.13" 
 gxhash = "2.2"
 rkyv = { workspace = true }
-rkyv-with = "0.1"
 glommio = { workspace = true, optional = true }
 bytes = "1.5"
-intmap = "2"
 futures = "0.3"
 kanal = { workspace = true }
-tokio = { workspace = true }
 uuid = { workspace = true }
-papaya = "0.2"
 byte-unit = { version = "5.1", features = ["serde"] }
 deepsize2 = { workspace = true }
 lru = "0.16"
-bb8 = "0.8"
-async-trait = "0.1"
 hotpath = { workspace = true }
 
 # tracing dependencies
@@ -58,20 +52,12 @@ tracing-subscriber = "0.3"
 tonic = { version = "0.8.2", features = ["tls-roots"] }
 opentelemetry-semantic-conventions = { version = "0.10.0" }
 opentelemetry-proto = { version = "0.1.0"}
-winnow = "0.7"
-unicode-ident = "1"
 
 # authentication dependencies
 #
 # these are the RustCrypto stack that `sha2 0.10` and `digest 0.10` are already in the tree for,
 # so none of them widen the dependency graph by a generation. none of them are reachable from
 # `shared::protocol`, which has to stay on `core` and `uuid` alone
-sha2 = "0.10"
-hmac = "0.12"
-pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
-base64 = "0.22"
-rand = "0.8"
-subtle = "2"
 
 # encryption dependencies
 #

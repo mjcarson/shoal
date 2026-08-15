@@ -2,10 +2,10 @@
 
 use rkyv::util::AlignedVec;
 
-use crate::shared::protocol::error::ErrorCode;
+use shoal_proto::shared::protocol::error::ErrorCode;
 
 #[cfg(feature = "stage-profile")]
-use crate::server::stage_profile::Stamp;
+use shoal_proto::stamps::Stamp;
 
 /// When a response arrived on the client side
 ///

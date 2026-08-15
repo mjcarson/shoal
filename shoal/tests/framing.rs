@@ -11,10 +11,10 @@
 
 use deepsize2::DeepSizeOf;
 use rkyv::{Archive, Deserialize, Serialize};
-use shoal_core::shared::protocol::auth::AuthMechanisms;
-use shoal_core::shared::protocol::{self, handshake};
-use shoal_core::shared::traits::QuerySupport;
-use shoal_core::tables::EphemeralSortedTable;
+use shoal::shared::protocol::auth::AuthMechanisms;
+use shoal::shared::protocol::{self, handshake};
+use shoal::shared::traits::QuerySupport;
+use shoal::tables::EphemeralSortedTable;
 use shoal_derive::{db, ShoalSortedTable};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -160,7 +160,7 @@ async fn assert_closed(sock: &mut TcpStream) {
 /// * `client` - The client to query with
 /// * `key` - The partition and sort key to use, so two calls do not collide
 async fn round_trip(
-    client: &shoal_core::client::Shoal<TestDbClient>,
+    client: &shoal::client::Shoal<TestDbClient>,
     key: &str,
 ) -> Result<(), TestError> {
     // insert a single row

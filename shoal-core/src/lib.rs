@@ -1,6 +1,5 @@
 #![feature(trivial_bounds)]
 
-pub mod client;
 pub mod server;
 mod utils;
 
@@ -9,7 +8,6 @@ mod utils;
 // it is how the engine refers to the wire format.
 pub use shoal_proto::shared;
 
-pub use client::FromShoal;
 pub use server::tables;
 pub use server::tables::storage;
 pub use server::ShoalPool;

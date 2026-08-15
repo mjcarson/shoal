@@ -35,8 +35,8 @@ use shoal::{
     Conf, Errors, FileSystem, PersistentSortedTable, PersistentUnsortedTable, Shoal, ShoalPool,
     ShoalProjection, ShoalSortedTable, ShoalUnsortedTable,
 };
-use shoal_core::server::conf::{DefaultStorageSettings, Networking, Resources, Storage, TraceLevel};
-use shoal_core::server::tables::storage::fs::conf::{
+use shoal::server::conf::{DefaultStorageSettings, Networking, Resources, Storage, TraceLevel};
+use shoal::server::tables::storage::fs::conf::{
     FileSystemLatencyWriterConf, FileSystemTableConf, FileSystemThroughputWriterConf,
 };
 
@@ -149,7 +149,7 @@ fn config(dir: &std::path::Path) -> Conf {
                 .expect("256MiB is a valid memory size"),
         )
         .networking(Networking::default().port(12345))
-        .tracing(shoal_core::server::conf::Tracing::default().level(TraceLevel::Warn))
+        .tracing(shoal::server::conf::Tracing::default().level(TraceLevel::Warn))
         .storage(
             Storage::default().default_settings(
                 DefaultStorageSettings::default().filesystem(

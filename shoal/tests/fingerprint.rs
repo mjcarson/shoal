@@ -17,14 +17,14 @@
 //! two are different types with the same shape, so their tables fingerprint the same and the only
 //! thing left to tell their databases apart is the projection.
 
-use shoal_core::shared::protocol::fingerprint;
-use shoal_core::shared::traits::{QuerySupport, ShoalProjection, TableSchemaSupport};
+use shoal::shared::protocol::fingerprint;
+use shoal::shared::traits::{QuerySupport, ShoalProjection, TableSchemaSupport};
 
 /// A schema with one sorted table and nothing else
 mod base {
     use deepsize2::DeepSizeOf;
     use rkyv::{Archive, Deserialize, Serialize};
-    use shoal_core::tables::EphemeralSortedTable;
+    use shoal::tables::EphemeralSortedTable;
     use shoal_derive::{db, ShoalSortedTable};
 
     /// The row this schema's only table holds
@@ -57,7 +57,7 @@ mod base {
 mod added_field {
     use deepsize2::DeepSizeOf;
     use rkyv::{Archive, Deserialize, Serialize};
-    use shoal_core::tables::EphemeralSortedTable;
+    use shoal::tables::EphemeralSortedTable;
     use shoal_derive::{db, ShoalSortedTable};
 
     /// The row this schema's only table holds, which has a field the base one does not
@@ -93,7 +93,7 @@ mod added_field {
 mod reordered {
     use deepsize2::DeepSizeOf;
     use rkyv::{Archive, Deserialize, Serialize};
-    use shoal_core::tables::EphemeralSortedTable;
+    use shoal::tables::EphemeralSortedTable;
     use shoal_derive::{db, ShoalSortedTable};
 
     /// The base row's fields, declared in a different order
@@ -126,7 +126,7 @@ mod reordered {
 mod projected {
     use deepsize2::DeepSizeOf;
     use rkyv::{Archive, Deserialize, Serialize};
-    use shoal_core::tables::EphemeralSortedTable;
+    use shoal::tables::EphemeralSortedTable;
     use shoal_derive::{db, ShoalProjection, ShoalSortedTable};
 
     /// The base row, declared identically down to its name

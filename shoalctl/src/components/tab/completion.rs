@@ -13,7 +13,7 @@ use ratatui::{
     widgets::{Clear, Paragraph},
 };
 use shoal::traits::QuerySupport;
-use shoal_core::shared::queries::parser::{Completions, Suggestion};
+use shoal::shared::queries::parser::{Completions, Suggestion};
 use unicode_width::UnicodeWidthStr;
 
 use super::Tab;

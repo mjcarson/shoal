@@ -13,7 +13,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
 };
 use shoal::{client::Shoal, traits::QuerySupport};
-use shoal_core::shared::queries::parser;
+use shoal::shared::queries::parser;
 use std::marker::PhantomData;
 use std::sync::Arc;
 use unicode_width::UnicodeWidthStr;

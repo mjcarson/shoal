@@ -4,6 +4,7 @@ resolver = "2"
 members = [
     "shoal",
     "shoal-bench",
+    "shoal-client",
     "shoal-core",
     "shoal-derive",
     "shoal-proto",

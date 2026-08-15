@@ -31,17 +31,17 @@ pub mod tls;
 
 // the error types are protocol, not transport - `QuerySupport` and `shared::responses` both name
 // them, so they cannot live above the crate that defines those
-pub use shoal_proto::client as errors;
+pub 
 
-use super::shared::queries::Queries;
-use crate::shared::auth::scram::{ClientStep, ScramClient};
-use crate::shared::auth::{AuthError, Credentials};
-use crate::shared::protocol::auth::{self as proto_auth, AuthMechanism, AuthStatus};
-use crate::shared::protocol::error::{self, ErrorCode};
-use crate::shared::protocol::{self, handshake, MessageType, ProtocolError};
-use crate::shared::responses::{ArchivedResponseError, ResponseActionNames};
-use crate::shared::tls::{self as shared_tls, TlsClientOptions};
-use crate::shared::traits::{
+use shoal_proto::shared::queries::Queries;
+use shoal_proto::shared::auth::scram::{ClientStep, ScramClient};
+use shoal_proto::shared::auth::{AuthError, Credentials};
+use shoal_proto::shared::protocol::auth::{self as proto_auth, AuthMechanism, AuthStatus};
+use shoal_proto::shared::protocol::error::{self, ErrorCode};
+use shoal_proto::shared::protocol::{self, handshake, MessageType, ProtocolError};
+use shoal_proto::shared::responses::{ArchivedResponseError, ResponseActionNames};
+use shoal_proto::shared::tls::{self as shared_tls, TlsClientOptions};
+use shoal_proto::shared::traits::{
     ExistsQuery, QuerySupport, RkyvSupport, ShoalQuerySupport, ShoalResponseSupport,
 };
 pub use shoal_proto::client::{
@@ -226,9 +226,9 @@ impl ClientOptions {
     /// # Examples
     ///
     /// ```
-    /// use shoal_core::client::ClientOptions;
-    /// use shoal_core::shared::auth::Credentials;
-    /// use shoal_core::shared::tls::TlsClientOptions;
+    /// use shoal_client::client::ClientOptions;
+    /// use shoal_proto::shared::auth::Credentials;
+    /// use shoal_proto::shared::tls::TlsClientOptions;
     ///
     /// let options = ClientOptions::new()
     ///     .credentials(Credentials::scram("reader", "hunter2"))
@@ -615,13 +615,13 @@ impl<S: QuerySupport> Shoal<S> {
     /// # Examples
     ///
     /// ```no_run
-    /// # async fn example<S: shoal_core::shared::traits::QuerySupport>() -> Result<(), shoal_core::client::Errors>
-    /// # where for<'a> <<S as shoal_core::shared::traits::QuerySupport>::ResponseKinds as rkyv::Archive>::Archived:
+    /// # async fn example<S: shoal_proto::shared::traits::QuerySupport>() -> Result<(), shoal_client::client::Errors>
+    /// # where for<'a> <<S as shoal_proto::shared::traits::QuerySupport>::ResponseKinds as rkyv::Archive>::Archived:
     /// #     rkyv::bytecheck::CheckBytes<rkyv::rancor::Strategy<rkyv::validation::Validator<
     /// #         rkyv::validation::archive::ArchiveValidator<'a>,
     /// #         rkyv::validation::shared::SharedValidator>, rkyv::rancor::Error>> {
-    /// use shoal_core::client::Shoal;
-    /// use shoal_core::shared::auth::Credentials;
+    /// use shoal_client::client::Shoal;
+    /// use shoal_proto::shared::auth::Credentials;
     ///
     /// let client = Shoal::<S>::with_credentials(
     ///     "127.0.0.1:12000",
@@ -664,14 +664,14 @@ impl<S: QuerySupport> Shoal<S> {
     /// # Examples
     ///
     /// ```no_run
-    /// # async fn example<S: shoal_core::shared::traits::QuerySupport>() -> Result<(), shoal_core::client::Errors>
-    /// # where for<'a> <<S as shoal_core::shared::traits::QuerySupport>::ResponseKinds as rkyv::Archive>::Archived:
+    /// # async fn example<S: shoal_proto::shared::traits::QuerySupport>() -> Result<(), shoal_client::client::Errors>
+    /// # where for<'a> <<S as shoal_proto::shared::traits::QuerySupport>::ResponseKinds as rkyv::Archive>::Archived:
     /// #     rkyv::bytecheck::CheckBytes<rkyv::rancor::Strategy<rkyv::validation::Validator<
     /// #         rkyv::validation::archive::ArchiveValidator<'a>,
     /// #         rkyv::validation::shared::SharedValidator>, rkyv::rancor::Error>> {
-    /// use shoal_core::client::{ClientOptions, Shoal};
-    /// use shoal_core::shared::auth::Credentials;
-    /// use shoal_core::shared::tls::TlsClientOptions;
+    /// use shoal_client::client::{ClientOptions, Shoal};
+    /// use shoal_proto::shared::auth::Credentials;
+    /// use shoal_proto::shared::tls::TlsClientOptions;
     ///
     /// let client = Shoal::<S>::with_options(
     ///     "127.0.0.1:12000",

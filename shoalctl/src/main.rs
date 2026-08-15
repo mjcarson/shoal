@@ -7,7 +7,7 @@
 //!
 //! ```ignore
 //! use std::sync::Arc;
-//! use shoal_core::client::Shoal;
+//! use shoal::client::Shoal;
 //!
 //! // Import your database types
 //! use my_db::{MyDbClient};
@@ -27,7 +27,7 @@ fn main() {
     eprintln!("Create your own binary that imports shoalctl and provides your database types:");
     eprintln!();
     eprintln!("    use std::sync::Arc;");
-    eprintln!("    use shoal_core::client::Shoal;");
+    eprintln!("    use shoal::client::Shoal;");
     eprintln!("    use my_db::MyDbClient;");
     eprintln!();
     eprintln!("    #[tokio::main]");

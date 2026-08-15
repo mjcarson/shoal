@@ -2,9 +2,9 @@
 
 use deepsize2::DeepSizeOf;
 use rkyv::{Archive, Deserialize, Serialize};
-use shoal_core::shared::traits::RkyvSupport;
-use shoal_core::storage::FileSystem;
-use shoal_core::tables::PersistentUnsortedTable;
+use shoal::shared::traits::RkyvSupport;
+use shoal::storage::FileSystem;
+use shoal::tables::PersistentUnsortedTable;
 use shoal_derive::{db, ShoalProjection, ShoalUnsortedTable};
 use std::time::Duration;
 use tempfile::TempDir;
@@ -412,8 +412,8 @@ async fn get_with_a_zero_limit_returns_nothing() -> Result<(), TestError> {
     // a get that asked for nothing gets nothing
     assert!(matches!(
         result,
-        Err(shoal_core::client::Errors::QueryDidNotSucceed {
-            kind: shoal_core::shared::responses::ResponseActionNames::Get,
+        Err(shoal::client::Errors::QueryDidNotSucceed {
+            kind: shoal::shared::responses::ResponseActionNames::Get,
             ..
         })
     ));
@@ -436,7 +436,7 @@ const SPREAD_PARTITIONS: usize = 20;
 ///
 /// * `client` - The client to insert our rows with
 async fn insert_spread_rows(
-    client: &shoal_core::client::Shoal<TestDbClient>,
+    client: &shoal::client::Shoal<TestDbClient>,
 ) -> Result<Vec<String>, TestError> {
     // build a partition key per partition we are spreading over
     let partition_keys = (0..SPREAD_PARTITIONS)
@@ -459,7 +459,7 @@ async fn insert_spread_rows(
 /// * `partition_keys` - The partitions to read, in the order to read them
 /// * `limit` - The most rows to ask for, if any
 async fn get_partition_keys(
-    client: &shoal_core::client::Shoal<TestDbClient>,
+    client: &shoal::client::Shoal<TestDbClient>,
     partition_keys: Vec<String>,
     limit: Option<usize>,
 ) -> Result<Vec<String>, TestError> {
@@ -554,7 +554,7 @@ async fn get_limit_takes_the_first_partitions() -> Result<(), TestError> {
 /// * `partition_keys` - The partitions to read, in the order to read them
 /// * `limit` - The most rows to ask for, if this get should set a limit
 async fn get_projected_keys(
-    client: &shoal_core::client::Shoal<TestDbClient>,
+    client: &shoal::client::Shoal<TestDbClient>,
     partition_keys: Vec<String>,
     limit: Option<usize>,
 ) -> Result<Vec<String>, TestError> {
@@ -709,8 +709,8 @@ async fn a_get_whose_partition_cannot_be_read_does_not_hang() -> Result<(), Test
     // not there from a row whose only copy could not be read
     assert!(matches!(
         answered.expect("timed out"),
-        Err(shoal_core::client::Errors::Server {
-            code: shoal_core::shared::protocol::error::ErrorCode::StorageRead,
+        Err(shoal::client::Errors::Server {
+            code: shoal::shared::protocol::error::ErrorCode::StorageRead,
             ..
         })
     ));
@@ -779,8 +779,8 @@ async fn a_get_whose_archive_is_missing_does_not_end_its_shard() -> Result<(), T
     // and the two arrive as different codes rather than as one indistinguishable empty answer
     assert!(matches!(
         answered.expect("timed out"),
-        Err(shoal_core::client::Errors::Server {
-            code: shoal_core::shared::protocol::error::ErrorCode::ArchiveMissing,
+        Err(shoal::client::Errors::Server {
+            code: shoal::shared::protocol::error::ErrorCode::ArchiveMissing,
             ..
         })
     ));

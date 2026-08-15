@@ -26,6 +26,8 @@ stage-profile = ["shoal-core/stage-profile"]
 
 
 [dependencies]
+shoal-proto = { version = "0.1.0", path = "../shoal-proto" }
+shoal-client = { version = "0.1.0", path = "../shoal-client" }
 shoal-core = { version = "0.1.0", path = "../shoal-core" }
 shoal-derive = { version = "0.1.0", path = "../shoal-derive" }
 # The derive macros no longer name any crate the caller has to declare - they emit `::shoal::`

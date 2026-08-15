@@ -12,14 +12,14 @@
 
 use deepsize2::DeepSizeOf;
 use rkyv::{Archive, Deserialize, Serialize};
-use shoal_core::client::{ConnectError, Errors, Shoal};
-use shoal_core::server::ShoalPool;
-use shoal_core::shared::auth::Credentials;
-use shoal_core::shared::protocol::auth::{AuthMechanisms, AuthStatus};
-use shoal_core::shared::protocol::handshake::RefusalReason;
-use shoal_core::shared::protocol::{self, auth as proto_auth, handshake, MessageType};
-use shoal_core::shared::traits::QuerySupport;
-use shoal_core::tables::EphemeralSortedTable;
+use shoal::client::{ConnectError, Errors, Shoal};
+use shoal::server::ShoalPool;
+use shoal::shared::auth::Credentials;
+use shoal::shared::protocol::auth::{AuthMechanisms, AuthStatus};
+use shoal::shared::protocol::handshake::RefusalReason;
+use shoal::shared::protocol::{self, auth as proto_auth, handshake, MessageType};
+use shoal::shared::traits::QuerySupport;
+use shoal::tables::EphemeralSortedTable;
 use shoal_derive::{db, ShoalSortedTable};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -205,7 +205,7 @@ async fn a_client_with_no_credentials_is_refused() -> Result<(), TestError> {
         .expect("a client with no credentials was let in");
     match refused {
         Errors::Handshake(ConnectError::Protocol(
-            shoal_core::shared::protocol::ProtocolError::Refused {
+            shoal::shared::protocol::ProtocolError::Refused {
                 reason: RefusalReason::NoCommonAuthMechanism,
             },
         )) => {}

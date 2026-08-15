@@ -21,8 +21,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result};
 use shoal::Conf;
-use shoal_core::server::conf::TraceLevel;
-use shoal_core::shared::tls::{TlsClientOptions, TlsServerOptions};
+use shoal::server::conf::TraceLevel;
+use shoal::shared::tls::{TlsClientOptions, TlsServerOptions};
 
 use crate::model::macro_layer::ConfFacts;
 use crate::workloads::workload::ConfOverrides;
@@ -165,8 +165,8 @@ pub fn client_tls(conf: &Conf) -> Option<TlsClientOptions> {
 pub fn facts(conf: &Conf) -> ConfFacts {
     // the durability barrier lives on the latency sensitive writer, which is what a write waits on
     let durability = match conf.storage.default.filesystem.latency_sensitive.durability {
-        shoal_core::server::tables::storage::fs::conf::Durability::Fsync => "fsync",
-        shoal_core::server::tables::storage::fs::conf::Durability::Async => "async",
+        shoal::server::tables::storage::fs::conf::Durability::Fsync => "fsync",
+        shoal::server::tables::storage::fs::conf::Durability::Async => "async",
     };
     ConfFacts {
         // an unset core count means every online core, which is not a number this can name

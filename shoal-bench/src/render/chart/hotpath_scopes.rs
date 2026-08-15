@@ -105,7 +105,7 @@ pub fn draw(profile: &HotpathProfile) -> Result<String> {
 /// * `name` - The scope's full path
 fn shorten(name: &str) -> String {
     // the crate prefix is the same for every scope in the profile and carries no information
-    let trimmed = name.strip_prefix("shoal_core::").unwrap_or(name);
+    let trimmed = name.strip_prefix("shoal::").unwrap_or(name);
     // plotters estimates text extents rather than measuring them, so a long label is a label that
     // overlaps its neighbour. keep the tail, which is the part that identifies the scope.
     const LIMIT: usize = 46;
@@ -164,8 +164,8 @@ mod tests {
     #[test]
     fn it_draws_the_most_expensive_scopes() {
         let profile = profile(&[
-            ("shoal_core::server::shard::handle_query", 7_538_153_856, 617_175),
-            ("shoal_core::server::tables::storage::fs::load_partition", 391, 1),
+            ("shoal::server::shard::handle_query", 7_538_153_856, 617_175),
+            ("shoal::server::tables::storage::fs::load_partition", 391, 1),
         ]);
         let svg = draw(&profile).expect("it draws");
         assert!(svg.contains("server::shard::handle_query"));
@@ -209,8 +209,8 @@ mod tests {
     /// A long scope path is shortened from the front, keeping what identifies it
     #[test]
     fn a_long_scope_is_shortened_from_the_front() {
-        assert_eq!(shorten("shoal_core::server::shard::handle_query"), "server::shard::handle_query");
-        let long = shorten("shoal_core::server::tables::storage::fs::stream::write_helper_with_a_long_name");
+        assert_eq!(shorten("shoal::server::shard::handle_query"), "server::shard::handle_query");
+        let long = shorten("shoal::server::tables::storage::fs::stream::write_helper_with_a_long_name");
         assert!(long.starts_with('…'), "{long}");
         assert!(long.ends_with("write_helper_with_a_long_name"), "{long}");
         assert!(long.chars().count() <= 46);

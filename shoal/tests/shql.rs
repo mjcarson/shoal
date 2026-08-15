@@ -7,11 +7,11 @@
 
 use deepsize2::DeepSizeOf;
 use rkyv::{Archive, Deserialize, Serialize};
-use shoal_core::shared::queries::parser::{FieldRole, Suggestion, SuggestionKind};
-use shoal_core::shared::queries::{SortSelect, SortedQuery, UnsortedQuery};
-use shoal_core::shared::traits::{PartitionKeySupport, QuerySupport};
-use shoal_core::storage::FileSystem;
-use shoal_core::tables::{PersistentSortedTable, PersistentUnsortedTable};
+use shoal::shared::queries::parser::{FieldRole, Suggestion, SuggestionKind};
+use shoal::shared::queries::{SortSelect, SortedQuery, UnsortedQuery};
+use shoal::shared::traits::{PartitionKeySupport, QuerySupport};
+use shoal::storage::FileSystem;
+use shoal::tables::{PersistentSortedTable, PersistentUnsortedTable};
 use shoal_derive::{db, ShoalProjection, ShoalSortedTable, ShoalUnsortedTable};
 use std::ops::Bound;
 
@@ -121,7 +121,7 @@ fn parse_err(query: &str) -> String {
 /// # Arguments
 ///
 /// * `query` - The query to parse
-fn parse_movie(query: &str) -> shoal_core::shared::queries::UnsortedGet<Movie> {
+fn parse_movie(query: &str) -> shoal::shared::queries::UnsortedGet<Movie> {
     // parse this query and make sure it bound to the movie table
     match parse(query) {
         ShqlDbQueryKinds::Movie(UnsortedQuery::Get(get)) => get,
@@ -134,7 +134,7 @@ fn parse_movie(query: &str) -> shoal_core::shared::queries::UnsortedGet<Movie> {
 /// # Arguments
 ///
 /// * `query` - The query to parse
-fn parse_review(query: &str) -> shoal_core::shared::queries::SortedGet<Review> {
+fn parse_review(query: &str) -> shoal::shared::queries::SortedGet<Review> {
     // parse this query and make sure it bound to the review table
     match parse(query) {
         ShqlDbQueryKinds::Review(SortedQuery::Get(get)) => get,
@@ -545,7 +545,7 @@ fn binds_a_lowercase_query() {
 ///
 /// * `query` - The query to suggest completions for
 fn suggest(query: &str) -> Vec<Suggestion> {
-    shoal_core::shared::queries::parser::suggest::<ShqlDbClient>(query, query.len()).items
+    shoal::shared::queries::parser::suggest::<ShqlDbClient>(query, query.len()).items
 }
 
 /// Suggest completions and return just their text, which is usually all a test cares about
@@ -775,7 +775,7 @@ fn accepted_text_is_spaced_for_the_next_token() {
 fn replaces_only_the_word_under_the_cursor() {
     let query = "SELECT * FROM Mov";
     let completions =
-        shoal_core::shared::queries::parser::suggest::<ShqlDbClient>(query, query.len());
+        shoal::shared::queries::parser::suggest::<ShqlDbClient>(query, query.len());
     assert_eq!(completions.word_start, "SELECT * FROM ".len());
     assert_eq!(completions.word_end, query.len());
 }

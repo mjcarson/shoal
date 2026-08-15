@@ -20,13 +20,14 @@
 pub use shoal_core::{deepsize2, glommio, gxhash, kanal, lru, rkyv, serde_json, tracing, uuid};
 
 // The protocol: what both peers see
-pub use shoal_core::shared::{self, traits};
+pub use shoal_proto::shared::{self, traits};
 
-// The client
-pub use shoal_core::FromShoal;
-pub use shoal_core::client::{
-    self, ChannelError, ConnectError, Errors, QuerySuceededOpts, Shoal, ShoalResponse,
-    ShoalUnorderedResultStream,
+// The client. Its error types come from the protocol crate rather than from here, because
+// `QuerySupport` and `shared::responses` both name them
+pub use shoal_proto::FromShoal;
+pub use shoal_proto::client::{ChannelError, ConnectError, Errors, QuerySuceededOpts};
+pub use shoal_client::client::{
+    self, Shoal, ShoalResponse, ShoalUnorderedResultStream,
 };
 
 // The server, and the engine it runs on

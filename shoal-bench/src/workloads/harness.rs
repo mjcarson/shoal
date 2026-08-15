@@ -77,7 +77,7 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
         // after them - so no other thread can be reading the environment concurrently with this
         unsafe {
             std::env::set_var(
-                shoal_core::server::stage_profile::SAMPLE_ENV,
+                shoal::server::stage_profile::SAMPLE_ENV,
                 request.stage_sample.to_string(),
             );
         }
@@ -219,8 +219,8 @@ fn start(
         // failed query, so an empty table would look like an unready server and the probe would
         // time out against a server that was working perfectly.
             let options = match tls {
-                Some(tls) => shoal_core::client::ClientOptions::new().tls(tls),
-                None => shoal_core::client::ClientOptions::new(),
+                Some(tls) => shoal::client::ClientOptions::new().tls(tls),
+                None => shoal::client::ClientOptions::new(),
             };
             let client = Shoal::<BenchClient>::with_options(&addr, options).await?;
             client.exists(ItemExists::new(u64::MAX)).await?;
@@ -261,10 +261,10 @@ fn write_stage_report(request: &RunRequest, measured: &crate::workloads::workloa
         return Ok(());
     };
     // take every record the shards handed over
-    let server_records = shoal_core::server::stage_profile::drain_stage_records();
+    let server_records = shoal::server::stage_profile::drain_stage_records();
     // measure what a clock read costs here, so stages of that order are marked as being at the
     // floor rather than printed as though they were measurements
-    let overhead = shoal_core::server::stage_profile::Stamp::measure_overhead(4096);
+    let overhead = shoal::server::stage_profile::Stamp::measure_overhead(4096);
     // join the two halves and summarize them
     let report = crate::workloads::stages::build_report(
         &server_records,

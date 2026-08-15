@@ -27,7 +27,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 use super::ConnectError;
-use crate::shared::tls::{
+use shoal_proto::shared::tls::{
     ktls, record_body_len, server_name, Established, TlsClientHandshake, TlsClientOptions,
     TlsError, TlsStep, RECORD_HEADER_LEN,
 };

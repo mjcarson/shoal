@@ -16,10 +16,10 @@
 
 use deepsize2::DeepSizeOf;
 use rkyv::{Archive, Deserialize, Serialize};
-use shoal_core::client::{ClientOptions, Shoal};
-use shoal_core::server::ShoalPool;
-use shoal_core::shared::auth::Credentials;
-use shoal_core::tables::EphemeralSortedTable;
+use shoal::client::{ClientOptions, Shoal};
+use shoal::server::ShoalPool;
+use shoal::shared::auth::Credentials;
+use shoal::tables::EphemeralSortedTable;
 use shoal_derive::{db, ShoalSortedTable};
 
 mod utils;

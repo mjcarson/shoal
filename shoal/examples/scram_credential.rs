@@ -15,7 +15,7 @@
 
 use std::io::{BufRead, Write};
 
-use shoal_core::shared::auth::{StoredCredential, DEFAULT_ITERATIONS};
+use shoal::shared::auth::{StoredCredential, DEFAULT_ITERATIONS};
 
 /// Read a password from the terminal and print the config stanza it derives to
 fn main() {

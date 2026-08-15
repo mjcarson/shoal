@@ -10,9 +10,9 @@
 //! same reason it is convenient everywhere else: it returns a client and a server that are
 //! already paired.
 
-use shoal_core::client::{ConnectError, Errors, Shoal};
-use shoal_core::server::ShoalPool;
-use shoal_core::shared::protocol::ProtocolError;
+use shoal::client::{ConnectError, Errors, Shoal};
+use shoal::server::ShoalPool;
+use shoal::shared::protocol::ProtocolError;
 
 mod utils;
 
@@ -22,7 +22,7 @@ use utils::TestError;
 mod server_schema {
     use deepsize2::DeepSizeOf;
     use rkyv::{Archive, Deserialize, Serialize};
-    use shoal_core::tables::EphemeralSortedTable;
+    use shoal::tables::EphemeralSortedTable;
     use shoal_derive::{db, ShoalSortedTable};
 
     /// The row this schema's only table holds
@@ -59,7 +59,7 @@ mod server_schema {
 mod client_schema {
     use deepsize2::DeepSizeOf;
     use rkyv::{Archive, Deserialize, Serialize};
-    use shoal_core::tables::EphemeralSortedTable;
+    use shoal::tables::EphemeralSortedTable;
     use shoal_derive::{db, ShoalSortedTable};
 
     /// The server's row, with one field added

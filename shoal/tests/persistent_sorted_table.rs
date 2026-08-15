@@ -2,10 +2,10 @@
 
 use deepsize2::DeepSizeOf;
 use rkyv::{Archive, Deserialize, Serialize};
-use shoal_core::shared::queries::SortRange;
-use shoal_core::shared::traits::RkyvSupport;
-use shoal_core::storage::FileSystem;
-use shoal_core::tables::PersistentSortedTable;
+use shoal::shared::queries::SortRange;
+use shoal::shared::traits::RkyvSupport;
+use shoal::storage::FileSystem;
+use shoal::tables::PersistentSortedTable;
 use shoal_derive::{db, ShoalProjection, ShoalSortedTable};
 use std::ops::Bound;
 use std::path::PathBuf;
@@ -878,7 +878,7 @@ async fn ack_survives_sigkill() -> Result<(), TestError> {
 /// * `partition_key` - The partition to insert our rows into
 /// * `sort_keys` - The sort keys to build a row for
 async fn insert_rows(
-    client: &shoal_core::client::Shoal<TestDbClient>,
+    client: &shoal::client::Shoal<TestDbClient>,
     partition_key: &str,
     sort_keys: &[&str],
 ) -> Result<(), TestError> {
@@ -937,8 +937,8 @@ async fn get_with_a_zero_limit_returns_nothing() -> Result<(), TestError> {
     // a get that asked for nothing gets nothing
     assert!(matches!(
         result,
-        Err(shoal_core::client::Errors::QueryDidNotSucceed {
-            kind: shoal_core::shared::responses::ResponseActionNames::Get,
+        Err(shoal::client::Errors::QueryDidNotSucceed {
+            kind: shoal::shared::responses::ResponseActionNames::Get,
             ..
         })
     ));
@@ -1050,7 +1050,7 @@ const SPREAD_ROWS_PER_PARTITION: usize = 3;
 ///
 /// * `client` - The client to insert our rows with
 async fn insert_spread_rows(
-    client: &shoal_core::client::Shoal<TestDbClient>,
+    client: &shoal::client::Shoal<TestDbClient>,
 ) -> Result<Vec<String>, TestError> {
     // build a partition key per partition we are spreading over
     let partition_keys = (0..SPREAD_PARTITIONS)
@@ -1069,7 +1069,7 @@ async fn insert_spread_rows(
 ///
 /// * `stream` - The result stream to drain
 async fn drain_get(
-    stream: &mut shoal_core::client::ShoalResultStream<TestDbClient>,
+    stream: &mut shoal::client::ShoalResultStream<TestDbClient>,
 ) -> Result<(usize, usize), TestError> {
     // count the responses and the rows they carried
     let mut responses = 0;
@@ -1154,7 +1154,7 @@ async fn get_applies_its_limit_across_shards() -> Result<(), TestError> {
 ///
 /// * `stream` - The result stream to drain
 async fn drain_row_keys(
-    stream: &mut shoal_core::client::ShoalResultStream<TestDbClient>,
+    stream: &mut shoal::client::ShoalResultStream<TestDbClient>,
 ) -> Result<Vec<(String, String)>, TestError> {
     // collect the keys of every row this get answered with
     let mut rows = Vec::new();
@@ -1197,7 +1197,7 @@ fn expected_row_keys(partition_keys: &[String], sort_keys: &[&str]) -> Vec<(Stri
 /// * `client` - The client to send our get with
 /// * `partition_keys` - The partitions to read, in the order to read them
 async fn get_row_keys(
-    client: &shoal_core::client::Shoal<TestDbClient>,
+    client: &shoal::client::Shoal<TestDbClient>,
     partition_keys: Vec<String>,
 ) -> Result<Vec<(String, String)>, TestError> {
     // get from every one of these partitions at once
@@ -1513,7 +1513,7 @@ async fn shql_rejects_a_partition_key_constrained_twice() -> Result<(), TestErro
 /// * `partition_keys` - The partitions to read, in the order to read them
 /// * `sort_keys` - The sort keys to select within each of those partitions
 async fn get_row_keys_by_sort_key(
-    client: &shoal_core::client::Shoal<TestDbClient>,
+    client: &shoal::client::Shoal<TestDbClient>,
     partition_keys: Vec<String>,
     sort_keys: &[&str],
 ) -> Result<Vec<(String, String)>, TestError> {
@@ -1756,7 +1756,7 @@ async fn exists_by_sort_key_survives_a_disk_load() -> Result<(), TestError> {
 /// * `partition_keys` - The partitions to read, in the order to read them
 /// * `range` - The range of sort keys to select within each of those partitions
 async fn get_row_keys_by_range(
-    client: &shoal_core::client::Shoal<TestDbClient>,
+    client: &shoal::client::Shoal<TestDbClient>,
     partition_keys: Vec<String>,
     range: SortRange<String>,
 ) -> Result<Vec<(String, String)>, TestError> {
@@ -2105,7 +2105,7 @@ async fn shql_bounds_rows_by_a_sort_key_range() -> Result<(), TestError> {
 ///
 /// * `stream` - The stream to drain
 async fn drain_projected_keys(
-    stream: &mut shoal_core::client::ShoalResultStream<TestDbClient>,
+    stream: &mut shoal::client::ShoalResultStream<TestDbClient>,
 ) -> Result<Vec<(String, String)>, TestError> {
     // collect the keys of every row this get answered with
     let mut rows = Vec::new();
@@ -2492,8 +2492,8 @@ async fn a_get_whose_partition_cannot_be_read_does_not_hang() -> Result<(), Test
     // not there from a row whose only copy could not be read
     assert!(matches!(
         answered.expect("timed out"),
-        Err(shoal_core::client::Errors::Server {
-            code: shoal_core::shared::protocol::error::ErrorCode::StorageRead,
+        Err(shoal::client::Errors::Server {
+            code: shoal::shared::protocol::error::ErrorCode::StorageRead,
             ..
         })
     ));
@@ -2571,8 +2571,8 @@ async fn a_get_whose_archive_is_missing_does_not_end_its_shard() -> Result<(), T
     // and the two arrive as different codes rather than as one indistinguishable empty answer
     assert!(matches!(
         answered.expect("timed out"),
-        Err(shoal_core::client::Errors::Server {
-            code: shoal_core::shared::protocol::error::ErrorCode::ArchiveMissing,
+        Err(shoal::client::Errors::Server {
+            code: shoal::shared::protocol::error::ErrorCode::ArchiveMissing,
             ..
         })
     ));

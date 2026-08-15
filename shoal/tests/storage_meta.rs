@@ -7,10 +7,10 @@
 
 use deepsize2::DeepSizeOf;
 use rkyv::{Archive, Deserialize, Serialize};
-use shoal_core::server::errors::ShoalError;
-use shoal_core::server::ServerError;
-use shoal_core::storage::FileSystem;
-use shoal_core::tables::PersistentUnsortedTable;
+use shoal::server::errors::ShoalError;
+use shoal::server::ServerError;
+use shoal::storage::FileSystem;
+use shoal::tables::PersistentUnsortedTable;
 use shoal_derive::{db, ShoalUnsortedTable};
 use std::time::Duration;
 use tempfile::TempDir;

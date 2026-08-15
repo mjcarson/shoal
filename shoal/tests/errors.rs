@@ -8,12 +8,12 @@
 
 use deepsize2::DeepSizeOf;
 use rkyv::{Archive, Deserialize, Serialize};
-use shoal_core::shared::protocol::error::{self, ErrorCode};
-use shoal_core::shared::protocol::auth::AuthMechanisms;
-use shoal_core::shared::protocol::{self, handshake};
-use shoal_core::shared::queries::Queries;
-use shoal_core::shared::traits::QuerySupport;
-use shoal_core::tables::EphemeralSortedTable;
+use shoal::shared::protocol::error::{self, ErrorCode};
+use shoal::shared::protocol::auth::AuthMechanisms;
+use shoal::shared::protocol::{self, handshake};
+use shoal::shared::queries::Queries;
+use shoal::shared::traits::QuerySupport;
+use shoal::tables::EphemeralSortedTable;
 use shoal_derive::{db, ShoalSortedTable};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;

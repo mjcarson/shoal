@@ -1,7 +1,7 @@
 //! The shared utilities for tests in Shoal
 
-use shoal_core::server::conf::{Conf, DefaultStorageSettings, Networking, Resources, Storage};
-use shoal_core::storage::fs::conf::{
+use shoal::server::conf::{Conf, DefaultStorageSettings, Networking, Resources, Storage};
+use shoal::storage::fs::conf::{
     FileSystemLatencyWriterConf, FileSystemTableConf, FileSystemThroughputWriterConf,
 };
 use std::sync::atomic::{AtomicU16, Ordering};

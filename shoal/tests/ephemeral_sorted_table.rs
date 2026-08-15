@@ -12,9 +12,9 @@
 
 use deepsize2::DeepSizeOf;
 use rkyv::{Archive, Deserialize, Serialize};
-use shoal_core::shared::queries::SortRange;
-use shoal_core::shared::traits::RkyvSupport;
-use shoal_core::tables::EphemeralSortedTable;
+use shoal::shared::queries::SortRange;
+use shoal::shared::traits::RkyvSupport;
+use shoal::tables::EphemeralSortedTable;
 use shoal_derive::{db, ShoalProjection, ShoalSortedTable};
 use std::ops::Bound;
 use std::time::Duration;
@@ -92,7 +92,7 @@ const SPREAD_PARTITIONS: usize = 20;
 /// * `partition_key` - The partition to insert our rows into
 /// * `sort_keys` - The sort keys to build a row for
 async fn insert_rows(
-    client: &shoal_core::client::Shoal<TestDbClient>,
+    client: &shoal::client::Shoal<TestDbClient>,
     partition_key: &str,
     sort_keys: &[&str],
 ) -> Result<(), TestError> {
@@ -113,7 +113,7 @@ async fn insert_rows(
 ///
 /// * `client` - The client to insert our rows with
 async fn insert_spread_rows(
-    client: &shoal_core::client::Shoal<TestDbClient>,
+    client: &shoal::client::Shoal<TestDbClient>,
 ) -> Result<Vec<String>, TestError> {
     // build a partition key per partition we are spreading over
     let partition_keys = (0..SPREAD_PARTITIONS)
@@ -132,7 +132,7 @@ async fn insert_spread_rows(
 ///
 /// * `stream` - The result stream to drain
 async fn drain_row_keys(
-    stream: &mut shoal_core::client::ShoalResultStream<TestDbClient>,
+    stream: &mut shoal::client::ShoalResultStream<TestDbClient>,
 ) -> Result<Vec<(String, String)>, TestError> {
     // collect the keys of every row this get answered with
     let mut rows = Vec::new();
@@ -175,7 +175,7 @@ fn expected_row_keys(partition_keys: &[String], sort_keys: &[&str]) -> Vec<(Stri
 /// * `client` - The client to send our get with
 /// * `partition_keys` - The partitions to read, in the order to read them
 async fn get_row_keys(
-    client: &shoal_core::client::Shoal<TestDbClient>,
+    client: &shoal::client::Shoal<TestDbClient>,
     partition_keys: Vec<String>,
 ) -> Result<Vec<(String, String)>, TestError> {
     // get from every one of these partitions at once
@@ -193,7 +193,7 @@ async fn get_row_keys(
 /// * `partition_keys` - The partitions to read, in the order to read them
 /// * `sort_keys` - The sort keys to select within each of those partitions
 async fn get_row_keys_by_sort_key(
-    client: &shoal_core::client::Shoal<TestDbClient>,
+    client: &shoal::client::Shoal<TestDbClient>,
     partition_keys: Vec<String>,
     sort_keys: &[&str],
 ) -> Result<Vec<(String, String)>, TestError> {
@@ -213,7 +213,7 @@ async fn get_row_keys_by_sort_key(
 /// * `partition_keys` - The partitions to read, in the order to read them
 /// * `range` - The range of sort keys to select within each of those partitions
 async fn get_row_keys_by_range(
-    client: &shoal_core::client::Shoal<TestDbClient>,
+    client: &shoal::client::Shoal<TestDbClient>,
     partition_keys: Vec<String>,
     range: SortRange<String>,
 ) -> Result<Vec<(String, String)>, TestError> {

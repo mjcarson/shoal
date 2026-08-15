@@ -21,7 +21,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use anyhow::{Context as _, Result};
-use shoal_core::shared::tls::TlsClientOptions;
+use shoal::shared::tls::TlsClientOptions;
 
 use crate::model::macro_layer::{ConfFacts, ScaleFacts, Timing};
 use crate::workloads::harness::seed::Scale;
@@ -212,8 +212,8 @@ impl Context {
     pub async fn client(&self) -> Result<shoal::Shoal<BenchClient>> {
         // an unencrypted workload gets exactly the client it always got
         let options = match &self.tls {
-            Some(tls) => shoal_core::client::ClientOptions::new().tls(tls.clone()),
-            None => shoal_core::client::ClientOptions::new(),
+            Some(tls) => shoal::client::ClientOptions::new().tls(tls.clone()),
+            None => shoal::client::ClientOptions::new(),
         };
         shoal::Shoal::<BenchClient>::with_options(&self.addr, options)
             .await

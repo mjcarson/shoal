@@ -17,7 +17,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
 };
 use shoal::traits::QuerySupport;
-use shoal_core::client::ShqlParseError;
+use shoal::client::ShqlParseError;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::Tab;

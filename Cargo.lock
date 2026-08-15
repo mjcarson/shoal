@@ -1855,12 +1855,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "intmap"
-version = "2.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee87fd093563344074bacf24faa0bb0227fb6969fb223e922db798516de924d6"
-
-[[package]]
 name = "intrusive-collections"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3243,17 +3237,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rkyv-with"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b3308fa04cf25d994d9f662057b67ef69774f3801d59c723bb644ec9ae83f500"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.108",
-]
-
-[[package]]
 name = "rkyv_derive"
 version = "0.7.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3628,8 +3611,10 @@ dependencies = [
  "rcgen",
  "rkyv 0.8.12",
  "serde_yaml",
+ "shoal-client",
  "shoal-core",
  "shoal-derive",
+ "shoal-proto",
  "tempfile",
  "tokio",
  "uuid",
@@ -3662,12 +3647,29 @@ dependencies = [
 ]
 
 [[package]]
-name = "shoal-core"
+name = "shoal-client"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "base64 0.22.1",
  "bb8",
+ "bytes",
+ "futures",
+ "kanal",
+ "papaya",
+ "rkyv 0.8.12",
+ "rustls 0.23.43",
+ "rustls-pki-types",
+ "shoal-proto",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "shoal-core"
+version = "0.1.0"
+dependencies = [
  "byte-unit",
  "bytes",
  "clap",
@@ -3676,9 +3678,7 @@ dependencies = [
  "futures",
  "glommio",
  "gxhash",
- "hmac",
  "hotpath",
- "intmap",
  "kanal",
  "libc",
  "lru",
@@ -3687,30 +3687,21 @@ dependencies = [
  "opentelemetry-proto 0.1.0",
  "opentelemetry-semantic-conventions",
  "opentelemetry_sdk 0.28.0",
- "papaya",
- "pbkdf2",
- "rand",
  "rcgen",
  "rkyv 0.8.12",
- "rkyv-with",
  "rustls 0.23.43",
  "rustls-pemfile 2.2.0",
  "rustls-pki-types",
  "serde",
  "serde_json",
  "serde_yaml",
- "sha2",
  "shoal-proto",
- "subtle",
  "tempfile",
- "tokio",
  "tonic 0.8.3",
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
- "unicode-ident",
  "uuid",
- "winnow",
 ]
 
 [[package]]

@@ -26,7 +26,7 @@
 //! which is the question.
 
 use crate::model::stages::{Bucket, JoinStats, OpReport, StageCost, StageReport};
-use shoal_core::server::stage_profile::{StageOp, StageRecord, Stamp};
+use shoal::server::stage_profile::{StageOp, StageRecord, Stamp};
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use uuid::Uuid;
@@ -107,7 +107,7 @@ const BATCH_STAGES: [&str; 4] = ["client_serialize", "client_pool", "client_writ
 
 /// How many queries this run keeps one client side record for
 ///
-/// **This must agree exactly with `shoal_core::server::stage_profile`'s own sample rate.** Both
+/// **This must agree exactly with `shoal::server::stage_profile`'s own sample rate.** Both
 /// sides sample on the query index rather than at random, so that the client and the server keep
 /// the *same* queries and the join has something to work with; if the two disagreed, each half
 /// would keep a disjoint set and the report would join nothing at all.
@@ -119,7 +119,7 @@ pub fn sample_rate() -> usize {
     // an unset, unparseable, or zero rate all mean "keep everything", matching the server exactly.
     // a rate of zero would otherwise divide by zero, and a partial profile is worse than a large
     // one.
-    std::env::var(shoal_core::server::stage_profile::SAMPLE_ENV)
+    std::env::var(shoal::server::stage_profile::SAMPLE_ENV)
         .ok()
         .and_then(|raw| raw.parse::<usize>().ok())
         .filter(|rate| *rate > 0)
@@ -330,7 +330,7 @@ fn journey(server: &StageRecord, client: &ClientRecord) -> Option<Journey> {
     // turn each server side offset back into an absolute stamp, so client and server stages
     // can be differenced against each other
     let base = stamps.base;
-    let at = |offset: shoal_core::server::stage_profile::Offset| -> Option<Stamp> {
+    let at = |offset: shoal::server::stage_profile::Offset| -> Option<Stamp> {
         offset
             .nanos()
             .map(|nanos| base.plus_nanos(u64::from(nanos)))
@@ -565,7 +565,7 @@ mod tests {
         build_report, read_report, write_report, ClientRecord, BUCKET_FRACTION, MIN_BUCKET,
         REPORT_VERSION, STAGE_NAMES,
     };
-    use shoal_core::server::stage_profile::{Offset, StageOp, StageRecord, StageStamps, Stamp};
+    use shoal::server::stage_profile::{Offset, StageOp, StageRecord, StageStamps, Stamp};
     use uuid::Uuid;
 
     /// Build one server record whose stages each take a known number of nanoseconds

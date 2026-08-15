@@ -12,19 +12,19 @@ use rkyv::validation::archive::ArchiveValidator;
 use rkyv::validation::shared::SharedValidator;
 use rkyv::validation::Validator;
 use rkyv::{Archive, Deserialize};
-use shoal_core::client::{Errors, Shoal};
-use shoal_core::server::conf::{
+use shoal::client::{Errors, Shoal};
+use shoal::server::conf::{
     Auth, Conf, DefaultStorageSettings, Networking, Resources, Storage,
 };
-use shoal_core::server::ServerError;
-use shoal_core::shared::queries::Queries;
-use shoal_core::shared::tls::TlsClientOptions;
-use shoal_core::server::database::ShoalDatabase;
-use shoal_core::shared::traits::QuerySupport;
-use shoal_core::storage::fs::conf::{
+use shoal::server::ServerError;
+use shoal::shared::queries::Queries;
+use shoal::shared::tls::TlsClientOptions;
+use shoal::ShoalDatabase;
+use shoal::shared::traits::QuerySupport;
+use shoal::storage::fs::conf::{
     FileSystemLatencyWriterConf, FileSystemTableConf, FileSystemThroughputWriterConf,
 };
-use shoal_core::ShoalPool;
+use shoal::ShoalPool;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 use tempfile::TempDir;
@@ -206,7 +206,7 @@ impl TestCertificate {
 /// answers `ENOENT`. Tests that need it say so and skip loudly rather than failing, which is the
 /// same treatment the `stage-profile` tests get for being outside a default run.
 pub fn ktls_available() -> bool {
-    shoal_core::shared::tls::ktls::is_available()
+    shoal::shared::tls::ktls::is_available()
 }
 
 /// Skip a test with a message naming what would make it run

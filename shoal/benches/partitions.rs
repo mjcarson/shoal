@@ -6,7 +6,7 @@
 //! about a third of its own wall clock, which is far larger than any of those entries claim
 //! to be worth.
 //!
-//! These reach `SortedPartition` through `shoal_core::server::tables::bench_exports`, which
+//! These reach `SortedPartition` through `shoal::server::tables::bench_exports`, which
 //! only exists under the `bench` feature. See `docs/src/features/performance-harness.md`.
 
 use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput};
@@ -20,7 +20,7 @@ use shoal::shared::queries::{SortRange, SortSelect, SortedExists, SortedGet};
 use shoal::shared::traits::RkyvSupport;
 use shoal::traits::ShoalProjection;
 use shoal::{FileSystem, PersistentSortedTable, ShoalSortedTable};
-use shoal_core::server::tables::bench_exports::{
+use shoal::server::tables::bench_exports::{
     MaybeLoaded, SeekBytes, SortedPartition, ValidatedArchive,
 };
 
