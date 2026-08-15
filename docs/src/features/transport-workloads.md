@@ -190,6 +190,12 @@ exactly this.
 
 - [F8. Purpose-built workloads](purpose-built-workloads.md) — the harness these are built on, and
   the `todos.md` entry that specified them
+**These have now been captured**, in `f14-encryption`, together with their encrypted twins — the
+first capture to hold either. What the pair says is in
+[F14](encryption-in-transit.md#performance); the short version is that the row-width axis this
+workload set was built around is what made the answer legible, since the cost is +6.7% at 256 bytes
+and +77.7% at a MiB.
+
 - [F14. Encryption in transit](encryption-in-transit.md) — the TLS half of the pair these eight are
   the plaintext half of. It added a `Wire` axis over these rather than a second set of workloads, so
   the eight identifiers here are byte identical to what they were and every capture still joins

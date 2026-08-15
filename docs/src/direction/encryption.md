@@ -372,8 +372,29 @@ What is needed, in order:
 3. The same workloads run plaintext and encrypted, as a control pair — the pattern
    [F9](../features/ephemeral-tables.md) established for storage, applied to the wire.
 
-A plaintext-versus-TLS pair is a **precondition** for taking this, not a follow-up. Until it
-exists, the honest statement is that nobody knows what encryption costs this system.
+~~A plaintext-versus-TLS pair is a **precondition** for taking this, not a follow-up. Until it
+exists, the honest statement is that nobody knows what encryption costs this system.~~
+
+**The pair exists and has been read.** `f14-encryption` is the capture; the numbers are in
+[F14](../features/encryption-in-transit.md#performance) and the charts in
+[Benchmark Results](../operations/benchmark-results.md#what-encryption-costs). The short version, and
+it vindicates the argument this section makes:
+
+| Row width | What TLS cost, one query deep |
+| ---: | ---: |
+| 256 B | +6.7%, not separable from noise |
+| 4 KiB | +11.9%, not separable |
+| 64 KiB | +25.7% |
+| 1 MiB | **+77.7%** |
+
+**A set measured only at 256 bytes would have said encryption was free**, which is precisely what
+this page predicted and precisely why [F13](../features/transport-workloads.md) was built at two
+widths rather than one. The marginal cost is ≈1 µs per response plus 0.159 ns per byte — 6.3 GB/s.
+
+The finding this page did *not* predict is that the overhead collapses under concurrency: the same
+MiB row costs +77.7% at one outstanding query and +4.8% at thirty-two, because twelve shards encrypt
+in parallel and the bottleneck moves to the wire. What does not collapse is throughput, which TLS
+costs about a tenth of. **Encryption is most expensive where the system is least busy.**
 
 **The plaintext half of that pair now exists.** [F13](../features/transport-workloads.md) built the
 four modes at two row widths, so what remains is the TLS axis on top of them — the same

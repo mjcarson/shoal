@@ -15,6 +15,7 @@ use crate::fmt;
 use crate::model::hotpath::HotpathProfile;
 use crate::model::macro_layer::MacroCaptureV2;
 use crate::model::stages::StageReport;
+use crate::render::chart::encryption::Point;
 use crate::render::chart::micro_scaling::Family;
 
 /// Renders a markdown table
@@ -119,6 +120,74 @@ pub fn micro_comparison(comparison: &MicroComparison) -> String {
         &["---", "---:", "---:", "---:", "---"],
         &rows,
     )
+}
+
+/// What encryption cost, at every point of both sweeps
+///
+/// The relief for the four overhead charts: three of the series colours fall below the contrast
+/// floor on the light themes, so the numbers have to be readable without them. It also carries the
+/// one thing the charts can only gesture at — whether a pair's runs overlapped, which decides
+/// whether its overhead is a result or noise.
+///
+/// # Arguments
+///
+/// * `depth` - The pairs of the load depth sweep
+/// * `clients` - The pairs of the client count sweep
+pub fn encryption(depth: &[Point], clients: &[Point]) -> String {
+    // both sweeps in one table, since they share every column but the axis they varied
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    let mut ordered: Vec<(&str, &Point)> = depth
+        .iter()
+        .map(|point| ("depth", point))
+        .chain(clients.iter().map(|point| ("clients", point)))
+        .collect();
+    // sorted explicitly, because the page has to render the same bytes twice
+    ordered.sort_by_key(|(sweep, point)| {
+        (*sweep, point.row_bytes, point.depth, point.clients)
+    });
+    for (sweep, point) in ordered {
+        rows.push(vec![
+            sweep.to_string(),
+            width(point.row_bytes),
+            point.depth.to_string(),
+            point.clients.to_string(),
+            fmt::duration_ns(point.plain_ns),
+            fmt::duration_ns(point.tls_ns),
+            format!("{:+.1}%", point.overhead_pct()),
+            // the verdict the macro layer's own disjointness rule reaches
+            if point.separated {
+                "result".to_string()
+            } else {
+                "runs overlapped".to_string()
+            },
+        ]);
+    }
+    if rows.is_empty() {
+        return String::new();
+    }
+    table(
+        &[
+            "Sweep", "Row", "Depth", "Clients", "Plaintext p50", "TLS p50", "Overhead", "Verdict",
+        ],
+        &["---", "---:", "---:", "---:", "---:", "---:", "---:", "---"],
+        &rows,
+    )
+}
+
+/// How wide a row is, written the way a reader thinks of it
+///
+/// # Arguments
+///
+/// * `bytes` - The row width
+fn width(bytes: u64) -> String {
+    // binary units, matching the chart's own end labels
+    if bytes >= 1024 * 1024 {
+        format!("{} MiB", bytes / (1024 * 1024))
+    } else if bytes >= 1024 {
+        format!("{} KiB", bytes / 1024)
+    } else {
+        format!("{bytes} B")
+    }
 }
 
 /// How each operation's cost grows with the partition size

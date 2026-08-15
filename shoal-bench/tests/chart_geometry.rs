@@ -106,6 +106,34 @@ fn every_chart() -> Vec<(String, String)> {
             chart::macro_wall_clock::draw(&points, points.first()).expect("it draws"),
         ));
     }
+    // the encryption sweeps, from whichever capture holds them. these are the only charts that
+    // pair workloads inside one capture rather than across two, so a capture taken before the
+    // sweeps existed simply yields nothing and they are skipped
+    for label in store.labels().expect("labels are readable") {
+        let Some((_, capture)) = store.resolve_macro(&label).expect("macro reads") else {
+            continue;
+        };
+        if !chart::encryption::pairs(&capture, chart::encryption::DEPTH_SWEEP).is_empty() {
+            charts.push((
+                "encryption_by_row".to_string(),
+                chart::encryption::draw_by_row(&capture).expect("it draws"),
+            ));
+            charts.push((
+                "encryption_by_depth".to_string(),
+                chart::encryption::draw_by_depth(&capture).expect("it draws"),
+            ));
+            charts.push((
+                "encryption_absolute".to_string(),
+                chart::encryption::draw_absolute(&capture).expect("it draws"),
+            ));
+        }
+        if !chart::encryption::pairs(&capture, chart::encryption::CLIENT_SWEEP).is_empty() {
+            charts.push((
+                "encryption_by_clients".to_string(),
+                chart::encryption::draw_by_clients(&capture).expect("it draws"),
+            ));
+        }
+    }
     // the current capture against the frozen baseline, which is the widest label gutter of any
     // chart on the page and therefore the one most likely to collide
     let (_, frozen) = store

@@ -545,8 +545,11 @@ above what this entry claimed when it was filed against four `O` numbers.
 
 **The `transport/*` half of that is now built** ([F13](../features/transport-workloads.md)), which
 takes the D4 precondition with it — the plaintext arms exist and ~~the TLS arms are one axis away~~
-**the TLS arms are built too** ([F14](../features/encryption-in-transit.md)), so the pair is
-complete at sixteen arms and has not been captured.
+~~**the TLS arms are built too** ([F14](../features/encryption-in-transit.md)), so the pair is
+complete at sixteen arms and has not been captured.~~ **It has now been captured**, as
+`f14-encryption`, together with forty-eight sweep arms that vary row width, load depth and client
+count. See [F14](../features/encryption-in-transit.md#performance). What that capture did *not*
+answer is the connect cost, for the reason [O30](optimizations.md) now records.
 The client-side `tracing` spans and the two micro benchmarks are still missing, so the *subtraction*
 this paragraph wanted is not available: a transport sample bounds the client and the server
 together and does not separate them.

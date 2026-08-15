@@ -125,6 +125,7 @@ so they get worse by existing longer rather than under load.
 | **C1** | [**O1**](#o1-queries-are-fully-deserialized-on-arrival) — zero-copy the request half | Argued | L | a `wire_codec` bench; the `BytesMut` reaching the shard | Contained | no |
 | **C2** | [**O2**](#o2-every-returned-row-is-copied-at-least-twice) + [**O18**](#o18-the-gathered-reorder-rehashes-every-rows-partition-key), together | Argued — the largest read-path win available | **XL** | each other; a `wire_codec` bench | **Major** — wire format and the client | no |
 | **C3** | [**O30**](#o30-nothing-can-see-what-a-connection-costs-to-open) — the connect path is unmeasured | **Unknown, and that is the entry** | S for the workload, unknown for whatever it finds | a `connect` workload | — | **no, and that is the point** |
+| **C4** | [**O31**](#o31-the-disjointness-rule-cannot-tell-a-result-from-a-saturated-workload) — a saturated workload passes the rule that decides what is real | **Measured** — four points report encryption making queries faster | S to detect, M to decide | nothing | Contained | **yes, it already has been** |
 
 **Tier D — declined, kept with the reason.** A rejected optimization is recorded, not dropped.
 
@@ -164,7 +165,7 @@ come out as a code block.
 | O13 | ~~none yet~~ `macro/fanout/{resident,evicted}/n` since [F8](../features/purpose-built-workloads.md) — **the question, not the isolated cost**. See the note below |
 | O20 | none yet — a `routing` bench over `Ring::find_shard` and `split_by_shard` is unbuilt, and likewise belongs in the micro layer |
 | O21 | `hotpath` `fs::commit` and `stream::prep` only; no micro-benchmark of the write path exists, though [F8](../features/purpose-built-workloads.md) built the standalone binary that would host one |
-| O28, O30 | none — **the client is not instrumented at all**. No `tracing` span, no `hotpath` scope, and no workload that isolates it. O30 is the only entry on this page whose cost is not even bounded by an argument |
+| O28, O30, O31 | none — **the client is not instrumented at all**. No `tracing` span, no `hotpath` scope, and no workload that isolates it. O30 is the only entry on this page whose cost is not even bounded by an argument |
 
 > This table previously claimed that `partition_sorted/insert` and `get_key` adjudicated **O5**,
 > and that `seek_bytes/*` adjudicated **O12** and **O13**. ~~It was wrong about all three.~~ Those
@@ -1287,6 +1288,64 @@ settled on, where the axis is whether authentication happened at all.
 [D3](../direction/authentication.md#how-it-would-be-measured) predicted this and predicted it
 correctly, which is why it is filed here rather than argued: the rule this page opens with does not
 stop applying once something has shipped.
+
+**[F14](../features/encryption-in-transit.md) tried to close this and did not.** Its client sweep
+opens *n* independent `Shoal` instances, each with its own pool and therefore its own handshakes,
+on the theory that the per-connection cost would appear as the count rose. It does not, and the
+reason is worth recording so nobody builds the same thing twice: **`bb8` fills `min_idle` inside
+`Pool::build()`**, so all ten connections of every client have connected, framed and authenticated
+before the constructor returns and long before the first sample is taken. The sweep measures steady
+state with *n* warm pools.
+
+Opening more connections is not the same experiment as timing one. This entry still wants a clock
+around `Shoal::new` itself.
+
+### O31. The disjointness rule cannot tell a result from a saturated workload
+
+| | |
+| --- | --- |
+| **Rank** | **B** — not a speed change at all, a correctness change to how speed is judged |
+| **Impact** | **Measured.** Four points of the `f14-encryption` capture report encryption making queries 14% to 47% *faster*, and every one of them passes the rule that decides whether a difference is real |
+| **Difficulty** | S to detect, M to decide what to do about it |
+| **Depends on** | nothing |
+| **Blocks** | trusting any macro comparison taken near saturation |
+| **Tradeoff** | Contained — a workload that is refused or flagged is one that produced a number nobody should have read |
+| **Benchmark** | `macro/encryption/depth/*/128`, which is the thing that exposed it |
+
+The macro layer calls a difference a result when the two sides' **observed intervals are disjoint**
+— when the slowest run of one is still faster than the fastest run of the other. That is a good rule
+and it is doing its job. What it cannot do is notice that the workload was not measuring what its
+name says.
+
+At a load depth of 128 the encryption sweep leaves the regime where a service time means anything.
+Throughput *falls* as depth rises — 351,150 queries a second at depth 32 against 277,402 at depth
+128, for 256 byte rows on the plaintext arm — which is the signature of a queue past its knee, and
+the p50 stops being a latency and becomes a measure of how long the queue is. In that regime the
+encrypted arm measured **faster**:
+
+| Row | depth 32 | depth 128 |
+| ---: | ---: | ---: |
+| 256 B | +5.7% | **−23.5%**, separated |
+| 4 KiB | +11.3% | **−46.8%**, separated |
+
+Both of the depth-128 rows are cleanly separated across five runs. They are reliably weird, and the
+rule detects *reliably* different, not *meaningfully* different.
+
+**This is not an argument for dropping the rule**, which is the only thing standing between the page
+and a curve drawn through noise. It is an argument that disjointness is necessary and not
+sufficient, and that a workload has no way today to say "the number I just produced is outside the
+regime I am for".
+
+**Fix direction**, cheapest first. A workload could record its own **throughput against the previous
+point on its axis** and flag a capture where more load bought less work — the data is already in the
+artifact, since `wall_clock_ns` and the query count are both recorded, so this is an analysis
+change and not a measurement one. Beyond that, a saturating sweep wants a declared knee: an axis
+that stops where throughput stops rising, which is a property of the machine rather than of the
+workload and would have to be found once and recorded.
+
+Found while reading the first capture that held the sweeps, which is the only way it could have
+been found — every point of it is correct, the harness did nothing wrong, and the numbers are still
+not readable.
 
 ### O26. `handle_query` cloned a `QueryMetadata` for a gather almost no query has
 

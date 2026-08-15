@@ -105,12 +105,18 @@ Alongside them it writes `<label>.meta.json`, which is what lets a committed num
 whether it still describes the current code: the commit, whether the tree was dirty, a content
 hash of the sources each layer measures, and the machine, governor and toolchain it ran on.
 
-A full capture is now thirty-one workloads times five runs, so it is substantially longer than
-the five runs it replaced — budget well over an hour rather than thirteen minutes. Eight of the
-thirty-one are the storage-free controls [F9](../features/ephemeral-tables.md) added, and they
-are the cheapest of the set: they have no disk to wait on. Eight more are the transport modes
-[F13](../features/transport-workloads.md) added, and the MiB half of those is the most expensive
-thing in a capture — 512 MiB seeded and two gigabytes over the wire, per run.
+A full capture is now **eighty-seven workloads times five runs**, so it is substantially longer
+than the five runs it replaced — budget two to three hours rather than thirteen minutes. Eight of
+them are the storage-free controls [F9](../features/ephemeral-tables.md) added, and they are the
+cheapest of the set: they have no disk to wait on. Sixteen are the transport modes
+[F13](../features/transport-workloads.md) added and [F14](../features/encryption-in-transit.md)
+doubled, and the MiB half of those is the most expensive thing in a capture — 512 MiB seeded and
+two gigabytes over the wire, per run. Forty-eight are F14's encryption sweeps, which are wide but
+not slow: each holds a fixed *byte* budget rather than a fixed query count, so a MiB arm runs 256
+queries where a 256-byte arm runs 20,000 and no width dominates.
+
+~~thirty-one workloads~~ was the count before both of those landed and stayed on this page for two
+features. If it disagrees with `shoal-bench list --layer macro | wc -l`, that command is right.
 `--scale smoke --runs 2` cuts the data two orders of magnitude and is what you want while
 iterating on a workload; the scale is recorded in the artifact, and a `smoke` capture is never
 compared against a `full` one.

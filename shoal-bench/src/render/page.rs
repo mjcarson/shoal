@@ -114,6 +114,7 @@ pub fn build(page: &Page) -> Result<String> {
     out.push_str(&macro_section(page)?);
     out.push_str(&micro_section(page)?);
     out.push_str(&scaling_section(page)?);
+    out.push_str(&encryption_section(page)?);
     out.push_str(&hotpath_section(page)?);
     out.push_str(&stages_section(page)?);
     out.push_str(&noise_section(page)?);
@@ -480,6 +481,79 @@ fn scaling_section(page: &Page) -> Result<String> {
          in a legend, so no colour has to be matched to a name.",
     ));
     out.push_str(&tables::micro_scaling(&families));
+    out.push('\n');
+    Ok(out)
+}
+
+/// The section saying what encryption costs
+///
+/// Every arm of the `macro/encryption/*` sweeps has a twin differing in the wire and in nothing
+/// else, so this is the one section on the page whose comparison is *within* a capture rather than
+/// across two. Both halves of every pair ran on the same machine, minutes apart, against the same
+/// seed and the same configuration.
+///
+/// # Arguments
+///
+/// * `page` - Everything the page is built from
+fn encryption_section(page: &Page) -> Result<String> {
+    let mut out = String::new();
+    out.push_str("## What encryption costs\n\n");
+    let Some(measured) = page.current().and_then(|current| current.macro_layer.as_ref()) else {
+        out.push_str("The current capture has no macro layer.\n\n");
+        return Ok(out);
+    };
+    let depth = chart::encryption::pairs(measured, chart::encryption::DEPTH_SWEEP);
+    let clients = chart::encryption::pairs(measured, chart::encryption::CLIENT_SWEEP);
+    if depth.is_empty() && clients.is_empty() {
+        out.push_str(
+            "The current capture holds no encryption sweep, so what TLS costs this system is \
+             unmeasured. See [F14](../features/encryption-in-transit.md).\n\n",
+        );
+        return Ok(out);
+    }
+    out.push_str(
+        "Every point below is a pair: one workload over a plaintext wire and one over a wire the \
+         kernel encrypts, differing in the wire and in nothing else — same seed, same rows, same \
+         row width, same query count, same load. The gap between them is therefore what encryption \
+         cost, rather than what else happened to move.\n\n\
+         **A hollow marker is not a result.** The macro layer's rule is that a difference counts \
+         only when the two sides' observed intervals are disjoint, and a pair whose runs overlapped \
+         has not been shown to differ however far apart its medians sit.\n\n",
+    );
+    if !depth.is_empty() {
+        out.push_str("### Against row width\n\n");
+        out.push_str(&chart::encryption::draw_by_row(measured)?);
+        out.push('\n');
+        out.push_str(&caption(
+            "What TLS added, as a share of the plaintext cost, against how wide a row is. One \
+             curve per load depth, each labelled at its right hand end.",
+        ));
+        out.push_str("### Against load depth\n\n");
+        out.push_str(&chart::encryption::draw_by_depth(measured)?);
+        out.push('\n');
+        out.push_str(&caption(
+            "The same pairs read the other way: what TLS added against how many queries were \
+             outstanding at once on one client. One curve per row width.",
+        ));
+        out.push_str("### What it was added to\n\n");
+        out.push_str(&chart::encryption::draw_absolute(measured)?);
+        out.push('\n');
+        out.push_str(&caption(
+            "The absolute p50 of one get on each wire, at a single outstanding query. A percentage \
+             is unreadable without this — a large share of a small number is not the same finding \
+             as a small share of a large one.",
+        ));
+    }
+    if !clients.is_empty() {
+        out.push_str("### Against client count\n\n");
+        out.push_str(&chart::encryption::draw_by_clients(measured)?);
+        out.push('\n');
+        out.push_str(&caption(
+            "What TLS added against how many independent clients produced the load, each one query \
+             deep and each with its own connection pool and its own handshakes.",
+        ));
+    }
+    out.push_str(&tables::encryption(&depth, &clients));
     out.push('\n');
     Ok(out)
 }

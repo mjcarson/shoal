@@ -208,6 +208,10 @@ for a profile that largely repeats the first.
 lifecycles, where before it was five. [F9](ephemeral-tables.md) took it to twenty-three and 115,
 and [F13](transport-workloads.md) to thirty-one and 155 — the largest step in wall clock of the
 three, because its large arm seeds 512 MiB and moves two gigabytes over the wire per run.
+[F14](encryption-in-transit.md) took it to **eighty-seven and 435**, which is the largest step in
+*count* and not in wall clock: sixteen of its arms are F13's doubled by a wire axis, and the other
+forty-eight hold a fixed byte budget rather than a fixed query count, so the widest of them runs
+256 queries and costs about what the narrowest does.
 
 **No workload covers** sort-key selection, projections, ~~transport modes,~~ durability, update,
 delete, exists, compaction or recovery. Transport modes are covered by

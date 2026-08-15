@@ -1,0 +1,594 @@
+{
+  "version": 1,
+  "captured": "2026-08-15T06:10:33Z",
+  "benchmarks": {
+    "partition_sorted/archived/access_and_one_row/1024": {
+      "mean_ns": 7796.159076807671,
+      "lower_ns": 7791.26239233637,
+      "upper_ns": 7802.242657154235,
+      "median_ns": 7789.974379438959
+    },
+    "partition_sorted/archived/access_and_one_row/16": {
+      "mean_ns": 171.68081116676385,
+      "lower_ns": 171.6252876805804,
+      "upper_ns": 171.74010650478516,
+      "median_ns": 171.61188408716484
+    },
+    "partition_sorted/archived/access_and_one_row/256": {
+      "mean_ns": 1986.0688803024464,
+      "lower_ns": 1985.485703415608,
+      "upper_ns": 1986.702505131896,
+      "median_ns": 1985.528150141926
+    },
+    "partition_sorted/archived/access_and_one_row/4096": {
+      "mean_ns": 31480.018592930763,
+      "lower_ns": 31376.960339055386,
+      "upper_ns": 31587.988764979673,
+      "median_ns": 31217.19986263736
+    },
+    "partition_sorted/archived/walk_all/1024": {
+      "mean_ns": 59749.703886056996,
+      "lower_ns": 59719.20865233276,
+      "upper_ns": 59784.629220290546,
+      "median_ns": 59688.95887762001
+    },
+    "partition_sorted/archived/walk_all/16": {
+      "mean_ns": 549.2871129126148,
+      "lower_ns": 548.9991576660505,
+      "upper_ns": 549.7172429323656,
+      "median_ns": 549.0031026331776
+    },
+    "partition_sorted/archived/walk_all/256": {
+      "mean_ns": 14543.798896038666,
+      "lower_ns": 14540.031311362703,
+      "upper_ns": 14547.994883631129,
+      "median_ns": 14538.205613765538
+    },
+    "partition_sorted/archived/walk_all/4096": {
+      "mean_ns": 239332.11619718865,
+      "lower_ns": 239278.79349243085,
+      "upper_ns": 239399.33518137704,
+      "median_ns": 239265.72300596852
+    },
+    "partition_sorted/codec/access/1024": {
+      "mean_ns": 7819.934731651931,
+      "lower_ns": 7807.026376712233,
+      "upper_ns": 7832.924838070969,
+      "median_ns": 7808.962992125984
+    },
+    "partition_sorted/codec/access/16": {
+      "mean_ns": 133.85151412951518,
+      "lower_ns": 133.67591585616572,
+      "upper_ns": 134.0080895457811,
+      "median_ns": 133.94694672804184
+    },
+    "partition_sorted/codec/access/256": {
+      "mean_ns": 1945.5336072679609,
+      "lower_ns": 1944.3950665475616,
+      "upper_ns": 1946.7502922108076,
+      "median_ns": 1944.108983833416
+    },
+    "partition_sorted/codec/access/4096": {
+      "mean_ns": 31404.337268232695,
+      "lower_ns": 31330.2223029668,
+      "upper_ns": 31484.930974452735,
+      "median_ns": 31564.71209490741
+    },
+    "partition_sorted/codec/serialize/1024": {
+      "mean_ns": 8943.433623376988,
+      "lower_ns": 8940.369081050121,
+      "upper_ns": 8946.626076380931,
+      "median_ns": 8945.21791967406
+    },
+    "partition_sorted/codec/serialize/16": {
+      "mean_ns": 284.33564878162116,
+      "lower_ns": 284.25651450273847,
+      "upper_ns": 284.4276728355888,
+      "median_ns": 284.2961765686997
+    },
+    "partition_sorted/codec/serialize/256": {
+      "mean_ns": 2402.9478893550145,
+      "lower_ns": 2401.6311153928655,
+      "upper_ns": 2404.324216730116,
+      "median_ns": 2401.206441405994
+    },
+    "partition_sorted/codec/serialize/4096": {
+      "mean_ns": 39688.413420699864,
+      "lower_ns": 39670.17588394293,
+      "upper_ns": 39705.98713659044,
+      "median_ns": 39713.0626709756
+    },
+    "partition_sorted/get_all/1024": {
+      "mean_ns": 52209.68304923583,
+      "lower_ns": 52157.81474173791,
+      "upper_ns": 52263.19751613746,
+      "median_ns": 52082.36486742424
+    },
+    "partition_sorted/get_all/16": {
+      "mean_ns": 528.7061689229181,
+      "lower_ns": 528.4810399172535,
+      "upper_ns": 528.9453536701407,
+      "median_ns": 528.7640123918385
+    },
+    "partition_sorted/get_all/256": {
+      "mean_ns": 12874.848109765526,
+      "lower_ns": 12873.02630688678,
+      "upper_ns": 12876.846289562616,
+      "median_ns": 12872.454172638954
+    },
+    "partition_sorted/get_all/4096": {
+      "mean_ns": 210248.6373173099,
+      "lower_ns": 210185.0416668732,
+      "upper_ns": 210322.1962689323,
+      "median_ns": 210138.90731707317
+    },
+    "partition_sorted/get_key/1024": {
+      "mean_ns": 35.880584395487155,
+      "lower_ns": 35.866285261444624,
+      "upper_ns": 35.897959499128405,
+      "median_ns": 35.8614776175005
+    },
+    "partition_sorted/get_key/16": {
+      "mean_ns": 23.855123464738295,
+      "lower_ns": 23.828444206835016,
+      "upper_ns": 23.880555623577447,
+      "median_ns": 23.89128766095363
+    },
+    "partition_sorted/get_key/256": {
+      "mean_ns": 35.451495229845605,
+      "lower_ns": 35.42327094394539,
+      "upper_ns": 35.48077338301153,
+      "median_ns": 35.426788327154156
+    },
+    "partition_sorted/get_key/4096": {
+      "mean_ns": 50.69964478162201,
+      "lower_ns": 50.65346016341702,
+      "upper_ns": 50.7505800065546,
+      "median_ns": 50.69843591651897
+    },
+    "partition_sorted/get_range_64/1024": {
+      "mean_ns": 3066.3811734197834,
+      "lower_ns": 3062.9705102009366,
+      "upper_ns": 3069.876948069937,
+      "median_ns": 3065.8476338415685
+    },
+    "partition_sorted/get_range_64/16": {
+      "mean_ns": 371.5501250893937,
+      "lower_ns": 371.0325495993251,
+      "upper_ns": 372.1067859909596,
+      "median_ns": 370.75422660391257
+    },
+    "partition_sorted/get_range_64/256": {
+      "mean_ns": 3006.5354504929646,
+      "lower_ns": 3005.328424375777,
+      "upper_ns": 3007.7967197043477,
+      "median_ns": 3006.015585711859
+    },
+    "partition_sorted/get_range_64/4096": {
+      "mean_ns": 3053.9175836431823,
+      "lower_ns": 3051.608090835143,
+      "upper_ns": 3056.2925318145603,
+      "median_ns": 3054.189484361792
+    },
+    "partition_sorted/insert/1024": {
+      "mean_ns": 144.4820840645102,
+      "lower_ns": 142.44141481569793,
+      "upper_ns": 146.48123017489735,
+      "median_ns": 147.8237037037037
+    },
+    "partition_sorted/insert/16": {
+      "mean_ns": 101.12989446997037,
+      "lower_ns": 99.31597375539448,
+      "upper_ns": 102.88240331054696,
+      "median_ns": 101.06354734348932
+    },
+    "partition_sorted/insert/256": {
+      "mean_ns": 168.97748252498474,
+      "lower_ns": 166.30847903963272,
+      "upper_ns": 171.91992203924676,
+      "median_ns": 170.54206946222791
+    },
+    "partition_sorted/insert/4096": {
+      "mean_ns": 186.4987083813474,
+      "lower_ns": 182.8305247966719,
+      "upper_ns": 190.3738701660561,
+      "median_ns": 185.57604166666667
+    },
+    "partition_sorted/maybe_loaded/exists_key/1024": {
+      "mean_ns": 90.9190394128146,
+      "lower_ns": 90.88948915677892,
+      "upper_ns": 90.95154435350337,
+      "median_ns": 90.90285527790354
+    },
+    "partition_sorted/maybe_loaded/exists_key/16": {
+      "mean_ns": 89.38240380148142,
+      "lower_ns": 89.32720912724758,
+      "upper_ns": 89.43448637527808,
+      "median_ns": 89.37593313135264
+    },
+    "partition_sorted/maybe_loaded/exists_key/256": {
+      "mean_ns": 93.54923072736024,
+      "lower_ns": 93.46537530988468,
+      "upper_ns": 93.63067461841996,
+      "median_ns": 93.6065739842515
+    },
+    "partition_sorted/maybe_loaded/exists_key/4096": {
+      "mean_ns": 105.17112322067828,
+      "lower_ns": 105.09062278260248,
+      "upper_ns": 105.25409262189036,
+      "median_ns": 105.09940542084578
+    },
+    "partition_sorted/maybe_loaded/get_all/1024": {
+      "mean_ns": 56192.76692006643,
+      "lower_ns": 56167.61897527251,
+      "upper_ns": 56218.85327427161,
+      "median_ns": 56184.69254850088
+    },
+    "partition_sorted/maybe_loaded/get_all/16": {
+      "mean_ns": 607.3406843531247,
+      "lower_ns": 606.9640220010072,
+      "upper_ns": 607.7182198711671,
+      "median_ns": 607.0125227983325
+    },
+    "partition_sorted/maybe_loaded/get_all/256": {
+      "mean_ns": 13908.699796669627,
+      "lower_ns": 13893.5340003846,
+      "upper_ns": 13929.065994642697,
+      "median_ns": 13888.008862161734
+    },
+    "partition_sorted/maybe_loaded/get_all/4096": {
+      "mean_ns": 224814.94532473537,
+      "lower_ns": 224775.73659624712,
+      "upper_ns": 224858.5042883403,
+      "median_ns": 224741.0560854446
+    },
+    "partition_sorted/maybe_loaded/get_key/1024": {
+      "mean_ns": 112.62129433077102,
+      "lower_ns": 112.55755685959818,
+      "upper_ns": 112.68724746317233,
+      "median_ns": 112.54583380155074
+    },
+    "partition_sorted/maybe_loaded/get_key/16": {
+      "mean_ns": 110.41576308017258,
+      "lower_ns": 110.36255119740416,
+      "upper_ns": 110.47770707324815,
+      "median_ns": 110.33520867188886
+    },
+    "partition_sorted/maybe_loaded/get_key/256": {
+      "mean_ns": 110.061182226945,
+      "lower_ns": 110.00210889060678,
+      "upper_ns": 110.11983911574352,
+      "median_ns": 110.06682629595248
+    },
+    "partition_sorted/maybe_loaded/get_key/4096": {
+      "mean_ns": 127.4822086979642,
+      "lower_ns": 127.37846310381951,
+      "upper_ns": 127.595272857176,
+      "median_ns": 127.35396066789524
+    },
+    "partition_sorted/maybe_loaded/get_range_64/1024": {
+      "mean_ns": 3432.210294414338,
+      "lower_ns": 3429.8999337319733,
+      "upper_ns": 3434.6021416011517,
+      "median_ns": 3430.4320075286214
+    },
+    "partition_sorted/maybe_loaded/get_range_64/16": {
+      "mean_ns": 532.122224345308,
+      "lower_ns": 531.9431434324234,
+      "upper_ns": 532.3098796523394,
+      "median_ns": 531.9604673004224
+    },
+    "partition_sorted/maybe_loaded/get_range_64/256": {
+      "mean_ns": 3468.366927755281,
+      "lower_ns": 3467.4220463434067,
+      "upper_ns": 3469.4236922708947,
+      "median_ns": 3467.4564152046783
+    },
+    "partition_sorted/maybe_loaded/get_range_64/4096": {
+      "mean_ns": 3463.7538750660506,
+      "lower_ns": 3462.7740882518538,
+      "upper_ns": 3464.821196292643,
+      "median_ns": 3462.5020896824694
+    },
+    "partition_sorted/maybe_loaded/loaded_get_key/1024": {
+      "mean_ns": 36.69765903511353,
+      "lower_ns": 36.63409502134254,
+      "upper_ns": 36.77435143218651,
+      "median_ns": 36.618505873074746
+    },
+    "partition_sorted/maybe_loaded/loaded_get_key/16": {
+      "mean_ns": 23.48234794716417,
+      "lower_ns": 23.46467943518936,
+      "upper_ns": 23.501999517144533,
+      "median_ns": 23.465892176470685
+    },
+    "partition_sorted/maybe_loaded/loaded_get_key/256": {
+      "mean_ns": 34.28342672654881,
+      "lower_ns": 34.27641253997253,
+      "upper_ns": 34.2907165043691,
+      "median_ns": 34.27905111792584
+    },
+    "partition_sorted/maybe_loaded/loaded_get_key/4096": {
+      "mean_ns": 49.92758748784295,
+      "lower_ns": 49.91272380045585,
+      "upper_ns": 49.9453428562656,
+      "median_ns": 49.906958535579456
+    },
+    "partition_sorted/maybe_loaded/validate_once/1024": {
+      "mean_ns": 7908.493255690418,
+      "lower_ns": 7897.234112100009,
+      "upper_ns": 7919.055767660857,
+      "median_ns": 7907.146435969868
+    },
+    "partition_sorted/maybe_loaded/validate_once/16": {
+      "mean_ns": 128.83513063397868,
+      "lower_ns": 128.53534397798853,
+      "upper_ns": 129.13360158544268,
+      "median_ns": 128.6842450073924
+    },
+    "partition_sorted/maybe_loaded/validate_once/256": {
+      "mean_ns": 1983.487478616231,
+      "lower_ns": 1980.614938757171,
+      "upper_ns": 1986.2822215228405,
+      "median_ns": 1980.0464525801617
+    },
+    "partition_sorted/maybe_loaded/validate_once/4096": {
+      "mean_ns": 31837.173480883095,
+      "lower_ns": 31742.765589574796,
+      "upper_ns": 31922.713716434628,
+      "median_ns": 31927.549192189515
+    },
+    "seek_bytes/new/one_key": {
+      "mean_ns": 72.25142748233847,
+      "lower_ns": 72.24038683373647,
+      "upper_ns": 72.26331182238047,
+      "median_ns": 72.22813543498962
+    },
+    "seek_bytes/new/range": {
+      "mean_ns": 118.58700398632568,
+      "lower_ns": 118.56589667345165,
+      "upper_ns": 118.61049434513995,
+      "median_ns": 118.5835723858617
+    },
+    "seek_bytes/new/sixty_four_keys": {
+      "mean_ns": 3599.070077026782,
+      "lower_ns": 3596.894873078234,
+      "upper_ns": 3601.2470526845464,
+      "median_ns": 3598.1656022548877
+    },
+    "wire_codec/header/decode": {
+      "mean_ns": 3.320065040276079,
+      "lower_ns": 3.319246971644219,
+      "upper_ns": 3.321141542070385,
+      "median_ns": 3.3187038307279915
+    },
+    "wire_codec/header/decode_response": {
+      "mean_ns": 5.4140992840365785,
+      "lower_ns": 5.413414958219673,
+      "upper_ns": 5.415021204242979,
+      "median_ns": 5.413348129096402
+    },
+    "wire_codec/header/encode": {
+      "mean_ns": 2.6200133826587626,
+      "lower_ns": 2.619693749427577,
+      "upper_ns": 2.620405192512091,
+      "median_ns": 2.619632798006848
+    },
+    "wire_codec/header/request_preamble": {
+      "mean_ns": 2.6211220046988752,
+      "lower_ns": 2.6202755530911563,
+      "upper_ns": 2.6221771393711815,
+      "median_ns": 2.619967705374723
+    },
+    "wire_codec/header/response_preamble": {
+      "mean_ns": 4.716116001743142,
+      "lower_ns": 4.715596159602963,
+      "upper_ns": 4.716726238896823,
+      "median_ns": 4.715379433802405
+    },
+    "wire_codec/request/decode/access/1": {
+      "mean_ns": 8.599303542156148,
+      "lower_ns": 8.595036819736876,
+      "upper_ns": 8.605372330281504,
+      "median_ns": 8.594244417068662
+    },
+    "wire_codec/request/decode/access/10": {
+      "mean_ns": 52.57153145742583,
+      "lower_ns": 52.544848155471506,
+      "upper_ns": 52.61097561516431,
+      "median_ns": 52.54891701565013
+    },
+    "wire_codec/request/decode/access/100": {
+      "mean_ns": 504.0347377203388,
+      "lower_ns": 503.7876561585621,
+      "upper_ns": 504.2734995253972,
+      "median_ns": 503.9852851369555
+    },
+    "wire_codec/request/decode/access_unchecked/1": {
+      "mean_ns": 0.360195254072279,
+      "lower_ns": 0.3599996030294037,
+      "upper_ns": 0.3603990550167151,
+      "median_ns": 0.3600923033179672
+    },
+    "wire_codec/request/decode/access_unchecked/10": {
+      "mean_ns": 0.35975664525192275,
+      "lower_ns": 0.35960726554551925,
+      "upper_ns": 0.3599245134120423,
+      "median_ns": 0.35959929998898005
+    },
+    "wire_codec/request/decode/access_unchecked/100": {
+      "mean_ns": 0.35999447053884753,
+      "lower_ns": 0.3597953495672834,
+      "upper_ns": 0.36020137794377793,
+      "median_ns": 0.3599708906374405
+    },
+    "wire_codec/request/decode/deserialize/1": {
+      "mean_ns": 29.63506710754713,
+      "lower_ns": 29.594811170700908,
+      "upper_ns": 29.68124739007277,
+      "median_ns": 29.545311173014852
+    },
+    "wire_codec/request/decode/deserialize/10": {
+      "mean_ns": 430.21283212073945,
+      "lower_ns": 429.9704658684105,
+      "upper_ns": 430.44509775651625,
+      "median_ns": 430.2606353884107
+    },
+    "wire_codec/request/decode/deserialize/100": {
+      "mean_ns": 5857.584573225912,
+      "lower_ns": 5856.395592534448,
+      "upper_ns": 5858.9164495730065,
+      "median_ns": 5856.835503538377
+    },
+    "wire_codec/request/decode/header/1": {
+      "mean_ns": 3.318587353910554,
+      "lower_ns": 3.317938103850059,
+      "upper_ns": 3.3194210314453314,
+      "median_ns": 3.3176581079041374
+    },
+    "wire_codec/request/decode/header/10": {
+      "mean_ns": 3.3211779293708945,
+      "lower_ns": 3.3185684950645844,
+      "upper_ns": 3.325274546121985,
+      "median_ns": 3.317958181408017
+    },
+    "wire_codec/request/decode/header/100": {
+      "mean_ns": 3.318231058658343,
+      "lower_ns": 3.3178275839090254,
+      "upper_ns": 3.318818390769936,
+      "median_ns": 3.3176482134666077
+    },
+    "wire_codec/request/encode/framed/1": {
+      "mean_ns": 57.394494805366165,
+      "lower_ns": 57.38118960580163,
+      "upper_ns": 57.408834646122614,
+      "median_ns": 57.373294027158025
+    },
+    "wire_codec/request/encode/framed/10": {
+      "mean_ns": 251.82855141074785,
+      "lower_ns": 251.75243730084432,
+      "upper_ns": 251.91068952522804,
+      "median_ns": 251.72130243148024
+    },
+    "wire_codec/request/encode/framed/100": {
+      "mean_ns": 1301.575346397468,
+      "lower_ns": 1301.3692206062992,
+      "upper_ns": 1301.8059502456265,
+      "median_ns": 1301.5677752844267
+    },
+    "wire_codec/request/encode/serialize/1": {
+      "mean_ns": 58.193889435595736,
+      "lower_ns": 58.17415940775926,
+      "upper_ns": 58.2198221670647,
+      "median_ns": 58.166596139200976
+    },
+    "wire_codec/request/encode/serialize/10": {
+      "mean_ns": 224.5685851614476,
+      "lower_ns": 224.51818229058392,
+      "upper_ns": 224.63520257726853,
+      "median_ns": 224.49847876388316
+    },
+    "wire_codec/request/encode/serialize/100": {
+      "mean_ns": 1342.3848445997876,
+      "lower_ns": 1341.884246610183,
+      "upper_ns": 1342.869614372873,
+      "median_ns": 1342.4141344610514
+    },
+    "wire_codec/response/decode/access/1024": {
+      "mean_ns": 4573.894154815175,
+      "lower_ns": 4571.328586792268,
+      "upper_ns": 4576.386257760903,
+      "median_ns": 4575.612033489428
+    },
+    "wire_codec/response/decode/access/16": {
+      "mean_ns": 82.35445209866388,
+      "lower_ns": 82.32214627785693,
+      "upper_ns": 82.38683788007476,
+      "median_ns": 82.3489202027244
+    },
+    "wire_codec/response/decode/access/256": {
+      "mean_ns": 1156.3082774867603,
+      "lower_ns": 1155.599791938075,
+      "upper_ns": 1157.0269958048398,
+      "median_ns": 1156.1681599097303
+    },
+    "wire_codec/response/decode/access/4096": {
+      "mean_ns": 18325.3349910094,
+      "lower_ns": 18314.42020419247,
+      "upper_ns": 18336.654168028093,
+      "median_ns": 18322.320888092392
+    },
+    "wire_codec/response/decode/into_aligned/1024": {
+      "mean_ns": 276.9906945290702,
+      "lower_ns": 276.74571907063216,
+      "upper_ns": 277.21075605542,
+      "median_ns": 277.0270617962085
+    },
+    "wire_codec/response/decode/into_aligned/16": {
+      "mean_ns": 10.634932086852746,
+      "lower_ns": 10.62382232834007,
+      "upper_ns": 10.647088252235635,
+      "median_ns": 10.627386746996985
+    },
+    "wire_codec/response/decode/into_aligned/256": {
+      "mean_ns": 49.40749109232778,
+      "lower_ns": 49.371911416083584,
+      "upper_ns": 49.45188755371395,
+      "median_ns": 49.36195512185168
+    },
+    "wire_codec/response/decode/into_aligned/4096": {
+      "mean_ns": 936.1518037576336,
+      "lower_ns": 935.4051289112437,
+      "upper_ns": 937.1456423581232,
+      "median_ns": 935.6430445248948
+    },
+    "wire_codec/response/encode/framed/1024": {
+      "mean_ns": 6130.575144315243,
+      "lower_ns": 6129.345566063822,
+      "upper_ns": 6131.9406867181815,
+      "median_ns": 6129.50008223454
+    },
+    "wire_codec/response/encode/framed/16": {
+      "mean_ns": 222.07481881315968,
+      "lower_ns": 221.9683972129453,
+      "upper_ns": 222.18212061704827,
+      "median_ns": 221.99538959566175
+    },
+    "wire_codec/response/encode/framed/256": {
+      "mean_ns": 1746.051365748088,
+      "lower_ns": 1739.70695450808,
+      "upper_ns": 1752.0504209026626,
+      "median_ns": 1763.799948423224
+    },
+    "wire_codec/response/encode/framed/4096": {
+      "mean_ns": 24686.23744348428,
+      "lower_ns": 24655.462347637345,
+      "upper_ns": 24718.2327244034,
+      "median_ns": 24583.375505050502
+    },
+    "wire_codec/response/encode/serialize/1024": {
+      "mean_ns": 6151.217288040568,
+      "lower_ns": 6148.539434139011,
+      "upper_ns": 6155.546145710999,
+      "median_ns": 6148.8006275879925
+    },
+    "wire_codec/response/encode/serialize/16": {
+      "mean_ns": 230.80889339975468,
+      "lower_ns": 230.7144629088906,
+      "upper_ns": 230.90685139520383,
+      "median_ns": 230.6648479115956
+    },
+    "wire_codec/response/encode/serialize/256": {
+      "mean_ns": 1711.756793707233,
+      "lower_ns": 1709.190794105325,
+      "upper_ns": 1714.613644664247,
+      "median_ns": 1707.0304506949583
+    },
+    "wire_codec/response/encode/serialize/4096": {
+      "mean_ns": 24900.19439399249,
+      "lower_ns": 24897.495787156455,
+      "upper_ns": 24903.315652026045,
+      "median_ns": 24895.99333714431
+    }
+  }
+}

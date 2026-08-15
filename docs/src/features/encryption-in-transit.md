@@ -177,27 +177,89 @@ that starts, listens, and serves every query in clear.
 
 ## Performance
 
-**Unmeasured, and the harness to measure it now exists.** [F13](transport-workloads.md) built four
-transport modes at two row widths; this added a third axis, so there are sixteen arms and each
-encrypted one differs from its plaintext twin in the wire and in nothing else — the control-pair
-shape [F9](ephemeral-tables.md) established for storage, applied to the wire.
+**Measured.** `f14-encryption` is the first capture to hold the control pair, and the first to hold
+the sweeps that say how the cost *behaves* rather than merely whether it exists. The charts are on
+[Benchmark Results](../operations/benchmark-results.md#what-encryption-costs); what follows is what
+they mean.
 
-```
-macro/transport/{mode}/{small,large}          the eight plaintext arms, names unchanged
-macro/transport/tls/{mode}/{small,large}      their encrypted twins
-```
+### The row-width prediction was right
 
-`ConfFacts` gained a `tls` field, so an encrypted capture and a plaintext one are distinguishable
-in the artifact rather than looking identical. The arm that decides whether this is affordable is
-`macro/transport/tls/*/large` against `macro/transport/*/large`, because a per-byte tax is
-invisible at 256 bytes and is the whole cost at a MiB.
+At a single outstanding query — a service time with nothing queued behind it — the cost rises
+monotonically with the row:
 
-What can be said without a capture: the bulk AEAD is done by the kernel with AES-NI, so the
-per-byte term is a hardware-rate one; the per-connection term grew by a TLS handshake, which lands
-where [D3](../direction/authentication.md#what-it-costs) already warned that fifty of them land,
-and which resumption can no longer soften.
+| Row | Plaintext p50 | TLS p50 | Overhead | Separated? |
+| ---: | ---: | ---: | ---: | --- |
+| 256 B | 32.26 µs | 34.42 µs | +6.7% | no |
+| 4 KiB | 34.98 µs | 39.13 µs | +11.9% | no |
+| 64 KiB | 44.47 µs | 55.88 µs | +25.7% | **yes** |
+| 1 MiB | 216.03 µs | 383.81 µs | **+77.7%** | **yes** |
 
-Until that pair is read, D4's own sentence stands: nobody knows what encryption costs this system.
+This is exactly what [F13](transport-workloads.md) built a row-width axis to catch, and it is worth
+being explicit about how close it came to being missed: **a set measured only at 256 bytes would
+have reported encryption as costing 6.7% and not been separable from noise.** The prediction that a
+per-byte tax is invisible in one regime and the whole cost in the other holds, with the two widest
+points the only ones the disjointness rule calls results.
+
+Fitting the two widest points gives **≈1 µs fixed per response plus 0.159 ns per byte — a marginal
+6.3 GB/s.** Single-stream bandwidth falls from 4.10 GB/s to 2.43 GB/s. That is the shape a hardware
+AEAD gives: a small constant, and a slope you only see once there are enough bytes for the slope to
+matter.
+
+### The cost shrinks as load rises, which is the finding worth keeping
+
+| 1 MiB row | depth 1 | depth 8 | depth 32 |
+| --- | ---: | ---: | ---: |
+| Overhead | +77.7% | +8.7% | +4.8% |
+
+and across independent clients, at the same width: +73.6% at one, +53.9% at two, +25.3% at four,
++15.8% at eight.
+
+**Encryption is most expensive exactly where the system is least busy.** At depth one the crypto
+sits in the critical path of a single round trip and there is nothing to hide it behind. Under
+concurrency twelve shards encrypt in parallel and the bottleneck moves to the wire, so the same
+per-byte work is absorbed rather than added.
+
+The sober half of that is throughput, which does not improve with hiding:
+
+| | plaintext | TLS | cost |
+| --- | ---: | ---: | ---: |
+| 1 MiB, depth 8 (peak) | 6.73 GB/s | 6.11 GB/s | −9.2% |
+| 1 MiB, depth 32 | 6.53 GB/s | 5.55 GB/s | −15.0% |
+| 256 B, depth 32 (peak) | 351k q/s | 320k q/s | −9.0% |
+
+So: **a latency cost between 5% and 78% depending entirely on how wide the rows are and how busy
+the server is, and a throughput cost of about a tenth.** A deployment returning small rows under
+load pays almost nothing. One returning MiB rows to an idle server pays nearly double.
+
+The transport control pair D4 called a precondition agrees, at the coarser grain a wall clock gives:
++7% to +21% across the eight modes, with `send_one/large` at +14.6%.
+
+### Two things the sweep found that are not about encryption
+
+**Depth 128 is past saturation and its numbers must not be read.** Throughput *falls* from depth 32
+to depth 128 — 351k to 277k queries a second at 256 bytes — and the overhead inverts, with TLS
+measuring 23% to 47% *faster*. That is congestion, not cryptography.
+
+What makes it worth recording is that **those inverted points pass the disjointness rule**: the runs
+are cleanly separated, so the macro layer calls them results. The rule detects *reliably* different
+and cannot detect *meaningfully* different, and a saturated workload is reliably weird. Filed as
+[O31](../appendix/optimizations.md); the charts draw the points rather than hiding them, and the
+analysis is what has to say they are noise.
+
+**The client sweep did not measure what it was built to measure.** It was added to expose the
+per-connection handshake — the cost [O30](../appendix/optimizations.md) says nothing can see,
+because every workload opens its pool before it samples. It does not, for the same reason: `bb8`
+fills `min_idle` during `Pool::build()`, so all ten connections of every client have handshaked
+before the first sample is taken. The sweep measures steady state with *n* pools. **O30 stays
+open**, and closing it needs a workload that times connection establishment itself rather than one
+that opens more connections.
+
+### What bounds the noise
+
+The two sweeps overlap at exactly one configuration — one client, one query deep — so each width
+was measured twice by independent workloads. They agree to **0.3–3.0%**, which is a free estimate of
+run-to-run noise and is why the 256 B and 4 KiB overheads are not separable: they are the same size
+as the noise floor. Any claim below about 5% in this capture is not a claim.
 
 ## Tests
 

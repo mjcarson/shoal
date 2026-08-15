@@ -3,6 +3,7 @@
 //! Every chart is drawn with plotters into a string, and then one substitution is made to the
 //! result. See [`palette`] for why the colours in that string are sentinels rather than colours.
 
+pub mod encryption;
 pub mod hotpath_scopes;
 pub mod macro_wall_clock;
 pub mod micro_delta;
