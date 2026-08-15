@@ -86,7 +86,7 @@ pub fn add(
     // extend our token stream
     stream.extend(quote! {
         #[automatically_derived]
-        impl shoal_core::shared::traits::PartitionKeySupport for #name {
+        impl ::shoal::shared::traits::PartitionKeySupport for #name {
             /// The partition key type for this data
             type PartitionKey = #partition_key_type;
 
@@ -109,7 +109,7 @@ pub fn add(
             #[inline]
             fn get_partition_key_from_values(values: &Self::PartitionKey) -> u64 {
                 use std::hash::{Hash, Hasher};
-                let mut hasher = shoal_core::gxhash::GxHasher::default();
+                let mut hasher = ::shoal::gxhash::GxHasher::default();
                 #(#hash_values_stmts)*
                 hasher.finish()
             }
@@ -121,7 +121,7 @@ pub fn add(
             /// * `intent` - The intent to get a partition key from
             fn get_partition_key_from_archived_insert(intent: &<Self as Archive>::Archived) -> u64 {
                 use std::hash::{Hash, Hasher};
-                let mut hasher = shoal_core::gxhash::GxHasher::default();
+                let mut hasher = ::shoal::gxhash::GxHasher::default();
                 #(#hash_archived_stmts)*
                 hasher.finish()
             }

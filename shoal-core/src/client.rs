@@ -41,8 +41,38 @@ use crate::shared::tls::{self as shared_tls, TlsClientOptions};
 use crate::shared::traits::{
     ExistsQuery, QuerySupport, RkyvSupport, ShoalQuerySupport, ShoalResponseSupport,
 };
-pub use errors::{ConnectError, Errors, ShqlParseError};
+pub use errors::{ChannelError, ConnectError, Errors, ShqlParseError};
 use messages::{BatchStamps, ClientMsg, ClientStamps};
+
+/// Say that a send found nobody left to receive it
+///
+/// The channel crate's own error type is mapped here rather than through a `From` impl, because
+/// [`Errors`] is shared with every peer and must not name the channels this particular client
+/// happens to be built on.
+///
+/// # Arguments
+///
+/// * `error` - The send failure to describe
+fn send_failed(error: kanal::SendError) -> Errors {
+    // say which end went away without naming the crate that told us
+    Errors::Channel(match error {
+        kanal::SendError::Closed => ChannelError::Closed,
+        kanal::SendError::ReceiveClosed => ChannelError::ReceiveClosed,
+    })
+}
+
+/// Say that a receive found nothing left to wait for
+///
+/// # Arguments
+///
+/// * `error` - The receive failure to describe
+fn receive_failed(error: kanal::ReceiveError) -> Errors {
+    // say which end went away without naming the crate that told us
+    Errors::Channel(match error {
+        kanal::ReceiveError::Closed => ChannelError::Closed,
+        kanal::ReceiveError::SendClosed => ChannelError::SendClosed,
+    })
+}
 
 /// The channel a query's responses are routed through, and where they are owed from
 ///
@@ -767,7 +797,7 @@ impl<S: QuerySupport> Shoal<S> {
         query_id: &mut Uuid,
     ) -> Result<(AsyncSender<ClientMsg>, AsyncReceiver<ClientMsg>), Errors> {
         // get the next available response channel or create a new one
-        let (tx, rx) = match self.channel_queue_rx.try_recv()? {
+        let (tx, rx) = match self.channel_queue_rx.try_recv().map_err(receive_failed)? {
             Some((tx, rx)) => (tx, rx),
             None => kanal::unbounded_async(),
         };
@@ -1360,7 +1390,7 @@ impl TcpProxy {
             // get the channel for this query
             match self.channel_map.pin_owned().get(&query_id) {
                 // send our message to the right shoal stream
-                Some(waiter) => waiter.tx.send(wrapped).await?,
+                Some(waiter) => waiter.tx.send(wrapped).await.map_err(send_failed)?,
                 // a frame for a query nobody is waiting on is dropped, and this loop goes on
                 //
                 // that happens when a result stream was dropped before it was drained, which
@@ -1775,7 +1805,7 @@ where
                 }
             }
             // get the next response from our query
-            let msg = response_rx.recv().await?;
+            let msg = response_rx.recv().await.map_err(receive_failed)?;
             // handle the different client messages
             match msg {
                 // get this responses message
@@ -1877,7 +1907,10 @@ where
         self.channel_map.pin().remove(&self.id);
         // take the ends of our channel
         if let (Some(tx), Some(rx)) = (self.response_tx.take(), self.response_rx.take()) {
-            self.channel_queue_tx.send((tx, rx)).await?;
+            self.channel_queue_tx
+                .send((tx, rx))
+                .await
+                .map_err(send_failed)?;
         }
         Ok(())
     }
@@ -2036,7 +2069,7 @@ where
         // keep looping until we have a message to return
         loop {
             // wait for the next message to return
-            match response_rx.recv().await? {
+            match response_rx.recv().await.map_err(receive_failed)? {
                 ClientMsg::Response(archived, stamps) => {
                     // wrap our response so we don't have to keep repaying access costs
                     let response = ShoalResponse::<S>::new(archived, stamps)?;
@@ -2101,7 +2134,10 @@ where
         self.channel_map.pin().remove(&self.id);
         // take the ends of our channel
         if let (Some(tx), Some(rx)) = (self.response_tx.take(), self.response_rx.take()) {
-            self.channel_queue_tx.send((tx, rx)).await?;
+            self.channel_queue_tx
+                .send((tx, rx))
+                .await
+                .map_err(send_failed)?;
         }
         Ok(())
     }
@@ -2262,7 +2298,8 @@ impl<Q: QuerySupport> ShoalQueryStream<Q> {
     pub async fn close(self) -> Result<(), Errors> {
         self.response_tx
             .send(ClientMsg::End(self.base_index))
-            .await?;
+            .await
+            .map_err(send_failed)?;
         Ok(())
     }
 }

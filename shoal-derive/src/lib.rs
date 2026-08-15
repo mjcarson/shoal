@@ -13,6 +13,50 @@ mod utils;
 
 use tables::{ShoalField, ShoalTable};
 
+/// Which half of a schema an expansion of [`db`] emits
+///
+/// A schema describes two things at once: a wire contract, which both peers need, and a database,
+/// which only a server has. Splitting them is what lets a client be built without an engine - see
+/// `docs/src/features/client-server-split.md`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DbHalf {
+    /// The whole schema: the database struct, its `ShoalDatabase` impl, its `ShardRouting` impl,
+    /// and the client
+    Both,
+    /// The client alone, for a crate that never starts a server
+    ///
+    /// The database struct itself is not emitted, which is what lets a client schema name
+    /// `PersistentSortedTable` and `FileSystem` in field position without either type existing
+    /// in its build at all. It also means such a schema must never `use` them.
+    Client,
+}
+
+impl DbHalf {
+    /// Read which half was asked for off the attribute
+    ///
+    /// # Arguments
+    ///
+    /// * `attr` - The tokens between the parentheses of the attribute, if there were any
+    fn parse(attr: TokenStream) -> Result<Self, syn::Error> {
+        // no argument at all is the whole schema, which is what every server writes
+        if attr.is_empty() {
+            return Ok(DbHalf::Both);
+        }
+        // the only argument this takes is a bare `client`
+        let ident = syn::parse::<Ident>(attr)
+            .map_err(|err| syn::Error::new(err.span(), "expected `client` or no argument"))?;
+        if ident == "client" {
+            Ok(DbHalf::Client)
+        } else {
+            // there is deliberately no `server` spelling - one meaning gets one spelling
+            Err(syn::Error::new_spanned(
+                &ident,
+                format!("expected `client` or no argument, found `{ident}`"),
+            ))
+        }
+    }
+}
+
 /// Derive the traits that let a struct be a projection of one of a databases tables
 ///
 /// A projection names a subset of a rows fields and a get can ask to be answered with it,
@@ -224,8 +268,32 @@ pub fn derive_shoal_unsorted_table(stream: TokenStream) -> TokenStream {
 /// Transforms simplified field types like `PersistentUnsortedTable<Movie, FileSystem>`
 /// into full types like `PersistentUnsortedTable<Movie, FileSystem<Tmdb>, TmdbTableNames>`,
 /// then generates the TableNames enum, Client struct, QueryKinds/ResponseKinds, and trait impls.
+///
+/// # Emitting only the client
+///
+/// `#[shoal::db(client)]` emits everything a caller needs to *talk* to a database and nothing it
+/// would need to *be* one - no `ShoalDatabase` impl, no `ShardRouting` impl, and not even the
+/// struct itself. A crate that writes one links no storage engine and no async runtime beyond the
+/// client's own, which is what `shoalctl` does:
+///
+/// ```ignore
+/// #[shoal::db(client)]
+/// pub struct Tmdb {
+///     pub movies: PersistentSortedTable<Movie, FileSystem>,
+/// }
+/// ```
+///
+/// Because the struct is never emitted, `PersistentSortedTable` and `FileSystem` above are read
+/// for their names and then discarded - they never reach type resolution. **A client schema must
+/// therefore name its table and storage types in field position only, and must never `use` them**,
+/// since the import would fail in a build where they do not exist.
 #[proc_macro_attribute]
-pub fn db(_attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn db(attr: TokenStream, item: TokenStream) -> TokenStream {
+    // work out whether we are emitting a whole schema or only its client
+    let half = match DbHalf::parse(attr) {
+        Ok(half) => half,
+        Err(err) => return err.to_compile_error().into(),
+    };
     // parse the input as a struct
     let mut item_struct = syn::parse_macro_input!(item as syn::ItemStruct);
     let struct_ident = item_struct.ident.clone();
@@ -259,8 +327,15 @@ pub fn db(_attr: TokenStream, item: TokenStream) -> TokenStream {
         utils::rewrite_table_fields(fields, &struct_ident);
     }
 
-    // emit the rewritten struct definition
-    let mut output = quote! { #item_struct };
+    // emit the rewritten struct definition, which only a server has any use for
+    //
+    // the rewrite above still runs for a client, because everything below reads the fields and
+    // has to see byte identical input in both halves - that is what makes a client schema's
+    // generated client the same code as a server schema's
+    let mut output = match half {
+        DbHalf::Both => quote! { #item_struct },
+        DbHalf::Client => quote! {},
+    };
 
     // now borrow the rewritten fields immutably for codegen
     let fields = match &item_struct.fields {
@@ -277,11 +352,16 @@ pub fn db(_attr: TokenStream, item: TokenStream) -> TokenStream {
     // add the enum naming each tables projections, since only we see all of them
     projections::add_enums(&mut output, &variants, &projections);
     // add ShoalDatabase support to our root struct
-    traits::db::add(&mut output, &struct_ident, fields, &variants, &projections);
+    //
+    // this is the whole server half: it is the only emission naming glommio, kanal, the storage
+    // loaders or the server config, so skipping it is what makes a client build possible
+    if half == DbHalf::Both {
+        traits::db::add(&mut output, &struct_ident, fields, &variants, &projections);
+    }
     // add our client
     structs::client::add(&mut output, &struct_ident, fields, &projections);
     // add our query kinds and response kinds enums with trait impls
-    structs::query_kinds::add(&mut output, &struct_ident, fields, &projections);
+    structs::query_kinds::add(&mut output, &struct_ident, fields, &projections, half);
     // add our query conversion traits
     traits::from_query::add(&mut output, &struct_ident, fields);
     // let every projection be pulled back out of a response the same way a row is

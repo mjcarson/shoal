@@ -38,7 +38,7 @@ pub fn add(
         .map(|(ident, ty)| {
             let name_str = ident.to_string();
             quote! {
-                #name_str => Some(shoal_core::shared::queries::parser::make_validator::<#ty>()),
+                #name_str => Some(::shoal::shared::queries::parser::make_validator::<#ty>()),
             }
         })
         .collect();
@@ -64,15 +64,15 @@ pub fn add(
             let name_str = ident.to_string();
             if partition_names.contains(&name_str) {
                 Some(quote! {
-                    #name_str => Some(shoal_core::shared::queries::parser::FieldRole::Partition),
+                    #name_str => Some(::shoal::shared::queries::parser::FieldRole::Partition),
                 })
             } else if sort_names.contains(&name_str) {
                 Some(quote! {
-                    #name_str => Some(shoal_core::shared::queries::parser::FieldRole::Sort),
+                    #name_str => Some(::shoal::shared::queries::parser::FieldRole::Sort),
                 })
             } else if filter_names.contains(&name_str) {
                 Some(quote! {
-                    #name_str => Some(shoal_core::shared::queries::parser::FieldRole::Filter),
+                    #name_str => Some(::shoal::shared::queries::parser::FieldRole::Filter),
                 })
             } else {
                 None
@@ -95,17 +95,17 @@ pub fn add(
 
     stream.extend(quote! {
         #[automatically_derived]
-        impl shoal_core::shared::traits::TableSchemaSupport for #name {
+        impl ::shoal::shared::traits::TableSchemaSupport for #name {
             const SCHEMA_FINGERPRINT: u64 = #schema_fingerprint;
 
-            fn get_field_validator(field_name: &str) -> Option<shoal_core::shared::queries::parser::TypeValidator> {
+            fn get_field_validator(field_name: &str) -> Option<::shoal::shared::queries::parser::TypeValidator> {
                 match field_name {
                     #(#validator_arms)*
                     _ => None,
                 }
             }
 
-            fn get_field_role(field_name: &str) -> Option<shoal_core::shared::queries::parser::FieldRole> {
+            fn get_field_role(field_name: &str) -> Option<::shoal::shared::queries::parser::FieldRole> {
                 match field_name {
                     #(#role_arms)*
                     _ => None,

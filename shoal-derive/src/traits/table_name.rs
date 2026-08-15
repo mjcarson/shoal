@@ -19,6 +19,6 @@ pub fn add(stream: &mut proc_macro2::TokenStream, enum_ident: &Ident, variants: 
         }
 
         #[automatically_derived]
-        impl shoal_core::shared::traits::TableNameSupport for #enum_ident {}
+        impl ::shoal::shared::traits::TableNameSupport for #enum_ident {}
     });
 }

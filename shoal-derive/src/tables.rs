@@ -89,7 +89,7 @@ pub(super) fn add(
     // generate the ShoalTableSupport implementation
     stream.extend(quote! {
         #[automatically_derived]
-        impl shoal_core::shared::traits::ShoalTableSupport for #name {
+        impl ::shoal::shared::traits::ShoalTableSupport for #name {
             /// The updates that can be applied to this table
             type Update = #update_name;
 
@@ -109,7 +109,7 @@ pub(super) fn add(
 
             fn is_filtered_archived(
                 filter: &Self::Filters,
-                row: &<Self as rkyv::Archive>::Archived,
+                row: &<Self as ::shoal::rkyv::Archive>::Archived,
             ) -> bool {
                 #(#filter_archived_checks)*
                 true
@@ -123,7 +123,7 @@ pub(super) fn add(
         /// this one. Both conversions are what a get has always done, so once they are inlined
         /// an unprojected get costs exactly what it did before projections existed.
         #[automatically_derived]
-        impl shoal_core::shared::traits::ShoalProjection for #name {
+        impl ::shoal::shared::traits::ShoalProjection for #name {
             /// A row projects its own table
             type Row = #name;
 
@@ -132,7 +132,7 @@ pub(super) fn add(
             /// There is nothing here the table does not already fold in, so borrowing its
             /// constant is what keeps the two from ever disagreeing about the same fields.
             const SCHEMA_FINGERPRINT: u64 =
-                <#name as shoal_core::shared::traits::TableSchemaSupport>::SCHEMA_FINGERPRINT;
+                <#name as ::shoal::shared::traits::TableSchemaSupport>::SCHEMA_FINGERPRINT;
 
             /// The whole row is the projection a get gets when it names none
             const PROJECTION: #projection_enum = #projection_enum::Full;
@@ -153,8 +153,8 @@ pub(super) fn add(
             ///
             /// * `row` - The archived row to project
             #[inline]
-            fn from_archived(row: &<#name as rkyv::Archive>::Archived) -> Self {
-                <#name as shoal_core::shared::traits::RkyvSupport>::deserialize(row).unwrap()
+            fn from_archived(row: &<#name as ::shoal::rkyv::Archive>::Archived) -> Self {
+                <#name as ::shoal::shared::traits::RkyvSupport>::deserialize(row).unwrap()
             }
         }
     });

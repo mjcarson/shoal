@@ -33,7 +33,7 @@ pub fn add(stream: &mut proc_macro2::TokenStream, name: &Ident, all_fields: &[(s
 
     stream.extend(quote! {
         #[automatically_derived]
-        impl shoal_core::shared::traits::TableRowFormat for #archived_name {
+        impl ::shoal::shared::traits::TableRowFormat for #archived_name {
             fn headers() -> Vec<&'static str> {
                 vec![#(#field_name_strs),*]
             }

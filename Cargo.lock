@@ -1408,15 +1408,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "gxhash"
-version = "3.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f3ce1bab7aa741d4e7042b2aae415b78741f267a98a7271ea226cd5ba6c43d7d"
-dependencies = [
- "rustversion",
-]
-
-[[package]]
 name = "h2"
 version = "0.3.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3634,9 +3625,6 @@ dependencies = [
  "criterion",
  "deepsize2",
  "futures",
- "glommio",
- "gxhash 3.5.0",
- "kanal",
  "rcgen",
  "rkyv 0.8.12",
  "serde_yaml",
@@ -3654,7 +3642,6 @@ dependencies = [
  "anyhow",
  "clap",
  "deepsize2",
- "glommio",
  "hex",
  "hotpath",
  "kanal",
@@ -3688,7 +3675,7 @@ dependencies = [
  "deepsize2",
  "futures",
  "glommio",
- "gxhash 2.3.1",
+ "gxhash",
  "hmac",
  "hotpath",
  "intmap",
@@ -3733,7 +3720,6 @@ dependencies = [
  "darling 0.20.11",
  "proc-macro2",
  "quote",
- "shoal-core",
  "syn 2.0.108",
 ]
 
@@ -3745,7 +3731,6 @@ dependencies = [
  "crossterm",
  "deepsize2",
  "futures",
- "glommio",
  "kanal",
  "ratatui",
  "ratatui-hypertile",

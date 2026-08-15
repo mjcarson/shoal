@@ -35,6 +35,7 @@ use uuid::Uuid;
 
 use super::messages::{QueryMetadata, ServerMsg};
 use super::ring::Ring;
+use super::routing::ShardRouting;
 use super::stage_profile::{self, StageStamps, Stamp};
 use super::tls;
 use super::{Comms, Conf, ServerError};

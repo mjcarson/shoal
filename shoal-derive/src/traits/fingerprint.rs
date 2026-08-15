@@ -76,15 +76,15 @@ pub fn row_expr(
                 roles |= 1 << 3;
             }
             quote! {
-                let hash = shoal_core::shared::protocol::fingerprint::mix_field(
+                let hash = ::shoal::shared::protocol::fingerprint::mix_field(
                     hash,
                     #field_name,
                     #type_name,
                     ::core::mem::size_of::<
-                        <#ty as shoal_core::rkyv::Archive>::Archived
+                        <#ty as ::shoal::rkyv::Archive>::Archived
                     >(),
                     ::core::mem::align_of::<
-                        <#ty as shoal_core::rkyv::Archive>::Archived
+                        <#ty as ::shoal::rkyv::Archive>::Archived
                     >(),
                     #index,
                     #roles,
@@ -96,8 +96,8 @@ pub fn row_expr(
     let type_name = name.to_string();
     quote! {
         {
-            let hash = shoal_core::shared::protocol::fingerprint::mix_str(
-                shoal_core::shared::protocol::fingerprint::SEED,
+            let hash = ::shoal::shared::protocol::fingerprint::mix_str(
+                ::shoal::shared::protocol::fingerprint::SEED,
                 #type_name,
             );
             #(#mixes)*
@@ -150,24 +150,24 @@ pub fn db_expr(
                 .map(|projection| {
                     let projection_name = projection.to_string();
                     quote! {
-                        let hash = shoal_core::shared::protocol::fingerprint::mix_str(
+                        let hash = ::shoal::shared::protocol::fingerprint::mix_str(
                             hash,
                             #projection_name,
                         );
-                        let hash = shoal_core::shared::protocol::fingerprint::mix_u64(
+                        let hash = ::shoal::shared::protocol::fingerprint::mix_u64(
                             hash,
-                            <#projection as shoal_core::shared::traits::ShoalProjection>
+                            <#projection as ::shoal::shared::traits::ShoalProjection>
                                 ::SCHEMA_FINGERPRINT,
                         );
                     }
                 })
                 .collect();
             quote! {
-                let hash = shoal_core::shared::protocol::fingerprint::mix_str(hash, #field_name);
-                let hash = shoal_core::shared::protocol::fingerprint::mix_str(hash, #type_name);
-                let hash = shoal_core::shared::protocol::fingerprint::mix_u64(
+                let hash = ::shoal::shared::protocol::fingerprint::mix_str(hash, #field_name);
+                let hash = ::shoal::shared::protocol::fingerprint::mix_str(hash, #type_name);
+                let hash = ::shoal::shared::protocol::fingerprint::mix_u64(
                     hash,
-                    <#row as shoal_core::shared::traits::TableSchemaSupport>::SCHEMA_FINGERPRINT,
+                    <#row as ::shoal::shared::traits::TableSchemaSupport>::SCHEMA_FINGERPRINT,
                 );
                 #(#projected)*
             }
@@ -177,13 +177,13 @@ pub fn db_expr(
     let db_name = struct_ident.to_string();
     quote! {
         {
-            let hash = shoal_core::shared::protocol::fingerprint::mix_str(
-                shoal_core::shared::protocol::fingerprint::SEED,
+            let hash = ::shoal::shared::protocol::fingerprint::mix_str(
+                ::shoal::shared::protocol::fingerprint::SEED,
                 #db_name,
             );
-            let hash = shoal_core::shared::protocol::fingerprint::mix_u64(
+            let hash = ::shoal::shared::protocol::fingerprint::mix_u64(
                 hash,
-                shoal_core::shared::protocol::PROTOCOL_VERSION as u64,
+                ::shoal::shared::protocol::PROTOCOL_VERSION as u64,
             );
             #(#mixes)*
             hash

@@ -16,6 +16,9 @@ uuid = { version = "1", features = ["v4"] }
 glommio = { path = "../glommio/glommio", version = "0.10"}
 tokio = { version = "1", features = ["full"] }
 kanal = "0.1.0-pre8"
+# pinned here rather than per crate because it is a supertrait bound on the table traits, so a
+# schema crate and the crate holding the bound have to agree on it or the impls stop unifying
+deepsize2 = "0.1"
 mimalloc = { version = "0.1.0"}
 hotpath = "0.9"
 criterion = { version = "0.7", features = ["html_reports"] }

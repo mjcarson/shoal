@@ -29,8 +29,8 @@ pub fn add(
     // generate the ShoalUnsortedTable implementation
     stream.extend(quote! {
         #[automatically_derived]
-        impl shoal_core::shared::traits::ShoalUnsortedTable for #name {
-            fn update(&mut self, update: &shoal_core::shared::queries::UnsortedUpdate<Self>) {
+        impl ::shoal::shared::traits::ShoalUnsortedTable for #name {
+            fn update(&mut self, update: &::shoal::shared::queries::UnsortedUpdate<Self>) {
                 #(#update_assignments)*
             }
         }

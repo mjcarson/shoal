@@ -33,7 +33,7 @@ pub fn add_unsorted(
     };
     // generate our get struct for this type and its methods
     stream.extend(quote! {
-        #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+        #[derive(Debug, Clone, ::shoal::rkyv::Archive, ::shoal::rkyv::Serialize, ::shoal::rkyv::Deserialize)]
         #[rkyv(derive(Debug))]
         pub struct #get_name {
             /// The partition keys of the partitions to get
@@ -47,7 +47,7 @@ pub fn add_unsorted(
         }
 
         #[automatically_derived]
-        impl shoal_core::shared::traits::RkyvSupport for #get_name {}
+        impl ::shoal::shared::traits::RkyvSupport for #get_name {}
 
         #[automatically_derived]
         impl #get_name {
@@ -106,10 +106,10 @@ pub fn add_unsorted(
             /// table will not compile here rather than failing when the query is answered.
             pub fn projection<P>(mut self) -> Self
             where
-                P: shoal_core::shared::traits::ShoalProjection<Row = #name>,
+                P: ::shoal::shared::traits::ShoalProjection<Row = #name>,
             {
                 // remember which of this tables projections was asked for
-                self.projection = <P as shoal_core::shared::traits::ShoalProjection>::PROJECTION;
+                self.projection = <P as ::shoal::shared::traits::ShoalProjection>::PROJECTION;
                 self
             }
         }
@@ -158,13 +158,13 @@ pub fn add_sorted(
     };
     // generate our get struct for this type and its methods
     stream.extend(quote! {
-        #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+        #[derive(Debug, Clone, ::shoal::rkyv::Archive, ::shoal::rkyv::Serialize, ::shoal::rkyv::Deserialize)]
         #[rkyv(derive(Debug))]
         pub struct #get_name {
             /// The partition keys to get data from
             pub partition_keys: Vec<#partition_key_type>,
             /// Which rows of each partition this get is asking for
-            pub sort_select: shoal_core::shared::queries::SortSelect<#sort_key_type>,
+            pub sort_select: ::shoal::shared::queries::SortSelect<#sort_key_type>,
             /// Any filters to use when deciding what rows to return
             pub filters: Option<#filter_name>,
             /// The number of rows to return
@@ -174,7 +174,7 @@ pub fn add_sorted(
         }
 
         #[automatically_derived]
-        impl shoal_core::shared::traits::RkyvSupport for #get_name {}
+        impl ::shoal::shared::traits::RkyvSupport for #get_name {}
 
         #[automatically_derived]
         impl #get_name {
@@ -186,7 +186,7 @@ pub fn add_sorted(
             pub fn new(partition_keys: Vec<#partition_key_type>) -> Self {
                 #get_name {
                     partition_keys,
-                    sort_select: shoal_core::shared::queries::SortSelect::All,
+                    sort_select: ::shoal::shared::queries::SortSelect::All,
                     filters: None,
                     limit: None,
                     // a get asks for the whole row until it is told to project it
@@ -206,7 +206,7 @@ pub fn add_sorted(
             /// * `sort_keys` - The sort keys of the rows to return
             pub fn sort_keys(mut self, sort_keys: Vec<#sort_key_type>) -> Self {
                 // set our sort keys, replacing whatever this get selected before
-                self.sort_select = shoal_core::shared::queries::SortSelect::Keys(sort_keys);
+                self.sort_select = ::shoal::shared::queries::SortSelect::Keys(sort_keys);
                 self
             }
 
@@ -225,10 +225,10 @@ pub fn add_sorted(
             /// * `sort_range` - The range of sort keys to return rows from
             pub fn sort_range(
                 mut self,
-                sort_range: shoal_core::shared::queries::SortRange<#sort_key_type>,
+                sort_range: ::shoal::shared::queries::SortRange<#sort_key_type>,
             ) -> Self {
                 // set our range, replacing whatever this get selected before
-                self.sort_select = shoal_core::shared::queries::SortSelect::Range(sort_range);
+                self.sort_select = ::shoal::shared::queries::SortSelect::Range(sort_range);
                 self
             }
 
@@ -259,10 +259,10 @@ pub fn add_sorted(
             /// table will not compile here rather than failing when the query is answered.
             pub fn projection<P>(mut self) -> Self
             where
-                P: shoal_core::shared::traits::ShoalProjection<Row = #name>,
+                P: ::shoal::shared::traits::ShoalProjection<Row = #name>,
             {
                 // remember which of this tables projections was asked for
-                self.projection = <P as shoal_core::shared::traits::ShoalProjection>::PROJECTION;
+                self.projection = <P as ::shoal::shared::traits::ShoalProjection>::PROJECTION;
                 self
             }
         }
@@ -304,22 +304,22 @@ fn add_sorted_exists(
     };
     // generate our exists struct for this type and its methods
     stream.extend(quote! {
-        #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+        #[derive(Debug, Clone, ::shoal::rkyv::Archive, ::shoal::rkyv::Serialize, ::shoal::rkyv::Deserialize)]
         #[rkyv(derive(Debug))]
         pub struct #exists_name {
             /// The partition keys to check for data in
             pub partition_keys: Vec<#partition_key_type>,
             /// Which rows of each partition this exists is asking about
-            pub sort_select: shoal_core::shared::queries::SortSelect<#sort_key_type>,
+            pub sort_select: ::shoal::shared::queries::SortSelect<#sort_key_type>,
             /// Any filters to use when deciding what rows to check
             pub filters: Option<#filter_name>,
         }
 
         #[automatically_derived]
-        impl shoal_core::shared::traits::RkyvSupport for #exists_name {}
+        impl ::shoal::shared::traits::RkyvSupport for #exists_name {}
 
         #[automatically_derived]
-        impl shoal_core::shared::traits::ExistsQuery for #exists_name {}
+        impl ::shoal::shared::traits::ExistsQuery for #exists_name {}
 
         #[automatically_derived]
         impl #exists_name {
@@ -331,7 +331,7 @@ fn add_sorted_exists(
             pub fn new(partition_keys: Vec<#partition_key_type>) -> Self {
                 #exists_name {
                     partition_keys,
-                    sort_select: shoal_core::shared::queries::SortSelect::All,
+                    sort_select: ::shoal::shared::queries::SortSelect::All,
                     filters: None,
                 }
             }
@@ -347,7 +347,7 @@ fn add_sorted_exists(
             /// * `sort_keys` - The sort keys of the rows to check for
             pub fn sort_keys(mut self, sort_keys: Vec<#sort_key_type>) -> Self {
                 // set our sort keys, replacing whatever this exists selected before
-                self.sort_select = shoal_core::shared::queries::SortSelect::Keys(sort_keys);
+                self.sort_select = ::shoal::shared::queries::SortSelect::Keys(sort_keys);
                 self
             }
 
@@ -364,10 +364,10 @@ fn add_sorted_exists(
             /// * `sort_range` - The range of sort keys to check for rows in
             pub fn sort_range(
                 mut self,
-                sort_range: shoal_core::shared::queries::SortRange<#sort_key_type>,
+                sort_range: ::shoal::shared::queries::SortRange<#sort_key_type>,
             ) -> Self {
                 // set our range, replacing whatever this exists selected before
-                self.sort_select = shoal_core::shared::queries::SortSelect::Range(sort_range);
+                self.sort_select = ::shoal::shared::queries::SortSelect::Range(sort_range);
                 self
             }
 
@@ -406,7 +406,7 @@ fn add_unsorted_exists(
     };
     // generate our exists struct for this type and its methods
     stream.extend(quote! {
-        #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+        #[derive(Debug, Clone, ::shoal::rkyv::Archive, ::shoal::rkyv::Serialize, ::shoal::rkyv::Deserialize)]
         #[rkyv(derive(Debug))]
         pub struct #exists_name {
             /// The partition key to check for data in
@@ -416,10 +416,10 @@ fn add_unsorted_exists(
         }
 
         #[automatically_derived]
-        impl shoal_core::shared::traits::RkyvSupport for #exists_name {}
+        impl ::shoal::shared::traits::RkyvSupport for #exists_name {}
 
         #[automatically_derived]
-        impl shoal_core::shared::traits::ExistsQuery for #exists_name {}
+        impl ::shoal::shared::traits::ExistsQuery for #exists_name {}
 
         #[automatically_derived]
         impl #exists_name {

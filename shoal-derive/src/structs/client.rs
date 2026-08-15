@@ -139,21 +139,21 @@ pub fn add(
         quote! {
             #archived_response_ident::#variant_ident(response) => {
                 match &response.data {
-                    shoal_core::shared::responses::ArchivedResponseAction::Get(opt) => {
+                    ::shoal::shared::responses::ArchivedResponseAction::Get(opt) => {
                         match opt {
-                            rkyv::option::ArchivedOption::Some(rows) => {
-                                let headers = <#archived_inner as shoal_core::shared::traits::TableRowFormat>::headers();
+                            ::shoal::rkyv::option::ArchivedOption::Some(rows) => {
+                                let headers = <#archived_inner as ::shoal::shared::traits::TableRowFormat>::headers();
                                 let values: Vec<Vec<String>> = rows.iter().map(|row| {
-                                    <#archived_inner as shoal_core::shared::traits::TableRowFormat>::row_values(row)
+                                    <#archived_inner as ::shoal::shared::traits::TableRowFormat>::row_values(row)
                                 }).collect();
                                 Some((headers, values))
                             }
-                            rkyv::option::ArchivedOption::None => None,
+                            ::shoal::rkyv::option::ArchivedOption::None => None,
                         }
                     }
                     // a query that failed has no rows to print, and printing it as an empty
                     // table would say it found nothing rather than that it did not run
-                    shoal_core::shared::responses::ArchivedResponseAction::Error(_) => None,
+                    ::shoal::shared::responses::ArchivedResponseAction::Error(_) => None,
                     _ => None,
                 }
             }
@@ -178,7 +178,7 @@ pub fn add(
         let inner_type = &table.inner_type;
         let table_name_str = inner_type.to_string();
         quote! {
-            #table_name_str => Some(<#inner_type as shoal_core::shared::traits::TableSchemaSupport>::fields()),
+            #table_name_str => Some(<#inner_type as ::shoal::shared::traits::TableSchemaSupport>::fields()),
         }
     });
     // build our table_field_validator arms
@@ -186,7 +186,7 @@ pub fn add(
         let inner_type = &table.inner_type;
         let table_name_str = inner_type.to_string();
         quote! {
-            #table_name_str => <#inner_type as shoal_core::shared::traits::TableSchemaSupport>::get_field_validator(field),
+            #table_name_str => <#inner_type as ::shoal::shared::traits::TableSchemaSupport>::get_field_validator(field),
         }
     });
     // build our parse arms for each table
@@ -220,7 +220,7 @@ pub fn add(
                     _ => {
                         // annotated because a table with no projections has an empty list here
                         let known: &[&str] = &[#(#projection_strs),*];
-                        return Err(shoal_core::client::ShqlParseError::new(
+                        return Err(::shoal::client::ShqlParseError::new(
                             format!(
                                 "'{}' is not a projection of {}. Its projections are: {:?}",
                                 named.name,
@@ -248,20 +248,20 @@ pub fn add(
         let check_conditions = quote! {
             for condition in &parsed.conditions {
                 // Validate field exists
-                let _role = <#inner_type as shoal_core::shared::traits::TableSchemaSupport>::get_field_role(&condition.field)
-                    .ok_or_else(|| shoal_core::client::ShqlParseError::new(
+                let _role = <#inner_type as ::shoal::shared::traits::TableSchemaSupport>::get_field_role(&condition.field)
+                    .ok_or_else(|| ::shoal::client::ShqlParseError::new(
                         format!(
                             "Unknown field '{}'. Valid fields are: {:?}",
                             condition.field,
-                            <#inner_type as shoal_core::shared::traits::TableSchemaSupport>::field_names()
+                            <#inner_type as ::shoal::shared::traits::TableSchemaSupport>::field_names()
                         ),
                         condition.field_start,
                         condition.field_end,
                         query,
                     ))?;
                 // Validate field type
-                let validator = <#inner_type as shoal_core::shared::traits::TableSchemaSupport>::get_field_validator(&condition.field)
-                    .ok_or_else(|| shoal_core::client::ShqlParseError::new(
+                let validator = <#inner_type as ::shoal::shared::traits::TableSchemaSupport>::get_field_validator(&condition.field)
+                    .ok_or_else(|| ::shoal::client::ShqlParseError::new(
                         format!("No validator for field '{}'", condition.field),
                         condition.field_start,
                         condition.field_end,
@@ -269,7 +269,7 @@ pub fn add(
                     ))?;
                 for found in condition.values() {
                     validator(&found.value).map_err(|err| {
-                        shoal_core::client::ShqlParseError::new(
+                        ::shoal::client::ShqlParseError::new(
                             format!("Type mismatch for field '{}': {}", condition.field, err),
                             found.start,
                             found.end,
@@ -286,10 +286,10 @@ pub fn add(
         let partition_keys = quote! {
             let partition_condition = parsed.conditions.iter()
                 .find(|c| {
-                    <#inner_type as shoal_core::shared::traits::TableSchemaSupport>::get_field_role(&c.field)
-                        == Some(shoal_core::shared::queries::parser::FieldRole::Partition)
+                    <#inner_type as ::shoal::shared::traits::TableSchemaSupport>::get_field_role(&c.field)
+                        == Some(::shoal::shared::queries::parser::FieldRole::Partition)
                 })
-                .ok_or_else(|| shoal_core::client::ShqlParseError::new(
+                .ok_or_else(|| ::shoal::client::ShqlParseError::new(
                     "Missing partition key in WHERE clause".to_string(),
                     0,
                     query.len(),
@@ -297,7 +297,7 @@ pub fn add(
                 ))?;
             // a partition is located by its exact key, so there is nothing to bound it with
             let partition_values = partition_condition.as_values()
-                .ok_or_else(|| shoal_core::client::ShqlParseError::new(
+                .ok_or_else(|| ::shoal::client::ShqlParseError::new(
                     format!(
                         "'{}' is a partition key and cannot be given a range. A partition is \
                          located by its exact key, so name the ones to read with = or IN",
@@ -309,8 +309,8 @@ pub fn add(
                 ))?;
             let mut partition_keys = Vec::with_capacity(partition_values.len());
             for found in partition_values {
-                let value = shoal_core::serde_json::from_value(found.value.clone())
-                    .map_err(|e| shoal_core::client::ShqlParseError::new(
+                let value = ::shoal::serde_json::from_value(found.value.clone())
+                    .map_err(|e| ::shoal::client::ShqlParseError::new(
                         format!("Failed to deserialize partition key: {}", e),
                         found.start,
                         found.end,
@@ -339,11 +339,11 @@ pub fn add(
                         get_query.filters = <#inner_type>::shql_build_filters(&parsed.conditions, query)?;
                         // Hash each partition key into the key of the partition holding it
                         let partition_key_hashes: Vec<u64> = partition_keys.iter()
-                            .map(|pk| <#inner_type as shoal_core::shared::traits::PartitionKeySupport>::get_partition_key_from_values(pk))
+                            .map(|pk| <#inner_type as ::shoal::shared::traits::PartitionKeySupport>::get_partition_key_from_values(pk))
                             .collect();
                         // Wrap in UnsortedQuery::Get and then in QueryKinds
-                        let unsorted_query = shoal_core::shared::queries::UnsortedQuery::Get(
-                            shoal_core::shared::queries::UnsortedGet {
+                        let unsorted_query = ::shoal::shared::queries::UnsortedQuery::Get(
+                            ::shoal::shared::queries::UnsortedGet {
                                 partition_keys: partition_key_hashes,
                                 filters: get_query.filters,
                                 limit: get_query.limit,
@@ -370,18 +370,18 @@ pub fn add(
                         // that one condition, and a query naming none selects every row
                         let sort_select = match parsed.conditions.iter()
                             .find(|c| {
-                                <#inner_type as shoal_core::shared::traits::TableSchemaSupport>::get_field_role(&c.field)
-                                    == Some(shoal_core::shared::queries::parser::FieldRole::Sort)
+                                <#inner_type as ::shoal::shared::traits::TableSchemaSupport>::get_field_role(&c.field)
+                                    == Some(::shoal::shared::queries::parser::FieldRole::Sort)
                             })
                         {
                             // this query narrowed itself, so read how it did it
                             Some(sort_condition) => match &sort_condition.constraint {
                                 // a set of values names the rows to return
-                                shoal_core::shared::queries::parser::WhereConstraint::Values(values) => {
+                                ::shoal::shared::queries::parser::WhereConstraint::Values(values) => {
                                     let mut sort_keys = Vec::with_capacity(values.len());
                                     for found in values {
-                                        let value = shoal_core::serde_json::from_value(found.value.clone())
-                                            .map_err(|e| shoal_core::client::ShqlParseError::new(
+                                        let value = ::shoal::serde_json::from_value(found.value.clone())
+                                            .map_err(|e| ::shoal::client::ShqlParseError::new(
                                                 format!("Failed to deserialize sort key: {}", e),
                                                 found.start,
                                                 found.end,
@@ -389,20 +389,20 @@ pub fn add(
                                             ))?;
                                         sort_keys.push(value);
                                     }
-                                    shoal_core::shared::queries::SortSelect::Keys(sort_keys)
+                                    ::shoal::shared::queries::SortSelect::Keys(sort_keys)
                                 }
                                 // a range bounds the rows to return at one or both ends
-                                shoal_core::shared::queries::parser::WhereConstraint::Range(range) => {
+                                ::shoal::shared::queries::parser::WhereConstraint::Range(range) => {
                                     // turn one end of the parsed range into a bound on a sort key
-                                    let bind = |bound: &Option<shoal_core::shared::queries::parser::WhereBound>|
-                                        -> Result<std::ops::Bound<_>, shoal_core::client::ShqlParseError>
+                                    let bind = |bound: &Option<::shoal::shared::queries::parser::WhereBound>|
+                                        -> Result<std::ops::Bound<_>, ::shoal::client::ShqlParseError>
                                     {
                                         // an end that was never written bounds nothing
                                         let Some(bound) = bound else {
                                             return Ok(std::ops::Bound::Unbounded);
                                         };
-                                        let value = shoal_core::serde_json::from_value(bound.value.value.clone())
-                                            .map_err(|e| shoal_core::client::ShqlParseError::new(
+                                        let value = ::shoal::serde_json::from_value(bound.value.value.clone())
+                                            .map_err(|e| ::shoal::client::ShqlParseError::new(
                                                 format!("Failed to deserialize sort key: {}", e),
                                                 bound.value.start,
                                                 bound.value.end,
@@ -415,8 +415,8 @@ pub fn add(
                                             std::ops::Bound::Excluded(value)
                                         })
                                     };
-                                    shoal_core::shared::queries::SortSelect::Range(
-                                        shoal_core::shared::queries::SortRange::new(
+                                    ::shoal::shared::queries::SortSelect::Range(
+                                        ::shoal::shared::queries::SortRange::new(
                                             bind(&range.lower)?,
                                             bind(&range.upper)?,
                                         )
@@ -424,7 +424,7 @@ pub fn add(
                                 }
                             },
                             // this query never mentioned its sort key, so it wants every row
-                            None => shoal_core::shared::queries::SortSelect::All,
+                            None => ::shoal::shared::queries::SortSelect::All,
                         };
                         // Build the Get query
                         let mut get_query = #get_ident::new(partition_keys.clone());
@@ -436,11 +436,11 @@ pub fn add(
                         get_query.filters = <#inner_type>::shql_build_filters(&parsed.conditions, query)?;
                         // Hash each partition key into the key of the partition holding it
                         let partition_key_hashes: Vec<u64> = partition_keys.iter()
-                            .map(|pk| <#inner_type as shoal_core::shared::traits::PartitionKeySupport>::get_partition_key_from_values(pk))
+                            .map(|pk| <#inner_type as ::shoal::shared::traits::PartitionKeySupport>::get_partition_key_from_values(pk))
                             .collect();
                         // Wrap in SortedQuery::Get and then in QueryKinds
-                        let sorted_query = shoal_core::shared::queries::SortedQuery::Get(
-                            shoal_core::shared::queries::SortedGet {
+                        let sorted_query = ::shoal::shared::queries::SortedQuery::Get(
+                            ::shoal::shared::queries::SortedGet {
                                 partition_keys: partition_key_hashes,
                                 sort_select: get_query.sort_select,
                                 filters: get_query.filters,
@@ -468,7 +468,7 @@ pub fn add(
     stream.extend(quote! {
         pub struct #client_ident {}
 
-        impl shoal_core::shared::traits::QuerySupport for #client_ident {
+        impl ::shoal::shared::traits::QuerySupport for #client_ident {
             /// A hash over every part of this databases schema that can reach the wire
             const SCHEMA_FINGERPRINT: u64 = #schema_fingerprint;
 
@@ -487,9 +487,9 @@ pub fn add(
             ///
             /// * `opts` - The options to use when validating query responses
             fn succeeded(
-                archived: &<Self::ResponseKinds as rkyv::Archive>::Archived,
-                opts: shoal_core::client::QuerySuceededOpts,
-            ) -> Result<(), shoal_core::client::Errors> {
+                archived: &<Self::ResponseKinds as ::shoal::rkyv::Archive>::Archived,
+                opts: ::shoal::client::QuerySuceededOpts,
+            ) -> Result<(), ::shoal::client::Errors> {
                 match archived {
                     #(#succeeded_arms)*
                 }
@@ -500,7 +500,7 @@ pub fn add(
             /// # Arguments
             ///
             /// * `archived` - The archived query to get the query kind for
-            fn kind(archived: &<Self::ResponseKinds as rkyv::Archive>::Archived) -> shoal_core::shared::responses::ResponseActionNames {
+            fn kind(archived: &<Self::ResponseKinds as ::shoal::rkyv::Archive>::Archived) -> ::shoal::shared::responses::ResponseActionNames {
                 match archived {
                     #(#kind_arms)*
                 }
@@ -511,7 +511,7 @@ pub fn add(
             /// # Arguments
             ///
             /// * `archived` - The archived response to get the exists result from
-            fn get_exists(archived: &<Self::ResponseKinds as rkyv::Archive>::Archived) -> Option<bool> {
+            fn get_exists(archived: &<Self::ResponseKinds as ::shoal::rkyv::Archive>::Archived) -> Option<bool> {
                 match archived {
                     #(#get_exists_arms)*
                 }
@@ -522,7 +522,7 @@ pub fn add(
             /// # Arguments
             ///
             /// * `archived` - The archived response to get the failure from
-            fn error(archived: &<Self::ResponseKinds as rkyv::Archive>::Archived) -> Option<&shoal_core::shared::responses::ArchivedResponseError> {
+            fn error(archived: &<Self::ResponseKinds as ::shoal::rkyv::Archive>::Archived) -> Option<&::shoal::shared::responses::ArchivedResponseError> {
                 match archived {
                     #(#error_arms)*
                 }
@@ -533,13 +533,13 @@ pub fn add(
             /// # Arguments
             ///
             /// * `query` - The SHQL query string to parse
-            fn parse(query: &str) -> Result<Self::QueryKinds, shoal_core::client::ShqlParseError> {
+            fn parse(query: &str) -> Result<Self::QueryKinds, ::shoal::client::ShqlParseError> {
                 // Parse the query string
-                let parsed = shoal_core::shared::queries::parser::ParsedSelect::new(query)?;
+                let parsed = ::shoal::shared::queries::parser::ParsedSelect::new(query)?;
                 // Match on the table name
                 match parsed.table_name.as_str() {
                     #(#parse_arms)*
-                    _ => Err(shoal_core::client::ShqlParseError::new(
+                    _ => Err(::shoal::client::ShqlParseError::new(
                         format!("Unknown table '{}'", parsed.table_name),
                         0,
                         query.len(),
@@ -563,7 +563,7 @@ pub fn add(
             /// # Arguments
             ///
             /// * `table` - The name of the table to get fields for
-            fn table_fields(table: &str) -> Option<Vec<shoal_core::shared::queries::parser::FieldInfo>> {
+            fn table_fields(table: &str) -> Option<Vec<::shoal::shared::queries::parser::FieldInfo>> {
                 match table {
                     #(#table_fields_arms)*
                     _ => None,
@@ -579,7 +579,7 @@ pub fn add(
             fn table_field_validator(
                 table: &str,
                 field: &str,
-            ) -> Option<shoal_core::shared::queries::parser::TypeValidator> {
+            ) -> Option<::shoal::shared::queries::parser::TypeValidator> {
                 match table {
                     #(#table_field_validator_arms)*
                     _ => None,
@@ -595,7 +595,7 @@ pub fn add(
 
             /// Get the table name from an archived response
             fn response_table_name(
-                archived: &<Self::ResponseKinds as rkyv::Archive>::Archived,
+                archived: &<Self::ResponseKinds as ::shoal::rkyv::Archive>::Archived,
             ) -> Self::TableNames {
                 match archived {
                     #(#response_table_name_arms)*
@@ -604,7 +604,7 @@ pub fn add(
 
             /// Format an archived response into column headers and row values
             fn format_response(
-                archived: &<Self::ResponseKinds as rkyv::Archive>::Archived,
+                archived: &<Self::ResponseKinds as ::shoal::rkyv::Archive>::Archived,
             ) -> Option<(Vec<&'static str>, Vec<Vec<String>>)> {
                 match archived {
                     #(#format_response_arms)*

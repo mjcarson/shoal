@@ -3,7 +3,7 @@
 use quote::{format_ident, quote};
 use syn::{FieldsNamed, Ident};
 
-use crate::{tables::TableKinds, utils};
+use crate::{DbHalf, tables::TableKinds, utils};
 
 /// Information about a table field needed for code generation
 struct TableInfo {
@@ -59,11 +59,13 @@ fn extract_table_info(fields: &FieldsNamed) -> Vec<TableInfo> {
 /// * `struct_ident` - The name of the database these queries are for
 /// * `fields` - The tables in this database
 /// * `projections` - The projections each of those tables declared
+/// * `half` - Which half of the schema is being emitted
 pub fn add(
     stream: &mut proc_macro2::TokenStream,
     struct_ident: &Ident,
     fields: &FieldsNamed,
     projections: &[Vec<Ident>],
+    half: DbHalf,
 ) {
     // extract the info for all tables in this db
     let tables = extract_table_info(fields);
@@ -83,13 +85,13 @@ pub fn add(
             TableKinds::Unsorted => {
                 // use the variant for unsorted tables
                 quote! {
-                    #variant(shoal_core::shared::queries::UnsortedQuery<#inner>)
+                    #variant(::shoal::shared::queries::UnsortedQuery<#inner>)
                 }
             }
             TableKinds::Sorted => {
                 // use the variant for sorted tables
                 quote! {
-                    #variant(shoal_core::shared::queries::SortedQuery<#inner>)
+                    #variant(::shoal::shared::queries::SortedQuery<#inner>)
                 }
             }
         }
@@ -101,13 +103,13 @@ pub fn add(
             let variant = &table.variant_ident;
             let inner = &table.inner_type;
             quote! {
-                #variant(shoal_core::shared::responses::Response<#inner>)
+                #variant(::shoal::shared::responses::Response<#inner>)
             }
         })
         // a projection answers in a variant named after itself, holding its own rows
         .chain(projected.iter().map(|projection| {
             quote! {
-                #projection(shoal_core::shared::responses::Response<#projection>)
+                #projection(::shoal::shared::responses::Response<#projection>)
             }
         }));
     // Generate response_query_id match arms
@@ -131,7 +133,8 @@ pub fn add(
             #query_ident::#variant(query) => {
                 // split this tables query up by shard
                 let mut split = Vec::default();
-                query.split_by_shard(ring, &mut split);
+                // named through the trait so a schema does not have to have it in scope
+                ::shoal::server::routing::ShardRouting::split_by_shard(query, ring, &mut split);
                 // wrap each narrowed query back up in the variant it came from
                 for (shard, narrowed) in split {
                     found.push((shard, #query_ident::#variant(narrowed)));
@@ -228,50 +231,61 @@ pub fn add(
             }
         });
 
+    // Routing is placement, and placement is something only a server knows. A client half emits
+    // nothing here, which is what keeps `Ring` and `ShardInfo` - and so the whole engine - out of
+    // a build that only ever talks to a database.
+    let routing = match half {
+        DbHalf::Both => quote! {
+            #[automatically_derived]
+            impl ::shoal::server::routing::ShardRouting for #query_ident {
+                /// Split this query into the per shard queries that answer it
+                ///
+                /// # Arguments
+                ///
+                /// * `ring` - The shard ring to check against
+                /// * `found` - The per shard queries we found for this query
+                fn split_by_shard<'a>(
+                    &self,
+                    ring: &'a ::shoal::server::ring::Ring,
+                    found: &mut Vec<(&'a ::shoal::server::shard::ShardInfo, Self)>,
+                ) {
+                    match &self {
+                        #(#split_by_shard_arms),*
+                    }
+                }
+            }
+        },
+        DbHalf::Client => quote! {},
+    };
+
     // Generate the enums and trait implementations
     stream.extend(quote! {
         /// The different tables we can query
-        #[derive(Debug, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize, Clone)]
+        #[derive(Debug, ::shoal::rkyv::Archive, ::shoal::rkyv::Serialize, ::shoal::rkyv::Deserialize, Clone)]
         pub enum #query_ident {
             #(#query_variants),*
         }
 
         /// The different tables we can get responses from
-        #[derive(Debug, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+        #[derive(Debug, ::shoal::rkyv::Archive, ::shoal::rkyv::Serialize, ::shoal::rkyv::Deserialize)]
         pub enum #response_ident {
             #(#response_variants),*
         }
 
         #[automatically_derived]
-        impl shoal_core::shared::traits::RkyvSupport for #query_ident {}
+        impl ::shoal::shared::traits::RkyvSupport for #query_ident {}
 
         #[automatically_derived]
-        impl shoal_core::shared::traits::ShoalQuerySupport for #query_ident {
+        impl ::shoal::shared::traits::ShoalQuerySupport for #query_ident {
             /// Deserialize our response types
             ///
             /// # Arguments
             ///
             /// * `buff` - The buffer to deserialize into a response
-            fn response_query_id(buff: &[u8]) -> Result<&uuid::Uuid, rkyv::rancor::Error> {
-                let archive = <#response_ident as shoal_core::shared::traits::RkyvSupport>::access(buff)?;
+            fn response_query_id(buff: &[u8]) -> Result<&::shoal::uuid::Uuid, ::shoal::rkyv::rancor::Error> {
+                let archive = <#response_ident as ::shoal::shared::traits::RkyvSupport>::access(buff)?;
                 match archive {
                     #(#response_query_id_arms),*
-                }
-            }
-
-            /// Split this query into the per shard queries that answer it
-            ///
-            /// # Arguments
-            ///
-            /// * `ring` - The shard ring to check against
-            /// * `found` - The per shard queries we found for this query
-            fn split_by_shard<'a>(
-                &self,
-                ring: &'a shoal_core::server::ring::Ring,
-                found: &mut Vec<(&'a shoal_core::server::shard::ShardInfo, Self)>,
-            ) {
-                match &self {
-                    #(#split_by_shard_arms),*
                 }
             }
 
@@ -290,27 +304,29 @@ pub fn add(
             }
         }
 
-        #[automatically_derived]
-        impl shoal_core::shared::traits::RkyvSupport for #response_ident {}
+        #routing
 
         #[automatically_derived]
-        impl shoal_core::shared::traits::ShoalResponseSupport for #response_ident {
+        impl ::shoal::shared::traits::RkyvSupport for #response_ident {}
+
+        #[automatically_derived]
+        impl ::shoal::shared::traits::ShoalResponseSupport for #response_ident {
             /// Get the index of a single response
-            fn get_index_archived(archived: &<Self as rkyv::Archive>::Archived) -> usize {
+            fn get_index_archived(archived: &<Self as ::shoal::rkyv::Archive>::Archived) -> usize {
                 match archived {
                     #(#get_index_arms),*
                 }
             }
 
             /// Get whether this is the last response in a response stream
-            fn is_end_of_stream(archived: &<Self as rkyv::Archive>::Archived) -> bool {
+            fn is_end_of_stream(archived: &<Self as ::shoal::rkyv::Archive>::Archived) -> bool {
                 match archived {
                     #(#is_end_of_stream_arms),*
                 }
             }
 
             /// Get the query id from the response
-            fn get_query_id(archived: &<Self as rkyv::Archive>::Archived) -> uuid::Uuid {
+            fn get_query_id(archived: &<Self as ::shoal::rkyv::Archive>::Archived) -> ::shoal::uuid::Uuid {
                 match archived {
                     #(#get_query_id_arms),*
                 }

@@ -23,7 +23,7 @@ mod unsorted;
 //                 // get our rows partition key
 //                 let key = #name::get_partition_key(&row);
 //                 // build our query kind
-//                 #query_name::#name(shoal_core::shared::queries::SortedQuery::Insert { key, row })
+//                 #query_name::#name(::shoal::shared::queries::SortedQuery::Insert { key, row })
 //             }
 //         }
 //     });

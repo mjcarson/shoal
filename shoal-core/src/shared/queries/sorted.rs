@@ -5,9 +5,7 @@ use rkyv::{Archive, Deserialize, Serialize};
 use std::ops::Bound;
 use uuid::Uuid;
 
-use crate::server::ring::Ring;
-use crate::server::shard::ShardInfo;
-use crate::shared::queries::{group_by_shard, normalize_sort_keys};
+use crate::shared::queries::normalize_sort_keys;
 use crate::shared::traits::{RkyvSupport, ShoalSortedTable};
 
 /// Which rows of a partition a sorted get or exists is asking for
@@ -283,49 +281,6 @@ pub enum SortedQuery<T: ShoalSortedTable + std::fmt::Debug + RkyvSupport> {
 }
 
 impl<T: ShoalSortedTable + std::fmt::Debug> SortedQuery<T> {
-    /// Split this query into the per shard queries that answer it
-    ///
-    /// A query naming several partition keys is only answerable by the shards that own
-    /// those keys, so it is narrowed to each shards own keys rather than sent whole to
-    /// every one of them. Shards are deduplicated too, so a shard owning two of the
-    /// keys gets one query naming both instead of the same query twice.
-    ///
-    /// # Arguments
-    ///
-    /// * `ring` - The shard ring to check against
-    /// * `found` - The per shard queries we found for this query
-    pub fn split_by_shard<'a>(&self, ring: &'a Ring, found: &mut Vec<(&'a ShardInfo, Self)>) {
-        // get the correct shards for this query
-        match self {
-            SortedQuery::Insert { key, .. } | SortedQuery::Delete { key, .. } => {
-                // a write names a single partition so it goes to a single shard
-                found.push((ring.find_shard(*key), self.clone()));
-            }
-            SortedQuery::Get(get) => {
-                // put this gets sort keys in the order the rows they name come back in
-                let sort_select = get.sort_select.normalized();
-                // narrow this get to each shards own partition keys
-                for (shard, keys) in group_by_shard(ring, &get.partition_keys) {
-                    let narrowed = get.for_partitions(keys, sort_select.clone());
-                    found.push((shard, SortedQuery::Get(narrowed)));
-                }
-            }
-            SortedQuery::Exists(exists) => {
-                // drop any sort key this exists named more than once
-                let sort_select = exists.sort_select.normalized();
-                // narrow this exists to each shards own partition keys
-                for (shard, keys) in group_by_shard(ring, &exists.partition_keys) {
-                    let narrowed = exists.for_partitions(keys, sort_select.clone());
-                    found.push((shard, SortedQuery::Exists(narrowed)));
-                }
-            }
-            SortedQuery::Update(update) => {
-                // an update names a single partition so it goes to a single shard
-                found.push((ring.find_shard(update.partition_key), self.clone()));
-            }
-        }
-    }
-
     /// Get the subset of each rows fields this query asked to be answered with
     ///
     /// Only a get returns rows, so every other query answers with the whole row it would have

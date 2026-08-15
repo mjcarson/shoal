@@ -9,8 +9,6 @@ mod sorted;
 mod unsorted;
 
 use crate::client::ShqlParseError;
-use crate::server::ring::Ring;
-use crate::server::shard::ShardInfo;
 
 use super::traits::{QuerySupport, RkyvSupport};
 
@@ -42,48 +40,6 @@ pub(crate) fn normalize_sort_keys<S: Ord + Clone>(sort_keys: &[S]) -> Vec<S> {
     // drop any key that was named more than once
     normalized.dedup();
     normalized
-}
-
-/// Group a queries partition keys by the shard that owns each of them
-///
-/// The keys are kept in the order they were asked for within each shard, so a narrowed query
-/// reads its partitions in the same order the whole query would have. That is what lets the
-/// shard collecting the shares put the rows back into the order the query named them in, and
-/// what makes each shards own share of a limit the right rows to keep.
-///
-/// A key named twice is grouped once. Reading a partition twice would hand back each of its
-/// rows twice, and every table below this counts on a key naming exactly one of its partitions.
-///
-/// # Arguments
-///
-/// * `ring` - The shard ring to check against
-/// * `partition_keys` - The partition keys to group
-pub(crate) fn group_by_shard<'a>(
-    ring: &'a Ring,
-    partition_keys: &[u64],
-) -> Vec<(&'a ShardInfo, Vec<u64>)> {
-    // build the per shard groups we find
-    let mut grouped: Vec<(&ShardInfo, Vec<u64>)> = Vec::with_capacity(1);
-    // place each partition key with the shard that owns it
-    for key in partition_keys {
-        // a key we have already placed names a partition we are already reading
-        if grouped.iter().any(|(_, keys)| keys.contains(key)) {
-            continue;
-        }
-        // find the shard that owns this key
-        let shard = ring.find_shard(*key);
-        // add this key to that shards group, or start a group for it
-        match grouped
-            .iter_mut()
-            .find(|(found, _)| found.mesh_id() == shard.mesh_id())
-        {
-            // this shard already owns one of our keys so add this one to it
-            Some((_, keys)) => keys.push(*key),
-            // this is the first key we have found for this shard
-            None => grouped.push((shard, vec![*key])),
-        }
-    }
-    grouped
 }
 
 /// A bundle of different query kinds

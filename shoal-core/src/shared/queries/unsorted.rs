@@ -8,9 +8,6 @@ use rkyv::util::AlignedVec;
 use rkyv::{Archive, Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::server::ring::Ring;
-use crate::server::shard::ShardInfo;
-use crate::shared::queries::group_by_shard;
 use crate::shared::traits::{RkyvSupport, ShoalTableSupport, ShoalUnsortedTable};
 
 /// The different types of queries for a single datatype
@@ -29,35 +26,6 @@ pub enum UnsortedQuery<T: ShoalUnsortedTable + std::fmt::Debug + RkyvSupport> {
 }
 
 impl<T: ShoalUnsortedTable + std::fmt::Debug> UnsortedQuery<T> {
-    /// Split this query into the per shard queries that answer it
-    ///
-    /// Every unsorted query but a get names exactly one partition, so it goes to a single
-    /// shard with nothing to narrow. A get may name several, so it is narrowed to each
-    /// shards own keys the same way a sorted get is.
-    ///
-    /// # Arguments
-    ///
-    /// * `ring` - The shard ring to check against
-    /// * `found` - The per shard queries we found for this query
-    pub fn split_by_shard<'a>(&self, ring: &'a Ring, found: &mut Vec<(&'a ShardInfo, Self)>) {
-        // get the correct shards for this query
-        let shard = match self {
-            UnsortedQuery::Insert { key, .. } | UnsortedQuery::Delete { key, .. } => {
-                ring.find_shard(*key)
-            }
-            UnsortedQuery::Get(get) => {
-                // narrow this get to each shards own partition keys
-                for (shard, keys) in group_by_shard(ring, &get.partition_keys) {
-                    found.push((shard, UnsortedQuery::Get(get.for_partitions(keys))));
-                }
-                return;
-            }
-            UnsortedQuery::Update(update) => ring.find_shard(update.partition_key),
-            UnsortedQuery::Exists(exists) => ring.find_shard(exists.partition_key),
-        };
-        found.push((shard, self.clone()));
-    }
-
     /// Get the subset of each rows fields this query asked to be answered with
     ///
     /// Only a get returns rows, so every other query answers with the whole row it would have

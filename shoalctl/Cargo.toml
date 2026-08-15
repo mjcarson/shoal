@@ -16,10 +16,10 @@ shoal-core = { path = "../shoal-core", features = ["shql-complete"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 uuid = { version = "1.11", features = ["v4"] }
 
-# this shouldn't be required by the user
-deepsize2 = "0.1"
+# a schema writes its own `#[derive(DeepSizeOf)]`, and the app really does use channels. glommio
+# used to sit here too, purely because `#[shoal::db]` named it - see F15 and known issue 54
+deepsize2 = { workspace = true }
 kanal = { workspace = true }
-glommio = { workspace = true }
 
 # maybe these should?
 serde = { version = "1", features = ["derive"] }

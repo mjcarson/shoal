@@ -11,7 +11,9 @@ path = "src/lib.rs"
 proc-macro = true
 
 [dependencies]
-shoal-core = { version = "0.1.0", path = "../shoal-core" }
+# no dependency on any shoal crate. this only emits tokens, and every path it emits is resolved in
+# the caller's crate through the `shoal` facade - so the engine is not on the critical path of
+# building this proc macro
 darling = "0.20.10"
 proc-macro2 = "1.0.86"
 quote = "1.0.36"

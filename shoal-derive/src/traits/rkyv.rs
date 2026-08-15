@@ -13,6 +13,6 @@ pub fn add(stream: &mut proc_macro2::TokenStream, name: &Ident) {
     // extend our token stream
     stream.extend(quote! {
         #[automatically_derived]
-        impl shoal_core::shared::traits::RkyvSupport for #name {}
+        impl ::shoal::shared::traits::RkyvSupport for #name {}
     });
 }

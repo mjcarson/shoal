@@ -39,7 +39,7 @@ pub(super) fn add_enums(
             #[doc = "The subsets of a rows fields a get of this table can be answered with"]
             #[derive(
                 Debug, Clone, Copy, Default, PartialEq, Eq, Hash,
-                rkyv::Archive, rkyv::Serialize, rkyv::Deserialize,
+                ::shoal::rkyv::Archive, ::shoal::rkyv::Serialize, ::shoal::rkyv::Deserialize,
             )]
             #[rkyv(derive(Debug))]
             pub enum #enum_ident {
@@ -53,7 +53,7 @@ pub(super) fn add_enums(
             }
 
             #[automatically_derived]
-            impl shoal_core::shared::traits::RkyvSupport for #enum_ident {}
+            impl ::shoal::shared::traits::RkyvSupport for #enum_ident {}
         });
     }
 }
@@ -185,7 +185,7 @@ pub(super) fn derive(ast: &syn::DeriveInput) -> proc_macro2::TokenStream {
         .iter()
         .map(|(ident, ty)| {
             quote! {
-                #ident: rkyv::api::deserialize_using::<#ty, _, rkyv::rancor::Error>(
+                #ident: ::shoal::rkyv::api::deserialize_using::<#ty, _, ::shoal::rkyv::rancor::Error>(
                     &row.#ident,
                     &mut pool,
                 ).unwrap(),
@@ -195,7 +195,7 @@ pub(super) fn derive(ast: &syn::DeriveInput) -> proc_macro2::TokenStream {
     // generate the projection itself
     output.extend(quote! {
         #[automatically_derived]
-        impl shoal_core::shared::traits::ShoalProjection for #name {
+        impl ::shoal::shared::traits::ShoalProjection for #name {
             /// The table whose rows this projects
             type Row = #table_name;
 
@@ -203,7 +203,7 @@ pub(super) fn derive(ast: &syn::DeriveInput) -> proc_macro2::TokenStream {
             const SCHEMA_FINGERPRINT: u64 = #schema_fingerprint;
 
             /// Which of its tables projections this type is
-            const PROJECTION: <#table_name as shoal_core::shared::traits::ShoalTableSupport>::Projection
+            const PROJECTION: <#table_name as ::shoal::shared::traits::ShoalTableSupport>::Projection
                 = #projection_enum::#name;
 
             /// Build this projection from a resident row
@@ -224,7 +224,7 @@ pub(super) fn derive(ast: &syn::DeriveInput) -> proc_macro2::TokenStream {
             /// * `row` - The archived row to project
             fn from_archived(row: &#archived_table) -> Self {
                 // share one pool across this rows fields rather than building one per field
-                let mut pool = rkyv::de::Pool::new();
+                let mut pool = ::shoal::rkyv::de::Pool::new();
                 #name {
                     #(#from_archived_fields)*
                 }
@@ -237,8 +237,8 @@ pub(super) fn derive(ast: &syn::DeriveInput) -> proc_macro2::TokenStream {
         const _: () = {
             fn assert_partition_key<P>()
             where
-                P: shoal_core::shared::traits::PartitionKeySupport<
-                    PartitionKey = <#table_name as shoal_core::shared::traits::PartitionKeySupport>::PartitionKey,
+                P: ::shoal::shared::traits::PartitionKeySupport<
+                    PartitionKey = <#table_name as ::shoal::shared::traits::PartitionKeySupport>::PartitionKey,
                 >,
             {
             }

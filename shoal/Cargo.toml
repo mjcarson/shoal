@@ -28,15 +28,14 @@ stage-profile = ["shoal-core/stage-profile"]
 [dependencies]
 shoal-core = { version = "0.1.0", path = "../shoal-core" }
 shoal-derive = { version = "0.1.0", path = "../shoal-derive" }
-# Named by paths the derive macros generate, so a crate that uses `#[shoal::db]` needs all of
-# these even though nothing in this facade mentions them by hand. See known issue 54.
+# The derive macros no longer name any crate the caller has to declare - they emit `::shoal::`
+# paths and this facade re-exports what they reach for (F15, known issue 54). What is left here is
+# what this crate's own tests, benches and examples write by hand: a schema declares its rkyv and
+# deepsize2 derives itself, and the tests are async.
 rkyv = { workspace = true }
-gxhash = { workspace = true }
 uuid = { workspace = true }
-glommio = { workspace = true }
 tokio = { workspace = true }
-kanal = { workspace = true }
-deepsize2 = "0.1"
+deepsize2 = { workspace = true }
 
 [dev-dependencies]
 # the shql tests cover autocompletion, which clients opt into

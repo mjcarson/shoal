@@ -33,22 +33,22 @@ pub fn add_unsorted(
     if update_fields.is_empty() {
         stream.extend(quote! {
             /// The updates that can be applied to this table
-            #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+            #[derive(Debug, Clone, ::shoal::rkyv::Archive, ::shoal::rkyv::Serialize, ::shoal::rkyv::Deserialize)]
             #[rkyv(derive(Debug))]
             pub struct #update_name {
                 /// The partition key to update data in
                 pub partition_key: #partition_key_type,
             }
 
-            impl shoal_core::shared::traits::RkyvSupport for #update_name {}
+            impl ::shoal::shared::traits::RkyvSupport for #update_name {}
 
             /// The server facing updates that can be applied to this table (just the updates no keys)
-            #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+            #[derive(Debug, Clone, ::shoal::rkyv::Archive, ::shoal::rkyv::Serialize, ::shoal::rkyv::Deserialize)]
             #[rkyv(derive(Debug))]
             pub struct #update_data_name;
 
             #[automatically_derived]
-            impl shoal_core::shared::traits::RkyvSupport for #update_data_name {}
+            impl ::shoal::shared::traits::RkyvSupport for #update_data_name {}
 
             #[automatically_derived]
             impl From<#update_name> for #update_data_name {
@@ -77,7 +77,7 @@ pub fn add_unsorted(
     // generate the update struct
     stream.extend(quote! {
         /// The updates that can be applied to this table
-        #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+        #[derive(Debug, Clone, ::shoal::rkyv::Archive, ::shoal::rkyv::Serialize, ::shoal::rkyv::Deserialize)]
         #[rkyv(derive(Debug))]
         pub struct #update_name {
             /// The partition key to update data in
@@ -86,17 +86,17 @@ pub fn add_unsorted(
         }
 
         #[automatically_derived]
-        impl shoal_core::shared::traits::RkyvSupport for #update_name {}
+        impl ::shoal::shared::traits::RkyvSupport for #update_name {}
 
         /// The server facing updates that can be applied to this table (just the updates no keys)
-        #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+        #[derive(Debug, Clone, ::shoal::rkyv::Archive, ::shoal::rkyv::Serialize, ::shoal::rkyv::Deserialize)]
         #[rkyv(derive(Debug))]
         pub struct #update_data_name {
             #(#data_fields),*
         }
 
         #[automatically_derived]
-        impl shoal_core::shared::traits::RkyvSupport for #update_data_name {}
+        impl ::shoal::shared::traits::RkyvSupport for #update_data_name {}
 
         #[automatically_derived]
         impl From<#update_name> for #update_data_name {
@@ -164,7 +164,7 @@ pub fn add_sorted(
     // generate the update struct
     stream.extend(quote! {
         /// The updates that can be applied to this table
-        #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+        #[derive(Debug, Clone, ::shoal::rkyv::Archive, ::shoal::rkyv::Serialize, ::shoal::rkyv::Deserialize)]
         #[rkyv(derive(Debug))]
         pub struct #update_name {
             /// The partition key to update data in
@@ -175,17 +175,17 @@ pub fn add_sorted(
         }
 
         #[automatically_derived]
-        impl shoal_core::shared::traits::RkyvSupport for #update_name {}
+        impl ::shoal::shared::traits::RkyvSupport for #update_name {}
 
         /// The server facing updates that can be applied to this table (just the updates no keys)
-        #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+        #[derive(Debug, Clone, ::shoal::rkyv::Archive, ::shoal::rkyv::Serialize, ::shoal::rkyv::Deserialize)]
         #[rkyv(derive(Debug))]
         pub struct #update_data_name {
             #(#data_fields),*
         }
 
         #[automatically_derived]
-        impl shoal_core::shared::traits::RkyvSupport for #update_data_name {}
+        impl ::shoal::shared::traits::RkyvSupport for #update_data_name {}
 
         #[automatically_derived]
         impl #update_name {

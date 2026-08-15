@@ -50,10 +50,8 @@ pub enum Errors {
     IO(std::io::Error),
     /// An rkyv error
     Rkyv(rkyv::rancor::Error),
-    /// An error sending data to a kanal channel
-    KanalSend(kanal::SendError),
-    /// An error receiving data from a kanal channel
-    KanalReceive(kanal::ReceiveError),
+    /// One of the clients internal channels went away
+    Channel(ChannelError),
     /// A stream has already ended
     StreamAlreadyTerminated,
     /// Failed to get a connection from the pool
@@ -68,6 +66,23 @@ pub enum Errors {
     ShqlParse(ShqlParseError),
     /// A shoalctl error
     Shoalctl(String),
+}
+
+/// Which end of one of the clients internal channels went away
+///
+/// The channel types belong to whichever client implementation is in use, so their own error
+/// types must not appear here - a second client built on different channels would carry two
+/// variants naming a crate it never links. This says the same thing without naming one, and it
+/// stays a `Copy` value rather than becoming a message, because a torn down channel is
+/// something a caller branches on rather than something it prints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChannelError {
+    /// The channel was closed at both ends
+    Closed,
+    /// Every receiver was dropped, so a send has nowhere to go
+    ReceiveClosed,
+    /// Every sender was dropped, so a receive has nothing left to wait for
+    SendClosed,
 }
 
 impl std::fmt::Display for Errors {
@@ -332,28 +347,6 @@ impl From<rkyv::rancor::Error> for Errors {
     /// * `error` - The error to convert
     fn from(error: rkyv::rancor::Error) -> Self {
         Errors::Rkyv(error)
-    }
-}
-
-impl From<kanal::SendError> for Errors {
-    /// Convert this error to our error type
-    ///
-    /// # Arguments
-    ///
-    /// * `error` - The error to convert
-    fn from(error: kanal::SendError) -> Self {
-        Errors::KanalSend(error)
-    }
-}
-
-impl From<kanal::ReceiveError> for Errors {
-    /// Convert this error to our error type
-    ///
-    /// # Arguments
-    ///
-    /// * `error` - The error to convert
-    fn from(error: kanal::ReceiveError) -> Self {
-        Errors::KanalReceive(error)
     }
 }
 

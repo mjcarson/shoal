@@ -17,11 +17,11 @@ fn add_insert(stream: &mut proc_macro2::TokenStream, table_name: &Ident, query_n
         impl From<#table_name> for #query_name {
             fn from(row: #table_name) -> #query_name {
                 // import partition key support so we can use the get_partition_key method
-                use shoal_core::shared::traits::PartitionKeySupport;
+                use ::shoal::shared::traits::PartitionKeySupport;
                 // get our rows partition key
                 let key = #table_name::get_partition_key(&row);
                 // build our query kind
-                #query_name::#table_name(shoal_core::shared::queries::UnsortedQuery::Insert { key, row })
+                #query_name::#table_name(::shoal::shared::queries::UnsortedQuery::Insert { key, row })
             }
         }
     });
@@ -46,10 +46,10 @@ fn add_get(stream: &mut proc_macro2::TokenStream, table_name: &Ident, query_kind
                   // hash each partition key, keeping them in the order they were asked for
                   let partition_keys = specific.partition_keys
                       .iter()
-                      .map(|key| <#table_name as shoal_core::shared::traits::PartitionKeySupport>::get_partition_key_from_values(key))
+                      .map(|key| <#table_name as ::shoal::shared::traits::PartitionKeySupport>::get_partition_key_from_values(key))
                       .collect();
                   // build the general query
-                  let general = shoal_core::shared::queries::UnsortedGet {
+                  let general = ::shoal::shared::queries::UnsortedGet {
                       partition_keys,
                       filters: specific.filters,
                       limit: specific.limit,
@@ -57,7 +57,7 @@ fn add_get(stream: &mut proc_macro2::TokenStream, table_name: &Ident, query_kind
                       projection: specific.projection,
                   };
                   // build our query kind
-                  Self::#table_name(shoal_core::shared::queries::UnsortedQuery::Get(general))
+                  Self::#table_name(::shoal::shared::queries::UnsortedQuery::Get(general))
               }
           }
       });
@@ -82,14 +82,14 @@ fn add_update(stream: &mut proc_macro2::TokenStream, table_name: &Ident, query_k
             /// Build a `QueryKind` for updating a row
             fn from(specific: #update_name) -> Self {
                 // hash the partition key to get the u64 key
-                let partition_key = <#table_name as shoal_core::shared::traits::PartitionKeySupport>::get_partition_key_from_values(&specific.partition_key);
+                let partition_key = <#table_name as ::shoal::shared::traits::PartitionKeySupport>::get_partition_key_from_values(&specific.partition_key);
                 // cast this update to a generalized update
-                let general = shoal_core::shared::queries::UnsortedUpdate {
+                let general = ::shoal::shared::queries::UnsortedUpdate {
                     partition_key,
                     update: #update_data_name::from(specific),
                 };
                 // wrap our general update in a query
-                let query = shoal_core::shared::queries::UnsortedQuery::Update(general);
+                let query = ::shoal::shared::queries::UnsortedQuery::Update(general);
                 // wrap in table specific query kind
                 #query_kinds::#table_name(query)
             }
@@ -114,8 +114,8 @@ fn add_delete(stream: &mut proc_macro2::TokenStream, table_name: &Ident, query_k
             /// Build a `QueryKind` for deleting a row
             fn from(delete: #delete_name) -> Self {
                 // hash the partition key to get the u64 key
-                let key = <#table_name as shoal_core::shared::traits::PartitionKeySupport>::get_partition_key_from_values(&delete.partition_key);
-                let query = shoal_core::shared::queries::UnsortedQuery::Delete { key };
+                let key = <#table_name as ::shoal::shared::traits::PartitionKeySupport>::get_partition_key_from_values(&delete.partition_key);
+                let query = ::shoal::shared::queries::UnsortedQuery::Delete { key };
                 #query_kinds::#table_name(query)
             }
         }
@@ -140,14 +140,14 @@ fn add_exists(stream: &mut proc_macro2::TokenStream, table_name: &Ident, query_k
             fn from(specific: #exists_name) -> Self {
                 // build the partition key by hashing the key
                 let partition_key =
-                    <#table_name as shoal_core::shared::traits::PartitionKeySupport>::get_partition_key_from_values(&specific.partition_key);
+                    <#table_name as ::shoal::shared::traits::PartitionKeySupport>::get_partition_key_from_values(&specific.partition_key);
                 // build the general query
-                let general = shoal_core::shared::queries::UnsortedExists {
+                let general = ::shoal::shared::queries::UnsortedExists {
                     partition_key,
                     filters: specific.filters,
                 };
                 // build our query kind
-                Self::#table_name(shoal_core::shared::queries::UnsortedQuery::Exists(general))
+                Self::#table_name(::shoal::shared::queries::UnsortedQuery::Exists(general))
             }
         }
     });

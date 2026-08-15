@@ -49,7 +49,6 @@ workloads = [
     "dep:rkyv",
     "dep:deepsize2",
     "dep:uuid",
-    "dep:glommio",
     "dep:mimalloc",
     "dep:rcgen",
 ]
@@ -103,14 +102,11 @@ tokio = { workspace = true, optional = true }
 kanal = { workspace = true, optional = true }
 rkyv = { workspace = true, optional = true }
 hotpath = { workspace = true, optional = true }
-# All three are named by paths the derive macros generate, so a schema does not compile without
-# them even though nothing here mentions any of them by hand. The `tmdb` example never had to
-# declare them because it is compiled inside `shoal`, which already depends on all three - which
-# is also why nothing had noticed that `#[shoal::db]` is not usable from outside this workspace
-# without them. Filed in docs/src/appendix/known-issues.md.
-deepsize2 = { version = "0.1", optional = true }
+# A schema writes its own rkyv and deepsize2 derives, and the workloads stamp their own uuids.
+# `glommio` sat here too until F15, named by a path `#[shoal::db]` generated rather than by
+# anything in this crate - which is what known issue 54 was.
+deepsize2 = { workspace = true, optional = true }
 uuid = { workspace = true, optional = true }
-glommio = { workspace = true, optional = true }
 # the server half of a workload runs on glommio, and the client half needs an allocator that
 # matches the one the server was measured with
 mimalloc = { workspace = true, optional = true }

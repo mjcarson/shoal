@@ -6,12 +6,21 @@ pub mod shared;
 mod utils;
 
 pub use client::FromShoal;
+pub use server::tables;
+pub use server::tables::storage;
+pub use server::ShoalPool;
+
+// The crates the generated code names by path. They are re-exported from here so that the facade
+// can hand a schema the exact versions this crate's trait signatures were compiled against,
+// instead of whatever the schema's own manifest happened to resolve - which is what known issue
+// 54 was really about.
+pub use deepsize2;
+pub use glommio;
 pub use gxhash;
+pub use kanal;
 pub use lru;
 pub use rkyv;
 pub use serde;
 pub use serde_json;
-pub use server::tables;
-pub use server::tables::storage;
-pub use server::ShoalPool;
 pub use tracing;
+pub use uuid;

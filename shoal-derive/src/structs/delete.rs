@@ -46,7 +46,7 @@ pub fn add_unsorted(
     };
     // generate the delete struct
     stream.extend(quote! {
-        #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+        #[derive(Debug, Clone, ::shoal::rkyv::Archive, ::shoal::rkyv::Serialize, ::shoal::rkyv::Deserialize)]
         #[rkyv(derive(Debug))]
         pub struct #delete_name{
             /// The key to the partition to delete
@@ -54,7 +54,7 @@ pub fn add_unsorted(
         }
 
         #[automatically_derived]
-        impl shoal_core::shared::traits::RkyvSupport for #delete_name {}
+        impl ::shoal::shared::traits::RkyvSupport for #delete_name {}
 
         #[automatically_derived]
         impl #delete_name {
@@ -136,7 +136,7 @@ pub fn add_sorted(
     };
     // generate the sorted delete struct and its methods
     stream.extend(quote! {
-        #[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+        #[derive(Debug, Clone, ::shoal::rkyv::Archive, ::shoal::rkyv::Serialize, ::shoal::rkyv::Deserialize)]
         #[rkyv(derive(Debug))]
         pub struct #delete_name {
             /// The key to the partition to delete from
@@ -146,7 +146,7 @@ pub fn add_sorted(
         }
 
         #[automatically_derived]
-        impl shoal_core::shared::traits::RkyvSupport for #delete_name {}
+        impl ::shoal::shared::traits::RkyvSupport for #delete_name {}
 
         #[automatically_derived]
         impl #delete_name {

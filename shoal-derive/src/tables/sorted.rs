@@ -48,7 +48,7 @@ pub fn add(
     // generate the ShoalUnsortedTable implementation
     stream.extend(quote! {
         #[automatically_derived]
-        impl shoal_core::shared::traits::ShoalSortedTable for #name {
+        impl ::shoal::shared::traits::ShoalSortedTable for #name {
             /// The sort type for this data
             type Sort = #sort_type;
 
@@ -63,7 +63,7 @@ pub fn add(
             /// # Arguments
             ///
             /// * `update` - The update to apply to a specific row
-            fn update(&mut self, update: &shoal_core::shared::queries::SortedUpdate<Self>) {
+            fn update(&mut self, update: &::shoal::shared::queries::SortedUpdate<Self>) {
                 #(#update_assignments)*
             }
         }

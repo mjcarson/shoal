@@ -1,4 +1,25 @@
 //! Different utilites for deriving traits/code
+//!
+//! # Every path these macros emit
+//!
+//! Generated code names `::shoal::…` and nothing else. It never names `shoal_core`, `rkyv`,
+//! `uuid`, `glommio` or `kanal` directly, because a crate writing a schema has no reason to have
+//! heard of any of them - that was known issue 54, and F15 is the fix. The leading `::` is load
+//! bearing: it is the crate root form, so a local module called `shoal` cannot shadow it.
+//!
+//! | Prefix | Comes from | Legal in a `db(client)` half? |
+//! | --- | --- | --- |
+//! | `::shoal::shared::…` | the protocol | yes |
+//! | `::shoal::client::…` | the client | yes |
+//! | `::shoal::{rkyv, uuid, gxhash, serde_json, tracing, deepsize2}` | passthroughs | yes |
+//! | `::shoal::server::…` | the engine | **no** |
+//! | `::shoal::storage::…` | the engine | **no** |
+//! | `::shoal::tables::…` | the engine | **no** |
+//! | `::shoal::{glommio, kanal, lru}` | the engine | **no** |
+//!
+//! A new `::shoal::server::` path emitted from the client half is a bug: it compiles here and
+//! fails in the caller, which is the worst place to find out. The client half is everything
+//! `crate::DbHalf::Client` still emits - see `crate::db`.
 
 use quote::format_ident;
 use syn::{FieldsNamed, Ident};
