@@ -49,7 +49,54 @@ pub struct Batch {
     pub queries: shoal::shared::queries::Queries<BenchClient>,
 }
 
+/// Which of the client's two streaming modes a driver drains
+///
+/// The two differ in one thing that shows up in a distribution: an ordered stream buffers a
+/// response until every earlier one has arrived, so one slow query holds back every sample behind
+/// it. That is a property worth measuring rather than avoiding, which is why this is a parameter
+/// and not a constant — `macro/transport/stream` and `macro/transport/stream_unordered` are the
+/// same workload with this flipped.
+///
+/// Named `StreamMode` rather than `Ordering` because this module already imports
+/// [`std::sync::atomic::Ordering`], and two things called `Ordering` in one file is how the wrong
+/// one gets used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamMode {
+    /// Responses come back in the order their queries were sent
+    Ordered,
+    /// Responses come back as they arrive
+    Unordered,
+}
+
+/// A result stream of either ordering, so one loop can drain both
+///
+/// The client returns a different type from `stream` and from `stream_unordered` and neither
+/// implements a shared trait, so telling them apart here is what keeps the driver from existing
+/// twice.
+enum Results {
+    /// Responses in the order their queries were sent
+    Ordered(shoal::client::ShoalResultStream<BenchClient>),
+    /// Responses in the order they arrived
+    Unordered(shoal::ShoalUnorderedResultStream<BenchClient>),
+}
+
+impl Results {
+    /// Waits for the next response off whichever stream this is
+    async fn next(&mut self) -> Result<Option<shoal::ShoalResponse<BenchClient>>, shoal::Errors> {
+        // the two arms have the same signature and different buffering, which is the whole
+        // difference this enum exists to carry
+        match self {
+            Results::Ordered(stream) => stream.next().await,
+            Results::Unordered(stream) => stream.next().await,
+        }
+    }
+}
+
 /// Runs a stream of batches at the server, timing each batch and counting each response
+///
+/// Drains an unordered stream at the default gate, which is what every seeding phase wants. A
+/// workload that needs the ordered stream, or a gate small enough to hold a MiB row's responses in
+/// memory, calls [`drive_with`] instead.
 ///
 /// Returns once every batch the producer yielded has been answered.
 ///
@@ -61,7 +108,7 @@ pub struct Batch {
 /// * `warmup` - How many responses to discard before sampling starts
 pub async fn drive<P>(
     client: &Shoal<BenchClient>,
-    mut batches: P,
+    batches: P,
     op: &str,
     warmup: u64,
 ) -> Result<Measurement>
@@ -74,14 +121,58 @@ where
         IN_FLIGHT > BATCH * 4,
         "the in flight gate must be well above the batch size"
     );
-    // open a stream that hands responses back as they arrive rather than in index order
+    // the shape every workload but the transport pair wants
+    drive_with(client, batches, op, warmup, StreamMode::Unordered, IN_FLIGHT).await
+}
+
+/// Runs a stream of batches at the server over a named stream mode and gate
+///
+/// # Arguments
+///
+/// * `client` - The client to send on
+/// * `batches` - Produces the next batch to send, or `None` when there are no more
+/// * `op` - The operation name to record samples under
+/// * `warmup` - How many responses to discard before sampling starts
+/// * `ordering` - Which of the client's two streaming modes to drain
+/// * `in_flight` - How many queries may be outstanding at once
+///
+/// # Invariants
+///
+/// **The gate bounds outstanding responses, not just outstanding queries.** At the default gate a
+/// workload reading MiB rows would have four gigabytes of responses in memory at once, so a
+/// workload whose rows are large has to lower it. That is why it is a parameter rather than the
+/// constant it used to be.
+pub async fn drive_with<P>(
+    client: &Shoal<BenchClient>,
+    mut batches: P,
+    op: &str,
+    warmup: u64,
+    ordering: StreamMode,
+    in_flight_gate: usize,
+) -> Result<Measurement>
+where
+    P: FnMut() -> Option<Batch>,
+{
+    // a gate of zero would send nothing and wait forever, which is a hang rather than an error
+    assert!(in_flight_gate > 0, "the in flight gate cannot be zero");
+    // open the stream this run was asked for
     //
-    // ordered streaming buffers a response until every earlier one has arrived, so a single slow
-    // query would hold back every sample behind it and the distribution would describe the
-    // buffering rather than the server
-    let (mut queries_tx, mut results_rx) = client
-        .stream_unordered()
-        .context("failed to open a query stream")?;
+    // unordered is the default everywhere else, because ordered streaming buffers a response until
+    // every earlier one has arrived and a single slow query would hold back every sample behind it,
+    // making the distribution describe the buffering rather than the server. the transport pair
+    // asks for ordered precisely to measure that
+    let (mut queries_tx, mut results_rx) = match ordering {
+        StreamMode::Ordered => {
+            let (tx, rx) = client.stream().context("failed to open a query stream")?;
+            (tx, Results::Ordered(rx))
+        }
+        StreamMode::Unordered => {
+            let (tx, rx) = client
+                .stream_unordered()
+                .context("failed to open a query stream")?;
+            (tx, Results::Unordered(rx))
+        }
+    };
     let mut measured = Measurement::default();
     // when each outstanding batch was sent, keyed by the index of its first query
     let mut sent_at: std::collections::BTreeMap<usize, Instant> = std::collections::BTreeMap::new();
@@ -100,7 +191,7 @@ where
     let mut drained = false;
     loop {
         // top the pipeline up unless it is already full or the producer has run dry
-        while in_flight < IN_FLIGHT && !drained {
+        while in_flight < in_flight_gate && !drained {
             match batches() {
                 Some(batch) => {
                     let count = batch.queries.len();

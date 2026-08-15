@@ -5,6 +5,7 @@ use config::{Config, ConfigError};
 use glommio::CpuSet;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use tracing::level_filters::LevelFilter;
 
 use super::tables::storage::fs::conf::FileSystemTableConf;
@@ -12,6 +13,7 @@ use super::{ServerError, ShoalError};
 use crate::shared::auth::{CredentialStore, StoredCredential, DEFAULT_ITERATIONS};
 use crate::shared::protocol::auth::AuthMechanism;
 use crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES;
+use crate::shared::tls::TlsServerOptions;
 use crate::utils::{self, IntoStorageSize};
 
 /// The resource settings to use
@@ -136,7 +138,15 @@ fn default_max_frame_bytes() -> u32 {
 }
 
 /// The networking settings for Shoal
+///
+/// # Invariants
+///
+/// **Unknown fields are refused.** Every other section of this config already refuses them, and
+/// this one is where it matters most: a misspelled `tls:` key under a section that ignored it
+/// would produce a server that starts, listens, and serves every query in clear, with nothing
+/// anywhere saying so. A typo has to be a startup failure rather than a silent downgrade.
 #[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct Networking {
     /// The interface to bind too
     #[serde(default = "default_interface")]
@@ -144,6 +154,14 @@ pub struct Networking {
     /// The port to bind too
     #[serde(default = "default_port")]
     pub port: u16,
+    /// The certificate and key to encrypt client connections with, if this listener should
+    ///
+    /// Absent means plaintext, which is what every deployment before
+    /// [F14](../../../docs/src/features/encryption-in-transit.md) had and what keeps the benchmark
+    /// harness comparable against the frozen baseline. The same shape the `auth` section uses:
+    /// a server asks for nothing unless a config says otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls: Option<TlsServerOptions>,
     /// The largest frame this server will read before it closes the connection that sent it
     ///
     /// A frame's length is used as an allocation size before a byte of its body has arrived, so
@@ -162,6 +180,7 @@ impl Default for Networking {
         Networking {
             interface: default_interface(),
             port: default_port(),
+            tls: None,
             max_frame_bytes: default_max_frame_bytes(),
         }
     }
@@ -177,6 +196,28 @@ impl Networking {
     /// Set the port to bind to
     pub fn port(mut self, port: u16) -> Self {
         self.port = port;
+        self
+    }
+
+    /// Encrypt client connections to this listener
+    ///
+    /// # Arguments
+    ///
+    /// * `cert` - The PEM file holding this server's certificate chain, leaf first
+    /// * `key` - The PEM file holding the private key for that chain
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use shoal_core::server::conf::Networking;
+    ///
+    /// let networking = Networking::default().tls("/etc/shoal/server.pem", "/etc/shoal/server.key");
+    /// ```
+    pub fn tls<C: Into<PathBuf>, K: Into<PathBuf>>(mut self, cert: C, key: K) -> Self {
+        self.tls = Some(TlsServerOptions {
+            cert: cert.into(),
+            key: key.into(),
+        });
         self
     }
 
@@ -587,7 +628,9 @@ impl Conf {
 
 #[cfg(test)]
 mod tests {
-    use super::{AuthMechanism, Conf, Resources, DEFAULT_ITERATIONS, DEFAULT_MAX_FRAME_BYTES};
+    use super::{
+        AuthMechanism, Conf, PathBuf, Resources, DEFAULT_ITERATIONS, DEFAULT_MAX_FRAME_BYTES,
+    };
 
     /// Write a config file into a temp dir and load it
     ///
@@ -748,6 +791,78 @@ mod tests {
         let (_dir, conf) = load("networking:\n  max_frame_bytes: 4096\n");
         let conf = conf.expect("a config naming a frame bound failed to load");
         assert_eq!(conf.networking.max_frame_bytes, 4096);
+    }
+
+    #[test]
+    /// A config with no tls section produces a plaintext listener
+    ///
+    /// The same case, and the same reason, as `auth_defaults_to_off` below: this is what every
+    /// deployment before encryption was in, and what the benchmark harness and the integration
+    /// suite are in. A default that encrypted would make every capture incomparable against the
+    /// frozen baseline without anything saying so.
+    fn tls_defaults_to_off() {
+        // a config that says nothing about networking at all
+        let (_dir, conf) = load("resources:\n  memory: \"4Gi\"\n");
+        let conf = conf.expect("a config with no networking section failed to load");
+        assert!(conf.networking.tls.is_none());
+        // and one that configures networking without mentioning tls
+        let (_dir, conf) = load("networking:\n  port: 13000\n");
+        let conf = conf.expect("a config with a partial networking section failed to load");
+        assert!(conf.networking.tls.is_none());
+    }
+
+    #[test]
+    /// A config that names a certificate and key produces a TLS listener
+    fn a_tls_section_is_read() {
+        // both paths are required, and neither is resolved until the server starts
+        let (_dir, conf) = load(
+            "networking:\n  tls:\n    cert: \"/etc/shoal/server.pem\"\n    key: \"/etc/shoal/server.key\"\n",
+        );
+        let conf = conf.expect("a config naming a certificate failed to load");
+        let tls = conf.networking.tls.expect("the tls section was dropped");
+        assert_eq!(tls.cert, PathBuf::from("/etc/shoal/server.pem"));
+        assert_eq!(tls.key, PathBuf::from("/etc/shoal/server.key"));
+    }
+
+    #[test]
+    /// A tls section missing half of its pair is refused rather than half applied
+    fn a_tls_section_needs_both_a_certificate_and_a_key() {
+        // a certificate with no key cannot make a server, so this has to fail while parsing
+        let (_dir, conf) = load("networking:\n  tls:\n    cert: \"/etc/shoal/server.pem\"\n");
+        assert!(
+            conf.is_err(),
+            "a tls section with no key should not have parsed"
+        );
+    }
+
+    #[test]
+    /// A misspelled networking key is refused rather than ignored
+    ///
+    /// This is the test that makes `deny_unknown_fields` on `Networking` load bearing. Without it
+    /// a config that meant to say `tls:` and said something else produces a server that starts,
+    /// listens, and serves every query in clear. A typo has to be a startup failure.
+    fn a_misspelled_networking_key_is_refused() {
+        // the shape of the mistake that matters - close enough to be plausible
+        let (_dir, conf) = load(
+            "networking:\n  tsl:\n    cert: \"/etc/shoal/server.pem\"\n    key: \"/etc/shoal/server.key\"\n",
+        );
+        assert!(
+            conf.is_err(),
+            "a misspelled tls section should not have parsed"
+        );
+    }
+
+    #[test]
+    /// A misspelled key inside the tls section is refused too
+    fn a_misspelled_tls_key_is_refused() {
+        // `deny_unknown_fields` on TlsServerOptions is what catches this one
+        let (_dir, conf) = load(
+            "networking:\n  tls:\n    cert: \"/etc/shoal/server.pem\"\n    key: \"/k\"\n    ca: \"/ca.pem\"\n",
+        );
+        assert!(
+            conf.is_err(),
+            "a tls section with an unknown key should not have parsed"
+        );
     }
 
     #[test]

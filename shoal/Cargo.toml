@@ -47,6 +47,8 @@ tempfile = "3"
 criterion = { workspace = true }
 # the scram_credential example prints the yaml stanza a shoal.yml carries
 serde_yaml = "0.9"
+# the tls tests generate a certificate per run rather than committing one, so nothing expires
+rcgen = { version = "0.13", default-features = false, features = ["crypto", "aws_lc_rs", "pem"] }
 
 # the micro benchmarks reach crate private internals of shoal-core through its `bench`
 # feature, so they cannot be built without it

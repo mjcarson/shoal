@@ -51,6 +51,7 @@ workloads = [
     "dep:uuid",
     "dep:glommio",
     "dep:mimalloc",
+    "dep:rcgen",
 ]
 # attribute time to scopes. must forward to `shoal`, which forwards to `shoal-core`, since every
 # instrumentation attribute lives there
@@ -113,6 +114,9 @@ glommio = { workspace = true, optional = true }
 # the server half of a workload runs on glommio, and the client half needs an allocator that
 # matches the one the server was measured with
 mimalloc = { workspace = true, optional = true }
+# the tls transport arms generate a certificate per workload per run rather than committing one,
+# so that nothing in the repository expires and invalidates a capture
+rcgen = { version = "0.13", default-features = false, features = ["crypto", "aws_lc_rs", "pem"], optional = true }
 
 [dev-dependencies]
 tempfile = "3"

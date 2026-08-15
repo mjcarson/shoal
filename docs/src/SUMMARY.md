@@ -59,6 +59,8 @@
   - [F10. Framing and protocol evolution](features/framing-and-protocol-evolution.md)
   - [F11. The error channel](features/error-channel.md)
   - [F12. Authentication](features/authentication.md)
+  - [F13. The transport workloads](features/transport-workloads.md)
+  - [F14. Encryption in transit](features/encryption-in-transit.md)
 
 # Direction
 

@@ -6,6 +6,7 @@ use crate::shared::auth::AuthError;
 use crate::shared::protocol::error::ErrorCode;
 use crate::shared::protocol::ProtocolError;
 use crate::shared::responses::ResponseActionNames;
+use crate::shared::tls::TlsError;
 
 /// The errors that can be returned from the Shoal client
 #[derive(Debug)]
@@ -209,6 +210,24 @@ pub enum ConnectError {
         /// What the server said about it
         msg: String,
     },
+    /// This connection could not be encrypted
+    ///
+    /// Everything from a certificate authority that could not be read to a server whose
+    /// certificate does not carry the name that was asked for. Like
+    /// [`ConnectError::AuthRequired`] it is a connect-time failure, and like it most causes are
+    /// deployment mistakes rather than anything a retry would fix.
+    Tls(TlsError),
+}
+
+impl From<TlsError> for ConnectError {
+    /// Convert this error to our error type
+    ///
+    /// # Arguments
+    ///
+    /// * `error` - The error to convert
+    fn from(error: TlsError) -> Self {
+        ConnectError::Tls(error)
+    }
 }
 
 impl std::fmt::Display for ConnectError {
@@ -228,6 +247,7 @@ impl std::fmt::Display for ConnectError {
             ConnectError::AuthFailed { msg } => {
                 write!(f, "the server refused this client's credentials: {msg}")
             }
+            ConnectError::Tls(error) => write!(f, "{error}"),
         }
     }
 }

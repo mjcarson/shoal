@@ -109,6 +109,14 @@ pub struct ConfFacts {
     pub memory: String,
     /// Which durability barrier writes waited on
     pub durability: String,
+    /// Whether the connection between the client and the shards was encrypted
+    ///
+    /// An encrypted capture and a plaintext one are not the same measurement, so this has to be on
+    /// the artifact rather than inferred from the workload's name. It defaults to false when an
+    /// older artifact is read, which is correct: every capture taken before
+    /// [F14](../../../docs/src/features/encryption-in-transit.md) was plaintext.
+    #[serde(default)]
+    pub tls: bool,
     /// A digest over the whole resolved configuration
     ///
     /// The three fields above are the ones worth reading. This covers everything else, so a

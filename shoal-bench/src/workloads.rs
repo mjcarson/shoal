@@ -37,6 +37,7 @@ pub mod schema;
 // committed report whether or not this build could have produced one.
 #[cfg(feature = "stage-profile")]
 pub mod stages;
+pub mod transport;
 pub mod workload;
 
 use workload::Workload;
@@ -76,6 +77,13 @@ pub fn all() -> Vec<Box<dyn Workload>> {
     built.push(Box::new(get_ephemeral::GetEphemeral));
     built.extend(
         fanout_ephemeral::FanoutEphemeral::all()
+            .into_iter()
+            .map(|workload| Box::new(workload) as Box<dyn Workload>),
+    );
+    // the client transport modes, appended for the same reason the ephemeral controls are: every
+    // workload declared above them keeps the port it has always had
+    built.extend(
+        transport::Transport::all()
             .into_iter()
             .map(|workload| Box::new(workload) as Box<dyn Workload>),
     );

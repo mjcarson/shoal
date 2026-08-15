@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 use crate::shared::auth::AuthError;
 use crate::shared::protocol::ProtocolError;
+use crate::shared::tls::TlsError;
 
 /// Any errors tht can be encountered when running Shoal
 #[derive(Debug)]
@@ -62,6 +63,22 @@ pub enum ServerError {
     /// while this server's own log — which nobody untrusted is reading — says which of the several
     /// failures it actually was.
     Auth(AuthError),
+    /// A connection that could not be encrypted
+    ///
+    /// This covers both halves of taking the wire: a certificate that could not be loaded, which
+    /// stops the server before it listens, and a handshake that failed, which ends one connection.
+    Tls(TlsError),
+}
+
+impl From<TlsError> for ServerError {
+    /// Convert this error to our error type
+    ///
+    /// # Arguments
+    ///
+    /// * `error` - The error to convert
+    fn from(error: TlsError) -> Self {
+        ServerError::Tls(error)
+    }
 }
 
 impl From<AuthError> for ServerError {

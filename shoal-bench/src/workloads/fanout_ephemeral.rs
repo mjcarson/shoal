@@ -142,6 +142,7 @@ impl Workload for FanoutEphemeral {
         let overrides = ConfOverrides {
             shards: Some(1),
             memory: None,
+            tls: false,
         };
         WorkloadPlan {
             // fresh, and only ever fresh. there is no evicted arm to reach by restarting, since a

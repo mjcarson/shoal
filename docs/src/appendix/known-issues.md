@@ -27,7 +27,7 @@ test suite does and does not reach is in [Test Coverage](test-coverage.md).
 Defects that have been fixed move to [Resolved Issues](resolved-issues.md), one page each,
 carrying the reasoning and the invariants the fix depends on. Item numbers are shared between
 the two pages and never reused, so a number appears on exactly one of them — which is why this
-list starts at 15 and skips 25, 26, 31, 34, 39, 44, 45, 48, 51, 56, 57 and 61, and why item 63 is
+list starts at 15 and skips 25, 26, 31, 34, 39, 44, 45, 48, 51, 56, 57 and 61, and why item 64 is
 the newest. The exceptions are items 16, 17, 20 and 24, which were only
 partly fixed: the open remainder is here and the rest is there. Items 9 and 51 were each one such
 exception until their second half was fixed, and are now on the resolved page alone; item 25 was one
@@ -35,9 +35,20 @@ in the other direction — it had one row left open, that row was fixed, and the
 [moved](resolved/claude-md-drift.md).
 
 **Baseline as of writing:** `cargo check --workspace --all-targets` passes with warnings;
-`cargo test --workspace` passes — 482 integration tests (one ignored), 301 `shoal-core` unit
-tests, 24 doctests, plus 8 more behind `--features stage-profile` that a default run does not
-reach ([Test Coverage](test-coverage.md)). That is up from 473, 272 and 21 with
+`cargo test --workspace` passes — 498 integration tests (one ignored), 323 `shoal-core` unit
+tests, 29 doctests, plus 8 more behind `--features stage-profile` that a default run does not
+reach ([Test Coverage](test-coverage.md)). That is up from 490, 301 and 25 with
+[F14](../features/encryption-in-transit.md) — one new integration binary (`tls.rs`) carrying 8
+tests, 17 unit tests over the TLS configuration and the kernel key material, 5 over the config
+section, and 4 new doctests. The 8 in `tls.rs` and one of the 17 need the `tls` kernel module and
+skip loudly without it, the same way the `stage-profile` tests sit outside a default run. No new
+defect was filed while building it; item 64 was filed just before it, while correcting
+[D4](../direction/encryption.md). Before that it was 482, 301 and 24 with
+[F13](../features/transport-workloads.md) — 8 unit tests in `shoal-bench` over the eight transport
+workloads and one doctest over `seed_batch`, with the `shoal-core` count unmoved because no engine
+code changed. No new defect was filed while writing it. Item 64 was filed later, while correcting
+[D4](../direction/encryption.md), and changes no count — it is a documentation defect and no test
+was added or could be. Before that it was 473, 272 and 21 with
 [F12](../features/authentication.md) — one new integration binary (`auth.rs`) carrying 9 tests, 17
 unit tests over the mechanism and its credential store, 8 over the auth frame codec and the
 handshake's new fields, 4 over the config section, and 3 new doctests. Item 63 was filed while
@@ -1154,6 +1165,33 @@ rate limit and does not exist. The half that removes the asymmetry is to do the 
 queues rather than compounds. Note the decoy path ([F12](../features/authentication.md)) constrains
 the shape of any fix: whatever is added must cost the same for a user that exists and one that does
 not, or it becomes the enumeration oracle the decoy exists to prevent.
+
+### 64. Four `direction/` pages cite the zero-copy read at a line it left two features ago
+
+Every page in the direction chapter that argues from the zero-copy response path quotes the same
+three lines and cites them as `shoal-core/src/client.rs:524-527`, `TcpProxy::start`. The read is now
+at `client.rs:1063-1066` and lives in `TcpProxy::read_frame`, because
+[F10](../features/framing-and-protocol-evolution.md) split frame decoding out of the relay loop. The
+quoted code is also one refactor stale — it reads `len` where the tree reads `frame.rest_len`.
+
+| Page | What it cites |
+| --- | --- |
+| `direction/transport.md` | `client.rs:524-527` — inside D1's argument that QUIC's crypto ends the zero-copy read |
+| `direction/overview.md` | `client.rs:524-527` — inside "the constraint every page inherits", which every other page refers back to |
+| `direction/authentication.md` | `conf.rs:132-138` for `Networking`, which is now `conf.rs:138-157` and has a third field |
+| `api/client.md` | the same read, in the `ShoalResponse` section |
+
+`direction/encryption.md` carried the same citation and is corrected, which is how this was found.
+The other four are left as they are rather than fixed in passing, because a sweep that fixes one
+stale citation and not the fifteen others on the same pages is the drift this item is about.
+
+**Established by reading the source**, while correcting [D4](../direction/encryption.md).
+
+**Fix direction:** the same treatment this page already gives itself — a
+re-resolution pass over every `file:line` in `docs/src/direction/` and `docs/src/api/`, with the
+symbol name kept beside each one so the next drift is greppable. The August 2026 review did this
+for the appendix and did not cover the direction chapter, which had just been written and was
+correct at the time.
 
 Everything that has been fixed, and why it was fixed the way it was, is in
 [Resolved Issues](resolved-issues.md). The SHQL parser has gained test coverage at both stages

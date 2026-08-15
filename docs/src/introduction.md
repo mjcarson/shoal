@@ -43,11 +43,12 @@ database") oversell the current state:
   partitions can be reached ([Query Execution](tables/query-execution.md)).
 - **No rebalancing.** Shard count is baked into the on-disk file layout. Changing it between
   restarts is refused at startup ([Partitioning and the Tablet Map](architecture/partitioning.md)).
-- **No encryption, and authentication is optional and off by default.** A server can now require
-  SCRAM-SHA-256 and refuse a client that cannot do it ([F12](features/authentication.md)), but the
-  default is still that anything which can reach the port can read and write any table — and even
-  an authenticated connection can, because there is no authorization
-  ([Wire Protocol](architecture/wire-protocol.md#limitations)).
+- **Encryption and authentication are both optional and both off by default.** A server can require
+  SCRAM-SHA-256 and refuse a client that cannot do it ([F12](features/authentication.md)), and it
+  can encrypt its listener with TLS 1.3 ([F14](features/encryption-in-transit.md)). Neither is on
+  unless a config asks, so the default is still that anything which can reach the port can read and
+  write any table — and even an authenticated, encrypted connection can, because there is still no
+  authorization ([Wire Protocol](architecture/wire-protocol.md#limitations)).
 
 What it would take to close the rest of that, and five other things the client cannot do, is
 designed in [Direction](direction/overview.md) — which is a design record, not a roadmap. Two of

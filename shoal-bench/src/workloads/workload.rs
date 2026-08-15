@@ -20,11 +20,13 @@ use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
 
-use anyhow::Result;
+use anyhow::{Context as _, Result};
+use shoal_core::shared::tls::TlsClientOptions;
 
 use crate::model::macro_layer::{ConfFacts, ScaleFacts, Timing};
 use crate::workloads::harness::seed::Scale;
 use crate::workloads::harness::timer::Samples;
+use crate::workloads::schema::BenchClient;
 
 /// A future a workload returns, boxed so the trait stays object safe
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -106,6 +108,13 @@ pub struct ConfOverrides {
     /// Set low to force eviction, which is the only way to reach the archived read path from a
     /// client. `shoal/tests/utils.rs::build_pressured_config` does the same thing.
     pub memory: Option<String>,
+    /// Whether this workload's server encrypts its connections
+    ///
+    /// The axis the TLS half of the transport control pair varies, and nothing else. A pair
+    /// differs in this and in nothing else, which is what makes the difference between them
+    /// attributable to encryption — the same shape [F9](../../../docs/src/features/ephemeral-tables.md)
+    /// established for storage, applied to the wire.
+    pub tls: bool,
 }
 
 /// Everything a workload produced
@@ -185,6 +194,31 @@ pub struct Context {
     pub warmup: u64,
     /// The configuration the server was actually started with
     pub conf: Option<ConfFacts>,
+    /// What a client has to do to reach this workload's server, if it is encrypted
+    ///
+    /// Populated from the resolved config rather than from the workload, so that a workload asks
+    /// for TLS in one place — its [`ConfOverrides`] — and gets a client that can reach it without
+    /// naming a certificate anywhere.
+    pub tls: Option<TlsClientOptions>,
+}
+
+impl Context {
+    /// Open a client that can reach this workload's server
+    ///
+    /// Every workload builds its client through here rather than calling a constructor, so that an
+    /// axis added to the server's configuration reaches every workload at once. Before this
+    /// existed, adding TLS would have meant editing eleven call sites that all said
+    /// `Shoal::new(&ctx.addr)`.
+    pub async fn client(&self) -> Result<shoal::Shoal<BenchClient>> {
+        // an unencrypted workload gets exactly the client it always got
+        let options = match &self.tls {
+            Some(tls) => shoal_core::client::ClientOptions::new().tls(tls.clone()),
+            None => shoal_core::client::ClientOptions::new(),
+        };
+        shoal::Shoal::<BenchClient>::with_options(&self.addr, options)
+            .await
+            .context("failed to open a client")
+    }
 }
 
 /// One purpose built benchmark

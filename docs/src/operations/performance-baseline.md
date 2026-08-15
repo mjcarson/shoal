@@ -401,6 +401,13 @@ precondition that lives outside the repository.
 
 ## What this does not cover
 
+- **Every number here is plaintext.** `B1` predates encryption entirely, and
+  [F14](../features/encryption-in-transit.md) is off unless a config asks for it, so nothing above
+  has moved and nothing above says anything about what encryption costs. **An encrypted capture and
+  a plaintext one are not the same measurement**, the same rule that already applies to `hotpath`
+  and `stage-profile` builds. The eight `macro/transport/tls/*` arms exist to answer that and have
+  not been captured — the arm that decides it is `macro/transport/tls/*/large` against
+  `macro/transport/*/large`, because a per-byte tax is invisible at 256 bytes.
 - **One machine, one filesystem, one device**, and that device is an Optane.
 - **No btrfs counterpart.** The migration happened before any baseline existed, so there is no
   before-and-after for the filesystem change that prompted all of this. The btrfs-era numbers

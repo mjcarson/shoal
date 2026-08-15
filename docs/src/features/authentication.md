@@ -200,7 +200,11 @@ derivation and could not produce a user's password if it were asked to.
   ASCII. Filed in [TODOs](../appendix/todos.md).
 - **No channel binding.** The gs2 header is `n` — "this client does not support it" — because
   binding needs a TLS layer to bind *to*. A `y` there without support is exactly the downgrade `y`
-  exists to detect, so claiming it would be worse than not offering it. This closes with D4.
+  exists to detect, so claiming it would be worse than not offering it. ~~This closes with D4.~~
+  **D4 has been built** ([F14](encryption-in-transit.md)) and this is still not closed: the
+  `tls-exporter` binding is available and unwired, and F14 turned up the ordering trap it will hit
+  — the exporter has to be taken from rustls *before* `dangerous_into_kernel_connection` consumes
+  the session. Filed in [TODOs](../appendix/todos.md).
 - **No authorization.** A `Principal` is produced, logged, and consulted by nothing. Who may read
   which table is a server-side catalog problem and stays in
   [TODOs](../appendix/todos.md#per-table-authorization), now unblocked rather than blocked.
@@ -274,8 +278,10 @@ still two reads into an `AlignedVec<16>` and the request write is still vectored
 queries against an already-warm pool, so three round trips and two PBKDF2 derivations per
 connection are invisible to every number in [Benchmark Results](../operations/benchmark-results.md).
 This is the one measurement [D3](../direction/authentication.md#how-it-would-be-measured) said the
-planned `transport/*` workloads would still not provide: what is needed is a *connect* workload,
-time to first successful query from a cold client. It is filed as
+~~planned~~ `transport/*` workloads would still not provide: what is needed is a *connect* workload,
+time to first successful query from a cold client. That prediction held —
+[F13](../features/transport-workloads.md) built them and they open their pool before sampling, so a
+handshake is still outside every number they report. It stays filed as
 [O30](../appendix/optimizations.md) rather than guessed at.
 
 What can be said without a benchmark: 4096 iterations of PBKDF2-HMAC-SHA-256 is on the order of a

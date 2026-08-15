@@ -51,6 +51,33 @@ pub const IDS: &[&str] = &[
     "macro/fanout/ephemeral/16",
     "macro/fanout/ephemeral/64",
     "macro/fanout/ephemeral/256",
+    // the four client transport modes, each at a narrow row and at a MiB one. the client is the
+    // one layer whose total has never been bounded, and the size axis is what makes a per-byte
+    // cost such as encryption visible at all - it disappears into the noise at 256 bytes.
+    // appended for the same reason the ephemeral controls are, so no earlier workload's port moves
+    "macro/transport/send_one/small",
+    "macro/transport/send_one/large",
+    "macro/transport/send_batched/small",
+    "macro/transport/send_batched/large",
+    "macro/transport/stream/small",
+    "macro/transport/stream/large",
+    "macro/transport/stream_unordered/small",
+    "macro/transport/stream_unordered/large",
+    // the same four modes at the same two widths, over a wire the kernel encrypts. the control
+    // pair D4 called a precondition for taking encryption at all: a pair differs in the wire and
+    // in nothing else, so the difference between them is what encryption costs.
+    //
+    // appended after the plaintext eight rather than interleaved with them, for the reason the
+    // ephemeral controls are: a workload's position here decides its port, and interleaving would
+    // move all eight plaintext arms onto different ones
+    "macro/transport/tls/send_one/small",
+    "macro/transport/tls/send_one/large",
+    "macro/transport/tls/send_batched/small",
+    "macro/transport/tls/send_batched/large",
+    "macro/transport/tls/stream/small",
+    "macro/transport/tls/stream/large",
+    "macro/transport/tls/stream_unordered/small",
+    "macro/transport/tls/stream_unordered/large",
 ];
 
 /// Whether an id names a workload this build knows about

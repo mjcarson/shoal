@@ -4,4 +4,5 @@ pub mod auth;
 pub mod protocol;
 pub mod queries;
 pub mod responses;
+pub mod tls;
 pub mod traits;

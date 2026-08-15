@@ -18,6 +18,7 @@ use shoal_core::server::conf::{
 };
 use shoal_core::server::ServerError;
 use shoal_core::shared::queries::Queries;
+use shoal_core::shared::tls::TlsClientOptions;
 use shoal_core::shared::traits::{QuerySupport, ShoalDatabase};
 use shoal_core::storage::fs::conf::{
     FileSystemLatencyWriterConf, FileSystemTableConf, FileSystemThroughputWriterConf,
@@ -147,6 +148,116 @@ pub fn build_single_shard_config(temp_dir: &TempDir) -> Conf {
     // run a single shard so every partition key lands on it
     conf.resources.cores = Some(1);
     conf
+}
+
+/// A certificate and key on disk, and the client options that trust them
+///
+/// The files live inside the caller's temp dir, so they go away with it and nothing expires. That
+/// is the reason these are generated rather than committed: a fixture with a hard expiry date
+/// fails the suite years from now for a reason nobody will connect to this file.
+pub struct TestCertificate {
+    /// The PEM file holding the certificate
+    pub cert: std::path::PathBuf,
+    /// The PEM file holding its key
+    pub key: std::path::PathBuf,
+}
+
+impl TestCertificate {
+    /// Generate a self signed certificate for `localhost` inside a temp dir
+    ///
+    /// # Arguments
+    ///
+    /// * `temp_dir` - The temp dir to write the certificate and key into
+    pub fn new(temp_dir: &TempDir) -> Self {
+        use std::io::Write;
+
+        // one throwaway certificate, valid for the name and the address a test connects to
+        let issued = rcgen::generate_simple_self_signed(vec![
+            "localhost".to_owned(),
+            "127.0.0.1".to_owned(),
+        ])
+        .expect("failed to generate a certificate");
+        let cert = temp_dir.path().join("cert.pem");
+        let key = temp_dir.path().join("key.pem");
+        std::fs::File::create(&cert)
+            .expect("failed to create a certificate file")
+            .write_all(issued.cert.pem().as_bytes())
+            .expect("failed to write a certificate");
+        std::fs::File::create(&key)
+            .expect("failed to create a key file")
+            .write_all(issued.key_pair.serialize_pem().as_bytes())
+            .expect("failed to write a key");
+        TestCertificate { cert, key }
+    }
+
+    /// The client options that trust this certificate
+    ///
+    /// The certificate is its own authority, since it is self signed, and the name asked for is
+    /// the one it carries rather than the loopback address a test connects to.
+    pub fn client_options(&self) -> TlsClientOptions {
+        TlsClientOptions::new(&self.cert).server_name("localhost")
+    }
+}
+
+/// Whether this machine can do kTLS at all
+///
+/// `setsockopt` does not autoload the kernel's `tls` module, so a machine that has never used it
+/// answers `ENOENT`. Tests that need it say so and skip loudly rather than failing, which is the
+/// same treatment the `stage-profile` tests get for being outside a default run.
+pub fn ktls_available() -> bool {
+    shoal_core::shared::tls::ktls::is_available()
+}
+
+/// Skip a test with a message naming what would make it run
+///
+/// # Arguments
+///
+/// * `test` - The name of the test being skipped
+#[macro_export]
+macro_rules! skip_without_ktls {
+    ($test:literal) => {
+        if !utils::ktls_available() {
+            eprintln!(
+                "SKIPPING {}: the 'tls' kernel module is not loaded. run 'sudo modprobe tls'",
+                $test
+            );
+            return Ok(());
+        }
+    };
+}
+
+/// Create a config for a server that encrypts every connection
+///
+/// # Arguments
+///
+/// * `temp_dir` - The temp dir to store this servers data in
+/// * `cert` - The certificate this server proves itself with
+pub fn build_tls_config(temp_dir: &TempDir, cert: &TestCertificate) -> Conf {
+    // start from the default test config and turn encryption on
+    let conf = build_config(temp_dir);
+    let port = conf.networking.port;
+    conf.networking(Networking::default().port(port).tls(&cert.cert, &cert.key))
+}
+
+/// Create a config for a server that encrypts and requires one user to authenticate
+///
+/// This is the pair the two features are meant to be deployed as, and the one D3 argues for: SCRAM
+/// over a plaintext link shows an observer the username and the whole exchange.
+///
+/// # Arguments
+///
+/// * `temp_dir` - The temp dir to store this servers data in
+/// * `cert` - The certificate this server proves itself with
+/// * `username` - The one user this server will accept
+/// * `password` - The password that user authenticates with
+pub fn build_tls_auth_config(
+    temp_dir: &TempDir,
+    cert: &TestCertificate,
+    username: &str,
+    password: &str,
+) -> Conf {
+    // both sections at once, since neither implies the other
+    build_tls_config(temp_dir, cert).auth(Auth::default().required(true).user(username, password))
 }
 
 /// Create a config for a server that requires one user to authenticate

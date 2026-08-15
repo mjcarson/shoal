@@ -109,6 +109,9 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
         scale: plan.scale.clone(),
         warmup: plan.warmup,
         conf: conf_facts.clone(),
+        // what a client needs to reach this server, which is nothing at all unless the workload
+        // asked for an encrypted one
+        tls: conf.as_ref().and_then(conf::client_tls),
     };
     let seeded = runtime.block_on(workload.seed(&ctx));
     // cycle the server when the workload needs its data on disk rather than in memory. a shutdown
@@ -196,10 +199,18 @@ fn start(
     let Some(conf) = conf else {
         return Ok(None);
     };
+    // the probe below has to reach this server the same way the workload will, so an encrypted
+    // arm needs the certificate before the server is even started. without this the probe
+    // connects in plaintext, is refused by its own server, and the arm times out looking exactly
+    // like a server that never came up
+    let tls = conf::client_tls(&conf);
     let pool = ShoalPool::<Bench>::start(conf)
         .map_err(|error| anyhow::anyhow!("failed to start a server: {error:?}"))?;
     // wait until it answers, rather than for a fixed number of seconds
-    runtime.block_on(ready::wait_until_answering(addr, |addr| async move {
+    runtime.block_on(ready::wait_until_answering(addr, |addr| {
+        // cloned per attempt, since the probe is an `Fn` and may be called several times
+        let tls = tls.clone();
+        async move {
         // a real query against a key no workload generates, so it is answered out of an empty
         // table and costs nothing measurable
         //
@@ -207,9 +218,14 @@ fn start(
         // and not whether the row is there. `send_one` treats a get that found nothing as a
         // failed query, so an empty table would look like an unready server and the probe would
         // time out against a server that was working perfectly.
-        let client = Shoal::<BenchClient>::new(&addr).await?;
-        client.exists(ItemExists::new(u64::MAX)).await?;
-        Ok(())
+            let options = match tls {
+                Some(tls) => shoal_core::client::ClientOptions::new().tls(tls),
+                None => shoal_core::client::ClientOptions::new(),
+            };
+            let client = Shoal::<BenchClient>::with_options(&addr, options).await?;
+            client.exists(ItemExists::new(u64::MAX)).await?;
+            Ok(())
+        }
     }))?;
     Ok(Some(pool))
 }

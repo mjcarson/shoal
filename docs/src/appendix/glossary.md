@@ -161,6 +161,17 @@ salt, an iteration count and two derived keys rather than a password; the client
 the password without sending it; and the exchange authenticates the *server* to the client as well,
 through a final signature the client checks. Three round trips on top of the handshake.
 
+**kTLS** — Kernel TLS. The handshake happens in userspace with rustls; the negotiated keys are then
+handed to the kernel with two `setsockopt` calls per direction, and from that moment the kernel does
+the record layer. `read()` returns plaintext into whatever buffer the caller names, which is why
+encryption cost Shoal's response path no copy and no code — see
+[F14](../features/encryption-in-transit.md). Needs the `tls` kernel module, which `setsockopt` does
+not autoload.
+
+**Upper layer protocol (ULP)** — The kernel's hook for stacking something on top of a TCP socket.
+`setsockopt(TCP_ULP, "tls")` is what attaches its TLS module, and reading the option back is the
+only way to tell a kTLS socket from a plaintext one from outside the kernel.
+
 **Stored credential** — The four fields a server keeps per user: `salt`, `iterations`,
 `stored_key`, `server_key`. None of them is a password and none can be turned back into one.
 `stored_key` **is** still a secret: anything that can read it can replay it as a login.

@@ -14,6 +14,7 @@ use glommio::{
 use gxhash::GxHasher;
 use kanal::{AsyncReceiver, AsyncSender};
 use lru::LruCache;
+use rustls::ServerConfig;
 use rkyv::{
     bytecheck::CheckBytes,
     rancor::Strategy,
@@ -35,6 +36,7 @@ use uuid::Uuid;
 use super::messages::{QueryMetadata, ServerMsg};
 use super::ring::Ring;
 use super::stage_profile::{self, StageStamps, Stamp};
+use super::tls;
 use super::{Comms, Conf, ServerError};
 use crate::{
     shared::{
@@ -539,6 +541,7 @@ async fn server_auth(
 /// * `node_local_tx` - The channel to forward this node's bundles on
 /// * `max_frame_bytes` - The largest frame this server will accept
 /// * `store` - The users this shard will accept, and whether it requires one
+/// * `tls` - What to encrypt connections with, if this listener is encrypted
 #[allow(clippy::future_not_send)]
 async fn client_acceptor<S: ShoalDatabase>(
     tcp_sock: TcpListener,
@@ -546,6 +549,7 @@ async fn client_acceptor<S: ShoalDatabase>(
     node_local_tx: AsyncSender<ServerMsg<S>>,
     max_frame_bytes: u32,
     store: Rc<CredentialStore>,
+    tls: Option<Arc<ServerConfig>>,
 ) -> Result<(), ServerError> {
     loop {
         // try to read a single datagram from our udp socket
@@ -562,6 +566,8 @@ async fn client_acceptor<S: ShoalDatabase>(
         // reference counted rather than cloned. an `Rc` and not an `Arc` because a shard is a
         // thread of its own and nothing here crosses one
         let store = store.clone();
+        // the tls config is shared the same way, and is an `Arc` only because rustls asks for one
+        let tls = tls.clone();
         // run this whole connection under one task that owns its lifetime
         //
         // the two halves of a split stream keep the stream alive between them, so a read relay
@@ -577,11 +583,24 @@ async fn client_acceptor<S: ShoalDatabase>(
             // the handshake's own result is wrapped rather than converted, so that a peer that
             // stalled and a peer that was refused stay distinguishable in the log
             //
-            // the deadline covers the authentication exchange as well as the handshake, since a
-            // peer that stalls between its `Hello` and its proof is holding exactly as much of
-            // this server as one that stalls before either
+            // the deadline covers the TLS handshake and the authentication exchange as well as
+            // the shoal handshake, since a peer that stalls between any two of them is holding
+            // exactly as much of this server as one that stalls before all three
             let handshake = glommio::timer::timeout(HANDSHAKE_TIMEOUT, async {
-                // shake hands first, which is what decides whether there is anything to prove
+                // take the wire before anything speaks the shoal protocol over it
+                //
+                // this has to come first: it is a handshake of its own, and everything below
+                // reads and writes the socket expecting whatever this leaves behind. the
+                // established session is bound rather than dropped so that rustls' record of it
+                // outlives the socket, which is where a key update would be handled
+                let _tls = match &tls {
+                    Some(config) => match tls::accept(&mut stream, config).await {
+                        Ok(established) => Some(established),
+                        Err(error) => return Ok(Err(error)),
+                    },
+                    None => None,
+                };
+                // shake hands next, which is what decides whether there is anything to prove
                 let (hello, mechanism) =
                     match server_handshake::<S>(&mut stream, max_frame_bytes, &store).await {
                         Ok(accepted) => accepted,
@@ -915,6 +934,30 @@ where
 
     /// Spawn our client network listener
     fn spawn_client_listener(&mut self) -> Result<(), ServerError> {
+        // build this listener's tls config before it binds, if it has one
+        //
+        // reading a certificate off disk once per shard at startup rather than once per
+        // connection, for the same reason the credential store is derived here: it is the same
+        // work every time and a connection is the wrong place to discover a missing file
+        let tls = match &self.conf.networking.tls {
+            Some(options) => {
+                // refuse to start rather than fall back to plaintext if the kernel cannot do this
+                //
+                // a server that asked for encryption and silently served in clear is the failure
+                // this whole feature exists to prevent, so it is checked before anything binds
+                if !crate::shared::tls::ktls::is_available() {
+                    return Err(crate::shared::tls::TlsError::UlpUnavailable(
+                        std::io::Error::new(
+                            std::io::ErrorKind::Unsupported,
+                            "the 'tls' kernel module is not loaded",
+                        ),
+                    )
+                    .into());
+                }
+                Some(crate::shared::tls::server_config(options)?)
+            }
+            None => None,
+        };
         // bind our udp socket
         let tcp_sock = TcpListener::bind(self.conf.networking.to_addr())?;
         // clone our kanal transmitter
@@ -929,6 +972,7 @@ where
                 // derive every credential this config named once per shard, at startup, rather
                 // than once per connection - a PBKDF2 derivation is the whole point of the cost
                 Rc::new(self.conf.auth.store()?),
+                tls,
             ),
             self.high_priority,
         )?;

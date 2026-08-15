@@ -198,6 +198,7 @@ impl Workload for Fanout {
         let overrides = ConfOverrides {
             shards: Some(1),
             memory: None,
+            tls: false,
         };
         let server = match self.residency {
             Residency::Resident => ServerNeed::Fresh(overrides),

@@ -66,7 +66,7 @@ independent logical streams over a pool of sockets.** That fact is what decides 
 | **Depends on** | nothing |
 | **Blocks** | nothing. Declining it makes [D2](framing.md), [D3](authentication.md), and [D4](encryption.md) into real work rather than free |
 | **Tradeoff** | Major — declining QUIC is a bet that the datacenter assumption holds |
-| **Benchmark** | `transport/*`, unbuilt. Nothing here has a number |
+| **Benchmark** | ~~`transport/*`, unbuilt. Nothing here has a number~~ — `transport/*` is **built** ([F13](../features/transport-workloads.md)), so the TCP side now has a number at four modes and two row widths. What is still missing is the other half of the comparison, which is a QUIC implementation |
 
 Three arguments, in order of force.
 
@@ -94,10 +94,14 @@ self.reader.read_exact(&mut aligned_buff).await?;
 That read, and the pointer into it that `ShoalResponse` holds, is the entire zero-copy property of
 the response path. Under QUIC the payload arrives in stream-reassembly buffers and has to be copied
 into aligned memory before rkyv can access it — one full copy of every row returned, on the path
-this branch exists to make copy-free. [D4](encryption.md) shows that TLS *can* be made to avoid
-this by decrypting in place into a caller-supplied buffer; QUIC's stream reassembly cannot, because
-a stream's bytes may arrive out of order across packets and the assembled result is by construction
-a copy.
+this branch exists to make copy-free. ~~[D4](encryption.md) shows that TLS *can* be made to avoid
+this by decrypting in place into a caller-supplied buffer~~ — no released rustls decrypts in place,
+and [F14](../features/encryption-in-transit.md) avoided the copy by handing the keys to the kernel
+instead, which is a stronger version of the same argument: under kTLS `read()` lands plaintext in
+the caller's buffer with no userspace record layer at all. QUIC's stream reassembly cannot do
+either, because a stream's bytes may arrive out of order across packets and the assembled result is
+by construction a copy. **This is now a built counter-example rather than a claim**: TCP plus
+encryption keeps the zero-copy read, and QUIC plus encryption cannot.
 
 Add to that userspace congestion control and per-packet ACK processing on a thread-per-core engine
 that reserves core 0 for coordination and gives every other core to a shard. GSO, GRO, and NIC
@@ -144,10 +148,13 @@ None. This page exists to be decided first, not built first.
 
 It cannot be, today, and this is one of the places where that matters most. Adjudicating TCP
 against QUIC needs the `transport/{send_one,send_batched,stream,stream_unordered}` workloads
-([TODOs](../appendix/todos.md#benchmark-coverage-the-harness-does-not-have)) *and* a QUIC
-implementation to measure them against — the second of which is the thing being decided. So the
-recommendation is made on structure rather than on measurement, and it is graded `Argued`
-accordingly.
+~~([TODOs](../appendix/todos.md#benchmark-coverage-the-harness-does-not-have))~~ — **now built**,
+at two row widths ([F13](../features/transport-workloads.md)) — *and* a QUIC implementation to
+measure them against, which is the thing being decided. **Half of that is no longer missing**: the
+TCP baseline exists, so a QUIC implementation would have something to be measured against on the
+day it was written rather than needing the harness built first. The recommendation is still made on
+structure rather than on measurement, and is still graded `Argued`, because the half that remains
+is the half that is the decision.
 
 What *could* be measured cheaply, and would inform this without building anything: the share of
 end-to-end latency that is socket time at all. `client.rs` has no spans

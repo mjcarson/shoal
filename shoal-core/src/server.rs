@@ -21,6 +21,7 @@ pub mod ring;
 pub mod shard;
 pub mod stage_profile;
 pub mod tables;
+pub mod tls;
 pub mod trace;
 
 use comms::Comms;

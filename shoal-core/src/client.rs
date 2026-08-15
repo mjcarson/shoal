@@ -28,6 +28,7 @@ use uuid::Uuid;
 
 pub mod errors;
 pub mod messages;
+pub mod tls;
 
 use super::shared::queries::Queries;
 use crate::shared::auth::scram::{ClientStep, ScramClient};
@@ -36,6 +37,7 @@ use crate::shared::protocol::auth::{self as proto_auth, AuthMechanism, AuthStatu
 use crate::shared::protocol::error::{self, ErrorCode};
 use crate::shared::protocol::{self, handshake, MessageType, ProtocolError};
 use crate::shared::responses::{ArchivedResponseError, ResponseActionNames};
+use crate::shared::tls::{self as shared_tls, TlsClientOptions};
 use crate::shared::traits::{
     ExistsQuery, QuerySupport, RkyvSupport, ShoalQuerySupport, ShoalResponseSupport,
 };
@@ -126,6 +128,12 @@ struct ShoalConnectionManager {
     /// usable. A connection the pool replaces after a failure re-authenticates with no code
     /// anywhere else.
     credentials: Arc<Credentials>,
+    /// What this client encrypts with, if it encrypts
+    ///
+    /// The certificate authority is read once here rather than once per connection, so a pool
+    /// opening ten connections at startup parses one PEM file rather than ten. It lives beside the
+    /// credentials for the reason they do: a connection the pool replaces re-encrypts for free.
+    tls: Option<(Arc<rustls::ClientConfig>, TlsClientOptions)>,
 }
 
 /// How long a server has to finish its half of the handshake
@@ -134,7 +142,68 @@ struct ShoalConnectionManager {
 /// without this a server that accepts a connection and then stalls would park `Shoal::new`
 /// forever. Before the handshake existed `connect` could not block at all, since it neither read
 /// nor wrote — this deadline is created by the handshake and belongs to it.
+///
+/// It covers **all three** handshakes a connection can have: the TLS one, the Shoal one, and the
+/// authentication exchange. A peer that stalls between any two of them holds exactly as much of
+/// this client as one that stalls before all three.
 const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Everything a client can be told about a connection beyond where to make it
+///
+/// This exists because `addr × credentials × tls` is three constructors' worth of combinations and
+/// [F12](../../../docs/src/features/authentication.md) predicted that a third one would be the
+/// signal that [D6](../../../docs/src/direction/connection-pool.md)'s builder is overdue. It is
+/// the seam that builder should absorb rather than sit beside — deadlines, pool sizing and health
+/// checks all belong on the same object and none of them are here.
+#[derive(Debug, Clone, Default)]
+pub struct ClientOptions {
+    /// What this client proves itself with, if the server asks it to
+    pub credentials: Credentials,
+    /// What this client encrypts with, if the server it is calling is encrypted
+    pub tls: Option<TlsClientOptions>,
+}
+
+impl ClientOptions {
+    /// Build options that prove nothing and encrypt nothing
+    ///
+    /// This is what every client had before either feature existed, and it is what a server with
+    /// no `auth` and no `networking.tls` section expects.
+    pub fn new() -> Self {
+        ClientOptions::default()
+    }
+
+    /// Prove this client's identity with a username and password
+    ///
+    /// # Arguments
+    ///
+    /// * `credentials` - What to prove this client's identity with
+    pub fn credentials(mut self, credentials: Credentials) -> Self {
+        self.credentials = credentials;
+        self
+    }
+
+    /// Encrypt this client's connections
+    ///
+    /// # Arguments
+    ///
+    /// * `tls` - Which authority to trust, and what name to ask the server for
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use shoal_core::client::ClientOptions;
+    /// use shoal_core::shared::auth::Credentials;
+    /// use shoal_core::shared::tls::TlsClientOptions;
+    ///
+    /// let options = ClientOptions::new()
+    ///     .credentials(Credentials::scram("reader", "hunter2"))
+    ///     .tls(TlsClientOptions::new("/etc/shoal/ca.pem"));
+    /// ```
+    pub fn tls(mut self, tls: TlsClientOptions) -> Self {
+        self.tls = Some(tls);
+        self
+    }
+}
 
 impl ShoalConnectionManager {
     /// Create a new shoal connection manager
@@ -146,16 +215,24 @@ impl ShoalConnectionManager {
     /// * `dead_conns` - Where read loops record that their connection has stopped
     /// * `peer_max_frame_bytes` - Where to record the largest frame the server will accept
     /// * `schema_fingerprint` - The fingerprint of the schema this client was built from
-    /// * `credentials` - What this client proves itself with, if the server asks it to
+    /// * `options` - What this client proves itself with and encrypts with
     pub fn new(
         server_addr: SocketAddr,
         proxy_tx: AsyncSender<(u64, OwnedReadHalf)>,
         dead_conns: &Arc<HashMap<u64, ()>>,
         peer_max_frame_bytes: &Arc<AtomicU32>,
         schema_fingerprint: u64,
-        credentials: Credentials,
-    ) -> Self {
-        ShoalConnectionManager {
+        options: ClientOptions,
+    ) -> Result<Self, Errors> {
+        // read the certificate authority once here rather than once per connection
+        let tls = match options.tls {
+            Some(tls) => Some((
+                shared_tls::client_config(&tls).map_err(ConnectError::Tls)?,
+                tls,
+            )),
+            None => None,
+        };
+        Ok(ShoalConnectionManager {
             server_addr,
             proxy_tx,
             // start at one so that zero is never a connection, and a default can never name one
@@ -163,8 +240,9 @@ impl ShoalConnectionManager {
             dead_conns: dead_conns.clone(),
             peer_max_frame_bytes: peer_max_frame_bytes.clone(),
             schema_fingerprint,
-            credentials: Arc::new(credentials),
-        }
+            credentials: Arc::new(options.credentials),
+            tls,
+        })
     }
 
     /// Shake hands with the server over a connection that has not been split yet
@@ -354,6 +432,22 @@ impl ManageConnection for ShoalConnectionManager {
         let mut stream = TcpStream::connect(&self.server_addr).await?;
         // Disable Nagle's algorithm
         stream.set_nodelay(true)?;
+        // take the wire before anything speaks the shoal protocol over it
+        //
+        // this is inside the deadline below along with the other two handshakes. the established
+        // session is bound rather than dropped so rustls' record of it outlives the socket, which
+        // is where a key update would be handled
+        let _tls = match &self.tls {
+            Some((config, options)) => Some(
+                tokio::time::timeout(
+                    HANDSHAKE_TIMEOUT,
+                    tls::connect(&mut stream, config, options, &self.server_addr),
+                )
+                .await
+                .map_err(|_| ConnectError::HandshakeTimeout)??,
+            ),
+            None => None,
+        };
         // shake hands before this stream is split
         //
         // this has to happen before the read half is handed to the proxy below, or the proxy
@@ -469,7 +563,7 @@ impl<S: QuerySupport> Shoal<S> {
                 >,
             >,
     {
-        Shoal::connect(addr, Credentials::none()).await
+        Shoal::connect(addr, ClientOptions::new()).await
     }
 
     /// Create a new shoal client that can prove who it is
@@ -518,19 +612,71 @@ impl<S: QuerySupport> Shoal<S> {
                 >,
             >,
     {
-        Shoal::connect(addr, credentials).await
+        Shoal::connect(addr, ClientOptions::new().credentials(credentials)).await
     }
 
-    /// Build a client and its pool
+    /// Create a new shoal client from a full set of options
     ///
-    /// Both public constructors land here rather than one calling the other, so that the ten line
-    /// `where` clause every one of them carries exists once.
+    /// This is what [`Shoal::new`] and [`Shoal::with_credentials`] both are, spelled out. Reach for
+    /// it when a connection needs more than one thing said about it — encryption, credentials, or
+    /// both — rather than for a fourth constructor naming the combination.
     ///
     /// # Arguments
     ///
     /// * `addr` - The address of the server to connect too
-    /// * `credentials` - What to prove this client's identity with
-    async fn connect<A: ToSocketAddrs>(addr: A, credentials: Credentials) -> Result<Self, Errors>
+    /// * `options` - What to prove this client's identity with and what to encrypt with
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # async fn example<S: shoal_core::shared::traits::QuerySupport>() -> Result<(), shoal_core::client::Errors>
+    /// # where for<'a> <<S as shoal_core::shared::traits::QuerySupport>::ResponseKinds as rkyv::Archive>::Archived:
+    /// #     rkyv::bytecheck::CheckBytes<rkyv::rancor::Strategy<rkyv::validation::Validator<
+    /// #         rkyv::validation::archive::ArchiveValidator<'a>,
+    /// #         rkyv::validation::shared::SharedValidator>, rkyv::rancor::Error>> {
+    /// use shoal_core::client::{ClientOptions, Shoal};
+    /// use shoal_core::shared::auth::Credentials;
+    /// use shoal_core::shared::tls::TlsClientOptions;
+    ///
+    /// let client = Shoal::<S>::with_options(
+    ///     "127.0.0.1:12000",
+    ///     ClientOptions::new()
+    ///         .credentials(Credentials::scram("reader", "hunter2"))
+    ///         .tls(TlsClientOptions::new("/etc/shoal/ca.pem")),
+    /// )
+    /// .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn with_options<A: ToSocketAddrs>(
+        addr: A,
+        options: ClientOptions,
+    ) -> Result<Self, Errors>
+    where
+        for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived:
+            rkyv::bytecheck::CheckBytes<
+                Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'a>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            >,
+    {
+        Shoal::connect(addr, options).await
+    }
+
+    /// Build a client and its pool
+    ///
+    /// Every public constructor lands here rather than one calling the other, so that the ten line
+    /// `where` clause each of them carries exists once.
+    ///
+    /// # Arguments
+    ///
+    /// * `addr` - The address of the server to connect too
+    /// * `options` - What to prove this client's identity with and what to encrypt with
+    async fn connect<A: ToSocketAddrs>(addr: A, options: ClientOptions) -> Result<Self, Errors>
     where
         for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived:
             rkyv::bytecheck::CheckBytes<
@@ -562,8 +708,8 @@ impl<S: QuerySupport> Shoal<S> {
             &dead_conns,
             &peer_max_frame_bytes,
             S::SCHEMA_FINGERPRINT,
-            credentials,
-        );
+            options,
+        )?;
         // build our connection pool
         let pool = bb8::Pool::builder()
             .min_idle(10)
@@ -1418,6 +1564,25 @@ impl<S: QuerySupport> ShoalResponse<S> {
             stamps,
             phantom: PhantomData,
         })
+    }
+
+    /// Where the buffer backing this response starts in memory
+    ///
+    /// This exists so the zero copy property can be asserted from outside this crate, which is
+    /// where the only test that can establish it under encryption lives — `shoal/tests/tls.rs`
+    /// needs a real server, a real socket and a real kernel to say anything, and none of those are
+    /// reachable from a unit test in here.
+    ///
+    /// The number is only ever interesting modulo sixteen, and it is deliberately the *buffer*
+    /// rather than the archive root: rkyv puts the root at the end of the buffer, so its address
+    /// carries the archived type's own alignment and not this path's. What matters here is that
+    /// the socket's bytes landed at the start of an allocation this client aligned, which is the
+    /// same thing `the_response_payload_lands_on_a_sixteen_byte_boundary` asserts on the plaintext
+    /// path. A response whose buffer is unaligned means the read path has started copying, and
+    /// that failure is otherwise completely silent — a copied response is correct in every
+    /// observable way.
+    pub fn buffer_address(&self) -> usize {
+        self._buff.as_ptr() as usize
     }
 
     /// Get the inner aligned vec and the stamps that came with it

@@ -37,6 +37,9 @@ networking:
   interface: "127.0.0.1"             # default
   port: 12000                        # default
   max_frame_bytes: 67108864          # default; 64 MiB
+  tls:                               # optional; omitting it serves plaintext
+    cert: "/etc/shoal/server.pem"    # certificate chain, leaf first
+    key: "/etc/shoal/server.key"     # the private key for that chain
 
 auth:                                # optional; omitting it requires nothing
   required: false                    # default
@@ -113,6 +116,48 @@ works and what it means for which shard receives your query.
 `Networking::to_addr` prints to stdout as a side effect of formatting the address
 (`shoal-core/src/server/conf.rs:111`) — a leftover debug line, so you get a "listening on"
 message per shard.
+
+**Unknown keys in this block are refused.** That is deliberate and it is newer than the rest of the
+section: a misspelled `tls:` key under a block that ignored it would produce a server that starts,
+listens, and serves every query in clear, with nothing anywhere saying so
+([F14](../features/encryption-in-transit.md)).
+
+#### networking.tls
+
+**Omitting this block serves plaintext**, which is what every deployment before
+[F14](../features/encryption-in-transit.md) was and what the benchmark config still is. The same
+shape `auth` has, and for the same reason: a capture taken against an encrypted server and one
+taken against a plaintext server are not the same measurement, so encryption has to be something a
+deployment opts into rather than something it gets.
+
+Both fields are required when the block is present, and both are PEM files. The certificate is the
+chain leaf first; the key is the private key for it.
+
+**This needs the kernel's TLS module.** Shoal hands the negotiated keys to the kernel and lets it do
+the record layer, which is what keeps the response read copy-free — see
+[F14](../features/encryption-in-transit.md) for why that matters. Two consequences for a
+deployment:
+
+- the kernel needs `CONFIG_TLS` (it is a module on most distributions);
+- **`setsockopt` does not autoload it**, so `modprobe tls` has to have run. A machine that has never
+  used kTLS answers `ENOENT`, and a server configured for TLS on such a machine **refuses to
+  start** rather than falling back to plaintext.
+
+Make it persistent with `echo tls > /etc/modules-load.d/shoal.conf`.
+
+A client reaches such a server with `Shoal::with_options`, naming the authority it trusts:
+
+```rust
+let client = Shoal::<MyDbClient>::with_options(
+    "shoal.internal:12000",
+    ClientOptions::new().tls(TlsClientOptions::new("/etc/shoal/ca.pem")),
+)
+.await?;
+```
+
+There is deliberately no system root store: the client trusts the authority named here and nothing
+else. `TlsClientOptions::server_name` overrides which name the certificate is checked against, for
+the case where a deployment connects by address to a certificate carrying a hostname.
 
 ### auth
 

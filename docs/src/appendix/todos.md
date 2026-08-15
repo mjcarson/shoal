@@ -410,7 +410,42 @@ absence is a defect rather than a missing feature.
 SCRAM's rounds on the second and subsequent connections of a pool. It is worth having **only behind
 TLS**: a ticket in `Hello` is a bearer token, replayable by anything that sees it, which is exactly
 what the options table rejected a bearer token for. Filed here rather than acted on, and it should
-not be picked up before [D4](../direction/encryption.md).
+not be picked up before [D4](../direction/encryption.md). **D4 has since been built**
+([F14](../features/encryption-in-transit.md)), so the precondition is met and this is now merely
+unbuilt — and it matters more than it did, because kTLS made TLS session resumption unavailable, so
+the ticket went from one of three mitigations for the fifty-handshake problem to one of two.
+
+### The rest of encryption
+
+Three pieces [F14](../features/encryption-in-transit.md) deliberately did not build, and one it
+could not.
+
+**Key updates, and the confidentiality limit that goes with them.** Once the kernel owns the record
+layer, rustls is out of the data path and neither peer generates a `KeyUpdate` — so none occur, and
+the AES-GCM message limit rustls normally enforces is enforced by nothing. Both peers being ours is
+what makes this survivable rather than a hole. `ktls::enable` keeps the `KernelConnection` for the
+life of the connection precisely so that handling one is a call site rather than a redesign:
+`update_tx_secret` and `update_rx_secret` hand back the new keys, and the socket takes them the same
+way it took the first pair. What is missing is the trigger — a byte counter and a
+`setsockopt`, or reading the kernel's key-expiry signal.
+
+**Session resumption**, which kTLS cost outright. A ticket after the handshake is a non application
+record and a plain `read` fails it with `EIO`, so `send_tls13_tickets = 0`. Recovering resumption
+means either handling control messages through `recvmsg` with a `CMSG` loop — which reaches the
+read path this whole feature exists to leave alone — or the re-auth ticket above, at the Shoal
+layer rather than the TLS one. The second is the cheaper answer and is why that entry now matters
+more.
+
+**mTLS.** `AuthMechanism::MutualTls` is still defined and still refused, in `server_auth` and in the
+client's `authenticate`. There is a TLS layer to read a certificate subject off of now, so this is
+the new arm in two matches [D3](../direction/authentication.md) predicted, plus a client
+certificate on `TlsClientOptions`, a CA on the server's config, and a subject-to-`Principal`
+mapping. The last of those is the part with a real design question in it.
+
+**Channel binding for SCRAM.** F14 makes `tls-exporter` available, which closes what
+[F12](../features/authentication.md) had to decline: its gs2 header is still `n`, and a `y` there
+without support is exactly the downgrade `y` exists to detect. Note the interaction — the exporter
+has to be taken from rustls *before* `dangerous_into_kernel_connection` consumes the session.
 
 ### Archive map reconstruction
 
@@ -507,6 +542,14 @@ plaintext-versus-TLS pair [D4](../direction/encryption.md) needs is a *precondit
 a follow-up; and `routing` is a hard dependency of [D7](../direction/shard-aware-routing.md), whose
 whole value rests on a hop nobody has measured. That raises what these are worth considerably
 above what this entry claimed when it was filed against four `O` numbers.
+
+**The `transport/*` half of that is now built** ([F13](../features/transport-workloads.md)), which
+takes the D4 precondition with it — the plaintext arms exist and ~~the TLS arms are one axis away~~
+**the TLS arms are built too** ([F14](../features/encryption-in-transit.md)), so the pair is
+complete at sixteen arms and has not been captured.
+The client-side `tracing` spans and the two micro benchmarks are still missing, so the *subtraction*
+this paragraph wanted is not available: a transport sample bounds the client and the server
+together and does not separate them.
 
 **A table-layer bench, over `PersistentSortedTable::get`.** The gap that was not known to be a gap.
 The micro layer stops at `SortedPartition`, so everything between a query arriving at a table and
@@ -612,11 +655,20 @@ need:
 - **`projection/{full,projected}`** — a narrow projection against a whole wide row. Same for
   [F2](../features/projections.md); the `ItemKeys` projection already exists in the workload
   schema for it.
-- **`transport/{send_one,send_batched,stream,stream_unordered}`** — the four client transport
+- ~~**`transport/{send_one,send_batched,stream,stream_unordered}`** — the four client transport
   modes over an identical query mix. This is also the only thing that could say how much of a
   measured latency is the harness's own, which is the open item above, **and it is what every page
   of [Direction](../direction/overview.md) is blocked on** — the client is the one layer of this
-  system whose total has never been bounded.
+  system whose total has never been bounded.~~ **Built**
+  ([F13](../features/transport-workloads.md)), as **eight** workloads rather than four. This entry
+  specified the mode axis and missed the one that decides whether the set can do its job: a second
+  axis on row width, a 256-byte row against a MiB one. The page most blocked on these is
+  [D4](../direction/encryption.md), whose question is a *per-byte* cost, and four 256-byte
+  workloads would have answered it with a number near zero — at that width the fixed per-response
+  costs dominate and the four modes spread nearly 4×, while at a MiB they collapse into one number
+  because the wire is the whole cost. What remains open is the subtraction the entry hoped for: a
+  sample still includes the server's work, and separating the two needs the client-side spans
+  [O28](optimizations.md) asks for.
 - **`durability/{fsync,async}`** — see the `Async` vs `Fsync` item above.
 - **`mutate/{update,delete,exists}`** — entirely unmeasured today.
 

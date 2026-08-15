@@ -1160,17 +1160,21 @@ small to act on, because the total it belongs to has never been bounded.
 
 **Fix direction:** hold one guard — `let map = self.channel_map.pin();` — across the check and the
 insert. `papaya` also has an `entry`-shaped API that expresses "insert if absent" in one operation,
-which is what this loop actually wants. Neither should be taken before
+which is what this loop actually wants. ~~Neither should be taken before
 `transport/{send_one,send_batched,stream,stream_unordered}`
 ([TODOs](todos.md#what-f8-left-undone)) exists, which is the workload that would give the client
-half a number at all.
+half a number at all.~~ **That workload exists** ([F13](../features/transport-workloads.md)), so
+this entry is adjudicable for the first time — and the arm to adjudicate it on is
+`macro/transport/send_one/small`, where a per-query cost is not buried under the bytes. It stays
+open because nothing has been measured, not because nothing can be.
 
-**That workload is now blocking more than this entry.** The [Direction](../direction/overview.md)
-chapter is nine design pages about the client, and its step 0 — before any of them — is exactly
-what this entry asks for: spans and `hotpath` scopes in `client.rs`, plus the `transport/*`
-workloads ([D6](../direction/connection-pool.md#how-it-would-be-measured)). The instrumentation was
-worth doing when the only thing it could adjudicate was two `papaya` guards. It is worth
-considerably more now.
+**That workload was blocking more than this entry, and half of that is now unblocked.** The
+[Direction](../direction/overview.md) chapter is nine design pages about the client, and its step 0
+— before any of them — is exactly what this entry asks for: spans and `hotpath` scopes in
+`client.rs`, plus the `transport/*` workloads
+([D6](../direction/connection-pool.md#how-it-would-be-measured)). The workloads landed; the spans
+did not. The instrumentation was worth doing when the only thing it could adjudicate was two
+`papaya` guards. It is worth considerably more now, and it is the only half left.
 
 ## The wire
 
@@ -1272,8 +1276,10 @@ becoming less so with each thing added in front of the first query:
 | [D6](../direction/connection-pool.md) | whatever a real health check costs on a connection that is being created |
 
 **What is needed is not a query workload.** The `transport/*` workloads
-[TODOs](todos.md#benchmark-coverage-the-harness-does-not-have) plans would still measure a warm
-pool, because that is what they are for. This wants time to first successful query from a cold
+~~[TODOs](todos.md#benchmark-coverage-the-harness-does-not-have) plans~~ —
+**built** ([F13](../features/transport-workloads.md)) — still measure a warm
+pool, because that is what they are for, so this entry is no more adjudicable than it was. This
+wants time to first successful query from a cold
 client, with `min_idle` as a parameter, run against a server with and without an `auth` section —
 the second being a control-and-null pair in the sense [F4](../features/validated-archives.md)
 settled on, where the axis is whether authentication happened at all.

@@ -367,9 +367,13 @@ branch name.
 The flat pool of interchangeable connections is what
 [D7](../direction/shard-aware-routing.md#what-it-breaks) would have to give up to route a query to
 the shard that owns its tablet. And the zero-copy read is the property
-[D4](../direction/encryption.md#the-options) has to work around, because
+[D4](../direction/encryption.md#the-options) had to work around, because
 the conventional way to add TLS decrypts into a buffer the TLS library owns and copies from there —
 which is correct, measurably slower, and would not be caught by anything in this repository.
+**That one has been paid off**: [F14](../features/encryption-in-transit.md) hands the negotiated
+keys to the kernel, so `read()` returns plaintext into the `AlignedVec<16>` this page describes and
+the read loop is byte for byte what it was. It is worth noting *how close that came to going the
+other way* — D4 recommended an API that would have copied while reading as though it did not.
 
 ## Limitations
 
@@ -419,10 +423,12 @@ a PBKDF2 derivation on both ends. Nothing measures it
 - ~~**No authentication and no encryption**, so anything that can reach the port can read and
   write any table.~~ Half built as [F12](../features/authentication.md): a client can prove who it
   is with `with_credentials`, and a server can refuse one that cannot. What remains is that there
-  is no TLS, so the username and the whole exchange are visible on the path
-  ([D4](../direction/encryption.md)); that a principal that authenticated may still read and write
-  any table, because there is no authorization; and that a server with no `auth` section — the
-  default — still requires nothing of anybody.
+  ~~is no TLS, so the username and the whole exchange are visible on the path
+  ([D4](../direction/encryption.md))~~ is no TLS *by default* — a listener encrypts when its config
+  says to ([F14](../features/encryption-in-transit.md)) and serves plaintext otherwise, so on a
+  default deployment the username and the whole exchange are still visible; that a principal that
+  authenticated may still read and write any table, because there is no authorization; and that a
+  server with no `auth` section — the default — still requires nothing of anybody.
 - **Credentials cannot be changed on a live client.** They are given to the constructor and held
   by the pool for the life of the client, so rotating a password means building a new `Shoal`
   ([D6](../direction/connection-pool.md#a-builder)).
@@ -448,7 +454,10 @@ a PBKDF2 derivation on both ends. Nothing measures it
 - `Shoal::send` archives the bundle before the id is finalised.
 - Two large blocks of commented-out code remain (`client.rs:549-603`, `:1048-1114`).
 - `suceeded` and `QuerySuceededOpts` are misspelled in the public API.
-- **Nothing measures any of this.** `client.rs` carries no `tracing` spans and no `hotpath` scopes,
-  so every macro benchmark number includes the client and none can attribute anything to it
-  ([TODOs](../appendix/todos.md#benchmark-coverage-the-harness-does-not-have)). The
-  `transport/*` workloads that would give it a number are unbuilt.
+- **Nothing *attributes* any of this.** `client.rs` carries no `tracing` spans and no `hotpath`
+  scopes, so every macro benchmark number includes the client and none can subtract it
+  ([TODOs](../appendix/todos.md#benchmark-coverage-the-harness-does-not-have)). ~~The
+  `transport/*` workloads that would give it a number are unbuilt.~~ They are **built**
+  ([F13](../features/transport-workloads.md)), so the three modes above now have a bounded total at
+  a 256-byte row and at a MiB one — but a total is not an attribution, and the spans that would
+  turn one into the other are what is still missing.

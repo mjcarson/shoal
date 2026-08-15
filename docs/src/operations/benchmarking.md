@@ -42,6 +42,17 @@ its per-batch timestamp cannot answer that.
 - `shoal.yml` at the repo root. It is committed and it *is* the benchmark configuration —
   changing it invalidates the recorded baseline.
 - A writable storage directory at whatever `shoal.yml` points at, `/opt/shoal` by default.
+- **The `tls` kernel module, for the eight encrypted transport arms only.** `modprobe tls` — a
+  machine that has never used kTLS answers `ENOENT`, `setsockopt` does not autoload it, and a
+  workload configured for TLS refuses to start rather than quietly capturing a plaintext number
+  under an encrypted label ([F14](../features/encryption-in-transit.md)). Every other workload is
+  unaffected.
+
+  **An encrypted capture and a plaintext one are not the same measurement**, the same rule
+  `hotpath` and `stage-profile` builds already follow. That is why the arms are separate workloads
+  with their own identifiers rather than a flag on the existing eight, and why `ConfFacts` records
+  a `tls` field: two captures across that axis have to be distinguishable in the artifact rather
+  than looking identical.
 - **The CPU governor set to `performance`.** This is a precondition of the recorded baseline and
   the one precondition that lives outside the repository:
 
@@ -94,10 +105,12 @@ Alongside them it writes `<label>.meta.json`, which is what lets a committed num
 whether it still describes the current code: the commit, whether the tree was dirty, a content
 hash of the sources each layer measures, and the machine, governor and toolchain it ran on.
 
-A full capture is now twenty-three workloads times five runs, so it is substantially longer than
-the five runs it replaced — budget an hour or so rather than thirteen minutes. Eight of the
-twenty-three are the storage-free controls [F9](../features/ephemeral-tables.md) added, and they
-are the cheapest of the set: they have no disk to wait on.
+A full capture is now thirty-one workloads times five runs, so it is substantially longer than
+the five runs it replaced — budget well over an hour rather than thirteen minutes. Eight of the
+thirty-one are the storage-free controls [F9](../features/ephemeral-tables.md) added, and they
+are the cheapest of the set: they have no disk to wait on. Eight more are the transport modes
+[F13](../features/transport-workloads.md) added, and the MiB half of those is the most expensive
+thing in a capture — 512 MiB seeded and two gigabytes over the wire, per run.
 `--scale smoke --runs 2` cuts the data two orders of magnitude and is what you want while
 iterating on a workload; the scale is recorded in the artifact, and a `smoke` capture is never
 compared against a `full` one.

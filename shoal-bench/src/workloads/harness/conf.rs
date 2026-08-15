@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, Result};
 use shoal::Conf;
 use shoal_core::server::conf::TraceLevel;
+use shoal_core::shared::tls::{TlsClientOptions, TlsServerOptions};
 
 use crate::model::macro_layer::ConfFacts;
 use crate::workloads::workload::ConfOverrides;
@@ -86,6 +87,14 @@ pub fn resolve(base: &Path, id: &str, overrides: &ConfOverrides, port: u16) -> R
     if let Some(shards) = overrides.shards {
         conf.resources.cores = Some(shards);
     }
+    // generate this workload's certificate beside its storage, if it is an encrypted arm
+    //
+    // one per workload per run rather than one committed fixture, for the reason the integration
+    // tests give: a checked in certificate has an expiry date that fails a capture years from now
+    // for a reason nobody will connect to this file
+    if overrides.tls {
+        conf.networking.tls = Some(write_certificate(&conf, &subdir)?);
+    }
     if let Some(memory) = &overrides.memory {
         // through the builder rather than the field, because the field is a byte count and the
         // override is written the way `shoal.yml` writes it
@@ -95,6 +104,57 @@ pub fn resolve(base: &Path, id: &str, overrides: &ConfOverrides, port: u16) -> R
             .map_err(|error| anyhow::anyhow!("{memory} is not a memory size: {error:?}"))?;
     }
     Ok(conf)
+}
+
+/// Write a self signed certificate for an encrypted workload beside its storage
+///
+/// Returns where the two files landed, which is what the server is pointed at and what the client
+/// trusts. The certificate is its own authority, since a benchmark has no PKI and does not need
+/// one — what is being measured is the record layer, not the trust decision.
+///
+/// # Arguments
+///
+/// * `conf` - The configuration being resolved, which names where this workload's storage is
+/// * `subdir` - This workload's own subdirectory
+fn write_certificate(conf: &Conf, subdir: &str) -> Result<TlsServerOptions> {
+    // put the pair beside the storage this workload already owns, so a run cleans up with it
+    let dir = conf
+        .storage
+        .default
+        .filesystem
+        .latency_sensitive
+        .path
+        .clone();
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("failed to create {} for {subdir}", dir.display()))?;
+    let issued = rcgen::generate_simple_self_signed(vec![
+        "localhost".to_owned(),
+        "127.0.0.1".to_owned(),
+    ])
+    .context("failed to generate a certificate")?;
+    let cert = dir.join("bench-cert.pem");
+    let key = dir.join("bench-key.pem");
+    std::fs::write(&cert, issued.cert.pem())
+        .with_context(|| format!("failed to write {}", cert.display()))?;
+    std::fs::write(&key, issued.key_pair.serialize_pem())
+        .with_context(|| format!("failed to write {}", key.display()))?;
+    Ok(TlsServerOptions { cert, key })
+}
+
+/// What a client needs to reach a server this configuration describes
+///
+/// Returns `None` for a plaintext listener, which is every workload but the TLS transport arms.
+/// The certificate is its own authority, so the client trusts the same file the server presents.
+///
+/// # Arguments
+///
+/// * `conf` - The configuration a server was started with
+pub fn client_tls(conf: &Conf) -> Option<TlsClientOptions> {
+    // the name asked for is the one the certificate carries rather than the loopback address
+    conf.networking
+        .tls
+        .as_ref()
+        .map(|tls| TlsClientOptions::new(&tls.cert).server_name("localhost"))
 }
 
 /// Summarizes a configuration into the facts the artifact records
@@ -113,6 +173,9 @@ pub fn facts(conf: &Conf) -> ConfFacts {
         shards: conf.resources.cores.unwrap_or(0) as u64,
         memory: binary_size(conf.resources.memory as u64),
         durability: durability.to_string(),
+        // without this an encrypted capture and a plaintext one are indistinguishable in the
+        // artifact, which is the same rule `hotpath` and `stage-profile` builds already follow
+        tls: conf.networking.tls.is_some(),
         digest: digest(conf),
     }
 }

@@ -169,9 +169,12 @@ reserved `ErrorCode::Shedding` for exactly this. What is left here is the bound 
 
 ### Instrumentation
 
-Spans and `hotpath` scopes in `client.rs`, and the `transport/*` workloads. This is step 0 of the
-whole chapter and it is listed last here only because it is not a pool feature — it is the
-precondition for knowing whether anything above cost anything.
+Spans and `hotpath` scopes in `client.rs`, and ~~the `transport/*` workloads~~ — those are **built**
+([F13](../features/transport-workloads.md)). This is step 0 of the whole chapter and it is listed
+last here only because it is not a pool feature — it is the precondition for knowing whether
+anything above cost anything. **Half of step 0 is now done**: a change to the pool can be measured
+end to end at four transport modes and two row widths. The spans are what remain, and they are what
+would say which part of a moved number was the pool rather than the wire.
 
 ## Recommendation
 
@@ -185,9 +188,9 @@ landed in both halves ([F10](../features/framing-and-protocol-evolution.md),
 | **Impact** | Argued for the performance of it; the value is correctness under failure, which no benchmark reports |
 | **Difficulty** | L — contained to `client.rs` and the new builder, except for the pieces that need D2's message types |
 | **Depends on** | ~~[D2](framing.md) for `Ping`, `Cancel`, `GoAway`~~ — **satisfied**, all three are defined and unwired since [F10](../features/framing-and-protocol-evolution.md), so each is a call site rather than a flag day; ~~still [D2](framing.md#the-error-channel) for the error channel~~ — also satisfied, by [F11](../features/error-channel.md). **Nothing on this page is blocked on the wire format any more** |
-| **Blocks** | [D3](authentication.md) and [D4](encryption.md) need the builder to put credentials and TLS into. [D7](shard-aware-routing.md) needs this pool before it can reshard it |
+| **Blocks** | ~~[D3](authentication.md) and [D4](encryption.md) need the builder to put credentials and TLS into.~~ **Both shipped without it**, and the seam they left is `ClientOptions` + `Shoal::with_options` ([F14](../features/encryption-in-transit.md)) — a struct holding credentials and TLS and nothing else. This builder should **absorb** that rather than sit beside it: deadlines, pool sizing and health checks belong on the same object, and a second options type would be the third way to configure a client. [D7](shard-aware-routing.md) needs this pool before it can reshard it |
 | **Tradeoff** | Contained — a deadline turns an indefinite wait into an error, which is a behaviour change callers must handle |
-| **Benchmark** | `transport/*`, unbuilt. **A deadline check on the hot path is the one piece here that could cost something measurable** |
+| **Benchmark** | ~~`transport/*`, unbuilt~~ — **built** ([F13](../features/transport-workloads.md)). **A deadline check on the hot path is the one piece here that could cost something measurable**, and `macro/transport/send_one/small` is where it would show: the narrow arm is the one where a fixed per-query cost is not buried under the bytes |
 
 The builder, `Drop`, and the endpoint list can all be done today, without D2. Everything else waits
 on a message type.
@@ -222,10 +225,11 @@ on a message type.
 
 Two different questions, and only one of them is a benchmark.
 
-**Does it cost anything?** `transport/{send_one,send_batched,stream,stream_unordered}` plus spans in
-`client.rs` ([TODOs](../appendix/todos.md#benchmark-coverage-the-harness-does-not-have),
-[O28](../appendix/optimizations.md#o28-the-client-takes-two-guards-on-its-response-map-for-every-query-it-sends)).
-The deadline check is the piece to watch.
+**Does it cost anything?** `transport/{send_one,send_batched,stream,stream_unordered}` — **built**
+([F13](../features/transport-workloads.md)) — plus spans in `client.rs`
+([O28](../appendix/optimizations.md#o28-the-client-takes-two-guards-on-its-response-map-for-every-query-it-sends)),
+which are not. The deadline check is the piece to watch, and the `small` arm of each mode is where
+to watch it: a fixed per-query cost is visible at 256 bytes and vanishes at a MiB.
 
 **Does it work?** Not a benchmark — a test, and the client has none for this. The streaming APIs
 have [no test at all](../appendix/test-coverage.md#the-streaming-client-apis), which is why item 60

@@ -33,7 +33,8 @@ O13's quadratic term as anything but an argument from the source.
 
 Fifteen purpose-built workloads live in `shoal-bench`, each isolating one path through the engine,
 each building its own rows from a seed. [F9](ephemeral-tables.md) has since added eight more —
-storage-free controls for the workloads below — bringing the set to twenty-three.
+storage-free controls for the workloads below — and [F13](transport-workloads.md) eight more again,
+over the client's four transport modes at two row widths, bringing the set to thirty-one.
 
 | Workload | Timing | Isolates |
 | --- | --- | --- |
@@ -204,10 +205,14 @@ in. A second workload opting in would double the cost of the two most expensive 
 for a profile that largely repeats the first.
 
 **A capture is much longer than it was.** Fifteen workloads times five runs is 75 server
-lifecycles, where before it was five. [F9](ephemeral-tables.md) took it to twenty-three and 115.
+lifecycles, where before it was five. [F9](ephemeral-tables.md) took it to twenty-three and 115,
+and [F13](transport-workloads.md) to thirty-one and 155 — the largest step in wall clock of the
+three, because its large arm seeds 512 MiB and moves two gigabytes over the wire per run.
 
-**No workload covers** sort-key selection, projections, transport modes, durability, update, delete,
-exists, compaction or recovery. Each is filed in [Todos](../appendix/todos.md) with its reason.
+**No workload covers** sort-key selection, projections, ~~transport modes,~~ durability, update,
+delete, exists, compaction or recovery. Transport modes are covered by
+[F13](transport-workloads.md). Each of the rest is filed in [Todos](../appendix/todos.md) with its
+reason.
 
 ## Invariants to uphold
 

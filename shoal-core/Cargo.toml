@@ -72,5 +72,20 @@ rand = "0.8"
 subtle = "2"
 nucleo-matcher = { version = "0.3", optional = true }
 
+# encryption dependencies
+#
+# rustls performs the handshake and nothing else - once the keys are handed to the kernel it is
+# out of the data path entirely, which is what keeps the response read copy free
+# (F14). `aws-lc-rs` is the provider rather than `ring` because it is rustls' own default and
+# because a userspace fallback, if one is ever needed, wants its AES-GCM assembly.
+#
+# note that `tonic`'s `tls-roots` already puts rustls 0.20 in the graph. two majors coexist, and
+# nothing here is reachable from `shared::protocol`, which has to stay on `core` and `uuid`
+rustls = { version = "0.23", default-features = false, features = ["std", "aws-lc-rs", "logging"] }
+rustls-pki-types = "1"
+rustls-pemfile = "2"
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = "3"
+rcgen = { version = "0.13", default-features = false, features = ["crypto", "aws_lc_rs", "pem"] }

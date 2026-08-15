@@ -89,7 +89,7 @@ certificate rotation, which a datacenter already has machinery for.
 | **Depends on** | ~~[D2](framing.md) for the handshake~~ — **satisfied**, the handshake and the `Auth`/`AuthResponse` discriminants landed with [F10](../features/framing-and-protocol-evolution.md); [D4](encryption.md) if mTLS is the mechanism |
 | **Blocks** | ~~per-table authorization, quotas, and any audit log worth keeping~~ — **unblocked** by [F12](../features/authentication.md), which produces a `Principal`. None of the three are built |
 | **Tradeoff** | Contained — a connection either authenticates or is refused, and the failure is at connect time. **Held**: the whole of F12 is off unless a config asks for it |
-| **Benchmark** | `transport/*`, unbuilt. The cost is per connection, not per query, so this is the one item here a query benchmark would not see. **Still true after the build** — see [O30](../appendix/optimizations.md) |
+| **Benchmark** | ~~`transport/*`, unbuilt.~~ Built ([F13](../features/transport-workloads.md)) — **and it does not help here**, which is the point this row was always making. The cost is per connection, not per query, so it is the one item in this chapter a query benchmark cannot see however many of them exist. **Still true after the build, and still true after F13** — see [O30](../appendix/optimizations.md) |
 
 ~~The ordering matters and is the reason this page is ranked behind [D4](encryption.md): the
 encryption decision makes the authentication decision.~~
@@ -128,7 +128,14 @@ ten eagerly-idle connections is a startup cost the client does not have today, a
 precisely when an application is starting and is least tolerant of latency. Three mitigations, in
 order of value:
 
-- **TLS session resumption**, so only the first connection pays a full handshake.
+- ~~**TLS session resumption**, so only the first connection pays a full handshake.~~
+  **Unavailable in the form encryption actually shipped.**
+  [F14](../features/encryption-in-transit.md) took kTLS, and a TLS 1.3 server sends
+  `NewSessionTicket` *after* the handshake — on a socket the kernel has taken over that is a non
+  application record, and a plain `read` fails it with `EIO`. So `send_tls13_tickets = 0`, and the
+  first and most valuable of these three mitigations is gone. Neither page saw this coming: it is
+  the second time an interaction between these two features was missed, the first being the
+  ordering argument struck through above.
 - **A re-auth ticket** issued on first authentication and accepted in `Hello` on subsequent
   connections of the same client, collapsing SCRAM's rounds to one.
 - **Lower `min_idle`**, which [D6](connection-pool.md) makes configurable anyway.
@@ -172,6 +179,10 @@ reconnect path was touched.
 ~~[D2](framing.md), for `Hello`, `Auth`, and `AuthResponse`.~~ Satisfied by
 [F10](../features/framing-and-protocol-evolution.md).
 
+**D4 has since been built** ([F14](../features/encryption-in-transit.md)), so the mTLS half is
+unblocked and still unbuilt — `AuthMechanism::MutualTls` is still defined and still refused, and
+turning it on is now genuinely the new arm in two matches this page predicted.
+
 ~~[D4](encryption.md), if the recommendation is taken as written~~ — and note this is the chapter's
 only *soft* edge: SCRAM over plaintext is a coherent deployment and was designed for exactly that,
 so D3 can ship without D4 if the mTLS half is deferred. **That is what happened.** D4 is still what
@@ -193,8 +204,10 @@ Connection establishment cost, which no existing benchmark reports. The macro la
 queries against an already-warm pool, so a handshake that costs milliseconds would be invisible to
 every number in [Benchmark Results](../operations/benchmark-results.md). If this is built, the
 thing to add is not a query workload but a *connect* workload — time to first successful query from
-a cold client — and it is the one measurement in this chapter that the planned `transport/*`
-workloads would still not provide.
+a cold client — and it is the one measurement in this chapter that the ~~planned~~ `transport/*`
+workloads would still not provide. **They are now built and this prediction held**:
+[F13](../features/transport-workloads.md) opens its pool before it samples anything, exactly as
+every other macro workload does, so a handshake cost is still outside every number it reports.
 
 **It was built and this is still unmeasured.** The connect workload does not exist, so the cost
 [F12](../features/authentication.md#performance) added is bounded by arithmetic and not by a

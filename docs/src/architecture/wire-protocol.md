@@ -2,8 +2,10 @@
 
 Shoal speaks a framed binary protocol over TCP. Every frame opens with the same eight bytes; a
 connection opens with a handshake that agrees a protocol version, a schema, and — since
-[F12](../features/authentication.md) — optionally an authentication mechanism. There is no
-encryption.
+[F12](../features/authentication.md) — optionally an authentication mechanism. Since
+[F14](../features/encryption-in-transit.md) the whole of it can run inside TLS 1.3, which is
+established before the first byte of this format crosses and which the format itself knows nothing
+about: the kernel does the record layer, so every layout below describes plaintext either way.
 
 The format lives in one place — `shoal-core/src/shared/protocol.rs`, with `protocol/handshake.rs`,
 `protocol/fingerprint.rs`, `protocol/error.rs` and `protocol/auth.rs` beside it. It depends on
@@ -408,9 +410,12 @@ concatenated, on either direction of the connection. The encoders return stack a
 
 - ~~**No authentication, no TLS.**~~ Half built as [F12](../features/authentication.md): a server
   can require SCRAM-SHA-256 and refuse a client that cannot do it, and a connection that completes
-  one carries a `Principal`. **What is left is the larger half.** There is no TLS, so the username
+  one carries a `Principal`. **What is left is the larger half.** ~~There is no TLS, so the username
   and the whole exchange are visible to anything on the path
-  ([D4](../direction/encryption.md)); there is no authorization, so a principal that authenticated
+  ([D4](../direction/encryption.md))~~ — there is TLS now
+  ([F14](../features/encryption-in-transit.md)), and it is off unless a config asks, so on a default
+  deployment the username and the whole exchange are still visible on the path; there is no
+  authorization, so a principal that authenticated
   can still read and write *any* table; and a server with no `auth` section — which is the default
   and every deployment today — still lets anything that reaches the port do anything.
 - ~~**No error responses.**~~ Built as [F11](../features/error-channel.md). What is left is that an

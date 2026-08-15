@@ -80,10 +80,14 @@ entry until a benchmark exists that would show the difference. This part inherit
 most pages have to answer *nothing can adjudicate this yet* — because `client.rs` carries no
 `tracing` spans and no `hotpath` scopes at all
 ([O28](../appendix/optimizations.md#o28-the-client-takes-two-guards-on-its-response-map-for-every-query-it-sends)),
-and the `transport/*`, `wire_codec`, and `routing` workloads that would give the client a number
-are unbuilt ([TODOs](../appendix/todos.md#benchmark-coverage-the-harness-does-not-have)). Saying so
-on every page is repetitive on purpose: it is the same missing thing each time, which is what makes
-it step 0 below.
+and ~~the `transport/*`, `wire_codec`, and `routing` workloads that would give the client a number
+are unbuilt~~ — `transport/*` is **built** ([F13](../features/transport-workloads.md)), `wire_codec`
+and `routing` are not ([TODOs](../appendix/todos.md#benchmark-coverage-the-harness-does-not-have)).
+Saying so on every page is repetitive on purpose: it is the same missing thing each time, which is
+what makes it step 0 below. **What F13 changed is which half is missing.** The client now has a
+bounded *total* at four transport modes and two row widths, so a change to it can be shown to have
+moved something. What it still has no way to do is *attribute* — a transport sample includes the
+server, and only the spans can separate them.
 
 The scorecard uses the axes and grades defined in
 [Optimizations](../appendix/optimizations.md#how-these-are-ranked) — `Impact` graded by what backs
@@ -98,7 +102,7 @@ since `XL` *means* "reaches the wire format, the on-disk format, or the client".
 | D1 | [The transport](transport.md) | Stay on TCP; QUIC's headline feature is already implemented in userspace and its crypto would end zero-copy |
 | D2 | [Framing and protocol evolution](framing.md) | An 8-byte header with a version, a type, and a bounded length — the keystone, and the flag day worth spending now |
 | D3 | [Authentication](authentication.md) | mTLS identity as the primary, SCRAM-SHA-256 for deployments with no PKI. **Half built** — [F12](../features/authentication.md) is the SCRAM half; mTLS waits on D4 |
-| D4 | [Encryption in transit](encryption.md) | rustls decrypting in place into the response buffer, so TLS does not cost the zero-copy path |
+| D4 | [Encryption in transit](encryption.md) | ~~rustls decrypting in place into the response buffer~~ — **no released rustls does that**; kTLS, with rustls doing only the handshake, so TLS does not cost the zero-copy path. **Built** as [F14](../features/encryption-in-transit.md) |
 | D5 | [Runtime portability](runtimes.md) | Split the crate first — the client is not tokio-portable, it is *glommio-infected*, and that is the real defect |
 | D6 | [A production connection pool](connection-pool.md) | Deadlines, real health checks, a builder, and a `Drop` — the most stability per unit of design risk |
 | D7 | [Shard-aware routing](shard-aware-routing.md) | Build it last, and measure the intra-node hop first, because it may be worth a microsecond |
@@ -128,12 +132,15 @@ designed for). They are ordered by convenience here, not by necessity.
 
 Step 0 is not a `D` item, and it is the most important line on this page.
 
-**0. Instrument the client.** `tracing` spans and `hotpath` scopes in `client.rs`, and the
-`transport/{send_one,send_batched,stream,stream_unordered}` workloads
-([TODOs](../appendix/todos.md#benchmark-coverage-the-harness-does-not-have)). Today every macro
+**0. Instrument the client.** `tracing` spans and `hotpath` scopes in `client.rs`, and
+~~the `transport/{send_one,send_batched,stream,stream_unordered}` workloads
+([TODOs](../appendix/todos.md#benchmark-coverage-the-harness-does-not-have))~~ — **the workloads are
+done** ([F13](../features/transport-workloads.md)), at eight rather than four, because a row-width
+axis turned out to decide whether they could answer [D4](encryption.md) at all. Today every macro
 number in [Benchmark Results](../operations/benchmark-results.md) includes the client and **none of
-them can attribute anything to it** — the total this chapter proposes to change has never been
-bounded. It is also the cheapest thing on the list. Nothing below can be judged until it is done.
+them can attribute anything to it** — the total this chapter proposes to change ~~has never been~~
+**is now** bounded, and the attribution is not. The spans are what remain, they are the cheapest
+thing on the list, and nothing below can be *attributed* until they are done.
 
 1. **[D5](runtimes.md)'s crate split.** Independent of everything else, closes [item
    54](../appendix/known-issues.md#54-shoaldb-needs-three-crates-the-caller-has-never-heard-of),
@@ -145,7 +152,20 @@ bounded. It is also the cheapest thing on the list. Nothing below can be judged 
 4. ~~**[D4](encryption.md), then [D3](authentication.md).** In that order, because the encryption
    decision is what makes the authentication decision.~~ **D3's SCRAM half was done first**, out of
    this order and without D4, because the ordering rested on the edge struck through above. What is
-   left here is **[D4](encryption.md)**, which now also carries D3's remaining half.
+   left here is **[D4](encryption.md)**, which now also carries D3's remaining half. **D4 has since
+   been built too**, as [F14](../features/encryption-in-transit.md) — so nothing remains at this
+   step. D3's mTLS half is unblocked and unbuilt, and is filed in
+   [TODOs](../appendix/todos.md) rather than left here, since it is now a missing feature rather
+   than a blocked design.
+
+   **D4's recommendation has since been corrected**, and the correction is worth reading before
+   starting any page in this chapter, because it is a failure of method rather than of judgement.
+   The page recommended rustls' unbuffered API on the strength of that API's documentation, which
+   describes it as letting the caller supply the buffers. It does — for ciphertext. The plaintext
+   still comes out of a `Vec` rustls owns, which the crate's own source says plainly and its
+   documentation does not. **A design page that argues from a dependency's prose rather than its
+   source is a page that can be confidently wrong**, and this chapter argues from dependencies on
+   almost every page. The corrected recommendation is kTLS.
 5. **[D8](typed-queries.md).** Entirely additive and parallel to all of the above. Its cheapest
    piece — the sealed bounds trait — could land any time.
 6. **[D7](shard-aware-routing.md).** Last, and only after `routing` says what the hop it removes is
