@@ -1,0 +1,30 @@
+[package]
+name = "shoal-client-check"
+version = "0.1.0"
+edition = "2021"
+description = "Proves a schema compiles against the client alone."
+license = "MIT"
+publish = false
+
+[lib]
+name = "shoal_client_check"
+path = "src/lib.rs"
+
+# This manifest is the test.
+#
+# There is no glommio here, no kanal, no uuid, no gxhash and no shoal-core. If a server path ever
+# creeps back into the client half of `#[shoal::db]`, this crate fails to resolve the crate it
+# names and the workspace build breaks - which is the everyday guard, and the regression that
+# will actually happen.
+#
+# The stronger property, that no engine is in the dependency graph at all, is a build rather than
+# a test, because `cargo test --workspace` unifies features across members and would link one:
+#
+#     cargo check -p shoal-client-check --no-default-features
+#
+[dependencies]
+shoal = { version = "0.1.0", path = "../shoal", default-features = false }
+# a schema writes these two derives by hand. everything else the macros need arrives through
+# `shoal`, which is the whole point of this crate
+rkyv = { workspace = true }
+deepsize2 = { workspace = true }

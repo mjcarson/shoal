@@ -18,11 +18,12 @@
 // schema used to have to declare `glommio`, `uuid` and `deepsize2` itself, having never heard of
 // any of them.
 //
-// `gxhash` comes from the engine rather than the protocol on purpose, because it is what hashes
-// every partition key and the two crates would not agree - see known issue 65.
-pub use shoal_proto::{deepsize2, rkyv, serde_json, tracing, uuid};
+// `gxhash` is among them because a client hashes its own partition keys, so it cannot be gated
+// behind the engine - the regression crate catches that directly. See known issue 65 for why the
+// version it resolves to is pinned in two places rather than the workspace one.
+pub use shoal_proto::{deepsize2, gxhash, rkyv, serde_json, tracing, uuid};
 #[cfg(feature = "server")]
-pub use shoal_core::{glommio, gxhash, kanal, lru};
+pub use shoal_core::{glommio, kanal, lru};
 
 // The protocol: what both peers see. Present whether or not an engine is linked.
 pub use shoal_proto::shared::{self, traits};

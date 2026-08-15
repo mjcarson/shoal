@@ -19,6 +19,10 @@ shql-complete = ["dep:nucleo-matcher"]
 rkyv = { workspace = true }
 uuid = { workspace = true }
 deepsize2 = { workspace = true }
+# pinned to the same major shoal-core uses, deliberately. this is what hashes every partition
+# key, so the two crates disagreeing would mean a key hashed one way by the client and another
+# by the ring - see known issue 65
+gxhash = "2.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"

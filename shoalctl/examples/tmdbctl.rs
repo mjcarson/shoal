@@ -3,9 +3,7 @@
 use deepsize2::DeepSizeOf;
 use rkyv::{Archive, Deserialize, Serialize};
 use shoal::client::Shoal;
-use shoal::storage::FileSystem;
-use shoal::tables::{PersistentSortedTable, PersistentUnsortedTable};
-use shoal::{ShoalProjection, ShoalSortedTable, ShoalUnsortedTable, db};
+use shoal::{ShoalProjection, ShoalSortedTable, ShoalUnsortedTable};
 use std::sync::Arc;
 
 /// Deserialize a comma-space separated string into a Vec<String>
@@ -136,7 +134,7 @@ pub struct MovieByKeyword {
 }
 
 /// The tables we are adding to to shoal
-#[db]
+#[shoal::db(client)]
 pub struct Tmdb {
     /// A basic key value table
     #[shoal(projections(MovieSummary))]

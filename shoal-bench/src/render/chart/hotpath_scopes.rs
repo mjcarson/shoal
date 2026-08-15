@@ -104,8 +104,18 @@ pub fn draw(profile: &HotpathProfile) -> Result<String> {
 ///
 /// * `name` - The scope's full path
 fn shorten(name: &str) -> String {
-    // the crate prefix is the same for every scope in the profile and carries no information
-    let trimmed = name.strip_prefix("shoal::").unwrap_or(name);
+    // The crate prefix is the same for every scope in the profile and carries no information.
+    //
+    // Every prefix a scope can start with is listed, not just the one the scopes happen to use
+    // today. Until F15 this stripped `shoal::` alone, which no real scope has ever started with -
+    // `hotpath` names them after the crate they are compiled in, and that is `shoal_core` - so
+    // the strip silently did nothing and every label spent twelve of its characters saying so.
+    // A scope that moves into another crate must not quietly re-break it.
+    const PREFIXES: [&str; 3] = ["shoal_core::", "shoal_client::", "shoal_proto::"];
+    let trimmed = PREFIXES
+        .iter()
+        .find_map(|prefix| name.strip_prefix(prefix))
+        .unwrap_or(name);
     // plotters estimates text extents rather than measuring them, so a long label is a label that
     // overlaps its neighbour. keep the tail, which is the part that identifies the scope.
     const LIMIT: usize = 46;
@@ -207,13 +217,35 @@ mod tests {
     }
 
     /// A long scope path is shortened from the front, keeping what identifies it
+    ///
+    /// Spelled with the prefix real scopes actually carry. The earlier version of this test used
+    /// `shoal::`, which no capture has ever contained, so it agreed with a strip that did nothing.
     #[test]
     fn a_long_scope_is_shortened_from_the_front() {
-        assert_eq!(shorten("shoal::server::shard::handle_query"), "server::shard::handle_query");
-        let long = shorten("shoal::server::tables::storage::fs::stream::write_helper_with_a_long_name");
+        assert_eq!(
+            shorten("shoal_core::server::shard::handle_query"),
+            "server::shard::handle_query"
+        );
+        let long = shorten(
+            "shoal_core::server::tables::storage::fs::stream::write_helper_with_a_long_name",
+        );
         assert!(long.starts_with('…'), "{long}");
         assert!(long.ends_with("write_helper_with_a_long_name"), "{long}");
         assert!(long.chars().count() <= 46);
+    }
+
+    /// A scope from any of the three crates loses its prefix
+    ///
+    /// Every `#[hotpath::measure]` site is in `shoal-core` today, so the other two are here to
+    /// keep the strip honest if one ever moves - a scope that silently kept its prefix would
+    /// shorten differently and read as a different scope on the chart.
+    #[test]
+    fn a_scope_from_any_crate_loses_its_prefix() {
+        assert_eq!(shorten("shoal_core::server::shard::reply"), "server::shard::reply");
+        assert_eq!(shorten("shoal_proto::shared::protocol::decode_response"), "shared::protocol::decode_response");
+        assert_eq!(shorten("shoal_client::client::send"), "client::send");
+        // and something from outside the workspace is left exactly as it came
+        assert_eq!(shorten("glommio::io::read_at"), "glommio::io::read_at");
     }
 
     /// A profile with nothing in it is an error rather than an empty chart

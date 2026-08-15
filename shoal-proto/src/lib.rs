@@ -18,11 +18,12 @@ pub use client::FromShoal;
 // The crates the generated code names by path, re-exported so a schema resolves the exact
 // versions these trait signatures were compiled against rather than whatever its own manifest
 // happened to pick. See known issue 54.
-// gxhash is deliberately absent. Partition keys are hashed with the one `shoal-core` pins, and
-// that pin is a different major to the workspace one - see known issue 65. Re-exporting a second
-// gxhash from here would make which one hashes a partition key depend on which re-export the
-// facade happened to pick, and changing that silently rehashes every persisted dataset.
+// gxhash is pinned here to the same major `shoal-core` uses rather than to the workspace one,
+// which is a different major again - see known issue 65. It has to come from this crate because
+// `PartitionKeySupport` lives here and a client hashes its own partition keys, and there has to
+// be exactly one of it, because two would mean the client and the ring hashing a key differently.
 pub use deepsize2;
+pub use gxhash;
 pub use rkyv;
 pub use serde_json;
 pub use tracing;

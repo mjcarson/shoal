@@ -10,10 +10,8 @@ use ratatui::backend::TestBackend;
 use ratatui::layout::Rect;
 use ratatui::style::Modifier;
 use rkyv::{Archive, Deserialize, Serialize};
-use shoal::storage::FileSystem;
-use shoal::tables::{PersistentSortedTable, PersistentUnsortedTable};
 use shoal::traits::QuerySupport;
-use shoal::{ShoalProjection, ShoalSortedTable, ShoalUnsortedTable, db};
+use shoal::{ShoalProjection, ShoalSortedTable, ShoalUnsortedTable};
 use shoalctl::components::{
     CompletionMenu, ErrorBar, QueryError, QueryRow, Tab, TabContent, TabQueryBar, layout_query,
 };
@@ -110,7 +108,7 @@ pub struct MovieSummary {
 }
 
 /// The database the query box is completing against
-#[db]
+#[shoal::db(client)]
 pub struct TestDb {
     /// The unsorted movie table
     #[shoal(projections(MovieSummary))]

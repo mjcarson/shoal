@@ -5,11 +5,20 @@
 //!
 //! # Example
 //!
+//! The schema below is written with `#[shoal::db(client)]`, which emits everything needed to
+//! *talk* to a database and nothing needed to *be* one. That is what lets this crate depend on
+//! `shoal` with `default-features = false` and link no storage engine at all (F15).
+//!
+//! Note what is not imported. `PersistentSortedTable` and `FileSystem` appear in field position
+//! and nowhere else: the macro reads their names and discards them, because it never emits the
+//! struct. **A `use shoal::tables::…` or `use shoal::storage::…` would not compile here**, since
+//! neither module exists without the `server` feature.
+//!
 //! ```no_run
 //! use std::sync::Arc;
 //! use deepsize2::DeepSizeOf;
 //! use rkyv::{Archive, Deserialize, Serialize};
-//! use shoal::{Shoal, ShoalSortedTable, PersistentSortedTable, FileSystem};
+//! use shoal::{Shoal, ShoalSortedTable};
 //!
 //! /// A simple sorted table for testing
 //! #[derive(
@@ -29,11 +38,11 @@
 //!     pub data: String,
 //! }
 //!
-//! /// The test database schema
-//! #[shoal::db]
+//! /// The test database schema, client half only
+//! #[shoal::db(client)]
 //! pub struct TestDb {
 //!     /// The sorted test table
-//!     pub test_records: PersistentSortedTable<TestRecord, FileSystem, TestDbTableNames>,
+//!     pub test_records: PersistentSortedTable<TestRecord, FileSystem>,
 //! }
 //!
 //! #[tokio::main]

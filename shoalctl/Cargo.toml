@@ -11,8 +11,9 @@ ratatui = "0.30.0"
 ratatui-hypertile = "0.2"
 unicode-width = "0.2"
 rkyv = "0.8"
-shoal = { path = "../shoal" }
-shoal-core = { path = "../shoal-core", features = ["shql-complete"] }
+# no engine. this is a terminal UI that opens a connection and sends queries - it has no shard,
+# no storage and no reason to compile io_uring, which it did until F15
+shoal = { path = "../shoal", default-features = false, features = ["shql-complete"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 uuid = { version = "1.11", features = ["v4"] }
 
