@@ -1,0 +1,7 @@
+# Cargo settings for the Shoal workspace.
+#
+# These rustflags used to live in a [build] table in the workspace Cargo.toml, where cargo
+# silently ignores them. Every benchmark taken before this file existed was built without
+# them, so a number from before it and a number from after it are not comparable.
+[build]
+rustflags = ["-Ctarget-cpu=native"]

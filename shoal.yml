@@ -1,0 +1,31 @@
+# The benchmark configuration for Shoal.
+#
+# This file is the record of what a baseline measured. Changing it invalidates every number in
+# docs/src/operations/performance-baseline.md, so change it deliberately and re-capture.
+#
+# Core layout on the development machine (Ryzen 9 9950X, 16 physical cores, 32 threads, where
+# cpu n and cpu n+16 are the two threads of physical core n):
+#
+#   cpu 0        coordinator, never gets a shard
+#   cores 0-11   12 shards, one per physical core
+#   cores 12-15  left free for the client's tokio workers (--client-cores 28,29,30,31)
+#
+# `exclude_cores` filters on the physical core id, so excluding a core drops both of its
+# threads. That is what makes the split clean: the client cores are not SMT siblings of any
+# core a shard is running on.
+resources:
+  cores: 12
+  exclude_cores: [12, 13, 14, 15]
+  memory: "4Gi"
+storage:
+  default:
+    filesystem:
+      latency_sensitive:
+        path: "/opt/shoal"
+        buffer_size: 4096
+      throughput_sensitive:
+        path: "/opt/shoal"
+tracing:
+  level: Info
+  #remote:
+  #  Grpc: "http://172.16.0.193:4318/v1/traces"
