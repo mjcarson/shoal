@@ -46,7 +46,8 @@ use crate::server::stage_profile::StageDurability;
 #[cfg(feature = "stage-profile")]
 use crate::server::stage_profile::StageStamps;
 use crate::server::{Conf, ServerError};
-use crate::shared::traits::{PartitionKeySupport, RkyvSupport, ShoalDatabase, TableNameSupport};
+use crate::server::database::ShoalDatabase;
+use crate::shared::traits::{PartitionKeySupport, RkyvSupport, TableNameSupport};
 use crate::storage::{FullArchiveMap, LoaderMsg, Loaders};
 use crate::tables::partitions::{MaybeLoaded, PartitionSupport};
 

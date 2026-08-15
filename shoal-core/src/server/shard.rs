@@ -34,6 +34,7 @@ use tracing::{event, instrument, Level, Span};
 use uuid::Uuid;
 
 use super::messages::{QueryMetadata, ServerMsg};
+use super::database::ShoalDatabase;
 use super::ring::Ring;
 use super::routing::ShardRouting;
 use super::stage_profile::{self, StageStamps, Stamp};
@@ -52,9 +53,7 @@ use crate::{
             handshake, ProtocolError,
         },
         queries::Queries,
-        traits::{
-            QuerySupport, RkyvSupport, ShoalDatabase, ShoalQuerySupport, ShoalResponseSupport,
-        },
+        traits::{QuerySupport, RkyvSupport, ShoalQuerySupport, ShoalResponseSupport},
     },
     storage::{FullArchiveMap, LoaderMsg, Loaders},
 };

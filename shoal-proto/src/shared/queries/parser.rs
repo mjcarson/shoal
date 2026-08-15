@@ -36,7 +36,7 @@
 //! # Parsing a query
 //!
 //! ```
-//! use shoal_core::shared::queries::parser::ParsedSelect;
+//! use shoal_proto::shared::queries::parser::ParsedSelect;
 //!
 //! let parsed = ParsedSelect::new("SELECT * FROM Movie WHERE id = 550 LIMIT 10")?;
 //!
@@ -44,7 +44,7 @@
 //! assert_eq!(parsed.conditions.len(), 1);
 //! assert_eq!(parsed.conditions[0].field, "id");
 //! assert_eq!(parsed.limit, Some(10));
-//! # Ok::<(), shoal_core::client::ShqlParseError>(())
+//! # Ok::<(), shoal_proto::client::ShqlParseError>(())
 //! ```
 //!
 //! # Choosing between values
@@ -53,19 +53,19 @@
 //! reading every one of those partitions:
 //!
 //! ```
-//! use shoal_core::shared::queries::parser::ParsedSelect;
+//! use shoal_proto::shared::queries::parser::ParsedSelect;
 //!
 //! let parsed = ParsedSelect::new("SELECT * FROM Movie WHERE id IN (550, 551)")?;
 //!
 //! assert_eq!(parsed.conditions.len(), 1);
 //! assert_eq!(parsed.conditions[0].values().count(), 2);
-//! # Ok::<(), shoal_core::client::ShqlParseError>(())
+//! # Ok::<(), shoal_proto::client::ShqlParseError>(())
 //! ```
 //!
 //! `OR` is spelled differently and means the same thing, so it folds into the same clause:
 //!
 //! ```
-//! use shoal_core::shared::queries::parser::ParsedSelect;
+//! use shoal_proto::shared::queries::parser::ParsedSelect;
 //!
 //! let with_or = ParsedSelect::new("SELECT * FROM Movie WHERE id = 550 OR id = 551")?;
 //! let with_in = ParsedSelect::new("SELECT * FROM Movie WHERE id IN (550, 551)")?;
@@ -75,7 +75,7 @@
 //!     with_or.conditions[0].values().count(),
 //!     with_in.conditions[0].values().count(),
 //! );
-//! # Ok::<(), shoal_core::client::ShqlParseError>(())
+//! # Ok::<(), shoal_proto::client::ShqlParseError>(())
 //! ```
 //!
 //! # Bounding a field
@@ -85,14 +85,14 @@
 //! is a membership test - but the grammar itself does not know about roles:
 //!
 //! ```
-//! use shoal_core::shared::queries::parser::ParsedSelect;
+//! use shoal_proto::shared::queries::parser::ParsedSelect;
 //!
 //! let parsed = ParsedSelect::new("SELECT * FROM Review WHERE movie = 550 AND reviewer > 'a'")?;
 //!
 //! let range = parsed.conditions[1].as_range().expect("reviewer is bounded");
 //! assert!(!range.lower.as_ref().expect("a lower bound").inclusive);
 //! assert!(range.upper.is_none());
-//! # Ok::<(), shoal_core::client::ShqlParseError>(())
+//! # Ok::<(), shoal_proto::client::ShqlParseError>(())
 //! ```
 //!
 //! **A range is the one shape where `AND` may name a field twice.** The two comparisons bound
@@ -100,7 +100,7 @@
 //! clause per field:
 //!
 //! ```
-//! use shoal_core::shared::queries::parser::ParsedSelect;
+//! use shoal_proto::shared::queries::parser::ParsedSelect;
 //!
 //! let parsed = ParsedSelect::new(
 //!     "SELECT * FROM Review WHERE movie = 550 AND reviewer >= 'a' AND reviewer < 'm'",
@@ -110,33 +110,33 @@
 //! let range = parsed.conditions[1].as_range().expect("reviewer is bounded");
 //! assert!(range.lower.as_ref().expect("a lower bound").inclusive);
 //! assert!(!range.upper.as_ref().expect("an upper bound").inclusive);
-//! # Ok::<(), shoal_core::client::ShqlParseError>(())
+//! # Ok::<(), shoal_proto::client::ShqlParseError>(())
 //! ```
 //!
 //! Keywords are case-insensitive and the trailing semicolon is optional, so this is the same
 //! query:
 //!
 //! ```
-//! use shoal_core::shared::queries::parser::ParsedSelect;
+//! use shoal_proto::shared::queries::parser::ParsedSelect;
 //!
 //! let parsed = ParsedSelect::new("select * from Movie where id = 550 limit 10;")?;
 //!
 //! assert_eq!(parsed.table_name, "Movie");
 //! assert_eq!(parsed.limit, Some(10));
-//! # Ok::<(), shoal_core::client::ShqlParseError>(())
+//! # Ok::<(), shoal_proto::client::ShqlParseError>(())
 //! ```
 //!
 //! Conditions on different fields are joined with `AND` and kept in the order they were
 //! written:
 //!
 //! ```
-//! use shoal_core::shared::queries::parser::ParsedSelect;
+//! use shoal_proto::shared::queries::parser::ParsedSelect;
 //!
 //! let parsed = ParsedSelect::new("SELECT * FROM Movie WHERE id = 550 AND title = 'Alien'")?;
 //!
 //! let fields: Vec<&str> = parsed.conditions.iter().map(|c| c.field.as_str()).collect();
 //! assert_eq!(fields, vec!["id", "title"]);
-//! # Ok::<(), shoal_core::client::ShqlParseError>(())
+//! # Ok::<(), shoal_proto::client::ShqlParseError>(())
 //! ```
 //!
 //! # Two stages

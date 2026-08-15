@@ -195,7 +195,7 @@ impl Credentials {
     /// # Examples
     ///
     /// ```
-    /// use shoal_core::shared::auth::Credentials;
+    /// use shoal_proto::shared::auth::Credentials;
     ///
     /// let creds = Credentials::scram("reader", "hunter2");
     /// ```

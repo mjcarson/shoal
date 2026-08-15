@@ -13,7 +13,7 @@ use crate::server::messages::ServerMsg;
 #[cfg(feature = "stage-profile")]
 use crate::server::stage_profile::{StageStamps, Stamp};
 use crate::server::ServerError;
-use crate::shared::traits::ShoalDatabase;
+use crate::server::database::ShoalDatabase;
 
 /// The sentinel written in place of a size header at the start of a pad region
 ///

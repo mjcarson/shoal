@@ -103,6 +103,7 @@ pub enum MessageType {
 
 impl MessageType {
     /// Get the byte this message type is written as
+    #[inline]
     pub const fn as_byte(self) -> u8 {
         self as u8
     }
@@ -112,6 +113,7 @@ impl MessageType {
     /// # Arguments
     ///
     /// * `raw` - The byte to parse a message type from
+    #[inline]
     pub const fn from_byte(raw: u8) -> Result<Self, ProtocolError> {
         // map each known discriminant back to its variant
         match raw {
@@ -133,6 +135,7 @@ impl MessageType {
     }
 
     /// Get the name of this message type
+    #[inline]
     pub const fn name(self) -> &'static str {
         match self {
             MessageType::Hello => "Hello",
@@ -197,11 +200,13 @@ impl Flags {
     /// # Arguments
     ///
     /// * `raw` - The raw bits to build a flag set from
+    #[inline]
     pub const fn from_bits(raw: u16) -> Self {
         Flags(raw)
     }
 
     /// Get the raw bits of this flag set
+    #[inline]
     pub const fn bits(self) -> u16 {
         self.0
     }
@@ -211,6 +216,7 @@ impl Flags {
     /// # Arguments
     ///
     /// * `other` - The flags to check for
+    #[inline]
     pub const fn contains(self, other: Flags) -> bool {
         self.0 & other.0 == other.0
     }
@@ -220,6 +226,7 @@ impl Flags {
     /// # Arguments
     ///
     /// * `other` - The flags to add to this set
+    #[inline]
     pub const fn union(self, other: Flags) -> Self {
         Flags(self.0 | other.0)
     }
@@ -355,6 +362,7 @@ impl RawHeader {
     /// # Arguments
     ///
     /// * `raw` - The eight header bytes to read
+    #[inline]
     pub const fn decode(raw: &[u8; HEADER_LEN]) -> Self {
         RawHeader {
             version: raw[0],
@@ -369,6 +377,7 @@ impl RawHeader {
     /// # Arguments
     ///
     /// * `max_frame_bytes` - The largest frame we are willing to allocate for
+    #[inline]
     pub const fn validate(self, max_frame_bytes: u32) -> Result<Header, ProtocolError> {
         // refuse a version we do not speak before we try to make sense of anything else
         if self.version != PROTOCOL_VERSION {
@@ -424,6 +433,7 @@ impl Header {
     /// * `body_len` - The number of bytes that will follow this header
     /// * `max_frame_bytes` - The largest frame the peer will accept
     #[allow(clippy::cast_possible_truncation)]
+    #[inline]
     pub const fn new(
         kind: MessageType,
         flags: Flags,
@@ -448,6 +458,7 @@ impl Header {
     }
 
     /// Write this header out as the eight bytes that go on the wire
+    #[inline]
     pub const fn encode(&self) -> [u8; HEADER_LEN] {
         // split our two multi byte fields into their little endian bytes
         let flags = self.flags.bits().to_le_bytes();
@@ -470,6 +481,7 @@ impl Header {
     ///
     /// * `raw` - The eight header bytes to read
     /// * `max_frame_bytes` - The largest frame we are willing to allocate for
+    #[inline]
     pub const fn decode(
         raw: &[u8; HEADER_LEN],
         max_frame_bytes: u32,
@@ -482,6 +494,7 @@ impl Header {
     /// # Arguments
     ///
     /// * `expected` - The message type this frame had to be
+    #[inline]
     pub const fn expect(self, expected: MessageType) -> Result<Self, ProtocolError> {
         // a frame of the wrong type is a peer that is out of step with us, not a corrupt frame
         if self.kind as u8 != expected as u8 {
@@ -494,6 +507,7 @@ impl Header {
     }
 
     /// Get the number of bytes that follow this header
+    #[inline]
     pub const fn body_len(&self) -> usize {
         self.len as usize
     }
@@ -535,6 +549,7 @@ pub struct ResponseFrame {
 ///
 /// * `payload_len` - The number of archived bytes that will follow this preamble
 /// * `max_frame_bytes` - The largest frame the server will accept
+#[inline]
 pub const fn request_preamble(
     payload_len: usize,
     max_frame_bytes: u32,
@@ -558,6 +573,7 @@ pub const fn request_preamble(
 /// * `query_id` - The query this response belongs to
 /// * `payload_len` - The number of archived bytes that will follow this preamble
 /// * `max_frame_bytes` - The largest frame the client will accept
+#[inline]
 pub fn response_preamble(
     query_id: &Uuid,
     payload_len: usize,
@@ -584,6 +600,7 @@ pub fn response_preamble(
 ///
 /// * `raw` - The preamble bytes to read
 /// * `max_frame_bytes` - The largest frame we are willing to allocate for
+#[inline]
 pub const fn decode_request(
     raw: &[u8; REQUEST_PREAMBLE_LEN],
     max_frame_bytes: u32,
@@ -607,6 +624,7 @@ pub const fn decode_request(
 ///
 /// * `raw` - The preamble bytes to read
 /// * `max_frame_bytes` - The largest frame we are willing to allocate for
+#[inline]
 pub fn decode_server_frame(
     raw: &[u8; RESPONSE_PREAMBLE_LEN],
     max_frame_bytes: u32,
@@ -644,6 +662,7 @@ pub fn decode_server_frame(
 ///
 /// * `raw` - The preamble bytes to read
 /// * `max_frame_bytes` - The largest frame we are willing to allocate for
+#[inline]
 pub fn decode_response(
     raw: &[u8; RESPONSE_PREAMBLE_LEN],
     max_frame_bytes: u32,

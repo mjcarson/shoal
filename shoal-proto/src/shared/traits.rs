@@ -21,10 +21,6 @@ use crate::shared::responses::{ArchivedResponseError, ResponseActionNames};
 pub use sorted::ShoalSortedTable;
 pub use unsorted::ShoalUnsortedTable;
 
-// re-exported at the path it was written at for a decade of callers, but it is a server trait
-// and it lives with the server now - see `crate::server::database`
-pub use crate::server::database::ShoalDatabase;
-
 /// Marker trait for Exists queries
 ///
 /// This trait is used to constrain the `exists` method on the Shoal client

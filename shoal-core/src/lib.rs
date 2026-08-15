@@ -2,8 +2,12 @@
 
 pub mod client;
 pub mod server;
-pub mod shared;
 mod utils;
+
+// The protocol is a crate of its own now, but from inside the server `shared` still means what it
+// always meant, so the whole of `server/` names it unchanged. This is not a compatibility shim -
+// it is how the engine refers to the wire format.
+pub use shoal_proto::shared;
 
 pub use client::FromShoal;
 pub use server::tables;

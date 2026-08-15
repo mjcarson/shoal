@@ -230,7 +230,7 @@ impl StoredCredential {
     /// # Examples
     ///
     /// ```
-    /// use shoal_core::shared::auth::{StoredCredential, DEFAULT_ITERATIONS};
+    /// use shoal_proto::shared::auth::{StoredCredential, DEFAULT_ITERATIONS};
     ///
     /// let stored = StoredCredential::from_password("hunter2", DEFAULT_ITERATIONS);
     /// assert_eq!(stored.iterations, DEFAULT_ITERATIONS);

@@ -26,7 +26,8 @@ use crate::server::messages::{QueryMetadata, ServerMsg};
 use crate::server::stage_profile::{StageDurability, StageStamps};
 use crate::server::{Conf, ServerError};
 use crate::shared::responses::{Response, ResponseAction};
-use crate::shared::traits::{PartitionKeySupport, RkyvSupport, ShoalDatabase, TableNameSupport};
+use crate::server::database::ShoalDatabase;
+use crate::shared::traits::{PartitionKeySupport, RkyvSupport, TableNameSupport};
 use crate::tables::partitions::{MaybeLoaded, PartitionSupport};
 
 /// An unblocked response

@@ -297,7 +297,7 @@ pub fn add(
     // build our ShoalDatabase impl
     stream.extend(quote! {
         #[automatically_derived]
-        impl ::shoal::shared::traits::ShoalDatabase for #struct_ident {
+        impl ::shoal::ShoalDatabase for #struct_ident {
             /// This databases external client type
             type ClientType = #client_ident;
 

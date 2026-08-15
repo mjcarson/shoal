@@ -256,7 +256,7 @@ fn tokenize(head: &str) -> Vec<Token> {
 /// # Examples
 ///
 /// ```
-/// use shoal_core::shared::queries::parser::{analyze, Expecting};
+/// use shoal_proto::shared::queries::parser::{analyze, Expecting};
 ///
 /// let query = "SELECT * FROM Movie WHERE ti";
 /// let context = analyze(query, query.len());

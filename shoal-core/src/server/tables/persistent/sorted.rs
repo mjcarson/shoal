@@ -35,10 +35,8 @@ use crate::server::ServerError;
 use crate::shared::queries::{SortedExists, SortedGet, SortedQuery};
 use crate::shared::queries::{SortedUpdate, UnsortedGet};
 use crate::shared::responses::{Response, ResponseAction, ResponseError};
-use crate::shared::traits::{
-    RkyvSupport, ShoalDatabase, ShoalProjection, ShoalSortedTable, ShoalTableSupport,
-    TableNameSupport,
-};
+use crate::server::database::ShoalDatabase;
+use crate::shared::traits::{RkyvSupport, ShoalProjection, ShoalSortedTable, ShoalTableSupport, TableNameSupport};
 use crate::storage::{
     FullArchiveMap, IntentReadSupport, LoaderMsg, Loaders, PendingResponse, RecoveryStats,
     ShouldPrune, StorageSupport,

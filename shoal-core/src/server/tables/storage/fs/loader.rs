@@ -14,7 +14,7 @@ use crate::server::messages::{LoadedPartition, LoadedPartitionKinds, ServerMsg};
 use crate::server::{ServerError, ShoalError};
 use crate::shared::protocol::error::ErrorCode;
 use crate::shared::responses::ResponseError;
-use crate::shared::traits::ShoalDatabase;
+use crate::server::database::ShoalDatabase;
 use crate::storage::fs::map::ArchiveEntry;
 use crate::storage::fs::ArchiveMap;
 use crate::storage::{FilteredFullArchiveMap, LoaderMsg};

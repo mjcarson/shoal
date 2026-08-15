@@ -33,10 +33,8 @@ pub use meta::StorageMeta;
 
 use crate::server::errors::ShoalError;
 
-use crate::shared::{
-    queries::Queries,
-    traits::{QuerySupport, ShoalDatabase},
-};
+use crate::server::database::ShoalDatabase;
+use crate::shared::{queries::Queries, traits::QuerySupport};
 
 /// A pool of ShoalDB shards
 pub struct ShoalPool<S: ShoalDatabase> {

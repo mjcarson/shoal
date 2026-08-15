@@ -25,7 +25,8 @@ use super::map::{ArchiveEntry, ArchiveMap, MapIntent, MapIntentKinds};
 use super::IntentLogReader;
 use crate::server::messages::ServerMsg;
 use crate::server::ServerError;
-use crate::shared::traits::{PartitionKeySupport, RkyvSupport, ShoalDatabase};
+use crate::server::database::ShoalDatabase;
+use crate::shared::traits::{PartitionKeySupport, RkyvSupport};
 use crate::storage::{CompactionJob, IntentReadSupport, RecoveryStats, ShouldPrune};
 
 /// The minimum size an active archive must be in order to be considered for compaction

@@ -10,7 +10,8 @@ use uuid::Uuid;
 use super::shard::{ShardContact, ShardInfo};
 use super::stage_profile::{StageStamps, Stamp};
 use crate::shared::responses::ResponseError;
-use crate::shared::traits::{QuerySupport, ShoalDatabase};
+use crate::server::database::ShoalDatabase;
+use crate::shared::traits::{QuerySupport};
 
 /// The metadata about a query from a client
 #[derive(Debug, Clone)]

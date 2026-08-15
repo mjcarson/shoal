@@ -11,8 +11,9 @@ default = ["server"]
 server = ["glommio"]
 # enable hotpath profiling
 hotpath = ["hotpath/hotpath"]
-# Enables SHQL autocompletion support for clients
-shql-complete = ["dep:nucleo-matcher"]
+# Enables SHQL autocompletion support for clients. The parser it turns on lives in the protocol
+# crate, so this only forwards - a server has no use for completion, but it is the same parser.
+shql-complete = ["shoal-proto/shql-complete"]
 # Re-exports crate private internals so the benches in shoal/benches can reach them.
 # This is not a supported API and carries no stability promise.
 bench = []
@@ -23,6 +24,7 @@ bench = []
 stage-profile = []
 
 [dependencies]
+shoal-proto = { version = "0.1.0", path = "../shoal-proto" }
 clap = { version = "4.2", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
@@ -70,7 +72,6 @@ pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
 base64 = "0.22"
 rand = "0.8"
 subtle = "2"
-nucleo-matcher = { version = "0.3", optional = true }
 
 # encryption dependencies
 #

@@ -1,0 +1,53 @@
+[package]
+name = "shoal-proto"
+version = "0.1.0"
+edition = "2021"
+description = "Shoal's wire format and the traits both peers share."
+license = "MIT"
+
+[lib]
+name = "shoal_proto"
+path = "src/lib.rs"
+
+[features]
+# SHQL autocompletion, which clients opt into
+shql-complete = ["dep:nucleo-matcher"]
+
+# No async runtime, no channels, no storage. Everything here is either the wire format, the
+# traits a schema implements, or a codec - see the crate docs for why that matters.
+[dependencies]
+rkyv = { workspace = true }
+uuid = { workspace = true }
+deepsize2 = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+# the SHQL parser
+winnow = "0.7"
+unicode-ident = "1"
+nucleo-matcher = { version = "0.3", optional = true }
+# SCRAM, both halves
+sha2 = "0.10"
+hmac = "0.12"
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+base64 = "0.22"
+rand = "0.8"
+subtle = "2"
+# TLS configuration and the record layer, neither of which does any I/O
+rustls = { version = "0.23", default-features = false, features = [
+    "std",
+    "aws-lc-rs",
+    "logging",
+] }
+rustls-pki-types = "1"
+rustls-pemfile = "2"
+libc = "0.2"
+
+[dev-dependencies]
+serde_yaml = "0.9"
+rcgen = { version = "0.13", default-features = false, features = [
+    "crypto",
+    "aws_lc_rs",
+    "pem",
+] }
+tempfile = "3"

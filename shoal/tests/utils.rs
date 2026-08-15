@@ -19,7 +19,8 @@ use shoal_core::server::conf::{
 use shoal_core::server::ServerError;
 use shoal_core::shared::queries::Queries;
 use shoal_core::shared::tls::TlsClientOptions;
-use shoal_core::shared::traits::{QuerySupport, ShoalDatabase};
+use shoal_core::server::database::ShoalDatabase;
+use shoal_core::shared::traits::QuerySupport;
 use shoal_core::storage::fs::conf::{
     FileSystemLatencyWriterConf, FileSystemTableConf, FileSystemThroughputWriterConf,
 };

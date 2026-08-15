@@ -78,6 +78,7 @@ pub const MAX_RECORD_LEN: usize = (1 << 14) + 2048;
 /// # Arguments
 ///
 /// * `header` - The five header bytes of a record
+#[inline]
 pub fn record_body_len(header: &[u8; RECORD_HEADER_LEN]) -> Result<usize, TlsError> {
     // the length is a big endian u16 at offsets 3..5, in every version of the protocol
     let len = u16::from_be_bytes([header[3], header[4]]) as usize;
@@ -238,7 +239,7 @@ impl TlsClientOptions {
     /// # Examples
     ///
     /// ```
-    /// use shoal_core::shared::tls::TlsClientOptions;
+    /// use shoal_proto::shared::tls::TlsClientOptions;
     ///
     /// let tls = TlsClientOptions::new("/etc/shoal/ca.pem").server_name("shoal.internal");
     /// ```

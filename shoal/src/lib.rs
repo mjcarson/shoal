@@ -31,7 +31,7 @@ pub use shoal_core::client::{
 
 // The server, and the engine it runs on
 pub use shoal_core::ShoalPool;
-pub use shoal_core::server::{self, Conf, routing::ShardRouting};
+pub use shoal_core::server::{self, Conf, database::ShoalDatabase, routing::ShardRouting};
 pub use shoal_core::storage::{self, FileSystem, NoStorage};
 pub use shoal_core::tables::{
     self, EphemeralSortedTable, EphemeralUnsortedTable, PersistentSortedTable,

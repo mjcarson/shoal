@@ -25,6 +25,7 @@
 //! drawn hollow and the caption counts them. An overhead curve drawn through overlapping intervals
 //! is a curve through noise, and it would look exactly like a real one.
 
+use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
 use anyhow::Result;
@@ -272,6 +273,8 @@ fn draw_overhead(
             [(min_x * 0.85, 0.0), (max_x * 1.2, 0.0)],
             palette::AXIS.stroke_width(1),
         ))?;
+        // where each curve ended, and what to call it, gathered before any label is placed
+        let mut ends: Vec<(f64, f64, String)> = Vec::with_capacity(series.len());
         for (index, (key, curve)) in series.iter().enumerate() {
             let colour = palette::series(index);
             chart.draw_series(LineSeries::new(
@@ -286,14 +289,36 @@ fn draw_overhead(
                 Circle::new((*x, *y), 3, colour.stroke_width(1))
             }))?;
             // labelled at the right hand end rather than in a legend, so a reader never has to
-            // match a colour to a name
+            // match a colour to a name. where each label goes is decided below, once every
+            // curve's end is known - two curves can end at the same cost, and two labels drawn
+            // at the same height are unreadable whichever colour they are
             if let Some((x, y, _)) = curve.last() {
-                chart.draw_series(std::iter::once(Text::new(
-                    series_label(*key),
-                    (*x * 1.08, *y),
-                    super::label_font(11),
-                )))?;
+                ends.push((*x * 1.08, *y, series_label(*key)));
             }
+        }
+        // push apart any labels that would overlap, keeping them in the order their curves
+        // ended in so a reader can still tell which is which
+        //
+        // the gap is in data units because that is what the label is placed in, converted from
+        // the pixels the text actually occupies: the plotting area is the chart height less the
+        // margins and the x label gutter.
+        let plot_px = 400.0 - 16.0 - 46.0;
+        let min_gap = (high - low) * (12.0 / plot_px);
+        ends.sort_by(|left, right| left.1.partial_cmp(&right.1).unwrap_or(Ordering::Equal));
+        let mut previous = f64::MIN;
+        for (_, y, _) in &mut ends {
+            // a label closer to the one below it than the text is tall gets nudged up
+            if *y - previous < min_gap {
+                *y = previous + min_gap;
+            }
+            previous = *y;
+        }
+        for (x, y, text) in ends {
+            chart.draw_series(std::iter::once(Text::new(
+                text,
+                (x, y),
+                super::label_font(11),
+            )))?;
         }
         // and a note when some pairs were not separated, so the chart cannot look more certain
         // than the data is

@@ -6,6 +6,7 @@ members = [
     "shoal-bench",
     "shoal-core",
     "shoal-derive",
+    "shoal-proto",
     "shoalctl",
 ]
 

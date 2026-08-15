@@ -26,9 +26,12 @@ use tokio::task::JoinHandle;
 use tracing::{event, Level};
 use uuid::Uuid;
 
-pub mod errors;
 pub mod messages;
 pub mod tls;
+
+// the error types are protocol, not transport - `QuerySupport` and `shared::responses` both name
+// them, so they cannot live above the crate that defines those
+pub use shoal_proto::client as errors;
 
 use super::shared::queries::Queries;
 use crate::shared::auth::scram::{ClientStep, ScramClient};
@@ -41,7 +44,9 @@ use crate::shared::tls::{self as shared_tls, TlsClientOptions};
 use crate::shared::traits::{
     ExistsQuery, QuerySupport, RkyvSupport, ShoalQuerySupport, ShoalResponseSupport,
 };
-pub use errors::{ChannelError, ConnectError, Errors, ShqlParseError};
+pub use shoal_proto::client::{
+    ChannelError, ConnectError, Errors, FromShoal, QuerySuceededOpts, ShqlParseError,
+};
 use messages::{BatchStamps, ClientMsg, ClientStamps};
 
 /// Say that a send found nobody left to receive it
@@ -1490,51 +1495,6 @@ impl<S: ShoalQuerySupport, R: ShoalResponseSupport + 'static> ShoalTcpProxy<S, R
                     );
                 }
             });
-        }
-    }
-}
-
-/// Allow types to be retrieved from a [`ShoalStream`]
-pub trait FromShoal<S: QuerySupport>: Sized + Archive {
-    /// The response kinds to deserialize from
-    type ResponseKinds: std::fmt::Debug;
-
-    /// Retrieve a type from a [`ShoalStream`]
-    ///
-    /// # Arguments
-    ///
-    /// * `kind` - The response kind to try to cast
-    fn retrieve(
-        archived: &<S::ResponseKinds as Archive>::Archived,
-    ) -> Result<&ArchivedOption<ArchivedVec<<Self as Archive>::Archived>>, Errors>;
-}
-
-/// The options for determining if a query suceeded or not
-///
-/// This will default to requiring every kind of query to succeed
-#[derive(Debug, Archive, Clone, Copy)]
-pub struct QuerySuceededOpts {
-    /// Whether to check if inserts actually inserted data
-    pub insert: bool,
-    /// Whether to check if updates actually inserted data
-    pub update: bool,
-    /// Whether to check if gets actually goted data
-    pub get: bool,
-    /// Whether to check if deletes actually deleted data
-    pub delete: bool,
-    /// Whether to check if exists actually found data
-    pub exists: bool,
-}
-
-impl Default for QuerySuceededOpts {
-    /// Default to requiring all queries to have actaully inserted data
-    fn default() -> Self {
-        QuerySuceededOpts {
-            insert: true,
-            update: true,
-            get: true,
-            delete: true,
-            exists: true,
         }
     }
 }
