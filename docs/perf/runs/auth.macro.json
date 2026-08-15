@@ -1,0 +1,5963 @@
+{
+  "version": 2,
+  "label": "auth",
+  "workloads": {
+    "macro/fanout/ephemeral/1": {
+      "timing": "per_query",
+      "seed": 42,
+      "scale": {
+        "scale": "full",
+        "rows": 4096,
+        "row_bytes": 256,
+        "keys": 4096,
+        "concurrency": 8
+      },
+      "conf": {
+        "shards": 1,
+        "memory": "4Gi",
+        "durability": "fsync",
+        "digest": "c67a54b225ea"
+      },
+      "counters": {
+        "retrieved": 8000
+      },
+      "ops": {
+        "get": {
+          "count": 7600,
+          "max": {
+            "secs": 0,
+            "nanos": 76817
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 48192
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 41680
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 38274
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 32873
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 33527
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 10650
+          }
+        }
+      },
+      "runs": 5,
+      "wall_clock_ns": [
+        33653128,
+        33992858,
+        34128248,
+        37102124,
+        37412058
+      ],
+      "spread_pct": 11.169630353529099,
+      "runs_detail": [
+        {
+          "wall_clock_ns": 37102124,
+          "ops": {
+            "get": {
+              "count": 7600,
+              "max": {
+                "secs": 0,
+                "nanos": 1106970
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 51639
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 44114
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 41009
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 36240
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 36728
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 20900
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 8000
+          }
+        },
+        {
+          "wall_clock_ns": 37412058,
+          "ops": {
+            "get": {
+              "count": 7600,
+              "max": {
+                "secs": 0,
+                "nanos": 68351
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 51539
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 43844
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 41179
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 36621
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 36929
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 19217
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 8000
+          }
+        },
+        {
+          "wall_clock_ns": 34128248,
+          "ops": {
+            "get": {
+              "count": 7600,
+              "max": {
+                "secs": 0,
+                "nanos": 76817
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 48192
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 41680
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 38274
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 32873
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 33527
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 10650
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 8000
+          }
+        },
+        {
+          "wall_clock_ns": 33653128,
+          "ops": {
+            "get": {
+              "count": 7600,
+              "max": {
+                "secs": 0,
+                "nanos": 54344
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 47741
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 44355
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 39816
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 32512
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 33120
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 21100
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 8000
+          }
+        },
+        {
+          "wall_clock_ns": 33992858,
+          "ops": {
+            "get": {
+              "count": 7600,
+              "max": {
+                "secs": 0,
+                "nanos": 1139723
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 47621
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 44194
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 39305
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 32462
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 33395
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 17924
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 8000
+          }
+        }
+      ]
+    },
+    "macro/fanout/ephemeral/16": {
+      "timing": "per_query",
+      "seed": 42,
+      "scale": {
+        "scale": "full",
+        "rows": 4096,
+        "row_bytes": 256,
+        "keys": 4096,
+        "concurrency": 8
+      },
+      "conf": {
+        "shards": 1,
+        "memory": "4Gi",
+        "durability": "fsync",
+        "digest": "677497546df8"
+      },
+      "counters": {
+        "retrieved": 32768
+      },
+      "ops": {
+        "get": {
+          "count": 1946,
+          "max": {
+            "secs": 0,
+            "nanos": 84772
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 82758
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 62991
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 58923
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 53723
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 54568
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 39316
+          }
+        }
+      },
+      "runs": 5,
+      "wall_clock_ns": [
+        14105558,
+        14305901,
+        14338013,
+        14340047,
+        14949734
+      ],
+      "spread_pct": 5.98470475255215,
+      "runs_detail": [
+        {
+          "wall_clock_ns": 14949734,
+          "ops": {
+            "get": {
+              "count": 1946,
+              "max": {
+                "secs": 0,
+                "nanos": 96504
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 86736
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 75184
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 65335
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 55587
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 57170
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 31972
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 32768
+          }
+        },
+        {
+          "wall_clock_ns": 14305901,
+          "ops": {
+            "get": {
+              "count": 1946,
+              "max": {
+                "secs": 0,
+                "nanos": 88860
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 82749
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 63872
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 58322
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 53693
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 54686
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 39296
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 32768
+          }
+        },
+        {
+          "wall_clock_ns": 14105558,
+          "ops": {
+            "get": {
+              "count": 1946,
+              "max": {
+                "secs": 0,
+                "nanos": 90052
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 80804
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 72890
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 61278
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 52019
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 53472
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 28895
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 32768
+          }
+        },
+        {
+          "wall_clock_ns": 14338013,
+          "ops": {
+            "get": {
+              "count": 1946,
+              "max": {
+                "secs": 0,
+                "nanos": 84772
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 82758
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 62991
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 58923
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 53723
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 54568
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 39316
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 32768
+          }
+        },
+        {
+          "wall_clock_ns": 14340047,
+          "ops": {
+            "get": {
+              "count": 1946,
+              "max": {
+                "secs": 0,
+                "nanos": 87999
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 82388
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 62710
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 58592
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 53653
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 54637
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 27393
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 32768
+          }
+        }
+      ]
+    },
+    "macro/fanout/ephemeral/2": {
+      "timing": "per_query",
+      "seed": 42,
+      "scale": {
+        "scale": "full",
+        "rows": 4096,
+        "row_bytes": 256,
+        "keys": 4096,
+        "concurrency": 8
+      },
+      "conf": {
+        "shards": 1,
+        "memory": "4Gi",
+        "durability": "fsync",
+        "digest": "7c993fd9d90c"
+      },
+      "counters": {
+        "retrieved": 16000
+      },
+      "ops": {
+        "get": {
+          "count": 7600,
+          "max": {
+            "secs": 0,
+            "nanos": 1106799
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 50788
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 42822
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 41389
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 38544
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 38514
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 19347
+          }
+        }
+      },
+      "runs": 5,
+      "wall_clock_ns": [
+        38134983,
+        38339103,
+        38798643,
+        39300295,
+        42567893
+      ],
+      "spread_pct": 11.624261114787963,
+      "runs_detail": [
+        {
+          "wall_clock_ns": 42567893,
+          "ops": {
+            "get": {
+              "count": 7600,
+              "max": {
+                "secs": 0,
+                "nanos": 62129
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 56639
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 49635
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 47491
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 42381
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 42446
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 25699
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 16000
+          }
+        },
+        {
+          "wall_clock_ns": 39300295,
+          "ops": {
+            "get": {
+              "count": 7600,
+              "max": {
+                "secs": 0,
+                "nanos": 64774
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 52521
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 45006
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 42331
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 38344
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 38879
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 22112
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 16000
+          }
+        },
+        {
+          "wall_clock_ns": 38339103,
+          "ops": {
+            "get": {
+              "count": 7600,
+              "max": {
+                "secs": 0,
+                "nanos": 1104466
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 50667
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 42762
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 41048
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 38053
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 38003
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 20188
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 16000
+          }
+        },
+        {
+          "wall_clock_ns": 38798643,
+          "ops": {
+            "get": {
+              "count": 7600,
+              "max": {
+                "secs": 0,
+                "nanos": 1106799
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 50788
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 42822
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 41389
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 38544
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 38514
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 19347
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 16000
+          }
+        },
+        {
+          "wall_clock_ns": 38134983,
+          "ops": {
+            "get": {
+              "count": 7600,
+              "max": {
+                "secs": 0,
+                "nanos": 58282
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 50046
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 42091
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 40758
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 37792
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 37794
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 24106
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 16000
+          }
+        }
+      ]
+    },
+    "macro/fanout/ephemeral/256": {
+      "timing": "per_query",
+      "seed": 42,
+      "scale": {
+        "scale": "full",
+        "rows": 4096,
+        "row_bytes": 256,
+        "keys": 4096,
+        "concurrency": 8
+      },
+      "conf": {
+        "shards": 1,
+        "memory": "4Gi",
+        "durability": "fsync",
+        "digest": "6b4aa6687d01"
+      },
+      "counters": {
+        "retrieved": 64000
+      },
+      "ops": {
+        "get": {
+          "count": 238,
+          "max": {
+            "secs": 0,
+            "nanos": 744827
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 705531
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 691504
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 652961
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 372463
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 421148
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 189583
+          }
+        }
+      },
+      "runs": 5,
+      "wall_clock_ns": [
+        13547518,
+        13558840,
+        13659383,
+        13756990,
+        13996088
+      ],
+      "spread_pct": 3.3110862078205026,
+      "runs_detail": [
+        {
+          "wall_clock_ns": 13996088,
+          "ops": {
+            "get": {
+              "count": 238,
+              "max": {
+                "secs": 0,
+                "nanos": 773411
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 726001
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 706143
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 663130
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 387642
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 432987
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 273063
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 64000
+          }
+        },
+        {
+          "wall_clock_ns": 13558840,
+          "ops": {
+            "get": {
+              "count": 238,
+              "max": {
+                "secs": 0,
+                "nanos": 810743
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 710311
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 692947
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 649905
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 374548
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 419914
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 187269
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 64000
+          }
+        },
+        {
+          "wall_clock_ns": 13756990,
+          "ops": {
+            "get": {
+              "count": 238,
+              "max": {
+                "secs": 0,
+                "nanos": 739056
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 719087
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 696925
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 662950
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 376942
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 426794
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 276490
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 64000
+          }
+        },
+        {
+          "wall_clock_ns": 13659383,
+          "ops": {
+            "get": {
+              "count": 238,
+              "max": {
+                "secs": 0,
+                "nanos": 744827
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 705531
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 691504
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 652961
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 372463
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 421148
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 189583
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 64000
+          }
+        },
+        {
+          "wall_clock_ns": 13547518,
+          "ops": {
+            "get": {
+              "count": 238,
+              "max": {
+                "secs": 0,
+                "nanos": 734947
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 697616
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 691635
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 657550
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 372243
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 420989
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 237155
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 64000
+          }
+        }
+      ]
+    },
+    "macro/fanout/ephemeral/4": {
+      "timing": "per_query",
+      "seed": 42,
+      "scale": {
+        "scale": "full",
+        "rows": 4096,
+        "row_bytes": 256,
+        "keys": 4096,
+        "concurrency": 8
+      },
+      "conf": {
+        "shards": 1,
+        "memory": "4Gi",
+        "durability": "fsync",
+        "digest": "de6ef7de5028"
+      },
+      "counters": {
+        "retrieved": 32000
+      },
+      "ops": {
+        "get": {
+          "count": 7600,
+          "max": {
+            "secs": 0,
+            "nanos": 62760
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 55135
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 45247
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 43013
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 39375
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 39723
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 27052
+          }
+        }
+      },
+      "runs": 5,
+      "wall_clock_ns": [
+        39314353,
+        39597654,
+        40287325,
+        41011562,
+        42153089
+      ],
+      "spread_pct": 7.2206097350756355,
+      "runs_detail": [
+        {
+          "wall_clock_ns": 39314353,
+          "ops": {
+            "get": {
+              "count": 7600,
+              "max": {
+                "secs": 0,
+                "nanos": 1106790
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 54765
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 45608
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 42692
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 38253
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 38777
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 22813
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 32000
+          }
+        },
+        {
+          "wall_clock_ns": 40287325,
+          "ops": {
+            "get": {
+              "count": 7600,
+              "max": {
+                "secs": 0,
+                "nanos": 62760
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 55135
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 45247
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 43013
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 39375
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 39723
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 27052
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 32000
+          }
+        },
+        {
+          "wall_clock_ns": 42153089,
+          "ops": {
+            "get": {
+              "count": 7600,
+              "max": {
+                "secs": 0,
+                "nanos": 1148910
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 59434
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 50517
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 47902
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 40317
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 41519
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 19968
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 32000
+          }
+        },
+        {
+          "wall_clock_ns": 39597654,
+          "ops": {
+            "get": {
+              "count": 7600,
+              "max": {
+                "secs": 0,
+                "nanos": 1141978
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 54575
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 44285
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 42230
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 38413
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 39012
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 24057
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 32000
+          }
+        },
+        {
+          "wall_clock_ns": 41011562,
+          "ops": {
+            "get": {
+              "count": 7600,
+              "max": {
+                "secs": 0,
+                "nanos": 68461
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 55336
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 47771
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 44826
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 39927
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 40554
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 28264
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 32000
+          }
+        }
+      ]
+    },
+    "macro/fanout/ephemeral/64": {
+      "timing": "per_query",
+      "seed": 42,
+      "scale": {
+        "scale": "full",
+        "rows": 4096,
+        "row_bytes": 256,
+        "keys": 4096,
+        "concurrency": 8
+      },
+      "conf": {
+        "shards": 1,
+        "memory": "4Gi",
+        "durability": "fsync",
+        "digest": "447e3d9ce896"
+      },
+      "counters": {
+        "retrieved": 32768
+      },
+      "ops": {
+        "get": {
+          "count": 487,
+          "max": {
+            "secs": 0,
+            "nanos": 205133
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 196366
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 183321
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 159967
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 113056
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 117273
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 39015
+          }
+        }
+      },
+      "runs": 5,
+      "wall_clock_ns": [
+        7776845,
+        7833273,
+        7853071,
+        8195609,
+        8281762
+      ],
+      "spread_pct": 6.492568644482434,
+      "runs_detail": [
+        {
+          "wall_clock_ns": 8281762,
+          "ops": {
+            "get": {
+              "count": 487,
+              "max": {
+                "secs": 0,
+                "nanos": 219951
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 206305
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 192238
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 147753
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 119348
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 124514
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 82749
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 32768
+          }
+        },
+        {
+          "wall_clock_ns": 7853071,
+          "ops": {
+            "get": {
+              "count": 487,
+              "max": {
+                "secs": 0,
+                "nanos": 205133
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 196366
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 183321
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 159967
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 113056
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 117273
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 39015
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 32768
+          }
+        },
+        {
+          "wall_clock_ns": 8195609,
+          "ops": {
+            "get": {
+              "count": 487,
+              "max": {
+                "secs": 0,
+                "nanos": 210463
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 206666
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 185956
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 163163
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 117014
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 122689
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 86226
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 32768
+          }
+        },
+        {
+          "wall_clock_ns": 7776845,
+          "ops": {
+            "get": {
+              "count": 487,
+              "max": {
+                "secs": 0,
+                "nanos": 208409
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 195404
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 183562
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 153845
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 112376
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 116821
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 49886
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 32768
+          }
+        },
+        {
+          "wall_clock_ns": 7833273,
+          "ops": {
+            "get": {
+              "count": 487,
+              "max": {
+                "secs": 0,
+                "nanos": 198620
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 194282
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 182409
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 126722
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 110812
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 116559
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 49475
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 32768
+          }
+        }
+      ]
+    },
+    "macro/fanout/evicted/1": {
+      "timing": "per_query",
+      "seed": 42,
+      "scale": {
+        "scale": "full",
+        "rows": 4096,
+        "row_bytes": 256,
+        "keys": 4096,
+        "concurrency": 8
+      },
+      "conf": {
+        "shards": 1,
+        "memory": "4Gi",
+        "durability": "fsync",
+        "digest": "36278debab2d"
+      },
+      "counters": {
+        "retrieved": 8000
+      },
+      "ops": {
+        "get": {
+          "count": 7600,
+          "max": {
+            "secs": 0,
+            "nanos": 1139212
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 81836
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 77198
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 75675
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 45427
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 51658
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 18125
+          }
+        }
+      },
+      "runs": 5,
+      "wall_clock_ns": [
+        53399073,
+        53668124,
+        53701112,
+        53971174,
+        54044504
+      ],
+      "spread_pct": 1.2086932670160773,
+      "runs_detail": [
+        {
+          "wall_clock_ns": 53971174,
+          "ops": {
+            "get": {
+              "count": 7600,
+              "max": {
+                "secs": 0,
+                "nanos": 96976
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 91145
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 79713
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 76877
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 45377
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 51997
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 20589
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 8000
+          }
+        },
+        {
+          "wall_clock_ns": 53399073,
+          "ops": {
+            "get": {
+              "count": 7600,
+              "max": {
+                "secs": 0,
+                "nanos": 98679
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 82278
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 77318
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 75645
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 44716
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 51395
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 15039
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 8000
+          }
+        },
+        {
+          "wall_clock_ns": 54044504,
+          "ops": {
+            "get": {
+              "count": 7600,
+              "max": {
+                "secs": 0,
+                "nanos": 1134333
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 82989
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 77719
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 76206
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 45327
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 51971
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 17564
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 8000
+          }
+        },
+        {
+          "wall_clock_ns": 53701112,
+          "ops": {
+            "get": {
+              "count": 7600,
+              "max": {
+                "secs": 0,
+                "nanos": 1139212
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 81836
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 77198
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 75675
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 45427
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 51658
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 18125
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 8000
+          }
+        },
+        {
+          "wall_clock_ns": 53668124,
+          "ops": {
+            "get": {
+              "count": 7600,
+              "max": {
+                "secs": 0,
+                "nanos": 1174420
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 82618
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 77328
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 75855
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 45197
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 51679
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 14157
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 8000
+          }
+        }
+      ]
+    },
+    "macro/fanout/evicted/16": {
+      "timing": "per_query",
+      "seed": 42,
+      "scale": {
+        "scale": "full",
+        "rows": 4096,
+        "row_bytes": 256,
+        "keys": 4096,
+        "concurrency": 8
+      },
+      "conf": {
+        "shards": 1,
+        "memory": "4Gi",
+        "durability": "fsync",
+        "digest": "6da41817aa67"
+      },
+      "counters": {
+        "retrieved": 32768
+      },
+      "ops": {
+        "get": {
+          "count": 1946,
+          "max": {
+            "secs": 0,
+            "nanos": 546116
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 483646
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 470541
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 69213
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 47782
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 82050
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 33093
+          }
+        }
+      },
+      "runs": 5,
+      "wall_clock_ns": [
+        35365147,
+        35485879,
+        35780473,
+        35896097,
+        36261374
+      ],
+      "spread_pct": 2.5342097404543518,
+      "runs_detail": [
+        {
+          "wall_clock_ns": 35780473,
+          "ops": {
+            "get": {
+              "count": 1946,
+              "max": {
+                "secs": 0,
+                "nanos": 546116
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 483646
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 470541
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 69213
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 47782
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 82050
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 33093
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 32768
+          }
+        },
+        {
+          "wall_clock_ns": 35485879,
+          "ops": {
+            "get": {
+              "count": 1946,
+              "max": {
+                "secs": 0,
+                "nanos": 485159
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 470872
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 460032
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 68672
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 47912
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 81218
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 23054
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 32768
+          }
+        },
+        {
+          "wall_clock_ns": 36261374,
+          "ops": {
+            "get": {
+              "count": 1946,
+              "max": {
+                "secs": 0,
+                "nanos": 568238
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 472295
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 461073
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 74833
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 50286
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 83901
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 27984
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 32768
+          }
+        },
+        {
+          "wall_clock_ns": 35896097,
+          "ops": {
+            "get": {
+              "count": 1946,
+              "max": {
+                "secs": 0,
+                "nanos": 1107431
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 483586
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 461414
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 68141
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 46599
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 81051
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 27002
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 32768
+          }
+        },
+        {
+          "wall_clock_ns": 35365147,
+          "ops": {
+            "get": {
+              "count": 1946,
+              "max": {
+                "secs": 0,
+                "nanos": 1485496
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 475741
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 464700
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 67429
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 47090
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 81447
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 26992
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 32768
+          }
+        }
+      ]
+    },
+    "macro/fanout/evicted/2": {
+      "timing": "per_query",
+      "seed": 42,
+      "scale": {
+        "scale": "full",
+        "rows": 4096,
+        "row_bytes": 256,
+        "keys": 4096,
+        "concurrency": 8
+      },
+      "conf": {
+        "shards": 1,
+        "memory": "4Gi",
+        "durability": "fsync",
+        "digest": "b9985a59d243"
+      },
+      "counters": {
+        "retrieved": 16000
+      },
+      "ops": {
+        "get": {
+          "count": 7600,
+          "max": {
+            "secs": 0,
+            "nanos": 1149943
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 119659
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 108217
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 101384
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 43043
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 55402
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 17403
+          }
+        }
+      },
+      "runs": 5,
+      "wall_clock_ns": [
+        53656662,
+        57421526,
+        59044331,
+        62763536,
+        67164285
+      ],
+      "spread_pct": 25.17417688040303,
+      "runs_detail": [
+        {
+          "wall_clock_ns": 53656662,
+          "ops": {
+            "get": {
+              "count": 7600,
+              "max": {
+                "secs": 0,
+                "nanos": 1105808
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 106163
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 100612
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 98880
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 37031
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 50228
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 15069
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 16000
+          }
+        },
+        {
+          "wall_clock_ns": 67164285,
+          "ops": {
+            "get": {
+              "count": 7600,
+              "max": {
+                "secs": 0,
+                "nanos": 128756
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 110762
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 101284
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 99481
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 43534
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 54669
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 29356
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 16000
+          }
+        },
+        {
+          "wall_clock_ns": 59044331,
+          "ops": {
+            "get": {
+              "count": 7600,
+              "max": {
+                "secs": 0,
+                "nanos": 1149943
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 119659
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 108217
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 101384
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 43043
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 55402
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 17403
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 16000
+          }
+        },
+        {
+          "wall_clock_ns": 57421526,
+          "ops": {
+            "get": {
+              "count": 7600,
+              "max": {
+                "secs": 0,
+                "nanos": 138836
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 117865
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 112405
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 101895
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 41680
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 54110
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 27883
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 16000
+          }
+        },
+        {
+          "wall_clock_ns": 62763536,
+          "ops": {
+            "get": {
+              "count": 7600,
+              "max": {
+                "secs": 0,
+                "nanos": 129558
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 107787
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 100823
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 99230
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 37482
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 50593
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 24296
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 16000
+          }
+        }
+      ]
+    },
+    "macro/fanout/evicted/256": {
+      "timing": "per_query",
+      "seed": 42,
+      "scale": {
+        "scale": "full",
+        "rows": 4096,
+        "row_bytes": 256,
+        "keys": 4096,
+        "concurrency": 8
+      },
+      "conf": {
+        "shards": 1,
+        "memory": "4Gi",
+        "durability": "fsync",
+        "digest": "7e41759ba07a"
+      },
+      "counters": {
+        "retrieved": 64000
+      },
+      "ops": {
+        "get": {
+          "count": 238,
+          "max": {
+            "secs": 0,
+            "nanos": 8075508
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 5139454
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 800463
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 548661
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 302970
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 471093
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 191277
+          }
+        }
+      },
+      "runs": 5,
+      "wall_clock_ns": [
+        45841723,
+        46797376,
+        49509931,
+        53228342,
+        54860870
+      ],
+      "spread_pct": 19.674537538652288,
+      "runs_detail": [
+        {
+          "wall_clock_ns": 54860870,
+          "ops": {
+            "get": {
+              "count": 238,
+              "max": {
+                "secs": 0,
+                "nanos": 7263562
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 6381734
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 985488
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 574781
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 311307
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 482388
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 167431
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 64000
+          }
+        },
+        {
+          "wall_clock_ns": 53228342,
+          "ops": {
+            "get": {
+              "count": 238,
+              "max": {
+                "secs": 0,
+                "nanos": 6845121
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 5034243
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 1127129
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 572847
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 311116
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 481071
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 155337
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 64000
+          }
+        },
+        {
+          "wall_clock_ns": 45841723,
+          "ops": {
+            "get": {
+              "count": 238,
+              "max": {
+                "secs": 0,
+                "nanos": 7766837
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 5564558
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 993012
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 598757
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 299454
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 485490
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 185575
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 64000
+          }
+        },
+        {
+          "wall_clock_ns": 49509931,
+          "ops": {
+            "get": {
+              "count": 238,
+              "max": {
+                "secs": 0,
+                "nanos": 8075508
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 5139454
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 800463
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 548661
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 302970
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 471093
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 191277
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 64000
+          }
+        },
+        {
+          "wall_clock_ns": 46797376,
+          "ops": {
+            "get": {
+              "count": 238,
+              "max": {
+                "secs": 0,
+                "nanos": 7393090
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 6065237
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 647711
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 593788
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 330823
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 501540
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 125921
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 64000
+          }
+        }
+      ]
+    },
+    "macro/fanout/evicted/4": {
+      "timing": "per_query",
+      "seed": 42,
+      "scale": {
+        "scale": "full",
+        "rows": 4096,
+        "row_bytes": 256,
+        "keys": 4096,
+        "concurrency": 8
+      },
+      "conf": {
+        "shards": 1,
+        "memory": "4Gi",
+        "durability": "fsync",
+        "digest": "b5d207bd69d7"
+      },
+      "counters": {
+        "retrieved": 32000
+      },
+      "ops": {
+        "get": {
+          "count": 7600,
+          "max": {
+            "secs": 0,
+            "nanos": 189012
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 156740
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 152081
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 50326
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 37902
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 47532
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 16191
+          }
+        }
+      },
+      "runs": 5,
+      "wall_clock_ns": [
+        53971576,
+        56647063,
+        64496783,
+        68699313,
+        70796180
+      ],
+      "spread_pct": 31.173082661140008,
+      "runs_detail": [
+        {
+          "wall_clock_ns": 68699313,
+          "ops": {
+            "get": {
+              "count": 7600,
+              "max": {
+                "secs": 0,
+                "nanos": 1141857
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 159595
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 151931
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 50457
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 37842
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 47615
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 25619
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 32000
+          }
+        },
+        {
+          "wall_clock_ns": 70796180,
+          "ops": {
+            "get": {
+              "count": 7600,
+              "max": {
+                "secs": 0,
+                "nanos": 197038
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 176217
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 168894
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 52230
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 38694
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 50135
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 20780
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 32000
+          }
+        },
+        {
+          "wall_clock_ns": 64496783,
+          "ops": {
+            "get": {
+              "count": 7600,
+              "max": {
+                "secs": 0,
+                "nanos": 189012
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 156740
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 152081
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 50326
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 37902
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 47532
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 16191
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 32000
+          }
+        },
+        {
+          "wall_clock_ns": 53971576,
+          "ops": {
+            "get": {
+              "count": 7600,
+              "max": {
+                "secs": 0,
+                "nanos": 194322
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 160107
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 154236
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 50778
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 37732
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 47628
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 23064
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 32000
+          }
+        },
+        {
+          "wall_clock_ns": 56647063,
+          "ops": {
+            "get": {
+              "count": 7600,
+              "max": {
+                "secs": 0,
+                "nanos": 205273
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 177190
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 166259
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 52440
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 39035
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 50249
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 20259
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 32000
+          }
+        }
+      ]
+    },
+    "macro/fanout/evicted/64": {
+      "timing": "per_query",
+      "seed": 42,
+      "scale": {
+        "scale": "full",
+        "rows": 4096,
+        "row_bytes": 256,
+        "keys": 4096,
+        "concurrency": 8
+      },
+      "conf": {
+        "shards": 1,
+        "memory": "4Gi",
+        "durability": "fsync",
+        "digest": "34004d007bab"
+      },
+      "counters": {
+        "retrieved": 32768
+      },
+      "ops": {
+        "get": {
+          "count": 487,
+          "max": {
+            "secs": 0,
+            "nanos": 1813273
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 1783837
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 1757326
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 158814
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 89521
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 228007
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 37683
+          }
+        }
+      },
+      "runs": 5,
+      "wall_clock_ns": [
+        40317884,
+        40352961,
+        40918384,
+        44591992,
+        52450033
+      ],
+      "spread_pct": 30.09123445069687,
+      "runs_detail": [
+        {
+          "wall_clock_ns": 44591992,
+          "ops": {
+            "get": {
+              "count": 487,
+              "max": {
+                "secs": 0,
+                "nanos": 1860634
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 1828252
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 1764740
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 164505
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 90634
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 228987
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 61488
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 32768
+          }
+        },
+        {
+          "wall_clock_ns": 40352961,
+          "ops": {
+            "get": {
+              "count": 487,
+              "max": {
+                "secs": 0,
+                "nanos": 2142404
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 1853771
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 1728050
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 217446
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 89772
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 226104
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 38344
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 32768
+          }
+        },
+        {
+          "wall_clock_ns": 40317884,
+          "ops": {
+            "get": {
+              "count": 487,
+              "max": {
+                "secs": 0,
+                "nanos": 2190746
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 1839503
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 1752066
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 151700
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 90303
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 229239
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 48052
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 32768
+          }
+        },
+        {
+          "wall_clock_ns": 52450033,
+          "ops": {
+            "get": {
+              "count": 487,
+              "max": {
+                "secs": 0,
+                "nanos": 2133246
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 1845625
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 1670479
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 162481
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 94722
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 231109
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 62960
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 32768
+          }
+        },
+        {
+          "wall_clock_ns": 40918384,
+          "ops": {
+            "get": {
+              "count": 487,
+              "max": {
+                "secs": 0,
+                "nanos": 1813273
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 1783837
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 1757326
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 158814
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 89521
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 228007
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 37683
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 32768
+          }
+        }
+      ]
+    },
+    "macro/fanout/resident/1": {
+      "timing": "per_query",
+      "seed": 42,
+      "scale": {
+        "scale": "full",
+        "rows": 4096,
+        "row_bytes": 256,
+        "keys": 4096,
+        "concurrency": 8
+      },
+      "conf": {
+        "shards": 1,
+        "memory": "4Gi",
+        "durability": "fsync",
+        "digest": "4c53bff5fcf9"
+      },
+      "counters": {
+        "retrieved": 8000
+      },
+      "ops": {
+        "get": {
+          "count": 7600,
+          "max": {
+            "secs": 0,
+            "nanos": 1135376
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 47802
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 43183
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 37832
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 32693
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 33567
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 16202
+          }
+        }
+      },
+      "runs": 5,
+      "wall_clock_ns": [
+        33570577,
+        33801619,
+        33978127,
+        34194192,
+        34262483
+      ],
+      "spread_pct": 2.0610488762227708,
+      "runs_detail": [
+        {
+          "wall_clock_ns": 34262483,
+          "ops": {
+            "get": {
+              "count": 7600,
+              "max": {
+                "secs": 0,
+                "nanos": 1106710
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 47381
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 41630
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 37412
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 33284
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 33878
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 19156
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 8000
+          }
+        },
+        {
+          "wall_clock_ns": 33570577,
+          "ops": {
+            "get": {
+              "count": 7600,
+              "max": {
+                "secs": 0,
+                "nanos": 51689
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 47340
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 43003
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 37572
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 32683
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 33191
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 21111
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 8000
+          }
+        },
+        {
+          "wall_clock_ns": 34194192,
+          "ops": {
+            "get": {
+              "count": 7600,
+              "max": {
+                "secs": 0,
+                "nanos": 1128412
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 47641
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 41299
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 37141
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 32933
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 33727
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 17433
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 8000
+          }
+        },
+        {
+          "wall_clock_ns": 33978127,
+          "ops": {
+            "get": {
+              "count": 7600,
+              "max": {
+                "secs": 0,
+                "nanos": 1135376
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 47802
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 43183
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 37832
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 32693
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 33567
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 16202
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 8000
+          }
+        },
+        {
+          "wall_clock_ns": 33801619,
+          "ops": {
+            "get": {
+              "count": 7600,
+              "max": {
+                "secs": 0,
+                "nanos": 1137259
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 47120
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 39646
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 36350
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 32762
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 33348
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 15680
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 8000
+          }
+        }
+      ]
+    },
+    "macro/fanout/resident/16": {
+      "timing": "per_query",
+      "seed": 42,
+      "scale": {
+        "scale": "full",
+        "rows": 4096,
+        "row_bytes": 256,
+        "keys": 4096,
+        "concurrency": 8
+      },
+      "conf": {
+        "shards": 1,
+        "memory": "4Gi",
+        "durability": "fsync",
+        "digest": "db3c72a7704c"
+      },
+      "counters": {
+        "retrieved": 32768
+      },
+      "ops": {
+        "get": {
+          "count": 1946,
+          "max": {
+            "secs": 0,
+            "nanos": 88870
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 84221
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 74403
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 60115
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 54364
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 55491
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 39496
+          }
+        }
+      },
+      "runs": 5,
+      "wall_clock_ns": [
+        14516848,
+        14536545,
+        14545211,
+        14882808,
+        16098728
+      ],
+      "spread_pct": 10.896855846393102,
+      "runs_detail": [
+        {
+          "wall_clock_ns": 14882808,
+          "ops": {
+            "get": {
+              "count": 1946,
+              "max": {
+                "secs": 0,
+                "nanos": 1108123
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 84773
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 73271
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 61458
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 55275
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 56613
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 33134
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 32768
+          }
+        },
+        {
+          "wall_clock_ns": 14536545,
+          "ops": {
+            "get": {
+              "count": 1946,
+              "max": {
+                "secs": 0,
+                "nanos": 100864
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 83750
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 72339
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 59985
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 54144
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 55193
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 35298
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 32768
+          }
+        },
+        {
+          "wall_clock_ns": 14545211,
+          "ops": {
+            "get": {
+              "count": 1946,
+              "max": {
+                "secs": 0,
+                "nanos": 88870
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 84221
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 74403
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 60115
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 54364
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 55491
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 39496
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 32768
+          }
+        },
+        {
+          "wall_clock_ns": 16098728,
+          "ops": {
+            "get": {
+              "count": 1946,
+              "max": {
+                "secs": 0,
+                "nanos": 100122
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 91666
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 80735
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 67169
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 60375
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 61446
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 43534
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 32768
+          }
+        },
+        {
+          "wall_clock_ns": 14516848,
+          "ops": {
+            "get": {
+              "count": 1946,
+              "max": {
+                "secs": 0,
+                "nanos": 88059
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 83289
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 63232
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 59253
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 54664
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 55519
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 40939
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 32768
+          }
+        }
+      ]
+    },
+    "macro/fanout/resident/2": {
+      "timing": "per_query",
+      "seed": 42,
+      "scale": {
+        "scale": "full",
+        "rows": 4096,
+        "row_bytes": 256,
+        "keys": 4096,
+        "concurrency": 8
+      },
+      "conf": {
+        "shards": 1,
+        "memory": "4Gi",
+        "durability": "fsync",
+        "digest": "77e1cdd7bda9"
+      },
+      "counters": {
+        "retrieved": 16000
+      },
+      "ops": {
+        "get": {
+          "count": 7600,
+          "max": {
+            "secs": 0,
+            "nanos": 67950
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 50928
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 42732
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 41159
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 38344
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 38291
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 25168
+          }
+        }
+      },
+      "runs": 5,
+      "wall_clock_ns": [
+        38363320,
+        38473361,
+        38586869,
+        41715186,
+        43288618
+      ],
+      "spread_pct": 12.83856037485807,
+      "runs_detail": [
+        {
+          "wall_clock_ns": 43288618,
+          "ops": {
+            "get": {
+              "count": 7600,
+              "max": {
+                "secs": 0,
+                "nanos": 1176394
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 58362
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 49885
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 48042
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 42401
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 43014
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 13806
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 16000
+          }
+        },
+        {
+          "wall_clock_ns": 38586869,
+          "ops": {
+            "get": {
+              "count": 7600,
+              "max": {
+                "secs": 0,
+                "nanos": 67950
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 50928
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 42732
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 41159
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 38344
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 38291
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 25168
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 16000
+          }
+        },
+        {
+          "wall_clock_ns": 38363320,
+          "ops": {
+            "get": {
+              "count": 7600,
+              "max": {
+                "secs": 0,
+                "nanos": 59754
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 50247
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 42251
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 40889
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 38013
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 38020
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 25980
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 16000
+          }
+        },
+        {
+          "wall_clock_ns": 41715186,
+          "ops": {
+            "get": {
+              "count": 7600,
+              "max": {
+                "secs": 0,
+                "nanos": 183592
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 56699
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 48954
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 47030
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 40408
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 41452
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 23826
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 16000
+          }
+        },
+        {
+          "wall_clock_ns": 38473361,
+          "ops": {
+            "get": {
+              "count": 7600,
+              "max": {
+                "secs": 0,
+                "nanos": 1132489
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 50607
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 42622
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 40988
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 38083
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 38123
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 18426
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 16000
+          }
+        }
+      ]
+    },
+    "macro/fanout/resident/256": {
+      "timing": "per_query",
+      "seed": 42,
+      "scale": {
+        "scale": "full",
+        "rows": 4096,
+        "row_bytes": 256,
+        "keys": 4096,
+        "concurrency": 8
+      },
+      "conf": {
+        "shards": 1,
+        "memory": "4Gi",
+        "durability": "fsync",
+        "digest": "8dc0db9191f9"
+      },
+      "counters": {
+        "retrieved": 64000
+      },
+      "ops": {
+        "get": {
+          "count": 238,
+          "max": {
+            "secs": 0,
+            "nanos": 771298
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 763241
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 754275
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 744466
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 404906
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 453302
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 249648
+          }
+        }
+      },
+      "runs": 5,
+      "wall_clock_ns": [
+        14536443,
+        14605696,
+        14771282,
+        15851765,
+        15951813
+      ],
+      "spread_pct": 9.736701062288759,
+      "runs_detail": [
+        {
+          "wall_clock_ns": 15851765,
+          "ops": {
+            "get": {
+              "count": 238,
+              "max": {
+                "secs": 0,
+                "nanos": 869055
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 840871
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 800303
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 791797
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 438600
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 492055
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 367204
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 64000
+          }
+        },
+        {
+          "wall_clock_ns": 14771282,
+          "ops": {
+            "get": {
+              "count": 238,
+              "max": {
+                "secs": 0,
+                "nanos": 771298
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 763241
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 754275
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 744466
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 404906
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 453302
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 249648
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 64000
+          }
+        },
+        {
+          "wall_clock_ns": 15951813,
+          "ops": {
+            "get": {
+              "count": 238,
+              "max": {
+                "secs": 0,
+                "nanos": 919461
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 876879
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 821464
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 762090
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 444782
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 495746
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 324492
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 64000
+          }
+        },
+        {
+          "wall_clock_ns": 14536443,
+          "ops": {
+            "get": {
+              "count": 238,
+              "max": {
+                "secs": 0,
+                "nanos": 767259
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 762480
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 738554
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 690162
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 398383
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 450089
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 238386
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 64000
+          }
+        },
+        {
+          "wall_clock_ns": 14605696,
+          "ops": {
+            "get": {
+              "count": 238,
+              "max": {
+                "secs": 0,
+                "nanos": 764434
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 754825
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 739957
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 697486
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 399365
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 448606
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 287932
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 64000
+          }
+        }
+      ]
+    },
+    "macro/fanout/resident/4": {
+      "timing": "per_query",
+      "seed": 42,
+      "scale": {
+        "scale": "full",
+        "rows": 4096,
+        "row_bytes": 256,
+        "keys": 4096,
+        "concurrency": 8
+      },
+      "conf": {
+        "shards": 1,
+        "memory": "4Gi",
+        "durability": "fsync",
+        "digest": "ad44d5c6f4a4"
+      },
+      "counters": {
+        "retrieved": 32000
+      },
+      "ops": {
+        "get": {
+          "count": 7600,
+          "max": {
+            "secs": 0,
+            "nanos": 66417
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 58823
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 50076
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 46479
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 40207
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 41026
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 24266
+          }
+        }
+      },
+      "runs": 5,
+      "wall_clock_ns": [
+        39799812,
+        41275751,
+        41524308,
+        41777625,
+        41809044
+      ],
+      "spread_pct": 5.048345454496117,
+      "runs_detail": [
+        {
+          "wall_clock_ns": 41809044,
+          "ops": {
+            "get": {
+              "count": 7600,
+              "max": {
+                "secs": 0,
+                "nanos": 67390
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 56157
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 45928
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 44285
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 40938
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 41225
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 26080
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 32000
+          }
+        },
+        {
+          "wall_clock_ns": 41275751,
+          "ops": {
+            "get": {
+              "count": 7600,
+              "max": {
+                "secs": 0,
+                "nanos": 67820
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 56758
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 47421
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 44425
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 40287
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 40748
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 21551
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 32000
+          }
+        },
+        {
+          "wall_clock_ns": 39799812,
+          "ops": {
+            "get": {
+              "count": 7600,
+              "max": {
+                "secs": 0,
+                "nanos": 1147719
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 55426
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 45968
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 42741
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 38273
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 39142
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 23305
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 32000
+          }
+        },
+        {
+          "wall_clock_ns": 41524308,
+          "ops": {
+            "get": {
+              "count": 7600,
+              "max": {
+                "secs": 0,
+                "nanos": 66417
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 58823
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 50076
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 46479
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 40207
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 41026
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 24266
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 32000
+          }
+        },
+        {
+          "wall_clock_ns": 41777625,
+          "ops": {
+            "get": {
+              "count": 7600,
+              "max": {
+                "secs": 0,
+                "nanos": 67400
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 55136
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 45477
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 44115
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 41339
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 41424
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 26190
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 32000
+          }
+        }
+      ]
+    },
+    "macro/fanout/resident/64": {
+      "timing": "per_query",
+      "seed": 42,
+      "scale": {
+        "scale": "full",
+        "rows": 4096,
+        "row_bytes": 256,
+        "keys": 4096,
+        "concurrency": 8
+      },
+      "conf": {
+        "shards": 1,
+        "memory": "4Gi",
+        "durability": "fsync",
+        "digest": "15b4d94c472a"
+      },
+      "counters": {
+        "retrieved": 32768
+      },
+      "ops": {
+        "get": {
+          "count": 487,
+          "max": {
+            "secs": 0,
+            "nanos": 206967
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 201857
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 186147
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 136923
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 118337
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 120724
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 59063
+          }
+        }
+      },
+      "runs": 5,
+      "wall_clock_ns": [
+        7875420,
+        7916720,
+        8031810,
+        8039224,
+        8043342
+      ],
+      "spread_pct": 2.1322291382554837,
+      "runs_detail": [
+        {
+          "wall_clock_ns": 7916720,
+          "ops": {
+            "get": {
+              "count": 487,
+              "max": {
+                "secs": 0,
+                "nanos": 213068
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 198741
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 184644
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 151901
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 116172
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 119550
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 52751
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 32768
+          }
+        },
+        {
+          "wall_clock_ns": 8043342,
+          "ops": {
+            "get": {
+              "count": 487,
+              "max": {
+                "secs": 0,
+                "nanos": 205764
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 200664
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 185575
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 159055
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 116333
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 120052
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 71407
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 32768
+          }
+        },
+        {
+          "wall_clock_ns": 7875420,
+          "ops": {
+            "get": {
+              "count": 487,
+              "max": {
+                "secs": 0,
+                "nanos": 199432
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 194212
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 182480
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 166669
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 114519
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 118048
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 74643
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 32768
+          }
+        },
+        {
+          "wall_clock_ns": 8039224,
+          "ops": {
+            "get": {
+              "count": 487,
+              "max": {
+                "secs": 0,
+                "nanos": 210734
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 200414
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 188301
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 158363
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 116303
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 120597
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 66979
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 32768
+          }
+        },
+        {
+          "wall_clock_ns": 8031810,
+          "ops": {
+            "get": {
+              "count": 487,
+              "max": {
+                "secs": 0,
+                "nanos": 206967
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 201857
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 186147
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 136923
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 118337
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 120724
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 59063
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 32768
+          }
+        }
+      ]
+    },
+    "macro/get_archived": {
+      "timing": "per_query",
+      "seed": 42,
+      "scale": {
+        "scale": "full",
+        "rows": 200000,
+        "row_bytes": 256,
+        "keys": 200000,
+        "concurrency": 16
+      },
+      "conf": {
+        "shards": 12,
+        "memory": "4Gi",
+        "durability": "fsync",
+        "digest": "2bcaab27a567"
+      },
+      "counters": {
+        "retrieved": 50000
+      },
+      "ops": {
+        "get": {
+          "count": 48000,
+          "max": {
+            "secs": 0,
+            "nanos": 3247994
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 157201
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 121844
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 107637
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 72549
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 76002
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 11181
+          }
+        }
+      },
+      "runs": 5,
+      "wall_clock_ns": [
+        233951388,
+        236074155,
+        238172336,
+        242396951,
+        255275067
+      ],
+      "spread_pct": 9.114576828242626,
+      "runs_detail": [
+        {
+          "wall_clock_ns": 242396951,
+          "ops": {
+            "get": {
+              "count": 48000,
+              "max": {
+                "secs": 0,
+                "nanos": 2835092
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 165878
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 121462
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 105813
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 71006
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 77411
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 11762
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 50000
+          }
+        },
+        {
+          "wall_clock_ns": 255275067,
+          "ops": {
+            "get": {
+              "count": 48000,
+              "max": {
+                "secs": 0,
+                "nanos": 3783830
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 187770
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 127574
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 111284
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 73020
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 81657
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 12093
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 50000
+          }
+        },
+        {
+          "wall_clock_ns": 236074155,
+          "ops": {
+            "get": {
+              "count": 48000,
+              "max": {
+                "secs": 0,
+                "nanos": 3150097
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 155348
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 117796
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 103448
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 70585
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 75543
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 10590
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 50000
+          }
+        },
+        {
+          "wall_clock_ns": 233951388,
+          "ops": {
+            "get": {
+              "count": 48000,
+              "max": {
+                "secs": 0,
+                "nanos": 3104760
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 152653
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 119559
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 104840
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 71547
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 74716
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 11502
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 50000
+          }
+        },
+        {
+          "wall_clock_ns": 238172336,
+          "ops": {
+            "get": {
+              "count": 48000,
+              "max": {
+                "secs": 0,
+                "nanos": 3247994
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 157201
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 121844
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 107637
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 72549
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 76002
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 11181
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 50000
+          }
+        }
+      ]
+    },
+    "macro/get_ephemeral": {
+      "timing": "per_query",
+      "seed": 42,
+      "scale": {
+        "scale": "full",
+        "rows": 200000,
+        "row_bytes": 256,
+        "keys": 200000,
+        "concurrency": 16
+      },
+      "conf": {
+        "shards": 12,
+        "memory": "4Gi",
+        "durability": "fsync",
+        "digest": "83a378a30400"
+      },
+      "counters": {
+        "retrieved": 50000
+      },
+      "ops": {
+        "get": {
+          "count": 48000,
+          "max": {
+            "secs": 0,
+            "nanos": 574681
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 124859
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 101555
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 90493
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 61197
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 63506
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 10210
+          }
+        }
+      },
+      "runs": 5,
+      "wall_clock_ns": [
+        193696580,
+        198264458,
+        199646826,
+        203474658,
+        212404792
+      ],
+      "spread_pct": 9.658514363031086,
+      "runs_detail": [
+        {
+          "wall_clock_ns": 212404792,
+          "ops": {
+            "get": {
+              "count": 48000,
+              "max": {
+                "secs": 0,
+                "nanos": 1452572
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 136121
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 108087
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 95232
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 65144
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 67476
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 10480
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 50000
+          }
+        },
+        {
+          "wall_clock_ns": 198264458,
+          "ops": {
+            "get": {
+              "count": 48000,
+              "max": {
+                "secs": 0,
+                "nanos": 2588899
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 129458
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 102506
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 90443
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 60275
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 62919
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 11462
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 50000
+          }
+        },
+        {
+          "wall_clock_ns": 199646826,
+          "ops": {
+            "get": {
+              "count": 48000,
+              "max": {
+                "secs": 0,
+                "nanos": 574681
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 124859
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 101555
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 90493
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 61197
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 63506
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 10210
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 50000
+          }
+        },
+        {
+          "wall_clock_ns": 203474658,
+          "ops": {
+            "get": {
+              "count": 48000,
+              "max": {
+                "secs": 0,
+                "nanos": 1449867
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 135930
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 106844
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 93389
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 61709
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 64699
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 11262
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 50000
+          }
+        },
+        {
+          "wall_clock_ns": 193696580,
+          "ops": {
+            "get": {
+              "count": 48000,
+              "max": {
+                "secs": 0,
+                "nanos": 327036
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 135529
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 111293
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 97968
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 56128
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 61578
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 10931
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 50000
+          }
+        }
+      ]
+    },
+    "macro/get_resident": {
+      "timing": "per_query",
+      "seed": 42,
+      "scale": {
+        "scale": "full",
+        "rows": 200000,
+        "row_bytes": 256,
+        "keys": 200000,
+        "concurrency": 16
+      },
+      "conf": {
+        "shards": 12,
+        "memory": "4Gi",
+        "durability": "fsync",
+        "digest": "d07e607d7521"
+      },
+      "counters": {
+        "retrieved": 50000
+      },
+      "ops": {
+        "get": {
+          "count": 48000,
+          "max": {
+            "secs": 0,
+            "nanos": 3735428
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 125521
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 99852
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 88420
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 57230
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 62104
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 11743
+          }
+        }
+      },
+      "runs": 5,
+      "wall_clock_ns": [
+        189164840,
+        191246719,
+        195109811,
+        199464846,
+        214998161
+      ],
+      "spread_pct": 13.656513017958305,
+      "runs_detail": [
+        {
+          "wall_clock_ns": 199464846,
+          "ops": {
+            "get": {
+              "count": 48000,
+              "max": {
+                "secs": 0,
+                "nanos": 1217744
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 130270
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 103729
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 91926
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 60205
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 63422
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 11983
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 50000
+          }
+        },
+        {
+          "wall_clock_ns": 189164840,
+          "ops": {
+            "get": {
+              "count": 48000,
+              "max": {
+                "secs": 0,
+                "nanos": 283273
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 120531
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 96886
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 86176
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 57269
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 60136
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 13256
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 50000
+          }
+        },
+        {
+          "wall_clock_ns": 191246719,
+          "ops": {
+            "get": {
+              "count": 48000,
+              "max": {
+                "secs": 0,
+                "nanos": 1559930
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 121673
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 100302
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 89451
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 56989
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 60651
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 12514
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 50000
+          }
+        },
+        {
+          "wall_clock_ns": 214998161,
+          "ops": {
+            "get": {
+              "count": 48000,
+              "max": {
+                "secs": 0,
+                "nanos": 1054310
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 135840
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 108929
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 96916
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 65726
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 68335
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 12875
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 50000
+          }
+        },
+        {
+          "wall_clock_ns": 195109811,
+          "ops": {
+            "get": {
+              "count": 48000,
+              "max": {
+                "secs": 0,
+                "nanos": 3735428
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 125521
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 99852
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 88420
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 57230
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 62104
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 11743
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 50000
+          }
+        }
+      ]
+    },
+    "macro/insert_ephemeral": {
+      "timing": "per_batch",
+      "seed": 42,
+      "scale": {
+        "scale": "full",
+        "rows": 200000,
+        "row_bytes": 256,
+        "keys": 200000,
+        "concurrency": 4096
+      },
+      "conf": {
+        "shards": 12,
+        "memory": "4Gi",
+        "durability": "fsync",
+        "digest": "34a2297d1444"
+      },
+      "counters": {
+        "inserted": 200000
+      },
+      "ops": {
+        "insert": {
+          "count": 195000,
+          "max": {
+            "secs": 0,
+            "nanos": 21849049
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 19995078
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 18246359
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 17199082
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 429633
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 3785897
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 56268
+          }
+        }
+      },
+      "runs": 5,
+      "wall_clock_ns": [
+        141674018,
+        146444054,
+        186685540,
+        201787847,
+        205100742
+      ],
+      "spread_pct": 44.76948200904417,
+      "runs_detail": [
+        {
+          "wall_clock_ns": 205100742,
+          "ops": {
+            "insert": {
+              "count": 195000,
+              "max": {
+                "secs": 0,
+                "nanos": 29370164
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 23220255
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 18213045
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 15274556
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 361282
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 4159730
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 53793
+              }
+            }
+          },
+          "counters": {
+            "inserted": 200000
+          }
+        },
+        {
+          "wall_clock_ns": 141674018,
+          "ops": {
+            "insert": {
+              "count": 195000,
+              "max": {
+                "secs": 0,
+                "nanos": 13620137
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 9687044
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 7487932
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 6280950
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 2440074
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 2856193
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 53012
+              }
+            }
+          },
+          "counters": {
+            "inserted": 200000
+          }
+        },
+        {
+          "wall_clock_ns": 201787847,
+          "ops": {
+            "insert": {
+              "count": 195000,
+              "max": {
+                "secs": 0,
+                "nanos": 24055015
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 22051828
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 20462995
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 19019880
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 356643
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 4101567
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 51148
+              }
+            }
+          },
+          "counters": {
+            "inserted": 200000
+          }
+        },
+        {
+          "wall_clock_ns": 186685540,
+          "ops": {
+            "insert": {
+              "count": 195000,
+              "max": {
+                "secs": 0,
+                "nanos": 21849049
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 19995078
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 18246359
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 17199082
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 429633
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 3785897
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 56268
+              }
+            }
+          },
+          "counters": {
+            "inserted": 200000
+          }
+        },
+        {
+          "wall_clock_ns": 146444054,
+          "ops": {
+            "insert": {
+              "count": 195000,
+              "max": {
+                "secs": 0,
+                "nanos": 16106540
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 12323944
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 9015058
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 7326092
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 2089352
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 2932783
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 54154
+              }
+            }
+          },
+          "counters": {
+            "inserted": 200000
+          }
+        }
+      ]
+    },
+    "macro/insert_unsorted": {
+      "timing": "per_batch",
+      "seed": 42,
+      "scale": {
+        "scale": "full",
+        "rows": 200000,
+        "row_bytes": 256,
+        "keys": 200000,
+        "concurrency": 4096
+      },
+      "conf": {
+        "shards": 12,
+        "memory": "4Gi",
+        "durability": "fsync",
+        "digest": "5565a6e37ccb"
+      },
+      "counters": {
+        "inserted": 200000
+      },
+      "ops": {
+        "insert": {
+          "count": 195000,
+          "max": {
+            "secs": 0,
+            "nanos": 175648601
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 155981365
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 125799862
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 38140985
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 25590987
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 31908017
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 740790
+          }
+        }
+      },
+      "runs": 5,
+      "wall_clock_ns": [
+        1410494676,
+        1518679422,
+        1531826181,
+        1561598540,
+        1610653857
+      ],
+      "spread_pct": 14.190708012286038,
+      "runs_detail": [
+        {
+          "wall_clock_ns": 1531826181,
+          "ops": {
+            "insert": {
+              "count": 195000,
+              "max": {
+                "secs": 0,
+                "nanos": 175648601
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 155981365
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 125799862
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 38140985
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 25590987
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 31908017
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 740790
+              }
+            }
+          },
+          "counters": {
+            "inserted": 200000
+          }
+        },
+        {
+          "wall_clock_ns": 1518679422,
+          "ops": {
+            "insert": {
+              "count": 195000,
+              "max": {
+                "secs": 0,
+                "nanos": 166324063
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 149245488
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 120290816
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 36745500
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 25169409
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 31683881
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 964718
+              }
+            }
+          },
+          "counters": {
+            "inserted": 200000
+          }
+        },
+        {
+          "wall_clock_ns": 1610653857,
+          "ops": {
+            "insert": {
+              "count": 195000,
+              "max": {
+                "secs": 0,
+                "nanos": 172698047
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 158493258
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 127899505
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 42736520
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 29001371
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 33609838
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 692637
+              }
+            }
+          },
+          "counters": {
+            "inserted": 200000
+          }
+        },
+        {
+          "wall_clock_ns": 1561598540,
+          "ops": {
+            "insert": {
+              "count": 195000,
+              "max": {
+                "secs": 0,
+                "nanos": 172657870
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 151491622
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 120776557
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 40103515
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 26347717
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 32541353
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 859968
+              }
+            }
+          },
+          "counters": {
+            "inserted": 200000
+          }
+        },
+        {
+          "wall_clock_ns": 1410494676,
+          "ops": {
+            "insert": {
+              "count": 195000,
+              "max": {
+                "secs": 0,
+                "nanos": 168074858
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 144347292
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 116942360
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 35208315
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 22029984
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 29375908
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 2133498
+              }
+            }
+          },
+          "counters": {
+            "inserted": 200000
+          }
+        }
+      ]
+    }
+  }
+}
