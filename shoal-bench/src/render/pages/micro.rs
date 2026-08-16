@@ -192,8 +192,9 @@ fn scaling(page: &Page) -> Result<String> {
     out.push_str(&chart::micro_scaling::draw(&families)?);
     out.push('\n');
     out.push_str(&caption(
-        "Mean time against partition size. Each line is labelled at its right hand end rather than \
-         in a legend, so no colour has to be matched to a name.",
+        "Mean time against partition size, both axes logarithmic: a cost proportional to the \
+         partition is a straight diagonal, a cost independent of it is flat, and the table below \
+         carries the same numbers for anyone the colours do not separate.",
     ));
     out.push_str(&tables::micro_scaling(&families));
     out.push('\n');

@@ -77,6 +77,7 @@
   - [F16. The client builder](features/client-builder.md)
   - [F17. The workload grid](features/workload-grid.md)
   - [F18. Results pages that explain themselves](features/results-pages.md)
+  - [F19. Charts that name their colours in one place](features/chart-legends.md)
 
 # Direction
 

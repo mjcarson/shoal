@@ -73,10 +73,50 @@ fn texts(svg: &str) -> Vec<(f64, f64, String)> {
     found
 }
 
+/// A sweep with the longest series names any page produces, drawn at the palette's full width
+///
+/// The sweeps on the pages are built from arms a page selects, so nothing here can reach one. This
+/// stands in for the widest legend the renderer can be asked for: eight series whose names are the
+/// `{op}, {table}` strings `render::arms::table_label` produces, which are the longest series names
+/// anywhere on the site.
+fn widest_sweep() -> String {
+    let mut series = Vec::new();
+    for op in ["read", "write"] {
+        for table in [
+            "unsorted",
+            "sorted",
+            "unsorted, no storage",
+            "sorted, no storage",
+        ] {
+            series.push(chart::sweep::Series {
+                name: format!("{op}, {table}"),
+                points: vec![
+                    (64.0, 40_000.0),
+                    (4_096.0, 44_000.0),
+                    (1_048_576.0, 900_000.0),
+                ],
+            });
+        }
+    }
+    chart::sweep::draw(
+        &chart::sweep::Spec {
+            id: "chart-test-widest".to_string(),
+            x_desc: "row width".to_string(),
+            y_desc: "p50 service time".to_string(),
+            x_axis: chart::sweep::Axis::Log,
+            y_axis: chart::sweep::Axis::Log,
+            x_unit: chart::sweep::Unit::Bytes,
+            y_unit: chart::sweep::Unit::Duration,
+        },
+        &series,
+    )
+    .expect("it draws")
+}
+
 /// Builds every chart this tree has the artifacts for
 fn every_chart() -> Vec<(String, String)> {
     let store = repo();
-    let mut charts = Vec::new();
+    let mut charts = vec![("widest_sweep".to_string(), widest_sweep())];
     // the wall clock of every capture that produced a macro artifact, per workload
     //
     // the page draws one chart per workload rather than one chart of everything, because a
@@ -276,6 +316,57 @@ fn stacked_labels_have_room() {
                     pair[0]
                 );
             }
+        }
+    }
+}
+
+/// Every series a chart draws is named exactly once, in its legend
+///
+/// The names used to be drawn at the end of each line as well, and the whole point of moving them
+/// into a legend is that there is now one place a name appears. A name drawn twice means an end
+/// label survived somewhere, which is the state this replaced.
+#[test]
+fn every_series_is_named_once() {
+    let svg = widest_sweep();
+    for op in ["read", "write"] {
+        for table in ["unsorted, no storage", "sorted, no storage"] {
+            let name = format!("{op}, {table}");
+            assert_eq!(
+                svg.matches(name.as_str()).count(),
+                1,
+                "{name:?} is drawn more than once"
+            );
+        }
+    }
+}
+
+/// A legend swatch has its name beside it rather than under the next one along
+///
+/// The columns are laid out from an *estimate* of how wide each name is, so this is the check that
+/// the estimate is generous enough: every swatch and the text next to it have to be closer to each
+/// other than the swatch is to the next swatch in its row.
+#[test]
+fn legend_names_stay_with_their_swatches() {
+    let svg = widest_sweep();
+    // every legend row, keyed by the y its entries share
+    let mut rows: std::collections::BTreeMap<i64, Vec<f64>> = std::collections::BTreeMap::new();
+    for (x, y, text) in texts(&svg) {
+        // the legend entries are the only labels drawn below the plot area
+        if !text.is_empty() && y > 420.0 {
+            rows.entry(y.round() as i64).or_default().push(x);
+        }
+    }
+    assert!(!rows.is_empty(), "no legend was drawn at all");
+    for (y, mut row) in rows {
+        row.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+        // the longest name in this chart is 26 characters, which at 11px is about 170 units
+        for pair in row.windows(2) {
+            assert!(
+                pair[1] - pair[0] >= 180.0,
+                "two legend entries in the row at y={y} are only {} apart, which is narrower \
+                 than the names they hold",
+                pair[1] - pair[0]
+            );
         }
     }
 }

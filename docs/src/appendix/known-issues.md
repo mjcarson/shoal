@@ -28,15 +28,19 @@ Defects that have been fixed move to [Resolved Issues](resolved-issues.md), one 
 carrying the reasoning and the invariants the fix depends on. Item numbers are shared between
 the two pages and never reused, so a number appears on exactly one of them — which is why this
 list starts at 15 and skips 25, 26, 31, 34, 39, 44, 45, 48, 51, 56, 57, 61, 67 and 68, and why
-item 69 is the newest. The exceptions are items 16, 17, 20, 24 and 54, which were only
+item 70 is the newest. The exceptions are items 16, 17, 20, 24 and 54, which were only
 partly fixed: the open remainder is here and the rest is there. Items 9 and 51 were each one such
 exception until their second half was fixed, and are now on the resolved page alone; item 25 was one
 in the other direction — it had one row left open, that row was fixed, and the whole item
 [moved](resolved/claude-md-drift.md).
 
 **Baseline as of writing:** `cargo check --workspace --all-targets` passes with warnings;
-`cargo test --workspace` passes — 896 tests, one ignored, plus 8 more behind
+`cargo test --workspace` passes — 986 tests, one ignored, plus 8 more behind
 `--features stage-profile` that a default run does not reach ([Test Coverage](test-coverage.md)).
+That is up from 967 with [F19](../features/chart-legends.md), which added 16 `shoal-bench` unit
+tests over the shared chart legend, the data-derived axis ticks and the encryption charts in
+nanoseconds, 2 integration tests over the legend's geometry, and 1 doctest. That is up from 896
+with [F17](../features/workload-grid.md) and [F18](../features/results-pages.md), which added 71.
 That is up from 876 with [F16](../features/client-builder.md), which added 12 `shoal-client` unit
 tests over the builder and the endpoint order, a new `pool.rs` integration binary carrying 6, and 2
 doctests. That is up from 868 with [F15](../features/client-server-split.md), which also
@@ -1308,6 +1312,46 @@ decide on the way. A library that installs a **global** subscriber takes that de
 the binary embedding it, so this may belong on `shoal-workload` and `shoalctl` rather than on
 `ShoalPool`. And whatever the answer, a benchmark capture must keep getting the subscriber it has
 always had — none — or every macro number moves for a reason that is not the code being measured.
+
+### 70. An axis writes more digits than its ticks have room for, and twice labels two at the same number
+
+`shoal-bench/src/render/chart/sweep.rs`, the `y_label_formatter` passed to `themed_mesh!`
+
+`chart-grid-latency` draws `900.00 µs`, `1.00 ms` and `1.00 ms` as three consecutive y ticks, and
+`chart-row-size-latency` does the same at several places on its axis. Two gridlines carrying the
+same label is a reader counting decades wrong: the chart says the two lines are at the same value
+and they are not.
+
+The cause is rounding, not placement. plotters chooses key points on a logarithmic axis at ratios
+that are not round numbers, and `fmt::duration_ns` writes two decimal places in each band, so
+1,000,000 ns and 1,004,000 ns both come out `1.00 ms`. Nothing detects the collision because the
+formatter sees one value at a time and has no memory of the previous tick.
+
+[F19](../features/chart-legends.md) fixed this for the **x** axis of every sweep, by ticking at the
+values the workloads were measured at instead of at a spacing plotters chose — there are never many
+of those and they are exact. The y axis has no such list: it is a continuum of measured costs, and
+picking ticks for it means choosing them rather than reusing them.
+
+**The same formatter crowds an axis it does not duplicate.** `chart-hotpath-scopes` ticks at
+`0.00 ns`, `50.000 s`, `100.000 s` … `450.000 s`, spaced 38 user units apart. `150.000 s` is nine
+characters at a 9.68 unit font, so two adjacent labels want about 44 units between their centres
+and have 38. Nothing here is wrong, only unreadable, and the cause is the same one: a formatter
+that writes a fixed number of digits per band, chosen without reference to how much room the axis
+gave it. Three decimals in the seconds band exist so that a 1.802 s measurement in a *table* keeps
+its precision; on an axis whose ticks are round multiples of fifty they are three characters of
+nothing. This half is older than item 70's other half and predates
+[F19](../features/chart-legends.md) — `hotpath_scopes.rs` is untouched by it.
+
+**Established by reading the generated pages.** `sed -n '/chart-grid-latency/,/<\/svg>/p'
+docs/src/performance/grid.md | grep -E '^[0-9.]+ (ns|µs|ms|s)$' | uniq -d` prints `1.00 ms`. The
+crowding is read off the tick anchors in `docs/src/performance/attribution.md`, which are `x="..."`
+attributes 38 apart on the `y="348"` row.
+
+**Fix direction:** give the value axis a key-point list of its own — round numbers of the unit the
+range lands in, one per half decade — rather than deduplicating labels after the fact. Dropping the
+duplicate leaves an unlabelled bold gridline, which is a smaller lie than the current one but is
+still a chart that has a gridline it will not name. `sweep::Scale` already takes a tick list, so
+the mechanism exists; what it needs is a generator for it.
 
 Everything that has been fixed, and why it was fixed the way it was, is in
 [Resolved Issues](resolved-issues.md). The SHQL parser has gained test coverage at both stages

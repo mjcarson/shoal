@@ -17,6 +17,15 @@
 //! not record: a depth arm at depth 1 and a client arm at one client have identical facts and
 //! would otherwise collide.
 //!
+//! # The gap is drawn in nanoseconds, not as a share
+//!
+//! These charts used to draw `(tls - plain) / plain` as a percentage. A percentage cannot tell a
+//! large share of a very small number from a small share of a large one, and both of those are on
+//! this sweep: a 256 byte row at depth 1 and a 4 MiB row at depth 128 are not the same finding
+//! however similar their percentages look. What each chart draws now is what encryption added, in
+//! the same unit everything else on the page is in, and [`draw_absolute`] says what it added it
+//! to. The share is still what the prose quotes, and [`Point::overhead_pct`] still computes it.
+//!
 //! # A point that is not a result is drawn hollow
 //!
 //! The macro layer's rule is that a difference is only a result when the two sides' observed
@@ -31,9 +40,16 @@ use std::collections::BTreeMap;
 use anyhow::Result;
 use plotters::prelude::*;
 
-use super::palette;
+use super::sweep::{Axis, Scale, Unit};
+use super::{legend, palette};
 use crate::fmt;
 use crate::model::macro_layer::MacroCaptureV2;
+
+/// How tall the plotting area is, before the legend is added under it
+const PLOT_HEIGHT: u32 = 400;
+
+/// How many curves the palette can carry before two of them share a colour
+const MAX_CURVES: usize = 8;
 
 /// The operation every arm of both sweeps records its samples under
 const OP: &str = "get";
@@ -72,12 +88,23 @@ pub struct Point {
 
 impl Point {
     /// What encryption cost here, as a percentage of the plaintext cost
+    ///
+    /// Still what the prose on the page quotes. It is no longer what any chart draws - see the
+    /// module header for why.
     pub fn overhead_pct(&self) -> f64 {
         // a plaintext arm that cost nothing would make this meaningless, and cannot happen
         if self.plain_ns <= 0.0 {
             return 0.0;
         }
         (self.tls_ns - self.plain_ns) / self.plain_ns * 100.0
+    }
+
+    /// What encryption cost here, in nanoseconds
+    ///
+    /// Negative where the encrypted arm came out faster, which happens and is exactly what the
+    /// hollow markers are for.
+    pub fn added_ns(&self) -> f64 {
+        self.tls_ns - self.plain_ns
     }
 }
 
@@ -161,10 +188,12 @@ fn disjoint(left: Option<(u128, u128)>, right: Option<(u128, u128)>) -> bool {
 /// * `points` - The pairs to group
 /// * `series_of` - Which curve a point belongs to
 /// * `x_of` - Where along the curve it sits
+/// * `y_of` - What the point measures
 fn curves(
     points: &[Point],
     series_of: impl Fn(&Point) -> u64,
     x_of: impl Fn(&Point) -> f64,
+    y_of: impl Fn(&Point) -> f64,
 ) -> Vec<(u64, Vec<(f64, f64, bool)>)> {
     // one entry per series, each sorted along the x axis so the line is drawn left to right
     let mut grouped: BTreeMap<u64, Vec<(f64, f64, bool)>> = BTreeMap::new();
@@ -172,7 +201,7 @@ fn curves(
         grouped
             .entry(series_of(point))
             .or_default()
-            .push((x_of(point), point.overhead_pct(), point.separated));
+            .push((x_of(point), y_of(point), point.separated));
     }
     let mut out: Vec<(u64, Vec<(f64, f64, bool)>)> = grouped.into_iter().collect();
     for (_, series) in &mut out {
@@ -183,22 +212,6 @@ fn curves(
         });
     }
     out
-}
-
-/// How wide a row is, written the way a reader thinks of it
-///
-/// # Arguments
-///
-/// * `bytes` - The row width
-fn width_label(bytes: u64) -> String {
-    // binary units, because the widths are powers of two and 1048576 reads as nothing
-    if bytes >= 1024 * 1024 {
-        format!("{} MiB", bytes / (1024 * 1024))
-    } else if bytes >= 1024 {
-        format!("{} KiB", bytes / 1024)
-    } else {
-        format!("{bytes} B")
-    }
 }
 
 /// Draws one overhead chart
@@ -212,6 +225,7 @@ fn width_label(bytes: u64) -> String {
 /// * `points` - The pairs to draw
 /// * `x_desc` - What the x axis is
 /// * `x_of` - Where along the x axis a point sits
+/// * `x_unit` - How x values are written
 /// * `series_of` - Which curve a point belongs to
 /// * `series_label` - How to name a curve
 fn draw_overhead(
@@ -219,6 +233,7 @@ fn draw_overhead(
     points: &[Point],
     x_desc: &str,
     x_of: impl Fn(&Point) -> f64,
+    x_unit: Unit,
     series_of: impl Fn(&Point) -> u64,
     series_label: impl Fn(u64) -> String,
 ) -> Result<String> {
@@ -226,9 +241,9 @@ fn draw_overhead(
     if points.is_empty() {
         anyhow::bail!("no encryption arm had a twin to be drawn against");
     }
-    let series = curves(points, series_of, x_of);
+    let series = curves(points, series_of, x_of, Point::added_ns);
     // the axes span everything drawn. x is logarithmic because every axis here is powers of two;
-    // y is not, because an overhead can be negative and a log axis cannot hold that
+    // y is not, because an added cost can be negative and a log axis cannot hold that
     let mut min_x = f64::MAX;
     let mut max_x = f64::MIN;
     let mut min_y = f64::MAX;
@@ -249,33 +264,48 @@ fn draw_overhead(
     let (low, high) = (min_y - span * 0.08, max_y + span * 0.08);
     let overlapping = points.iter().filter(|point| !point.separated).count();
     let aria = format!(
-        "What encryption costs against {x_desc}, {} curves, from {:.0}% to {:.0}%",
+        "What encryption added against {x_desc}, {} curves, from {} to {}",
         series.len(),
-        min_y,
-        max_y
+        fmt::duration_ns(min_y),
+        fmt::duration_ns(max_y)
     );
+    // one legend entry per curve, in the order the colours were handed out
+    let entries: Vec<legend::Entry> = series
+        .iter()
+        .enumerate()
+        .map(|(index, (key, _))| legend::Entry::new(series_label(*key), palette::series(index)))
+        .collect();
+    let height = PLOT_HEIGHT + legend::height(&entries);
+    // the ticks the x axis gets, which are the widths, depths or client counts the sweep was
+    // actually run at rather than the powers of ten plotters would space a log axis with
+    let ticks = distinct_x(&series);
     let x_desc = x_desc.to_string();
-    super::draw(id, &aria, 400, move |root| {
-        let mut chart = ChartBuilder::on(root)
+    let x_unit = x_unit;
+    super::draw(id, &aria, height, move |root| {
+        // the plot, and the strip under it that says what each colour is
+        let (area, strip) = root.split_vertically(PLOT_HEIGHT);
+        let mut chart = ChartBuilder::on(&area)
             .margin(16)
-            .margin_right(150)
+            // no gutter is reserved on the right any more, because nothing is drawn out there
+            .margin_right(24)
             .x_label_area_size(46)
-            .y_label_area_size(70)
-            .build_cartesian_2d((min_x * 0.85..max_x * 1.2).log_scale(), low..high)?;
+            .y_label_area_size(78)
+            .build_cartesian_2d(
+                Scale::new(min_x * 0.85..max_x * 1.2, Axis::Log).ticks(ticks),
+                Scale::new(low..high, Axis::Linear),
+            )?;
         crate::themed_mesh!(chart)
             .x_desc(&x_desc)
-            .x_label_formatter(&|value: &f64| format!("{}", value.round() as u64))
-            .y_desc("TLS cost over plaintext")
-            .y_label_formatter(&|value: &f64| format!("{value:.0}%"))
+            .x_label_formatter(&move |value: &f64| x_unit.format(*value))
+            .y_desc("what TLS added")
+            .y_label_formatter(&|value: &f64| fmt::duration_ns(*value))
             .draw()?;
         // the zero line, so "no cost" is a place on the chart rather than a value to read off
         chart.draw_series(LineSeries::new(
             [(min_x * 0.85, 0.0), (max_x * 1.2, 0.0)],
             palette::AXIS.stroke_width(1),
         ))?;
-        // where each curve ended, and what to call it, gathered before any label is placed
-        let mut ends: Vec<(f64, f64, String)> = Vec::with_capacity(series.len());
-        for (index, (key, curve)) in series.iter().enumerate() {
+        for (index, (_, curve)) in series.iter().enumerate() {
             let colour = palette::series(index);
             chart.draw_series(LineSeries::new(
                 curve.iter().map(|(x, y, _)| (*x, *y)),
@@ -288,40 +318,9 @@ fn draw_overhead(
             chart.draw_series(curve.iter().filter(|(_, _, ok)| !*ok).map(|(x, y, _)| {
                 Circle::new((*x, *y), 3, colour.stroke_width(1))
             }))?;
-            // labelled at the right hand end rather than in a legend, so a reader never has to
-            // match a colour to a name. where each label goes is decided below, once every
-            // curve's end is known - two curves can end at the same cost, and two labels drawn
-            // at the same height are unreadable whichever colour they are
-            if let Some((x, y, _)) = curve.last() {
-                ends.push((*x * 1.08, *y, series_label(*key)));
-            }
         }
-        // push apart any labels that would overlap, keeping them in the order their curves
-        // ended in so a reader can still tell which is which
-        //
-        // the gap is in data units because that is what the label is placed in, converted from
-        // the pixels the text actually occupies: the plotting area is the chart height less the
-        // margins and the x label gutter.
-        let plot_px = 400.0 - 16.0 - 46.0;
-        let min_gap = (high - low) * (12.0 / plot_px);
-        ends.sort_by(|left, right| left.1.partial_cmp(&right.1).unwrap_or(Ordering::Equal));
-        let mut previous = f64::MIN;
-        for (_, y, _) in &mut ends {
-            // a label closer to the one below it than the text is tall gets nudged up
-            if *y - previous < min_gap {
-                *y = previous + min_gap;
-            }
-            previous = *y;
-        }
-        for (x, y, text) in ends {
-            chart.draw_series(std::iter::once(Text::new(
-                text,
-                (x, y),
-                super::label_font(11),
-            )))?;
-        }
-        // and a note when some pairs were not separated, so the chart cannot look more certain
-        // than the data is
+        // a note when some pairs were not separated, so the chart cannot look more certain than
+        // the data is
         if overlapping > 0 {
             chart.draw_series(std::iter::once(Text::new(
                 format!("{overlapping} hollow: runs overlapped, not a result"),
@@ -329,8 +328,32 @@ fn draw_overhead(
                 super::label_font(10),
             )))?;
         }
+        legend::draw(&strip, &entries)?;
         Ok(())
     })
+}
+
+/// The x values every curve shares, if there are few enough of them to be ticks
+///
+/// The same rule [`sweep`](super::sweep) applies, over the shape these charts hold their curves in.
+///
+/// # Arguments
+///
+/// * `series` - The curves being drawn
+fn distinct_x(series: &[(u64, Vec<(f64, f64, bool)>)]) -> Option<Vec<f64>> {
+    // gather every x anything was measured at
+    let mut values: Vec<f64> = series
+        .iter()
+        .flat_map(|(_, curve)| curve.iter().map(|(x, _, _)| *x))
+        .collect();
+    values.sort_by(|left, right| left.partial_cmp(right).unwrap_or(Ordering::Equal));
+    // two curves measured at the same width contribute one tick, not two
+    values.dedup_by(|left, right| (*left - *right).abs() <= right.abs() * 1e-9);
+    // above a dozen these have stopped being chosen points and started being a scatter
+    if values.is_empty() || values.len() > 12 {
+        return None;
+    }
+    Some(values)
 }
 
 /// Draws what encryption costs against row width, one curve per load depth
@@ -343,8 +366,9 @@ pub fn draw_by_row(capture: &MacroCaptureV2) -> Result<String> {
     draw_overhead(
         "chart-encryption-by-row",
         &points,
-        "row width in bytes",
+        "row width",
         |point| point.row_bytes as f64,
+        Unit::Bytes,
         |point| u64::from(point.depth),
         |depth| format!("{depth} deep"),
     )
@@ -362,8 +386,9 @@ pub fn draw_by_depth(capture: &MacroCaptureV2) -> Result<String> {
         &points,
         "queries outstanding at once",
         |point| f64::from(point.depth),
+        Unit::Count,
         |point| point.row_bytes,
-        width_label,
+        fmt::bytes,
     )
 }
 
@@ -379,36 +404,45 @@ pub fn draw_by_clients(capture: &MacroCaptureV2) -> Result<String> {
         &points,
         "independent clients",
         |point| f64::from(point.clients),
+        Unit::Count,
         |point| point.row_bytes,
-        width_label,
+        fmt::bytes,
     )
 }
 
 /// Draws what a query actually cost on each wire, against row width
 ///
-/// The overhead charts say how much encryption added; this says what it added *to*. A percentage
-/// is unreadable without it — a large share of a very small number is not the same finding as a
-/// small share of a large one.
+/// The overhead chart says how much encryption added; this says what it added *to*, at every depth
+/// the sweep covers rather than only the shallowest. A gap of the same number of microseconds is a
+/// different finding on a query that takes forty of them and on one that takes four thousand, and
+/// the depth axis is where that difference lives.
 ///
 /// # Arguments
 ///
 /// * `capture` - The capture to read
 pub fn draw_absolute(capture: &MacroCaptureV2) -> Result<String> {
-    // the shallowest depth, where a service time is a round trip and nothing queues behind it
-    let points: Vec<Point> = pairs(capture, DEPTH_SWEEP)
-        .into_iter()
-        .filter(|point| point.depth == 1)
-        .collect();
+    let points = pairs(capture, DEPTH_SWEEP);
     if points.is_empty() {
-        anyhow::bail!("no single-deep encryption pair was captured");
+        anyhow::bail!("no encryption pair was captured");
     }
-    let mut sorted = points;
-    sorted.sort_by_key(|point| point.row_bytes);
+    // one curve per depth per wire, in depth order so the legend reads as a ladder
+    let mut depths: Vec<u32> = points.iter().map(|point| point.depth).collect();
+    depths.sort_unstable();
+    depths.dedup();
+    // two wires to a depth, against a palette eight colours wide. beyond this the ninth curve
+    // would reuse a colour and two lines would be indistinguishable, so say so rather than draw it
+    if depths.len() * 2 > MAX_CURVES {
+        anyhow::bail!(
+            "the depth sweep has {} depths, which is {} curves against a palette of {MAX_CURVES}",
+            depths.len(),
+            depths.len() * 2
+        );
+    }
     let mut min_x = f64::MAX;
     let mut max_x = f64::MIN;
     let mut min_y = f64::MAX;
     let mut max_y = f64::MIN;
-    for point in &sorted {
+    for point in &points {
         min_x = min_x.min(point.row_bytes as f64);
         max_x = max_x.max(point.row_bytes as f64);
         for cost in [point.plain_ns, point.tls_ns] {
@@ -422,35 +456,15 @@ pub fn draw_absolute(capture: &MacroCaptureV2) -> Result<String> {
     if min_y > max_y {
         anyhow::bail!("no encryption pair had a positive cost to draw");
     }
-    let aria = format!(
-        "Cost of one get on each wire against row width, from {} to {}, both axes logarithmic",
-        fmt::duration_ns(min_y),
-        fmt::duration_ns(max_y)
-    );
-    super::draw("chart-encryption-absolute", &aria, 400, move |root| {
-        let mut chart = ChartBuilder::on(root)
-            .margin(16)
-            .margin_right(150)
-            .x_label_area_size(46)
-            .y_label_area_size(78)
-            .build_cartesian_2d(
-                (min_x * 0.85..max_x * 1.2).log_scale(),
-                (min_y * 0.7..max_y * 1.4).log_scale(),
-            )?;
-        crate::themed_mesh!(chart)
-            .x_desc("row width in bytes")
-            .x_label_formatter(&|value: &f64| format!("{}", value.round() as u64))
-            .y_desc("p50 of one get")
-            .y_label_formatter(&|value: &f64| fmt::duration_ns(*value))
-            .draw()?;
-        // two lines, plaintext first so it is the lower one wherever encryption costs anything
-        for (index, (name, encrypted)) in [("plaintext", false), ("TLS", true)]
-            .into_iter()
-            .enumerate()
-        {
-            let colour = palette::series(index);
-            let line: Vec<(f64, f64)> = sorted
+    // each curve, gathered before anything is drawn so the legend and the lines cannot disagree
+    let mut lines: Vec<(String, Vec<(f64, f64)>)> = Vec::with_capacity(depths.len() * 2);
+    for depth in &depths {
+        // plaintext first at each depth, so it is the lower of the pair wherever encryption cost
+        // anything and the two sit next to each other in the legend
+        for (wire, encrypted) in [("plaintext", false), ("TLS", true)] {
+            let mut curve: Vec<(f64, f64)> = points
                 .iter()
+                .filter(|point| point.depth == *depth)
                 .map(|point| {
                     let cost = if encrypted {
                         point.tls_ns
@@ -460,19 +474,60 @@ pub fn draw_absolute(capture: &MacroCaptureV2) -> Result<String> {
                     (point.row_bytes as f64, cost)
                 })
                 .collect();
-            chart.draw_series(LineSeries::new(line.iter().copied(), colour.stroke_width(2)))?;
-            chart.draw_series(
-                line.iter()
-                    .map(|point| Circle::new(*point, 3, colour.filled())),
-            )?;
-            if let Some((x, y)) = line.last() {
-                chart.draw_series(std::iter::once(Text::new(
-                    name.to_string(),
-                    (*x * 1.08, *y),
-                    super::label_font(11),
-                )))?;
+            curve.sort_by(|left, right| left.0.partial_cmp(&right.0).unwrap_or(Ordering::Equal));
+            if !curve.is_empty() {
+                lines.push((format!("{depth} deep, {wire}"), curve));
             }
         }
+    }
+    let aria = format!(
+        "Cost of one get on each wire against row width, {} curves, from {} to {}, both axes \
+         logarithmic",
+        lines.len(),
+        fmt::duration_ns(min_y),
+        fmt::duration_ns(max_y)
+    );
+    let entries: Vec<legend::Entry> = lines
+        .iter()
+        .enumerate()
+        .map(|(index, (name, _))| legend::Entry::new(name.clone(), palette::series(index)))
+        .collect();
+    let height = PLOT_HEIGHT + legend::height(&entries);
+    // the widths the sweep was run at, which are powers of two and are not where a log axis would
+    // otherwise put its gridlines
+    let mut ticks: Vec<f64> = points.iter().map(|point| point.row_bytes as f64).collect();
+    ticks.sort_by(|left, right| left.partial_cmp(right).unwrap_or(Ordering::Equal));
+    ticks.dedup_by(|left, right| (*left - *right).abs() <= right.abs() * 1e-9);
+    let ticks = (ticks.len() <= 12).then_some(ticks);
+    super::draw("chart-encryption-absolute", &aria, height, move |root| {
+        // the plot, and the strip under it that says what each colour is
+        let (area, strip) = root.split_vertically(PLOT_HEIGHT);
+        let mut chart = ChartBuilder::on(&area)
+            .margin(16)
+            // no gutter is reserved on the right any more, because nothing is drawn out there
+            .margin_right(24)
+            .x_label_area_size(46)
+            .y_label_area_size(78)
+            .build_cartesian_2d(
+                Scale::new(min_x * 0.85..max_x * 1.2, Axis::Log).ticks(ticks),
+                Scale::new(min_y * 0.7..max_y * 1.4, Axis::Log),
+            )?;
+        crate::themed_mesh!(chart)
+            .x_desc("row width")
+            .x_label_formatter(&|value: &f64| Unit::Bytes.format(*value))
+            .y_desc("p50 of one get")
+            .y_label_formatter(&|value: &f64| fmt::duration_ns(*value))
+            .draw()?;
+        for (index, (_, curve)) in lines.iter().enumerate() {
+            let colour = palette::series(index);
+            chart.draw_series(LineSeries::new(curve.iter().copied(), colour.stroke_width(2)))?;
+            chart.draw_series(
+                curve
+                    .iter()
+                    .map(|point| Circle::new(*point, 3, colour.filled())),
+            )?;
+        }
+        legend::draw(&strip, &entries)?;
         Ok(())
     })
 }
@@ -647,11 +702,62 @@ mod tests {
     }
 
     #[test]
-    /// A row width is written the way a reader thinks of it
-    fn a_width_reads_in_binary_units() {
-        assert_eq!(width_label(256), "256 B");
-        assert_eq!(width_label(4096), "4 KiB");
-        assert_eq!(width_label(65536), "64 KiB");
-        assert_eq!(width_label(1024 * 1024), "1 MiB");
+    /// What encryption cost is drawn as a duration, not as a share
+    ///
+    /// A percentage cannot tell a large share of a very small number from a small share of a large
+    /// one, and both are on this sweep. The axis is what stops the chart making that claim.
+    fn the_overhead_chart_is_drawn_in_nanoseconds() {
+        let capture = capture_with(&[100, 110, 120], &[300, 310, 320]);
+        let svg = draw_by_row(&capture).expect("it draws");
+        assert!(svg.contains("what TLS added"), "the axis is not the added cost");
+        assert!(!svg.contains("TLS cost over plaintext"), "the percentage axis survived");
+        // 200 ns of overhead, written the way every other duration on the page is
+        assert!(svg.contains(" ns"), "no duration was written on the axis");
+        assert!(!svg.contains('%'), "a percentage was written anyway");
+    }
+
+    #[test]
+    /// Every curve is named once, in the legend, and nowhere else
+    fn every_curve_is_named_in_the_legend() {
+        let capture = capture_with(&[100, 110, 120], &[300, 310, 320]);
+        let svg = draw_by_row(&capture).expect("it draws");
+        assert_eq!(svg.matches("1 deep").count(), 1, "the curve is named twice");
+    }
+
+    #[test]
+    /// The absolute chart covers every depth, not only the shallowest
+    fn the_absolute_chart_covers_the_whole_sweep() {
+        let mut capture = capture_with(&[100, 110, 120], &[300, 310, 320]);
+        capture.workloads.insert(
+            format!("{DEPTH_SWEEP}plain/256/8"),
+            arm(256, 8, 1, false, &[400, 410, 420]),
+        );
+        capture.workloads.insert(
+            format!("{DEPTH_SWEEP}tls/256/8"),
+            arm(256, 8, 1, true, &[500, 510, 520]),
+        );
+        let svg = draw_absolute(&capture).expect("it draws");
+        for name in ["1 deep, plaintext", "1 deep, TLS", "8 deep, plaintext", "8 deep, TLS"] {
+            assert!(svg.contains(name), "{name} is not on the chart");
+        }
+    }
+
+    #[test]
+    /// More depths than the palette can carry is an error, not two curves in one colour
+    fn too_many_depths_is_refused() {
+        let mut capture = capture_with(&[100, 110, 120], &[300, 310, 320]);
+        // five depths is ten curves against a palette of eight
+        for depth in [2u32, 4, 8, 16] {
+            capture.workloads.insert(
+                format!("{DEPTH_SWEEP}plain/256/{depth}"),
+                arm(256, depth, 1, false, &[400, 410, 420]),
+            );
+            capture.workloads.insert(
+                format!("{DEPTH_SWEEP}tls/256/{depth}"),
+                arm(256, depth, 1, true, &[500, 510, 520]),
+            );
+        }
+        let err = draw_absolute(&capture).expect_err("ten curves must not pass");
+        assert!(format!("{err}").contains("palette of 8"));
     }
 }

@@ -63,8 +63,9 @@ pub fn build(page: &Page) -> Result<String> {
         out.push_str(&encryption::draw_by_row(capture)?);
         out.push('\n');
         out.push_str(&caption(
-            "What TLS added, as a share of the plaintext cost, against how wide a row is. One curve \
-             per load depth, each labelled at its right hand end.",
+            "What TLS added, in nanoseconds, against how wide a row is. One curve per load depth. \
+             Zero is drawn, so a curve that hugs it is visibly hugging it, and a curve below it is \
+             a pair where the encrypted arm came out faster.",
         ));
         out.push_str("### Against load depth\n\n");
         out.push_str(&encryption::draw_by_depth(capture)?);
@@ -77,9 +78,9 @@ pub fn build(page: &Page) -> Result<String> {
         out.push_str(&encryption::draw_absolute(capture)?);
         out.push('\n');
         out.push_str(&caption(
-            "The absolute p50 of one get on each wire, at a single outstanding query. A percentage \
-             is unreadable without this - a large share of a small number is not the same finding \
-             as a small share of a large one.",
+            "The absolute p50 of one get on each wire, at every load depth the sweep covers. This \
+             is what the gap above was added to: the same number of microseconds is a different \
+             finding on a query that takes forty of them and on one that takes four thousand.",
         ));
     }
     if !clients.is_empty() {

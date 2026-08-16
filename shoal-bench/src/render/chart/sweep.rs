@@ -5,23 +5,42 @@
 //! share, throughput against load depth, latency against load depth - and four copies of the same
 //! four hundred lines is how two of them end up drawn differently.
 //!
-//! # Labels at the end of the line, not in a legend
+//! # A legend under the plot, not a label at the end of each line
 //!
-//! Every series is named at its own right hand end. A legend costs the reader a colour match on
-//! every glance, and three of the eight series colours fall below a 3:1 contrast ratio on the light
-//! themes, so a colour match is exactly what this must not require. The labels are spread apart
-//! along the value axis when two series end at the same place, which they routinely do.
+//! Every series used to be named at its own right hand end, with a pass that pushed apart any two
+//! labels that landed together. On a chart of a mixture the lines routinely end within a few
+//! pixels of each other, and that pass ran out of axis: `chart-grid-latency` put two of its eight
+//! names three pixels apart at an eight pixel font. The names are now in a
+//! [`legend`](super::legend) below the plot, which is also what let the two hundred and ten units
+//! of right margin they needed go back to the plot.
+//!
+//! # Ticks where the measurements are
+//!
+//! A sweep's x values are the widths, depths and key counts a workload was actually run at, and
+//! there are never many of them. Left to itself plotters ticks a log axis at powers of ten, which
+//! labels a gridline at 1,000,000 on a chart whose widest series is 1 MiB - two different numbers
+//! for the same place. When the x values are few enough to fit, they are the ticks.
 
 use anyhow::{Result, bail};
+use plotters::coord::ranged1d::KeyPointWeight;
 use plotters::prelude::*;
 
-use super::palette;
+use super::{legend, palette};
 
 /// How many series are drawn before the rest are folded away
 ///
 /// Eight is the palette's width. A ninth series would reuse a colour and two lines would be
 /// indistinguishable, which is worse than a line that is missing and declared.
 const MAX_SERIES: usize = 8;
+
+/// How tall the plotting area is, before the legend is added under it
+const PLOT_HEIGHT: u32 = 420;
+
+/// How many distinct x values an axis will tick individually
+///
+/// Above this the values stop being a handful of chosen points and start being a scatter, and the
+/// labels would collide however they were written - so plotters chooses the ticks instead.
+const MAX_TICKS: usize = 12;
 
 /// Whether an axis is drawn logarithmically
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,6 +61,16 @@ pub enum Unit {
     Rate,
     /// A plain number
     Count,
+    /// A number of bytes, in binary units
+    Bytes,
+    /// A number of bytes per second, in binary units
+    ByteRate,
+    /// A share of a whole, already in percent
+    ///
+    /// For an axis that *is* a percentage - a read share is a knob a workload was set to, not a
+    /// comparison against anything - rather than for one where a percentage stands in for a
+    /// measurement nobody wrote down.
+    Percent,
 }
 
 impl Unit {
@@ -56,7 +85,9 @@ impl Unit {
             // a rate is quoted in thousands rather than in full, since an axis label of
             // `1,284,113` is wider than the space an axis has for it
             Unit::Rate => {
-                if value >= 1_000_000.0 {
+                if value >= 1_000_000_000.0 {
+                    format!("{:.1}G", value / 1_000_000_000.0)
+                } else if value >= 1_000_000.0 {
                     format!("{:.1}M", value / 1_000_000.0)
                 } else if value >= 1_000.0 {
                     format!("{:.0}k", value / 1_000.0)
@@ -65,6 +96,9 @@ impl Unit {
                 }
             }
             Unit::Count => crate::fmt::thousands(value.round() as u128),
+            Unit::Bytes => crate::fmt::bytes_axis(value),
+            Unit::ByteRate => crate::fmt::byte_rate(value),
+            Unit::Percent => format!("{}%", crate::fmt::fixed(value, 0)),
         }
     }
 }
@@ -130,15 +164,27 @@ pub fn draw(spec: &Spec, series: &[Series]) -> Result<String> {
         spec.y_unit.format(min_y),
         spec.y_unit.format(max_y)
     );
+    // the x values the workloads were actually run at, when there are few enough to be ticks
+    let ticks = distinct_x(&shown);
+    // one legend entry per line, in the order the colours were handed out
+    let entries: Vec<legend::Entry> = shown
+        .iter()
+        .enumerate()
+        .map(|(index, line)| legend::Entry::new(line.name.clone(), palette::series(index)))
+        .collect();
+    let height = PLOT_HEIGHT + legend::height(&entries);
     let spec = spec.clone();
-    super::draw(&spec.id.clone(), &aria, 420, move |root| {
-        let mut chart = ChartBuilder::on(root)
+    super::draw(&spec.id.clone(), &aria, height, move |root| {
+        // the plot, and the strip under it that says what each colour is
+        let (area, strip) = root.split_vertically(PLOT_HEIGHT);
+        let mut chart = ChartBuilder::on(&area)
             .margin(16)
-            .margin_right(210)
+            // no gutter is reserved on the right any more, because nothing is drawn out there
+            .margin_right(24)
             .x_label_area_size(46)
             .y_label_area_size(84)
             .build_cartesian_2d(
-                Scale::new(low_x..high_x, spec.x_axis),
+                Scale::new(low_x..high_x, spec.x_axis).ticks(ticks),
                 Scale::new(low_y..high_y, spec.y_axis),
             )?;
         let x_unit = spec.x_unit;
@@ -149,8 +195,6 @@ pub fn draw(spec: &Spec, series: &[Series]) -> Result<String> {
             .y_desc(spec.y_desc.clone())
             .y_label_formatter(&move |value: &f64| y_unit.format(*value))
             .draw()?;
-        // where each name goes, spread apart so two series that end together stay readable
-        let anchors = anchors(&shown, low_y, high_y, spec.y_axis);
         for (index, line) in shown.iter().enumerate() {
             let colour = palette::series(index);
             chart.draw_series(LineSeries::new(
@@ -162,18 +206,6 @@ pub fn draw(spec: &Spec, series: &[Series]) -> Result<String> {
                     .iter()
                     .map(|point| Circle::new(*point, 3, colour.filled())),
             )?;
-            if let (Some((x, _)), Some(at)) = (line.points.last(), anchors.get(index)) {
-                // just past the end of the line, in whichever space the axis is in
-                let offset = match spec.x_axis {
-                    Axis::Linear => x + (high_x - low_x) * 0.02,
-                    Axis::Log => x * 1.08,
-                };
-                chart.draw_series(std::iter::once(Text::new(
-                    line.name.clone(),
-                    (offset, *at),
-                    super::label_font(11),
-                )))?;
-            }
         }
         // a chart that dropped a series says so, or it looks complete and is not
         if dropped > 0 {
@@ -183,19 +215,45 @@ pub fn draw(spec: &Spec, series: &[Series]) -> Result<String> {
                 super::label_font(10),
             )))?;
         }
+        legend::draw(&strip, &entries)?;
         Ok(())
     })
+}
+
+/// The x values every series shares, if there are few enough of them to be ticks
+///
+/// # Arguments
+///
+/// * `series` - The lines being drawn
+fn distinct_x(series: &[Series]) -> Option<Vec<f64>> {
+    // gather every x anything was measured at
+    let mut values: Vec<f64> = series
+        .iter()
+        .flat_map(|line| line.points.iter().map(|(x, _)| *x))
+        .collect();
+    values.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+    // two series measured at the same width contribute one tick, not two. compared relatively,
+    // because the values span four orders of magnitude and an absolute epsilon fits neither end
+    values.dedup_by(|left, right| (*left - *right).abs() <= right.abs() * 1e-9);
+    // above the cap these have stopped being chosen points and started being a scatter, and
+    // plotters' own spacing reads better than a label at every one of them
+    if values.is_empty() || values.len() > MAX_TICKS {
+        return None;
+    }
+    Some(values)
 }
 
 /// A coordinate range that is linear or logarithmic, chosen at run time
 ///
 /// plotters picks its axis kind in the type, so a chart that is linear on one page and logarithmic
 /// on the next would be two functions. This is the one wrapper that lets it be a parameter.
-struct Scale {
+pub(super) struct Scale {
     /// The range being spanned
     range: std::ops::Range<f64>,
     /// Which way it is spaced
     axis: Axis,
+    /// The values to tick, when the caller has better ones than plotters would choose
+    ticks: Option<Vec<f64>>,
 }
 
 impl Scale {
@@ -205,8 +263,22 @@ impl Scale {
     ///
     /// * `range` - The values to span
     /// * `axis` - Whether the spacing is logarithmic
-    fn new(range: std::ops::Range<f64>, axis: Axis) -> Self {
-        Scale { range, axis }
+    pub(super) fn new(range: std::ops::Range<f64>, axis: Axis) -> Self {
+        Scale {
+            range,
+            axis,
+            ticks: None,
+        }
+    }
+
+    /// Fixes the values this axis ticks at
+    ///
+    /// # Arguments
+    ///
+    /// * `ticks` - The values to tick, or `None` to let plotters space them
+    pub(super) fn ticks(mut self, ticks: Option<Vec<f64>>) -> Self {
+        self.ticks = ticks;
+        self
     }
 }
 
@@ -241,6 +313,15 @@ impl plotters::coord::ranged1d::Ranged for Scale {
     ///
     /// * `hint` - How many the caller has room for
     fn key_points<Hint: plotters::coord::ranged1d::KeyPointHint>(&self, hint: Hint) -> Vec<f64> {
+        // a fixed tick list answers for the gridlines that carry labels, and refuses the minor
+        // ones outright: a minor gridline between two ticks that are already the measurements is
+        // a line at a value nothing was measured at
+        if let Some(ticks) = &self.ticks {
+            return match hint.weight() {
+                KeyPointWeight::Bold => ticks.clone(),
+                KeyPointWeight::Any => Vec::new(),
+            };
+        }
         match self.axis {
             Axis::Linear => plotters::coord::ranged1d::Ranged::key_points(
                 &plotters::coord::types::RangedCoordf64::from(self.range.clone()),
@@ -324,57 +405,6 @@ fn pad(low: f64, high: f64, axis: Axis) -> (f64, f64) {
     }
 }
 
-/// Where each series' end label sits, far enough apart to be read
-///
-/// The same spreading [`micro_scaling`](super::micro_scaling) does, generalised over the axis kind:
-/// on a log axis "far enough below" is a division, and on a linear one it is a subtraction.
-///
-/// # Arguments
-///
-/// * `series` - The lines being drawn, in drawing order
-/// * `low` - The bottom of the value axis
-/// * `high` - The top of it
-/// * `axis` - Whether the axis is logarithmic
-fn anchors(series: &[Series], low: f64, high: f64, axis: Axis) -> Vec<f64> {
-    /// How far apart two labels have to be, as a fraction of the whole axis
-    const MIN_SEPARATION: f64 = 0.06;
-    // start each label at the end of its own line
-    let mut anchors: Vec<f64> = series
-        .iter()
-        .map(|line| line.points.last().map(|(_, value)| *value).unwrap_or(low))
-        .collect();
-    // then walk them from the top down, pushing any that is too close to the one above it further
-    // down, keeping each as close to its own line as it can be
-    let mut order: Vec<usize> = (0..anchors.len()).collect();
-    order.sort_by(|left, right| {
-        anchors[*right]
-            .partial_cmp(&anchors[*left])
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    let gap = match axis {
-        Axis::Linear => (high - low) * MIN_SEPARATION,
-        Axis::Log => (high / low.max(f64::MIN_POSITIVE)).log10() * MIN_SEPARATION,
-    };
-    let mut previous: Option<f64> = None;
-    for index in order {
-        let mut at = anchors[index].max(low);
-        if let Some(above) = previous {
-            let ceiling = match axis {
-                Axis::Linear => above - gap,
-                Axis::Log => above / 10f64.powf(gap),
-            };
-            if at > ceiling {
-                at = ceiling;
-            }
-        }
-        // never push a label off the bottom of the chart trying to make room
-        at = at.max(low);
-        anchors[index] = at;
-        previous = Some(at);
-    }
-    anchors
-}
-
 #[cfg(test)]
 mod tests {
     use super::{Axis, Series, Spec, Unit, draw};
@@ -410,20 +440,80 @@ mod tests {
         }
     }
 
-    /// Every series is drawn and named
+    /// Every series is drawn, and named exactly once in the legend
+    ///
+    /// Exactly once is the part that matters: a name drawn both at the end of its line and in the
+    /// legend would mean the end labels had not actually been removed.
     #[test]
     fn it_draws_and_labels_every_series() {
         let svg = draw(
             &spec(Axis::Log, Axis::Log),
             &[
-                series("unsorted", &[(64.0, 100.0), (1024.0, 300.0)]),
-                series("sorted", &[(64.0, 120.0), (1024.0, 380.0)]),
+                series("read unsorted", &[(64.0, 100.0), (1024.0, 300.0)]),
+                series("write sorted", &[(64.0, 120.0), (1024.0, 380.0)]),
             ],
         )
         .expect("it draws");
-        assert!(svg.contains("unsorted"));
-        assert!(svg.contains("sorted"));
+        assert_eq!(svg.matches("read unsorted").count(), 1);
+        assert_eq!(svg.matches("write sorted").count(), 1);
         assert!(!svg.contains("NaN"));
+    }
+
+    /// The canvas grows to hold the legend rather than drawing it over the plot
+    #[test]
+    fn the_canvas_makes_room_for_the_legend() {
+        let svg = draw(
+            &spec(Axis::Log, Axis::Log),
+            &[series("unsorted", &[(64.0, 100.0), (1024.0, 300.0)])],
+        )
+        .expect("it draws");
+        let entries = [super::legend::Entry::new(
+            "unsorted",
+            super::palette::series(0),
+        )];
+        let expected = super::PLOT_HEIGHT + super::legend::height(&entries);
+        assert!(
+            svg.contains(&format!(r#"viewBox="0 0 820 {expected}""#)),
+            "the canvas is not plot plus legend"
+        );
+    }
+
+    /// A handful of measured x values become the ticks themselves
+    #[test]
+    fn a_short_x_axis_ticks_at_the_measurements() {
+        let svg = draw(
+            &Spec {
+                x_unit: Unit::Bytes,
+                ..spec(Axis::Log, Axis::Log)
+            },
+            &[series(
+                "unsorted",
+                &[(256.0, 100.0), (4096.0, 300.0), (1_048_576.0, 900.0)],
+            )],
+        )
+        .expect("it draws");
+        // the widths themselves, in the units the series names use
+        for label in ["256 B", "4 KiB", "1 MiB"] {
+            assert!(svg.contains(label), "{label} is not on the axis");
+        }
+        // and not plotters' powers of ten, which land between them
+        assert!(!svg.contains("977 KiB"), "a power of ten was ticked anyway");
+    }
+
+    /// Too many distinct x values and plotters chooses the ticks again
+    #[test]
+    fn a_long_x_axis_is_left_to_plotters() {
+        let points: Vec<(f64, f64)> = (1..=40)
+            .map(|step| (f64::from(step) * 10.0, f64::from(step)))
+            .collect();
+        let svg = draw(&spec(Axis::Linear, Axis::Linear), &[series("many", &points)])
+            .expect("it draws");
+        assert!(!svg.contains("NaN"));
+        // forty labels would not fit, so far fewer than forty were drawn
+        assert!(
+            svg.matches("<text ").count() < 30,
+            "every one of forty x values was ticked"
+        );
     }
 
     /// A linear axis draws without a log axis's constraints
@@ -506,5 +596,16 @@ mod tests {
         assert_eq!(Unit::Rate.format(1_284_113.0), "1.3M");
         assert_eq!(Unit::Rate.format(42_600.0), "43k");
         assert_eq!(Unit::Rate.format(812.0), "812");
+        // and a rate past a billion steps up rather than reading `1000.0M`
+        assert_eq!(Unit::Rate.format(1_500_000_000.0), "1.5G");
+    }
+
+    /// A width is written in the binary units the widths were chosen in
+    #[test]
+    fn a_width_is_written_in_binary_units() {
+        assert_eq!(Unit::Bytes.format(256.0), "256 B");
+        assert_eq!(Unit::Bytes.format(65_536.0), "64 KiB");
+        assert_eq!(Unit::Bytes.format(4_194_304.0), "4 MiB");
+        assert_eq!(Unit::ByteRate.format(222_039_839.0), "212 MiB/s");
     }
 }

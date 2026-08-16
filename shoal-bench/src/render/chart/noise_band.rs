@@ -15,10 +15,13 @@ use std::collections::BTreeMap;
 use anyhow::Result;
 use plotters::prelude::*;
 
-use super::palette;
+use super::{legend, palette};
 use crate::compare::micro::{FAST_THRESHOLD_NS, NOISE_FAST_PCT, NOISE_SLOW_PCT};
 use crate::fmt;
 use crate::model::micro::MicroCapture;
+
+/// How tall the plotting area is, before the legend is added under it
+const PLOT_HEIGHT: u32 = 360;
 
 /// One group of identical repeats
 #[derive(Debug, Clone)]
@@ -97,8 +100,17 @@ pub fn draw(groups: &[Group]) -> Result<String> {
          takes, with the {NOISE_FAST_PCT} and {NOISE_SLOW_PCT} percent screening tiers"
     );
     let groups: Vec<Group> = groups.to_vec();
-    super::draw("chart-noise-band", &aria, 360, move |root| {
-        let mut chart = ChartBuilder::on(root)
+    // one legend entry per set of repeats, in the order the colours were handed out
+    let entries: Vec<legend::Entry> = groups
+        .iter()
+        .enumerate()
+        .map(|(index, group)| legend::Entry::new(group.name.clone(), palette::series(index)))
+        .collect();
+    let height = PLOT_HEIGHT + legend::height(&entries);
+    super::draw("chart-noise-band", &aria, height, move |root| {
+        // the plot, and the strip under it that says what each colour is
+        let (area, strip) = root.split_vertically(PLOT_HEIGHT);
+        let mut chart = ChartBuilder::on(&area)
             .margin(16)
             .margin_right(30)
             .x_label_area_size(48)
@@ -126,7 +138,8 @@ pub fn draw(groups: &[Group]) -> Result<String> {
             (min_x * 0.8, NOISE_FAST_PCT * 1.06),
             super::label_font(11),
         )))?;
-        // then each set of repeats, in its own colour, labelled at the top right
+        // then each set of repeats, in its own colour, named in the legend below rather than
+        // stacked at a fixed spot inside the plot where a dense cloud of points can reach them
         for (index, group) in groups.iter().enumerate() {
             let colour = palette::series(index);
             chart.draw_series(
@@ -135,12 +148,8 @@ pub fn draw(groups: &[Group]) -> Result<String> {
                     .iter()
                     .map(|point| Circle::new(*point, 3, colour.mix(0.75).filled())),
             )?;
-            chart.draw_series(std::iter::once(Text::new(
-                group.name.clone(),
-                (max_x * 0.25, max_y * (0.95 - 0.07 * index as f64)),
-                super::label_font(12),
-            )))?;
         }
+        legend::draw(&strip, &entries)?;
         Ok(())
     })
 }

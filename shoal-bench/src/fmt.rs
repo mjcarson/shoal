@@ -271,6 +271,55 @@ pub fn bytes(bytes: u64) -> String {
     format!("{value} {}", UNITS[unit])
 }
 
+/// Formats a byte count for an axis label, rounding into the nearest binary unit
+///
+/// Separate from [`bytes`] for the reason [`byte_rate`] is: `bytes` steps up a unit only when the
+/// value divides exactly, which is right for a row width chosen as a power of two and wrong for an
+/// axis tick, where the value is whatever the axis put a gridline at. An axis that labels a
+/// gridline `1000000` when the series on it is called `1 MiB` is the thing this exists to stop.
+///
+/// # Arguments
+///
+/// * `value` - The number of bytes
+///
+/// # Examples
+///
+/// ```
+/// use shoal_bench::fmt::bytes_axis;
+///
+/// assert_eq!(bytes_axis(256.0), "256 B");
+/// assert_eq!(bytes_axis(4_096.0), "4 KiB");
+/// assert_eq!(bytes_axis(1_048_576.0), "1 MiB");
+/// // and a tick that is not a whole number of anything is still readable
+/// assert_eq!(bytes_axis(1_000_000.0), "977 KiB");
+/// ```
+pub fn bytes_axis(value: f64) -> String {
+    /// The units, from smallest to largest
+    const UNITS: [&str; 4] = ["B", "KiB", "MiB", "GiB"];
+    // a non finite value is not a width
+    if !value.is_finite() {
+        return "-".to_string();
+    }
+    let mut scaled = value;
+    let mut unit = 0;
+    // step up while there is a larger unit and the value is at least one of it
+    while unit + 1 < UNITS.len() && scaled.abs() >= 1024.0 {
+        scaled /= 1024.0;
+        unit += 1;
+    }
+    // whole bytes are always whole, and a scaled value keeps one decimal only while it is small
+    // enough for that decimal to mean anything
+    let places = if unit == 0 || scaled.abs() >= 100.0 { 0 } else { 1 };
+    let rendered = fixed(scaled, places);
+    // a scaled value that landed on a whole number is written as one, so an axis of powers of two
+    // reads `4 KiB` rather than `4.0 KiB`
+    let rendered = match rendered.strip_suffix(".0") {
+        Some(whole) => whole.to_string(),
+        None => rendered,
+    };
+    format!("{rendered} {}", UNITS[unit])
+}
+
 /// Formats a rate of bytes per second
 ///
 /// Separate from [`bytes`] because a rate is never a round number of anything: `bytes` steps up a
@@ -363,6 +412,33 @@ mod tests {
         assert_eq!(fixed(-0.0, 2), "0.00");
         assert_eq!(fixed(-0.0001, 2), "0.00");
         assert_eq!(fixed(-0.006, 2), "-0.01");
+    }
+
+    /// A width chosen as a power of two is written as one, on an axis and in a cell
+    ///
+    /// The two formatters differ on purpose - `bytes` refuses to round and `bytes_axis` has to,
+    /// because an axis puts a gridline wherever it likes - but they must not disagree about the
+    /// widths this repository actually uses, which are all powers of two.
+    #[test]
+    fn a_power_of_two_reads_the_same_either_way() {
+        for width in [256u64, 1024, 4096, 65_536, 1_048_576, 4_194_304] {
+            assert_eq!(bytes(width), bytes_axis(width as f64), "{width}");
+        }
+        assert_eq!(bytes_axis(256.0), "256 B");
+        assert_eq!(bytes_axis(65_536.0), "64 KiB");
+        assert_eq!(bytes_axis(4_194_304.0), "4 MiB");
+    }
+
+    /// An axis tick that is not a whole number of anything is still readable
+    ///
+    /// This is the case `bytes` cannot serve: it would print 1,000,000 as `1000000 B`, which is
+    /// the number the old row width axis was labelled with.
+    #[test]
+    fn an_axis_tick_between_units_is_rounded_rather_than_spelled_out() {
+        assert_eq!(bytes_axis(1_000_000.0), "977 KiB");
+        assert_eq!(bytes_axis(1_500.0), "1.5 KiB");
+        assert_eq!(bytes_axis(0.0), "0 B");
+        assert_eq!(bytes_axis(f64::NAN), "-");
     }
 
     /// Separators land every three digits from the right, and never lead

@@ -90,12 +90,12 @@ fn throughput(cells: &[Arm<'_>], kinds: &[String]) -> Result<String> {
     out.push_str(&sweep::draw(
         &sweep::Spec {
             id: "chart-grid-throughput".to_string(),
-            x_desc: "reads, as a percentage of all queries".to_string(),
+            x_desc: "reads, as a share of all queries".to_string(),
             y_desc: "queries answered per second".to_string(),
             // the share runs from zero, which a logarithmic axis cannot place at all
             x_axis: sweep::Axis::Linear,
             y_axis: sweep::Axis::Linear,
-            x_unit: Unit::Count,
+            x_unit: Unit::Percent,
             y_unit: Unit::Rate,
         },
         &series,
@@ -185,13 +185,13 @@ fn latency(cells: &[Arm<'_>], kinds: &[String]) -> Result<String> {
     out.push_str(&sweep::draw(
         &sweep::Spec {
             id: "chart-grid-latency".to_string(),
-            x_desc: "reads, as a percentage of all queries".to_string(),
+            x_desc: "reads, as a share of all queries".to_string(),
             y_desc: "p50 service time".to_string(),
             x_axis: sweep::Axis::Linear,
             // logarithmic, because a read and a write differ by enough that a linear axis would
             // draw every read line flat against the floor
             y_axis: sweep::Axis::Log,
-            x_unit: Unit::Count,
+            x_unit: Unit::Percent,
             y_unit: Unit::Duration,
         },
         &series,

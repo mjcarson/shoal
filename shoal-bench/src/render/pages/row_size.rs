@@ -103,11 +103,11 @@ fn latency(fixed: &[Arm<'_>], kinds: &[String]) -> Result<String> {
     out.push_str(&sweep::draw(
         &sweep::Spec {
             id: "chart-row-size-latency".to_string(),
-            x_desc: "row width in bytes".to_string(),
+            x_desc: "row width".to_string(),
             y_desc: "p50 service time".to_string(),
             x_axis: sweep::Axis::Log,
             y_axis: sweep::Axis::Log,
-            x_unit: Unit::Count,
+            x_unit: Unit::Bytes,
             y_unit: Unit::Duration,
         },
         &series,
@@ -199,11 +199,11 @@ fn rows_per_sec(fixed: &[Arm<'_>], kinds: &[String]) -> Result<String> {
     out.push_str(&sweep::draw(
         &sweep::Spec {
             id: "chart-row-size-ops".to_string(),
-            x_desc: "row width in bytes".to_string(),
+            x_desc: "row width".to_string(),
             y_desc: "queries answered per second".to_string(),
             x_axis: sweep::Axis::Log,
             y_axis: sweep::Axis::Log,
-            x_unit: Unit::Count,
+            x_unit: Unit::Bytes,
             y_unit: Unit::Rate,
         },
         &series,
@@ -233,12 +233,12 @@ fn bytes_per_sec(fixed: &[Arm<'_>], kinds: &[String]) -> Result<String> {
     out.push_str(&sweep::draw(
         &sweep::Spec {
             id: "chart-row-size-bytes".to_string(),
-            x_desc: "row width in bytes".to_string(),
+            x_desc: "row width".to_string(),
             y_desc: "payload bytes per second".to_string(),
             x_axis: sweep::Axis::Log,
             y_axis: sweep::Axis::Log,
-            x_unit: Unit::Count,
-            y_unit: Unit::Rate,
+            x_unit: Unit::Bytes,
+            y_unit: Unit::ByteRate,
         },
         &series,
     )?);

@@ -79,16 +79,25 @@ as it runs, the grid's throughput is throughput at one depth, the instrumented b
 a latency — and every one of those limits has at some point been read past in this repository.
 
 **Two new chart kinds rather than four more copies of one.** `chart::sweep` is `micro_scaling`
-generalised: numeric x, one line per named series, labels at the right-hand end, and the axis kind a
-*parameter* rather than a type — which needed one `Ranged` wrapper, because plotters picks linear or
-logarithmic in the type and the read-share axis starts at zero where the width axis spans four
-orders of magnitude. `chart::bars` exists because four table kinds and three key distributions are
-not numbers, and drawing them as a line implies an ordering they do not have.
+generalised: numeric x, one line per named series, ~~labels at the right-hand end~~ (a shared
+legend since [F19](chart-legends.md)), and the axis kind a *parameter* rather than a type — which
+needed one `Ranged` wrapper, because plotters picks linear or logarithmic in the type and the
+read-share axis starts at zero where the width axis spans four orders of magnitude. `chart::bars`
+exists because four table kinds and three key distributions are not numbers, and drawing them as a
+line implies an ordering they do not have.
 
-**Labels at the end of the line, never a legend.** Three of the eight series colours fall below a
+~~**Labels at the end of the line, never a legend.** Three of the eight series colours fall below a
 3:1 contrast ratio on the light themes, permitted only under the relief rule that every chart ships
 beside a table. A legend would make reading the chart require the colour match that the relief rule
-exists to avoid.
+exists to avoid.~~
+
+**Superseded by [F19](chart-legends.md).** The colour-contrast half of that argument still holds
+and is why a legend entry is an eleven by eleven filled block rather than a sample of the line. The
+conclusion drawn from it did not: a label at the end of a line is only attached to that line when
+the lines end far apart, and on a chart of a mixture they do not. `chart-grid-latency` ended eight
+curves inside a six pixel band, and the pass that pushed the names apart to fit put two of them
+three pixels apart. A name pushed a third of the way down the chart to find room costs the colour
+match anyway, without the legend that would have made it possible.
 
 ## Alternatives rejected
 
@@ -124,13 +133,17 @@ all-or-none rule avoids, to save seconds on a command that already takes seconds
 - **A family is a partition by identifier prefix.** A workload that belongs to two questions is
   placed in one family and selected onto the other page by predicate, which works and is two
   mechanisms where one would be nicer.
-- **The diffs are smaller, not small.** 169 KB across ten files against 1.1 MB in one, and still
-  mostly SVG path data. Reviewers should still read `render --check` and the tables.
+- **The diffs are smaller, not small.** ~~169 KB across ten files~~ — 529 KB since
+  [F19](chart-legends.md), which put a legend under every chart and widened the encryption sweep —
+  against 1.1 MB in one, and still mostly SVG path data. Reviewers should still read
+  `render --check` and the tables.
 - **`all-workloads.md` is still a long table** — one row per workload per capture, and the grid
   multiplied the workload count by nearly three.
 - **Nothing checks that a page's prose still describes what it draws.** The four blocks are
   hand-written; the charts are generated. A chart that changed what it plots would leave its own
-  description behind, and only a reader would notice.
+  description behind, and only a reader would notice. [F19](chart-legends.md) is the first change
+  to hit this: three captions said a curve was "labelled at its right hand end" and one described a
+  percentage axis, and all four had to be found by grep rather than by a test.
 
 ## Invariants to uphold
 

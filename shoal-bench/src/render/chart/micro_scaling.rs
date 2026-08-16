@@ -13,12 +13,15 @@ use std::collections::BTreeMap;
 use anyhow::Result;
 use plotters::prelude::*;
 
-use super::palette;
+use super::{legend, palette};
 use crate::fmt;
 use crate::model::micro::MicroCapture;
 
 /// How many operation families are drawn before the rest are folded away
 const MAX_FAMILIES: usize = 8;
+
+/// How tall the plotting area is, before the legend is added under it
+const PLOT_HEIGHT: u32 = 420;
 
 /// One operation measured at several partition sizes
 #[derive(Debug, Clone)]
@@ -122,10 +125,20 @@ pub fn draw(families: &[Family]) -> Result<String> {
         fmt::duration_ns(min_y),
         fmt::duration_ns(max_y)
     );
-    super::draw("chart-micro-scaling", &aria, 420, move |root| {
-        let mut chart = ChartBuilder::on(root)
+    // one legend entry per family, in the order the colours were handed out
+    let entries: Vec<legend::Entry> = shown
+        .iter()
+        .enumerate()
+        .map(|(index, family)| legend::Entry::new(family.name.clone(), palette::series(index)))
+        .collect();
+    let height = PLOT_HEIGHT + legend::height(&entries);
+    super::draw("chart-micro-scaling", &aria, height, move |root| {
+        // the plot, and the strip under it that says what each colour is
+        let (area, strip) = root.split_vertically(PLOT_HEIGHT);
+        let mut chart = ChartBuilder::on(&area)
             .margin(16)
-            .margin_right(260)
+            // no gutter is reserved on the right any more, because nothing is drawn out there
+            .margin_right(24)
             .x_label_area_size(46)
             .y_label_area_size(78)
             .build_cartesian_2d(
@@ -134,15 +147,13 @@ pub fn draw(families: &[Family]) -> Result<String> {
             )?;
         crate::themed_mesh!(chart)
             .x_desc("rows in the partition")
-            .x_label_formatter(&|value: &f64| format!("{}", value.round() as u64))
+            .x_label_formatter(&|value: &f64| crate::fmt::thousands(value.round() as u128))
             .y_desc("mean time")
             .y_label_formatter(&|value: &f64| fmt::duration_ns(*value))
             .draw()?;
-        // where each line's label goes, spread apart so two families that end at the same cost do
-        // not draw their names on top of each other - which two of the real ones do
-        let anchors = label_anchors(&shown, min_y * 0.7, max_y * 1.4);
-        // one line per operation, each labelled at its right hand end rather than in a legend, so
-        // that a reader never has to match a colour to a name
+        // one line per operation, named in the legend rather than at its own end - two of the real
+        // families end within 2% of each other at 4096 rows, which is a collision no amount of
+        // pushing labels apart along the axis ever made readable
         for (index, family) in shown.iter().enumerate() {
             let colour = palette::series(index);
             chart.draw_series(LineSeries::new(
@@ -155,13 +166,6 @@ pub fn draw(families: &[Family]) -> Result<String> {
                     .iter()
                     .map(|point| Circle::new(*point, 3, colour.filled())),
             )?;
-            if let (Some((size, _)), Some(at)) = (family.points.last(), anchors.get(index)) {
-                chart.draw_series(std::iter::once(Text::new(
-                    family.name.clone(),
-                    (*size * 1.1, *at),
-                    super::label_font(11),
-                )))?;
-            }
         }
         // and a note when the cheap tail was left out, so the chart cannot look complete
         if dropped > 0 {
@@ -171,59 +175,9 @@ pub fn draw(families: &[Family]) -> Result<String> {
                 super::label_font(10),
             )))?;
         }
+        legend::draw(&strip, &entries)?;
         Ok(())
     })
-}
-
-/// Where each family's end label should sit, spread far enough apart to be read
-///
-/// A family is labelled at the right hand end of its own line, which is the right place for it
-/// right up until two families end at the same cost - and two of the real ones do, within 2% of
-/// each other at 4096 rows. So the labels are pushed apart along the axis, in the order the
-/// families are drawn, keeping each as close to its line as it can be.
-///
-/// The spacing is computed in log space because the axis is logarithmic: a fixed offset in
-/// nanoseconds is a large gap at the bottom of the chart and an invisible one at the top.
-///
-/// # Arguments
-///
-/// * `families` - The families being drawn, in drawing order
-/// * `low` - The bottom of the axis
-/// * `high` - The top of the axis
-fn label_anchors(families: &[Family], low: f64, high: f64) -> Vec<f64> {
-    // how far apart two labels have to be, as a fraction of the whole axis
-    const MIN_SEPARATION: f64 = 0.055;
-    let span = (high / low).log10();
-    let gap = span * MIN_SEPARATION;
-    // start each label at the end of its own line
-    let mut anchors: Vec<f64> = families
-        .iter()
-        .map(|family| family.points.last().map(|(_, cost)| *cost).unwrap_or(low))
-        .collect();
-    // then walk them from the top down, pushing any that is too close to the one above it further
-    // down. the families are already ordered by cost, so this converges in one pass.
-    let mut order: Vec<usize> = (0..anchors.len()).collect();
-    order.sort_by(|left, right| {
-        anchors[*right]
-            .partial_cmp(&anchors[*left])
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    let mut previous: Option<f64> = None;
-    for index in order {
-        let mut at = anchors[index].max(low);
-        if let Some(above) = previous {
-            // in log space, "far enough below" is a division rather than a subtraction
-            let ceiling = above / 10f64.powf(gap);
-            if at > ceiling {
-                at = ceiling;
-            }
-        }
-        // never push a label off the bottom of the chart trying to make room
-        at = at.max(low);
-        anchors[index] = at;
-        previous = Some(at);
-    }
-    anchors
 }
 
 #[cfg(test)]

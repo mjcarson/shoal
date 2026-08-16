@@ -20,7 +20,7 @@ use std::collections::BTreeMap;
 use anyhow::Result;
 use plotters::prelude::*;
 
-use super::palette;
+use super::{legend, palette};
 use crate::fmt;
 use crate::model::stages::StageReport;
 
@@ -29,16 +29,6 @@ const MAX_STAGES: usize = 7;
 
 /// How tall each rank's bar is drawn
 const ROW_HEIGHT: u32 = 40;
-
-/// How many legend entries fit across the chart
-///
-/// Five, because a stage name runs to seventeen characters and eight of them across 820 units
-/// leaves each one about ninety - not enough, and the overflow is invisible until somebody looks
-/// at the page.
-const LEGEND_COLUMNS: usize = 5;
-
-/// How far apart legend rows sit, in pixels
-const LEGEND_ROW_PX: f64 = 17.0;
 
 /// Draws one operation's stage breakdown at every rank
 ///
@@ -108,39 +98,39 @@ pub fn draw(report: &StageReport, op: &str) -> Result<String> {
         .max()
         .unwrap_or(1) as f64;
     let count = bars.len();
-    // how many rows the legend needs, and how much axis room that is. The legend is drawn inside
-    // the chart's coordinate space rather than below it, so the space has to exist: a coordinate
-    // outside the range is clamped to the edge, which silently stacks every legend row on the
-    // same pixel.
     // the legend names what was actually drawn, rather than the stage list, so a segment can
     // never appear on the chart without a name against it
-    let mut legend: Vec<String> = named.clone();
+    let mut stages: Vec<String> = named.clone();
     for (_, _, segments) in &bars {
         for (name, _) in segments {
-            if !legend.contains(name) {
-                legend.push(name.clone());
+            if !stages.contains(name) {
+                stages.push(name.clone());
             }
         }
     }
-    let legend_rows = legend.len().div_ceil(LEGEND_COLUMNS).max(1);
-    let row_gap = LEGEND_ROW_PX / f64::from(ROW_HEIGHT);
-    let legend_span = 0.35 + row_gap * legend_rows as f64;
-    let height = ROW_HEIGHT * count as u32 + 96 + (legend_span * f64::from(ROW_HEIGHT)) as u32;
+    let entries: Vec<legend::Entry> = stages
+        .iter()
+        .map(|name| legend::Entry::new(name.clone(), colour_for(name, &named)))
+        .collect();
+    // the plot is as tall as its rows, and the legend sits on its own strip beneath it rather than
+    // inside the chart's coordinate space - where the axis had to be extended to make room and a
+    // row that did not fit was silently clamped onto the one above it
+    let plot_height = ROW_HEIGHT * count as u32 + 96;
+    let height = plot_height + legend::height(&entries);
     let aria = format!(
         "Stage breakdown of {op} queries at {count} latency ranks, the slowest totalling {}",
         fmt::duration_ns(widest)
     );
     let id = format!("chart-stages-{op}");
     super::draw(&id, &aria, height, move |root| {
-        let mut chart = ChartBuilder::on(root)
+        // the plot, and the strip under it that says what each colour is
+        let (area, strip) = root.split_vertically(plot_height);
+        let mut chart = ChartBuilder::on(&area)
             .margin(14)
             .margin_right(30)
             .x_label_area_size(44)
             .y_label_area_size(120)
-            .build_cartesian_2d(
-                0f64..widest * 1.02,
-                (-0.5f64 - legend_span)..(count as f64 - 0.5),
-            )?;
+            .build_cartesian_2d(0f64..widest * 1.02, -0.5f64..(count as f64 - 0.5))?;
         // the y axis is one latency rank per row, in the order the report lists them
         let ranks: Vec<String> = bars
             .iter()
@@ -178,25 +168,8 @@ pub fn draw(report: &StageReport, op: &str) -> Result<String> {
                 at = end;
             }
         }
-        // a legend along the bottom, since a stacked bar cannot label its own segments.
-        // laid out in the chart's own coordinates, where one unit is one bar row. The row spacing
-        // has to be derived from that rather than picked by eye: a stage name is drawn at 10px, so
-        // a spacing that looks generous in data units can be seven pixels on the page.
-        for (index, name) in legend.iter().enumerate() {
-            let colour = colour_for(name, &named);
-            let column = index % LEGEND_COLUMNS;
-            let x = widest * (0.005 + 0.2 * column as f64);
-            let y = -0.62 - row_gap * (index / LEGEND_COLUMNS) as f64;
-            chart.draw_series(std::iter::once(Rectangle::new(
-                [(x, y - 0.06), (x + widest * 0.012, y + 0.06)],
-                colour.filled(),
-            )))?;
-            chart.draw_series(std::iter::once(Text::new(
-                name.clone(),
-                (x + widest * 0.02, y),
-                super::label_font(10),
-            )))?;
-        }
+        // a legend under the plot, since a stacked bar cannot label its own segments
+        legend::draw(&strip, &entries)?;
         Ok(())
     })
 }

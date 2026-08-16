@@ -94,9 +94,18 @@ All three are listed rather than just the one in use, because F15 made it possib
 firing without fixing anything, and the test's value is precisely that it draws from what is
 committed — a chart that is fine for one dataset and broken for the next is the failure mode.
 
-**A legend instead of end-of-curve labels for 67.** It removes the collision by removing the
+~~**A legend instead of end-of-curve labels for 67.** It removes the collision by removing the
 labels, at the cost of the property the current design was chosen for: a reader never has to match
-a colour to a name. Deconflicting the labels keeps both.
+a colour to a name. Deconflicting the labels keeps both.~~
+
+**This was the wrong call, and [F19](../../features/chart-legends.md) reversed it.** Deconflicting
+keeps both only while there is axis left to deconflict into. `chart-grid-latency` draws eight
+curves that end within six pixels of each other; the spreading pass ran out of room, clamped
+against the plot floor and left two names three pixels apart at an eight pixel font — the same
+symptom 67 was, on a chart the fix could not reach. And a name that has been pushed a third of the
+way down the chart to find room is not attached to its curve either, so the colour match this
+alternative was rejected to avoid was being paid for regardless. The fix below is still what stops
+labels colliding *within* a placement pass; F19 removed the placement pass from the line charts.
 
 **Truncating from the tail rather than the front for 68.** The tail is what identifies a scope —
 `handle_query` — and the front is what every scope shares. That choice was already right; only the
@@ -118,6 +127,9 @@ prefix list was wrong.
 Nothing from these two. The wider issue they are instances of — that plotters is built here
 without a font backend and therefore *estimates* text extents rather than measuring them — is
 described in the header of `shoal-bench/tests/chart_geometry.rs` and is not fixable from this side.
+It is still what decides the legend's column width in
+[F19](../../features/chart-legends.md); the estimate simply has somewhere safe to be wrong now,
+because a column that is too wide is a gap rather than an overlap.
 
 ## Tests
 
@@ -135,3 +147,5 @@ described in the header of `shoal-bench/tests/chart_geometry.rs` and is not fixa
   was latent in
 - [F7. A benchmark runner that renders its own results](../../features/bench-runner.md) — which
   built this layer
+- [F19. Charts that name their colours in one place](../../features/chart-legends.md) — which
+  reversed the alternative 67 rejected, and deleted the placement pass 67's fix added

@@ -10,19 +10,25 @@
 //! A **group** is one category on the x axis - one table kind, one distribution. A **series** is
 //! one bar within every group - one row width, one operation. Every group carries the same series
 //! in the same order, so a colour means the same thing across the whole chart, and the series are
-//! named in a strip above the plot rather than inside it.
+//! named in a [`legend`](super::legend) under the plot rather than inside it.
 
 use anyhow::{Result, bail};
 use plotters::prelude::*;
 
-use super::palette;
 use super::sweep::Unit;
+use super::{legend, palette};
 
 /// How many series a group may hold before the chart stops being readable
 const MAX_SERIES: usize = 6;
 
 /// How many groups fit across the canvas
 const MAX_GROUPS: usize = 8;
+
+/// How tall the plotting area is, before the legend is added under it
+///
+/// The same 372 the plot had when the legend was a 28 unit strip above it, so moving the names
+/// below the plot changed where they are and nothing about the bars.
+const PLOT_HEIGHT: u32 = 372;
 
 /// One bar in every group
 #[derive(Debug, Clone)]
@@ -100,25 +106,18 @@ pub fn draw(spec: &Spec, groups: &[String], series: &[Series]) -> Result<String>
         shown.len(),
         spec.unit.format(high)
     );
+    // one legend entry per series, in the order the colours were handed out
+    let entries: Vec<legend::Entry> = shown
+        .iter()
+        .enumerate()
+        .map(|(index, line)| legend::Entry::new(line.name.clone(), palette::series(index)))
+        .collect();
+    let height = PLOT_HEIGHT + legend::height(&entries);
     let spec = spec.clone();
     let groups = groups.to_vec();
-    super::draw(&spec.id.clone(), &aria, 400, move |root| {
-        // the strip of series names sits above the plot, so the plot itself carries no legend
-        let (strip, plot) = root.split_vertically(28);
-        let width = super::WIDTH as i32;
-        for (index, line) in shown.iter().enumerate() {
-            let at = 12 + (index as i32) * (width - 24) / shown.len().max(1) as i32;
-            // a filled square in the series' own colour, then its name beside it
-            strip.draw(&Rectangle::new(
-                [(at, 8), (at + 11, 19)],
-                palette::series(index).filled(),
-            ))?;
-            strip.draw(&Text::new(
-                line.name.clone(),
-                (at + 16, 9),
-                super::label_font(11),
-            ))?;
-        }
+    super::draw(&spec.id.clone(), &aria, height, move |root| {
+        // the plot, and the strip under it that says what each colour is
+        let (plot, strip) = root.split_vertically(PLOT_HEIGHT);
         let mut chart = ChartBuilder::on(&plot)
             .margin(16)
             .x_label_area_size(42)
@@ -173,6 +172,7 @@ pub fn draw(spec: &Spec, groups: &[String], series: &[Series]) -> Result<String>
                 super::label_font(10),
             )))?;
         }
+        legend::draw(&strip, &entries)?;
         Ok(())
     })
 }

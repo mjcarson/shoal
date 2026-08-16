@@ -187,10 +187,12 @@ with a ±0.2% interval.
   is still a manual step.
 - **plotters is built without a font backend**, so it estimates text extents rather than measuring
   them. Labels can collide when a chart's data changes shape; `tests/chart_geometry.rs` catches a
-  collision in a column and gross overflow, and cannot catch everything a pair of eyes would.
+  collision in a column and gross overflow, and cannot catch everything a pair of eyes would. Since
+  [F19](chart-legends.md) the estimate decides a legend column's width rather than where a label
+  lands, so being wrong is a gap rather than an overlap — but it is still an estimate.
 - **The generated diffs are unreadable.** ~~It is 110 KB, most of it SVG path data.~~ It reached
   **1.1 MB** on one page before [F18](results-pages.md) split it into ten and dropped the
-  per-workload chart wall; it is 169 KB now, and still mostly SVG path data. Reviewers are expected
+  per-workload chart wall; it is 529 KB across those ten now, and still mostly SVG path data. Reviewers are expected
   to read `render --check` and the tables, not the hunks. It is deliberately *not* marked `-diff` in
   `.gitattributes`, because that would hide real changes too.
 - **`render --check` fails after any commit.** Every page states which commit it was rendered

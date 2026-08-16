@@ -6,6 +6,7 @@
 pub mod bars;
 pub mod encryption;
 pub mod hotpath_scopes;
+pub mod legend;
 pub mod macro_wall_clock;
 pub mod micro_delta;
 pub mod micro_scaling;
