@@ -15,6 +15,7 @@ use crate::fmt;
 use crate::model::hotpath::HotpathProfile;
 use crate::model::macro_layer::MacroCaptureV2;
 use crate::model::stages::StageReport;
+use crate::render::arms::{self, Arm};
 use crate::render::chart::encryption::Point;
 use crate::render::chart::micro_scaling::Family;
 
@@ -470,4 +471,353 @@ mod tests {
         assert!(rendered.contains("under 100 ns"));
         assert!(!rendered.contains("over 20 µs"));
     }
+}
+
+/// The interval a metric was observed over, or a note that there is none
+///
+/// # Arguments
+///
+/// * `arm` - The workload to read
+/// * `op` - Which operation to read
+/// * `metric` - Which percentile to read
+fn interval(arm: &Arm<'_>, op: &str, metric: &str) -> String {
+    // an arm run once has no interval, which is not the same as having a zero width one - a
+    // comparison against it cannot say whether a difference is a result, and the table says so
+    match arm.capture.stat_interval_ns(op, metric) {
+        Some((low, high)) => format!(
+            "{} – {}",
+            fmt::duration_ns(low as f64),
+            fmt::duration_ns(high as f64)
+        ),
+        None => "one run".to_string(),
+    }
+}
+
+/// One value of an arm's, or a dash where it has none
+///
+/// # Arguments
+///
+/// * `value` - What was measured, if anything was
+/// * `render` - How to write it
+fn optional(value: Option<f64>, render: impl Fn(f64) -> String) -> String {
+    // a dash rather than a zero: an arm that recorded nothing did not measure nothing
+    value.map(render).unwrap_or_else(|| "–".to_string())
+}
+
+/// Every cell of the grid, with both halves of its mixture apart
+///
+/// # Arguments
+///
+/// * `cells` - The arms to tabulate
+pub fn grid_cells(cells: &[Arm<'_>]) -> String {
+    // sorted by table, then read share, then width, which is how the charts above are read
+    let mut sorted: Vec<&Arm<'_>> = cells.iter().collect();
+    sorted.sort_by(|left, right| {
+        left.table_kind()
+            .cmp(&right.table_kind())
+            .then_with(|| left.read_pct().cmp(&right.read_pct()))
+            .then_with(|| left.row_bytes().cmp(&right.row_bytes()))
+            .then_with(|| left.id.cmp(right.id))
+    });
+    let rows: Vec<Vec<String>> = sorted
+        .iter()
+        .map(|arm| {
+            vec![
+                format!("`{}`", arm.id),
+                arm.table_kind()
+                    .map(arms::table_label)
+                    .unwrap_or_else(|| "–".to_string()),
+                arm.read_pct()
+                    .map(|pct| format!("{pct}%"))
+                    .unwrap_or_else(|| "–".to_string()),
+                arm.width_label(),
+                optional(arm.stat("read", "p50"), fmt::duration_ns),
+                optional(arm.stat("read", "p99"), fmt::duration_ns),
+                optional(arm.stat("write", "p50"), fmt::duration_ns),
+                optional(arm.stat("write", "p99"), fmt::duration_ns),
+                optional(arm.ops_per_sec(), |rate| {
+                    fmt::thousands(rate.round() as u128)
+                }),
+                optional(arm.bytes_per_sec(), fmt::byte_rate),
+            ]
+        })
+        .collect();
+    table(
+        &[
+            "Workload",
+            "Table",
+            "Reads",
+            "Row",
+            "read p50",
+            "read p99",
+            "write p50",
+            "write p99",
+            "queries/s",
+            "payload/s",
+        ],
+        &[
+            "---", "---", "---:", "---:", "---:", "---:", "---:", "---:", "---:", "---:",
+        ],
+        &rows,
+    )
+}
+
+/// Each mixed-width arm against the fixed-width arms either side of its mean
+///
+/// # Arguments
+///
+/// * `mixed` - The arms drawing from a width distribution
+/// * `fixed` - The arms at a fixed width, on the same tables
+pub fn width_mixtures(mixed: &[Arm<'_>], fixed: &[Arm<'_>]) -> String {
+    let mut sorted: Vec<&Arm<'_>> = mixed.iter().collect();
+    sorted.sort_by(|left, right| {
+        left.table_kind()
+            .cmp(&right.table_kind())
+            .then_with(|| left.row_bytes().cmp(&right.row_bytes()))
+    });
+    let rows: Vec<Vec<String>> = sorted
+        .iter()
+        .map(|arm| {
+            // the fixed-width arm on the same table whose width is closest to this mixture's mean,
+            // which is what a mixture would cost if the cost were linear across its range
+            let nearest = fixed
+                .iter()
+                .filter(|other| other.table_kind() == arm.table_kind())
+                .min_by_key(|other| other.row_bytes().abs_diff(arm.row_bytes()));
+            let measured = arm.stat("read", "p50");
+            let expected = nearest.and_then(|other| other.stat("read", "p50"));
+            vec![
+                format!("`{}`", arm.row_profile().unwrap_or("–")),
+                arm.table_kind()
+                    .map(arms::table_label)
+                    .unwrap_or_else(|| "–".to_string()),
+                fmt::bytes(arm.row_bytes()),
+                optional(measured, fmt::duration_ns),
+                nearest
+                    .map(|other| fmt::bytes(other.row_bytes()))
+                    .unwrap_or_else(|| "–".to_string()),
+                optional(expected, fmt::duration_ns),
+                match (measured, expected) {
+                    // a share rather than a ratio, since the interesting case is a few percent
+                    // either way and a ratio near one is hard to read
+                    (Some(measured), Some(expected)) if expected > 0.0 => {
+                        fmt::signed_pct((measured - expected) / expected * 100.0)
+                    }
+                    _ => "–".to_string(),
+                },
+            ]
+        })
+        .collect();
+    table(
+        &[
+            "Mixture",
+            "Table",
+            "Mean row",
+            "read p50",
+            "Nearest fixed",
+            "its read p50",
+            "Difference",
+        ],
+        &["---", "---", "---:", "---:", "---:", "---:", "---:"],
+        &rows,
+    )
+}
+
+/// Each key distribution's read cost, per table
+///
+/// # Arguments
+///
+/// * `points` - The arms of the skew sweep
+/// * `distributions` - The distributions to show, in reading order
+pub fn skew(points: &[Arm<'_>], distributions: &[String]) -> String {
+    let kinds = arms::table_kinds(points);
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    for kind in &kinds {
+        for dist in distributions {
+            let Some(arm) = points
+                .iter()
+                .find(|arm| arm.table_kind() == Some(kind.as_str()) && arm.distribution() == dist)
+            else {
+                continue;
+            };
+            rows.push(vec![
+                arms::table_label(kind),
+                format!("`{dist}`"),
+                optional(arm.stat("read", "p50"), fmt::duration_ns),
+                optional(arm.stat("read", "p99"), fmt::duration_ns),
+                interval(arm, "read", "p50"),
+                optional(arm.ops_per_sec(), |rate| {
+                    fmt::thousands(rate.round() as u128)
+                }),
+            ]);
+        }
+    }
+    table(
+        &[
+            "Table",
+            "Keys",
+            "read p50",
+            "read p99",
+            "p50 across runs",
+            "queries/s",
+        ],
+        &["---", "---", "---:", "---:", "---:", "---:"],
+        &rows,
+    )
+}
+
+/// Each rung of the load depth ladder
+///
+/// # Arguments
+///
+/// * `rungs` - The arms of the ladder
+pub fn depth_ladder(rungs: &[Arm<'_>]) -> String {
+    let mut sorted: Vec<&Arm<'_>> = rungs.iter().collect();
+    sorted.sort_by_key(|arm| arm.depth());
+    let rows: Vec<Vec<String>> = sorted
+        .iter()
+        .map(|arm| {
+            vec![
+                arm.depth().to_string(),
+                optional(arm.ops_per_sec(), |rate| {
+                    fmt::thousands(rate.round() as u128)
+                }),
+                optional(arm.stat("read", "p50"), fmt::duration_ns),
+                optional(arm.stat("read", "p99"), fmt::duration_ns),
+                optional(arm.stat("write", "p50"), fmt::duration_ns),
+                optional(arm.stat("write", "p99"), fmt::duration_ns),
+            ]
+        })
+        .collect();
+    table(
+        &[
+            "Depth",
+            "queries/s",
+            "read p50",
+            "read p99",
+            "write p50",
+            "write p99",
+        ],
+        &["---:", "---:", "---:", "---:", "---:", "---:"],
+        &rows,
+    )
+}
+
+/// Every point of the fan-out curve
+///
+/// # Arguments
+///
+/// * `curve` - The fan-out workloads to tabulate
+pub fn fanout(curve: &[Arm<'_>]) -> String {
+    // sorted by arm, then by key count as a number rather than as a string - `256` sorts before
+    // `4` alphabetically, which would draw the curve's rows in an order the curve is not in
+    let mut sorted: Vec<&Arm<'_>> = curve.iter().collect();
+    sorted.sort_by_key(|arm| {
+        let keys = arm
+            .id
+            .rsplit_once('/')
+            .and_then(|(_, tail)| tail.parse::<u64>().ok())
+            .unwrap_or(0);
+        (arm.id.rsplit_once('/').map(|(head, _)| head.to_string()), keys)
+    });
+    let rows: Vec<Vec<String>> = sorted
+        .iter()
+        .map(|arm| {
+            let keys = arm
+                .id
+                .rsplit_once('/')
+                .and_then(|(_, tail)| tail.parse::<f64>().ok())
+                .unwrap_or(1.0);
+            let per_partition = arm.stat("get", "p50").map(|p50| p50 / keys.max(1.0));
+            vec![
+                format!("`{}`", arm.id),
+                fmt::thousands(keys as u128),
+                optional(arm.stat("get", "p50"), fmt::duration_ns),
+                optional(arm.stat("get", "p99"), fmt::duration_ns),
+                optional(per_partition, fmt::duration_ns),
+                interval(arm, "get", "p50"),
+            ]
+        })
+        .collect();
+    table(
+        &[
+            "Workload",
+            "Keys",
+            "get p50",
+            "get p99",
+            "p50 per partition",
+            "p50 across runs",
+        ],
+        &["---", "---:", "---:", "---:", "---:", "---:"],
+        &rows,
+    )
+}
+
+/// Every transport mode, at each row width it was measured at
+///
+/// # Arguments
+///
+/// * `modes` - The transport workloads to tabulate
+pub fn transport(modes: &[Arm<'_>]) -> String {
+    let mut sorted: Vec<&Arm<'_>> = modes.iter().collect();
+    sorted.sort_by_key(|arm| arm.id);
+    let rows: Vec<Vec<String>> = sorted
+        .iter()
+        .map(|arm| {
+            vec![
+                format!("`{}`", arm.id),
+                fmt::bytes(arm.row_bytes()),
+                arm.depth().to_string(),
+                fmt::millis(arm.capture.median_wall_clock_ns() as f64),
+                optional(arm.stat("get", "p50"), fmt::duration_ns),
+                optional(arm.stat("get", "p99"), fmt::duration_ns),
+            ]
+        })
+        .collect();
+    table(
+        &["Workload", "Row", "Depth", "Wall clock", "get p50", "get p99"],
+        &["---", "---:", "---:", "---:", "---:", "---:"],
+        &rows,
+    )
+}
+
+/// Each isolating workload beside the control it is read against
+///
+/// # Arguments
+///
+/// * `capture` - The capture to read from
+/// * `pairs` - Each workload, its control, and what the pair is
+pub fn control_pairs(capture: &MacroCaptureV2, pairs: &[(&str, &str, &str)]) -> String {
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    for (subject, control, what) in pairs {
+        // a pair needs both halves; one half alone is not a control for anything
+        let (Some(left), Some(right)) = (
+            capture.workloads.get(*subject),
+            capture.workloads.get(*control),
+        ) else {
+            continue;
+        };
+        let subject_wall = left.median_wall_clock_ns() as f64;
+        let control_wall = right.median_wall_clock_ns() as f64;
+        rows.push(vec![
+            format!("`{subject}`"),
+            format!("`{control}`"),
+            (*what).to_string(),
+            fmt::millis(subject_wall),
+            fmt::millis(control_wall),
+            if control_wall > 0.0 {
+                format!("{}×", fmt::fixed(subject_wall / control_wall, 2))
+            } else {
+                "–".to_string()
+            },
+        ]);
+    }
+    if rows.is_empty() {
+        return String::new();
+    }
+    table(
+        &["Workload", "Control", "What the pair is", "Wall clock", "Control's", "Ratio"],
+        &["---", "---", "---", "---:", "---:", "---:"],
+        &rows,
+    )
 }

@@ -28,16 +28,19 @@ Defects that have been fixed move to [Resolved Issues](resolved-issues.md), one 
 carrying the reasoning and the invariants the fix depends on. Item numbers are shared between
 the two pages and never reused, so a number appears on exactly one of them — which is why this
 list starts at 15 and skips 25, 26, 31, 34, 39, 44, 45, 48, 51, 56, 57, 61, 67 and 68, and why
-item 66 is the newest. The exceptions are items 16, 17, 20, 24 and 54, which were only
+item 69 is the newest. The exceptions are items 16, 17, 20, 24 and 54, which were only
 partly fixed: the open remainder is here and the rest is there. Items 9 and 51 were each one such
 exception until their second half was fixed, and are now on the resolved page alone; item 25 was one
 in the other direction — it had one row left open, that row was fixed, and the whole item
 [moved](resolved/claude-md-drift.md).
 
 **Baseline as of writing:** `cargo check --workspace --all-targets` passes with warnings;
-`cargo test --workspace` passes — 876 tests, one ignored, plus 8 more behind
+`cargo test --workspace` passes — 896 tests, one ignored, plus 8 more behind
 `--features stage-profile` that a default run does not reach ([Test Coverage](test-coverage.md)).
-That is up from 868 with [F15](../features/client-server-split.md), which also re-attributed 177
+That is up from 876 with [F16](../features/client-builder.md), which added 12 `shoal-client` unit
+tests over the builder and the endpoint order, a new `pool.rs` integration binary carrying 6, and 2
+doctests. That is up from 868 with [F15](../features/client-server-split.md), which also
+re-attributed 177
 of them: `shoal-core` went from 323 unit tests to 146 as the protocol and the client became crates
 of their own, and none were lost. That is up from 490, 301 and 25 with
 [F14](../features/encryption-in-transit.md) — one new integration binary (`tls.rs`) carrying 8
@@ -436,6 +439,9 @@ correctness fix, and the cost removal is change left over.
   [F11](../features/error-channel.md) narrowed this rather than closing it: both now also refuse a
   connection whose *read half* has stopped, which is the case they were silently passing. A peer
   that is gone but whose socket has not been reset still looks healthy, and that needs a `Ping`.
+  **[F16](../features/client-builder.md) narrowed it again from the other side** — a client now
+  has other endpoints to fall back to when one stops answering — without closing it either, since
+  detecting that it stopped is still what is missing.
 - `Shoal::send` archives the bundle before `track_response` may regenerate its id
   (`shoal-core/src/client.rs:209-215`).
 - Two large commented-out blocks remain (`shoal-core/src/client.rs:549-603`, `:1048-1114`).
@@ -884,7 +890,7 @@ tabulated, which is the right treatment. The trap is that it looks exactly like 
 number anybody would reach for first. `total` — nanoseconds summed across every shard that entered
 the scope — is the field to rank by, and it needs saying that it is a sum across shards rather
 than a share of the wall clock, which is why the chart's axis on
-[Benchmark Results](../operations/benchmark-results.md) says so.
+[Benchmark Results](../performance/overview.md) says so.
 
 **Established by reading the committed artifacts**, while building
 [F7](../features/bench-runner.md). `shoal-bench` never plots or tabulates the field, and
@@ -1263,8 +1269,45 @@ workspace.
 **Fix direction:** decide what the release profile should be and put it at the root. Note that
 adding one changes the codegen of every binary and therefore invalidates every stored capture, so
 it needs its own before-and-after and a note on
-[Performance Baseline](../operations/performance-baseline.md). Whether `lto = "thin"` would let
+[Performance Baseline](../performance/baseline.md). Whether `lto = "thin"` would let
 the thirty `#[inline]` attributes be dropped again is the interesting half of the question.
+
+### 69. Nothing in the workspace ever installs a tracing subscriber
+
+`shoal-core/src/server/trace.rs:75`, `trace::setup`, and the absence of any caller
+
+`trace.rs` builds a `tracing_subscriber` registry, reads `Tracing` out of the config, and wires an
+OpenTelemetry exporter when `tracing.remote` names a gRPC endpoint. `pub fn setup(conf: &Conf)` is
+its entry point and **nothing calls it** — not `ShoalPool::start`, not `shard::start`, not
+`shoal-workload`, not `shoalctl`, not a test. `grep -rn "trace::setup"` over the workspace returns
+its own definition and nothing else.
+
+Three things follow, and the third is the one worth noticing:
+
+- **The `tracing` section of `shoal.yml` configures nothing.** A deployment setting
+  `tracing.level: Debug`, or pointing `tracing.remote` at a collector, gets the same behaviour as
+  one that sets neither, which is silence.
+- **Every `#[instrument]` and `event!` in the workspace goes to a no-op dispatcher.** That includes
+  the server's — `Shard::reply`, `Shard::handle_query`, `Coordinator::send_to_shard` and the rest
+  have never been switched on — and the `event!(Level::ERROR, ...)` calls the error paths use to
+  report a dead connection or a refused frame. **An operator debugging a failure gets no output
+  from any of them.**
+- **It conditions what [F16](../features/client-builder.md) measured.** That feature added spans to
+  the client and found they cost nothing across 144 metrics. That is true and narrower than it
+  sounds: a span whose dispatcher finds no subscriber is close to free, so the measurement says
+  what these spans cost *in this configuration*, and this configuration is the only one that
+  currently exists. It is not a result about what the spans cost.
+
+**Established by reading the source and confirming by grep**, while writing
+[F16](../features/client-builder.md)'s *Performance* section — the question "what do these spans
+cost?" turned into "what is listening?" and the answer was nothing.
+
+**Fix direction:** call `trace::setup` from `ShoalPool::start` and hold its `SdkTracerProvider` for
+the life of the pool, since `trace::shutdown` already exists and already takes one. Two things to
+decide on the way. A library that installs a **global** subscriber takes that decision away from
+the binary embedding it, so this may belong on `shoal-workload` and `shoalctl` rather than on
+`ShoalPool`. And whatever the answer, a benchmark capture must keep getting the subscriber it has
+always had — none — or every macro number moves for a reason that is not the code being measured.
 
 Everything that has been fixed, and why it was fixed the way it was, is in
 [Resolved Issues](resolved-issues.md). The SHQL parser has gained test coverage at both stages

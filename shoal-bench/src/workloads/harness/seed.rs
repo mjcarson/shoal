@@ -77,6 +77,35 @@ impl Seeded {
         Seeded::new(mixed)
     }
 
+    /// Creates the generator that belongs to one index, rather than one walked forward
+    ///
+    /// Everything a mixture generates - which key a query asks for, how wide a row is, whether a
+    /// query is a read or a write - has to be a function of the query's index and of nothing else.
+    /// A mixture is driven by several slots pulling from one shared cursor, so anything drawn in
+    /// sequence would depend on which slot reached the cursor first, and two runs of one arm would
+    /// send different queries. That is the opposite of what a repeatable benchmark is.
+    ///
+    /// The index is spread by [`GAMMA`] before it is folded in, because two indices one apart
+    /// would otherwise seed two generators one apart.
+    ///
+    /// # Arguments
+    ///
+    /// * `seed` - The stream seed to address into
+    /// * `index` - Which index's generator is wanted
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use shoal_bench::workloads::harness::seed::Seeded;
+    ///
+    /// // the same index gives the same value, however many times it is asked and in any order
+    /// assert_eq!(Seeded::at(42, 7).next_u64(), Seeded::at(42, 7).next_u64());
+    /// assert_ne!(Seeded::at(42, 7).next_u64(), Seeded::at(42, 8).next_u64());
+    /// ```
+    pub fn at(seed: u64, index: u64) -> Self {
+        Seeded::new(seed ^ index.wrapping_mul(GAMMA))
+    }
+
     /// Draws the next value
     pub fn next_u64(&mut self) -> u64 {
         // walk the state by the golden ratio increment, which is what makes the period full

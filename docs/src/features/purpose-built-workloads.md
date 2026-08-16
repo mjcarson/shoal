@@ -29,6 +29,14 @@ no `PersistentSortedTable` coverage — so **O5**, **O12** and **O13** were list
 benchmarks that do not build a table at all — no `Async`-vs-`Fsync` capture, and no way to see
 O13's quadratic term as anything but an argument from the source.
 
+> **Amended by [F17](workload-grid.md).** ~~No workload here blends two paths.~~ Seventy-four of
+> them now do, and deliberately: the grid measures a fixed ratio of reads to writes because *how
+> will this handle my workload* is a real question and nothing here could answer it. The argument
+> above is untouched, because it is about **attribution** rather than about blending. A grid arm
+> says a mixture got slower; only a pair from this set says which half. **A regression is never
+> attributed to a grid arm**, and the grid's own page says so in the section it is required to
+> carry. The two are a division of labour, not a reversal.
+
 ## What it does
 
 Fifteen purpose-built workloads live in `shoal-bench`, each isolating one path through the engine,
@@ -208,10 +216,12 @@ for a profile that largely repeats the first.
 lifecycles, where before it was five. [F9](ephemeral-tables.md) took it to twenty-three and 115,
 and [F13](transport-workloads.md) to thirty-one and 155 — the largest step in wall clock of the
 three, because its large arm seeds 512 MiB and moves two gigabytes over the wire per run.
-[F14](encryption-in-transit.md) took it to **eighty-seven and 435**, which is the largest step in
+[F14](encryption-in-transit.md) took it to eighty-seven and 435, which was the largest step in
 *count* and not in wall clock: sixteen of its arms are F13's doubled by a wire axis, and the other
 forty-eight hold a fixed byte budget rather than a fixed query count, so the widest of them runs
-256 queries and costs about what the narrowest does.
+256 queries and costs about what the narrowest does. [F17](workload-grid.md) took it to **a hundred
+and sixty one and 805**, and roughly doubled the wall clock — a full capture is four to five hours
+now, and the grid alone is most of it.
 
 **No workload covers** sort-key selection, projections, ~~transport modes,~~ durability, update,
 delete, exists, compaction or recovery. Transport modes are covered by
@@ -357,8 +367,8 @@ first capture of the new workloads rather than a new frozen reference. Establish
   `shoal-bench` with the rest of the harness
 - [F4. Archives are validated once, not once per read](validated-archives.md) — the
   control-and-null shape the pairs use
-- [Benchmarking](../operations/benchmarking.md) — how to take a capture
-- [Performance Baseline](../operations/performance-baseline.md) — what the retired `tmdb` numbers
+- [Benchmarking](../performance/benchmarking.md) — how to take a capture
+- [Performance Baseline](../performance/baseline.md) — what the retired `tmdb` numbers
   were, and why they have no replacement
 - [Todos](../appendix/todos.md) — the workloads deliberately not built, and the criterion gap that
   stays open

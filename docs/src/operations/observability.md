@@ -197,7 +197,7 @@ See [Known Issues](../appendix/known-issues.md#17-leftover-debug-printlns).
 ## hotpath
 
 A profiler enabled by a feature flag. See
-[Benchmarking](benchmarking.md#profile) for how to run one and
+[Benchmarking](../performance/benchmarking.md#profile) for how to run one and
 [F3](../features/performance-harness.md) for why it is kept apart from the other measurements.
 
 ```bash
@@ -299,12 +299,17 @@ instrumentation away, so the hot path pays nothing in a default release build.
 
 - The remote exporter ignores the configured level.
 - `RemoteTracing::Grpc` uses HTTP.
-- `trace::setup` is never called by the library.
+- `trace::setup` is never called by the library **or by anything else** — not the example, not
+  `shoal-workload`, not `shoalctl`. So no subscriber is ever installed and **every span and event
+  on this page dispatches to nobody**, which makes the `tracing` section of `shoal.yml` inert.
+  Filed as [item 69](../appendix/known-issues.md).
 - ~~`PersistentSortedTable` is not `hotpath`-instrumented.~~ It is now, along with the partition
   layer, the stream writer, the compactor and the loader — see the table above.
-- `partitions.rs` and `client.rs` still have **no `tracing` spans at all**, so the hottest CPU
-  code and the whole client path are invisible to a trace even though `hotpath` now covers the
-  first of them.
+- ~~`partitions.rs` and `client.rs` still have **no `tracing` spans at all**~~ — `client.rs` has
+  spans and `hotpath` scopes since [F16](../features/client-builder.md), on `Shoal::send`,
+  `ShoalQueryStream::send`, `ShoalConnectionManager::connect_to`, `track_response`,
+  `TcpProxy::read_frame` and both `next()`s. `partitions.rs` still has none, so the hottest CPU code
+  is invisible to a trace even though `hotpath` covers it.
 - ~~Corruption and truncation are warnings with no counters.~~ Counted and summarized per shard
   now, but only as an event — nothing scrapes it, and nothing aggregates across shards.
 - Because `trace::setup` is never called by the library, none of these events reach a test. The

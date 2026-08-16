@@ -15,7 +15,9 @@
 
 pub mod conf;
 pub mod driver;
+pub mod keys;
 pub mod ready;
+pub mod rows;
 pub mod seed;
 pub mod timer;
 
@@ -152,7 +154,12 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
     // this catches a real and quiet failure: the driver counts rows by trying each row type the
     // schema declares, so a schema gaining a row type the driver was not taught about produces a
     // run with healthy looking percentiles over an answer that was never there
-    if measured.ops.contains_key("get") && measured.counters.get("retrieved").copied() == Some(0) {
+    //
+    // both spellings of the read operation are checked: an isolating workload records `get` and a
+    // mixture records `read`, and a guard that knew only the first would let every read arm of the
+    // grid report an empty table as a fast one
+    let timed_reads = measured.ops.contains_key("get") || measured.ops.contains_key("read");
+    if timed_reads && measured.counters.get("retrieved").copied() == Some(0) {
         bail!(
             "{} timed gets but retrieved no rows, so its samples measure lookups that found nothing",
             workload.id()

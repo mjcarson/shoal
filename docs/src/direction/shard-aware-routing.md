@@ -183,8 +183,10 @@ and that a `routing` bench is cheap next to the feature it would justify.
 
 ## What it costs
 
-- **Per-shard sub-pools.** `min_idle` and `max_size` stop being global numbers. With 12 shards and
-  `min_idle: 10`, a naive translation opens 120 idle connections — and each one is a TLS handshake
+- **Per-shard sub-pools.** `min_idle` and `max_size` stop being global numbers — they are
+  `PoolConfig` fields since [F16](../features/client-builder.md), which is the seam this would grow
+  a per-shard variant on. With 12 shards and `min_idle: 10`, a naive translation opens 120 idle
+  connections — and each one is a TLS handshake
   and an authentication once [D3](authentication.md) and [D4](encryption.md) land.
 - **Merge work moves to the client**, so a client machine now pays what a shard used to. For a
   fan-out query that is real CPU.

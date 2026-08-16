@@ -6,14 +6,14 @@ never reused.
 
 ~~**None of these are measured.** They come from reading the source, and they are ordered by the
 size of the argument for them, not by observed benefit. Anything here should be confirmed against
-a profile before it is acted on — [Benchmarking](../operations/benchmarking.md) and the `hotpath`
+a profile before it is acted on — [Benchmarking](../performance/benchmarking.md) and the `hotpath`
 feature are what that is for.~~
 
 That was true of every entry below when it was filed, and it is worth keeping because it says
 what the entries *are*: arguments from the source, ordered by the strength of the argument
 rather than by observed benefit. What has changed is that there is now somewhere to settle
 them. [F3](../features/performance-harness.md) built a harness that can resolve a few percent,
-[Performance Baseline](../operations/performance-baseline.md) records what the system currently
+[Performance Baseline](../performance/baseline.md) records what the system currently
 does, and the `hotpath` feature — which until then was wired up in a way that produced an empty
 profile — reported 57 scopes on a `tmdb` run, which was the workload the figure was taken
 from before [F8](../features/purpose-built-workloads.md) retired it.
@@ -54,7 +54,7 @@ the whole point of the rule above, so it is a column rather than a caveat:
 | Grade | Means |
 | --- | --- |
 | **Measured** | A micro-benchmark or a baseline figure, cited on the entry |
-| **Profiled** | A `hotpath` scope. Attribution only — [never a result](../operations/performance-baseline.md#profile--where-the-time-goes) — so a call count is worth more here than a duration |
+| **Profiled** | A `hotpath` scope. Attribution only — [never a result](../performance/baseline.md#profile--where-the-time-goes) — so a call count is worth more here than a duration |
 | **Asymptotic** | The cost grows in something a caller controls, so it is established without a number |
 | **Argued** | Source reading alone. The default, and the weakest |
 
@@ -107,7 +107,7 @@ filing.
 **Tier B — argued, contained, waiting on its benchmark.** The profile is what orders this tier:
 `write_helper` is 30.5 ms per call against roughly 350 ns for the insert it persists, so a write-path
 entry is removing work from a path that is [already waiting on the
-device](../operations/performance-baseline.md#profile--where-the-time-goes). O9 and O8 lead it
+device](../performance/baseline.md#profile--where-the-time-goes). O9 and O8 lead it
 because they are the exception — their cost scales with data on disk rather than with request rate,
 so they get worse by existing longer rather than under load.
 
@@ -570,7 +570,7 @@ actually calls it, and `archived/*` and `codec/*` are kept beside it as controls
 | | |
 | --- | --- |
 | **Rank** | **B2** — the entry whose *correctness* value exceeds its performance value |
-| **Impact** | Argued, and discounted — the write path is [waiting on the device](../operations/performance-baseline.md#profile--where-the-time-goes), not on this |
+| **Impact** | Argued, and discounted — the write path is [waiting on the device](../performance/baseline.md#profile--where-the-time-goes), not on this |
 | **Difficulty** | M — 13 call sites, but they all want the same thing |
 | **Depends on** | nothing |
 | **Blocks** | [item 22](known-issues.md#22-size-accounting-inconsistencies) — the same edit settles it |
@@ -640,7 +640,7 @@ The original entry read:
 > | **Benchmark** | `hotpath` `shard::handle_flushed`; no micro-benchmark |
 >
 > **Why a `hotpath` number is enough here, when the page says it is attribution only.** The
-> [caveat](../operations/performance-baseline.md#profile--where-the-time-goes) is about *durations* —
+> [caveat](../performance/baseline.md#profile--where-the-time-goes) is about *durations* —
 > the instrumented binary perturbs them. The **call count** is not perturbed: 705,886 calls against
 > 617,175 queries is a structural fact about the loop, and it is the part of this entry that matters.
 > The 1.8 µs is the soft half of the claim.
@@ -935,7 +935,7 @@ What the two that moved have in common is that they are dominated by a linear wa
 `AlignedVec` built at group setup. `AlignedVec` guarantees 16-byte alignment and nothing about where
 the buffer lands relative to a cache set or a page, so adding a benchmark group ahead of them in the
 binary changes what they are walking over. This is the between-process variation
-[Performance Baseline](../operations/performance-baseline.md#what-the-micro-layer-can-actually-resolve)
+[Performance Baseline](../performance/baseline.md#what-the-micro-layer-can-actually-resolve)
 says a confidence interval cannot see, caught in the act.
 
 **Fix direction:** neither obvious nor free. Allocating the buffer at a known page offset would pin
@@ -1128,7 +1128,7 @@ database is the shape a real use of ephemeral tables has.
 | **Depends on** | nothing |
 | **Blocks** | nothing |
 | **Tradeoff** | None |
-| **Benchmark** | none, and **none can exist yet** — `client.rs` has no `tracing` spans and no `hotpath` scopes at all |
+| **Benchmark** | `macro/transport/send_one/small`, and it is **adjudicable now** — ~~`client.rs` has no `tracing` spans and no `hotpath` scopes at all~~, it has both since [F16](../features/client-builder.md) |
 
 `Shoal::track_response` registers a query's response channel by asking whether an id is taken and
 then inserting under it:
@@ -1153,7 +1153,7 @@ The other side pays a heavier one: `TcpProxy` uses `pin_owned()` once per respon
 no instrumentation whatsoever. `docs/src/appendix/todos.md` records that "`client.rs` has neither
 `tracing` spans nor `hotpath` scopes, so the share of measured latency that is the harness's own is
 unknown" — every macro number in
-[Benchmark Results](../operations/benchmark-results.md) includes this code and none of them can
+[Benchmark Results](../performance/overview.md) includes this code and none of them can
 attribute anything to it. That makes a client-side entry worth *recording* even when it is too
 small to act on, because the total it belongs to has never been bounded.
 
@@ -1169,13 +1169,26 @@ this entry is adjudicable for the first time — and the arm to adjudicate it on
 `macro/transport/send_one/small`, where a per-query cost is not buried under the bytes. It stays
 open because nothing has been measured, not because nothing can be.
 
-**That workload was blocking more than this entry, and half of that is now unblocked.** The
-[Direction](../direction/overview.md) chapter is nine design pages about the client, and its step 0
-— before any of them — is exactly what this entry asks for: spans and `hotpath` scopes in
-`client.rs`, plus the `transport/*` workloads
-([D6](../direction/connection-pool.md#how-it-would-be-measured)). The workloads landed; the spans
-did not. The instrumentation was worth doing when the only thing it could adjudicate was two
-`papaya` guards. It is worth considerably more now, and it is the only half left.
+~~**That workload was blocking more than this entry, and half of that is now unblocked.**~~
+**Both halves have landed.** The [Direction](../direction/overview.md) chapter is nine design pages
+about the client, and its step 0 — before any of them — is exactly what this entry asks for: spans
+and `hotpath` scopes in `client.rs`, plus the `transport/*` workloads
+([D6](../direction/connection-pool.md#how-it-would-be-measured)). The workloads landed with
+[F13](../features/transport-workloads.md) and the instrumentation with
+[F16](../features/client-builder.md), which put a `hotpath` scope on `track_response` itself. **Step
+0 is done and this entry is adjudicable for the first time since it was filed.**
+
+**F16 deliberately did not take the fix**, and the reason is a rule worth reusing: it landed the
+instrumentation and measured that, so that the capture carrying the instrumentation's cost is not
+also the capture carrying this fix's benefit. Two changes in one capture is one number nobody can
+attribute. The fix is still one guard instead of two, and it is still small; what it now has is a
+before and an after that mean something.
+
+**One thing to know before measuring it.** F16's own capture found no result in 144 metrics across
+sixteen `transport` workloads, at spreads of a few percent on the `small` arms. A pair of `papaya`
+guard acquisitions is nanoseconds against a wall clock of ~60 µs per query, so this is very likely
+below what the macro layer can see at all, and the honest place to adjudicate it may be a
+`hotpath` capture over the `client::track_response` scope rather than a `transport` wall clock.
 
 ## The wire
 
@@ -1255,12 +1268,12 @@ the thing that separates them is not size but whether the claim can be checked.
 | **Rank** | **C3** — not actionable, because there is nothing to act on yet |
 | **Impact** | **Unknown.** Every other entry on this page is at least argued from the source; this one cannot be, because the quantity is a wall clock and no clock is started |
 | **Difficulty** | S to build the workload. Unknown for whatever it then shows |
-| **Depends on** | a `connect` workload in `shoal-bench` |
+| **Depends on** | a `connect` workload in `shoal-bench`. The *instrumentation* half is done ([F16](../features/client-builder.md) put a `hotpath` scope and a span on `ShoalConnectionManager::connect_to`), so what is missing is now only the workload |
 | **Blocks** | any judgement about [F12](../features/authentication.md)'s cost, and about [D4](../direction/encryption.md)'s and [D6](../direction/connection-pool.md)'s |
 | **Tradeoff** | — |
 | **Benchmark** | the missing one *is* the entry |
 
-Every macro number in [Benchmark Results](../operations/benchmark-results.md) is measured against an
+Every macro number in [Benchmark Results](../performance/overview.md) is measured against an
 already-warm pool. `Shoal::new` runs before the timer starts, so the ten connections it opens, the
 ten handshakes they exchange, and — since [F12](../features/authentication.md) — the ten SCRAM
 exchanges and twenty PBKDF2 derivations that go with them, are all invisible to every capture this
@@ -1275,6 +1288,7 @@ becoming less so with each thing added in front of the first query:
 | [F12](../features/authentication.md) | two more round trips and a PBKDF2 derivation on each end, when a config asks for it |
 | [D4](../direction/encryption.md) | a TLS handshake, when it exists |
 | [D6](../direction/connection-pool.md) | whatever a real health check costs on a connection that is being created |
+| [F16](../features/client-builder.md) | nothing per connection — but a client with several endpoints may now try, and be refused by, more than one before it opens one |
 
 **What is needed is not a query workload.** The `transport/*` workloads
 ~~[TODOs](todos.md#benchmark-coverage-the-harness-does-not-have) plans~~ —
@@ -1346,6 +1360,15 @@ workload and would have to be found once and recorded.
 Found while reading the first capture that held the sweeps, which is the only way it could have
 been found — every point of it is correct, the harness did nothing wrong, and the numbers are still
 not readable.
+
+**Partly addressed by [F17](../features/workload-grid.md), and still open.** The grid ships a
+four-rung **load depth ladder** at its reference cell — depths 1, 8, 32 and 128, identical in every
+other respect — and [Access patterns](../performance/access-patterns.md) draws throughput and
+latency against depth together and states in prose whether throughput fell at any rung. That makes
+the knee *visible* for the one cell every grid arm's depth was chosen from, which is the first time
+anything here could see it at all. What it does not do is either half of the fix direction above:
+nothing computes the flag automatically, no axis carries a declared knee, and the ladder covers one
+cell rather than every sweep. **The entry stays open.**
 
 ### O32. `Queries::deserialize` costs about nine nanoseconds more than it did
 

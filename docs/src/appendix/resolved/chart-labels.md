@@ -1,7 +1,7 @@
 # 67, 68. Chart labels collided, and the scope prefix strip never matched
 
 Two defects in the same layer, found the same way and fixed together: the charts on
-[Benchmark Results](../../operations/benchmark-results.md) place their text without measuring it,
+[Benchmark Results](../../performance/overview.md) place their text without measuring it,
 and neither of these was visible in any test that did not draw a real capture.
 
 ## Symptom

@@ -15,7 +15,7 @@ not `shoal-core/hotpath`, and every `#[cfg_attr(feature = "hotpath", ...)]` attr
 in [Building Shoal](../getting-started/building.md) — produced a profiler with nothing to
 report. Anyone who ran it saw an empty table and concluded the code was cheap.
 
-**The only harness could not resolve anything.** [Benchmarking](../operations/benchmarking.md)
+**The only harness could not resolve anything.** [Benchmarking](../performance/benchmarking.md)
 measured the `tmdb` example's own run-to-run spread at roughly ±30%. Nearly every entry in
 [Optimizations](../appendix/optimizations.md) claims a saving far below that, so the harness
 could not have confirmed or refuted any of them. The page said as much: *"None of these are
@@ -55,9 +55,9 @@ at p99 were waiting on. That is F6's question, and it needed a different instrum
 ~~`scripts/bench.sh <label>` captures all four. `scripts/compare.sh` diffs a run against
 baselines.~~ Both are now `shoal-bench` — see [F7](bench-runner.md), which also gave every capture
 a record of the tree it was taken from and made the results a generated page.
-[Benchmarking](../operations/benchmarking.md) is the runbook;
-[Benchmark Results](../operations/benchmark-results.md) is the current result and
-[Performance Baseline](../operations/performance-baseline.md) is the frozen one.
+[Benchmarking](../performance/benchmarking.md) is the runbook;
+[Benchmark Results](../performance/overview.md) is the current result and
+[Performance Baseline](../performance/baseline.md) is the frozen one.
 
 **Two baselines, not one.** Each optimization is judged against both
 `docs/perf/baselines/B1-performance.json`, which is frozen, and `docs/perf/baselines/trailing.json`,
@@ -134,8 +134,8 @@ is not in the repository. The governor is recorded in the hardware block instead
 **Reversed.** The machine now runs `performance` / EPP `performance`, and the baseline was
 re-captured under it as **B1**. The original objection was real and is answered by writing the
 requirement down rather than by declining to meet it: the governor is a stated precondition of
-the baseline in [Benchmarking](../operations/benchmarking.md#prerequisites), and the
-[hardware block](../operations/performance-baseline.md#hardware) records it. What the objection
+the baseline in [Benchmarking](../performance/benchmarking.md#prerequisites), and the
+[hardware block](../performance/baseline.md#hardware) records it. What the objection
 got wrong was treating an unrecorded setting and an unmet one as the same problem — the fix for
 "nobody knows to set this" is documentation, not accepting avoidable noise. The powersave
 capture is kept as `B0-powersave` so the difference between the two is itself measured.
@@ -168,7 +168,7 @@ and `hotpath` cannot express it.
   layer covers it instead, which gives attribution but not a confidence interval. Filed in
   [TODOs](../appendix/todos.md).
 - **Macro timing is still per batch**, not per query. `--per-query` was not built; see
-  [Benchmarking](../operations/benchmarking.md#what-is-actually-measured).
+  [Benchmarking](../performance/benchmarking.md#what-is-actually-measured).
 - **The macro benchmark needs a dataset that is not in the repository** — a 65 MB TMDB CSV. The
   micro layer is self contained; the macro layer is not.
 - **`bench_exports` is unsupported API.** Nothing outside `shoal/benches` may use it.
@@ -266,8 +266,8 @@ The benches themselves are not tests and are not run by `cargo test`. `cargo che
 
 ## Related
 
-- [Benchmarking](../operations/benchmarking.md) — how to run one
-- [Performance Baseline](../operations/performance-baseline.md) — the recorded numbers and the hardware they came from
+- [Benchmarking](../performance/benchmarking.md) — how to run one
+- [Performance Baseline](../performance/baseline.md) — the recorded numbers and the hardware they came from
 - [Observability](../operations/observability.md) — what `hotpath` covers
 - [Optimizations](../appendix/optimizations.md) — the backlog this exists to adjudicate
 - [Resolved #18](../appendix/resolved/excluded-cores-typo.md) — the config typo, and the placement defect found underneath it

@@ -28,7 +28,7 @@ variant rather than a new handshake. The D3 page records which half is still ope
 
 **A server requires nothing by default.** A config with no `auth` section behaves exactly as every
 server did before this, which is what keeps the benchmark harness, the integration suite and the
-[frozen baseline](../operations/performance-baseline.md) comparable.
+[frozen baseline](../performance/baseline.md) comparable.
 
 A server that wants credentials says so:
 
@@ -276,7 +276,7 @@ still two reads into an `AlignedVec<16>` and the request write is still vectored
 
 **Connect cost is not measured, and no existing benchmark can see it.** The macro layer measures
 queries against an already-warm pool, so three round trips and two PBKDF2 derivations per
-connection are invisible to every number in [Benchmark Results](../operations/benchmark-results.md).
+connection are invisible to every number in [Benchmark Results](../performance/overview.md).
 This is the one measurement [D3](../direction/authentication.md#how-it-would-be-measured) said the
 ~~planned~~ `transport/*` workloads would still not provide: what is needed is a *connect* workload,
 time to first successful query from a cold client. That prediction held —

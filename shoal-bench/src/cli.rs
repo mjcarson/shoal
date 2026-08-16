@@ -34,7 +34,7 @@ pub enum Command {
     Compare(CompareArgs),
     /// Report what has been captured and whether it still describes the current code
     Status(StatusArgs),
-    /// Regenerate the book's benchmark results page
+    /// Regenerate the book's performance pages
     Render(RenderArgs),
     /// Advance a baseline to a captured run
     Promote(PromoteArgs),
@@ -218,10 +218,10 @@ pub struct StatusArgs {
 /// Arguments to `shoal-bench render`
 #[derive(clap::Args, Debug)]
 pub struct RenderArgs {
-    /// Where to write the page
+    /// The directory to write the pages into, defaulting to `docs/src/performance`
     #[clap(long)]
     pub out: Option<PathBuf>,
-    /// Regenerate into memory and fail if it differs from what is committed, writing nothing
+    /// Regenerate into memory and fail if any page differs from what is committed, writing nothing
     #[clap(long)]
     pub check: bool,
     /// The frozen baseline to draw against

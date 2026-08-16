@@ -58,6 +58,12 @@ pub enum Errors {
     ConnectionPool(String),
     /// Failed to resolve a DNS address
     DnsResolution(String),
+    /// A client was described in a way that cannot be built
+    ///
+    /// This is a caller's mistake rather than a peer's, and it is caught before a socket is
+    /// opened - a builder with no endpoint, or a pool whose minimum idle count is above its
+    /// maximum size, has nothing to try.
+    Config(String),
     /// A frame that could not be written or read
     Protocol(ProtocolError),
     /// A connection could not be opened, or was refused by the server

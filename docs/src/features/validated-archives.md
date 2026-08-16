@@ -189,7 +189,7 @@ This is the section to read before changing `ValidatedArchive`.
 
 Measured by `scripts/bench.sh` — the shell harness [F7](bench-runner.md) replaced with
 `shoal-bench` — `o3-before` against `o3-after`, on the hardware in
-[Performance Baseline](../operations/performance-baseline.md). Both captures were taken in the same
+[Performance Baseline](../performance/baseline.md). Both captures were taken in the same
 session under the same settings, so the pair is the result; comparisons against the frozen `B1`
 baseline carry an environment difference as well.
 
@@ -255,7 +255,7 @@ call directly, and `archived/walk_all` — same function — moved −4% in the 
 the same time.
 
 The likeliest mechanism is the one
-[Performance Baseline](../operations/performance-baseline.md#what-the-micro-layer-can-actually-resolve)
+[Performance Baseline](../performance/baseline.md#what-the-micro-layer-can-actually-resolve)
 names as invisible to a confidence interval: the bench binary changed shape, and the buffer those
 two walk landed at a different offset. A validator walking 30 µs of one `AlignedVec` is exactly what
 that would show up on.
@@ -294,6 +294,6 @@ Recorded rather than explained away, and filed as
 - [F1](sort-key-ranges.md) — `SeekBytes`, whose "bytes in the carrier, references at the point of
   use" shape this completes
 - [F3](performance-harness.md) — the harness that made this adjudicable
-- [Performance Baseline](../operations/performance-baseline.md) — the numbers above, in context
+- [Performance Baseline](../performance/baseline.md) — the numbers above, in context
 - [archive checksums](../appendix/todos.md#archive-checksums) — still unpaid, and still the
   dependency of the `Major` form this did not take

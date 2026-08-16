@@ -3,7 +3,32 @@
 What the test suite reaches, what it does not, and the one place where it is unsound.
 
 **Established by running it.** `cargo check --workspace --all-targets` passes with warnings and
-`cargo test --workspace` passes: **876 tests**, one ignored.
+`cargo test --workspace` passes: **967 tests**, one ignored.
+
+**[F17](../features/workload-grid.md) and [F18](../features/results-pages.md) added 71**, every one
+of them in `shoal-bench`. Sixty unit tests net: sixty-three added — the grid's fourteen, the
+row-width and key distribution generators' eleven, the two new chart kinds' fourteen, the family and
+page registries' nineteen, and the arm selector's five — less the three that replaced six in
+`page.rs`, whose section builders moved out to the ten page modules. Two integration tests over the committed corpus, both of which
+exist to protect it rather than to test new code — one asserts the four new `ScaleFacts` fields stay
+skipped when absent, because if one stops being skipped every existing workload re-serializes with
+new nulls and the whole corpus churns on a change that measured nothing. And nine doctests. The
+total went 896 → 967.
+
+**The two that matter most are registry tests rather than behaviour tests.**
+`family::every_workload_has_a_family` and `pages::every_page_renders_with_nothing_captured` are what
+stop a new sweep landing on the site as an unexplained chart, and what stops a clean checkout
+failing to build the book. Neither tests what any code computes; both test that a thing was not
+forgotten, which is the failure mode the page they replace actually had.
+
+**[F16](../features/client-builder.md) added 20.** Twelve `shoal-client` unit tests over
+`PoolConfig`'s defaults, the endpoint resolver and `endpoint_order`; a new `pool.rs` integration
+binary carrying six; and two doctests. The total went 876 → 896. **Six of the twelve unit tests
+exist because the integration test was not enough** — `an_endpoint_that_is_down_is_tried_past`
+passes against a build with the failover loop stubbed out, since `bb8`'s retries and the round
+robin counter reach a live endpoint on their own, so what the loop actually buys is pinned over
+`endpoint_order` directly. That is the general lesson: an end-to-end test that passes either way is
+not a test of the mechanism.
 
 **[F15](../features/client-server-split.md) moved where they live without changing what they
 cover.** Splitting `shoal-core` into three crates re-attributed 177 unit tests and added 8. The
@@ -14,13 +39,13 @@ should read this table rather than assume it was.
 | --- | --- | --- |
 | `shoal-proto` unit | 171 | the protocol, the SHQL parser, SCRAM, the TLS config — moved out of `shoal-core` |
 | `shoal-core` unit | 146 | the engine: partitions, storage, the shard. Was 323 before the split |
-| `shoal-client` unit | 6 | the client read loop and its error routing — moved out of `shoal-core` |
-| `shoal-bench` unit | 274 | the harness, the workloads, the charts |
-| `shoal` integration | 191 | 13 binaries against a live server, one ignored |
+| `shoal-client` unit | 18 | the client read loop and its error routing, and — new with [F16](../features/client-builder.md) — the builder, the pool defaults and the endpoint order |
+| `shoal-bench` unit | 334 | the harness, the workloads, the charts, and — new with [F17](../features/workload-grid.md) and [F18](../features/results-pages.md) — the grid, the row-width and key generators, the family and page registries, and the two new chart kinds |
+| `shoal` integration | 197 | 14 binaries against a live server, one ignored. `pool.rs` is **new** with [F16](../features/client-builder.md) |
 | `shoalctl` integration | 34 | the completion menu, driven the way the key handler does |
 | `shoal-client-check` integration | 7 | **new.** A schema compiling and running against the client alone |
-| `shoal-bench` integration | 17 | committed artifacts, chart geometry, CSS sync |
-| doctests | 30 | up 1: `shoalctl`'s example moved to `#[shoal::db(client)]` and gained one |
+| `shoal-bench` integration | 19 | committed artifacts, chart geometry, CSS sync. Up 2 with [F17](../features/workload-grid.md), both guarding the committed corpus against the four fields it added |
+| doctests | 41 | up 9 with [F17](../features/workload-grid.md): the row profile's five, `Seeded::at`, `queries_for`, and the two byte formatters |
 
 The 8 added are the 7 in `shoal-client-check` and one in `hotpath_scopes`
 (`a_scope_from_any_crate_loses_its_prefix`). The `chart_geometry` count did not move, but
@@ -176,6 +201,7 @@ are in [Optimizations](optimizations.md).
 | `tls.rs` | 8 | encryption against a running server ([F14](../features/encryption-in-transit.md)), every one of which skips without `modprobe tls`: that a query round trips over TLS at all; that a MiB response — about sixty four TLS records — comes back byte for byte and lands at the start of a buffer the client aligned; that SCRAM runs over TLS in that order and that TLS does not authenticate on its own; that a plaintext client is refused by an encrypted server and an encrypted client by a plaintext one; and that a client trusting an unrelated authority is refused, so the certificate is checked rather than merely presented |
 | `auth.rs` | 9 | authentication against a running server ([F12](../features/authentication.md)): that the right credentials connect **and can then query**, which is what catches an exchange that left a byte unread on the stream the relays are handed afterwards; that a wrong password and a user that does not exist are refused in the same variant carrying the same sentence; that a client with no credentials is turned away in the `HelloAck` rather than after an exchange; that credentials offered to a server which requires none are ignored rather than used, so adding them to a client cannot break it against every server that has not opted in; and four raw-socket tests — that the ack names the mechanism the server selected and names none when it requires none, that a bundle of queries sent instead of a proof is refused **and the shard keeps serving**, that an auth frame past the 4 KiB auth bound is refused inside the 64 MiB frame bound, and that a refusal is flagged in its header |
 | `errors.rs` | 3 | the error channel against a running server ([F11](../features/error-channel.md)): that a response too large for the frame bound a raw socket advertised comes back as an `Error` frame naming the query and both sizes rather than as a closed connection, that the *same* connection answers the next query normally afterwards — which is the whole of [Resolved #61](resolved/response-error-channel.md) — and that a get of a partition that was never written is still not a failure, which is the half of the distinction that did not change |
+| `pool.rs` | 6 | the pool and the builder against a running server ([F16](../features/client-builder.md)): that a client the builder built answers a query at all, so the route every constructor now takes through it loses nothing; that a client given a dead endpoint ahead of a live one reaches the live one; that a client whose every endpoint is dead fails rather than reporting one that worked; that a pool held to two connections still answers eight concurrent sends, so the numbers reach `bb8` rather than being taken and dropped; and two that open no socket at all — an unsatisfiable pool and a builder with no endpoint are both refused by looking at the configuration rather than by failing to connect with it |
 | `framing.rs` | 6 | the framing against a running server ([F10](../features/framing-and-protocol-evolution.md)): four raw sockets sending a hostile length prefix, an unknown message type, a frame that only travels the other way, and a frame from a version that does not exist — each asserting both that its own connection closed **and that a healthy client beside it still answers**, which is the assertion the shard-killing panics used to fail. Plus the two handshake refusals a raw socket can provoke, checking that the reply is a `HelloAck` written in a header the client can read, with the refused flag set and the server's own fingerprint in the body |
 | `handshake.rs` | 2 | two schemas in one binary, differing by one field: that a client built from one cannot open a connection to a server built from the other and gets both fingerprints back, and that a client built from the server's own schema connects to the very same server and can query it — the second being what stops the first passing against a check that refuses everybody |
 | `fingerprint.rs` | 6 | that the compile-time schema fingerprint actually moves when a schema moves: a field added, a row's fields reordered, a projection declared on an otherwise identical table, and that a whole row and its own identity projection agree. No server, so all six run instantly |
@@ -317,11 +343,19 @@ read before writing the tests this section is asking for.
 
 ### Concurrency and the connection pool
 
-Nothing issues concurrent queries, exhausts the pool, or forces a reconnect. The pool is
-configured for 10 idle and 50 maximum connections (`client.rs:140-148`) and every test uses one
-query at a time, so `is_valid` / `has_broken` — already known not to detect a dead peer
-([item 23](known-issues.md#23-client-stream-and-pool-rough-edges)) — are never exercised against
-one.
+~~Nothing issues concurrent queries, exhausts the pool, or forces a reconnect.~~ **Partly closed by
+[F16](../features/client-builder.md)**, which added `pool.rs`: `a_pool_sized_by_the_caller_still_answers`
+holds a client to two connections and sends eight queries at once, so the pool is exhausted and
+shared for the first time, and `an_endpoint_that_is_down_is_tried_past` forces a connect to fail and
+be retried elsewhere.
+
+**What is still not reached is the health checks.** `is_valid` and `has_broken` are exercised
+incidentally by any test that checks a connection out, but nothing kills a peer underneath a live
+client, so the case they are known not to catch — a server gone without its socket being reset
+([item 23](known-issues.md#23-client-stream-and-pool-rough-edges)) — is still not something a test
+would notice either way. That needs a harness that can take a server away from a client mid-query,
+which is what [D6](../direction/connection-pool.md#how-it-would-be-measured) calls the single most
+valuable test infrastructure this client could grow, and it is what the `Ping` work will need.
 
 ### Filters, end to end
 
@@ -381,13 +415,21 @@ line (`conf.rs:166`) from each binary in turn:
 | `storage_meta` | 13000-13002 |
 | `framing` | 13000-13005 |
 | `handshake` | 13000-13001 |
+| `pool` | 13000-13002 |
 
-**It is seven binaries now, not two.** This table listed the two persistent ones; the two ephemeral
+**It is eight binaries now, not two.** This table listed the two persistent ones; the two ephemeral
 binaries arrived with [F9](../features/ephemeral-tables.md), `storage_meta` was never counted, and
 `framing` and `handshake` arrived with
 [F10](../features/framing-and-protocol-evolution.md) — which made this worse in a way worth
 naming, because both of them connect raw sockets to a port by number and would be handed a server
-belonging to another binary just as readily as a client would.
+belonging to another binary just as readily as a client would. `pool` arrived with
+[F16](../features/client-builder.md) and makes it worse again in a **new** way: it is the first
+binary whose tests assert on *failing* to connect, and a `SO_REUSEPORT` server from another binary
+answering on what it believes to be a dead port would turn `a_client_with_no_live_endpoint_fails`
+into a flake. It avoids that by taking its dead ports from the kernel — bind port 0, read the
+assignment back, release it — rather than from the shared counter, which is also the fix
+[item 38](known-issues.md#38-integration-test-binaries-all-bind-the-same-ports) proposes for every
+binary here.
 Every range grows with every test that restarts a server — the sorted binary was 13034 when this
 was first measured and 13100 at the last one. Re-measure them with `-- --nocapture` rather than
 trusting the numbers above; the overlap is the point, not the endpoints.

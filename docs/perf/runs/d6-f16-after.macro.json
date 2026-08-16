@@ -1,0 +1,4166 @@
+{
+  "version": 2,
+  "label": "d6-f16-after",
+  "workloads": {
+    "macro/transport/send_batched/large": {
+      "timing": "per_batch",
+      "seed": 42,
+      "scale": {
+        "scale": "full",
+        "rows": 512,
+        "row_bytes": 1048576,
+        "keys": 512,
+        "concurrency": 4
+      },
+      "conf": {
+        "shards": 12,
+        "memory": "4Gi",
+        "durability": "fsync",
+        "tls": false,
+        "digest": "eb7de295396f"
+      },
+      "counters": {
+        "retrieved": 2000
+      },
+      "ops": {
+        "get": {
+          "count": 237,
+          "max": {
+            "secs": 0,
+            "nanos": 11229722
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 10357451
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 7577696
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 6764568
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 4556288
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 4756964
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 1559647
+          }
+        }
+      },
+      "runs": 5,
+      "wall_clock_ns": [
+        301653065,
+        301910378,
+        303548867,
+        305172517,
+        308810787
+      ],
+      "spread_pct": 2.372832512078072,
+      "runs_detail": [
+        {
+          "wall_clock_ns": 303548867,
+          "ops": {
+            "get": {
+              "count": 237,
+              "max": {
+                "secs": 0,
+                "nanos": 11229722
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 10357451
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 7577696
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 6764568
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 4556288
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 4756964
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 1559647
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 2000
+          }
+        },
+        {
+          "wall_clock_ns": 301653065,
+          "ops": {
+            "get": {
+              "count": 237,
+              "max": {
+                "secs": 0,
+                "nanos": 8921581
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 8696860
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 7684932
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 6733670
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 4468360
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 4729045
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 1550900
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 2000
+          }
+        },
+        {
+          "wall_clock_ns": 308810787,
+          "ops": {
+            "get": {
+              "count": 237,
+              "max": {
+                "secs": 0,
+                "nanos": 11088331
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 8837940
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 7474378
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 6540078
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 4661910
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 4854151
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 2119099
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 2000
+          }
+        },
+        {
+          "wall_clock_ns": 305172517,
+          "ops": {
+            "get": {
+              "count": 237,
+              "max": {
+                "secs": 0,
+                "nanos": 10995103
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 10196763
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 7273333
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 6811789
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 4636572
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 4816910
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 1430791
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 2000
+          }
+        },
+        {
+          "wall_clock_ns": 301910378,
+          "ops": {
+            "get": {
+              "count": 237,
+              "max": {
+                "secs": 0,
+                "nanos": 9877461
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 9559953
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 7690322
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 7070214
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 4558983
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 4769374
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 1982738
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 2000
+          }
+        }
+      ]
+    },
+    "macro/transport/send_batched/small": {
+      "timing": "per_batch",
+      "seed": 42,
+      "scale": {
+        "scale": "full",
+        "rows": 200000,
+        "row_bytes": 256,
+        "keys": 200000,
+        "concurrency": 16
+      },
+      "conf": {
+        "shards": 12,
+        "memory": "4Gi",
+        "durability": "fsync",
+        "tls": false,
+        "digest": "b16db13043d3"
+      },
+      "counters": {
+        "retrieved": 50000
+      },
+      "ops": {
+        "get": {
+          "count": 480,
+          "max": {
+            "secs": 0,
+            "nanos": 4559043
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 3994572
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 3353294
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 2709320
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 897640
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 1206162
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 327938
+          }
+        }
+      },
+      "runs": 5,
+      "wall_clock_ns": [
+        28394984,
+        32858535,
+        39034806,
+        43361124,
+        50062992
+      ],
+      "spread_pct": 76.30928054053491,
+      "runs_detail": [
+        {
+          "wall_clock_ns": 32858535,
+          "ops": {
+            "get": {
+              "count": 480,
+              "max": {
+                "secs": 0,
+                "nanos": 2861482
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 2386823
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 1713332
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 1551843
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 918189
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 1003802
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 334661
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 50000
+          }
+        },
+        {
+          "wall_clock_ns": 43361124,
+          "ops": {
+            "get": {
+              "count": 480,
+              "max": {
+                "secs": 0,
+                "nanos": 4781890
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 4546820
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 3783036
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 3068749
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 941103
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 1333735
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 338869
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 50000
+          }
+        },
+        {
+          "wall_clock_ns": 50062992,
+          "ops": {
+            "get": {
+              "count": 480,
+              "max": {
+                "secs": 0,
+                "nanos": 5726580
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 5025647
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 4511071
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 3787836
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 1035193
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 1541211
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 216434
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 50000
+          }
+        },
+        {
+          "wall_clock_ns": 28394984,
+          "ops": {
+            "get": {
+              "count": 480,
+              "max": {
+                "secs": 0,
+                "nanos": 2645848
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 2435195
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 1694807
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 1465868
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 779503
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 874159
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 242996
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 50000
+          }
+        },
+        {
+          "wall_clock_ns": 39034806,
+          "ops": {
+            "get": {
+              "count": 480,
+              "max": {
+                "secs": 0,
+                "nanos": 4559043
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 3994572
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 3353294
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 2709320
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 897640
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 1206162
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 327938
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 50000
+          }
+        }
+      ]
+    },
+    "macro/transport/send_one/large": {
+      "timing": "per_query",
+      "seed": 42,
+      "scale": {
+        "scale": "full",
+        "rows": 512,
+        "row_bytes": 1048576,
+        "keys": 512,
+        "concurrency": 4
+      },
+      "conf": {
+        "shards": 12,
+        "memory": "4Gi",
+        "durability": "fsync",
+        "tls": false,
+        "digest": "9df6bbe509a5"
+      },
+      "counters": {
+        "retrieved": 2000
+      },
+      "ops": {
+        "get": {
+          "count": 1900,
+          "max": {
+            "secs": 0,
+            "nanos": 3111290
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 1117050
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 879214
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 775475
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 533823
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 557954
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 197017
+          }
+        }
+      },
+      "runs": 5,
+      "wall_clock_ns": [
+        272648313,
+        280237241,
+        282855106,
+        286247204,
+        288577467
+      ],
+      "spread_pct": 5.842381280385916,
+      "runs_detail": [
+        {
+          "wall_clock_ns": 272648313,
+          "ops": {
+            "get": {
+              "count": 1900,
+              "max": {
+                "secs": 0,
+                "nanos": 3691742
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 1139533
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 866550
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 758262
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 504627
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 538269
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 190986
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 2000
+          }
+        },
+        {
+          "wall_clock_ns": 288577467,
+          "ops": {
+            "get": {
+              "count": 1900,
+              "max": {
+                "secs": 0,
+                "nanos": 1634642
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 1083085
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 897930
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 799792
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 544403
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 569281
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 182761
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 2000
+          }
+        },
+        {
+          "wall_clock_ns": 280237241,
+          "ops": {
+            "get": {
+              "count": 1900,
+              "max": {
+                "secs": 0,
+                "nanos": 2202559
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 1086952
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 857312
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 767099
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 534474
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 555151
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 196406
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 2000
+          }
+        },
+        {
+          "wall_clock_ns": 286247204,
+          "ops": {
+            "get": {
+              "count": 1900,
+              "max": {
+                "secs": 0,
+                "nanos": 1768939
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 1136748
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 908090
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 793110
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 540335
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 566765
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 198901
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 2000
+          }
+        },
+        {
+          "wall_clock_ns": 282855106,
+          "ops": {
+            "get": {
+              "count": 1900,
+              "max": {
+                "secs": 0,
+                "nanos": 3111290
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 1117050
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 879214
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 775475
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 533823
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 557954
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 197017
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 2000
+          }
+        }
+      ]
+    },
+    "macro/transport/send_one/small": {
+      "timing": "per_query",
+      "seed": 42,
+      "scale": {
+        "scale": "full",
+        "rows": 200000,
+        "row_bytes": 256,
+        "keys": 200000,
+        "concurrency": 16
+      },
+      "conf": {
+        "shards": 12,
+        "memory": "4Gi",
+        "durability": "fsync",
+        "tls": false,
+        "digest": "76f9f8ac4862"
+      },
+      "counters": {
+        "retrieved": 50000
+      },
+      "ops": {
+        "get": {
+          "count": 48000,
+          "max": {
+            "secs": 0,
+            "nanos": 2470463
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 121313
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 98649
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 88209
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 58001
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 61313
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 12183
+          }
+        }
+      },
+      "runs": 5,
+      "wall_clock_ns": [
+        186244966,
+        191226168,
+        192823138,
+        193492530,
+        195056756
+      ],
+      "spread_pct": 4.731290294310559,
+      "runs_detail": [
+        {
+          "wall_clock_ns": 192823138,
+          "ops": {
+            "get": {
+              "count": 48000,
+              "max": {
+                "secs": 0,
+                "nanos": 2470463
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 121313
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 98649
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 88209
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 58001
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 61313
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 12183
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 50000
+          }
+        },
+        {
+          "wall_clock_ns": 186244966,
+          "ops": {
+            "get": {
+              "count": 48000,
+              "max": {
+                "secs": 0,
+                "nanos": 1381477
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 118617
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 96305
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 85785
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 56438
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 59270
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 12123
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 50000
+          }
+        },
+        {
+          "wall_clock_ns": 191226168,
+          "ops": {
+            "get": {
+              "count": 48000,
+              "max": {
+                "secs": 0,
+                "nanos": 689120
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 125019
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 99240
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 87738
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 57511
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 60559
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 12945
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 50000
+          }
+        },
+        {
+          "wall_clock_ns": 195056756,
+          "ops": {
+            "get": {
+              "count": 48000,
+              "max": {
+                "secs": 0,
+                "nanos": 709239
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 121583
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 98529
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 88339
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 59093
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 61960
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 12955
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 50000
+          }
+        },
+        {
+          "wall_clock_ns": 193492530,
+          "ops": {
+            "get": {
+              "count": 48000,
+              "max": {
+                "secs": 0,
+                "nanos": 565353
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 126212
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 101754
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 89471
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 58311
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 61496
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 11672
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 50000
+          }
+        }
+      ]
+    },
+    "macro/transport/stream/large": {
+      "timing": "per_batch",
+      "seed": 42,
+      "scale": {
+        "scale": "full",
+        "rows": 512,
+        "row_bytes": 1048576,
+        "keys": 512,
+        "concurrency": 4
+      },
+      "conf": {
+        "shards": 12,
+        "memory": "4Gi",
+        "durability": "fsync",
+        "tls": false,
+        "digest": "d59f3629ff0c"
+      },
+      "counters": {
+        "retrieved": 2000
+      },
+      "ops": {
+        "get": {
+          "count": 1900,
+          "max": {
+            "secs": 0,
+            "nanos": 15348081
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 14730699
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 14148252
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 13643997
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 11332689
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 11321172
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 3273310
+          }
+        }
+      },
+      "runs": 5,
+      "wall_clock_ns": [
+        329683772,
+        339736479,
+        339764933,
+        343010651,
+        344483393
+      ],
+      "spread_pct": 4.489035329285179,
+      "runs_detail": [
+        {
+          "wall_clock_ns": 339736479,
+          "ops": {
+            "get": {
+              "count": 1900,
+              "max": {
+                "secs": 0,
+                "nanos": 15437763
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 15041203
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 14358466
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 13870170
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 11335685
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 11332159
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 3298980
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 2000
+          }
+        },
+        {
+          "wall_clock_ns": 329683772,
+          "ops": {
+            "get": {
+              "count": 1900,
+              "max": {
+                "secs": 0,
+                "nanos": 16287511
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 15606647
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 14521177
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 13628577
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 10693344
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 10928092
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 2818750
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 2000
+          }
+        },
+        {
+          "wall_clock_ns": 344483393,
+          "ops": {
+            "get": {
+              "count": 1900,
+              "max": {
+                "secs": 0,
+                "nanos": 17786673
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 17129674
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 14873763
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 14171588
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 11364851
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 11524690
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 3523320
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 2000
+          }
+        },
+        {
+          "wall_clock_ns": 343010651,
+          "ops": {
+            "get": {
+              "count": 1900,
+              "max": {
+                "secs": 0,
+                "nanos": 16031290
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 15065120
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 14164604
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 13704132
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 11418624
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 11387212
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 3359164
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 2000
+          }
+        },
+        {
+          "wall_clock_ns": 339764933,
+          "ops": {
+            "get": {
+              "count": 1900,
+              "max": {
+                "secs": 0,
+                "nanos": 15348081
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 14730699
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 14148252
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 13643997
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 11332689
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 11321172
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 3273310
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 2000
+          }
+        }
+      ]
+    },
+    "macro/transport/stream/small": {
+      "timing": "per_batch",
+      "seed": 42,
+      "scale": {
+        "scale": "full",
+        "rows": 200000,
+        "row_bytes": 256,
+        "keys": 200000,
+        "concurrency": 16
+      },
+      "conf": {
+        "shards": 12,
+        "memory": "4Gi",
+        "durability": "fsync",
+        "tls": false,
+        "digest": "7954bff58486"
+      },
+      "counters": {
+        "retrieved": 50000
+      },
+      "ops": {
+        "get": {
+          "count": 48000,
+          "max": {
+            "secs": 0,
+            "nanos": 5246741
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 5173100
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 4815504
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 4687830
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 3855125
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 3739928
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 1408558
+          }
+        }
+      },
+      "runs": 5,
+      "wall_clock_ns": [
+        43702959,
+        44498282,
+        46123795,
+        52616273,
+        54457350
+      ],
+      "spread_pct": 24.607924145365075,
+      "runs_detail": [
+        {
+          "wall_clock_ns": 46123795,
+          "ops": {
+            "get": {
+              "count": 48000,
+              "max": {
+                "secs": 0,
+                "nanos": 5246741
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 5173100
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 4815504
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 4687830
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 3855125
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 3739928
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 1408558
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 50000
+          }
+        },
+        {
+          "wall_clock_ns": 54457350,
+          "ops": {
+            "get": {
+              "count": 48000,
+              "max": {
+                "secs": 0,
+                "nanos": 5733103
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 5719176
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 5607271
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 5523101
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 4930906
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 4351670
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 1277848
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 50000
+          }
+        },
+        {
+          "wall_clock_ns": 43702959,
+          "ops": {
+            "get": {
+              "count": 48000,
+              "max": {
+                "secs": 0,
+                "nanos": 5162780
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 5114828
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 4616453
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 4517033
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 3664379
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 3554618
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 1648358
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 50000
+          }
+        },
+        {
+          "wall_clock_ns": 52616273,
+          "ops": {
+            "get": {
+              "count": 48000,
+              "max": {
+                "secs": 0,
+                "nanos": 5772227
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 5736659
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 5647178
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 5437877
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 4349081
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 4257975
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 1571200
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 50000
+          }
+        },
+        {
+          "wall_clock_ns": 44498282,
+          "ops": {
+            "get": {
+              "count": 48000,
+              "max": {
+                "secs": 0,
+                "nanos": 5226062
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 5151829
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 4809343
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 4451017
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 3717291
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 3647577
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 1739051
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 50000
+          }
+        }
+      ]
+    },
+    "macro/transport/stream_unordered/large": {
+      "timing": "per_batch",
+      "seed": 42,
+      "scale": {
+        "scale": "full",
+        "rows": 512,
+        "row_bytes": 1048576,
+        "keys": 512,
+        "concurrency": 4
+      },
+      "conf": {
+        "shards": 12,
+        "memory": "4Gi",
+        "durability": "fsync",
+        "tls": false,
+        "digest": "135d2add6a7c"
+      },
+      "counters": {
+        "retrieved": 2000
+      },
+      "ops": {
+        "get": {
+          "count": 1900,
+          "max": {
+            "secs": 0,
+            "nanos": 41341926
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 26696220
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 20967285
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 16694881
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 9899684
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 10654110
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 810122
+          }
+        }
+      },
+      "runs": 5,
+      "wall_clock_ns": [
+        293364507,
+        310126307,
+        313387003,
+        318046248,
+        320228429
+      ],
+      "spread_pct": 9.157182058155385,
+      "runs_detail": [
+        {
+          "wall_clock_ns": 293364507,
+          "ops": {
+            "get": {
+              "count": 1900,
+              "max": {
+                "secs": 0,
+                "nanos": 47692401
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 39014307
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 31136386
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 27157684
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 4833840
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 9854177
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 459711
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 2000
+          }
+        },
+        {
+          "wall_clock_ns": 318046248,
+          "ops": {
+            "get": {
+              "count": 1900,
+              "max": {
+                "secs": 0,
+                "nanos": 54106828
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 33809857
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 24107050
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 16237906
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 10412296
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 10745873
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 748374
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 2000
+          }
+        },
+        {
+          "wall_clock_ns": 320228429,
+          "ops": {
+            "get": {
+              "count": 1900,
+              "max": {
+                "secs": 0,
+                "nanos": 53768321
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 35870745
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 26871546
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 21511728
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 9883173
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 10732038
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 611782
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 2000
+          }
+        },
+        {
+          "wall_clock_ns": 313387003,
+          "ops": {
+            "get": {
+              "count": 1900,
+              "max": {
+                "secs": 0,
+                "nanos": 41341926
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 26696220
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 20967285
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 16694881
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 9899684
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 10654110
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 810122
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 2000
+          }
+        },
+        {
+          "wall_clock_ns": 310126307,
+          "ops": {
+            "get": {
+              "count": 1900,
+              "max": {
+                "secs": 0,
+                "nanos": 48049665
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 30488145
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 23363887
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 19773218
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 9122565
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 10525896
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 571024
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 2000
+          }
+        }
+      ]
+    },
+    "macro/transport/stream_unordered/small": {
+      "timing": "per_batch",
+      "seed": 42,
+      "scale": {
+        "scale": "full",
+        "rows": 200000,
+        "row_bytes": 256,
+        "keys": 200000,
+        "concurrency": 16
+      },
+      "conf": {
+        "shards": 12,
+        "memory": "4Gi",
+        "durability": "fsync",
+        "tls": false,
+        "digest": "b3ee6f3b4dcf"
+      },
+      "counters": {
+        "retrieved": 50000
+      },
+      "ops": {
+        "get": {
+          "count": 48000,
+          "max": {
+            "secs": 0,
+            "nanos": 13732697
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 10620555
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 8639229
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 7390538
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 1174069
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 2746490
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 58552
+          }
+        }
+      },
+      "runs": 5,
+      "wall_clock_ns": [
+        33393941,
+        34122446,
+        35485657,
+        43509387,
+        47120586
+      ],
+      "spread_pct": 41.105196298933386,
+      "runs_detail": [
+        {
+          "wall_clock_ns": 33393941,
+          "ops": {
+            "get": {
+              "count": 48000,
+              "max": {
+                "secs": 0,
+                "nanos": 10324057
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 8043428
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 6628598
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 5703726
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 2415427
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 2633972
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 46489
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 50000
+          }
+        },
+        {
+          "wall_clock_ns": 47120586,
+          "ops": {
+            "get": {
+              "count": 48000,
+              "max": {
+                "secs": 0,
+                "nanos": 19704827
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 16481632
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 12835568
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 10347572
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 1850555
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 3605040
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 55667
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 50000
+          }
+        },
+        {
+          "wall_clock_ns": 35485657,
+          "ops": {
+            "get": {
+              "count": 48000,
+              "max": {
+                "secs": 0,
+                "nanos": 13732697
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 10620555
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 8639229
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 7390538
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 1174069
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 2746490
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 58552
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 50000
+          }
+        },
+        {
+          "wall_clock_ns": 34122446,
+          "ops": {
+            "get": {
+              "count": 48000,
+              "max": {
+                "secs": 0,
+                "nanos": 12065453
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 9256732
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 7273504
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 5464678
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 1940437
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 2403648
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 68582
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 50000
+          }
+        },
+        {
+          "wall_clock_ns": 43509387,
+          "ops": {
+            "get": {
+              "count": 48000,
+              "max": {
+                "secs": 0,
+                "nanos": 17813133
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 13769578
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 11023347
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 9174696
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 2029918
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 3274021
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 59745
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 50000
+          }
+        }
+      ]
+    },
+    "macro/transport/tls/send_batched/large": {
+      "timing": "per_batch",
+      "seed": 42,
+      "scale": {
+        "scale": "full",
+        "rows": 512,
+        "row_bytes": 1048576,
+        "keys": 512,
+        "concurrency": 4
+      },
+      "conf": {
+        "shards": 12,
+        "memory": "4Gi",
+        "durability": "fsync",
+        "tls": true,
+        "digest": "b56ce627634d"
+      },
+      "counters": {
+        "retrieved": 2000
+      },
+      "ops": {
+        "get": {
+          "count": 237,
+          "max": {
+            "secs": 0,
+            "nanos": 11334213
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 10785753
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 8735237
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 7776961
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 5259150
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 5610267
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 2806604
+          }
+        }
+      },
+      "runs": 5,
+      "wall_clock_ns": [
+        347775004,
+        349370088,
+        359937453,
+        363308678,
+        363796412
+      ],
+      "spread_pct": 4.606831375379699,
+      "runs_detail": [
+        {
+          "wall_clock_ns": 349370088,
+          "ops": {
+            "get": {
+              "count": 237,
+              "max": {
+                "secs": 0,
+                "nanos": 10666975
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 8257011
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 7395361
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 6843754
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 5310629
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 5452759
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 2761107
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 2000
+          }
+        },
+        {
+          "wall_clock_ns": 359937453,
+          "ops": {
+            "get": {
+              "count": 237,
+              "max": {
+                "secs": 0,
+                "nanos": 11334213
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 10785753
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 8735237
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 7776961
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 5259150
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 5610267
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 2806604
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 2000
+          }
+        },
+        {
+          "wall_clock_ns": 363308678,
+          "ops": {
+            "get": {
+              "count": 237,
+              "max": {
+                "secs": 0,
+                "nanos": 9918212
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 9022226
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 8093547
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 7248730
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 5486545
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 5649348
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 2847332
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 2000
+          }
+        },
+        {
+          "wall_clock_ns": 347775004,
+          "ops": {
+            "get": {
+              "count": 237,
+              "max": {
+                "secs": 0,
+                "nanos": 8971509
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 8339088
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 7929233
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 7267155
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 5298075
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 5439118
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 2863262
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 2000
+          }
+        },
+        {
+          "wall_clock_ns": 363796412,
+          "ops": {
+            "get": {
+              "count": 237,
+              "max": {
+                "secs": 0,
+                "nanos": 10370006
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 9039359
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 8036588
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 7462119
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 5541241
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 5705233
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 2622712
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 2000
+          }
+        }
+      ]
+    },
+    "macro/transport/tls/send_batched/small": {
+      "timing": "per_batch",
+      "seed": 42,
+      "scale": {
+        "scale": "full",
+        "rows": 200000,
+        "row_bytes": 256,
+        "keys": 200000,
+        "concurrency": 16
+      },
+      "conf": {
+        "shards": 12,
+        "memory": "4Gi",
+        "durability": "fsync",
+        "tls": true,
+        "digest": "13f3ee6a4ac3"
+      },
+      "counters": {
+        "retrieved": 50000
+      },
+      "ops": {
+        "get": {
+          "count": 480,
+          "max": {
+            "secs": 0,
+            "nanos": 5339609
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 4863777
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 3773850
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 3453085
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 1290873
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 1630449
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 427419
+          }
+        }
+      },
+      "runs": 5,
+      "wall_clock_ns": [
+        48457016,
+        49003082,
+        54086079,
+        55474979,
+        55567607
+      ],
+      "spread_pct": 14.674017483866525,
+      "runs_detail": [
+        {
+          "wall_clock_ns": 54086079,
+          "ops": {
+            "get": {
+              "count": 480,
+              "max": {
+                "secs": 0,
+                "nanos": 5339609
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 4863777
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 3773850
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 3453085
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 1290873
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 1630449
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 427419
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 50000
+          }
+        },
+        {
+          "wall_clock_ns": 55567607,
+          "ops": {
+            "get": {
+              "count": 480,
+              "max": {
+                "secs": 0,
+                "nanos": 5617822
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 4938610
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 3988461
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 3279752
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 1345748
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 1668195
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 426757
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 50000
+          }
+        },
+        {
+          "wall_clock_ns": 55474979,
+          "ops": {
+            "get": {
+              "count": 480,
+              "max": {
+                "secs": 0,
+                "nanos": 6473451
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 5975006
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 4823520
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 4028777
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 1194178
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 1686342
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 410456
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 50000
+          }
+        },
+        {
+          "wall_clock_ns": 48457016,
+          "ops": {
+            "get": {
+              "count": 480,
+              "max": {
+                "secs": 0,
+                "nanos": 5744871
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 4300275
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 3191180
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 2434542
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 1276254
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 1458576
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 427519
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 50000
+          }
+        },
+        {
+          "wall_clock_ns": 49003082,
+          "ops": {
+            "get": {
+              "count": 480,
+              "max": {
+                "secs": 0,
+                "nanos": 5161193
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 4561965
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 3689315
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 3077503
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 1158388
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 1454504
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 440754
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 50000
+          }
+        }
+      ]
+    },
+    "macro/transport/tls/send_one/large": {
+      "timing": "per_query",
+      "seed": 42,
+      "scale": {
+        "scale": "full",
+        "rows": 512,
+        "row_bytes": 1048576,
+        "keys": 512,
+        "concurrency": 4
+      },
+      "conf": {
+        "shards": 12,
+        "memory": "4Gi",
+        "durability": "fsync",
+        "tls": true,
+        "digest": "8b87a5b67ec8"
+      },
+      "counters": {
+        "retrieved": 2000
+      },
+      "ops": {
+        "get": {
+          "count": 1900,
+          "max": {
+            "secs": 0,
+            "nanos": 2286240
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 1148099
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 944650
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 854767
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 632061
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 655997
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 331475
+          }
+        }
+      },
+      "runs": 5,
+      "wall_clock_ns": [
+        332231392,
+        332547407,
+        333408016,
+        333515612,
+        340768626
+      ],
+      "spread_pct": 2.5696650604287266,
+      "runs_detail": [
+        {
+          "wall_clock_ns": 340768626,
+          "ops": {
+            "get": {
+              "count": 1900,
+              "max": {
+                "secs": 0,
+                "nanos": 3646636
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 1378240
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 1000035
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 884905
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 628664
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 669424
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 314302
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 2000
+          }
+        },
+        {
+          "wall_clock_ns": 333408016,
+          "ops": {
+            "get": {
+              "count": 1900,
+              "max": {
+                "secs": 0,
+                "nanos": 2286240
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 1148099
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 944650
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 854767
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 632061
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 655997
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 331475
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 2000
+          }
+        },
+        {
+          "wall_clock_ns": 333515612,
+          "ops": {
+            "get": {
+              "count": 1900,
+              "max": {
+                "secs": 0,
+                "nanos": 2111775
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 1137098
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 959868
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 860328
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 628343
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 656835
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 354990
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 2000
+          }
+        },
+        {
+          "wall_clock_ns": 332547407,
+          "ops": {
+            "get": {
+              "count": 1900,
+              "max": {
+                "secs": 0,
+                "nanos": 1811600
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 1155604
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 958246
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 880637
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 625348
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 656129
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 311076
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 2000
+          }
+        },
+        {
+          "wall_clock_ns": 332231392,
+          "ops": {
+            "get": {
+              "count": 1900,
+              "max": {
+                "secs": 0,
+                "nanos": 2875840
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 1202503
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 975218
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 886468
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 626260
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 654983
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 318941
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 2000
+          }
+        }
+      ]
+    },
+    "macro/transport/tls/send_one/small": {
+      "timing": "per_query",
+      "seed": 42,
+      "scale": {
+        "scale": "full",
+        "rows": 200000,
+        "row_bytes": 256,
+        "keys": 200000,
+        "concurrency": 16
+      },
+      "conf": {
+        "shards": 12,
+        "memory": "4Gi",
+        "durability": "fsync",
+        "tls": true,
+        "digest": "15dc9538afba"
+      },
+      "counters": {
+        "retrieved": 50000
+      },
+      "ops": {
+        "get": {
+          "count": 48000,
+          "max": {
+            "secs": 0,
+            "nanos": 968575
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 139177
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 110652
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 98179
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 65305
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 69037
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 15680
+          }
+        }
+      },
+      "runs": 5,
+      "wall_clock_ns": [
+        201690244,
+        211468505,
+        218869763,
+        222599599,
+        224447057
+      ],
+      "spread_pct": 11.283050954115561,
+      "runs_detail": [
+        {
+          "wall_clock_ns": 222599599,
+          "ops": {
+            "get": {
+              "count": 48000,
+              "max": {
+                "secs": 0,
+                "nanos": 952545
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 142743
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 113117
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 99751
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 66287
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 70279
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 17363
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 50000
+          }
+        },
+        {
+          "wall_clock_ns": 224447057,
+          "ops": {
+            "get": {
+              "count": 48000,
+              "max": {
+                "secs": 0,
+                "nanos": 1009353
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 147342
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 116734
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 102697
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 66928
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 70999
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 15540
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 50000
+          }
+        },
+        {
+          "wall_clock_ns": 218869763,
+          "ops": {
+            "get": {
+              "count": 48000,
+              "max": {
+                "secs": 0,
+                "nanos": 968575
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 139177
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 110652
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 98179
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 65305
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 69037
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 15680
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 50000
+          }
+        },
+        {
+          "wall_clock_ns": 201690244,
+          "ops": {
+            "get": {
+              "count": 48000,
+              "max": {
+                "secs": 0,
+                "nanos": 490259
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 125000
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 100783
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 89902
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 60716
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 63583
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 15129
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 50000
+          }
+        },
+        {
+          "wall_clock_ns": 211468505,
+          "ops": {
+            "get": {
+              "count": 48000,
+              "max": {
+                "secs": 0,
+                "nanos": 928158
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 126722
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 103368
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 93078
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 63692
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 66741
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 17854
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 50000
+          }
+        }
+      ]
+    },
+    "macro/transport/tls/stream/large": {
+      "timing": "per_batch",
+      "seed": 42,
+      "scale": {
+        "scale": "full",
+        "rows": 512,
+        "row_bytes": 1048576,
+        "keys": 512,
+        "concurrency": 4
+      },
+      "conf": {
+        "shards": 12,
+        "memory": "4Gi",
+        "durability": "fsync",
+        "tls": true,
+        "digest": "6d8794e13f56"
+      },
+      "counters": {
+        "retrieved": 2000
+      },
+      "ops": {
+        "get": {
+          "count": 1900,
+          "max": {
+            "secs": 0,
+            "nanos": 17310918
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 16751997
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 16131429
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 15390039
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 12369636
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 12152396
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 2319041
+          }
+        }
+      },
+      "runs": 5,
+      "wall_clock_ns": [
+        349596542,
+        367608662,
+        368434153,
+        369092853,
+        378871629
+      ],
+      "spread_pct": 8.373963550245872,
+      "runs_detail": [
+        {
+          "wall_clock_ns": 368434153,
+          "ops": {
+            "get": {
+              "count": 1900,
+              "max": {
+                "secs": 0,
+                "nanos": 17310918
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 16751997
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 16131429
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 15390039
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 12369636
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 12152396
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 2319041
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 2000
+          }
+        },
+        {
+          "wall_clock_ns": 378871629,
+          "ops": {
+            "get": {
+              "count": 1900,
+              "max": {
+                "secs": 0,
+                "nanos": 45436993
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 44658032
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 14251779
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 13218661
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 11485743
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 11971527
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 4146650
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 2000
+          }
+        },
+        {
+          "wall_clock_ns": 367608662,
+          "ops": {
+            "get": {
+              "count": 1900,
+              "max": {
+                "secs": 0,
+                "nanos": 17950672
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 17253066
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 16285724
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 15265050
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 11924673
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 12197532
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 4647519
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 2000
+          }
+        },
+        {
+          "wall_clock_ns": 349596542,
+          "ops": {
+            "get": {
+              "count": 1900,
+              "max": {
+                "secs": 0,
+                "nanos": 16291605
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 15568310
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 14474185
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 13578461
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 11568953
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 11594765
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 5357649
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 2000
+          }
+        },
+        {
+          "wall_clock_ns": 369092853,
+          "ops": {
+            "get": {
+              "count": 1900,
+              "max": {
+                "secs": 0,
+                "nanos": 19238598
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 17768083
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 16427235
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 15535878
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 12110459
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 12296893
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 3888956
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 2000
+          }
+        }
+      ]
+    },
+    "macro/transport/tls/stream/small": {
+      "timing": "per_batch",
+      "seed": 42,
+      "scale": {
+        "scale": "full",
+        "rows": 200000,
+        "row_bytes": 256,
+        "keys": 200000,
+        "concurrency": 16
+      },
+      "conf": {
+        "shards": 12,
+        "memory": "4Gi",
+        "durability": "fsync",
+        "tls": true,
+        "digest": "82b652aea949"
+      },
+      "counters": {
+        "retrieved": 50000
+      },
+      "ops": {
+        "get": {
+          "count": 48000,
+          "max": {
+            "secs": 0,
+            "nanos": 5776812
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 5743298
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 5658595
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 5514169
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 4572826
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 4486367
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 1235436
+          }
+        }
+      },
+      "runs": 5,
+      "wall_clock_ns": [
+        48020411,
+        53258660,
+        57160301,
+        63968298,
+        66184400
+      ],
+      "spread_pct": 37.82555921897461,
+      "runs_detail": [
+        {
+          "wall_clock_ns": 57160301,
+          "ops": {
+            "get": {
+              "count": 48000,
+              "max": {
+                "secs": 0,
+                "nanos": 5776812
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 5743298
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 5658595
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 5514169
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 4572826
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 4486367
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 1235436
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 50000
+          }
+        },
+        {
+          "wall_clock_ns": 53258660,
+          "ops": {
+            "get": {
+              "count": 48000,
+              "max": {
+                "secs": 0,
+                "nanos": 5968027
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 5885630
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 5454875
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 5306411
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 4184353
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 4236340
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 2218638
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 50000
+          }
+        },
+        {
+          "wall_clock_ns": 48020411,
+          "ops": {
+            "get": {
+              "count": 48000,
+              "max": {
+                "secs": 0,
+                "nanos": 5848860
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 5755971
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 5470524
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 4639935
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 3772984
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 3755866
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 1605675
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 50000
+          }
+        },
+        {
+          "wall_clock_ns": 66184400,
+          "ops": {
+            "get": {
+              "count": 48000,
+              "max": {
+                "secs": 0,
+                "nanos": 8085322
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 8011130
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 7508477
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 6986348
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 5247197
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 5211690
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 1415340
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 50000
+          }
+        },
+        {
+          "wall_clock_ns": 63968298,
+          "ops": {
+            "get": {
+              "count": 48000,
+              "max": {
+                "secs": 0,
+                "nanos": 6782928
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 6757739
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 6592143
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 6392651
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 5239854
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 5101789
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 2741830
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 50000
+          }
+        }
+      ]
+    },
+    "macro/transport/tls/stream_unordered/large": {
+      "timing": "per_batch",
+      "seed": 42,
+      "scale": {
+        "scale": "full",
+        "rows": 512,
+        "row_bytes": 1048576,
+        "keys": 512,
+        "concurrency": 4
+      },
+      "conf": {
+        "shards": 12,
+        "memory": "4Gi",
+        "durability": "fsync",
+        "tls": true,
+        "digest": "434ac6b0b47d"
+      },
+      "counters": {
+        "retrieved": 2000
+      },
+      "ops": {
+        "get": {
+          "count": 1900,
+          "max": {
+            "secs": 0,
+            "nanos": 51679807
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 35106693
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 30321580
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 26865101
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 6572365
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 10784265
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 764093
+          }
+        }
+      },
+      "runs": 5,
+      "wall_clock_ns": [
+        315503800,
+        324441415,
+        325142767,
+        327245344,
+        343227987
+      ],
+      "spread_pct": 8.787275145338977,
+      "runs_detail": [
+        {
+          "wall_clock_ns": 327245344,
+          "ops": {
+            "get": {
+              "count": 1900,
+              "max": {
+                "secs": 0,
+                "nanos": 45440060
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 39146739
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 30903164
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 24959953
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 7715704
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 10804736
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 789813
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 2000
+          }
+        },
+        {
+          "wall_clock_ns": 315503800,
+          "ops": {
+            "get": {
+              "count": 1900,
+              "max": {
+                "secs": 0,
+                "nanos": 35892417
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 31293952
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 25545415
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 21494668
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 7906239
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 10307970
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 697645
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 2000
+          }
+        },
+        {
+          "wall_clock_ns": 325142767,
+          "ops": {
+            "get": {
+              "count": 1900,
+              "max": {
+                "secs": 0,
+                "nanos": 51679807
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 35106693
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 30321580
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 26865101
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 6572365
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 10784265
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 764093
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 2000
+          }
+        },
+        {
+          "wall_clock_ns": 343227987,
+          "ops": {
+            "get": {
+              "count": 1900,
+              "max": {
+                "secs": 0,
+                "nanos": 48381501
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 40908131
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 32747826
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 27636118
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 5745732
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 11508150
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 547508
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 2000
+          }
+        },
+        {
+          "wall_clock_ns": 324441415,
+          "ops": {
+            "get": {
+              "count": 1900,
+              "max": {
+                "secs": 0,
+                "nanos": 62739324
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 44786087
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 36022276
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 28635972
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 5710365
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 10732508
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 705190
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 2000
+          }
+        }
+      ]
+    },
+    "macro/transport/tls/stream_unordered/small": {
+      "timing": "per_batch",
+      "seed": 42,
+      "scale": {
+        "scale": "full",
+        "rows": 200000,
+        "row_bytes": 256,
+        "keys": 200000,
+        "concurrency": 16
+      },
+      "conf": {
+        "shards": 12,
+        "memory": "4Gi",
+        "durability": "fsync",
+        "tls": true,
+        "digest": "7b6a79feb0e8"
+      },
+      "counters": {
+        "retrieved": 50000
+      },
+      "ops": {
+        "get": {
+          "count": 48000,
+          "max": {
+            "secs": 0,
+            "nanos": 22176884
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 15256844
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 11490262
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 9697108
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 1554357
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 3600953
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 65505
+          }
+        }
+      },
+      "runs": 5,
+      "wall_clock_ns": [
+        46163925,
+        48437960,
+        49497569,
+        60880254,
+        62364005
+      ],
+      "spread_pct": 35.09251000646067,
+      "runs_detail": [
+        {
+          "wall_clock_ns": 49497569,
+          "ops": {
+            "get": {
+              "count": 48000,
+              "max": {
+                "secs": 0,
+                "nanos": 22176884
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 15256844
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 11490262
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 9697108
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 1554357
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 3600953
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 65505
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 50000
+          }
+        },
+        {
+          "wall_clock_ns": 48437960,
+          "ops": {
+            "get": {
+              "count": 48000,
+              "max": {
+                "secs": 0,
+                "nanos": 15469902
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 11693190
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 9181981
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 7860521
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 3372678
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 3659927
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 56107
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 50000
+          }
+        },
+        {
+          "wall_clock_ns": 46163925,
+          "ops": {
+            "get": {
+              "count": 48000,
+              "max": {
+                "secs": 0,
+                "nanos": 13866983
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 10437045
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 7654948
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 6558799
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 3344314
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 3475426
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 64954
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 50000
+          }
+        },
+        {
+          "wall_clock_ns": 62364005,
+          "ops": {
+            "get": {
+              "count": 48000,
+              "max": {
+                "secs": 0,
+                "nanos": 20376337
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 15548713
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 12467382
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 10841198
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 4284544
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 4748984
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 56718
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 50000
+          }
+        },
+        {
+          "wall_clock_ns": 60880254,
+          "ops": {
+            "get": {
+              "count": 48000,
+              "max": {
+                "secs": 0,
+                "nanos": 30184147
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 23370100
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 18481568
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 14930670
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 1476347
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 4545896
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 59675
+              }
+            }
+          },
+          "counters": {
+            "retrieved": 50000
+          }
+        }
+      ]
+    }
+  }
+}

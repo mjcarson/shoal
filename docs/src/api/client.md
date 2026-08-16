@@ -1,7 +1,9 @@
 # The Client
 
-`shoal-core/src/client.rs` — the whole client, 1300 lines. Unlike the server it runs on
-tokio, not glommio, so it is an ordinary async library.
+`shoal-client/src/client.rs` — the whole client, ~2700 lines, plus `client/builder.rs`,
+`client/messages.rs` and `client/tls.rs`. Unlike the server it runs on tokio, not glommio, so it is
+an ordinary async library, and since [F15](../features/client-server-split.md) it is a crate that
+links no storage engine.
 
 ## Construction
 
@@ -26,6 +28,28 @@ let client = Shoal::<TestDbClient>::with_credentials(
 requires nothing are ignored rather than used — the server picks the mechanism, so a client that
 holds them still works against every server that has not turned authentication on.
 
+Anything the three constructors do not take goes through the builder
+([F16](../features/client-builder.md)) — several servers, a pool sized for this caller, or a
+deadline:
+
+```rust
+let client = Shoal::<TestDbClient>::builder()
+    .endpoints(["10.0.0.1:12000", "10.0.0.2:12000"])
+    .pool(PoolConfig { max_size: 200, ..PoolConfig::default() })
+    .deadlines(Deadlines { handshake: Duration::from_secs(2) })
+    .credentials(Credentials::scram("reader", "hunter2"))
+    .tls(TlsClientOptions::new("/etc/shoal/ca.pem"))
+    .build()
+    .await?;
+```
+
+Every constructor is this builder with everything left at its default, and every default is exactly
+the literal it replaced. **An endpoint expands to every address it resolves to**, so a name with
+three records behind it produces a client that knows all three; before F16 the client called
+`.next()` on that iterator and kept one. One attempt to open a connection walks the whole endpoint
+list from a shared turn counter, so a server being down costs one refused connect rather than the
+pool's whole connection-timeout budget.
+
 The type parameter is the generated `*Client` marker implementing `QuerySupport`
 ([Derive Macros](derive-macros.md#step-2-emit-the-supporting-types)), which is what ties the
 client to a specific schema.
@@ -33,32 +57,45 @@ client to a specific schema.
 ```rust
 pub struct Shoal<S: QuerySupport> {
     pool: bb8::Pool<ShoalConnectionManager>,
-    pub channel_map: Arc<HashMap<Uuid, AsyncSender<ClientMsg>>>,   // papaya
+    channel_map: Arc<HashMap<Uuid, Waiter>>,                       // papaya
     channel_queue_tx: AsyncSender<(AsyncSender<ClientMsg>, AsyncReceiver<ClientMsg>)>,
     channel_queue_rx: AsyncReceiver<(AsyncSender<ClientMsg>, AsyncReceiver<ClientMsg>)>,
     is_shutting_down: Arc<AtomicBool>,
+    dead_conns: Arc<HashMap<u64, ()>>,
+    peer_max_frame_bytes: Arc<AtomicU32>,
     proxy_handle: JoinHandle<()>,
     phantom: PhantomData<S>,
 }
 ```
 
-`shoal-core/src/client.rs:93-108`
+`shoal-client/src/client.rs`
+
+`channel_map`'s value is a `Waiter { conn: Option<u64>, tx }` rather than a bare sender
+([F11](../features/error-channel.md)) — the connection a bundle was written to is recorded beside
+the channel its responses go on, so a read loop that dies can fail the queries owed on *its* socket
+and no others. `dead_conns` is where a read loop records that it has stopped, and both pool health
+checks drain it.
 
 ## Split connections
 
 The client's central trick: **write halves go in the pool, read halves go to a proxy.**
 
 ```rust
-async fn connect(&self) -> Result<Self::Connection, Self::Error> {
-    let stream = TcpStream::connect(&self.server_addr).await?;
+async fn connect_to(&self, addr: SocketAddr) -> Result<ShoalConnection, ConnectError> {
+    let mut stream = TcpStream::connect(&addr).await?;
     stream.set_nodelay(true)?;
+    let _tls = /* the TLS handshake, under a deadline */;
+    let ack = /* the Shoal handshake and the auth exchange, under the same deadline */;
+    let id = self.next_conn_id.fetch_add(1, Ordering::Relaxed);
     let (tcp_rx, tcp_tx) = stream.into_split();
-    self.proxy_tx.send(tcp_rx).await...;
-    Ok(tcp_tx)      // only the write half is pooled
+    self.proxy_tx.send((id, tcp_rx)).await...;
+    Ok(ShoalConnection { writer: tcp_tx, id })   // only the write half is pooled
 }
 ```
 
-`shoal-core/src/client.rs:63-74`
+`shoal-client/src/client.rs`. `ManageConnection::connect` is a loop around this that decides
+*which* endpoint to ask ([F16](../features/client-builder.md)); the connection carries an id so a
+dead read loop can name itself.
 
 ```
    Shoal::send  ──▶ pool.get() ──▶ OwnedWriteHalf ──▶ socket
@@ -75,9 +112,10 @@ A bundle may go out on connection 3 and its responses arrive on connection 3's r
 the demultiplexing is by query id through a shared map, so the streams do not care. This is
 what lets the pool hand out connections freely.
 
-Pool settings:
+Pool settings, all of them `PoolConfig` fields since [F16](../features/client-builder.md) and all
+defaulted to the literals they replaced:
 
-| Setting | Value |
+| Setting | Default |
 | --- | --- |
 | `min_idle` | 10 |
 | `max_size` | 50 |
@@ -85,25 +123,40 @@ Pool settings:
 | `idle_timeout` | 300 s |
 | `max_lifetime` | 1800 s |
 
-`shoal-core/src/client.rs:140-148`
+`shoal-client/src/client/builder.rs`, `PoolConfig::default`
 
-Health checking is nominal:
+`Deadlines::handshake` (10 s) sits beside them and is deliberately *not* on `PoolConfig`:
+`connection_timeout` bounds `bb8`'s checkout and retry loop, and the handshake deadline exists
+because that timeout does not reach inside `connect`.
+
+Health checking is partial:
 
 ```rust
 async fn is_valid(&self, conn: &mut Self::Connection) -> Result<(), Self::Error> {
     // TODO implement a ping/pong type request?
+    //
+    // reading this entry is what discards the connection, so it is taken rather than peeked
+    if self.dead_conns.pin().remove(&conn.id).is_some() {
+        return Err(ConnectError::Io(std::io::Error::new(
+            ErrorKind::ConnectionAborted,
+            "this connection's read half has stopped",
+        )));
+    }
     conn.peer_addr()?;
     Ok(())
 }
-fn has_broken(&self, conn: &mut Self::Connection) -> bool {
-    conn.peer_addr().is_err()
-}
 ```
 
-`shoal-core/src/client.rs:76-90`
+`shoal-client/src/client.rs`, and `has_broken` does the same check without the `async`
 
-`peer_addr()` reads local socket state; it does not probe the peer. A server that has gone away
-without closing the socket will not be detected.
+Two different things are being asked. The `dead_conns` half ([F11](../features/error-channel.md))
+catches the case these checks used to pass silently: a connection whose **read half** has stopped
+is still perfectly writable, and `peer_addr` answers for it, so the pool would hand out a socket
+whose answers nobody is listening for. Neither check touches the wire, though — `peer_addr()` asks
+the kernel about our own end — so a server that has gone away without its socket being reset still
+looks healthy. That needs a `Ping`
+([D6](../direction/connection-pool.md#health-checks-that-work),
+[item 23](../appendix/known-issues.md#23-client-stream-and-pool-rough-edges)).
 
 ## Query ids and channel reuse
 
@@ -123,10 +176,10 @@ loop {
 }
 ```
 
-`shoal-core/src/client.rs:183-206`
+`shoal-client/src/client.rs`
 
 Two things going on. Channel pairs are recycled through `channel_queue` — a finished stream
-returns its channels (`client.rs:1012-1015`) rather than dropping them, so a high-throughput
+returns its channels rather than dropping them, so a high-throughput
 client stops allocating. And ids are checked for collision and regenerated, so a UUIDv4
 collision cannot silently cross two streams' responses.
 
@@ -144,7 +197,7 @@ Note the check-then-insert is not atomic — two threads could pass the `get` be
 pub async fn send(&self, mut queries: Queries<S>) -> Result<ShoalResultStream<S>, Errors>
 ```
 
-`shoal-core/src/client.rs:209-250`
+`shoal-client/src/client.rs`
 
 Archive, register the id, grab a connection, write vectored, return a stream. Note the archive
 is built *before* the id is finalised by `track_response` — if `track_response` regenerates the
@@ -155,9 +208,9 @@ Convenience wrappers:
 
 | Method | Behaviour |
 | --- | --- |
-| `send_one(query)` | One query, one response, checks success (`client.rs:313-344`) |
-| `exec(queries)` | Drains the stream, collects failures into `Errors::BulkError` (`client.rs:265-301`) |
-| `exists(query)` | Returns `bool`; missing data is not an error (`client.rs:360-401`) |
+| `send_one(query)` | One query, one response, checks success |
+| `exec(queries)` | Drains the stream, collects failures into `Errors::BulkError` |
+| `exists(query)` | Returns `bool`; missing data is not an error |
 
 `exists` is constrained by a marker trait so only exists queries can be passed:
 
@@ -166,7 +219,7 @@ pub trait ExistsQuery {}
 pub async fn exists<Q: ExistsQuery + Into<S::QueryKinds>>(&self, query: Q) -> Result<bool, Errors>
 ```
 
-`shoal-core/src/shared/traits.rs:40-44`, `client.rs:360-363`
+`shoal-proto/src/shared/traits.rs`, `client.rs`
 
 A small, effective use of the type system: the response-kind mismatch this would otherwise
 produce is a compile error rather than a runtime `UnexpectedResponseKind`.
@@ -177,14 +230,14 @@ produce is a compile error rather than a runtime `UnexpectedResponseKind`.
 let (mut query_stream, mut result_stream) = client.stream()?;
 ```
 
-`stream()` and `stream_unordered()` (`client.rs:404-464`) return a pair sharing one query id.
+`stream()` and `stream_unordered()` return a pair sharing one query id.
 Queries can be pushed indefinitely; `ShoalQueryStream::send` advances `base_index` by the
 number of queries sent so indices stay globally ordered across bundles
-(`client.rs:1270-1305`).
+.
 
 Both set `unbounded_queries: true`, which makes the result stream **ignore the server's `end`
 flag** and terminate only on `ShoalQueryStream::close`, which posts a local
-`ClientMsg::End(base_index)` directly into the response channel (`client.rs:1308-1313`). This
+`ClientMsg::End(base_index)` directly into the response channel. This
 is why the server's `end` computation being wrong for streamed bundles never surfaced in
 streaming tests — the flag was simply not consulted on that path. It is
 [fixed](../appendix/resolved/sorted-limit.md) now, but nothing on this path depends on it.
@@ -196,12 +249,12 @@ streaming tests — the flag was simply not consulted on that path. It is
 | `ShoalResultStream` | Strict index order | `BTreeMap<usize, ClientMsg>` of early arrivals |
 | `ShoalUnorderedResultStream` | As they arrive | `BTreeSet<usize>` of seen indices, for completion only |
 
-Ordered reassembly (`shoal-core/src/client.rs:880-978`): if the head of `pending` is `next_index`,
+Ordered reassembly (`shoal-client/src/client.rs`): if the head of `pending` is `next_index`,
 pop and return it; otherwise wait for the next message, return it if it is `next_index`, else stash
 it.
 
 The unordered stream returns everything immediately and tracks `next_index` only to know when
-the stream is complete (`client.rs:1160-1210`) — it advances `next_index` past every
+the stream is complete — it advances `next_index` past every
 contiguous run of seen indices so it can recognise the end.
 
 **Memory:** an ordered stream holds every out-of-order response until the gap fills. One slow
@@ -230,7 +283,7 @@ which is a path where one does.
 
 **`End` cannot collide with a response.** The terminator shares the same map:
 `self.pending.insert(index, ClientMsg::End(index))`. It is safe because
-`ShoalQueryStream::close` posts `ClientMsg::End(self.base_index)` (`client.rs:1348`) *after*
+`ShoalQueryStream::close` posts `ClientMsg::End(self.base_index)` *after*
 `base_index` has been advanced past every query sent (`:1341`), so its index is always one past the
 last response index rather than equal to one.
 
@@ -259,7 +312,7 @@ pub struct ShoalResponse<S: QuerySupport> {
 }
 ```
 
-`shoal-core/src/client.rs:710-717`
+`shoal-client/src/client.rs`
 
 `_buff` owns the bytes read off the socket; `archived` points into them. Nothing is copied and
 nothing is parsed — accessing a row is a pointer cast.
@@ -278,11 +331,11 @@ unsafe impl<S: QuerySupport> Send for ShoalResponse<S> where ... {}
 unsafe impl<S: QuerySupport> Sync for ShoalResponse<S> where ... {}
 ```
 
-`shoal-core/src/client.rs:725-743`
+`shoal-client/src/client.rs`
 
 It holds: `_buff` is never exposed mutably, and `AlignedVec`'s heap allocation does not move
 when the struct moves. The invariant to preserve is "no `&mut` to `_buff`". `inner(self)`
-consumes the struct to return the buffer for recycling (`client.rs:764-766`), which is fine.
+consumes the struct to return the buffer for recycling, which is fine.
 
 Accessors, all going through `unsafe { &*self.archived }`:
 
@@ -295,7 +348,7 @@ Accessors, all going through `unsafe { &*self.archived }`:
 | `get_index()` | The response's index |
 | `format_response()` | `(headers, rows)` as strings, for shoalctl |
 
-`shoal-core/src/client.rs:768-832`
+`shoal-client/src/client.rs`
 
 Typical use:
 
@@ -322,9 +375,9 @@ pub struct QuerySuceededOpts {
 }
 ```
 
-`shoal-core/src/client.rs:682-694`
+`shoal-client/src/client.rs`
 
-Defaults to `true` everywhere (`client.rs:696-707`), so by default **a get that finds nothing
+Defaults to `true` everywhere, so by default **a get that finds nothing
 is an error**, and so is an update that matched no row. `send_one` and `exec` apply the
 default, which is why the tests treat a missing row as a failure. To treat absence as normal,
 pass an opts value with `get: false`, or use `exists`.
@@ -340,10 +393,10 @@ impl<S: QuerySupport> Drop for Shoal<S> {
 }
 ```
 
-`shoal-core/src/client.rs:467-474`
+`shoal-client/src/client.rs`
 
 The flag lets in-flight proxies distinguish a clean shutdown from a server failure — EOF while
-shutting down returns `Ok(())` rather than an error (`client.rs:506-513`). `abort()` stops the
+shutting down returns `Ok(())` rather than an error. `abort()` stops the
 acceptor loop; per-connection proxies are separate tasks and are not aborted, ending when
 their sockets close.
 
@@ -378,9 +431,9 @@ other way* — D4 recommended an API that would have copied while reading as tho
 ## Limitations
 
 Most of this list is one page: [D6](../direction/connection-pool.md) designs a pool with deadlines,
-a health check that works, a builder, an endpoint list, and a `Drop` — the pieces are small
-individually and four of them ~~wait on a message type the wire format does not have~~ now need
-only a call site, since `Ping`, `Pong`, `Cancel` and `GoAway` are defined and unwired message types
+a health check that works, a builder, an endpoint list, and a `Drop`. **The builder and the endpoint
+list are built** ([F16](../features/client-builder.md)); the deadlines and the `Drop` are next, and
+the health check needs the `Ping` and `Pong` that are defined and unwired message types
 ([F10](../features/framing-and-protocol-evolution.md)).
 
 **A connection now shakes hands before it is used.** `Shoal::new` opens ten connections and each
@@ -411,9 +464,11 @@ a PBKDF2 derivation on both ends. Nothing measures it
   ([D6](../direction/connection-pool.md#deadlines), and
   [retries](../direction/connection-pool.md#retries), which are only safe for `Get` and `Exists`).
 - Ordered streams buffer unboundedly behind a gap.
-- Only one endpoint is ever known — `Shoal::new` takes the first address `lookup_host` returns
-  (`client.rs:130`), so there is no failover
-  ([D6](../direction/connection-pool.md#a-builder)).
+- ~~Only one endpoint is ever known — `Shoal::new` takes the first address `lookup_host` returns,
+  so there is no failover.~~ Built as [F16](../features/client-builder.md): a client knows every
+  address every endpoint it was given resolves to, and one attempt to connect walks all of them.
+  What remains is that endpoints are tried in order rather than by health, so a dead one is retried
+  on every connection whose turn starts at it.
 - ~~No server-side error channel, so failures arrive as closed connections.~~ Built as
   [F11](../features/error-channel.md): a query that failed comes back as
   `Errors::Server { code, msg, .. }`, and `response.error()` answers it directly. What remains is
@@ -442,7 +497,7 @@ a PBKDF2 derivation on both ends. Nothing measures it
   ([item 54](../appendix/known-issues.md#54-shoaldb-needs-three-crates-the-caller-has-never-heard-of),
   [D5](../direction/runtimes.md)).
 - `ShoalResultStream::skip(0)` panics with an integer underflow
-  (`client.rs:1001-1008`) — the decrement precedes the zero check.
+  — the decrement precedes the zero check.
 - **A stream that is not drained to its end leaks its slot in `channel_map` and its pooled channel
   pair**, because neither stream type implements `Drop`
   ([item 60](../appendix/known-issues.md#60-a-result-stream-that-is-not-drained-to-the-end-leaks-its-slot-in-the-client)).
@@ -452,12 +507,13 @@ a PBKDF2 derivation on both ends. Nothing measures it
   Responses the server later sends for that query are then delivered into an unbounded channel with
   no reader.
 - `Shoal::send` archives the bundle before the id is finalised.
-- Two large blocks of commented-out code remain (`client.rs:549-603`, `:1048-1114`).
+- Two large blocks of commented-out code remain.
 - `suceeded` and `QuerySuceededOpts` are misspelled in the public API.
-- **Nothing *attributes* any of this.** `client.rs` carries no `tracing` spans and no `hotpath`
-  scopes, so every macro benchmark number includes the client and none can subtract it
-  ([TODOs](../appendix/todos.md#benchmark-coverage-the-harness-does-not-have)). ~~The
-  `transport/*` workloads that would give it a number are unbuilt.~~ They are **built**
-  ([F13](../features/transport-workloads.md)), so the three modes above now have a bounded total at
-  a 256-byte row and at a MiB one — but a total is not an attribution, and the spans that would
-  turn one into the other are what is still missing.
+- ~~**Nothing *attributes* any of this.** `client.rs` carries no `tracing` spans and no `hotpath`
+  scopes~~ — it carries both since [F16](../features/client-builder.md), and the `transport/*`
+  workloads that bound the total are built ([F13](../features/transport-workloads.md)). So step 0
+  of the [Direction](../direction/overview.md) chapter is done and
+  [O28](../appendix/optimizations.md) and O30 are adjudicable. **What the spans still do not do is
+  reach anything**: nothing in the workspace calls `trace::setup`, so no subscriber is ever
+  installed, the server's spans have never been switched on either, and `shoal.yml`'s `tracing`
+  section configures nothing ([item 69](../appendix/known-issues.md)).

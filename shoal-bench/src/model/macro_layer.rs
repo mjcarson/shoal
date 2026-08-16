@@ -81,7 +81,12 @@ impl Timing {
 ///
 /// Recorded so a capture is self describing. Two captures taken at different scales are not
 /// comparable, and without this the artifact gives no way to notice that.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// [`Default`] exists so that a workload can fill in the facts it has and leave the rest, which is
+/// how every workload that is not a mixture says so: `..ScaleFacts::default()` reads as "no read
+/// share, no width distribution, no skew, one client". It is not a usable value on its own - a
+/// defaulted `scale` is the empty string, which no run ever produces.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScaleFacts {
     /// Which named scale this run used
     pub scale: String,
@@ -102,6 +107,36 @@ pub struct ScaleFacts {
     /// one query outstanding on each of eight clients has eight of each.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clients: Option<u32>,
+    /// What share of this workload's queries were reads, as a percentage
+    ///
+    /// `None` means the workload is not a mixture at all, which is what every workload before
+    /// [F17](../../../docs/src/features/workload-grid.md) was: reads and writes were separate
+    /// workloads so that neither could hide the other. A mixture is a different kind of
+    /// measurement rather than a better one, and this field is what says which kind is being read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_pct: Option<u32>,
+    /// Which named row width distribution the payloads were drawn from
+    ///
+    /// `None` means every row was exactly [`ScaleFacts::row_bytes`] wide, which is what a fixed
+    /// width workload does. When this is set, `row_bytes` carries the **mean** of the distribution
+    /// and this names the distribution it is the mean of - without it a mixture and a fixed width
+    /// run of the same average are indistinguishable in the artifact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row_profile: Option<String>,
+    /// Which named key access distribution the queries were drawn from
+    ///
+    /// `None` means uniform, which is what every workload before the skew sweep used. Uniform is
+    /// the honest default because it defeats every cache in the system; a skewed distribution
+    /// measures a warmer table and the two must never be compared to each other.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distribution: Option<String>,
+    /// Which kind of table the workload drove
+    ///
+    /// `None` on a workload whose identifier already says, which is every one that predates the
+    /// grid. Recorded rather than parsed back out of the identifier, so a reader that groups by
+    /// table type is reading a fact instead of a naming convention.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table_kind: Option<String>,
 }
 
 /// The server settings a workload ran against
@@ -212,6 +247,58 @@ impl WorkloadCapture {
         }
         let rows: u64 = self.counters.values().sum();
         rows as f64 / (wall as f64 / 1_000_000_000.0)
+    }
+
+    /// Queries answered per second, counting only what this workload actually asked for
+    ///
+    /// Separate from [`WorkloadCapture::rows_per_sec`], which sums every counter and so charges a
+    /// mixture's reads and its writes to one figure while a fan-out workload's single query counts
+    /// as the two hundred and fifty six rows it returned. This counts operations, which is the
+    /// figure a throughput comparison across a read/write mixture needs.
+    ///
+    /// **Read it beside [`WorkloadCapture::timing`].** A [`Timing::PerQuery`] workload holds a
+    /// bounded number of queries outstanding, so this is the throughput *at that depth* and not
+    /// the throughput the server is capable of. Only a saturating [`Timing::PerBatch`] run
+    /// produces the second thing.
+    ///
+    /// `None` when the workload counted no queries, which is every workload taken before
+    /// [`OP_COUNTERS`] existed. That is deliberately not zero: a workload that did not count is
+    /// not a workload that answered nothing, and a chart that plotted it at the origin would be
+    /// inventing a measurement.
+    pub fn ops_per_sec(&self) -> Option<f64> {
+        // a zero wall clock would be a divide by zero, and is not a run that happened
+        let wall = self.median_wall_clock_ns();
+        if wall == 0 {
+            return None;
+        }
+        // the operation counters, which are the ones a query is counted under exactly once. a row
+        // counter cannot stand in for them: one fan-out query answers with two hundred and fifty
+        // six rows, and one get of a wide row answers with one
+        let mut ops = 0u64;
+        let mut counted = false;
+        for name in OP_COUNTERS {
+            if let Some(seen) = self.counters.get(name) {
+                ops += *seen;
+                counted = true;
+            }
+        }
+        // nothing counted queries, so there is no query rate to report
+        if !counted {
+            return None;
+        }
+        Some(ops as f64 / (wall as f64 / 1_000_000_000.0))
+    }
+
+    /// Payload bytes moved per second, as the workload's own row width reports them
+    ///
+    /// The width is the *mean* when [`ScaleFacts::row_profile`] is set, so a mixture's figure is a
+    /// mean rate rather than a measured byte count. It covers payloads only: framing, keys and the
+    /// archive's own overhead are not in it, so this is a floor on what crossed the wire and never
+    /// a ceiling.
+    pub fn bytes_per_sec(&self) -> Option<f64> {
+        // one row's worth of payload per operation, at whatever width this workload ran
+        self.ops_per_sec()
+            .map(|ops| ops * self.scale.row_bytes as f64)
     }
 
     /// Reads one percentile metric out of the run that was kept
@@ -422,6 +509,14 @@ impl Stats {
 /// The names of the percentile metrics a macro comparison covers, in the order they are reported
 pub const STAT_METRICS: [&str; 7] = ["min", "p50", "p90", "p95", "p99", "avg", "max"];
 
+/// The counters that hold a count of queries rather than a count of rows
+///
+/// [`WorkloadCapture::ops_per_sec`] sums these and nothing else. They are separate from `inserted`
+/// and `retrieved` because those two count **rows**: one fan-out query is answered with two
+/// hundred and fifty six of them and one keyed get with one, so a rate built from them is a row
+/// rate and cannot be compared across workloads that return different numbers of rows per query.
+pub const OP_COUNTERS: [&str; 2] = ["reads", "writes"];
+
 /// One run's contribution to a multi run capture
 ///
 /// `scripts/bench.sh` kept only every run's wall clock, so the median run's percentiles had no
@@ -543,6 +638,9 @@ impl MacroCaptureV1 {
                 keys: self.inserted,
                 concurrency: 0,
                 clients: None,
+                // it blended reads and writes without recording the share, which is one of the
+                // reasons it was replaced. an invented share here would be worse than none
+                ..ScaleFacts::default()
             },
             // version 1 captures did not record what they ran against
             conf: None,

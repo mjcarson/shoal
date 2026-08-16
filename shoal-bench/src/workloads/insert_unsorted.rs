@@ -85,6 +85,8 @@ impl Workload for InsertUnsorted {
                 keys: rows,
                 concurrency: driver::IN_FLIGHT as u32,
                 clients: None,
+                // not a mixture, a width distribution or a skewed access pattern
+                ..ScaleFacts::default()
             },
             // enough to cover connection establishment and the first log rotation
             warmup: (rows / 40).min(5_000),

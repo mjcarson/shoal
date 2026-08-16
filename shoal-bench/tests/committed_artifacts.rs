@@ -9,7 +9,7 @@
 use std::path::{Path, PathBuf};
 
 use shoal_bench::model::macro_layer::{
-    MACRO_VERSION_V1, MacroCaptureV1, TMDB_WORKLOAD, Timing,
+    MACRO_VERSION_V1, MacroCaptureV1, OP_COUNTERS, ScaleFacts, TMDB_WORKLOAD, Timing,
 };
 use shoal_bench::registry::Layer;
 use shoal_bench::store::Store;
@@ -314,4 +314,64 @@ fn the_two_baselines_disagree_by_the_maybe_loaded_group() {
         24,
         "expected the maybe_loaded group to be the whole difference, found {added:?}"
     );
+}
+
+/// A workload that is not a mixture writes exactly the keys it wrote before the grid existed
+///
+/// [F17](../../docs/src/features/workload-grid.md) added four fields to `ScaleFacts`. Every one of
+/// them is optional and skipped when absent, which is what stops eighty-seven existing workloads
+/// from re-serializing with four new nulls the next time a capture is folded - and what stops the
+/// committed corpus from being rewritten by a change that measured nothing. If a field here stops
+/// being skipped, this fails before the corpus churns rather than after.
+#[test]
+fn a_workload_that_is_not_a_mixture_serializes_the_keys_it_always_did() {
+    let facts = ScaleFacts {
+        scale: "full".to_string(),
+        rows: 200_000,
+        row_bytes: 256,
+        keys: 200_000,
+        concurrency: 16,
+        clients: None,
+        ..ScaleFacts::default()
+    };
+    let json = serde_json::to_value(&facts).expect("scale facts serialize");
+    // sorted, because `serde_json::Value` holds its keys in a map rather than in file order. what
+    // is under test is which keys are present, not what order they land in
+    let keys: Vec<&str> = json
+        .as_object()
+        .expect("scale facts are an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        keys,
+        vec!["concurrency", "keys", "row_bytes", "rows", "scale"],
+        "an optional field stopped being skipped, which rewrites every committed capture"
+    );
+}
+
+/// Every committed capture reports no query rate, because none of them counted queries
+///
+/// `ops_per_sec` is `None` rather than zero when a workload counted no operations. The corpus is
+/// the proof that the distinction is load bearing: every capture in it predates
+/// [`OP_COUNTERS`](shoal_bench::model::macro_layer::OP_COUNTERS), and a zero would put all of them
+/// on a throughput chart at the origin as though they had answered nothing.
+#[test]
+fn a_capture_that_counted_no_queries_reports_no_query_rate() {
+    let store = repo();
+    for path in files_ending_with(&store.runs_dir(), ".macro.json") {
+        let capture = store
+            .read_macro(&path)
+            .unwrap_or_else(|err| panic!("{}: {err:#}", path.display()));
+        for (id, workload) in &capture.workloads {
+            // none of these counted `reads` or `writes`, so none of them can report a rate
+            if workload.counters.keys().all(|name| !OP_COUNTERS.contains(&name.as_str())) {
+                assert!(
+                    workload.ops_per_sec().is_none(),
+                    "{} invented a query rate for {id}",
+                    path.display()
+                );
+            }
+        }
+    }
 }

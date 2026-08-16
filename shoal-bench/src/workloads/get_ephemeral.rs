@@ -119,6 +119,8 @@ impl Workload for GetEphemeral {
                 keys: rows,
                 concurrency: CONCURRENCY,
                 clients: None,
+                // not a mixture, a width distribution or a skewed access pattern
+                ..ScaleFacts::default()
             },
             // enough to cover connection establishment before sampling starts
             warmup: (Self::queries(scale) / 20).min(2_000),

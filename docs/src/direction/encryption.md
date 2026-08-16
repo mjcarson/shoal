@@ -278,7 +278,7 @@ it is wasted. `dangerous_into_kernel_connection` is the seam all three options m
 field). This is not a hedge — it is what
 keeps the benchmark harness and the integration tests on the plaintext path, so that captures stay
 comparable against the frozen `B1-performance` baseline
-([Benchmarking](../operations/benchmarking.md)). A build where every capture silently included TLS
+([Benchmarking](../performance/benchmarking.md)). A build where every capture silently included TLS
 would invalidate every number in the book.
 
 ## What it costs
@@ -328,7 +328,7 @@ would invalidate every number in the book.
   the other.
 - **Comparability of captures**, unless the per-listener default holds. An encrypted capture and a
   plaintext one are not the same measurement, the same rule that already applies to `hotpath` and
-  `stage-profile` builds ([Performance Baseline](../operations/performance-baseline.md)).
+  `stage-profile` builds ([Performance Baseline](../performance/baseline.md)).
 
 ## Prerequisites
 
@@ -377,7 +377,7 @@ exists, the honest statement is that nobody knows what encryption costs this sys
 
 **The pair exists and has been read.** `f14-encryption` is the capture; the numbers are in
 [F14](../features/encryption-in-transit.md#performance) and the charts in
-[Benchmark Results](../operations/benchmark-results.md#what-encryption-costs). The short version, and
+[Benchmark Results](../performance/transport.md#what-encryption-costs). The short version, and
 it vindicates the argument this section makes:
 
 | Row width | What TLS cost, one query deep |
@@ -421,4 +421,4 @@ both are still cheap to build.
   record framing interacts with
 - [D3. Authentication](authentication.md) — what mTLS gives once this exists
 - [The Client](../api/client.md#shoalresponse) — the zero-copy property being protected
-- [Benchmarking](../operations/benchmarking.md) — why the per-listener default matters
+- [Benchmarking](../performance/benchmarking.md) — why the per-listener default matters

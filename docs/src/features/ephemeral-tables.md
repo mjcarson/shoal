@@ -197,7 +197,7 @@ means the memory limit does not bound an ephemeral table — see *Limitations*.
 
 Measured on the development machine with the CPU governor in `powersave` and at `smoke` scale, so
 these are indicative rather than a baseline — the frozen numbers live in
-[Performance Baseline](../operations/performance-baseline.md) and a full capture under
+[Performance Baseline](../performance/baseline.md) and a full capture under
 `performance` is what belongs there.
 
 | Workload | Wall clock | p50 |

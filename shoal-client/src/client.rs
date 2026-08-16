@@ -17,17 +17,20 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::{ErrorKind, IoSlice};
 use std::marker::PhantomData;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpStream, ToSocketAddrs};
 use tokio::task::JoinHandle;
-use tracing::{event, Level};
+use tracing::{event, instrument, Level};
 use uuid::Uuid;
 
+pub mod builder;
 pub mod messages;
 pub mod tls;
+
+pub use builder::{Deadlines, PoolConfig, ShoalBuilder};
 
 // the error types are protocol, not transport - `QuerySupport` and `shared::responses` both name
 // them, so they cannot live above the crate that defines those
@@ -79,6 +82,22 @@ fn receive_failed(error: kanal::ReceiveError) -> Errors {
     })
 }
 
+/// The order to try endpoints in, for a connection whose turn it is to start at `start`
+///
+/// Every endpoint exactly once, wrapping, so that one attempt to open a connection has tried every
+/// server before it reports that it could not. Pulled out of [`ManageConnection::connect`] so that
+/// "every endpoint, once, starting here" can be asserted without standing up a pool and a set of
+/// servers to observe it through.
+///
+/// # Arguments
+///
+/// * `start` - The endpoint whose turn it is, which may be any number and is taken modulo `count`
+/// * `count` - How many endpoints there are
+fn endpoint_order(start: usize, count: usize) -> impl Iterator<Item = usize> {
+    // walk forward from this connection's turn, wrapping, for exactly as many as there are
+    (0..count).map(move |offset| (start.wrapping_add(offset)) % count.max(1))
+}
+
 /// The channel a query's responses are routed through, and where they are owed from
 ///
 /// The connection is here rather than in a map of its own so that there is exactly one place a
@@ -127,8 +146,20 @@ impl std::ops::DerefMut for ShoalConnection {
 // Connection manager for bb8
 #[derive(Clone)]
 struct ShoalConnectionManager {
-    /// The shoal server to connect too
-    server_addr: SocketAddr,
+    /// The shoal servers to connect too, in the order they were given
+    ///
+    /// A client knows every address every endpoint it was given resolved to, rather than the one
+    /// address the first of them happened to resolve to first. That is what makes a server going
+    /// away survivable: `bb8` asks for another connection, and this manager tries the next one.
+    endpoints: Arc<Vec<SocketAddr>>,
+    /// Which endpoint to try first for the next connection this manager opens
+    ///
+    /// Shared with every clone of this manager, since `bb8` clones it and the point of the
+    /// counter is to spread connections across endpoints for the whole pool rather than within
+    /// one clone of it. It only ever increases; the index into `endpoints` is taken modulo.
+    next_endpoint: Arc<AtomicUsize>,
+    /// How long a server has to finish its half of opening a connection
+    handshake_timeout: std::time::Duration,
     /// The channel to send our read halves to our proxy over, with the connection they came from
     proxy_tx: AsyncSender<(u64, OwnedReadHalf)>,
     /// The id to give the next connection this manager opens
@@ -170,18 +201,6 @@ struct ShoalConnectionManager {
     /// credentials for the reason they do: a connection the pool replaces re-encrypts for free.
     tls: Option<(Arc<rustls::ClientConfig>, TlsClientOptions)>,
 }
-
-/// How long a server has to finish its half of the handshake
-///
-/// `bb8`'s connection timeout bounds its retry loop and `pool.get()`, not `connect` itself, so
-/// without this a server that accepts a connection and then stalls would park `Shoal::new`
-/// forever. Before the handshake existed `connect` could not block at all, since it neither read
-/// nor wrote — this deadline is created by the handshake and belongs to it.
-///
-/// It covers **all three** handshakes a connection can have: the TLS one, the Shoal one, and the
-/// authentication exchange. A peer that stalls between any two of them holds exactly as much of
-/// this client as one that stalls before all three.
-const HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Everything a client can be told about a connection beyond where to make it
 ///
@@ -245,14 +264,16 @@ impl ShoalConnectionManager {
     ///
     /// # Arguments
     ///
-    /// * `server_addr` - The address of the server to connect too
+    /// * `endpoints` - The addresses of the servers to connect too
+    /// * `handshake_timeout` - How long a server has to finish opening a connection
     /// * `proxy_tx` - The channel to hand read halves to the proxy over
     /// * `dead_conns` - Where read loops record that their connection has stopped
     /// * `peer_max_frame_bytes` - Where to record the largest frame the server will accept
     /// * `schema_fingerprint` - The fingerprint of the schema this client was built from
     /// * `options` - What this client proves itself with and encrypts with
     pub fn new(
-        server_addr: SocketAddr,
+        endpoints: Vec<SocketAddr>,
+        handshake_timeout: std::time::Duration,
         proxy_tx: AsyncSender<(u64, OwnedReadHalf)>,
         dead_conns: &Arc<HashMap<u64, ()>>,
         peer_max_frame_bytes: &Arc<AtomicU32>,
@@ -268,7 +289,9 @@ impl ShoalConnectionManager {
             None => None,
         };
         Ok(ShoalConnectionManager {
-            server_addr,
+            endpoints: Arc::new(endpoints),
+            next_endpoint: Arc::new(AtomicUsize::new(0)),
+            handshake_timeout,
             proxy_tx,
             // start at one so that zero is never a connection, and a default can never name one
             next_conn_id: Arc::new(AtomicU64::new(1)),
@@ -456,15 +479,26 @@ impl ShoalConnectionManager {
         let (status, payload) = proto_auth::decode_auth_response_body(&body)?;
         Ok((status, payload.to_vec()))
     }
-}
 
-#[async_trait::async_trait]
-impl ManageConnection for ShoalConnectionManager {
-    type Connection = ShoalConnection;
-    type Error = ConnectError;
-
-    async fn connect(&self) -> Result<Self::Connection, Self::Error> {
-        let mut stream = TcpStream::connect(&self.server_addr).await?;
+    /// Open one connection to one server, all the way to a usable pair of halves
+    ///
+    /// This is the whole of what opening a connection is; [`ManageConnection::connect`] is a loop
+    /// around it that decides *which* server to ask. Splitting them is what lets an endpoint that
+    /// refuses us be tried past rather than being the end of the attempt.
+    ///
+    /// # Invariants
+    ///
+    /// **Nothing is handed to the proxy until every handshake has succeeded.** A failed attempt
+    /// therefore leaves no read half registered anywhere, which is what makes trying the next
+    /// endpoint safe rather than a way to accumulate half-open connections.
+    ///
+    /// # Arguments
+    ///
+    /// * `addr` - The address of the server to open a connection to
+    #[instrument(name = "ShoalConnectionManager::connect_to", skip_all, err(Debug))]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    async fn connect_to(&self, addr: SocketAddr) -> Result<ShoalConnection, ConnectError> {
+        let mut stream = TcpStream::connect(&addr).await?;
         // Disable Nagle's algorithm
         stream.set_nodelay(true)?;
         // take the wire before anything speaks the shoal protocol over it
@@ -475,8 +509,8 @@ impl ManageConnection for ShoalConnectionManager {
         let _tls = match &self.tls {
             Some((config, options)) => Some(
                 tokio::time::timeout(
-                    HANDSHAKE_TIMEOUT,
-                    tls::connect(&mut stream, config, options, &self.server_addr),
+                    self.handshake_timeout,
+                    tls::connect(&mut stream, config, options, &addr),
                 )
                 .await
                 .map_err(|_| ConnectError::HandshakeTimeout)??,
@@ -488,7 +522,7 @@ impl ManageConnection for ShoalConnectionManager {
         // this has to happen before the read half is handed to the proxy below, or the proxy
         // consumes the ack and decodes it as a response to a query nobody sent. moving the
         // handshake after the split is the natural looking refactor that would break that
-        let ack = tokio::time::timeout(HANDSHAKE_TIMEOUT, self.handshake(&mut stream))
+        let ack = tokio::time::timeout(self.handshake_timeout, self.handshake(&mut stream))
             .await
             .map_err(|_| ConnectError::HandshakeTimeout)??;
         // remember how large a frame this server is willing to be sent
@@ -509,6 +543,55 @@ impl ManageConnection for ShoalConnectionManager {
             writer: tcp_tx,
             id,
         })
+    }
+}
+
+#[async_trait::async_trait]
+impl ManageConnection for ShoalConnectionManager {
+    type Connection = ShoalConnection;
+    type Error = ConnectError;
+
+    async fn connect(&self) -> Result<Self::Connection, Self::Error> {
+        // start at whichever endpoint is this connection's turn, and take the next one for the
+        // connection after it
+        //
+        // the counter is shared by every clone of this manager, so a pool opening ten connections
+        // at startup spreads them across the endpoints rather than piling all ten onto the first
+        let start = self.next_endpoint.fetch_add(1, Ordering::Relaxed);
+        // remember why the last endpoint refused us, so a client that cannot reach any of them
+        // fails with a reason rather than with a count
+        let mut last: Option<ConnectError> = None;
+        // try each endpoint exactly once before giving up
+        //
+        // `bb8` is what retries and backs off after this returns, so looping here is about
+        // reaching a *different* server rather than about trying the same one again. the counter
+        // alone would eventually find a live endpoint across enough of bb8's retries, but those
+        // retries are bounded by the pool's connection timeout — a client with four dead
+        // endpoints and one live one would spend that whole budget on backoff instead of on the
+        // one address that would have answered
+        for index in endpoint_order(start, self.endpoints.len()) {
+            // work out which endpoint this attempt is for
+            let addr = self.endpoints[index];
+            match self.connect_to(addr).await {
+                Ok(conn) => return Ok(conn),
+                Err(error) => {
+                    event!(
+                        Level::DEBUG,
+                        msg = "an endpoint refused a connection",
+                        %addr,
+                        ?error,
+                    );
+                    last = Some(error);
+                }
+            }
+        }
+        // every endpoint refused us, so hand back whatever the last one said
+        Err(last.unwrap_or_else(|| {
+            ConnectError::Io(std::io::Error::new(
+                ErrorKind::NotFound,
+                "this client has no endpoints to connect to",
+            ))
+        }))
     }
 
     /// Check if a connection is still valid
@@ -575,6 +658,58 @@ pub struct Shoal<S: QuerySupport> {
 }
 
 impl<S: QuerySupport> Shoal<S> {
+    /// Start describing a client rather than naming one
+    ///
+    /// This is the way to reach anything the three constructors below do not take: several
+    /// endpoints, a pool sized for this caller, or a deadline. Those constructors remain the
+    /// shorthand for the common case, and each is this builder with everything left at its
+    /// default.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # async fn example<S: shoal_proto::shared::traits::QuerySupport>() -> Result<(), shoal_client::client::Errors>
+    /// # where for<'a> <<S as shoal_proto::shared::traits::QuerySupport>::ResponseKinds as rkyv::Archive>::Archived:
+    /// #     rkyv::bytecheck::CheckBytes<rkyv::rancor::Strategy<rkyv::validation::Validator<
+    /// #         rkyv::validation::archive::ArchiveValidator<'a>,
+    /// #         rkyv::validation::shared::SharedValidator>, rkyv::rancor::Error>> {
+    /// use shoal_client::client::Shoal;
+    ///
+    /// let client = Shoal::<S>::builder()
+    ///     .endpoints(["10.0.0.1:12000", "10.0.0.2:12000"])
+    ///     .build()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[must_use]
+    pub fn builder() -> ShoalBuilder<S> {
+        ShoalBuilder::new()
+    }
+
+    /// Resolve one address into every address it stands for
+    ///
+    /// The three constructors take a single `A: ToSocketAddrs` and this is what they turn it into.
+    /// **Every** answer is kept rather than the first, so a name with several records behind it
+    /// produces a client that has somewhere else to go when one of them stops answering. Before
+    /// this the client called `.next()` on the same iterator and threw the rest away.
+    ///
+    /// # Arguments
+    ///
+    /// * `addr` - The address of the server to connect too
+    async fn resolve<A: ToSocketAddrs>(addr: A) -> Result<Vec<SocketAddr>, Errors> {
+        // ask the resolver what this address is
+        let resolved: Vec<SocketAddr> = tokio::net::lookup_host(addr)
+            .await
+            .map_err(|e| Errors::DnsResolution(format!("failed to resolve host: {e}")))?
+            .collect();
+        // an address that resolved to nothing leaves us with nowhere to go
+        if resolved.is_empty() {
+            return Err(Errors::DnsResolution("no addresses found for host".into()));
+        }
+        Ok(resolved)
+    }
+
     /// Create a new shoal client
     ///
     /// This offers no credentials, which is what a server with no `auth` section wants and what
@@ -598,7 +733,13 @@ impl<S: QuerySupport> Shoal<S> {
                 >,
             >,
     {
-        Shoal::connect(addr, ClientOptions::new()).await
+        Shoal::connect(
+            Shoal::<S>::resolve(addr).await?,
+            ClientOptions::new(),
+            PoolConfig::default(),
+            Deadlines::default(),
+        )
+        .await
     }
 
     /// Create a new shoal client that can prove who it is
@@ -647,7 +788,13 @@ impl<S: QuerySupport> Shoal<S> {
                 >,
             >,
     {
-        Shoal::connect(addr, ClientOptions::new().credentials(credentials)).await
+        Shoal::connect(
+            Shoal::<S>::resolve(addr).await?,
+            ClientOptions::new().credentials(credentials),
+            PoolConfig::default(),
+            Deadlines::default(),
+        )
+        .await
     }
 
     /// Create a new shoal client from a full set of options
@@ -699,7 +846,13 @@ impl<S: QuerySupport> Shoal<S> {
                 >,
             >,
     {
-        Shoal::connect(addr, options).await
+        Shoal::connect(
+            Shoal::<S>::resolve(addr).await?,
+            options,
+            PoolConfig::default(),
+            Deadlines::default(),
+        )
+        .await
     }
 
     /// Build a client and its pool
@@ -709,9 +862,16 @@ impl<S: QuerySupport> Shoal<S> {
     ///
     /// # Arguments
     ///
-    /// * `addr` - The address of the server to connect too
+    /// * `endpoints` - The addresses of the servers to connect too, already resolved
     /// * `options` - What to prove this client's identity with and what to encrypt with
-    async fn connect<A: ToSocketAddrs>(addr: A, options: ClientOptions) -> Result<Self, Errors>
+    /// * `pool_config` - How to size and age the pool underneath this client
+    /// * `deadlines` - How long to give each part of this client's work
+    pub(crate) async fn connect(
+        endpoints: Vec<SocketAddr>,
+        options: ClientOptions,
+        pool_config: PoolConfig,
+        deadlines: Deadlines,
+    ) -> Result<Self, Errors>
     where
         for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived:
             rkyv::bytecheck::CheckBytes<
@@ -724,12 +884,6 @@ impl<S: QuerySupport> Shoal<S> {
                 >,
             >,
     {
-        // convert our address into a socker addr
-        let addr = tokio::net::lookup_host(addr)
-            .await
-            .map_err(|e| Errors::DnsResolution(format!("failed to resolve host: {e}")))?
-            .next()
-            .ok_or_else(|| Errors::DnsResolution("no addresses found for host".into()))?;
         // create a channel for our connection pool and our tcp proxy
         let (proxy_tx, proxy_rx) = kanal::unbounded_async();
         // assume the server accepts what we do until it tells us otherwise when we connect
@@ -738,7 +892,8 @@ impl<S: QuerySupport> Shoal<S> {
         let dead_conns = Arc::new(HashMap::with_capacity(16));
         // Create a new shoal connection manager
         let manager = ShoalConnectionManager::new(
-            addr,
+            endpoints,
+            deadlines.handshake,
             proxy_tx,
             &dead_conns,
             &peer_max_frame_bytes,
@@ -747,11 +902,11 @@ impl<S: QuerySupport> Shoal<S> {
         )?;
         // build our connection pool
         let pool = bb8::Pool::builder()
-            .min_idle(10)
-            .max_size(50)
-            .connection_timeout(std::time::Duration::from_secs(5))
-            .idle_timeout(Some(std::time::Duration::from_secs(300)))
-            .max_lifetime(Some(std::time::Duration::from_secs(1800)))
+            .min_idle(pool_config.min_idle)
+            .max_size(pool_config.max_size)
+            .connection_timeout(pool_config.connection_timeout)
+            .idle_timeout(pool_config.idle_timeout)
+            .max_lifetime(pool_config.max_lifetime)
             .build(manager)
             .await
             .map_err(Errors::Handshake)?;
@@ -797,6 +952,7 @@ impl<S: QuerySupport> Shoal<S> {
     }
 
     /// Add a response stream to our channel map
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn track_response(
         &self,
         query_id: &mut Uuid,
@@ -829,6 +985,8 @@ impl<S: QuerySupport> Shoal<S> {
     }
 
     /// Send a query to our server
+    #[instrument(name = "Shoal::send", skip_all, err(Debug))]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub async fn send(&self, mut queries: Queries<S>) -> Result<ShoalResultStream<S>, Errors> {
         // archive our queries
         let archived = rkyv::to_bytes::<_>(&queries)?;
@@ -1219,6 +1377,7 @@ impl TcpProxy {
     /// **The length is checked against our own frame bound before the allocation happens**, not
     /// after. A decoder that returned the length and left the check to the caller would be one
     /// forgotten call site away from letting a peer name its own allocation size.
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     async fn read_frame(&mut self) -> Result<Option<Frame>, Errors> {
         // have a buffer for the header and the query id that follows it
         let mut preamble = [0u8; protocol::RESPONSE_PREAMBLE_LEN];
@@ -1876,6 +2035,7 @@ where
     }
 
     /// Get the next response to our query
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub async fn next(&mut self) -> Result<Option<ShoalResponse<S>>, Errors>
     where
         for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived:
@@ -2103,6 +2263,7 @@ where
     }
 
     /// Get the next available response to our query
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub async fn next(&mut self) -> Result<Option<ShoalResponse<S>>, Errors>
     where
         for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived:
@@ -2189,6 +2350,8 @@ impl<Q: QuerySupport> ShoalQueryStream<Q> {
     /// Those are batch level costs shared by every query in the bundle, and are a zero sized
     /// type unless the `stage-profile` feature is on, so a caller that ignores them pays
     /// nothing for them.
+    #[instrument(name = "ShoalQueryStream::send", skip_all, err(Debug))]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub async fn send(&mut self, mut queries: Queries<Q>) -> Result<BatchStamps, Errors> {
         // start timing this bundle
         let mut stamps = BatchStamps::entered_now();
@@ -2266,7 +2429,7 @@ impl<Q: QuerySupport> ShoalQueryStream<Q> {
 
 #[cfg(test)]
 mod tests {
-    use super::{error, protocol, ClientMsg, ErrorCode, Frame, TcpProxy, Waiter};
+    use super::{endpoint_order, error, protocol, ClientMsg, ErrorCode, Frame, TcpProxy, Waiter};
     use papaya::HashMap;
     use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
@@ -2641,5 +2804,58 @@ mod tests {
             other_rx.try_recv().expect("the channel closed").is_none(),
             "one dead connection failed a query belonging to another"
         );
+    }
+}
+
+#[cfg(test)]
+mod endpoint_tests {
+    use super::endpoint_order;
+
+    /// One attempt to connect tries every endpoint, and tries none of them twice
+    ///
+    /// This is what the loop in `ManageConnection::connect` buys over the round robin counter on
+    /// its own. The counter alone would find a live endpoint eventually, across enough of `bb8`'s
+    /// retries — but those retries are bounded by the pool's connection timeout, so a client whose
+    /// first endpoints are all down would spend that budget backing off rather than reaching the
+    /// one address that would have answered it.
+    #[test]
+    fn one_attempt_tries_every_endpoint_exactly_once() {
+        let visited: Vec<usize> = endpoint_order(0, 4).collect();
+        assert_eq!(visited, vec![0, 1, 2, 3]);
+    }
+
+    /// Each connection starts at its own endpoint, so a pool spreads across them
+    ///
+    /// Without this every connection a pool opens would begin at the same server, and a pool of
+    /// ten would be ten connections to one endpoint with the rest held in reserve for a failure.
+    #[test]
+    fn each_connection_starts_where_its_turn_says() {
+        assert_eq!(endpoint_order(1, 4).collect::<Vec<_>>(), vec![1, 2, 3, 0]);
+        assert_eq!(endpoint_order(3, 4).collect::<Vec<_>>(), vec![3, 0, 1, 2]);
+    }
+
+    /// The counter only ever increases, so the order has to keep working past the endpoint count
+    ///
+    /// `next_endpoint` is a `fetch_add` that is never reset. A client that has opened five
+    /// connections to two endpoints asks for a turn of five, which is not an index.
+    #[test]
+    fn a_turn_past_the_endpoint_count_still_names_an_endpoint() {
+        assert_eq!(endpoint_order(5, 2).collect::<Vec<_>>(), vec![1, 0]);
+        assert_eq!(endpoint_order(usize::MAX, 2).collect::<Vec<_>>(), vec![1, 0]);
+    }
+
+    /// A client with one endpoint tries it once rather than looping on it
+    #[test]
+    fn a_single_endpoint_is_tried_once() {
+        assert_eq!(endpoint_order(7, 1).collect::<Vec<_>>(), vec![0]);
+    }
+
+    /// A client with no endpoints has nothing to try, and does not divide by zero finding that out
+    ///
+    /// The builder refuses this before a manager is ever made, so this is about the arithmetic
+    /// holding on its own rather than about a reachable state.
+    #[test]
+    fn no_endpoints_yields_nothing() {
+        assert_eq!(endpoint_order(3, 0).count(), 0);
     }
 }

@@ -1,9 +1,9 @@
 # Benchmarking
 
 How to run a benchmark. The numbers themselves are on
-[Benchmark Results](benchmark-results.md), which is generated from the captures this page tells
+[Benchmark Results](overview.md), which is generated from the captures this page tells
 you how to take; the frozen `B1` capture and the hardware it came from are in
-[Performance Baseline](performance-baseline.md). The design of the harness is
+[Performance Baseline](baseline.md). The design of the harness is
 [F3](../features/performance-harness.md), and of the tool that drives it,
 [F7](../features/bench-runner.md).
 
@@ -62,7 +62,7 @@ its per-batch timestamp cannot answer that.
 
   It is worth being honest about why it is required, because the reason is not the obvious one:
   measuring it showed the governor makes **no detectable difference** to either layer
-  ([what the governor changed](performance-baseline.md#what-the-governor-changed)). It is
+  ([what the governor changed](baseline.md#what-the-governor-changed)). It is
   required so that a capture matches the environment the baseline was taken in, not because it
   is faster.
 - ~~**The dataset, which is not in the repository and which no script fetches.** The macro
@@ -105,18 +105,32 @@ Alongside them it writes `<label>.meta.json`, which is what lets a committed num
 whether it still describes the current code: the commit, whether the tree was dirty, a content
 hash of the sources each layer measures, and the machine, governor and toolchain it ran on.
 
-A full capture is now **eighty-seven workloads times five runs**, so it is substantially longer
-than the five runs it replaced — budget two to three hours rather than thirteen minutes. Eight of
-them are the storage-free controls [F9](../features/ephemeral-tables.md) added, and they are the
-cheapest of the set: they have no disk to wait on. Sixteen are the transport modes
-[F13](../features/transport-workloads.md) added and [F14](../features/encryption-in-transit.md)
-doubled, and the MiB half of those is the most expensive thing in a capture — 512 MiB seeded and
-two gigabytes over the wire, per run. Forty-eight are F14's encryption sweeps, which are wide but
-not slow: each holds a fixed *byte* budget rather than a fixed query count, so a MiB arm runs 256
-queries where a 256-byte arm runs 20,000 and no width dominates.
+A full capture is now **a hundred and sixty one workloads times five runs**, so budget four to
+five hours. Eight of them are the storage-free controls [F9](../features/ephemeral-tables.md)
+added, and they are the cheapest of the set: they have no disk to wait on. Sixteen are the
+transport modes [F13](../features/transport-workloads.md) added and
+[F14](../features/encryption-in-transit.md) doubled, and the MiB half of those is the most
+expensive single thing in a capture — 512 MiB seeded and two gigabytes over the wire, per run.
+Forty-eight are F14's encryption sweeps, which are wide but not slow: each holds a fixed *byte*
+budget rather than a fixed query count, so a MiB arm runs 256 queries where a 256-byte arm runs
+20,000 and no width dominates.
 
-~~thirty-one workloads~~ was the count before both of those landed and stayed on this page for two
-features. If it disagrees with `shoal-bench list --layer macro | wc -l`, that command is right.
+**Seventy-four are [F17](../features/workload-grid.md)'s grid**, which is the largest and slowest
+phase and roughly doubled a capture on its own. It holds the same byte budget the encryption sweeps
+do, for the same reason. While iterating on anything else, `--layer macro` with a filter that
+excludes it is the difference between a coffee and an afternoon:
+
+```bash
+# everything but the grid
+shoal-bench run --label <label> --layer macro macro/insert macro/get macro/fanout macro/transport
+
+# or the grid alone
+shoal-bench run --label <label> --layer macro macro/grid macro/skew
+```
+
+~~thirty-one workloads~~ and ~~eighty-seven workloads~~ were the counts before F13, F14 and F17
+landed, and each stayed on this page for at least one feature after it stopped being true. If a
+number here disagrees with `shoal-bench list --layer macro | wc -l`, that command is right.
 `--scale smoke --runs 2` cuts the data two orders of magnitude and is what you want while
 iterating on a workload; the scale is recorded in the artifact, and a `smoke` capture is never
 compared against a `full` one.
@@ -185,7 +199,7 @@ outlying value with a **±0.2%** interval, tighter than any of the runs it disag
 proportionally worse the faster the benchmark: **±9% below 1 µs, ±5% above**. And **a single
 capture is not evidence** — confirm any apparent win by repeating the whole capture; two
 captures agreeing is the evidence. See
-[what the micro layer can actually resolve](performance-baseline.md#what-the-micro-layer-can-actually-resolve).
+[what the micro layer can actually resolve](baseline.md#what-the-micro-layer-can-actually-resolve).
 
 Criterion's own `--save-baseline` / `--baseline` work and are useful mid-session, but they live
 in `target/criterion`, which is not committed and does not survive `cargo clean` —
@@ -306,7 +320,7 @@ shoal-bench promote <label>
 
 which refuses a partial capture, refuses one that no longer describes the current code, and
 copies the capture's provenance alongside the baseline so a later comparison can say where it
-came from. Then add a row to [Performance Baseline](performance-baseline.md) carrying **both**
+came from. Then add a row to [Performance Baseline](baseline.md) carrying **both**
 deltas.
 
 ## What has been captured, and whether it still holds
@@ -325,18 +339,25 @@ the list of sources each layer measures lives in `docs/perf/sources.json` and is
 hand. A path missing from it produces a capture wrongly called *unaffected* — which still shows
 the commit distance — and never one wrongly called fresh.
 
-## The results page
+## The results pages
 
 ```bash
-shoal-bench render          # regenerate docs/src/operations/benchmark-results.md
-shoal-bench render --check  # fail if the committed page is out of date, writing nothing
+shoal-bench render          # regenerate every page under docs/src/performance/
+shoal-bench render --check  # fail if any committed page is out of date, writing nothing
 ```
 
-[Benchmark Results](benchmark-results.md) is generated from the committed artifacts and is
-committed itself, because `create-missing = false` means the book will not build without it and
-because regenerating it needs this machine. `--check` is what says whether it is current; it fails
-after any commit, because the page states which commit it was rendered against and every staleness
-verdict on it is relative to that commit.
+Ten pages, listed on [Performance](overview.md), generated from the committed artifacts and
+committed themselves — `create-missing = false` means the book will not build without them and
+regenerating them needs this machine. **`render` writes all ten or none**: a tree holding four
+current pages and six stale ones is worse than one holding ten stale ones, because nothing on a
+page says which kind it is. `--check` reports every page that is out of date rather than the first,
+and it fails after any commit, because each page states which commit it was rendered against and
+every staleness verdict on it is relative to that commit.
+
+Which page a workload lands on is decided by its **family**, in
+`shoal-bench/src/render/family.rs`. A workload belonging to no family fails a test rather than
+landing on no page, which is [F18](../features/results-pages.md)'s whole mechanism: before it, a
+new sweep appeared on the one big page as an unexplained chart and nobody noticed.
 
 ## Getting a number you can trust
 
@@ -451,14 +472,14 @@ This is the measurement that made the micro layer necessary: no amount of statis
 [Optimizations](../appendix/optimizations.md) claims less than that.
 
 At full scale with a warmup and deterministic shard placement it is now **10.5%**
-([Performance Baseline](performance-baseline.md#end-to-end--retired)), which is better and is still not
+([Performance Baseline](baseline.md#end-to-end--retired)), which is better and is still not
 enough to adjudicate most of that backlog.
 
 > Both tables above were taken on **btrfs**, on 4 shards, before the storage filesystem moved
 > to XFS and before shard placement was made deterministic. They are kept because the shapes
 > they show — the Little's Law knee, and the size of the spread — are properties of the
 > harness rather than of the filesystem. Do not compare their absolute numbers against anything
-> current. Post-migration numbers are in [Performance Baseline](performance-baseline.md).
+> current. Post-migration numbers are in [Performance Baseline](baseline.md).
 
 ### A baseline that loads and is not comparable
 
@@ -484,7 +505,7 @@ silently runs on defaults. Confirm the config printed at startup is the one you 
 > was never a meaningful variance source here, because `amd-pstate-epp` reaches boost clocks
 > almost immediately under the sustained load both layers apply, and because the macro workload
 > waits on `fdatasync` rather than on the CPU. See
-> [what the governor changed](performance-baseline.md#what-the-governor-changed).
+> [what the governor changed](baseline.md#what-the-governor-changed).
 
 The governor is still pinned to `performance` and listed as a prerequisite — not because it
 helps, but because it costs nothing and removes a variable from the environment the baseline
@@ -559,4 +580,4 @@ Things the harness still does not do, which bound what you can conclude from it:
   controller.
 - **One machine, one filesystem, one storage device**, and that device is an Intel Optane whose
   fsync latency is not representative. See
-  [Performance Baseline](performance-baseline.md#hardware).
+  [Performance Baseline](baseline.md#hardware).

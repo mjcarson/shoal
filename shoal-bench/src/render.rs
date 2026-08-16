@@ -1,11 +1,15 @@
-//! Turning the artifacts into the book's benchmark results page
+//! Turning the artifacts into the book's performance pages
 //!
-//! The page lands at `docs/src/operations/benchmark-results.md` and is committed. See
-//! [`page`] for why it has to be, and for the four rules that keep `--check` meaningful.
+//! The pages land under `docs/src/performance/` and are committed. See [`page`] for why they have
+//! to be, and for the four rules that keep `--check` meaningful, and [`pages`] for why there is
+//! more than one of them.
 
+pub mod arms;
 pub mod badges;
 pub mod chart;
+pub mod family;
 pub mod page;
+pub mod pages;
 pub mod tables;
 
 use std::path::PathBuf;
@@ -15,69 +19,124 @@ use anyhow::{Context, Result, bail};
 use crate::cli::RenderArgs;
 use crate::fingerprint::{self, Facts, RealFacts};
 use crate::registry::Layer;
+use crate::render::family::Surface;
 use crate::render::page::{Page, Snapshot};
+use crate::render::pages::PAGES;
 use crate::stale;
 use crate::store::Store;
 
-/// Where the generated page goes
-pub const PAGE_PATH: &str = "docs/src/operations/benchmark-results.md";
+/// Where the generated pages go, relative to the repository root
+///
+/// Each page's own path is on [`Surface`]; this is the directory they share, which is what a
+/// `--out` override replaces and what the dirty check has to ignore.
+pub const PAGE_DIR: &str = "docs/src/performance";
 
 /// Runs `shoal-bench render`
+///
+/// Writes every page, or checks every page, and never a subset of either: a tree holding four
+/// current pages and six stale ones is worse than one holding ten stale ones, because nothing on
+/// the page says which kind it is.
 ///
 /// # Arguments
 ///
 /// * `store` - The artifact tree to work in
 /// * `args` - What the caller asked for
 pub fn run_render(store: &Store, args: &RenderArgs) -> Result<i32> {
-    // gather everything the page is built from, then build it
+    // gather everything every page is built from, once
     let page = gather(store, args)?;
-    let rendered = page::build(&page)?;
-    let target = args
+    let root = args
         .out
         .clone()
-        .unwrap_or_else(|| store.root().join(PAGE_PATH));
-    // a check regenerates into memory and compares, writing nothing
+        .unwrap_or_else(|| store.root().join(PAGE_DIR));
+    // build them all before writing any, so a page that fails to render does not leave half the
+    // set rewritten and the other half describing an older capture
+    let mut built: Vec<(PathBuf, String)> = Vec::with_capacity(PAGES.len());
+    for spec in PAGES {
+        let rendered = (spec.build)(&page)
+            .with_context(|| format!("rendering {}", spec.surface.title()))?;
+        built.push((page_path_in(&root, spec.surface), rendered));
+    }
     if args.check {
-        return check(&target, &rendered);
+        return check_all(&built);
     }
-    if let Some(parent) = target.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
+    std::fs::create_dir_all(&root)
+        .with_context(|| format!("creating {}", root.display()))?;
+    let mut bytes = 0;
+    for (target, rendered) in &built {
+        std::fs::write(target, rendered)
+            .with_context(|| format!("writing {}", target.display()))?;
+        bytes += rendered.len();
     }
-    std::fs::write(&target, &rendered)
-        .with_context(|| format!("writing {}", target.display()))?;
     println!(
-        "wrote {} ({} captures, {} bytes)",
-        target.display(),
-        page.statuses.len(),
-        rendered.len()
+        "wrote {} pages under {} ({} captures, {bytes} bytes)",
+        built.len(),
+        root.display(),
+        page.statuses.len()
     );
     Ok(0)
 }
 
-/// Compares a freshly rendered page against the committed one
+/// Where one page is written, under a root directory
+///
+/// # Arguments
+///
+/// * `root` - The directory the pages are written into
+/// * `surface` - Which page is wanted
+fn page_path_in(root: &std::path::Path, surface: Surface) -> PathBuf {
+    // the surface knows its own path relative to the repository, and the file name is the part
+    // that survives an `--out` pointing somewhere else entirely
+    let name = surface
+        .path()
+        .rsplit_once('/')
+        .map(|(_, name)| name)
+        .unwrap_or(surface.path());
+    root.join(name)
+}
+
+/// Compares every freshly rendered page against the committed one
+///
+/// # Arguments
+///
+/// * `built` - Each page's path and what it would be now
+fn check_all(built: &[(PathBuf, String)]) -> Result<i32> {
+    let mut stale: Vec<String> = Vec::new();
+    for (target, rendered) in built {
+        match check_one(target, rendered) {
+            Ok(()) => println!("{} is up to date", target.display()),
+            Err(detail) => stale.push(detail),
+        }
+    }
+    if stale.is_empty() {
+        return Ok(0);
+    }
+    // every stale page is named, rather than the first one found, so one run says how much work
+    // there is rather than one page's worth of it
+    bail!(
+        "{} of {} pages are out of date. Run `shoal-bench render`.\n\n{}\n\nThis is expected \
+         after a commit: every page states which commit it was rendered against, and the staleness \
+         verdicts on them are relative to that commit.",
+        stale.len(),
+        built.len(),
+        stale.join("\n")
+    )
+}
+
+/// Whether one committed page is what a fresh render would produce
 ///
 /// # Arguments
 ///
 /// * `target` - The committed page
 /// * `rendered` - What the page would be now
-fn check(target: &std::path::Path, rendered: &str) -> Result<i32> {
-    // a page that does not exist is as out of date as one that differs
-    let committed = match std::fs::read_to_string(target) {
-        Ok(body) => body,
-        Err(_) => {
-            bail!(
-                "{} does not exist. Run `shoal-bench render` to create it - the book will not \
-                 build without it, because create-missing is off.",
-                target.display()
-            );
-        }
+fn check_one(target: &std::path::Path, rendered: &str) -> std::result::Result<(), String> {
+    // a page that does not exist is as out of date as one that differs, and worse: the book will
+    // not build without it, because create-missing is off
+    let Ok(committed) = std::fs::read_to_string(target) else {
+        return Err(format!("  {} does not exist", target.display()));
     };
     if committed == rendered {
-        println!("{} is up to date", target.display());
-        return Ok(0);
+        return Ok(());
     }
-    // say where they first differ, since the page is mostly svg and a plain "they differ" would
+    // say where they first differ, since a page is mostly svg and a plain "they differ" would
     // leave nowhere to start
     let at = committed
         .lines()
@@ -91,12 +150,7 @@ fn check(target: &std::path::Path, rendered: &str) -> Result<i32> {
             rendered.lines().count()
         ),
     };
-    bail!(
-        "{} is out of date ({detail}). Run `shoal-bench render`.\n\nThis is expected after a \
-         commit: the page states which commit it was rendered against, and the staleness verdicts \
-         on it are relative to that commit.",
-        target.display()
-    )
+    Err(format!("  {} ({detail})", target.display()))
 }
 
 /// Reads every artifact the page is built from
@@ -110,14 +164,14 @@ fn gather(store: &Store, args: &RenderArgs) -> Result<Page> {
     // what the tree is now, which is what every verdict on the page is relative to
     let now = fingerprint::current(store, &facts, false)?;
     let (_, statuses) = stale::status_of(store, &facts, &[])?;
-    // The page is an output of this command, not an input to it. Counting it would make the page
-    // report itself as an uncommitted change the moment it was written, so rendering twice would
-    // produce two different files and `--check` could never pass.
+    // The pages are outputs of this command, not inputs to it. Counting them would make every
+    // page report itself as an uncommitted change the moment it was written, so rendering twice
+    // would produce two different sets and `--check` could never pass.
     let dirty = facts
         .git_dirty()
         .unwrap_or_default()
         .iter()
-        .any(|path| path.as_path() != std::path::Path::new(PAGE_PATH));
+        .any(|path| !path.starts_with(PAGE_DIR));
     // every capture, and whatever each of them produced
     let mut timeline: Vec<Snapshot> = Vec::new();
     for label in store.labels()? {
@@ -221,13 +275,14 @@ fn repeat_groups(store: &Store) -> Result<Vec<(String, Vec<(f64, f64)>)>> {
     Ok(groups)
 }
 
-/// Where the page is written, for the tests and for the promote command's messages
+/// Where one page is written, for the tests and for the promote command's messages
 ///
 /// # Arguments
 ///
 /// * `store` - The artifact tree to work in
-pub fn page_path(store: &Store) -> PathBuf {
-    store.root().join(PAGE_PATH)
+/// * `surface` - Which page is wanted
+pub fn page_path(store: &Store, surface: Surface) -> PathBuf {
+    store.root().join(surface.path())
 }
 
 #[cfg(test)]

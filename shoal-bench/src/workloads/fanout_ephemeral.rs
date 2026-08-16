@@ -157,6 +157,8 @@ impl Workload for FanoutEphemeral {
                 keys: partitions,
                 concurrency: CONCURRENCY,
                 clients: None,
+                // not a mixture, a width distribution or a skewed access pattern
+                ..ScaleFacts::default()
             },
             warmup: (self.queries(scale) / 20).max(10),
         }

@@ -8,7 +8,7 @@ and `scripts/compare.sh` — which captured JSON into `docs/perf/` and stopped t
 followed from that, and none of them was a scripting problem that a better script would have
 fixed:
 
-- **Nothing read the artifacts back.** `operations/performance-baseline.md` carried around twelve
+- **Nothing read the artifacts back.** `../performance/baseline.md` carried around twelve
   tables of numbers transcribed by hand out of files sitting in the repository.
 - **Only the micro layer could be compared.** `compare.sh` diffed two maps of criterion estimates.
   The layer that measures what a client actually experiences was captured five times per run,
@@ -36,7 +36,7 @@ be skipped."
 | `run --label <name> [FILTER…]` | captures the selected layers and stores them with their provenance |
 | `compare <label>` | judges a capture against the frozen baseline and the trailing one |
 | `status` | says what has been captured and whether each layer still describes the current code |
-| `render` | regenerates [Benchmark Results](../operations/benchmark-results.md); `--check` verifies it |
+| `render` | regenerates every page under [Performance](../performance/overview.md); `--check` verifies them |
 | `promote <label>` | advances a baseline to a capture |
 
 **Filtering works the way `cargo test` does.** A positional argument is a substring of a
@@ -140,7 +140,7 @@ artifact, so a field added to `BenchResult` fails a test that names it.
 work: CSS variables in SVG presentation attributes are not reliably supported. It would also have
 put the theme mapping in Rust string constants rather than in a reviewable stylesheet.
 
-**`{{#include}}` fragments in `performance-baseline.md`.** Converting that page's hand-transcribed
+**`{{#include}}` fragments in `../performance/baseline.md`.** Converting that page's hand-transcribed
 tables to generated fragments was the obvious way to remove the duplication, and was rejected for
 three reasons. The page is a narrative about a frozen moment, pinned to `B1` on purpose. It is full
 of strikethrough annotations that a generator would either destroy or need to model. And decisively:
@@ -188,12 +188,17 @@ with a ±0.2% interval.
 - **plotters is built without a font backend**, so it estimates text extents rather than measuring
   them. Labels can collide when a chart's data changes shape; `tests/chart_geometry.rs` catches a
   collision in a column and gross overflow, and cannot catch everything a pair of eyes would.
-- **The generated page's diffs are unreadable.** It is 110 KB, most of it SVG path data. Reviewers
-  are expected to read `render --check` and the tables, not the hunks. It is deliberately *not*
-  marked `-diff` in `.gitattributes`, because that would hide real changes too.
-- **`render --check` fails after any commit.** The page states which commit it was rendered against
-  and every staleness verdict on it is relative to that commit, so this is the page reporting that it
-  no longer describes the tree — but it does mean the check cannot be a blanket CI gate.
+- **The generated diffs are unreadable.** ~~It is 110 KB, most of it SVG path data.~~ It reached
+  **1.1 MB** on one page before [F18](results-pages.md) split it into ten and dropped the
+  per-workload chart wall; it is 169 KB now, and still mostly SVG path data. Reviewers are expected
+  to read `render --check` and the tables, not the hunks. It is deliberately *not* marked `-diff` in
+  `.gitattributes`, because that would hide real changes too.
+- **`render --check` fails after any commit.** Every page states which commit it was rendered
+  against and every staleness verdict on it is relative to that commit, so this is a page reporting
+  that it no longer describes the tree — but it does mean the check cannot be a blanket CI gate.
+- **`render` writes every page or none.** A tree holding four current pages and six stale ones is
+  worse than one holding ten stale ones, because nothing on a page says which kind it is. There is
+  deliberately no `--page` flag.
 - **A partial capture cannot be promoted** without `--force-partial`.
 - **Three of the eight series colours fall below 3:1 contrast on the book's light themes**, and four
   on `rust`. That is permitted only under the relief rule, which holds because every chart on the
@@ -287,9 +292,9 @@ same plan a real capture executes, with the execution left out. Execution was ve
 
 ## Related
 
-- [Benchmarking](../operations/benchmarking.md) — the runbook, rewritten around these commands
-- [Benchmark Results](../operations/benchmark-results.md) — what this feature generates
-- [Performance Baseline](../operations/performance-baseline.md) — the frozen `B1` capture
+- [Benchmarking](../performance/benchmarking.md) — the runbook, rewritten around these commands
+- [Benchmark Results](../performance/overview.md) — what this feature generates
+- [Performance Baseline](../performance/baseline.md) — the frozen `B1` capture
 - [F3, the performance harness](performance-harness.md) — the layers this drives
 - [F6, the stage breakdown](stage-breakdown.md) — the fourth layer, whose artifact this finally commits
 - [Known issue 53](../appendix/known-issues.md) — `hotpath`'s unnormalised `percent_total`

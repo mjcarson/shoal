@@ -34,7 +34,7 @@ networking:
 
 **A config with no `tls:` section behaves exactly as every server did before this**, which is what
 keeps the benchmark harness, the integration suite and the frozen
-[baseline](../operations/performance-baseline.md) comparable. The same shape `auth:` already had.
+[baseline](../performance/baseline.md) comparable. The same shape `auth:` already had.
 
 A client says what it trusts:
 
@@ -179,7 +179,7 @@ that starts, listens, and serves every query in clear.
 
 **Measured.** `f14-encryption` is the first capture to hold the control pair, and the first to hold
 the sweeps that say how the cost *behaves* rather than merely whether it exists. The charts are on
-[Benchmark Results](../operations/benchmark-results.md#what-encryption-costs); what follows is what
+[Benchmark Results](../performance/transport.md#what-encryption-costs); what follows is what
 they mean.
 
 ### The row-width prediction was right
@@ -299,7 +299,7 @@ the skip prints and why the server refuses to start rather than falling back.
 - [D4. Encryption in transit](../direction/encryption.md) — the design, and the correction to it
 - [D3. Authentication](../direction/authentication.md) — mTLS, and the resumption mitigation this
   took away
-- [D1. The transport](transport.md) — QUIC would have supplied this, and its stream reassembly is
+- [D1. The transport](../direction/transport.md) — QUIC would have supplied this, and its stream reassembly is
   the copy this avoided
 - [F12. Authentication](authentication.md) — the exchange this now runs underneath
 - [F13. Transport workloads](transport-workloads.md) — the plaintext half of the control pair

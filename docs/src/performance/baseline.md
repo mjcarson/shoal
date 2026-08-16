@@ -5,7 +5,7 @@
 > changes. Its numbers are pinned to `B1` on purpose and are not updated.
 >
 > The **current** numbers, and which of them are stale, are on
-> [Benchmark Results](benchmark-results.md), which is generated from the committed artifacts.
+> [Benchmark Results](overview.md), which is generated from the committed artifacts.
 
 What Shoal currently does, on known hardware, so that a later change can be shown to have
 helped rather than argued to have. [Benchmarking](benchmarking.md) is how to run one;
@@ -67,7 +67,7 @@ Captured 2026-08-09 by ~~`scripts/bench.sh B1-performance`~~ — the shell harne
 [F7](../features/bench-runner.md) replaced with `shoal-bench run --label B1-performance` — under
 the `performance` governor. Frozen at `docs/perf/baselines/B1-performance.json`; the raw run is in
 `docs/perf/runs/`. It predates provenance recording, so it carries no `.meta.json` and is reported
-as having **no provenance** on [Benchmark Results](benchmark-results.md); the hardware section
+as having **no provenance** on [Benchmark Results](overview.md); the hardware section
 above is the only record of what it ran on.
 
 The earlier `powersave` capture is kept as `B0-powersave.*` — not as a superseded baseline but
@@ -94,6 +94,14 @@ two, so the governor is the only variable.
 > a workload named `macro/tmdb`, so the seven captures from this era still chart and still compare
 > **against each other**. A capture taken after F8 shares no workload with them, and
 > `shoal-bench compare` says so rather than printing an empty table.
+>
+> **[F17](../features/workload-grid.md) is not that replacement either, and is the nearest thing
+> to one.** The grid does blend reads and writes, which is the one property this workload had that
+> nothing between F8 and F17 did. It is still not comparable to these numbers, for every reason
+> above — but where this workload's ratio was whatever the dataset happened to imply, the grid's is
+> a declared axis, and where this one's row was TMDB's twenty-four-field shape, the grid's is one
+> payload whose width is swept. The lesson survives the replacement: **a blended number is only
+> worth having when what was blended is stated.**
 >
 > **The micro half of B1 below is unaffected.** It never touched the `tmdb` workload, and remains
 > the frozen baseline.
@@ -409,7 +417,7 @@ precondition that lives outside the repository.
   not been captured.~~ **They have been**, in `f14-encryption`, along with forty-eight sweep arms
   across row width, load depth and client count. Those numbers live in
   [F14](../features/encryption-in-transit.md#performance) and
-  [Benchmark Results](benchmark-results.md#what-encryption-costs), not here, and they are not
+  [Benchmark Results](transport.md#what-encryption-costs), not here, and they are not
   comparable with anything above — which is the point of keeping them apart.
 - **One machine, one filesystem, one device**, and that device is an Optane.
 - **No btrfs counterpart.** The migration happened before any baseline existed, so there is no

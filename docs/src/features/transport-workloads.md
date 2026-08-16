@@ -204,5 +204,5 @@ and +77.7% at a MiB.
 - [D4. Encryption in transit](../direction/encryption.md) — the page these unblock, and why the
   size axis exists
 - [Direction](../direction/overview.md) — the chapter that is step-0 blocked on client measurement
-- [Benchmarking](../operations/benchmarking.md) — how to run them
+- [Benchmarking](../performance/benchmarking.md) — how to run them
 - [Optimizations](../appendix/optimizations.md) — O28 and O30, which these make adjudicable

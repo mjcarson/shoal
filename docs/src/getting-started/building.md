@@ -110,7 +110,7 @@ cargo bench -p shoal --features bench                     # the micro benchmarks
 ```
 
 See [Observability](../operations/observability.md) for what `hotpath` reports and
-[Benchmarking](../operations/benchmarking.md) for how to run either.
+[Benchmarking](../performance/benchmarking.md) for how to run either.
 
 ## Running the example
 
@@ -127,11 +127,11 @@ filter, and the same query written in SHQL.
 
 The benchmark harness it used to be is now twenty-three purpose-built workloads in `shoal-bench`.
 See
-[Benchmarking](../operations/benchmarking.md) for how to run them and what the numbers mean.
+[Benchmarking](../performance/benchmarking.md) for how to run them and what the numbers mean.
 
 Note that the checked-in `shoal.yml` points storage at `/opt/shoal`, which must exist and be
 writable. It is also the benchmark configuration, so changing it invalidates the recorded
-baseline ([Performance Baseline](../operations/performance-baseline.md)). It used to carry a
+baseline ([Performance Baseline](../performance/baseline.md)). It used to carry a
 typo that silently disabled core exclusion; a misspelled resource key now fails the load
 instead ([Configuration](configuration.md#the-exluded_cores-typo--fixed)).
 

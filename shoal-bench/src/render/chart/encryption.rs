@@ -541,6 +541,8 @@ mod tests {
                 keys: 100,
                 concurrency: depth,
                 clients: Some(clients),
+                // not a mixture, a width distribution or a skewed access pattern
+                ..ScaleFacts::default()
             },
             conf: Some(ConfFacts {
                 shards: 12,

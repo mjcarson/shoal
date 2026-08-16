@@ -26,6 +26,7 @@
 
 pub mod fanout;
 pub mod fanout_ephemeral;
+pub mod grid;
 pub mod get_ephemeral;
 pub mod encryption;
 pub mod harness;
@@ -93,6 +94,15 @@ pub fn all() -> Vec<Box<dyn Workload>> {
     // across row width, load depth and client count rather than merely whether it exists
     built.extend(
         encryption::Encryption::all()
+            .into_iter()
+            .map(|workload| Box::new(workload) as Box<dyn Workload>),
+    );
+    // the grid, appended last and for the reason every block above it was: it is seventy four arms
+    // and it is the widest thing here, so declaring it anywhere but the end would re-port every
+    // workload that came before it. it is also the most expensive phase of a capture, which is the
+    // other reason it belongs at the end - the cheap, isolating workloads are answered first
+    built.extend(
+        grid::Grid::all()
             .into_iter()
             .map(|workload| Box::new(workload) as Box<dyn Workload>),
     );

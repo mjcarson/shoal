@@ -22,7 +22,7 @@ run 3  cpus 2,4,7,11,13,14,16,18,20,23,24,26,27,28,29,30 -> cores 2,4,7,11,13,14
 Run 1 puts two shards on each of cores 2, 5, 8, 11, 12, 13 and none at all on cores 0, 6, 7,
 14. Run 3 doubles up cores 2, 4, 7, 11, 13, 14. The set is different every time, and the
 docs' claim that `cores: 16` "puts one shard thread on every physical core"
-([Benchmarking](../../operations/benchmarking.md)) was never true.
+([Benchmarking](../../performance/benchmarking.md)) was never true.
 
 ## Cause
 
@@ -135,7 +135,7 @@ was the more widely deployed spelling.
   schedulable, which is worse than not excluding it at all.
 - **New config structs get `deny_unknown_fields`.** The point is the class, not the key.
 - **`shoal.yml` stays committed**, and changing it invalidates the recorded baseline
-  ([Performance Baseline](../../operations/performance-baseline.md)).
+  ([Performance Baseline](../../performance/baseline.md)).
 
 ## Still open
 
@@ -161,6 +161,6 @@ nothing.
 ## Related
 
 - [F3. A three layer performance harness](../../features/performance-harness.md) — this was found while building it
-- [Performance Baseline](../../operations/performance-baseline.md) — the numbers this defect would have invalidated
-- [Benchmarking](../../operations/benchmarking.md) — the core layout section this corrects
+- [Performance Baseline](../../performance/baseline.md) — the numbers this defect would have invalidated
+- [Benchmarking](../../performance/benchmarking.md) — the core layout section this corrects
 - [Configuration](../../getting-started/configuration.md) — where the typo was documented as a hazard

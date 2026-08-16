@@ -159,7 +159,7 @@ reconnect path was touched.
   the point, but means the setting has to be configurable per listener and default to off until a
   deployment opts in. The same requirement [D4](encryption.md) has, for the same reason: the
   benchmark harness and the integration tests must be able to keep connecting without credentials
-  or the [frozen baseline](../operations/performance-baseline.md) becomes incomparable. **Built as
+  or the [frozen baseline](../performance/baseline.md) becomes incomparable. **Built as
   described**, though the granularity is per server rather than per listener, because there is one
   listener.
 - **`shoalctl` grows a credential surface** — somewhere to type a password or point at a
@@ -202,7 +202,7 @@ there is any notion of a principal would be a design for nothing.
 
 Connection establishment cost, which no existing benchmark reports. The macro layer measures
 queries against an already-warm pool, so a handshake that costs milliseconds would be invisible to
-every number in [Benchmark Results](../operations/benchmark-results.md). If this is built, the
+every number in [Benchmark Results](../performance/overview.md). If this is built, the
 thing to add is not a query workload but a *connect* workload — time to first successful query from
 a cold client — and it is the one measurement in this chapter that the ~~planned~~ `transport/*`
 workloads would still not provide. **They are now built and this prediction held**:

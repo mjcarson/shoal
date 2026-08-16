@@ -407,6 +407,99 @@ where
     Ok(measured)
 }
 
+/// Runs a mixture of reads and writes, keeping each kind's latencies apart
+///
+/// The same bounded-concurrency measurement [`drive_per_query_across`] takes, with two differences,
+/// both of which exist because the queries are not all the same kind:
+///
+/// - **The build closure names the operation it built.** A single `op` name would pool a read's
+///   service time with a write's, and the pooled p99 of a 70/30 mixture is a number describing
+///   neither - which is exactly the blending
+///   [F8](../../../../docs/src/features/purpose-built-workloads.md) removed. The two land under
+///   `read` and `write` and are never added together.
+/// - **Queries are counted as well as rows.** `retrieved` and `inserted` count *rows*, and a read
+///   answering with one row and a write acknowledging one are not comparable to a fan-out query
+///   answering with two hundred and fifty six. `reads` and `writes` count queries, which is what
+///   [`ops_per_sec`](crate::model::macro_layer::WorkloadCapture::ops_per_sec) sums.
+///
+/// # Arguments
+///
+/// * `clients` - The clients to spread the slots across, in order
+/// * `concurrency` - How many queries may be outstanding at once in total, one per slot
+/// * `total` - How many queries to send in all
+/// * `warmup` - How many to send before sampling starts
+/// * `build` - Builds the query at a given index, and names the operation it is
+///
+/// # Invariants
+///
+/// **The operation name the closure returns must be one the caller can find again.** It is the key
+/// in the artifact's `ops` map and therefore the key a comparison joins on, so it is as much a
+/// stable identifier as the workload's own name is.
+pub async fn drive_mixed_per_query<F, Q>(
+    clients: &[Arc<Shoal<BenchClient>>],
+    concurrency: u32,
+    total: u64,
+    warmup: u64,
+    build: F,
+) -> Result<Measurement>
+where
+    F: Fn(u64) -> (&'static str, Q) + Send + Sync + 'static,
+    Q: Into<crate::workloads::schema::BenchQueryKinds> + Send,
+{
+    assert!(!clients.is_empty(), "a run needs at least one client");
+    // one shared cursor, so a slow slot does not leave the others idle at the end of the run
+    let next = Arc::new(AtomicU64::new(0));
+    let build = Arc::new(build);
+    let mut slots = tokio::task::JoinSet::new();
+    for slot in 0..concurrency.max(1) {
+        // deal this slot to a client, walking them in turn so the load is spread evenly
+        let client = clients[slot as usize % clients.len()].clone();
+        let next = next.clone();
+        let build = build.clone();
+        slots.spawn(async move {
+            let mut measured = Measurement::default();
+            loop {
+                // claim the next query, and stop when they have all been claimed
+                let index = next.fetch_add(1, Ordering::Relaxed);
+                if index >= total {
+                    break;
+                }
+                // the index decides both which query this is and which kind it is, so the mixture
+                // is a function of the index rather than of which slot got there first. two runs
+                // of the same arm therefore send the same queries in the same proportions
+                let (op, query) = build(index);
+                // one timestamp either side of one query, which is what makes this a service time
+                let started = Instant::now();
+                let response = client.send_one(query).await.context("a query failed")?;
+                let elapsed = started.elapsed();
+                // count the queries by what they were, and the rows by what came back
+                match response.kind() {
+                    ResponseActionNames::Insert => {
+                        measured.count("writes", 1);
+                        measured.count("inserted", 1);
+                    }
+                    ResponseActionNames::Get => {
+                        measured.count("reads", 1);
+                        measured.count("retrieved", rows_in(&response));
+                    }
+                    _ => {}
+                }
+                // the warmup is counted on the claimed index so every slot agrees where it ends
+                if index >= warmup {
+                    measured.record(op, elapsed);
+                }
+            }
+            Ok::<Measurement, anyhow::Error>(measured)
+        });
+    }
+    // pool what every slot gathered, which pools each operation under its own name
+    let mut measured = Measurement::default();
+    while let Some(slot) = slots.join_next().await {
+        measured.absorb(slot.context("a query slot panicked")??);
+    }
+    Ok(measured)
+}
+
 /// How many rows a response carried
 ///
 /// # Arguments

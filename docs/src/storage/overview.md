@@ -195,11 +195,11 @@ Set `durability: Async` (see [Configuration](../getting-started/configuration.md
 write can be acknowledged and then lost to power loss.
 
 If you want to know what the fsync actually costs on your hardware, measure it rather than
-guessing — [Benchmarking](../operations/benchmarking.md) covers how, and why btrfs is a poor
+guessing — [Benchmarking](../performance/benchmarking.md) covers how, and why btrfs is a poor
 host for this write path. **Measure it on your own hardware, not from the numbers here**: the
 development machine writes to an Intel Optane SSD, whose fsync latency is roughly an order of
 magnitude below a consumer NVMe, so it is close to the best case this decision has
-([Performance Baseline](../operations/performance-baseline.md#hardware)). An `Async` versus
+([Performance Baseline](../performance/baseline.md#hardware)). An `Async` versus
 `Fsync` comparison has not been captured yet.
 
 Also solid: the archive map's snapshot uses a proper write-temp → sync → rename → fsync parent
@@ -244,7 +244,7 @@ block another on IO. The cost is that shard count is baked into the layout
   load, but a single isolated write pays a full write plus fsync round trip. This is measured:
   `stream::write_helper`, the DMA write and the sync behind it, averages **32.6 ms per call**
   against 344 ns for the partition insert it is persisting
-  ([Performance Baseline](../operations/performance-baseline.md#profile--where-the-time-goes)).
+  ([Performance Baseline](../performance/baseline.md#profile--where-the-time-goes)).
   The write path waits on storage, not on CPU.
 - The filesystem matters more than it looks. **Shoal's storage is now on XFS**; it was on
   btrfs, which is copy-on-write and commits a log tree on every `fdatasync`, making it a poor

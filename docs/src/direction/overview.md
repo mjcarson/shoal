@@ -80,8 +80,9 @@ entry until a benchmark exists that would show the difference. This part inherit
 most pages have to answer *nothing can adjudicate this yet* — because `client.rs` carries no
 `tracing` spans and no `hotpath` scopes at all
 ([O28](../appendix/optimizations.md#o28-the-client-takes-two-guards-on-its-response-map-for-every-query-it-sends)),
-and ~~the `transport/*`, `wire_codec`, and `routing` workloads that would give the client a number
-are unbuilt~~ — `transport/*` is **built** ([F13](../features/transport-workloads.md)), `wire_codec`
+~~and `client.rs` carries no `tracing` spans and no `hotpath` scopes at all~~ — it carries both
+since [F16](../features/client-builder.md) — and ~~the `transport/*`, `wire_codec`, and `routing`
+workloads that would give the client a number are unbuilt~~ — `transport/*` is **built** ([F13](../features/transport-workloads.md)), `wire_codec`
 and `routing` are not ([TODOs](../appendix/todos.md#benchmark-coverage-the-harness-does-not-have)).
 Saying so on every page is repetitive on purpose: it is the same missing thing each time, which is
 what makes it step 0 below. **What F13 changed is which half is missing.** The client now has a
@@ -104,7 +105,7 @@ since `XL` *means* "reaches the wire format, the on-disk format, or the client".
 | D3 | [Authentication](authentication.md) | mTLS identity as the primary, SCRAM-SHA-256 for deployments with no PKI. **Half built** — [F12](../features/authentication.md) is the SCRAM half; mTLS waits on D4 |
 | D4 | [Encryption in transit](encryption.md) | ~~rustls decrypting in place into the response buffer~~ — **no released rustls does that**; kTLS, with rustls doing only the handshake, so TLS does not cost the zero-copy path. **Built** as [F14](../features/encryption-in-transit.md) |
 | D5 | [Runtime portability](runtimes.md) | Split the crate first — the client is not tokio-portable, it is *glommio-infected*, and that is the real defect |
-| D6 | [A production connection pool](connection-pool.md) | Deadlines, real health checks, a builder, and a `Drop` — the most stability per unit of design risk |
+| D6 | [A production connection pool](connection-pool.md) | Deadlines, real health checks, a builder, and a `Drop` — the most stability per unit of design risk. **Builder half built** as [F16](../features/client-builder.md), which also closed step 0 |
 | D7 | [Shard-aware routing](shard-aware-routing.md) | Build it last, and measure the intra-node hop first, because it may be worth a microsecond |
 | D8 | [Compile-time guarantees](typed-queries.md) | A `Query::Response` associated type, and a sealed trait that deletes eighty lines of copy-pasted bounds |
 | D9 | [Lessons from other databases](prior-art.md) | Scylla, Cassandra, FoundationDB, Aerospike, Redis, TiKV, Dragonfly, Kafka — what to copy and what not to |
@@ -132,15 +133,22 @@ designed for). They are ordered by convenience here, not by necessity.
 
 Step 0 is not a `D` item, and it is the most important line on this page.
 
-**0. Instrument the client.** `tracing` spans and `hotpath` scopes in `client.rs`, and
+**0. Instrument the client. Done**, as part of [F16](../features/client-builder.md) — `tracing`
+spans and `hotpath` scopes in `client.rs`, and
 ~~the `transport/{send_one,send_batched,stream,stream_unordered}` workloads
 ([TODOs](../appendix/todos.md#benchmark-coverage-the-harness-does-not-have))~~ — **the workloads are
 done** ([F13](../features/transport-workloads.md)), at eight rather than four, because a row-width
 axis turned out to decide whether they could answer [D4](encryption.md) at all. Today every macro
-number in [Benchmark Results](../operations/benchmark-results.md) includes the client and **none of
+number in [Benchmark Results](../performance/overview.md) includes the client and **none of
 them can attribute anything to it** — the total this chapter proposes to change ~~has never been~~
-**is now** bounded, and the attribution is not. The spans are what remain, they are the cheapest
-thing on the list, and nothing below can be *attributed* until they are done.
+**is now** bounded, and ~~the attribution is not. The spans are what remain, they are the cheapest
+thing on the list, and nothing below can be *attributed* until they are done.~~ so is the
+attribution. What F16 also found is that **the spans reach nobody**: `trace::setup` has no callers
+anywhere in this workspace, so no subscriber is ever installed, the server's spans have never been
+switched on either, and `shoal.yml`'s `tracing` section configures nothing
+([item 69](../appendix/known-issues.md)). The scopes work regardless — `hotpath` does not go through
+`tracing` — so the attribution this step was for is available, and making the *spans* reach a
+collector is a separate piece of work that step 0 turned up rather than one it was.
 
 1. **[D5](runtimes.md)'s crate split.** Independent of everything else, closes [item
    54](../appendix/known-issues.md#54-shoaldb-needs-three-crates-the-caller-has-never-heard-of),
@@ -148,7 +156,12 @@ thing on the list, and nothing below can be *attributed* until they are done.
 2. **[D2](framing.md).** The keystone, and a flag day. Every later item becomes additive once it
    lands, and it is cheapest now, while the only deployments are tests, benchmarks, and `shoalctl`.
 3. **[D6](connection-pool.md).** Deadlines, health, configuration, `Drop`. The largest stability
-   return for the least design risk, and it is where the seam for D7 gets put in.
+   return for the least design risk, and it is where the seam for D7 gets put in. **The
+   configuration third is built** ([F16](../features/client-builder.md)) — the builder, the
+   endpoint list and the instrumentation — and the seam for D7 is the `PoolConfig` it introduced.
+   Deadlines and `Drop` are next; the health check waits on nothing but the work. `Cancel` was
+   **dropped from scope** on inspection, because the two things D6 said needed it had already been
+   fixed from the other end ([TODOs](../appendix/todos.md)).
 4. ~~**[D4](encryption.md), then [D3](authentication.md).** In that order, because the encryption
    decision is what makes the authentication decision.~~ **D3's SCRAM half was done first**, out of
    this order and without D4, because the ordering rested on the edge struck through above. What is

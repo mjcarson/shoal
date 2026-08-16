@@ -381,6 +381,8 @@ impl Workload for Encryption {
                 keys: rows,
                 concurrency: self.depth,
                 clients: Some(self.clients),
+                // not a mixture, a width distribution or a skewed access pattern
+                ..ScaleFacts::default()
             },
             warmup: (queries_for(self.row_bytes, scale) / 20).max(10),
         }

@@ -235,6 +235,77 @@ pub fn thousands(value: u128) -> String {
     out
 }
 
+/// Formats a byte count in binary units
+///
+/// Binary rather than decimal, and `KiB` rather than `kB`, because every width in this repository
+/// is chosen as a power of two and rendering 1024 as `1.0 kB` would make a table of exact powers
+/// look like a table of approximations.
+///
+/// # Arguments
+///
+/// * `bytes` - The number of bytes
+///
+/// # Examples
+///
+/// ```
+/// use shoal_bench::fmt::bytes;
+///
+/// assert_eq!(bytes(64), "64 B");
+/// assert_eq!(bytes(1024), "1 KiB");
+/// assert_eq!(bytes(4 * 1024 * 1024), "4 MiB");
+/// // a mixture's mean is not a round number, and is not rounded to one
+/// assert_eq!(bytes(240), "240 B");
+/// assert_eq!(bytes(786_432), "768 KiB");
+/// ```
+pub fn bytes(bytes: u64) -> String {
+    /// The units, from smallest to largest
+    const UNITS: [&str; 4] = ["B", "KiB", "MiB", "GiB"];
+    let mut value = bytes;
+    let mut unit = 0;
+    // step up a unit only while the value divides exactly, so a width that is not a whole number
+    // of kibibytes is quoted in bytes rather than rounded into a lie
+    while unit + 1 < UNITS.len() && value >= 1024 && value % 1024 == 0 {
+        value /= 1024;
+        unit += 1;
+    }
+    format!("{value} {}", UNITS[unit])
+}
+
+/// Formats a rate of bytes per second
+///
+/// Separate from [`bytes`] because a rate is never a round number of anything: `bytes` steps up a
+/// unit only when the value divides exactly, which is right for a row width chosen as a power of
+/// two and wrong for a measurement, where it leaves nine digits of false precision on the page.
+///
+/// # Arguments
+///
+/// * `per_sec` - The rate in bytes per second
+///
+/// # Examples
+///
+/// ```
+/// use shoal_bench::fmt::byte_rate;
+///
+/// assert_eq!(byte_rate(222_039_839.0), "212 MiB/s");
+/// assert_eq!(byte_rate(4_096.0), "4.0 KiB/s");
+/// assert_eq!(byte_rate(512.0), "512 B/s");
+/// ```
+pub fn byte_rate(per_sec: f64) -> String {
+    /// The units, from smallest to largest
+    const UNITS: [&str; 4] = ["B", "KiB", "MiB", "GiB"];
+    let mut value = per_sec;
+    let mut unit = 0;
+    // step up while there is a larger unit and the value is at least one of it
+    while unit + 1 < UNITS.len() && value >= 1024.0 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    // three significant figures, which is more than the measurement carries and less than a raw
+    // float would print
+    let places = if unit == 0 || value >= 100.0 { 0 } else { 1 };
+    format!("{} {}/s", fixed(value, places), UNITS[unit])
+}
+
 /// Formats a float at a fixed number of decimal places, without a signed zero
 ///
 /// `format!("{:.2}", -0.0001)` produces `-0.00`, which reads as a negative number that is not

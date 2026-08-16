@@ -164,7 +164,7 @@ the case where a deployment connects by address to a certificate carrying a host
 **Omitting this block requires nothing of a client**, which is what every deployment before
 [F12](../features/authentication.md) was and what the benchmark config still is — `shoal.yml` in
 the repository root has no `auth` block on purpose, because turning it on would change what the
-[frozen baseline](../operations/performance-baseline.md) measured.
+[frozen baseline](../performance/baseline.md) measured.
 
 Setting `required: true` refuses every client that cannot do a mechanism this server accepts,
 including one built before authentication existed. A client opts in with

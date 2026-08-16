@@ -207,6 +207,8 @@ mod tests {
                 keys: 400_000,
                 concurrency: 4096,
                 clients: None,
+                // not a mixture, a width distribution or a skewed access pattern
+                ..ScaleFacts::default()
             },
             conf: None,
             counters,

@@ -40,8 +40,8 @@ all eight had drifted.
 
 | Location | TODO | What finishing it involves |
 | --- | --- | --- |
-| `client.rs:82` | `implement a ping/pong type request?` | `is_valid` calls `peer_addr()`, which cannot detect a dead peer. ~~Needs a message-type field the wire format does not have~~ — the format has one since [F10](../features/framing-and-protocol-evolution.md), and `Ping` and `Pong` are message types 7 and 8 with nothing behind them. What is left is a send, a handler, and a deadline: [D6](../direction/connection-pool.md#health-checks-that-work). No longer a flag day. |
-| `client.rs:1302` | `make it so we don't need to do this` | `ShoalQueryStream::send` overwrites `queries.id` on every bundle. The stream's id should be set at construction. |
+| `shoal-client/src/client.rs`, `is_valid` | `implement a ping/pong type request?` | `is_valid` calls `peer_addr()`, which cannot detect a dead peer. ~~Needs a message-type field the wire format does not have~~ — the format has one since [F10](../features/framing-and-protocol-evolution.md), and `Ping` and `Pong` are message types 7 and 8 with nothing behind them. What is left is a send, a handler, and a deadline: [D6](../direction/connection-pool.md#health-checks-that-work). No longer a flag day. |
+| `shoal-client/src/client.rs`, `ShoalQueryStream::send` | `make it so we don't need to do this` | `ShoalQueryStream::send` overwrites `queries.id` on every bundle. The stream's id should be set at construction. |
 | `shoalctl/src/app.rs:465` | `Handle insert mode for editing rows` | Insert mode edits the query bar only; result rows are read-only. Writing would also need SHQL to parse mutations. |
 
 ## Larger unbuilt work
@@ -338,15 +338,75 @@ thing this entry does not: **a deadline without a way to cancel converts a slow 
 leak.** A client that gives up has to tell the server, or the server keeps working and writes into
 a channel with no reader — the same failure as
 [item 60](known-issues.md#60-a-result-stream-that-is-not-drained-to-the-end-leaks-its-slot-in-the-client),
-reached from the other side. ~~That needs a `Cancel` message type~~ — `Cancel` is message type 12
-since [F10](../features/framing-and-protocol-evolution.md), defined and unwired, so what is left is
-the send and the handler rather than a format change.
+reached from the other side. ~~That needs a `Cancel` message type~~ — and **it does not need one at all**: the leak that
+sentence names was closed from the other end by [F11](../features/error-channel.md), so a deadline
+without a `Cancel` is a deadline and not a leak. See [`Cancel`, and what it would actually
+buy](#cancel-and-what-it-would-actually-buy).
 
 ~~A partition load that never completes parks its queries permanently.~~ A partition read that
 *fails* now releases them ([Resolved Issues #16, 51](resolved/partition-load-failure.md)). One
 that neither completes nor fails still parks them permanently, and that is what a deadline here
 would cover — the difference matters, because the first was a bug in the read path and the
 second is the absence of a deadline.
+
+### `Cancel`, and what it would actually buy
+
+**Dropped from [D6](../direction/connection-pool.md)'s scope**, deliberately, and recorded here
+rather than left implied. `Cancel` is message type 12, defined and unwired since
+[F10](../features/framing-and-protocol-evolution.md). D6 treated it as a prerequisite for both the
+deadlines and the `Drop`, on two premises that
+[F11](../features/error-channel.md) had already made false: an orphaned response is a `WARN` and a
+`continue` rather than a killed read loop, and the `channel_map` entry a `Drop` has to remove comes
+out with a synchronous call. So without `Cancel` there is no leak, no hang and no wrong answer —
+only wasted server work and response bytes written to a socket whose reader discards them, which is
+a performance claim, and [Optimizations](optimizations.md) forbids acting on one before a benchmark
+exists that would show it. Nothing in `shoal-bench` abandons a stream.
+
+There are two depths, and **the cheap one does not buy what the expensive one is for**:
+
+| Depth | What it costs | What it buys |
+| --- | --- | --- |
+| Drop at the connection relay | a `protocol/cancel.rs`, a message-type dispatch replacing `decode_request`'s `.expect(Queries)` in `client_rx_relay`, and an `Rc<RefCell<HashSet<Uuid>>>` shared with `client_tx_relay` | the bytes are not written. The shard still does the work |
+| Cancel at the shard | a `ServerMsg::Cancel` broadcast the way `NewClient` is, plus an **expiring** cancelled-set on every shard — a cancel can arrive before, during or after its query — and a lookup on the path `macro/transport/send_one/small` measures | the work stops |
+
+The case that motivates cancellation at all is a timeout storm: a short deadline against a slow
+server, at concurrency, with the server grinding on queries nobody will read. Only the second row
+addresses that, and it is the row that puts a lookup on the hot path and an unbounded-unless-expired
+set on every shard.
+
+**One thing to settle before building either.** The wire query id is a *bundle* id
+(`shoal-proto/src/shared/queries.rs`, `Queries::default`), so a `Cancel` naming one cancels every
+query in that bundle. On the streaming path a whole session shares one id, which makes `Cancel` and
+`ShoalQueryStream::close` near-synonyms. A per-query cancel needs an index, and
+[F11](../features/error-channel.md) already identified where one would go: the two reserved bytes
+after the error code.
+
+### Choosing a default for the query deadlines
+
+[F17](../direction/connection-pool.md#deadlines) ships `Deadlines::request` and `Deadlines::idle` as
+`Option<Duration>`, both `None`. That is the choice that breaks nothing on landing and it gives
+nobody the stability D6 exists for — a caller who never reads the docs keeps the hang.
+
+The reason it was not decided there is that a non-`None` default changes the behaviour of every
+existing caller, including `shoal-bench`, and the evidence for a number does not exist yet: nothing
+has run the `transport/*` workloads with deadlines on. Do that first, at both row widths, and pick
+from what the tail actually looks like rather than from a round number.
+
+### Retrying more than a single-query bundle
+
+[F17](../direction/connection-pool.md#retries) retries `send_one` and `exists` only — single-query
+bundles where nothing has been delivered to the caller yet — on `ErrorCode::ConnectionLost`, under
+`RetryPolicy::ReadsOnly`.
+
+`exec` and `send` are harder for a reason that is not idempotency: both may have handed responses
+to the caller before the connection died, so replaying the bundle would deliver some of them twice.
+Retrying them means either buffering until the bundle completes, which gives up the streaming the
+API exists for, or replaying only the indices not yet seen, which needs the server to answer a
+bundle partially. `stream` is harder again, since its bundle is open-ended.
+
+Note this is a *different* problem from the one below, and the two are often confused: this one is
+about a client that has already returned rows, and that one is about a server that has already
+applied a write.
 
 ### An idempotency key, so a write can be retried
 
@@ -473,8 +533,14 @@ the actual work here, and it would be useful well beyond recovery: a readiness e
 exactly the same thing.
 
 A third piece is smaller but blocks testing either of the above: `trace::setup` is never called
-by the library, only by the example binary, so no test can observe any event the server emits
-([Test Coverage](test-coverage.md)).
+by the library, ~~only by the example binary~~ **or by anything else** — the example does not call
+it either, and neither does `shoal-workload`, `shoalctl` or any test. So no test can observe any
+event the server emits ([Test Coverage](test-coverage.md)), the `tracing` section of `shoal.yml`
+configures nothing, and every `#[instrument]` and `event!` in the workspace — including the client's
+since [F16](../features/client-builder.md) — dispatches to nobody. Filed as
+[item 69](known-issues.md), where the two decisions it needs are written down: whether a library
+should install a *global* subscriber at all, and how a benchmark capture keeps getting the same
+one it has always had.
 
 **Promote eviction drift to a `WARN`.** The eviction event now carries a `drift` field — the gap
 between what a pass actually dropped and what the shard counter moved by, which is non zero only
@@ -496,7 +562,7 @@ did **not** close is marked below; what it added instead is at the end of this s
 
 **A micro-benchmark of the storage write path.** This is the important one. `write_helper`
 dominates the profile at 32.6 ms per call, five orders of magnitude above the partition insert
-it persists ([Performance Baseline](../operations/performance-baseline.md)) — and it is the one
+it persists ([Performance Baseline](../performance/baseline.md)) — and it is the one
 layer with no confidence interval around it, so any change to it can only be judged by a
 measurement whose spread is 10.5%. It was not built because timing `StreamWriter::write` and
 `start_sync` means driving a glommio `LocalExecutor` from inside criterion's sampling loop,
@@ -618,7 +684,7 @@ this item gave: the recorded spread figures were measured that way.
 side.~~ `shoal-bench compare` still does, for the micro layer. It needs to take
 several, because one cannot be trusted: across four identical repeats `get_key/4096` moved 22%
 and reported its outlying value with a ±0.2% confidence interval
-([Performance Baseline](../operations/performance-baseline.md#what-the-micro-layer-can-actually-resolve)).
+([Performance Baseline](../performance/baseline.md#what-the-micro-layer-can-actually-resolve)).
 The protocol therefore requires a confirming repeat, and the tool cannot express it — the
 confirmation is a manual step today, which means it is a step that will be skipped. Taking
 `--against` several times per side and comparing observed ranges rather than point estimates
@@ -715,6 +781,46 @@ baseline and is unaffected by F8. There is no frozen macro reference for the new
 rather than a baseline. Establishing one means a `performance`-governor run on a committed tree,
 committed as `B2-workloads`. Note `promote` cannot enforce this — it only knows about micro
 baselines — so it is a convention rather than a mechanism.
+[F17](../features/workload-grid.md) sharpens what such a reference should be taken over: the grid's
+reference cell is the one point four separate sweeps cross at, so a `B2` that covered the grid would
+be a reference for the whole cross rather than for a list of unrelated workloads.
+
+### What F17 left undone
+
+The grid is a **cross, not a cube** — each axis swept fully against a fixed reference of the others.
+What that buys is a capture of four to five hours instead of an overnight one; what it costs is
+every entry below.
+
+- **No interaction between axes is measured.** A cost that appears only at a wide row *under a
+  write-heavy mixture* is invisible to both sweeps, because the width sweep runs at `r50` and the
+  mixture sweep runs at 1 KiB. The cheapest thing that would find one is a third sweep at a second
+  reference — say the width axis again at `r0` — which is eleven more arms per table rather than the
+  two hundred and sixty four a full cube costs. Nobody has looked for such an interaction; the claim
+  that there is none is an assumption, not a finding.
+- **YCSB workload E (short range scans) and F (read-modify-write) are not built.** E needs a scan
+  over a sorted table whose partitions hold many rows, which is a different seeding shape from
+  anything the grid does — every grid arm writes one row per partition so that the four tables stay
+  comparable. F needs a read and a write of the same key inside one logical operation, which the
+  disjoint-range write scheme deliberately makes impossible. Both are real gaps against the
+  published YCSB set and both are more than one file.
+- **Writes are inserts, never updates in place.** The reasoning is on
+  [F17](../features/workload-grid.md) and it is sound, but it means the update path — the one an
+  `#[shoal(update)]` query drives — is measured by nothing at all, which the `mutate/*` entry above
+  already asks for.
+- **The depth ladder covers one cell.** Every other arm in the grid is assumed to sit at the same
+  point on its own throughput curve as the reference cell does, and that assumption has not been
+  checked at the wide end, where the byte budget makes an arm's query count two orders of magnitude
+  smaller.
+- **The skew sweep measures a resident table.** Its gap is locality inside a table that fits in
+  memory, not a hit rate against disk, so it is a floor on what skew is worth rather than an
+  estimate of it. Measuring the other case needs a working set deliberately larger than
+  `resources.memory`, which is a seeding shape nothing here has.
+- **No comparison against another database.** The identifiers and `ScaleFacts` are shaped so a
+  foreign system's numbers could be described in the same schema — the axes are recorded as fields
+  rather than only in the identifier string, which is the part that would otherwise have to be
+  reverse-engineered. Nothing that would consume such a capture is built, and a fair comparison
+  needs more thought than a schema: the other system's client, its durability setting and its own
+  saturation point all have to be argued about before a number means anything.
 
 **A sorted table cannot have an integer sort key.** `RkyvSupport` is implemented for `String` and
 for nothing else, so `#[shoal(sort)] at: u64` does not compile. The F8 workload schema works

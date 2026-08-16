@@ -11,7 +11,7 @@ other time.
 Filed as [O17](../appendix/optimizations.md), ranked **A2**, the head of that page's priority queue
 once [F4](validated-archives.md) closed A1. It was the only entry there whose evidence was a profile
 rather than an argument, and the reason it counted is worth restating: the
-[caveat on profile numbers](../operations/performance-baseline.md#profile--where-the-time-goes) is
+[caveat on profile numbers](../performance/baseline.md#profile--where-the-time-goes) is
 about *durations* — the instrumented binary perturbs them — but a **call count is not perturbed**.
 Calls against queries was a structural fact about the loop, readable off the profile without
 trusting a single timestamp on it.
@@ -199,7 +199,7 @@ This is the section to read before changing `tables/storage/fs/stream.rs`.
 
 Captured by `scripts/bench.sh` — the shell harness [F7](bench-runner.md) replaced with
 `shoal-bench` — `o17-after` against the `o3-after-repeat` capture that preceded it,
-on the hardware in [Performance Baseline](../operations/performance-baseline.md).
+on the hardware in [Performance Baseline](../performance/baseline.md).
 
 **The result is the call count, and it was the one thing the profile could adjudicate on its own:**
 
@@ -296,5 +296,5 @@ silently; the integration tests catch the gate itself, but only by hanging.
 - [F3. A three layer performance harness](performance-harness.md) — where the call count came from
 - [The intent log](../storage/intent-log.md) — `DataFlushed`, the watermarks, and why the message
   carries no position
-- [Performance Baseline](../operations/performance-baseline.md) — the profile, and the finding that
+- [Performance Baseline](../performance/baseline.md) — the profile, and the finding that
   the write path waits on storage

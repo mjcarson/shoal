@@ -39,10 +39,22 @@
 # Operations
 
 - [Observability](operations/observability.md)
-- [Benchmarking](operations/benchmarking.md)
-- [Benchmark Results](operations/benchmark-results.md)
-- [Performance Baseline](operations/performance-baseline.md)
 - [shoalctl](operations/shoalctl.md)
+
+# Performance
+
+- [Performance](performance/overview.md)
+  - [Read/write mixtures](performance/grid.md)
+  - [Row size](performance/row-size.md)
+  - [Table types and what storage costs](performance/table-types.md)
+  - [Access patterns and load depth](performance/access-patterns.md)
+  - [Transport and encryption](performance/transport.md)
+  - [Reading many partitions at once](performance/fanout.md)
+  - [The micro layer](performance/micro.md)
+  - [Where the time goes](performance/attribution.md)
+  - [Every workload](performance/all-workloads.md)
+- [Benchmarking](performance/benchmarking.md)
+- [Performance Baseline](performance/baseline.md)
 
 # Features
 
@@ -62,6 +74,9 @@
   - [F13. The transport workloads](features/transport-workloads.md)
   - [F14. Encryption in transit](features/encryption-in-transit.md)
   - [F15. The client is a crate that cannot start a database](features/client-server-split.md)
+  - [F16. The client builder](features/client-builder.md)
+  - [F17. The workload grid](features/workload-grid.md)
+  - [F18. Results pages that explain themselves](features/results-pages.md)
 
 # Direction
 

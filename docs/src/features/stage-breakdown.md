@@ -6,7 +6,7 @@
 *where*.
 
 The macro benchmark takes one `Instant` per batch in `MovieWorker::send_batch` and stops it
-when the worker dequeues the response. The frozen [B1 baseline](../operations/performance-baseline.md)
+when the worker dequeues the response. The frozen [B1 baseline](../performance/baseline.md)
 that comes out of it says an insert's p50 is 49.7 ms against a min of 423.6 µs, and a get's p50
 is 128.7 µs against a min of 21.4 µs. Two orders of magnitude of spread, and the number itself
 cannot say what any of it was.
@@ -29,7 +29,7 @@ A `stage-profile` build records, for every query, when it reached each of ninete
 between the client handing it to `send` and the response coming back. ~~`scripts/bench.sh`~~
 `shoal-bench run` captures one as a fifth phase and archives it to
 `docs/perf/runs/<label>.stages.json`, where [Benchmark
-Results](../operations/benchmark-results.md) draws it as a stacked bar per latency rank.
+Results](../performance/overview.md) draws it as a stacked bar per latency rank.
 
 | Stage | From → to | Per |
 | --- | --- | --- |
@@ -221,8 +221,8 @@ result only when the two captures' observed intervals are disjoint.
 
 ## Related
 
-- [Benchmarking](../operations/benchmarking.md) — the runbook, and where this sits among the layers
-- [Performance baseline](../operations/performance-baseline.md) — the B1 numbers this explains
+- [Benchmarking](../performance/benchmarking.md) — the runbook, and where this sits among the layers
+- [Performance baseline](../performance/baseline.md) — the B1 numbers this explains
 - [F3](performance-harness.md) — the three layers this is a fourth of
 - [F5](flushed-sweep-gate.md) — the sweep whose delay `release_wake` measures
 - [O26](../appendix/optimizations.md) — the `QueryMetadata` clone found while building this

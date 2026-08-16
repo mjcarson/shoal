@@ -21,9 +21,12 @@ default = ["server"]
 server = ["dep:shoal-core"]
 # enable hotpath profiling
 #
-# only forwards to shoal-core now. The `hotpath/hotpath` half went with `main`, which moved to
-# `shoal-bench`'s workload binary when the benchmark harness left this crate.
-hotpath = ["server", "shoal-core/hotpath"]
+# forwards to both halves, and — unlike before — does **not** imply `server`. The client is the
+# layer this exists to attribute, and requiring an engine to profile it would mean the one build
+# where the client is the whole of the code is the one build that cannot be measured. The
+# `hotpath/hotpath` half went with `main`, which moved to `shoal-bench`'s workload binary when
+# the benchmark harness left this crate.
+hotpath = ["shoal-client/hotpath", "shoal-core?/hotpath"]
 # expose shoal-core internals to the criterion benches in benches/
 bench = ["server", "shoal-core/bench"]
 # record where each query spent its time, stage by stage

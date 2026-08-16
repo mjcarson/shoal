@@ -3654,6 +3654,7 @@ dependencies = [
  "bb8",
  "bytes",
  "futures",
+ "hotpath",
  "kanal",
  "papaya",
  "rkyv 0.8.12",
