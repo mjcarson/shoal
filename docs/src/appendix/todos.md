@@ -575,12 +575,24 @@ workload can drive engine internals inside its own `LocalExecutor` with no serve
 uses that arm yet. Writing `micro/write_path` against it is now a matter of writing the workload
 rather than of solving the executor problem.
 
-**An `Async` vs `Fsync` capture.** The single comparison that would isolate the cost of the
+~~**An `Async` vs `Fsync` capture.** The single comparison that would isolate the cost of the
 durability barrier, on a config change alone, with no code change. It is cheap. It has not been
 run. [F8](../features/purpose-built-workloads.md) made it nearly free to build — `ConfOverrides`
 already carries per-workload configuration and `insert_unsorted` is the arm it would pair against
 — and deliberately did not build it, to keep the first workload set reviewable. It is the cheapest
-remaining item on this page.
+remaining item on this page.~~ **Built**
+([F20](../features/configuration-sweeps.md)), as two arms of a nine-knob sweep rather than as one
+comparison. This entry was right that it was cheap and right about why it had not been run, and it
+missed the reason: there was nowhere to put the answer. One number, on no page, comparable to
+nothing. What it costs to *build* an isolated capture was never the binding constraint — what it
+costs to make one **readable** was, which is why the durability pair arrived alongside eight other
+sweeps and a page whose job is to say which of the nine moved anything measurable.
+
+The arm it pairs against is not `insert_unsorted`, as this entry expected, but the grid's reference
+cell `macro/grid/unsorted/r50/1024` — because a barrier is a property of a *workload's* write path
+and the reference cell is the one every other page already quotes. `macro/conf/storage/durability/r50/fsync`
+duplicates that cell deliberately, since an arm that ran in a different storage directory under a
+different port is not a control for one that did not.
 
 **`wire_codec` and `routing` benches.** `rkyv` round trips over `Queries` and `ResponseKinds`,
 and `Ring::find_shard` / `split_by_shard`. Between them they are what O1, O18, O19 and O20 are
@@ -738,7 +750,10 @@ need:
   because the wire is the whole cost. What remains open is the subtraction the entry hoped for: a
   sample still includes the server's work, and separating the two needs the client-side spans
   [O28](optimizations.md) asks for.
-- **`durability/{fsync,async}`** — see the `Async` vs `Fsync` item above.
+- ~~**`durability/{fsync,async}`** — see the `Async` vs `Fsync` item above.~~ **Built**
+  ([F20](../features/configuration-sweeps.md)), as `macro/conf/storage/durability/r50/{fsync,async}`.
+  Note it is *not* under `macro/durability/` as this entry names it: a configuration arm belongs
+  with the other configuration arms, because what it varies is the server rather than the query.
 - **`mutate/{update,delete,exists}`** — entirely unmeasured today.
 
 **Two need something that does not exist yet**, and are not one file each:
@@ -821,6 +836,51 @@ every entry below.
   reverse-engineered. Nothing that would consume such a capture is built, and a fair comparison
   needs more thought than a schema: the other system's client, its durability setting and its own
   saturation point all have to be argued about before a number means anything.
+
+### What F20 left undone
+
+The configuration sweep is a cross for the same reason the grid is, and pays the same price. It also
+inherits one gap the grid does not have: it measures a machine as much as it measures a database.
+
+- **No interaction between two settings is measured.** A write-behind depth that only pays off at a
+  large buffer shows as two flat sweeps, and nothing would say so. The cheapest thing that would
+  find one is a second reference for the storage half — the write-behind ladder repeated at
+  `latency_buffer/64Ki` — which is five more arms rather than the twenty-five a full cross of those
+  two costs. As with the grid: the claim that there is no interaction is an assumption.
+- **The storage knobs are swept at `r50` only.** A setting that only bites under sustained writing
+  is being asked half a question. Repeating the six storage sweeps at `r0` is twenty-three more
+  arms and would say whether the barrier's group-commit behaviour changes the shape of any of them.
+- **The memory sweep brackets one working set.** Its rungs are sized against the reference cell's
+  own — about 1.6 MiB a shard from the seed plus half as much again from the run — so `1Mi` and
+  `4Mi` straddle it and the rest are flat. What that cannot say is whether the *ratio* it finds
+  holds at a working set a hundred times larger, where compaction and eviction have far more to do.
+  Answering that needs a seeding shape deliberately larger than the limit, which is the same thing
+  the skew sweep's entry above asks for; building it once would serve both.
+- **Nothing checks that the recommendations are acted on.** `every_sweep_covers_the_shipped_default`
+  asserts the sweep brackets what `shoal.yml` says; nothing asserts `shoal.yml` says what the page
+  recommends. That is deliberate for now — the committed file is the baseline every historical
+  capture was taken under, and retuning it invalidates all of them — but it means the page can
+  recommend a value nobody ever adopts and no test will mind.
+- **The results are a property of one machine and one device.** A buffer size is rounded up to the
+  disk's O_DIRECT alignment and the shard curve is a curve in one box whose client shares its cores.
+  Nothing here transfers to other hardware as a number. A second capture on different hardware would
+  say which of the *shapes* transfer, and there is no second machine.
+- **`ServerNeed::None` is still unused.** F20 configures servers rather than avoiding them, so the
+  arm F8 added for a workload that drives engine internals with no server at all remains as empty
+  as the entry above says.
+
+### What F21 left undone
+
+- **Nothing checks the groups cover the registry.** A workload in no group is reachable only by
+  prefix, which is the state everything was in before groups existed — so a family added without a
+  group silently reverts to it.
+- **A group's summary can drift from its membership.** `every_group_selects_something` checks a
+  group is non-empty. Nothing checks that `isolating` still describes what it holds, which is the
+  same class of gap [F18](../features/results-pages.md) records for its page prose.
+- **`FULL_MACRO_CAPTURE_SECS` is a hand-maintained constant.** Every `~capture` projection is
+  proportionally wrong until somebody updates it, and nothing detects that it has gone stale. The
+  honest fix is for a capture to record its own end-to-end duration in `CaptureMeta`, which nothing
+  does today — the artifacts record what was measured and never what the measuring cost.
 
 **A sorted table cannot have an integer sort key.** `RkyvSupport` is implemented for `String` and
 for nothing else, so `#[shoal(sort)] at: u64` does not compile. The F8 workload schema works

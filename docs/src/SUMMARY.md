@@ -40,6 +40,7 @@
 
 - [Observability](operations/observability.md)
 - [shoalctl](operations/shoalctl.md)
+- [Tuning](operations/tuning.md)
 
 # Performance
 
@@ -50,6 +51,7 @@
   - [Access patterns and load depth](performance/access-patterns.md)
   - [Transport and encryption](performance/transport.md)
   - [Reading many partitions at once](performance/fanout.md)
+  - [Configuration and what each setting is worth](performance/configuration.md)
   - [The micro layer](performance/micro.md)
   - [Where the time goes](performance/attribution.md)
   - [Every workload](performance/all-workloads.md)
@@ -78,6 +80,8 @@
   - [F17. The workload grid](features/workload-grid.md)
   - [F18. Results pages that explain themselves](features/results-pages.md)
   - [F19. Charts that name their colours in one place](features/chart-legends.md)
+  - [F20. What each setting is worth](features/configuration-sweeps.md)
+  - [F21. Benchmark groups](features/benchmark-groups.md)
 
 # Direction
 

@@ -605,6 +605,8 @@ mod tests {
                 durability: "fsync".to_string(),
                 tls,
                 digest: "test".to_string(),
+                // the transport pair varies encryption and nothing about the writers
+                ..ConfFacts::default()
             }),
             counters: BTreeMap::new(),
             ops: stats(median),

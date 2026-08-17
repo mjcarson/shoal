@@ -105,6 +105,10 @@ fn question(surface: Surface) -> &'static str {
         }
         Surface::Transport => "what the client's sending mode costs, and what encryption costs",
         Surface::Fanout => "what reading many partitions in one query costs, and how that grows",
+        Surface::Configuration => {
+            "what each setting in `shoal.yml` is worth, and which of them this workload is actually \
+             sensitive to"
+        }
         Surface::Micro => {
             "whether a change made one function faster - not what the system will do with data"
         }

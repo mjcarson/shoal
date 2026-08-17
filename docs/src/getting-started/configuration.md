@@ -210,7 +210,7 @@ patterns it has:
 | Profile | Used for | Default buffer | Default write-behind |
 | --- | --- | --- | --- |
 | `latency_sensitive` | The intent log, the archive map, the map's own intent log | 512 B | 128 |
-| `throughput_sensitive` | Archives (compacted partition data) | 128 KiB | 4 |
+| `throughput_sensitive` | ~~Archives (compacted partition data)~~ **the archive map's intent log only** — see below | 128 KiB | 4 |
 
 `shoal-core/src/server/tables/storage/fs/conf.rs:19-26`, `:96-102`
 
@@ -218,6 +218,15 @@ The intent log is on the critical path of every write, so it uses small buffers 
 write-behind: get the bytes moving, keep queue depth high. Archives are written in bulk by a
 background compactor where per-write latency is irrelevant, so they use large buffers and
 shallow queue depth.
+
+> **The second row is what the settings are *for*, not what they currently reach.**
+> `ArchiveMap::get_active_writer` builds the archive writers with no `with_buffer_size` and no
+> `with_write_behind` in either branch (`.../fs/map.rs:415`, `:433`), so the archives themselves are
+> written at glommio's defaults and `throughput_sensitive` governs only the map's own intent log
+> (`:403`). Filed as [item 71](../appendix/known-issues.md) and as
+> [O33](../appendix/optimizations.md); the sweeps at
+> [Configuration and what each setting is worth](../performance/configuration.md) are expected to be
+> flat until it is fixed, and that flatness is the evidence.
 
 `intent_log_size` is the rotation threshold — once the active intent log exceeds it,
 compaction is triggered ([Compaction](../storage/compaction.md)). It defaults to 10 MiB.
@@ -248,7 +257,19 @@ full round trip.
 > `FileSystemThroughputWriterConf::write_behind` is a *count*, but is annotated with
 > `deserialize_with = "utils::deserialize_byte_size"`
 > (`shoal-core/src/server/tables/storage/fs/conf.rs:116-118`). It works, but it means
-> `write_behind: "4KiB"` is accepted and yields 4096 in-flight writes.
+> `write_behind: "4KiB"` is accepted and yields 4096 in-flight writes. Also
+> [item 71](../appendix/known-issues.md), so the two are fixed together.
+
+### What to set these to
+
+This page says what each setting **is**. What each one is *worth* is measured — nine of them are
+swept at [Configuration and what each setting is worth](../performance/configuration.md), which
+names, per setting, the value that answered a query fastest, the value that answered the most of
+them, and whether the difference between the best and worst arm is larger than the run-to-run noise
+at all. [Tuning](../operations/tuning.md) turns that into advice per workload shape.
+
+Read the *Real?* column before acting on any of it: several of these settings do not move anything
+measurable for the reference workload, and knowing which is worth more than a recommendation.
 
 ## On-disk layout
 
@@ -372,3 +393,9 @@ indistinguishable from "the user wanted defaults". For a database where `memory`
   runs permanently under memory pressure.
 - Per-table storage settings are keyed by a string that must match the macro-generated table
   name exactly, with no check that a key matched anything.
+- `throughput_sensitive` reaches the archive map's intent log and not the archive writers
+  ([item 71](../appendix/known-issues.md)), so tuning it today changes less than its name suggests.
+- Nothing here is validated against what is measured. `shoal.yml` can be set to a value
+  [Configuration and what each setting is worth](../performance/configuration.md) reports as the
+  worst arm of its sweep, and no test minds — the committed file is the baseline every historical
+  capture was taken under, so it is deliberately not chased.

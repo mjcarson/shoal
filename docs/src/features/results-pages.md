@@ -21,8 +21,9 @@ under the old renderer meant seventy-four more alphabetically-sorted charts.
 
 ## What it does
 
-`shoal-bench render` writes **ten pages** under `docs/src/performance/` instead of one under
-`docs/src/operations/`. The split is by question, not by workload:
+`shoal-bench render` writes ~~**ten pages**~~ **eleven pages** under `docs/src/performance/` instead
+of one under `docs/src/operations/` — ten as delivered, and one more since
+[F20](configuration-sweeps.md). The split is by question, not by workload:
 
 | Page | The question it answers |
 |---|---|
@@ -33,6 +34,7 @@ under the old renderer meant seventy-four more alphabetically-sorted charts.
 | `access-patterns.md` | what skew buys, and where the server stops keeping up |
 | `transport.md` | what the sending mode costs, and what encryption costs |
 | `fanout.md` | what reading many partitions in one query costs |
+| `configuration.md` | what each setting in `shoal.yml` is worth ([F20](configuration-sweeps.md), added after) |
 | `micro.md` | whether a change made one function faster |
 | `attribution.md` | which code the time is spent inside |
 | `all-workloads.md` | every raw number, with no selection |
@@ -60,7 +62,9 @@ book build. A page that appeared because somebody added a workload would break t
 commit that added it. For the same reason **every page renders even when it has nothing to draw** —
 a capture that measured no encryption still produces `transport.md`, saying so.
 
-**`render` writes all ten or none.** Every page is built into memory before any is written. A tree
+**`render` writes all ~~ten~~ eleven or none.** [F20](configuration-sweeps.md) added
+`configuration.md`, so the count moved; the rule did not. Every page is built into memory before
+any is written. A tree
 holding four current pages and six stale ones is worse than one holding ten stale ones, because
 nothing on a page says which kind it is.
 
@@ -128,8 +132,10 @@ all-or-none rule avoids, to save seconds on a command that already takes seconds
 - **`render --check` still fails after any commit.** Every page states the commit it was rendered
   against, because the staleness verdicts on it are relative to that commit. It cannot be a blanket
   CI gate. Unchanged from [F7](bench-runner.md).
-- **Ten pages is ten `SUMMARY.md` entries to maintain by hand.** A page added in `PAGES` without a
-  `SUMMARY` entry is simply unreachable; nothing catches that.
+- **~~Ten~~ Eleven pages is ~~ten~~ eleven `SUMMARY.md` entries to maintain by hand.** A page added
+  in `PAGES` without a `SUMMARY` entry is simply unreachable; nothing catches that.
+  [F20](configuration-sweeps.md) added the eleventh and had to remember, which is the limitation
+  being demonstrated rather than fixed.
 - **A family is a partition by identifier prefix.** A workload that belongs to two questions is
   placed in one family and selected onto the other page by predicate, which works and is two
   mechanisms where one would be nicer.
@@ -154,7 +160,7 @@ failed once.
 **Every family fills in all four blocks.** An empty one renders a heading with nothing under it,
 which is worse than not having the heading.
 
-**The four determinism rules from [F7](bench-runner.md) apply to all ten pages, not to one.** No
+**The four determinism rules from [F7](bench-runner.md) apply to every page, not to one.** No
 wall clock reaches a page; every map walked is a `BTreeMap` and every list explicitly sorted; every
 float goes through `crate::fmt`; chart geometry is a pure function of the data and the canvas size.
 `render --check` compares byte for byte, so any of these breaks the check on a tree nobody touched.

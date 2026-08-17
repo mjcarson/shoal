@@ -307,6 +307,17 @@ pub enum Sweep {
     Skew,
     /// A rung of the load depth ladder
     Depth,
+    /// A point of a configuration sweep, holding the name of the setting that moved
+    ///
+    /// Minted by [`conf_sweep`](super::conf_sweep) rather than by [`Grid::all`], because the two
+    /// answer different questions: the grid asks what a mixture costs against the configuration
+    /// this repository benchmarks under, and a configuration arm asks what one setting of that
+    /// configuration is worth. They share a driver because the second is the first with one field
+    /// moved, and sharing it is what makes them comparable.
+    Conf {
+        /// Which setting this arm moved
+        knob: &'static str,
+    },
 }
 
 /// One arm of the grid
@@ -323,8 +334,18 @@ pub struct Grid {
     pub distribution: KeyDistribution,
     /// How many queries it keeps outstanding at once
     pub depth: u32,
+    /// What this arm asks of its server
+    ///
+    /// Empty for every arm of the grid proper, which is the point: those arms are about what a
+    /// caller's workload costs against the committed `shoal.yml`, so an arm that pinned a setting
+    /// would be holding still something it is not about. A configuration arm names exactly one
+    /// field here and nothing else, which is what makes the difference between it and the arm
+    /// beside it attributable to that field.
+    pub conf: ConfOverrides,
     /// This arm's identifier, built once because the trait hands back a `&'static str`
     pub id: &'static str,
+    /// One line saying what this arm measures, built once for the same reason
+    pub summary: &'static str,
 }
 
 impl Grid {
@@ -392,7 +413,9 @@ impl Grid {
             rows,
             distribution: KeyDistribution::Uniform,
             depth: DEPTH,
+            conf: ConfOverrides::default(),
             id,
+            summary: "a read/write mixture at one row width against one kind of table",
         }
     }
 
@@ -418,7 +441,9 @@ impl Grid {
             rows: REFERENCE_WIDTH,
             distribution,
             depth: DEPTH,
+            conf: ConfOverrides::default(),
             id,
+            summary: "the reference mixture with the reads drawn from a skewed key space",
         }
     }
 
@@ -437,7 +462,9 @@ impl Grid {
             rows: REFERENCE_WIDTH,
             distribution: KeyDistribution::Uniform,
             depth,
+            conf: ConfOverrides::default(),
             id,
+            summary: "the reference mixture at one load depth",
         }
     }
 
@@ -578,11 +605,9 @@ impl Workload for Grid {
 
     /// What this workload measures
     fn summary(&self) -> &'static str {
-        match self.sweep {
-            Sweep::Cell => "a read/write mixture at one row width against one kind of table",
-            Sweep::Skew => "the reference mixture with the reads drawn from a skewed key space",
-            Sweep::Depth => "the reference mixture at one load depth",
-        }
+        // built when the arm was minted rather than matched here, because a configuration arm's
+        // summary names the setting it moved and there is no `&'static str` to match onto
+        self.summary
     }
 
     /// How this workload's samples are taken
@@ -608,11 +633,12 @@ impl Workload for Grid {
         let row_bytes = self.rows.mean();
         let rows = rows_for(row_bytes, scale);
         WorkloadPlan {
-            // nothing about the server is pinned. these arms are about what a caller's workload
-            // costs against the configuration this repository benchmarks under, so an arm that
-            // named a shard count or a memory limit would be holding still something it is not
-            // about - the same choice `transport` and `encryption` make
-            server: ServerNeed::Fresh(ConfOverrides::default()),
+            // a grid arm pins nothing about the server: it is about what a caller's workload costs
+            // against the configuration this repository benchmarks under, so an arm that named a
+            // shard count or a memory limit would be holding still something it is not about - the
+            // same choice `transport` and `encryption` make. a configuration arm carries exactly
+            // one field here, which is the only difference between the two.
+            server: ServerNeed::Fresh(self.conf.clone()),
             scale: ScaleFacts {
                 scale: scale.as_str().to_string(),
                 rows,
@@ -653,7 +679,7 @@ impl Workload for Grid {
             let total = ctx.scale.rows;
             // sized from the widest row this arm can produce rather than from the mean, since a
             // bundle of the widest rows is the one that has to fit inside a frame
-            let batch = seed_batch(profile.widest());
+            let batch = seed_batch(profile.widest(), frame_bytes(ctx));
             let mut built = 0u64;
             let batches = move || {
                 if built >= total {
@@ -721,15 +747,37 @@ impl Workload for Grid {
 
 /// How many rows of a given width fit in one seed bundle
 ///
+/// Sized against the frame bound the server was **actually started with** rather than against
+/// [`DEFAULT_MAX_FRAME_BYTES`](shoal::shared::protocol::DEFAULT_MAX_FRAME_BYTES). The two are the
+/// same for every arm that does not sweep the bound, and for the arms that do, the constant is the
+/// wrong number: a bundle sized against 64 MiB and sent to a server that will accept 1 MiB is
+/// refused outright, which is a workload that cannot run rather than one that runs slowly.
+///
 /// # Arguments
 ///
 /// * `row_bytes` - How wide one row is
-fn seed_batch(row_bytes: u64) -> usize {
+/// * `frame_bytes` - The largest frame the server will accept
+fn seed_batch(row_bytes: u64, frame_bytes: u64) -> usize {
     // what a quarter of a frame holds at this width, and never fewer than one row
-    let budget = u64::from(shoal::shared::protocol::DEFAULT_MAX_FRAME_BYTES)
-        / SEED_FRAME_SHARE
-        / row_bytes.max(1);
+    let budget = frame_bytes / SEED_FRAME_SHARE / row_bytes.max(1);
     (budget.max(1) as usize).min(driver::BATCH)
+}
+
+/// The largest frame the server this run was given will accept
+///
+/// Falls back to the protocol default, which is what a workload running without a server would see
+/// and what every arm that does not move the bound resolves to anyway.
+///
+/// # Arguments
+///
+/// * `ctx` - The run this workload was given
+fn frame_bytes(ctx: &Context) -> u64 {
+    // the resolved configuration records it, so this is reading back what the server was started
+    // with rather than assuming what it was started with
+    ctx.conf
+        .as_ref()
+        .and_then(|conf| conf.max_frame_bytes)
+        .unwrap_or_else(|| u64::from(shoal::shared::protocol::DEFAULT_MAX_FRAME_BYTES))
 }
 
 #[cfg(test)]
@@ -783,6 +831,11 @@ mod tests {
                     arm.table.as_str()
                 ),
                 Sweep::Depth => format!("macro/grid/depth/{}", arm.depth),
+                // the configuration sweep is minted by `conf_sweep`, which names its own arms and
+                // tests them there. `Grid::all` producing one would mean a sweep had moved house.
+                Sweep::Conf { knob } => {
+                    unreachable!("Grid::all minted a configuration arm for {knob}")
+                }
             };
             assert_eq!(arm.id(), expected);
         }
@@ -978,12 +1031,31 @@ mod tests {
         let frame = u64::from(shoal::shared::protocol::DEFAULT_MAX_FRAME_BYTES);
         for profile in WIDTHS {
             let widest = profile.widest();
-            let bundle = seed_batch(widest) as u64 * widest;
+            let bundle = seed_batch(widest, frame) as u64 * widest;
             assert!(
                 bundle * super::SEED_FRAME_SHARE <= frame,
                 "{} byte rows bundle to {bundle} bytes",
                 widest
             );
+        }
+    }
+
+    /// A bundle fits inside a frame the configuration sweep narrowed, too
+    ///
+    /// The reason [`seed_batch`] takes the bound rather than reading the constant. Sized against
+    /// the constant, the reference width would bundle a hundred rows regardless, and the arm that
+    /// narrows the bound to a megabyte would be seeding into a server that refuses its frames.
+    #[test]
+    fn a_seed_bundle_fits_inside_a_narrowed_frame() {
+        for frame in [1u64 << 20, 8 << 20, u64::from(shoal::shared::protocol::DEFAULT_MAX_FRAME_BYTES)] {
+            for profile in WIDTHS {
+                let widest = profile.widest();
+                let bundle = seed_batch(widest, frame) as u64 * widest;
+                assert!(
+                    bundle * super::SEED_FRAME_SHARE <= frame || bundle == widest,
+                    "{widest} byte rows bundle to {bundle} bytes under a {frame} byte frame"
+                );
+            }
         }
     }
 

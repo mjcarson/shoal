@@ -90,6 +90,67 @@ impl<'a> Arm<'a> {
         self.id.starts_with("macro/skew/")
     }
 
+    /// Whether this arm is a point of a configuration sweep
+    pub fn is_conf(&self) -> bool {
+        self.id.starts_with("macro/conf/")
+    }
+
+    /// Which setting a configuration arm moved
+    ///
+    /// Read out of the identifier rather than out of the facts, and deliberately: the *value* a
+    /// knob was set to is a fact and is read as one below, but which knob an arm is a sweep *of* is
+    /// the arm's identity rather than something it measured. Two arms can resolve to the same
+    /// configuration - `latency_buffer/4Ki` and the value `shoal.yml` already sets - and only the
+    /// identifier says which sweep each belongs to. This is the same prefix check
+    /// [`Arm::is_grid`] and its neighbours are.
+    pub fn conf_knob(&self) -> Option<&'a str> {
+        // `macro/conf/<section>/<knob>/r<pct>/<value>`, so the knob is the fourth segment
+        let rest = self.id.strip_prefix("macro/conf/")?;
+        let mut segments = rest.split('/');
+        let _section = segments.next()?;
+        segments.next()
+    }
+
+    /// Which half of the configuration a configuration arm belongs to
+    pub fn conf_section(&self) -> Option<&'a str> {
+        // the third segment, which is why it is in the identifier at all
+        self.id.strip_prefix("macro/conf/")?.split('/').next()
+    }
+
+    /// What value a configuration arm set its knob to, as it is written on an axis
+    ///
+    /// The identifier's last segment. It is the value spelled the way the sweep spelled it - `4Ki`
+    /// rather than `4096` - which is what a reader has to type into `shoal.yml` afterwards, and so
+    /// is the only spelling worth putting on a chart.
+    pub fn conf_value(&self) -> Option<&'a str> {
+        // the last segment of a configuration identifier, and nothing else has this prefix
+        if !self.is_conf() {
+            return None;
+        }
+        self.id.rsplit('/').next()
+    }
+
+    /// This arm's configuration, when it recorded one
+    pub fn conf(&self) -> Option<&'a crate::model::macro_layer::ConfFacts> {
+        self.capture.conf.as_ref()
+    }
+
+    /// The interval this arm's wall clock spanned across its runs, in nanoseconds
+    ///
+    /// What a difference between two arms has to clear before it is a difference at all. A macro
+    /// comparison is interval disjointness rather than a percentage, for the reason
+    /// [F7](../../../docs/src/features/bench-runner.md) gives: the frozen baseline spread ten and a
+    /// half percent over five identical runs, so a flat threshold either swallows real movement or
+    /// reports noise as movement.
+    pub fn wall_clock_interval_ns(&self) -> Option<(u64, u64)> {
+        self.capture.wall_clock_interval_ns()
+    }
+
+    /// This arm's median wall clock in nanoseconds
+    pub fn median_wall_clock_ns(&self) -> u128 {
+        self.capture.median_wall_clock_ns()
+    }
+
     /// One latency metric of one operation, in nanoseconds
     ///
     /// # Arguments
@@ -153,6 +214,44 @@ pub fn depth_ladder(capture: &MacroCaptureV2) -> Vec<Arm<'_>> {
 /// * `capture` - The capture to walk
 pub fn skew(capture: &MacroCaptureV2) -> Vec<Arm<'_>> {
     all(capture).into_iter().filter(Arm::is_skew).collect()
+}
+
+/// Every point of every configuration sweep in a capture
+///
+/// # Arguments
+///
+/// * `capture` - The capture to walk
+pub fn conf(capture: &MacroCaptureV2) -> Vec<Arm<'_>> {
+    all(capture).into_iter().filter(Arm::is_conf).collect()
+}
+
+/// The configuration arms of a capture, gathered into one list per knob
+///
+/// Ordered by the knob name and, within a knob, by the read share and then by the order the arms
+/// appear in the capture - which is identifier order, since a capture is a `BTreeMap`. Deterministic
+/// on purpose: a page whose series changed order between two renders of the same artifact would fail
+/// `render --check` for no reason.
+///
+/// # Arguments
+///
+/// * `capture` - The capture to walk
+pub fn conf_sweeps(capture: &MacroCaptureV2) -> Vec<(String, u32, Vec<Arm<'_>>)> {
+    let mut grouped: std::collections::BTreeMap<(String, u32), Vec<Arm<'_>>> =
+        std::collections::BTreeMap::new();
+    for arm in conf(capture) {
+        // an arm with no knob or no read share is not a sweep point, whatever else it is
+        let (Some(knob), Some(read_pct)) = (arm.conf_knob(), arm.read_pct()) else {
+            continue;
+        };
+        grouped
+            .entry((knob.to_string(), read_pct))
+            .or_default()
+            .push(arm);
+    }
+    grouped
+        .into_iter()
+        .map(|((knob, read_pct), arms)| (knob, read_pct, arms))
+        .collect()
 }
 
 /// Every workload whose identifier starts with a prefix

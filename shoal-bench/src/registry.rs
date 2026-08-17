@@ -14,7 +14,7 @@ use std::str::FromStr;
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::cli::{Format, ListArgs, Selection};
+use crate::cli::{DEFAULT_RUNS, Format, ListArgs, Selection};
 use crate::store::Store;
 
 /// One of the four measurement layers
@@ -321,11 +321,17 @@ impl Registry {
     ///
     /// * `selection` - What the caller asked for
     pub fn select(&self, selection: &Selection) -> Result<Vec<BenchId>> {
-        // keep the entries that pass both the layer restriction and the substring filters
+        // a name that is not a group is a mistake in the request rather than a set that happens to
+        // be empty, and it is worth saying so before anything is filtered
+        if let Some(message) = crate::groups::unknown(&selection.groups) {
+            bail!("{message}");
+        }
+        // keep the entries that pass the layer restriction, the groups and the substring filters
         let picked: Vec<BenchId> = self
             .entries
             .iter()
             .filter(|entry| selection.layers.is_empty() || selection.layers.contains(&entry.layer))
+            .filter(|entry| crate::groups::matches_groups(entry, &selection.groups))
             .filter(|entry| matches_filters(&entry.id, &selection.filters, selection.exact))
             .cloned()
             .collect();
@@ -348,6 +354,11 @@ impl Registry {
         } else {
             format!("no benchmark matches {:?} in", selection.filters)
         };
+        // and which groups it was narrowed to, since a group is the likelier reason a filter that
+        // looks right selected nothing
+        if !selection.groups.is_empty() {
+            message.push_str(&format!(" group(s) {} of", selection.groups.join(", ")));
+        }
         // and which layers it was asked for in
         if selection.layers.is_empty() {
             message.push_str(" the registry");
@@ -508,6 +519,11 @@ pub fn run_list(store: &Store, args: &ListArgs) -> Result<i32> {
     // discovering the list can mean building the bench target, which is the price of not
     // hardcoding it
     let registry = Registry::load(store, args.refresh)?;
+    // the group listing is about the sets rather than about their members, so it prints instead of
+    // the benchmarks rather than beside them
+    if args.groups {
+        return crate::groups::run_groups(store, registry.entries(), DEFAULT_RUNS, args.format);
+    }
     let picked = registry.select(&args.selection)?;
     // print it in whichever shape was asked for
     match args.format {
@@ -562,6 +578,7 @@ mod tests {
             filters: filters.iter().map(|f| f.to_string()).collect(),
             exact: false,
             layers: Vec::new(),
+            groups: Vec::new(),
         }
     }
 
@@ -600,6 +617,7 @@ mod tests {
             filters: vec!["hotpath/insert_unsorted".to_string()],
             exact: true,
             layers: Vec::new(),
+            groups: Vec::new(),
         };
         let picked = registry.select(&selection).expect("selects");
         assert_eq!(picked.len(), 1);
@@ -651,6 +669,7 @@ mod tests {
             filters: vec!["partition_sorted/get_key/16".to_string()],
             exact: true,
             layers: Vec::new(),
+            groups: Vec::new(),
         };
         let picked = registry.select(&selection).expect("selects");
         assert_eq!(picked.len(), 1);
@@ -665,10 +684,78 @@ mod tests {
             filters: Vec::new(),
             exact: false,
             layers: vec![Layer::Micro],
+            groups: Vec::new(),
         };
         let picked = registry.select(&selection).expect("selects");
         assert_eq!(picked.len(), 6);
         assert!(picked.iter().all(|entry| entry.layer == Layer::Micro));
+    }
+
+    /// A group restriction intersects with the layers and the substrings, rather than replacing them
+    #[test]
+    fn a_group_restriction_intersects() {
+        let registry = registry();
+        // the group alone selects every configuration arm
+        let by_group = Selection {
+            filters: Vec::new(),
+            exact: false,
+            layers: Vec::new(),
+            groups: vec!["conf/storage".to_string()],
+        };
+        let picked = registry.select(&by_group).expect("selects");
+        assert!(picked.len() > 1);
+        assert!(picked.iter().all(|entry| entry.id.starts_with("macro/conf/storage/")));
+        // and narrowing it with a substring intersects rather than widening it back out
+        let narrowed = Selection {
+            filters: vec!["durability".to_string()],
+            exact: false,
+            layers: Vec::new(),
+            groups: vec!["conf/storage".to_string()],
+        };
+        let picked = registry.select(&narrowed).expect("selects");
+        assert!(
+            picked
+                .iter()
+                .all(|entry| entry.id.contains("durability")),
+            "{picked:?}"
+        );
+        assert_eq!(picked.len(), 2);
+    }
+
+    /// Two groups are combined with or, the way two filters are
+    #[test]
+    fn two_groups_are_combined_with_or() {
+        let registry = registry();
+        let selection = Selection {
+            filters: Vec::new(),
+            exact: false,
+            layers: Vec::new(),
+            groups: vec!["conf/storage".to_string(), "fanout".to_string()],
+        };
+        let picked = registry.select(&selection).expect("selects");
+        assert!(picked.iter().any(|entry| entry.id.starts_with("macro/conf/storage/")));
+        assert!(picked.iter().any(|entry| entry.id.starts_with("macro/fanout/")));
+    }
+
+    /// A group that does not exist is an error, and names the ones that do
+    ///
+    /// Without this a mistyped group falls through to selecting everything, and a capture that
+    /// measured the whole registry when half an hour of it was asked for looks like a success.
+    #[test]
+    fn an_unknown_group_is_an_error() {
+        let registry = registry();
+        let selection = Selection {
+            filters: Vec::new(),
+            exact: false,
+            layers: Vec::new(),
+            groups: vec!["conf/storag".to_string()],
+        };
+        let err = registry
+            .select(&selection)
+            .expect_err("an unknown group is an error");
+        let message = format!("{err}");
+        assert!(message.contains("unknown group"), "{message}");
+        assert!(message.contains("conf/storage"), "{message}");
     }
 
     /// A filter that matches nothing fails, and says what it might have meant

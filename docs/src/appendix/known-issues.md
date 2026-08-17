@@ -28,16 +28,18 @@ Defects that have been fixed move to [Resolved Issues](resolved-issues.md), one 
 carrying the reasoning and the invariants the fix depends on. Item numbers are shared between
 the two pages and never reused, so a number appears on exactly one of them — which is why this
 list starts at 15 and skips 25, 26, 31, 34, 39, 44, 45, 48, 51, 56, 57, 61, 67 and 68, and why
-item 70 is the newest. The exceptions are items 16, 17, 20, 24 and 54, which were only
+item 71 is the newest. The exceptions are items 16, 17, 20, 24 and 54, which were only
 partly fixed: the open remainder is here and the rest is there. Items 9 and 51 were each one such
 exception until their second half was fixed, and are now on the resolved page alone; item 25 was one
 in the other direction — it had one row left open, that row was fixed, and the whole item
 [moved](resolved/claude-md-drift.md).
 
 **Baseline as of writing:** `cargo check --workspace --all-targets` passes with warnings;
-`cargo test --workspace` passes — 986 tests, one ignored, plus 8 more behind
+`cargo test --workspace` passes — 1,015 tests, two ignored, plus 8 more behind
 `--features stage-profile` that a default run does not reach ([Test Coverage](test-coverage.md)).
-That is up from 967 with [F19](../features/chart-legends.md), which added 16 `shoal-bench` unit
+That is up from 986 with [F20](../features/configuration-sweeps.md) and
+[F21](../features/benchmark-groups.md), which added 29 between them, all in `shoal-bench`. Before
+that it was up from 967 with [F19](../features/chart-legends.md), which added 16 `shoal-bench` unit
 tests over the shared chart legend, the data-derived axis ticks and the encryption charts in
 nanoseconds, 2 integration tests over the legend's geometry, and 1 doctest. That is up from 896
 with [F17](../features/workload-grid.md) and [F18](../features/results-pages.md), which added 71.
@@ -1356,3 +1358,56 @@ the mechanism exists; what it needs is a generator for it.
 Everything that has been fixed, and why it was fixed the way it was, is in
 [Resolved Issues](resolved-issues.md). The SHQL parser has gained test coverage at both stages
 ([SHQL](../api/shql.md#testing)) — items 26–29 were found while writing it.
+
+### 71. `throughput_sensitive` is configured, documented and mostly unused
+
+`shoal-core/src/server/tables/storage/fs/map.rs:415` and `:433`, `ArchiveMap::get_active_writer`
+
+`FileSystemThroughputWriterConf` carries a `buffer_size` and a `write_behind`, both defaulted, both
+documented in [Configuration](../getting-started/configuration.md) as the settings for "the lower
+latency but high throughput sensitive io". Exactly one writer reads them:
+
+```rust
+// map.rs:403 - ArchiveMap::new_writer, the map's own intent log
+let writer = DmaStreamWriterBuilder::new(file)
+    .with_buffer_size(self.conf.throughput_sensitive.buffer_size)
+    .with_write_behind(self.conf.throughput_sensitive.write_behind)
+    .build();
+```
+
+The writers for the archives themselves do not:
+
+```rust
+// map.rs:415 - the cached-handle branch
+return Ok(DmaStreamWriterBuilder::new(file.dup()?).build());
+// map.rs:433 - the freshly-opened branch
+Ok(DmaStreamWriterBuilder::new(file).build())
+```
+
+Both build with glommio's defaults. `map.rs:224`, the temporary file a map snapshot is staged
+through, does the same. So the section named for throughput governs the intent log of the archive
+*map* — a small, latency-shaped write — and not the bulk data path it appears to name. A deployment
+that raises `throughput_sensitive.buffer_size` to tune bulk ingest changes nothing about how the
+archives are written.
+
+There is a second, smaller wart in the same struct. `FileSystemThroughputWriterConf::write_behind`
+is a **count** and carries `deserialize_with = "utils::deserialize_byte_size"`
+(`fs/conf.rs:154-156`), so `write_behind: "4Ki"` parses to 4096 in-flight writes. The matching field
+on the latency writer has no such annotation. This is already noted in
+[Configuration](../getting-started/configuration.md) and is filed here so it is fixed alongside the
+line above rather than separately.
+
+**Established by reading the source.** [F20](../features/configuration-sweeps.md) sweeps both
+settings anyway — `macro/conf/storage/throughput_buffer/*` and
+`macro/conf/storage/throughput_write_behind/*` — precisely so that this stops being an argument from
+reading and becomes a measurement. A flat sweep there is the reproduction, and
+[Configuration and what each setting is worth](../performance/configuration.md) says so on the page
+rather than leaving a reader to conclude the device does not care.
+
+**Fix direction:** thread `&self.conf` into both branches of `get_active_writer` the way
+`new_writer` already does. The cached-handle branch is the awkward one — it builds a writer from a
+`dup()`ed handle it did not open, so the configuration has to reach it from `self` rather than from
+the call site, which it can. Decide separately whether the staging writer at `:224` should be
+configured or should stay on glommio's defaults deliberately; it writes a whole map in one pass and
+is not obviously the same kind of write. Then re-run `--group conf/storage` and the two sweeps
+should stop being flat — which is also the test that the fix did anything.

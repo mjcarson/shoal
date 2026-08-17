@@ -197,8 +197,9 @@ impl Workload for Fanout {
         // does the same thing for the same reason.
         let overrides = ConfOverrides {
             shards: Some(1),
-            memory: None,
-            tls: false,
+            // the shard count is the only thing this curve depends on, so everything else tracks
+            // the base configuration
+            ..ConfOverrides::default()
         };
         let server = match self.residency {
             Residency::Resident => ServerNeed::Fresh(overrides),

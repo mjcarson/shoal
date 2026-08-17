@@ -103,6 +103,31 @@ pub fn resolve(base: &Path, id: &str, overrides: &ConfOverrides, port: u16) -> R
             .memory(memory.as_str())
             .map_err(|error| anyhow::anyhow!("{memory} is not a memory size: {error:?}"))?;
     }
+    // the storage writer knobs, each reaching exactly one field so that an arm that names one is
+    // the base configuration in every other respect
+    let filesystem = &mut conf.storage.default.filesystem;
+    if let Some(durability) = overrides.durability {
+        filesystem.latency_sensitive.durability = durability;
+    }
+    if let Some(buffer_size) = overrides.latency_buffer_size {
+        filesystem.latency_sensitive.buffer_size = buffer_size;
+    }
+    if let Some(write_behind) = overrides.latency_write_behind {
+        filesystem.latency_sensitive.write_behind = write_behind;
+    }
+    if let Some(intent_log_size) = overrides.intent_log_size {
+        filesystem.latency_sensitive.intent_log_size = intent_log_size;
+    }
+    if let Some(buffer_size) = overrides.throughput_buffer_size {
+        filesystem.throughput_sensitive.buffer_size = buffer_size;
+    }
+    if let Some(write_behind) = overrides.throughput_write_behind {
+        filesystem.throughput_sensitive.write_behind = write_behind;
+    }
+    // and the one knob that is not storage at all
+    if let Some(max_frame_bytes) = overrides.max_frame_bytes {
+        conf.networking.max_frame_bytes = max_frame_bytes;
+    }
     Ok(conf)
 }
 
@@ -168,6 +193,9 @@ pub fn facts(conf: &Conf) -> ConfFacts {
         shoal::server::tables::storage::fs::conf::Durability::Fsync => "fsync",
         shoal::server::tables::storage::fs::conf::Durability::Async => "async",
     };
+    // the writer knobs are recorded for every workload, not only the ones that sweep them, so that
+    // a page groups arms by a fact rather than by parsing an identifier
+    let filesystem = &conf.storage.default.filesystem;
     ConfFacts {
         // an unset core count means every online core, which is not a number this can name
         shards: conf.resources.cores.unwrap_or(0) as u64,
@@ -176,6 +204,12 @@ pub fn facts(conf: &Conf) -> ConfFacts {
         // without this an encrypted capture and a plaintext one are indistinguishable in the
         // artifact, which is the same rule `hotpath` and `stage-profile` builds already follow
         tls: conf.networking.tls.is_some(),
+        latency_buffer_size: Some(filesystem.latency_sensitive.buffer_size as u64),
+        latency_write_behind: Some(filesystem.latency_sensitive.write_behind as u64),
+        intent_log_size: Some(binary_size(filesystem.latency_sensitive.intent_log_size)),
+        throughput_buffer_size: Some(filesystem.throughput_sensitive.buffer_size as u64),
+        throughput_write_behind: Some(filesystem.throughput_sensitive.write_behind as u64),
+        max_frame_bytes: Some(u64::from(conf.networking.max_frame_bytes)),
         digest: digest(conf),
     }
 }

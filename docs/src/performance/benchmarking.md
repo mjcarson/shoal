@@ -105,8 +105,8 @@ Alongside them it writes `<label>.meta.json`, which is what lets a committed num
 whether it still describes the current code: the commit, whether the tree was dirty, a content
 hash of the sources each layer measures, and the machine, governor and toolchain it ran on.
 
-A full capture is now **a hundred and sixty one workloads times five runs**, so budget four to
-five hours. Eight of them are the storage-free controls [F9](../features/ephemeral-tables.md)
+A full capture is now **two hundred and nine workloads times five runs**, so budget six to
+seven hours. Eight of them are the storage-free controls [F9](../features/ephemeral-tables.md)
 added, and they are the cheapest of the set: they have no disk to wait on. Sixteen are the
 transport modes [F13](../features/transport-workloads.md) added and
 [F14](../features/encryption-in-transit.md) doubled, and the MiB half of those is the most
@@ -117,19 +117,38 @@ budget rather than a fixed query count, so a MiB arm runs 256 queries where a 25
 
 **Seventy-four are [F17](../features/workload-grid.md)'s grid**, which is the largest and slowest
 phase and roughly doubled a capture on its own. It holds the same byte budget the encryption sweeps
-do, for the same reason. While iterating on anything else, `--layer macro` with a filter that
-excludes it is the difference between a coffee and an afternoon:
+do, for the same reason. **Forty-eight are [F20](../features/configuration-sweeps.md)'s configuration
+sweeps**, which add about ninety minutes.
+
+While iterating on anything else, ask for a **group** rather than a prefix
+([F21](../features/benchmark-groups.md)) — it is the difference between a coffee and an afternoon,
+and unlike a prefix it can express "everything that isolates one path":
 
 ```bash
-# everything but the grid
-shoal-bench run --label <label> --layer macro macro/insert macro/get macro/fanout macro/transport
+# what the groups are, what each answers, and what a capture of each would cost
+shoal-bench list --groups
+
+# everything that drives one path and only one - which is what attributes a regression
+shoal-bench run --label <label> --group isolating
 
 # or the grid alone
-shoal-bench run --label <label> --layer macro macro/grid macro/skew
+shoal-bench run --label <label> --group grid
+
+# or one half of the configuration sweep
+shoal-bench run --label <label> --group conf/storage
 ```
 
-~~thirty-one workloads~~ and ~~eighty-seven workloads~~ were the counts before F13, F14 and F17
-landed, and each stayed on this page for at least one feature after it stopped being true. If a
+Groups combine with **or** and intersect with `--layer` and the positional filters, so
+`--group conf durability` is the two durability arms. An unknown group name is an error that prints
+the real ones, rather than falling through to selecting everything — which is the failure mode the
+prefixes this replaces had, and it costs three hours to notice.
+
+**A group selects; it never schedules.** A capture runs one `shoal-workload` process at a time
+whatever is selected, and must: two servers at once would share a page cache, a device queue and a
+set of cores, and each one's numbers would be a measurement of the other.
+
+~~thirty-one workloads~~, ~~eighty-seven workloads~~ and ~~a hundred and sixty one workloads~~ were
+the counts before F13, F14, F17 and F20 landed, and each stayed on this page for at least one feature after it stopped being true. If a
 number here disagrees with `shoal-bench list --layer macro | wc -l`, that command is right.
 `--scale smoke --runs 2` cuts the data two orders of magnitude and is what you want while
 iterating on a workload; the scale is recorded in the artifact, and a `smoke` capture is never
@@ -346,10 +365,10 @@ shoal-bench render          # regenerate every page under docs/src/performance/
 shoal-bench render --check  # fail if any committed page is out of date, writing nothing
 ```
 
-Ten pages, listed on [Performance](overview.md), generated from the committed artifacts and
+Eleven pages, listed on [Performance](overview.md), generated from the committed artifacts and
 committed themselves — `create-missing = false` means the book will not build without them and
-regenerating them needs this machine. **`render` writes all ten or none**: a tree holding four
-current pages and six stale ones is worse than one holding ten stale ones, because nothing on a
+regenerating them needs this machine. **`render` writes all eleven or none**: a tree holding four
+current pages and seven stale ones is worse than one holding eleven stale ones, because nothing on a
 page says which kind it is. `--check` reports every page that is out of date rather than the first,
 and it fails after any commit, because each page states which commit it was rendered against and
 every staleness verdict on it is relative to that commit.

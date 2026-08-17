@@ -30,6 +30,13 @@ Seventy-four workloads under `macro/grid/` and `macro/skew/`, in four sweeps.
 | Key distribution | `macro/skew/<dist>/<table>` | 6 | three distributions × two tables |
 | Load depth | `macro/grid/depth/<depth>` | 4 | four depths |
 
+[F20](configuration-sweeps.md) added a fifth user of this driver. `Grid` gained a
+`conf: ConfOverrides` field and a `Sweep::Conf` naming variant, and forty-eight arms under
+`macro/conf/` are the reference cell `macro/grid/unsorted/r50/1024` with exactly one field of the
+server configuration moved. They are minted by `conf_sweep.rs` rather than by `Grid::all`, so the
+counts in this table are unchanged — but a change to the driver now moves both families, and the
+reference cell is a control for both.
+
 **Row widths**: 64 B, 128 B, 512 B, 1 KiB, 8 KiB, 512 KiB, 1 MiB, 4 MiB, plus three named
 *distributions* of widths — `mixed_small` (four widths under a kilobyte), `mixed_mid` (1 KiB to
 8 KiB) and `mixed_large` (512 KiB to 1 MiB).

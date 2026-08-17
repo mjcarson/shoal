@@ -21,6 +21,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use anyhow::{Context as _, Result};
+use shoal::server::tables::storage::fs::conf::Durability;
 use shoal::shared::tls::TlsClientOptions;
 
 use crate::model::macro_layer::{ConfFacts, ScaleFacts, Timing};
@@ -115,6 +116,41 @@ pub struct ConfOverrides {
     /// attributable to encryption — the same shape [F9](../../../docs/src/features/ephemeral-tables.md)
     /// established for storage, applied to the wire.
     pub tls: bool,
+    /// Which durability barrier a write waits on before its response is released
+    ///
+    /// The one axis [F8](../../../docs/src/features/purpose-built-workloads.md) said was nearly free
+    /// to build and did not build. `Async` acknowledges a write once the kernel has taken it;
+    /// `Fsync` waits for the fdatasync, and the difference between the two arms is what the barrier
+    /// costs.
+    pub durability: Option<Durability>,
+    /// How many bytes the intent log buffers before it flushes
+    ///
+    /// A minimum rather than an exact size: the writer rounds it up to the device's O_DIRECT
+    /// alignment, so a value below the device block size is a no-op. See
+    /// `shoal-core/src/server/tables/storage/fs/stream.rs`.
+    pub latency_buffer_size: Option<usize>,
+    /// How many intent log writes may be in flight at once
+    ///
+    /// The io_uring queue depth for the write path. The writer stalls until a completion drains
+    /// once this many are outstanding.
+    pub latency_write_behind: Option<usize>,
+    /// How large the intent log may grow before compaction is due
+    pub intent_log_size: Option<u64>,
+    /// How many bytes the throughput sensitive writer buffers before it flushes
+    ///
+    /// Note that this reaches less of the engine than its name suggests - see item 71 in
+    /// `docs/src/appendix/known-issues.md`. The sweep over it is deliberate anyway: a flat line is
+    /// the evidence for that item.
+    pub throughput_buffer_size: Option<usize>,
+    /// How many throughput sensitive writes may be in flight at once
+    ///
+    /// Carries the same caveat as [`ConfOverrides::throughput_buffer_size`].
+    pub throughput_write_behind: Option<usize>,
+    /// The largest frame the server will accept, in bytes
+    ///
+    /// A frame length is used as an allocation size before the body arrives, so this is a bound on
+    /// what one client can make the server allocate as much as it is a bound on a batch.
+    pub max_frame_bytes: Option<u32>,
 }
 
 /// Everything a workload produced

@@ -26,6 +26,7 @@
 pub mod access;
 pub mod all_workloads;
 pub mod attribution;
+pub mod configuration;
 pub mod fanout;
 pub mod grid;
 pub mod micro;
@@ -76,6 +77,10 @@ pub const PAGES: &[PageSpec] = &[
     PageSpec {
         surface: Surface::Fanout,
         build: fanout::build,
+    },
+    PageSpec {
+        surface: Surface::Configuration,
+        build: configuration::build,
     },
     PageSpec {
         surface: Surface::Micro,

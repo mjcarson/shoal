@@ -1404,6 +1404,34 @@ across the boundary; check whether rkyv's `Pool` allocation is being hoisted dif
 that [item 66](known-issues.md) means there is no LTO to hide any of this, so whatever it is would
 likely vanish under `lto = "thin"` — which is itself worth measuring before chasing this further.
 
+### O33. The archives are written with glommio's defaults, and nothing can tune them
+
+| | |
+| --- | --- |
+| **Rank** | **C** — argued, and about to become measured |
+| **Impact** | Unknown. The bulk write path uses whatever `DmaStreamWriterBuilder` defaults to, and the setting that appears to govern it does not |
+| **Difficulty** | S — thread `&self.conf` into two branches of one function |
+| **Depends on** | [item 71](known-issues.md), which is the same finding as a defect |
+| **Blocks** | any tuning advice about bulk ingest |
+| **Tradeoff** | None known. It is a setting that already exists reaching code it already names |
+| **Benchmark** | `macro/conf/storage/throughput_buffer/*` and `macro/conf/storage/throughput_write_behind/*` ([F20](../features/configuration-sweeps.md)) |
+
+`ArchiveMap::get_active_writer` builds a `DmaStreamWriter` with no `with_buffer_size` and no
+`with_write_behind`, in both its branches (`map.rs:415`, `:433`), while `new_writer` twelve lines
+above configures the map's own intent log from `throughput_sensitive`. So the archives — the actual
+bulk data — are written at glommio's default buffer size and queue depth, and the only thing
+`throughput_sensitive` reaches is a small latency-shaped write.
+
+**Argued from reading the source.** What makes this worth an `O` number rather than only a defect is
+that the default may well be *wrong* for the workload: the archive writer is the one place in the
+engine that streams whole compacted partitions, which is exactly the case a deep queue and a large
+buffer exist for, and it is running at whatever a general-purpose default chose.
+
+**How to adjudicate it.** The two sweeps named above are expected to be flat today. That flatness is
+[item 71](known-issues.md)'s evidence. Fix the wiring, re-run `--group conf/storage`, and the same
+two sweeps say whether the setting is worth anything — if they are still flat afterwards, the
+default was fine and this entry closes as measured-and-declined rather than as taken.
+
 ### O26. `handle_query` cloned a `QueryMetadata` for a gather almost no query has
 
 | | |

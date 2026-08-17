@@ -3,7 +3,28 @@
 What the test suite reaches, what it does not, and the one place where it is unsound.
 
 **Established by running it.** `cargo check --workspace --all-targets` passes with warnings and
-`cargo test --workspace` passes: **986 tests**, one ignored.
+`cargo test --workspace` passes: **1,015 tests**, two ignored.
+
+**[F20](../features/configuration-sweeps.md) and [F21](../features/benchmark-groups.md) added 29**,
+every one of them in `shoal-bench`, and the split says what each feature rests on. Twenty-six unit
+tests: nine over the configuration sweep, eleven over the group table, three in the registry over
+`--group` intersecting rather than replacing, one over seed bundles fitting inside a *narrowed*
+frame, and two over parsing a swept value back into the number behind it. Plus three doctests. The
+total went 986 → 1,015.
+
+**The one that carries the feature is `conf_sweep::an_arm_moves_one_field`.** Everything on
+[Configuration and what each setting is worth](../performance/configuration.md) rests on an arm
+differing from the base in exactly one field, because that is what makes the gap between two arms
+attributable to a setting; the test counts the moved fields with one term per field, so a field
+added to `ConfOverrides` without a term is a visible omission in the diff rather than a check that
+silently stops covering it. `every_sweep_covers_the_shipped_default` is the second: it resolves the
+committed `shoal.yml` and asserts each sweep contains the value in use, so retuning that file fails
+a test instead of leaving the page recommending against a reference that is not on the chart.
+
+**`groups::the_conf_halves_partition_the_sweep` is a counting test that earns its place.** It
+asserts every configuration arm is in exactly one of `conf/storage` and `conf/resources` — not
+neither, not both — which is what makes two half-captures add up to the whole one, and it is the
+kind of thing that goes wrong silently when a prefix is added.
 
 **[F19](../features/chart-legends.md) added 19.** Sixteen unit tests — seven over the shared
 legend's layout, four over the sweep's canvas and its data-derived ticks, three over the encryption
@@ -50,12 +71,12 @@ should read this table rather than assume it was.
 | `shoal-proto` unit | 171 | the protocol, the SHQL parser, SCRAM, the TLS config — moved out of `shoal-core` |
 | `shoal-core` unit | 146 | the engine: partitions, storage, the shard. Was 323 before the split |
 | `shoal-client` unit | 18 | the client read loop and its error routing, and — new with [F16](../features/client-builder.md) — the builder, the pool defaults and the endpoint order |
-| `shoal-bench` unit | 350 | the harness, the workloads, the charts, and — new with [F17](../features/workload-grid.md) and [F18](../features/results-pages.md) — the grid, the row-width and key generators, the family and page registries, and the two new chart kinds; and — new with [F19](../features/chart-legends.md) — the shared legend, the data-derived axis ticks, and the encryption charts in nanoseconds |
+| `shoal-bench` unit | 376 | the harness, the workloads, the charts, and — new with [F17](../features/workload-grid.md) and [F18](../features/results-pages.md) — the grid, the row-width and key generators, the family and page registries, and the two new chart kinds; and — new with [F19](../features/chart-legends.md) — the shared legend, the data-derived axis ticks, and the encryption charts in nanoseconds; and — new with [F20](../features/configuration-sweeps.md) and [F21](../features/benchmark-groups.md) — the configuration sweep, the group table, and `--group` in the registry |
 | `shoal` integration | 197 | 14 binaries against a live server, one ignored. `pool.rs` is **new** with [F16](../features/client-builder.md) |
 | `shoalctl` integration | 34 | the completion menu, driven the way the key handler does |
 | `shoal-client-check` integration | 7 | **new.** A schema compiling and running against the client alone |
 | `shoal-bench` integration | 21 | committed artifacts, chart geometry, CSS sync. Up 2 with [F17](../features/workload-grid.md), both guarding the committed corpus against the four fields it added, and 2 more with [F19](../features/chart-legends.md) over the legend's layout |
-| doctests | 42 | up 9 with [F17](../features/workload-grid.md): the row profile's five, `Seeded::at`, `queries_for`, and the two byte formatters; and one with [F19](../features/chart-legends.md) over the third |
+| doctests | 45 | up 9 with [F17](../features/workload-grid.md): the row profile's five, `Seeded::at`, `queries_for`, and the two byte formatters; one with [F19](../features/chart-legends.md) over the third; and 3 with [F21](../features/benchmark-groups.md) and [F20](../features/configuration-sweeps.md) over `human_duration`, `numeric` and the page's list formatter |
 
 The 8 added are the 7 in `shoal-client-check` and one in `hotpath_scopes`
 (`a_scope_from_any_crate_loses_its_prefix`). The `chart_geometry` count did not move, but

@@ -50,6 +50,8 @@ pub enum Surface {
     Transport,
     /// What reading many partitions in one query costs
     Fanout,
+    /// What each setting of the server configuration is worth
+    Configuration,
     /// The criterion layer, its scaling curves and what it can resolve
     Micro,
     /// Where the time goes, from the two instrumented builds
@@ -69,6 +71,7 @@ impl Surface {
             Surface::Access => "docs/src/performance/access-patterns.md",
             Surface::Transport => "docs/src/performance/transport.md",
             Surface::Fanout => "docs/src/performance/fanout.md",
+            Surface::Configuration => "docs/src/performance/configuration.md",
             Surface::Micro => "docs/src/performance/micro.md",
             Surface::Attribution => "docs/src/performance/attribution.md",
             Surface::AllWorkloads => "docs/src/performance/all-workloads.md",
@@ -85,6 +88,7 @@ impl Surface {
             Surface::Access => "Access patterns and load depth",
             Surface::Transport => "Transport and encryption",
             Surface::Fanout => "Reading many partitions at once",
+            Surface::Configuration => "Configuration and what each setting is worth",
             Surface::Micro => "The micro layer",
             Surface::Attribution => "Where the time goes",
             Surface::AllWorkloads => "Every workload",
@@ -101,7 +105,7 @@ impl Surface {
     }
 
     /// Every page, in the order they are registered in `SUMMARY.md`
-    pub const ALL: [Surface; 10] = [
+    pub const ALL: [Surface; 11] = [
         Surface::Overview,
         Surface::Grid,
         Surface::RowSize,
@@ -109,6 +113,7 @@ impl Surface {
         Surface::Access,
         Surface::Transport,
         Surface::Fanout,
+        Surface::Configuration,
         Surface::Micro,
         Surface::Attribution,
         Surface::AllWorkloads,
@@ -413,6 +418,77 @@ pub const FAMILIES: &[Family] = &[
              reason the transport family gives.",
     },
     Family {
+        name: "conf-storage",
+        title: "The filesystem writer settings",
+        surface: Surface::Configuration,
+        what_it_measures:
+            "The grid's reference cell - one client, an even read/write mixture, 1 KiB rows, the \
+             persistent unsorted table, thirty two queries outstanding - run once for each value of \
+             one storage setting, with every other setting left at what the committed `shoal.yml` \
+             says. The settings are the ones on the two filesystem writers: the durability barrier a \
+             write waits on, how many bytes the intent log buffers, how many writes it keeps in \
+             flight, how large it grows before compaction, and the same buffer and queue depth on \
+             the throughput writer.",
+        how_to_read_it:
+            "Down a column, never across one. Two arms of one sweep differ in exactly one field of \
+             the configuration, so the difference between them is what that field is worth; two arms \
+             of *different* sweeps differ in two and are never comparable. **A difference counts \
+             only when the two arms' observed run intervals are disjoint** - the macro layer's rule, \
+             for the reason [F7](../features/bench-runner.md) gives - which is what the *Real?* \
+             column of the recommendation table reports. Each sweep also contains the value \
+             `shoal.yml` is actually set to, so the arm to read every other one against is named \
+             rather than implied.",
+        what_would_make_it_wrong:
+            "Reading a flat sweep as \"this setting does not matter\" rather than as \"this setting \
+             did not reach the code\". The throughput writer's two sweeps are the live example: \
+             [item 71](../appendix/known-issues.md) records that `throughput_sensitive` is applied \
+             to the archive map's intent log and *not* to the archive writers themselves, so a flat \
+             line there is evidence about the wiring and not about the device. The other one is the \
+             mixture: these arms are swept at an even read/write share, so a setting that only bites \
+             under sustained writing is being asked half a question.",
+        what_it_cannot_say:
+            "What two settings are worth together. One knob moves at a time against a fixed \
+             reference of every other, which is the same cross-not-cube choice \
+             [F17](../features/workload-grid.md) makes and has the same consequence: a write-behind \
+             depth that only pays off at a large buffer would show here as two flat sweeps. It also \
+             says nothing about a device other than the one the capture ran on - a buffer size is \
+             rounded up to the O_DIRECT alignment of the disk underneath it, so the shape of that \
+             sweep is a property of the pair.",
+    },
+    Family {
+        name: "conf-resources",
+        title: "Cores, memory and the frame bound",
+        surface: Surface::Configuration,
+        what_it_measures:
+            "The same reference cell, swept across the shard count, the per-shard memory limit, and \
+             the largest frame the server will accept. The first two are swept at the even mixture \
+             *and* at a pure read share, because they are the two settings whose effect plausibly \
+             differs between the halves of a mixture - more shards is more parallelism for reads and \
+             more fsync contention for writes, and a memory limit only bites once a read has to \
+             reach disk.",
+        how_to_read_it:
+            "The shard sweep is a scaling curve: read where it stops rising, not what it reaches. \
+             The memory sweep is a cliff rather than a curve - it is flat while the working set fits \
+             and steps once it does not - so the value worth taking off it is **where** the step is, \
+             which is where this hardware's reads start being answered from disk. Note that \
+             `resources.memory` is a **per-shard** budget, so a twelve shard server at 4Gi is holding \
+             48 GiB, and the two axes of this page interact for that reason alone.",
+        what_would_make_it_wrong:
+            "The client and the server share this machine. A one shard arm leaves eleven cores idle \
+             for a client that needs four, and a twelve shard arm does not, so the low end of the \
+             shard sweep is measured under less contention than the high end and the curve flatters \
+             the small configurations. The memory sweep has the matching hazard: an arm that evicts \
+             is measuring compaction as well as the read path, because a partition cannot be evicted \
+             until its generation has been compacted.",
+        what_it_cannot_say:
+            "How Shoal scales past this machine. Every arm here runs on one host with a fixed core \
+             count and one device, so the shard curve is a curve in *this* box and not a statement \
+             about scaling. It also cannot say what a frame bound costs a client that batches to it: \
+             the seed bundles size themselves to whatever bound the server was started with, which \
+             is what lets the narrow arms run at all, and it means the narrow arms send more, smaller \
+             bundles rather than failing.",
+    },
+    Family {
         name: "retired",
         title: "The retired blended workload",
         surface: Surface::AllWorkloads,
@@ -461,6 +537,10 @@ pub fn family_for(id: &str) -> Option<&'static Family> {
         "grid"
     } else if id.starts_with("macro/skew/") {
         "skew"
+    } else if id.starts_with("macro/conf/storage/") {
+        "conf-storage"
+    } else if id.starts_with("macro/conf/resources/") {
+        "conf-resources"
     } else if id.starts_with("macro/fanout/") {
         "fanout"
     } else if id.starts_with("macro/transport/") {

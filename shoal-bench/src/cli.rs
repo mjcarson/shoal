@@ -40,6 +40,12 @@ pub enum Command {
     Promote(PromoteArgs),
 }
 
+/// How many times a capture runs each workload before taking its median
+///
+/// Named rather than written twice, because `list --groups` estimates what a capture would cost and
+/// an estimate taken at a different run count than the capture uses is not an estimate of it.
+pub const DEFAULT_RUNS: u32 = 5;
+
 /// How a filter selects benchmarks, shared by `list` and `run`
 #[derive(clap::Args, Debug, Clone, Default)]
 pub struct Selection {
@@ -52,6 +58,19 @@ pub struct Selection {
     /// Restrict the selection to these layers
     #[clap(long = "layer", value_name = "LAYER")]
     pub layers: Vec<Layer>,
+    /// Restrict the selection to these named groups, repeatable
+    ///
+    /// A group is a set of benchmarks that answers one question, declared in `crate::groups` and
+    /// listed by `list --groups`. Several groups are combined with or; the result intersects with
+    /// `--layer` and with the positional filters, the same way those two intersect with each other.
+    /// Selecting a group narrows what a capture measures and changes nothing about how it runs -
+    /// one workload at a time, exactly as a full capture does.
+    ///
+    /// The explicit `id` is load bearing: clap keys a flattened argument by its field name, and
+    /// `list` carries its own `--groups` flag in a field of the same name. Without this the two
+    /// collide at runtime rather than at compile time.
+    #[clap(long = "group", value_name = "GROUP", id = "group")]
+    pub groups: Vec<String>,
 }
 
 /// How a command that prints a report should print it
@@ -78,6 +97,12 @@ pub struct ListArgs {
     /// Rediscover the micro benchmarks instead of using the cached list
     #[clap(long)]
     pub refresh: bool,
+    /// Print the declared groups and what each one answers, instead of the benchmarks
+    ///
+    /// Reads the committed artifacts to estimate what a capture of each would cost, which is the
+    /// number worth having before choosing one.
+    #[clap(long)]
+    pub groups: bool,
 }
 
 /// How much data a workload builds, and how hard it drives it
@@ -129,7 +154,7 @@ pub struct RunArgs {
     #[clap(long)]
     pub label: String,
     /// How many times to run each workload before taking its median
-    #[clap(long, default_value_t = 5)]
+    #[clap(long, default_value_t = DEFAULT_RUNS)]
     pub runs: u32,
     /// The server configuration to run against
     #[clap(long, default_value = "shoal.yml")]

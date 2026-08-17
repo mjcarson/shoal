@@ -141,8 +141,9 @@ impl Workload for FanoutEphemeral {
         // and the two would not be comparable if only one of them did
         let overrides = ConfOverrides {
             shards: Some(1),
-            memory: None,
-            tls: false,
+            // the shard count is the only thing this curve depends on, so everything else tracks
+            // the base configuration
+            ..ConfOverrides::default()
         };
         WorkloadPlan {
             // fresh, and only ever fresh. there is no evicted arm to reach by restarting, since a

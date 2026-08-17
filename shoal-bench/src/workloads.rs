@@ -24,6 +24,7 @@
 //! A test asserts those two agree, so forgetting the second is a test failure rather than a
 //! workload that is never run.
 
+pub mod conf_sweep;
 pub mod fanout;
 pub mod fanout_ephemeral;
 pub mod grid;
@@ -103,6 +104,16 @@ pub fn all() -> Vec<Box<dyn Workload>> {
     // other reason it belongs at the end - the cheap, isolating workloads are answered first
     built.extend(
         grid::Grid::all()
+            .into_iter()
+            .map(|workload| Box::new(workload) as Box<dyn Workload>),
+    );
+    // the configuration sweeps, appended after the grid because they are the newest block and for
+    // the reason every block above them was appended. they are the grid's reference cell run under
+    // forty six different server configurations, so they read after the grid as well as porting
+    // after it: the grid says what a mixture costs, and these say what one setting of the
+    // configuration that mixture ran under was worth
+    built.extend(
+        conf_sweep::all()
             .into_iter()
             .map(|workload| Box::new(workload) as Box<dyn Workload>),
     );

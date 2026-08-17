@@ -34,6 +34,7 @@ pub mod collect;
 pub mod compare;
 pub mod fingerprint;
 pub mod fmt;
+pub mod groups;
 pub mod model;
 pub mod promote;
 pub mod registry;

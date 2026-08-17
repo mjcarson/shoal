@@ -145,7 +145,11 @@ pub struct ScaleFacts {
 /// disk needs a memory limit that forces eviction, and a durability workload changes nothing but
 /// the barrier. Without these recorded, a comparison across a configuration change is silently
 /// invalid rather than visibly so.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// [`Default`] exists for the same reason [`ScaleFacts`]'s does: a caller fills in the facts it has
+/// and leaves the rest. It is not a usable value on its own - a defaulted `memory` is the empty
+/// string, which no run ever produces.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConfFacts {
     /// How many shards the server ran with
     pub shards: u64,
@@ -161,9 +165,32 @@ pub struct ConfFacts {
     /// [F14](../../../docs/src/features/encryption-in-transit.md) was plaintext.
     #[serde(default)]
     pub tls: bool,
+    /// How many bytes the latency sensitive writer buffered before flushing
+    ///
+    /// The intent log's write size, and a minimum rather than an exact one: the writer rounds it up
+    /// to the device's O_DIRECT alignment. `None` on every capture taken before
+    /// [F20](../../../docs/src/features/configuration-sweeps.md), which is why this and the five
+    /// fields below it are optional - un-skipping them would rewrite the whole committed corpus.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_buffer_size: Option<u64>,
+    /// How many writes the latency sensitive writer kept in flight at once
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_write_behind: Option<u64>,
+    /// How large the intent log was allowed to grow before compaction was due
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub intent_log_size: Option<String>,
+    /// How many bytes the throughput sensitive writer buffered before flushing
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub throughput_buffer_size: Option<u64>,
+    /// How many writes the throughput sensitive writer kept in flight at once
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub throughput_write_behind: Option<u64>,
+    /// The largest frame the server would accept, in bytes
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_frame_bytes: Option<u64>,
     /// A digest over the whole resolved configuration
     ///
-    /// The three fields above are the ones worth reading. This covers everything else, so a
+    /// The named fields above are the ones worth reading. This covers everything else, so a
     /// configuration change that moved a setting nobody thought to name here still shows up.
     pub digest: String,
 }

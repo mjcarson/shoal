@@ -212,6 +212,67 @@ pub const IDS: &[&str] = &[
     "macro/grid/depth/8",
     "macro/grid/depth/32",
     "macro/grid/depth/128",
+    // the configuration sweeps, appended after the grid for the reason every block here is
+    // appended. each is the grid's reference cell - `macro/grid/unsorted/r50/1024` - with exactly
+    // one field of the server configuration moved, so the cell is what each of them is read
+    // against. the section segment (`storage`, `resources`) is in the identifier so that the group
+    // table and the page families can split the sweep without linking the engine.
+    //
+    // the storage writers first: the barrier a write waits on, then how it is buffered and queued
+    "macro/conf/storage/durability/r50/fsync",
+    "macro/conf/storage/durability/r50/async",
+    "macro/conf/storage/latency_buffer/r50/512",
+    "macro/conf/storage/latency_buffer/r50/4Ki",
+    "macro/conf/storage/latency_buffer/r50/16Ki",
+    "macro/conf/storage/latency_buffer/r50/64Ki",
+    "macro/conf/storage/latency_buffer/r50/256Ki",
+    "macro/conf/storage/latency_write_behind/r50/1",
+    "macro/conf/storage/latency_write_behind/r50/8",
+    "macro/conf/storage/latency_write_behind/r50/32",
+    "macro/conf/storage/latency_write_behind/r50/128",
+    "macro/conf/storage/latency_write_behind/r50/512",
+    "macro/conf/storage/intent_log/r50/1Mi",
+    "macro/conf/storage/intent_log/r50/10Mi",
+    "macro/conf/storage/intent_log/r50/100Mi",
+    "macro/conf/storage/intent_log/r50/1Gi",
+    // the throughput writer, which item 71 in `docs/src/appendix/known-issues.md` says reaches less
+    // of the engine than its name suggests. these arms are swept anyway: a flat line here is that
+    // item's evidence, and an unmeasured knob would leave it an argument from reading the source
+    "macro/conf/storage/throughput_buffer/r50/32Ki",
+    "macro/conf/storage/throughput_buffer/r50/128Ki",
+    "macro/conf/storage/throughput_buffer/r50/512Ki",
+    "macro/conf/storage/throughput_buffer/r50/1Mi",
+    "macro/conf/storage/throughput_write_behind/r50/1",
+    "macro/conf/storage/throughput_write_behind/r50/4",
+    "macro/conf/storage/throughput_write_behind/r50/16",
+    // then what the server is given to run on. the two resource knobs are swept at a pure read
+    // share as well, because more shards is more parallelism for reads and more fsync contention
+    // for writes, and a mixture alone would blend the two
+    "macro/conf/resources/shards/r50/1",
+    "macro/conf/resources/shards/r50/2",
+    "macro/conf/resources/shards/r50/4",
+    "macro/conf/resources/shards/r50/8",
+    "macro/conf/resources/shards/r50/12",
+    "macro/conf/resources/shards/r100/1",
+    "macro/conf/resources/shards/r100/2",
+    "macro/conf/resources/shards/r100/4",
+    "macro/conf/resources/shards/r100/8",
+    "macro/conf/resources/shards/r100/12",
+    "macro/conf/resources/memory/r50/1Mi",
+    "macro/conf/resources/memory/r50/4Mi",
+    "macro/conf/resources/memory/r50/16Mi",
+    "macro/conf/resources/memory/r50/64Mi",
+    "macro/conf/resources/memory/r50/1Gi",
+    "macro/conf/resources/memory/r50/4Gi",
+    "macro/conf/resources/memory/r100/1Mi",
+    "macro/conf/resources/memory/r100/4Mi",
+    "macro/conf/resources/memory/r100/16Mi",
+    "macro/conf/resources/memory/r100/64Mi",
+    "macro/conf/resources/memory/r100/1Gi",
+    "macro/conf/resources/memory/r100/4Gi",
+    "macro/conf/resources/frame/r50/1Mi",
+    "macro/conf/resources/frame/r50/8Mi",
+    "macro/conf/resources/frame/r50/64Mi",
 ];
 
 /// Whether an id names a workload this build knows about

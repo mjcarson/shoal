@@ -49,6 +49,13 @@ cargo run -p shoal-bench --release -- run --label <label>
 cargo run -p shoal-bench --release -- list get_key
 cargo run -p shoal-bench --release -- run --label <label> --layer micro get_key
 
+# the named groups, what each answers, and what a capture of it would cost
+cargo run -p shoal-bench --release -- list --groups
+
+# one question rather than the whole suite. --group combines with or, and intersects
+# with --layer and the filters. it selects only: nothing runs concurrently, ever
+cargo run -p shoal-bench --release -- run --label <label> --group conf/storage
+
 # a whole capture at a fraction of the data, for checking a workload runs at all
 cargo run -p shoal-bench --release -- run --label <label> --scale smoke --runs 2
 
@@ -107,10 +114,10 @@ A full capture is four to five hours. While iterating, `--scale smoke --runs 2` 
 at a hundredth of the data in a couple of minutes and proves every workload still runs — which is
 what you want before spending the afternoon on the real one.
 
-The macro layer is a hundred and sixty one **workloads** living in `shoal-bench/src/workloads/`,
+The macro layer is two hundred and nine **workloads** living in `shoal-bench/src/workloads/`,
 each generating its own rows from `--seed` — there is no dataset to fetch
-([F8](docs/src/features/purpose-built-workloads.md)). They come in two kinds and the difference
-matters:
+([F8](docs/src/features/purpose-built-workloads.md)). They come in three kinds and the differences
+matter:
 
 - **Isolating workloads** drive one path each, so a difference between two captures can be
   attributed to something. Eight of them are storage-free controls over ephemeral tables, each
@@ -123,6 +130,12 @@ matters:
   ([F17](docs/src/features/workload-grid.md)). It answers what a caller's workload costs.
   **A regression is never attributed to a grid arm** — the grid says a mixture got slower, the
   isolating pairs say which half.
+- **The configuration sweep** is forty-eight workloads under `macro/conf/`, each one the grid's
+  reference cell `macro/grid/unsorted/r50/1024` with **exactly one field** of the server
+  configuration moved ([F20](docs/src/features/configuration-sweeps.md)). It answers what a setting
+  in `shoal.yml` is worth. Every sweep contains the value the committed `shoal.yml` resolves to, and
+  a test fails if one stops bracketing it — so retuning that file is a test failure rather than a
+  sweep that quietly stops covering the configuration everything else is measured under.
 
 They are compiled into a second binary of that crate, `shoal-workload`, which the runner builds and
 spawns; the runner half still builds with `--no-default-features` and no engine at all, which is
@@ -133,12 +146,16 @@ and deprecate instead — and **append**, never interleave: a workload's positio
 line in `workloads::all()`, one line in `workload_ids::IDS`, and a family in
 `shoal-bench/src/render/family.rs` — a test fails if you forget any of the last three.
 
-A full capture is now four to five hours. `--layer macro macro/grid macro/skew` runs the grid alone
-and a filter excluding it runs everything else; `--scale smoke` runs anything at a hundredth of the
-data.
+A full capture is now six to seven hours, so **use a group** rather than a prefix
+([F21](docs/src/features/benchmark-groups.md)). `list --groups` prints the twelve declared sets,
+what each answers, and what a capture of it would cost; `--group grid` is the grid alone, `--group
+isolating` is everything that drives one path, `--group conf/storage` is the writer knobs. A group
+**selects and never schedules** — a capture still runs one `shoal-workload` process at a time, and
+must, because two servers at once share a page cache, a device queue and a set of cores. `--scale
+smoke` runs anything at a hundredth of the data.
 
 **Everything under `docs/src/performance/` except `benchmarking.md` and `baseline.md` is
-generated** — never edit those pages by hand, run `shoal-bench render`, which writes all ten or
+generated** — never edit those pages by hand, run `shoal-bench render`, which writes all eleven or
 none. Each page opens with four mandatory blocks (what it measures, how to read it, what would make
 it wrong, what it cannot tell you) that come from its family
 ([F18](docs/src/features/results-pages.md)). See `docs/src/performance/benchmarking.md` for the

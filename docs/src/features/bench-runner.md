@@ -32,7 +32,7 @@ be skipped."
 
 | Command | What it does |
 | --- | --- |
-| `list [FILTER…]` | prints the benchmarks a filter selects, running nothing |
+| `list [FILTER…]` | prints the benchmarks a filter selects, running nothing; `--groups` prints the declared groups instead |
 | `run --label <name> [FILTER…]` | captures the selected layers and stores them with their provenance |
 | `compare <label>` | judges a capture against the frozen baseline and the trailing one |
 | `status` | says what has been captured and whether each layer still describes the current code |
@@ -41,7 +41,9 @@ be skipped."
 
 **Filtering works the way `cargo test` does.** A positional argument is a substring of a
 benchmark's identifier, any of them matching selects it, `--exact` switches to equality, and
-`--layer` intersects. The micro list is *discovered* by asking criterion — `cargo bench -- --list`
+`--layer` intersects. [F21](benchmark-groups.md) added `--group`, which intersects the same way and
+names a declared set rather than a shape — because a prefix cannot express "everything that isolates
+one path", and a prefix that selects a superset is not discovered until the capture ends. The micro list is *discovered* by asking criterion — `cargo bench -- --list`
 measures nothing — rather than written down, so a benchmark added to `shoal/benches/partitions.rs`
 is selectable immediately. A filter matching nothing is an error that names the three closest ids.
 

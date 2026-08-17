@@ -821,3 +821,210 @@ pub fn control_pairs(capture: &MacroCaptureV2, pairs: &[(&str, &str, &str)]) -> 
         &rows,
     )
 }
+
+/// How a knob's arms are ranked, and what the ranking means
+///
+/// A configuration sweep produces two different recommendations and they routinely disagree: the
+/// value that answers a query fastest is often not the value that answers the most of them. Naming
+/// both is the honest shape, because which one a caller wants is a property of their workload and
+/// not of this measurement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Rank {
+    /// Lowest is best, which is every latency
+    Lower,
+    /// Highest is best, which is every throughput
+    Higher,
+}
+
+/// One knob's verdict, as the recommendation table reports it
+pub struct Verdict<'a> {
+    /// Which setting this is about
+    pub knob: &'a str,
+    /// What share of the queries were reads while it was swept
+    pub read_pct: u32,
+    /// The value that answered a query fastest, and what it answered in
+    pub best_latency: Option<(&'a str, f64)>,
+    /// The value that answered the most queries a second, and how many
+    pub best_throughput: Option<(&'a str, f64)>,
+    /// The ratio between the slowest and fastest arm of this sweep
+    pub spread: Option<f64>,
+    /// Whether the fastest and slowest arms' observed run intervals are disjoint
+    ///
+    /// `None` when at least one of them ran once and so has no interval at all. A single run cannot
+    /// establish a difference, which is not the same as establishing there is none.
+    pub real: Option<bool>,
+}
+
+/// The best arm of a sweep by one metric, and its value
+///
+/// # Arguments
+///
+/// * `arms` - The arms of one sweep
+/// * `rank` - Which direction is better
+/// * `metric` - How to read one arm, where `None` means it has no such measurement
+fn best<'a>(
+    arms: &[Arm<'a>],
+    rank: Rank,
+    metric: impl Fn(&Arm<'a>) -> Option<f64>,
+) -> Option<(&'a str, f64)> {
+    // ties break on the identifier, which is what keeps a rendered page byte identical across two
+    // renders of the same artifact
+    arms.iter()
+        .filter_map(|arm| Some((arm.conf_value()?, metric(arm)?)))
+        .reduce(|left, right| {
+            let better = match rank {
+                Rank::Lower => right.1 < left.1,
+                Rank::Higher => right.1 > left.1,
+            };
+            if better || (right.1 == left.1 && right.0 < left.0) {
+                right
+            } else {
+                left
+            }
+        })
+}
+
+/// Whether two arms of a sweep were shown to differ at all
+///
+/// The macro layer's rule, and the only gate between this page and a table of noise: two arms
+/// differ when their observed wall clock intervals are **disjoint**, and not when their medians are
+/// far apart. The frozen baseline spread ten and a half percent over five identical runs, so a flat
+/// percentage threshold would either swallow real movement or report that spread as movement.
+///
+/// # Arguments
+///
+/// * `left` - One arm
+/// * `right` - The other
+fn disjoint(left: &Arm<'_>, right: &Arm<'_>) -> Option<bool> {
+    // an arm run once has no interval, so nothing can be established either way
+    let (low_left, high_left) = left.wall_clock_interval_ns()?;
+    let (low_right, high_right) = right.wall_clock_interval_ns()?;
+    Some(high_left < low_right || high_right < low_left)
+}
+
+/// What one sweep found
+///
+/// # Arguments
+///
+/// * `knob` - Which setting was swept
+/// * `read_pct` - What share of the queries were reads
+/// * `arms` - The arms of the sweep
+pub fn verdict<'a>(knob: &'a str, read_pct: u32, arms: &[Arm<'a>]) -> Verdict<'a> {
+    // the two recommendations, which answer different questions and often disagree
+    let best_latency = best(arms, Rank::Lower, |arm| {
+        // the whole mixture's cost rather than one half of it, since a setting is chosen once for
+        // both. the per-operation numbers are in the table below for anyone who needs one half.
+        arm.stat("write", "p50").or_else(|| arm.stat("read", "p50"))
+    });
+    let best_throughput = best(arms, Rank::Higher, Arm::ops_per_sec);
+    // the spread is over the wall clock, because that is the number the disjointness test is run
+    // on and the two must describe the same pair of arms
+    let mut by_wall: Vec<&Arm<'a>> = arms
+        .iter()
+        .filter(|arm| arm.median_wall_clock_ns() > 0)
+        .collect();
+    by_wall.sort_by_key(|arm| (arm.median_wall_clock_ns(), arm.id));
+    let (spread, real) = match (by_wall.first(), by_wall.last()) {
+        (Some(fastest), Some(slowest)) if by_wall.len() > 1 => (
+            Some(slowest.median_wall_clock_ns() as f64 / fastest.median_wall_clock_ns() as f64),
+            disjoint(fastest, slowest),
+        ),
+        _ => (None, None),
+    };
+    Verdict {
+        knob,
+        read_pct,
+        best_latency,
+        best_throughput,
+        spread,
+        real,
+    }
+}
+
+/// What the configuration sweeps say to set, per knob
+///
+/// # Arguments
+///
+/// * `verdicts` - One verdict per sweep, in the order they are read
+pub fn conf_recommendations(verdicts: &[Verdict<'_>]) -> String {
+    let rows: Vec<Vec<String>> = verdicts
+        .iter()
+        .map(|verdict| {
+            vec![
+                format!("`{}`", verdict.knob),
+                format!("r{}", verdict.read_pct),
+                match verdict.best_latency {
+                    Some((value, at)) => format!("`{value}` ({})", fmt::duration_ns(at)),
+                    None => "–".to_string(),
+                },
+                match verdict.best_throughput {
+                    Some((value, at)) => {
+                        format!("`{value}` ({}/s)", fmt::thousands(at.round() as u128))
+                    }
+                    None => "–".to_string(),
+                },
+                match verdict.spread {
+                    Some(ratio) => format!("{}×", fmt::fixed(ratio, 2)),
+                    None => "–".to_string(),
+                },
+                // the gate. a sweep whose ends overlap has not been shown to have ends
+                match verdict.real {
+                    Some(true) => "yes".to_string(),
+                    Some(false) => "**no**".to_string(),
+                    None => "one run".to_string(),
+                },
+            ]
+        })
+        .collect();
+    table(
+        &[
+            "Setting",
+            "Reads",
+            "Best for latency",
+            "Best for throughput",
+            "Spread",
+            "Real?",
+        ],
+        &["---", "---:", "---", "---", "---:", "---"],
+        &rows,
+    )
+}
+
+/// Every arm of every configuration sweep
+///
+/// # Arguments
+///
+/// * `sweeps` - The sweeps, as `(knob, read share, arms)`
+pub fn conf_arms(sweeps: &[(String, u32, Vec<Arm<'_>>)]) -> String {
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    for (knob, read_pct, arms) in sweeps {
+        for arm in arms {
+            rows.push(vec![
+                format!("`{knob}`"),
+                format!("`{}`", arm.conf_value().unwrap_or("–")),
+                format!("r{read_pct}"),
+                optional(arm.stat("read", "p50"), fmt::duration_ns),
+                optional(arm.stat("write", "p50"), fmt::duration_ns),
+                optional(arm.stat("write", "p99"), fmt::duration_ns),
+                optional(arm.ops_per_sec(), |rate| {
+                    fmt::thousands(rate.round() as u128)
+                }),
+                interval(arm, "write", "p50"),
+            ]);
+        }
+    }
+    table(
+        &[
+            "Setting",
+            "Value",
+            "Reads",
+            "read p50",
+            "write p50",
+            "write p99",
+            "queries/s",
+            "write p50 across runs",
+        ],
+        &["---", "---", "---:", "---:", "---:", "---:", "---:", "---:"],
+        &rows,
+    )
+}
