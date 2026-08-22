@@ -110,9 +110,12 @@ Not on every change. Take one when:
 Do **not** take one for a docs-only change, a renderer change, or a test-only change. For a renderer
 change, `render` and `render --check` are the verification; the artifacts underneath are untouched.
 
-A full capture is four to five hours. While iterating, `--scale smoke --runs 2` runs the whole set
-at a hundredth of the data in a couple of minutes and proves every workload still runs — which is
-what you want before spending the afternoon on the real one.
+A full capture is **seventy-five minutes**, measured by `F20-conf` on 2026-08-22 — the first one
+anybody timed. This file said four to five hours until then, and that figure was never a
+measurement. While iterating, `--scale smoke --runs 2` runs the whole set at a hundredth of the
+data and proves every workload still runs — which is what you want before spending the hour on the
+real one. Budget twenty minutes for a macro-only smoke pass; the criterion layer is what makes a
+full smoke run take longer than you expect.
 
 The macro layer is two hundred and nine **workloads** living in `shoal-bench/src/workloads/`,
 each generating its own rows from `--seed` — there is no dataset to fetch
@@ -146,9 +149,11 @@ and deprecate instead — and **append**, never interleave: a workload's positio
 line in `workloads::all()`, one line in `workload_ids::IDS`, and a family in
 `shoal-bench/src/render/family.rs` — a test fails if you forget any of the last three.
 
-A full capture is now six to seven hours, so **use a group** rather than a prefix
-([F21](docs/src/features/benchmark-groups.md)). `list --groups` prints the twelve declared sets,
-what each answers, and what a capture of it would cost; `--group grid` is the grid alone, `--group
+A full capture is seventy-five minutes and its macro layer is sixty of them, so **use a group**
+rather than a prefix ([F21](docs/src/features/benchmark-groups.md)) when a question is narrower than
+the whole set. `list --groups` prints the twelve declared sets, what each answers, and what a
+capture of it would cost — now projected onto a measured hour rather than a guessed four and a half,
+so the numbers it prints dropped by more than four times without anything getting faster; `--group grid` is the grid alone, `--group
 isolating` is everything that drives one path, `--group conf/storage` is the writer knobs. A group
 **selects and never schedules** — a capture still runs one `shoal-workload` process at a time, and
 must, because two servers at once share a page cache, a device queue and a set of cores. `--scale

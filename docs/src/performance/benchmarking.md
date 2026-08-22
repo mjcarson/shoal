@@ -105,8 +105,12 @@ Alongside them it writes `<label>.meta.json`, which is what lets a committed num
 whether it still describes the current code: the commit, whether the tree was dirty, a content
 hash of the sources each layer measures, and the machine, governor and toolchain it ran on.
 
-A full capture is now **two hundred and nine workloads times five runs**, so budget six to
-seven hours. Eight of them are the storage-free controls [F9](../features/ephemeral-tables.md)
+A full capture is now **two hundred and nine workloads times five runs**, and ~~budget six to
+seven hours~~ **takes seventy-five minutes** — one minute building, fourteen in the micro layer,
+sixty in the macro layer, and under a minute in the two instrumented ones. That is the first
+capture anybody put a clock on, `F20-conf` on 2026-08-22; every figure this page carried before it
+was an estimate, and the estimate was over by more than four times. Eight of them are the
+storage-free controls [F9](../features/ephemeral-tables.md)
 added, and they are the cheapest of the set: they have no disk to wait on. Sixteen are the
 transport modes [F13](../features/transport-workloads.md) added and
 [F14](../features/encryption-in-transit.md) doubled, and the MiB half of those is the most
@@ -118,7 +122,10 @@ budget rather than a fixed query count, so a MiB arm runs 256 queries where a 25
 **Seventy-four are [F17](../features/workload-grid.md)'s grid**, which is the largest and slowest
 phase and roughly doubled a capture on its own. It holds the same byte budget the encryption sweeps
 do, for the same reason. **Forty-eight are [F20](../features/configuration-sweeps.md)'s configuration
-sweeps**, which add about ninety minutes.
+sweeps**, which ~~add about ninety minutes~~ are 31% of the macro layer, about nineteen minutes —
+they are wide but each one is the 1 KiB reference cell, and the expensive arms in a capture are the
+MiB ones. `list --groups` is where that number comes from and it is now measured rather than
+projected onto a guess.
 
 While iterating on anything else, ask for a **group** rather than a prefix
 ([F21](../features/benchmark-groups.md)) — it is the difference between a coffee and an afternoon,
@@ -141,7 +148,7 @@ shoal-bench run --label <label> --group conf/storage
 Groups combine with **or** and intersect with `--layer` and the positional filters, so
 `--group conf durability` is the two durability arms. An unknown group name is an error that prints
 the real ones, rather than falling through to selecting everything — which is the failure mode the
-prefixes this replaces had, and it costs three hours to notice.
+prefixes this replaces had, and it costs a whole capture to notice.
 
 **A group selects; it never schedules.** A capture runs one `shoal-workload` process at a time
 whatever is selected, and must: two servers at once would share a page cache, a device queue and a

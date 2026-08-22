@@ -314,13 +314,19 @@ pub fn unknown(names: &[String]) -> Option<String> {
 /// Measured rather than derived, and it has to be: a capture spends most of its time seeding,
 /// building, and starting and stopping a server per arm, and **none of that is in any artifact**.
 /// The measured phases of every macro workload put together come to a couple of minutes; the
-/// capture they come from takes four to five hours. So the sum of the wall clocks cannot be
-/// presented as a duration - it is off by two orders of magnitude - and what it is good for is a
-/// *share*. This constant is what turns that share back into a number somebody can plan around.
+/// capture they come from takes an hour. So the sum of the wall clocks cannot be presented as a
+/// duration - it is off by two orders of magnitude - and what it is good for is a *share*. This
+/// constant is what turns that share back into a number somebody can plan around.
+///
+/// **This was 4h30m and was never timed.** The `F20-conf` capture of 2026-08-22 is the first one
+/// anybody put a clock on: two hundred and nine workloads at five runs took sixty minutes of macro
+/// layer, inside seventy-five minutes end to end. Every projection this constant fed before that
+/// was overstated by more than four times, which is the direction that makes somebody not run a
+/// benchmark they had time for.
 ///
 /// Update it when the observed cost of a full capture changes. `docs/src/performance/benchmarking.md`
 /// is where the figure comes from.
-const FULL_MACRO_CAPTURE_SECS: u128 = 4 * 3_600 + 1_800;
+const FULL_MACRO_CAPTURE_SECS: u128 = 3_600;
 
 /// What one workload's measured runs last, taken from the newest capture that holds it
 ///

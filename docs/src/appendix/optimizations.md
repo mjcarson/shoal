@@ -1408,7 +1408,7 @@ likely vanish under `lto = "thin"` — which is itself worth measuring before ch
 
 | | |
 | --- | --- |
-| **Rank** | **C** — argued, and about to become measured |
+| **Rank** | **C** — measured. The sweeps that would show the wiring are flat, so the defect is confirmed and the *value* of fixing it is still unknown |
 | **Impact** | Unknown. The bulk write path uses whatever `DmaStreamWriterBuilder` defaults to, and the setting that appears to govern it does not |
 | **Difficulty** | S — thread `&self.conf` into two branches of one function |
 | **Depends on** | [item 71](known-issues.md), which is the same finding as a defect |
@@ -1422,15 +1422,22 @@ above configures the map's own intent log from `throughput_sensitive`. So the ar
 bulk data — are written at glommio's default buffer size and queue depth, and the only thing
 `throughput_sensitive` reaches is a small latency-shaped write.
 
-**Argued from reading the source.** What makes this worth an `O` number rather than only a defect is
+**Argued from reading the source, and the reading is now confirmed.** The `F20-conf` capture of
+2026-08-22 swept both settings and both came back at **1.01×**, failing the *Real?* gate — which is
+what a setting that never reaches the code it names looks like from the outside. What makes this
+worth an `O` number rather than only a defect is
 that the default may well be *wrong* for the workload: the archive writer is the one place in the
 engine that streams whole compacted partitions, which is exactly the case a deep queue and a large
 buffer exist for, and it is running at whatever a general-purpose default chose.
 
-**How to adjudicate it.** The two sweeps named above are expected to be flat today. That flatness is
-[item 71](known-issues.md)'s evidence. Fix the wiring, re-run `--group conf/storage`, and the same
-two sweeps say whether the setting is worth anything — if they are still flat afterwards, the
-default was fine and this entry closes as measured-and-declined rather than as taken.
+**How to adjudicate it.** The two sweeps named above *were* flat, and that flatness is
+[item 71](known-issues.md)'s evidence. Half of this entry is therefore settled: the wiring is broken
+as described. The other half is not, and cannot be until the wiring is fixed — flat sweeps say
+nothing about what the setting would be worth if it reached anything. Fix it, re-run
+`--group conf/storage` against `F20-conf` as the before, and the same two sweeps say whether the
+setting is worth turning — if they are still flat afterwards, glommio's default was fine all along
+and this entry closes as measured-and-declined rather than as taken. Nineteen minutes of machine
+time settles it either way.
 
 ### O26. `handle_query` cloned a `QueryMetadata` for a gather almost no query has
 

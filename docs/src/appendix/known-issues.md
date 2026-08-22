@@ -28,7 +28,7 @@ Defects that have been fixed move to [Resolved Issues](resolved-issues.md), one 
 carrying the reasoning and the invariants the fix depends on. Item numbers are shared between
 the two pages and never reused, so a number appears on exactly one of them — which is why this
 list starts at 15 and skips 25, 26, 31, 34, 39, 44, 45, 48, 51, 56, 57, 61, 67 and 68, and why
-item 71 is the newest. The exceptions are items 16, 17, 20, 24 and 54, which were only
+item 72 is the newest. The exceptions are items 16, 17, 20, 24 and 54, which were only
 partly fixed: the open remainder is here and the rest is there. Items 9 and 51 were each one such
 exception until their second half was fixed, and are now on the resolved page alone; item 25 was one
 in the other direction — it had one row left open, that row was fixed, and the whole item
@@ -37,6 +37,12 @@ in the other direction — it had one row left open, that row was fixed, and the
 **Baseline as of writing:** `cargo check --workspace --all-targets` passes with warnings;
 `cargo test --workspace` passes — 1,015 tests, two ignored, plus 8 more behind
 `--features stage-profile` that a default run does not reach ([Test Coverage](test-coverage.md)).
+**Unchanged by the `F20-conf` capture**, which added no tests and moved no count: a capture is
+evidence rather than a test, and what it produced was a reproduction for
+[item 71](#71-throughput_sensitive-is-configured-documented-and-mostly-unused), a second and worse
+reproduction for [item 58](#58-a-shard-that-dies-is-not-reported-to-whoever-started-the-pool), and
+[item 72](#72-an-arm-with-no-writes-is-reported-as-an-arm-that-ran-once) filed from reading the
+renderer against the page it had just produced.
 That is up from 986 with [F20](../features/configuration-sweeps.md) and
 [F21](../features/benchmark-groups.md), which added 29 between them, all in `shoal-bench`. Before
 that it was up from 967 with [F19](../features/chart-legends.md), which added 16 `shoal-bench` unit
@@ -997,6 +1003,29 @@ This was found while fixing [item 57](resolved/missing-archive.md), where a shar
 partition read twenty seconds before `pool.exit()` returned `Ok(())`. That defect is fixed and
 this one is why it could only be observed as a client that never got an answer.
 
+**Reproduced again on 2026-08-22, at startup rather than at runtime, and this is the worse case.**
+Taking the `F20-conf` capture on a host that had not loaded the kernel `tls` module since its last
+reboot, every `macro/transport/tls/*` and `macro/encryption/*/tls/*` arm failed. `shard.rs:948`
+checks for the TLS ULP *before* it binds and returns `TlsError::UlpUnavailable`, whose message says
+"the 'tls' kernel module is not loaded" — the one sentence that would have ended the investigation.
+Nobody saw it. `ShoalPool::start` returned `Ok`, no shard reached `to_addr`, and the only symptom
+was the readiness probe timing out after thirty seconds with
+`Handshake(Io(ConnectionRefused))` — an error that describes a closed port and names nothing about
+why it is closed. Diagnosing it took reading `shard.rs` to find the check.
+
+So the item is not only that a shard's death is unreported at `exit`: **a shard that never starts
+is unreported at `start`**, which is the same swallow one phase earlier, and `start` returning
+`Ok(())` is a stronger claim than `exit` doing so — a caller has every reason to read it as "the
+server is up". The fix direction below covers it: whatever `start` learns about a shard failing to
+bind has to reach its return value, because the readiness probe cannot distinguish a shard that
+refused to start from one that is still starting.
+
+The sharp edge is that **the test suite already knew about this dependency and the benchmark did
+not**: the 8 tests in `tls.rs` and one of the 17 TLS unit tests check for the kernel module and skip
+loudly without it, as the baseline note at the top of this page records. So the environment that
+silently produced no benchmark produces a legible skip under `cargo test`. Whatever `start` learns
+to report, `shoal-bench` should make the same check the tests already make.
+
 **Fix direction:** the smallest honest version is for `exit` to return the first shard error
 rather than swallow it, which changes a signature nothing currently relies on. The useful version
 is a liveness check that does not wait for shutdown, since the interesting question is asked while
@@ -1397,10 +1426,15 @@ on the latency writer has no such annotation. This is already noted in
 [Configuration](../getting-started/configuration.md) and is filed here so it is fixed alongside the
 line above rather than separately.
 
-**Established by reading the source.** [F20](../features/configuration-sweeps.md) sweeps both
-settings anyway — `macro/conf/storage/throughput_buffer/*` and
-`macro/conf/storage/throughput_write_behind/*` — precisely so that this stops being an argument from
-reading and becomes a measurement. A flat sweep there is the reproduction, and
+**Established by reading the source, and since reproduced by measurement.**
+[F20](../features/configuration-sweeps.md) swept both settings for exactly this reason —
+`macro/conf/storage/throughput_buffer/*` and `macro/conf/storage/throughput_write_behind/*` — and
+the `F20-conf` capture of 2026-08-22 came back flat: **1.01× between the fastest and slowest arm of
+each**, across a four-fold sweep of the buffer size (32Ki through 1Mi) and a sixteen-fold sweep of
+the queue depth (1 through 16). Both fail the *Real?* gate — their arms' observed run intervals
+overlap — so there is no evidence either setting changes anything at all on this path. The argument
+from reading `map.rs` predicted a flat sweep and the sweep is flat, which is as close as a sweep
+gets to reproducing a wiring defect.
 [Configuration and what each setting is worth](../performance/configuration.md) says so on the page
 rather than leaving a reader to conclude the device does not care.
 
@@ -1409,5 +1443,40 @@ rather than leaving a reader to conclude the device does not care.
 `dup()`ed handle it did not open, so the configuration has to reach it from `self` rather than from
 the call site, which it can. Decide separately whether the staging writer at `:224` should be
 configured or should stay on glommio's defaults deliberately; it writes a whole map in one pass and
-is not obviously the same kind of write. Then re-run `--group conf/storage` and the two sweeps
-should stop being flat — which is also the test that the fix did anything.
+is not obviously the same kind of write. Then re-run `--group conf/storage` against `F20-conf` as
+the before, and the two sweeps should stop being flat — which is also the test that the fix did
+anything. That is nineteen minutes of machine time, not an afternoon.
+
+### 72. An arm with no writes is reported as an arm that ran once
+
+`shoal-bench/src/render/tables.rs:483-493`, `interval`
+
+The *write p50 across runs* column of
+[Configuration](../performance/configuration.md#every-arm) reads `one run` for every `r100` arm of
+the shard and memory sweeps. All eleven of them ran five times — `F20-conf` records
+`runs: 5` and five wall clocks for each. They have no *writes*, because `r100` is a pure read share.
+
+```rust
+// tables.rs:486 - `interval`
+match arm.capture.stat_interval_ns(op, metric) {
+    Some((low, high)) => format!(...),
+    None => "one run".to_string(),
+}
+```
+
+`stat_interval_ns` (`model/macro_layer.rs:351`) returns `None` for two unrelated reasons: fewer than
+two runs, and `run.ops.get(op)?` failing because the arm never performed that operation. The caller
+collapses both into the sentence that describes only the first. The neighbouring `write p50` and
+`write p99` columns get this right and print `–`, so one row says the arm has no writes twice and
+then says it ran once.
+
+It is a wrong sentence rather than a wrong number, which is why it is filed here rather than
+mattering to a verdict — but it is a statement about provenance on a page whose whole argument is
+that a difference counts only when the intervals are disjoint, and a reader checking whether an arm
+was measured enough times is told it was not.
+
+**Fix direction:** distinguish the two `None`s. The narrow version is for `interval` to ask whether
+the op exists before asking for its spread, and return `–` when it does not. The version that stops
+this recurring is for `stat_interval_ns` to return something with three cases rather than an
+`Option`, since every caller that formats it has the same choice to make and two of the three
+call sites (`tables.rs:59`, `:492`) already make it independently.
