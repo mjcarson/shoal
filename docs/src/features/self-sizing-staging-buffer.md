@@ -129,6 +129,13 @@ memory budget and the control the tests are written against.
   widths and nothing else, so what is measured is this knob against this reference cell. The grid,
   the isolating pairs and the other five storage knobs all ran against the old writer and have not
   been re-taken; a full capture would say whether sizing the buffer changed anything they measure.
+- **The generated pages do not draw that capture, and cannot.** `render` picks its current capture
+  as the newest one carrying a micro layer, and a `--group` capture has none — so
+  [Configuration and what each setting is worth](../performance/configuration.md) still reports
+  18,537/s for the `4Ki @ 64 KiB` arm from `f22-row-size` while `f23-staging-buffer` says 22,619/s
+  for the same identifier at the current commit. Found by rendering, filed as
+  [item 77](../appendix/known-issues.md#77-a-macro-only-capture-can-never-reach-the-pages-it-was-taken-for).
+  The numbers on *this* page are the newer ones.
 - **Rows above the ceiling behave exactly as before.** A 4 MiB row still gets one write and one DMA
   allocation per insert. That is deliberate — it is where the memory cost of batching would be
   worst — but it means O34's mechanism is still fully in force above 256 KiB unless an operator

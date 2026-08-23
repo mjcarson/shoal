@@ -31,7 +31,7 @@ Defects that have been fixed move to [Resolved Issues](resolved-issues.md), one 
 carrying the reasoning and the invariants the fix depends on. Item numbers are shared between
 the two pages and never reused, so a number appears on exactly one of them — which is why this
 list starts at 15 and skips 25, 26, 31, 34, 39, 44, 45, 48, 51, 56, 57, 61, 67, 68 and 74, and
-why item 76 is both the newest number and the newest entry here. The exceptions are items 16, 17, 20, 24, 54 and 73, which were only
+why item 77 is both the newest number and the newest entry here. The exceptions are items 16, 17, 20, 24, 54 and 73, which were only
 partly fixed: the open remainder is here and the rest is there. Items 9 and 51 were each one such
 exception until their second half was fixed, and are now on the resolved page alone; item 25 was one
 in the other direction — it had one row left open, that row was fixed, and the whole item
@@ -50,6 +50,11 @@ where items [75](#75-a-control-that-was-measured-at-every-width-is-not-drawn-and
 and [76](#76-the-stage-layer-joins-nothing-for-any-grid-arm-and-reports-it-as-a-layer-that-ran)
 came from — both read out of the committed artifact rather than out of the source, which is the
 reverse of how everything above them was found and the reason neither was caught earlier.
+**Unchanged by `f23-staging-buffer` too**, which is where
+[item 77](#77-a-macro-only-capture-can-never-reach-the-pages-it-was-taken-for) came from — found by
+rendering the pages with that capture committed and noticing that none of them drew it. A third way
+of finding a defect, after reading the source and reading an artifact: running the tool that
+consumes one.
 **Unchanged by the `F20-conf` capture** before it, which added no tests and moved no count: a capture is
 evidence rather than a test, and what it produced was a reproduction for
 [item 71](#71-throughput_sensitive-is-configured-documented-and-mostly-unused), a second and worse
@@ -1634,3 +1639,60 @@ the one that would have caught this — a smoke-scale `stage-profile` run of one
 cannot answer, and [O11](optimizations.md#o11-a-fresh-alignedvec-per-write-and-per-response) and
 [O29](optimizations.md#o29-a-request-body-is-zeroed-and-then-immediately-overwritten) are blocked on
 a broken instrument rather than on a missing one.
+
+### 77. A macro-only capture can never reach the pages it was taken for
+
+`shoal-bench/src/render.rs:211-221`
+
+The generated pages draw their current numbers from one capture, chosen like this:
+
+```rust
+// which capture the current numbers come from: the caller's choice, or the most recent one
+// that produced a micro layer
+let current = match &args.current {
+    Some(label) => label.clone(),
+    None => timeline
+        .iter()
+        .rev()
+        .find(|snapshot| snapshot.micro.is_some())
+        .map(|snapshot| snapshot.label.clone())
+        .unwrap_or_default(),
+};
+```
+
+**A capture taken with `--group` or `--layer macro` has no micro layer**, so it can never be
+`current`, however new it is and however exactly it covers the arms a page draws. That is most of
+what [F21](../features/benchmark-groups.md) exists to make cheap: `list --groups` prints twelve
+sets and prices them precisely so a narrow question does not cost two hours, and
+[CLAUDE.md](../../../CLAUDE.md) tells a reader to use a group rather than a prefix. A capture taken
+that way lands in `docs/perf/runs/`, appears on the freshness table, appears on
+[Every workload](../performance/all-workloads.md) — and is not what any other page reports.
+
+**The live instance**, which is how this was found.
+[Configuration and what each setting is worth](../performance/configuration.md) reports the
+`latency_buffer` sweep at `4Ki @ 64 KiB` as **18,537/s** and calls `256Ki` the best rung at 1.22×.
+Those come from `f22-row-size`, whose macro layer the same site marks **stale, four commits**,
+because [F23](../features/self-sizing-staging-buffer.md) changed the writer underneath it.
+`f23-staging-buffer` measured those exact fifteen identifiers at the current commit on a clean
+tree and says **22,619/s** and 1.010× of spread. Both numbers are committed, one is drawn, and it
+is the one that describes code that no longer exists.
+
+**Not a wrong number, and that is what makes it bad.** The page is internally consistent, its
+provenance line is accurate, and the badge on the overview page does say the capture is stale. The
+defect is that the page has no way to say *these rows in particular have been re-measured since*,
+so the correction is available, committed, and invisible to the reader who needs it.
+
+**Evidence: established by rendering.** `render` was run on a clean tree at `c46310b` with
+`f23-staging-buffer` committed; the fifteen new rows appear on `all-workloads.md` and every other
+page is unchanged apart from its provenance line and the staleness badges. Then traced to the
+`find(|snapshot| snapshot.micro.is_some())` above.
+
+**Fix direction:** the choice conflates two questions — which capture is the *reference* for the
+micro layer's comparisons, and which capture most recently measured *this arm*. The first genuinely
+wants a full capture. The second is per-arm and has an answer here. Drawing each arm from the newest
+capture that measured it would mix captures within a page, which is exactly what
+[Baseline](../performance/baseline.md) forbids and should stay forbidden — so the cheaper fix is to
+keep one `current` and have a page *say* when a newer capture covers arms it is drawing, the way the
+freshness table says a layer is stale. A row that could be labelled "re-measured in
+`f23-staging-buffer`" would have made this visible without joining two machines' numbers into one
+table. Filed as work rather than fixed here, in [TODOs](todos.md).

@@ -980,6 +980,15 @@ every entry below.
 The configuration sweep is a cross for the same reason the grid is, and pays the same price. It also
 inherits one gap the grid does not have: it measures a machine as much as it measures a database.
 
+- **A narrow capture cannot reach the pages, and narrow captures are what the tooling encourages.**
+  `render` picks its current capture as the newest one carrying a *micro* layer, so anything taken
+  with `--group` or `--layer macro` is committed, listed, and never drawn
+  ([item 77](known-issues.md#77-a-macro-only-capture-can-never-reach-the-pages-it-was-taken-for)).
+  The cheap fix is not to mix captures within a page — that is the thing
+  [Baseline](../performance/baseline.md) forbids — but to let a page label a row whose arm a newer
+  capture has re-measured, the way the freshness table labels a stale layer. Until then the way to
+  get a narrow answer onto a page is `render --current <label>`, which requires the capture to be
+  complete enough to draw every page, or a full capture at two hours.
 - **No interaction between two settings is measured.** A write-behind depth that only pays off at a
   large buffer shows as two flat sweeps, and nothing would say so. The cheapest thing that would
   find one is a second reference for the storage half — the write-behind ladder repeated at
