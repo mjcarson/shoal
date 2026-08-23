@@ -180,24 +180,23 @@ This section used to be titled *The intent log stops batching past the staging b
 capture kept the mechanism while correcting the shape — see below.
 
 `shoal.yml` sets `latency_sensitive.buffer_size: 4096`. The writer stages records into one aligned
-buffer and flushes it when the next record will not fit (`fs/stream.rs:655-665`):
+buffer and flushes it when the next record will not fit. **At the time of the capture** it then
+allocated the replacement at `std::cmp::max(self.default_buffer_size, size)` — a buffer sized to the
+record, holding exactly one of it once a row exceeded the setting:
 
 ```rust
-pub async fn prep(&mut self, size: usize) -> &mut [u8] {
-    // if we don't have enough usable space then write our current buffer out
-    if self.usable() < size + self.buff_pos {
-        // we won't have enough space to write this new data to out buffer so get a new one
-        // make this new buffer big enough for our next write or bigger
-        let new_usable = std::cmp::max(self.default_buffer_size, size);
-        // write but not sync our current buffer to disk
-        self.write(new_usable).await.unwrap();
-    }
+// ~~what `prep` did when this was measured~~
+let new_usable = std::cmp::max(self.default_buffer_size, size);
 ```
 
-`write` then calls `alloc_buffer(new_usable)` (`:617`), a fresh `alloc_dma_buffer` sized to the
-record. Fewer records per buffer means more DMA writes, more DMA allocations, and less for the group
-commit to amortize the durability barrier across. Filed as
+Fewer records per buffer means more DMA writes, more DMA allocations, and less for the group commit
+to amortize the durability barrier across. Filed as
 [O34](../appendix/optimizations.md#o34-a-record-wider-than-the-staging-buffer-defeats-intent-log-batching).
+
+**That line is now `self.staging_target(size)`** ([F23](../features/self-sizing-staging-buffer.md)).
+`buffer_size` is a floor, a new `max_buffer_size` is a ceiling, and the writer sizes each buffer to
+hold about eight of the widest record the last one held. **The numbers on this page were captured
+before that change** and describe the code above, which is what makes them the argument for it.
 
 **The mixture split confirms this octave is the write path.** Over 1 KiB → 8 KiB the pure-write arm
 falls to **58.8%** of its own 64 B rate while the pure-read arm is still at **96.7%**. The page
@@ -355,13 +354,16 @@ width effect attributable to storage does not exist for the depth axis.
 
 Two of these three now have a number behind them, and the first one has changed.
 
-- **Size `latency_sensitive.buffer_size` to several times your widest row** — not merely above it.
-  ~~Above your widest row, so the intent log can batch again.~~ The sweep says a buffer that holds
-  *one* record buys nothing over one that holds none: at 8 KiB rows, `16Ki` and `4Ki` are within
-  noise of each other, and the gain arrives at `64Ki` and `256Ki` where 8 and 32 records share a
-  write. Worth **1.22×** at 64 KiB rows. It is a minimum that gets rounded up to the device's
-  O_DIRECT alignment; the cost is padding on a partial flush and a larger DMA allocation per shard.
-  See [Tuning](../operations/tuning.md#if-your-rows-are-wide).
+- ~~**Size `latency_sensitive.buffer_size` to several times your widest row** — not merely above
+  it.~~ ~~Above your widest row, so the intent log can batch again.~~ **The writer does this
+  itself now** ([F23](../features/self-sizing-staging-buffer.md)): `buffer_size` is a floor,
+  `max_buffer_size` is a ceiling defaulting to 256 KiB, and each buffer is sized to hold about eight
+  of the widest record the last one held. What is left for you is the **ceiling**, and only if your
+  rows are wider than a quarter of a mebibyte — above that the writer is back to one record per
+  write, which is the mechanism this section describes still fully in force. Raising it costs up to
+  `write_behind + 1` buffers of that size per table per shard. The advice this bullet used to give
+  is what the sweep measured at **1.22×** on 64 KiB rows, and it is why the rule is eight records
+  rather than one. See [Tuning](../operations/tuning.md#if-your-rows-are-wide).
 - **Keep the load depth down when rows are wide** — this is the largest lever on this page. At
   512 KiB, dropping from 32 outstanding queries to one takes the read p50 from 360.04 µs to
   119.37 µs and the p99 from 16.85 ms to 201.54 µs. At 4 MiB it is 20.72 ms to 1.15 ms. Nothing else
@@ -380,14 +382,17 @@ did not run at all.** Ordered as they were filed, cheapest first.
 | # | What it was to settle | What it said |
 | ---: | --- | --- |
 | 1 | The per-byte half of O1 and O2 | **Answered.** Response decode grows ×432.8 and encode ×72.2 over 64 B → 64 KiB, against a control flat to a quarter of a percent. `access` and `into_aligned` are 1.6 ns apart at 64 B and 2× apart at 64 KiB |
-| 2 | O34 — is `latency_buffer` a step, and is the step at the buffer | **Answered, and the shape was wrong.** Worth 1.22× at 64 KiB rows on disjoint intervals, but the gain is in records per buffer rather than at the threshold |
+| 2 | O34 — is `latency_buffer` a step, and is the step at the buffer | **Answered, and the shape was wrong.** Worth 1.22× at 64 KiB rows on disjoint intervals, but the gain is in records per buffer rather than at the threshold. **Then acted on** ([F23](../features/self-sizing-staging-buffer.md)), which is what the correction bought: the fix is a sizing rule and not the larger default the old shape implied |
 | 3 | Where the knee is | **Answered, and it was not where the question assumed.** Throughput falls smoothly; the tail peaks at 52× at 128 KiB and recovers past it |
 | 4 | How much of a wide arm was queue rather than service | **Answered, and it was most of it.** The p99/p50 spread is 1.3–2.5× at every width at depth 1. Eighteen nineteenths of the 4 MiB read latency was queue |
 | 5 | Which half of the mixture the per-byte cost is on | **Answered, and it is both, in different places.** Write below ~64 KiB, read above it |
 | 6 | **Which** of the nineteen stages grows with bytes | **Did not run.** All three reports joined zero queries — [item 76](../appendix/known-issues.md#76-the-stage-layer-joins-nothing-for-any-grid-arm-and-reports-it-as-a-layer-that-ran) |
 
-**What this changed in the priority queue.** O34 moved from argued to measured with a contained fix
-and is now the head of Tier A. O2 gained a measurement on the half that grows in what the caller
+**What this changed in the priority queue.** O34 moved from argued to measured with a contained fix,
+became the head of Tier A, and has since been **built** as
+[F23](../features/self-sizing-staging-buffer.md) — the only entry that has ever left that tier by
+being acted on rather than by being reattributed. A4 is the head now, and it needs a benchmark that
+does not exist. O2 gained a measurement on the half that grows in what the caller
 controls, and `r100` says the read path owns the wide end, so it is the largest established win
 available — still behind a design pass, because it reaches the wire format. O35 lost its evidence
 and left the queue. O11 and O29 did not move, and their unblocker is now known to be broken rather
@@ -408,6 +413,7 @@ buffer in the middle of it. Two arms at 2 KiB and 4 KiB would bracket it, and ar
 - [Request Lifecycle](../architecture/request-lifecycle.md) — the path the payload is copied along
 - [Tuning](../operations/tuning.md) — what to set, and what rests on a measurement
 - [F22](../features/row-size-benchmarks.md) — the six benchmarks this page asked for, built
+- [F23](../features/self-sizing-staging-buffer.md) — what the second of those six turned into
 - [Optimizations](../appendix/optimizations.md) — O1, O2, O11, O29, O34, O35, and the queue they
   are ordered in
 - [Known Issues](../appendix/known-issues.md) — items 75 and 76, both found in this capture

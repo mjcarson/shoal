@@ -14,7 +14,7 @@ use tempfile::TempDir;
 
 use super::conf::Durability;
 use super::reader::IntentLogReader;
-use super::stream::{align_up, pad_region, FlushState, PAD_SENTINEL, PAD_SENTINEL_SIZE};
+use super::stream::{align_up, pad_region, staging_target, FlushState, PAD_SENTINEL, PAD_SENTINEL_SIZE};
 
 /// Create a temp dir on a filesystem that supports direct IO
 ///
@@ -363,4 +363,65 @@ fn sentinel_cannot_be_a_real_size() {
     // a record claiming to be u64::MAX bytes long could never fit in any log
     assert_eq!(PAD_SENTINEL, u64::MAX);
     assert_eq!(PAD_SENTINEL_SIZE, 8);
+}
+
+#[test]
+/// A staging buffer is sized to hold several records rather than one
+///
+/// This is the whole of O34: a buffer that holds one record leaves the group commit below it
+/// nothing to group, and the capture that settled that entry says the gain is in how many
+/// records share an aligned write.
+fn staging_target_batches_eight_records() {
+    // a kilobyte row against the shipped floor gets a buffer eight of them fit in
+    assert_eq!(staging_target(1024, 4096, 256 << 10), 8192);
+    // and so does a row that already exceeded the floor
+    assert_eq!(staging_target(8 << 10, 4096, 256 << 10), 64 << 10);
+}
+
+#[test]
+/// A record far narrower than the floor still gets the buffer that was configured
+fn staging_target_never_drops_below_the_floor() {
+    // eight sixty four byte records is 512 bytes, which is well under any sane floor
+    assert_eq!(staging_target(64, 4096, 256 << 10), 4096);
+    // and a writer that has staged nothing at all is still given its floor
+    assert_eq!(staging_target(0, 4096, 256 << 10), 4096);
+}
+
+#[test]
+/// The ceiling is what bounds the memory a writer can stage into
+///
+/// Eight records of sixty four kilobytes is half a mebibyte, and an operator who set a ceiling
+/// of a quarter of one is owed a quarter of one.
+fn staging_target_is_bounded_by_the_ceiling() {
+    assert_eq!(staging_target(64 << 10, 4096, 256 << 10), 256 << 10);
+}
+
+#[test]
+/// A record wider than the ceiling still gets a buffer of its own
+///
+/// Records are never split across buffers - the reader frames them as whole records and the
+/// writer has no continuation - so this is a correctness property rather than a tuning one, and
+/// no ceiling may override it.
+fn a_record_wider_than_the_ceiling_gets_its_own_buffer() {
+    // a four mebibyte record against a quarter mebibyte ceiling
+    assert_eq!(staging_target(4 << 20, 4096, 256 << 10), 4 << 20);
+    // and a ceiling below the floor is a misconfiguration that may not shrink either bound
+    assert_eq!(staging_target(64, 4096, 512), 4096);
+}
+
+#[test]
+/// A ceiling pinned to the floor is exactly the behaviour this replaced
+///
+/// `max(default_buffer_size, size)` is what `prep` allocated before the buffer sized itself, so
+/// this is both the definition of what changed and the escape hatch for an operator who wants
+/// the old behaviour back.
+fn a_ceiling_at_the_floor_is_the_old_behaviour() {
+    // every awkward width either side of the floor
+    for width in [1usize, 64, 512, 4095, 4096, 4097, 8 << 10, 64 << 10, 4 << 20] {
+        assert_eq!(
+            staging_target(width, 4096, 4096),
+            std::cmp::max(4096, width),
+            "a pinned ceiling changed the buffer for a {width} byte record"
+        );
+    }
 }

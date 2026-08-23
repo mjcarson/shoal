@@ -41,6 +41,44 @@ pub fn align_up(value: usize, alignment: usize) -> usize {
     value.div_ceil(alignment) * alignment
 }
 
+/// How many records a staging buffer aims to hold
+///
+/// Eight, because eight is where the gain arrives and nothing past it is worth anything. The
+/// `f22-row-size` capture swept the buffer at three row widths: at 8 KiB rows a buffer holding
+/// *two* records is worth nothing over one that holds none (36,319 against 36,465 queries a
+/// second), a buffer holding eight is worth 6%, and one holding thirty two is worth nothing more
+/// than the eight. What matters is how many records share an aligned write, not whether the
+/// record fits, which is the correction that capture made to [O34].
+///
+/// [O34]: ../../../../../../docs/src/appendix/optimizations.md
+const TARGET_RECORDS_PER_BUFFER: usize = 8;
+
+/// The usable space a staging buffer should be given for records of this width
+///
+/// A buffer that holds one record gives the group commit below it nothing to group, so this
+/// sizes one to hold [`TARGET_RECORDS_PER_BUFFER`] of them — bounded below by what the operator
+/// configured and above by what they are willing to spend on it.
+///
+/// The result is never smaller than `widest`. Records are never split across buffers, so a
+/// record wider than the ceiling still gets a buffer of its own; that is a correctness property
+/// of the log's framing rather than a tuning decision, and the ceiling may not override it.
+///
+/// # Arguments
+///
+/// * `widest` - The widest record this buffer has to be able to hold
+/// * `floor` - The smallest buffer the operator configured
+/// * `ceiling` - The largest buffer the operator will pay for
+pub fn staging_target(widest: usize, floor: usize, ceiling: usize) -> usize {
+    // aim for a buffer several records wide so they share one aligned write
+    let batched = widest.saturating_mul(TARGET_RECORDS_PER_BUFFER);
+    // a ceiling below the floor is a misconfiguration, and the floor is the value somebody set
+    let ceiling = ceiling.max(floor);
+    // hold that aim inside what was configured
+    let bounded = batched.clamp(floor, ceiling);
+    // but never below one record, since a record is never split across two buffers
+    bounded.max(widest)
+}
+
 /// Pad a staged buffer up to an aligned length so it can be written with O_DIRECT
 ///
 /// Returns the aligned length to write. When any padding is required the pad region
@@ -80,6 +118,8 @@ pub struct StreamWriterBuilder<D: ShoalDatabase> {
     pub shard_local_tx: AsyncSender<ServerMsg<D>>,
     /// The default/minumum size to make our DMA buffer
     pub buffer_size: usize,
+    /// The largest size our DMA buffer may size itself up to
+    pub max_buffer_size: usize,
     /// Maximum number of in-flight write tasks
     pub write_behind: usize,
     /// How durable a write has to be before it can be acknowledged
@@ -97,6 +137,7 @@ impl<D: ShoalDatabase> StreamWriterBuilder<D> {
             path: path.into(),
             shard_local_tx,
             buffer_size: 4096,
+            max_buffer_size: 256 << 10,
             write_behind: 4,
             durability: Durability::Fsync,
         }
@@ -109,6 +150,16 @@ impl<D: ShoalDatabase> StreamWriterBuilder<D> {
     /// * `buffer_size` - The buffer size to set in bytes
     pub fn buffer_size(mut self, buffer_size: usize) -> Self {
         self.buffer_size = buffer_size;
+        self
+    }
+
+    /// Set the largest size our buffer may size itself up to
+    ///
+    /// # Arguments
+    ///
+    /// * `max_buffer_size` - The buffer size ceiling to set in bytes
+    pub fn max_buffer_size(mut self, max_buffer_size: usize) -> Self {
+        self.max_buffer_size = max_buffer_size;
         self
     }
 
@@ -147,7 +198,16 @@ impl<D: ShoalDatabase> StreamWriterBuilder<D> {
         let alignment = file.alignment() as usize;
         // clamp our usable buffer size up to at least one aligned block
         let default_buffer_size = align_up(std::cmp::max(self.buffer_size, alignment), alignment);
+        // clamp our ceiling up to our floor, since a ceiling below it would shrink a buffer
+        // below the size somebody deliberately configured
+        let max_buffer_size = align_up(
+            std::cmp::max(self.max_buffer_size, default_buffer_size),
+            alignment,
+        );
         // get a buffer to write, reserving a block of slack for padding
+        //
+        // this starts at the floor rather than at any larger size, because no record has been
+        // staged yet and the size to batch for is read off the records themselves
         let buffer = file.alloc_dma_buffer(default_buffer_size + alignment);
         // build this stream writer
         let writer = StreamWriter {
@@ -157,6 +217,9 @@ impl<D: ShoalDatabase> StreamWriterBuilder<D> {
             buffer,
             alignment,
             default_buffer_size,
+            max_buffer_size,
+            widest_staged: 0,
+            widest_flushed: 0,
             file_pos: 0,
             buff_pos: 0,
             state: Rc::new(RefCell::new(FlushState::default())),
@@ -524,6 +587,20 @@ pub struct StreamWriter<D: ShoalDatabase> {
     /// Buffers are allocated one alignment block larger than this so a partial
     /// flush always has room for its pad region.
     default_buffer_size: usize,
+    /// The largest amount of usable space we will size a buffer up to
+    max_buffer_size: usize,
+    /// The widest record staged into our current buffer
+    ///
+    /// Reset on every flush, since it describes the buffer we are filling rather than the writer.
+    widest_staged: usize,
+    /// The widest record the buffer before this one held
+    ///
+    /// Sizing reads both this and `widest_staged`, so an empty buffer still knows how wide the
+    /// records reaching it have been — which is what lets a flush, and a rotation, keep the size
+    /// the writer had already learned. It is deliberately *not* a high water mark over the
+    /// writer's whole life: one outlier costs one oversized buffer and then decays, instead of
+    /// pinning every buffer after it wide.
+    widest_flushed: usize,
     /// The current position we have written data in our file up too
     file_pos: u64,
     /// The current position we have written data in our buffer up too
@@ -570,6 +647,23 @@ impl<D: ShoalDatabase> StreamWriter<D> {
     /// flush needs somewhere to put its pad region.
     fn usable(&self) -> usize {
         self.buffer.len() - self.alignment
+    }
+
+    /// The usable space our next buffer should have
+    ///
+    /// Sized from the widest record our current buffer held and the one about to be staged, so
+    /// that several records share an aligned write instead of each getting one to itself.
+    ///
+    /// # Arguments
+    ///
+    /// * `incoming` - The record about to be staged, or zero when nothing is waiting
+    fn staging_target(&self, incoming: usize) -> usize {
+        // the next buffer has to hold the widest record we know about, several times over
+        let widest = self
+            .widest_staged
+            .max(self.widest_flushed)
+            .max(incoming);
+        staging_target(widest, self.default_buffer_size, self.max_buffer_size)
     }
 
     /// Allocate a buffer with at least this much usable space
@@ -643,6 +737,12 @@ impl<D: ShoalDatabase> StreamWriter<D> {
         self.file_pos = end;
         // reset our buff position
         self.buff_pos = 0;
+        // hand the width this buffer held over to the next one, and start measuring again
+        //
+        // carrying it rather than keeping a high water mark is what makes the sizing decay: a
+        // buffer that happened to hold one wide record sizes its successor and nothing after it
+        self.widest_flushed = self.widest_staged;
+        self.widest_staged = 0;
         Ok(())
     }
 
@@ -656,11 +756,13 @@ impl<D: ShoalDatabase> StreamWriter<D> {
         // if we don't have enough usable space then write our current buffer out
         if self.usable() < size + self.buff_pos {
             // we won't have enough space to write this new data to out buffer so get a new one
-            // make this new buffer big enough for our next write or bigger
-            let new_usable = std::cmp::max(self.default_buffer_size, size);
+            // make this new buffer big enough to batch several writes of this size
+            let new_usable = self.staging_target(size);
             // write but not sync our current buffer to disk
             self.write(new_usable).await.unwrap();
         }
+        // remember this record so the buffer after this one is sized to batch records like it
+        self.widest_staged = std::cmp::max(self.widest_staged, size);
         // get a mutable ref to our buffer
         &mut self.buffer.as_bytes_mut()[self.buff_pos..self.buff_pos + size]
     }
@@ -677,7 +779,7 @@ impl<D: ShoalDatabase> StreamWriter<D> {
         // if we have consumed all of our usable space then write it to disk
         if self.usable() <= self.buff_pos {
             // write but not sync our current buffer to disk
-            self.write(self.default_buffer_size).await.unwrap();
+            self.write(self.staging_target(0)).await.unwrap();
         }
     }
 
@@ -749,7 +851,7 @@ impl<D: ShoalDatabase> StreamWriter<D> {
     /// [`ServerMsg::DataFlushed`] is recieved by this shard.
     pub async fn sync(&mut self) -> Result<(), ServerError> {
         if self.buff_pos > 0 {
-            self.write(self.default_buffer_size).await.unwrap();
+            self.write(self.staging_target(0)).await.unwrap();
         }
         Ok(())
     }
@@ -764,7 +866,7 @@ impl<D: ShoalDatabase> StreamWriter<D> {
     pub async fn sync_blocking(&mut self) -> Result<(), ServerError> {
         // write out whatever is still staged in our buffer
         if self.buff_pos > 0 {
-            self.write(self.default_buffer_size).await?;
+            self.write(self.staging_target(0)).await?;
         }
         // wait for every in flight write to land
         self.drain_pending_writes().await;
@@ -830,7 +932,10 @@ impl<D: ShoalDatabase> StreamWriter<D> {
         // replace our old file with out new one
         let old_file = std::mem::replace(&mut self.file, Rc::new(file));
         // get a buffer to write
-        self.buffer = self.alloc_buffer(self.default_buffer_size);
+        //
+        // sized from what our last buffer held rather than from the floor, so a rotation does
+        // not make the writer relearn the width of the rows it has been taking all along
+        self.buffer = self.alloc_buffer(self.staging_target(0));
         // close our old file
         old_file.close_rc().await?;
         // reset our position counters
@@ -856,7 +961,7 @@ impl<D: ShoalDatabase> StreamWriter<D> {
         self.drain_pending_writes().await;
         // write out whatever is still staged in our buffer
         if self.buff_pos > 0 {
-            self.write(self.default_buffer_size).await?;
+            self.write(self.staging_target(0)).await?;
             self.drain_pending_writes().await;
         }
         // sync our files data to stable storage before we let go of it

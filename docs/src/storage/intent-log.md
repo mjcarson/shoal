@@ -91,42 +91,66 @@ Callers do not hand the writer bytes; they ask for space and fill it:
 
 ```rust
 pub async fn prep(&mut self, size: usize) -> &mut [u8] {
-    if self.buffer.len() < size + self.buff_pos {
-        let new_size = std::cmp::max(self.default_buffer_size, size);
-        self.write(new_size).await.unwrap();
+    if self.usable() < size + self.buff_pos {
+        // sized to hold several records of this width, not just this one
+        let new_usable = self.staging_target(size);
+        self.write(new_usable).await.unwrap();
     }
+    self.widest_staged = std::cmp::max(self.widest_staged, size);
     &mut self.buffer.as_bytes_mut()[self.buff_pos..self.buff_pos + size]
 }
 
 pub async fn consume(&mut self, size: usize) {
     self.buff_pos += size;
-    if self.buffer.len() <= self.buff_pos {
-        self.write(self.default_buffer_size).await.unwrap();
+    if self.usable() <= self.buff_pos {
+        self.write(self.staging_target(0)).await.unwrap();
     }
 }
 ```
 
-`.../fs/stream.rs:207-233`
+`.../fs/stream.rs`
 
 This avoids one copy: the record is serialized by rkyv into an `AlignedVec`, then written
 once into the DMA buffer, rather than into an intermediate frame. If a record does not fit in
-the remaining space, the current buffer is flushed and a new one allocated — sized to
-`max(default_buffer_size, size)`, so a record larger than the configured buffer gets a buffer
-of its own. Records are never split across buffers.
+the remaining space, the current buffer is flushed and a new one allocated. **Records are never
+split across buffers**, so whatever else sizing does, a buffer is never smaller than the record
+about to go in it.
 
-**That last sentence is a performance cliff as well as a correctness property.** A record that
+### How wide the buffer is
+
+`latency_sensitive.buffer_size` is a **floor** and `latency_sensitive.max_buffer_size` a **ceiling**.
+Between them, `staging_target` sizes each buffer to hold about eight of the widest record the
+previous one held ([F23](../features/self-sizing-staging-buffer.md)):
+
+```rust
+pub fn staging_target(widest: usize, floor: usize, ceiling: usize) -> usize {
+    let batched = widest.saturating_mul(TARGET_RECORDS_PER_BUFFER);
+    let bounded = batched.clamp(floor, ceiling.max(floor));
+    bounded.max(widest)
+}
+```
+
+~~**That last sentence is a performance cliff as well as a correctness property.** A record that
 fits shares an aligned write with the records around it; a record that does not gets one DMA
 write and one `alloc_dma_buffer` to itself, and the group commit below has nothing left to
-group. The transition is a step at the configured buffer size, not a slope, and it is why a
-table with wide rows behaves differently from one with narrow rows under the same settings —
-see [Row size and what it costs](../tables/row-size.md#the-intent-log-batches-fewer-records-as-rows-widen)
-and [O34](../appendix/optimizations.md).
+group. The transition is a step at the configured buffer size, not a slope.~~
 
-**This is read from the source and has never been measured.** The configuration sweep ran
-`buffer_size` across five values at 1 KiB rows against a 4096 byte buffer, which is entirely on the
-flat side of the step. The same five rungs now also run at 8 KiB and 64 KiB rows
-([F22](../features/row-size-benchmarks.md)) and no capture has been taken at either, so the step
-above is still a claim about `prep` rather than a curve anybody has drawn.
+**Two things in that paragraph were wrong and one is now fixed.** It was not a step — the capture
+that settled [O34](../appendix/optimizations.md) found a buffer holding *two* 8 KiB records worth
+nothing over one holding none, and the gain arriving where eight of them share a write. And the
+buffer no longer waits to be told: a table whose rows exceed the configured floor gets a buffer
+sized to batch them anyway. A bundle of 128 rows of 8 KiB took 128 DMA writes before that change
+and takes 16 after it.
+
+**What survives of it** is everything above the ceiling. A row wider than `max_buffer_size` — 256
+KiB by default — still gets one DMA write and one `alloc_dma_buffer` to itself, and the group commit
+below still has nothing to group, which is why a table with very wide rows behaves differently from
+one with narrow rows under the same settings. See
+[Row size and what it costs](../tables/row-size.md#the-intent-log-batches-fewer-records-as-rows-widen).
+
+**The re-capture has not been taken.** The five `latency_buffer` rungs at 8 KiB and 64 KiB
+([F22](../features/row-size-benchmarks.md)) are what judge the sizing, and the prediction is that
+they converge, since they now all resolve to the same ceiling.
 
 `prep` returns a `&mut [u8]` of exactly the requested size; a caller that writes less than it
 asked for leaves uninitialised bytes in the log. `commit` is the only caller and it is
@@ -298,7 +322,7 @@ pub async fn refresh(&mut self, rename_to: &PathBuf) -> Result<u64, ServerError>
     }
     let file = OpenOptions::new().create(true).read(true).write(true)
         .dma_open(&self.path).await?;
-    self.buffer = file.alloc_dma_buffer(self.default_buffer_size);
+    self.buffer = self.alloc_buffer(self.staging_target(0));  // keeps the width it learned
     let old_file = std::mem::replace(&mut self.file, Rc::new(file));
     old_file.close_rc().await?;
     self.file_pos = 0;

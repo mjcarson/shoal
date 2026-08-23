@@ -65,7 +65,8 @@ storage:
     filesystem:
       latency_sensitive:
         path: "/opt/shoal"
-        buffer_size: 512             # bytes; accepts "4KiB" style strings
+        buffer_size: 512             # floor; bytes, or "4KiB" style strings
+        max_buffer_size: "256KiB"    # ceiling the staging buffer sizes itself up to
         write_behind: 128
         intent_log_size: "10MiB"
         durability: Fsync            # Fsync (default) or Async
@@ -231,22 +232,35 @@ shallow queue depth.
 `intent_log_size` is the rotation threshold — once the active intent log exceeds it,
 compaction is triggered ([Compaction](../storage/compaction.md)). It defaults to 10 MiB.
 
-`buffer_size` is a *minimum*. At startup it is rounded up to at least one block of the backing
-device's direct IO alignment, because every write to the intent log has to be block aligned.
-Setting it below the device block size therefore has no effect, and setting it small costs
-write amplification at low load — see [pad regions](../storage/intent-log.md#pad-regions).
+`buffer_size` is a *floor*, and `max_buffer_size` is the ceiling above it. At startup the floor is
+rounded up to at least one block of the backing device's direct IO alignment, because every write to
+the intent log has to be block aligned. Setting it below the device block size therefore has no
+effect, and setting it small costs write amplification at low load — see
+[pad regions](../storage/intent-log.md#pad-regions).
 
-Setting it below your **row** size costs more than that: a record larger than the buffer is
+Between the two, the writer sizes each staging buffer to hold about **eight** of the widest record
+the previous one held ([F23](../features/self-sizing-staging-buffer.md)). So a table with 8 KiB rows
+gets a 64 KiB buffer without being told to, and a table with kilobyte rows gets an 8 KiB one.
+
+~~Setting it below your **row** size costs more than that: a record larger than the buffer is
 never batched with another one, so every insert becomes its own aligned write and its own DMA
-allocation. If your rows are wider than a few kilobytes, this is the first setting to move —
-see [Row size and what it costs](../tables/row-size.md).
+allocation. If your rows are wider than a few kilobytes, this is the first setting to move.~~
+~~That advice is read from `StreamWriter::prep` and not from a measurement.~~ ~~It is measured now,
+and it needs one correction: setting the buffer merely *above* your row size is not enough. Size
+this to a **multiple** of your widest row, not just past it.~~ **The writer does that itself now.**
+The measurement is what chose the multiple: the sweep at 8 KiB rows shows a buffer holding two
+records is worth nothing over one holding none, and the gain arrives where 8 to 32 records share a
+write — **1.22×** at 64 KiB rows ([F22](../features/row-size-benchmarks.md), captured as
+`f22-row-size`).
 
-~~That advice is read from `StreamWriter::prep` and not from a measurement.~~ **It is measured
-now**, and it needs one correction: setting the buffer merely *above* your row size is not enough.
-The sweep at 8 KiB rows shows a buffer holding two records is worth nothing over one holding none,
-and the gain arrives where 8 to 32 records share a write — **1.22×** at 64 KiB rows. Size this to a
-**multiple** of your widest row, not just past it
-([F22](../features/row-size-benchmarks.md), captured as `f22-row-size`).
+**`max_buffer_size` is the one still worth setting**, and only if your rows are wide. It defaults to
+256 KiB; above it the writer is back to one record per DMA write and one DMA allocation per insert,
+which is exactly the behaviour the paragraph above describes. It is also the memory bound on the
+staging half of the write path — a writer may hold up to `write_behind + 1` buffers of this size at
+once, per table, per shard, and `write_behind` defaults to 128. Setting it equal to `buffer_size`
+turns the sizing off and gives back the old allocation exactly. See
+[Row size and what it costs](../tables/row-size.md) and
+[Tuning](../operations/tuning.md#if-your-rows-are-wide).
 
 #### `durability`
 

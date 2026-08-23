@@ -95,30 +95,33 @@ this page opens with. Ordered inside each tier.
 | --- | --- | --- | --- | --- | --- | --- |
 | ~~**A1**~~ | ~~[**O3** + **O23**](#o3-every-archived-read-is-fully-validated-inside-a-tracing-span)~~ — **done**, by [F4](../features/validated-archives.md) | Measured — 29.89 µs of a 30.43 µs cold single-row get | M | — | Contained | it was, and it was |
 | ~~**A2**~~ | ~~[**O17**](#o17-handle_flushed-runs-on-every-message)~~ — **done**, by [F5](../features/flushed-sweep-gate.md) | Profiled — 711,638 calls became 21,279 | S | — | Contained | it was, on the profile alone |
-| **A3** | [**O34**](#o34-a-record-wider-than-the-staging-buffer-defeats-intent-log-batching) — the intent log batches fewer records as rows widen | **Measured** — 1.22× at 64 KiB rows, disjoint intervals | S–M | ~~a `latency_buffer` sweep above the buffer~~ — discharged | Contained | **yes, it already has been** |
+| ~~**A3**~~ | ~~[**O34**](#o34-a-record-wider-than-the-staging-buffer-defeats-intent-log-batching)~~ — **done**, by [F23](../features/self-sizing-staging-buffer.md) | Measured — 1.22× at 64 KiB rows, disjoint intervals; 128 writes became 16 in the reproduction | S–M | ~~a `latency_buffer` sweep above the buffer~~ — discharged | Contained | it was, and it was |
 | **A4** | [**O13**](#o13-a-multi-partition-get-is-quadratic-in-the-partitions-it-names) (+ [**O12**](#o12-to_blocked-clones-the-whole-filter-set-per-blocked-partition) beside it) — the quadratic multi-partition get | Asymptotic — O(n²) in a caller-set n | S | — | None | no — still needs a bench over `PersistentSortedTable::get` |
 | **A5** | [**O5**](#o5-the-hottest-maps-use-siphash), [**O14**](#o14-fixed-thousand-element-preallocations-on-per-call-paths), [**O28**](#o28-the-client-takes-two-guards-on-its-response-map-for-every-query-it-sends) — hasher, allocation sizes, and a doubled map guard | Argued | S | — | None | no — needs a table-layer bench, and O28 needs the client measured at all |
 | **A6** | [**O25**](#o25-two-instrument-spans-remain-on-per-query-paths) — two `#[instrument]` spans on per-query paths | Argued — but the cost is in the *uninstrumented* binary | S | — | Contained | no — needs a with/without capture |
 
-**Do O34 first.** It moved from the bottom of this tier to the top on the strength of one capture,
-and it is now **the only entry on this page whose cost is both measured and contained**. Everything
-above it in the old ordering is still argued or asymptotic; everything with a comparable measurement
-behind it is XL, Major, or both. 1.22× on 64 KiB rows, S–M, one file, and part of the fix is a
-number in `shoal.yml`.
+~~**Do O34 first.**~~ **Done**, by [F23](../features/self-sizing-staging-buffer.md). It moved from
+the bottom of this tier to the top on the strength of one capture, was for one release **the only
+entry on this page whose cost was both measured and contained**, and was then acted on. Both
+cautions that came with it were carried into the fix rather than around it. The *shape* correction
+— the gain is in how many records share an aligned write, not in whether the record fits — is why
+F23 is a sizing rule and not a larger default: it became `TARGET_RECORDS_PER_BUFFER = 8`, read off
+the rung where the capture says the gain arrives. The boundary at 4096 is **still unbracketed**,
+because the width axis still jumps 1024 → 8192 around it, and that is the one thing this entry still
+cannot state.
 
-Two cautions that come with it, both from the same capture. The measurement says the *shape* of the
-entry was wrong — the gain is in how many records share an aligned write, not in whether the record
-fits — so a default sized just above the widest expected row buys nothing and the fix has to be a
-multiple of the row or a self-sizing buffer. And the boundary at 4096 is still unbracketed, because
-the width axis jumps 1024 → 8192 around it.
+**A4 is the head of the queue now**, and it is the first one here that a profile cannot settle: it
+needs a benchmark over `PersistentSortedTable::get` that does not exist yet. So the tier has gone
+back to being blocked on measurement rather than on code — which is the state this page prefers to
+be honest about, since A3 is the only entry that has ever left it by being built.
 
-**A4 was the head of the queue until `f22-row-size`**, and it is the first one there that a profile
-cannot settle: it needs a benchmark over `PersistentSortedTable::get` that does not exist yet. A1
-and A2 are struck rather than deleted because what each got wrong is the useful part — A1 claimed
-the narrow form needed no `unsafe`, and there is no such form; A2 accepted a rotation delay that
-turned out not to be necessary, and would have quietly changed what four tests exercise if it had
-been. See [O3](#o3-every-archived-read-is-fully-validated-inside-a-tracing-span) and
-[O17](#o17-handle_flushed-runs-on-every-message).
+A1, A2 and A3 are struck rather than deleted because what each got wrong is the useful part — A1
+claimed the narrow form needed no `unsafe`, and there is no such form; A2 accepted a rotation delay
+that turned out not to be necessary, and would have quietly changed what four tests exercise if it
+had been; A3 described a step and was a slope. See
+[O3](#o3-every-archived-read-is-fully-validated-inside-a-tracing-span),
+[O17](#o17-handle_flushed-runs-on-every-message) and
+[O34](#o34-a-record-wider-than-the-staging-buffer-defeats-intent-log-batching).
 
 **A6 is ranked last despite being the smallest diff**, because unlike everything else here its
 impact is argued rather than profiled — a span's cost is invisible to the profile that would
@@ -201,7 +204,7 @@ come out as a code block.
 | O20 | none yet — a `routing` bench over `Ring::find_shard` and `split_by_shard` is unbuilt, and likewise belongs in the micro layer |
 | O11, O29 | the `r0` width sweep against the `r100` one — **captured**, and it says the write path owns the axis below ~64 KiB, which is where O11's three passes live. The per-stage breakdown that would say *which* stage they are in ran at three widths and **joined zero queries at all three** ([item 76](known-issues.md#76-the-stage-layer-joins-nothing-for-any-grid-arm-and-reports-it-as-a-layer-that-ran)), so the instrument is broken rather than missing. This is the only row in this table where a capture made things worse than an absent benchmark: an absent one is honest |
 | O21 | `hotpath` `fs::commit` and `stream::prep` only; no micro-benchmark of the write path exists, though [F8](../features/purpose-built-workloads.md) built the standalone binary that would host one |
-| O34 | ~~**none yet**~~ ~~built and not yet captured~~ `macro/conf/storage/latency_buffer/r50/w8192/*` and `.../w65536/*` ([F22](../features/row-size-benchmarks.md)). **Captured, and it settled the entry**: 1.22× at 64 KiB rows on disjoint intervals against 1.06× at the reference cell — and it corrected the shape, because crossing the buffer threshold at 8 KiB bought nothing while 8–32 records per buffer bought 6%. The sweep that could not see this now can |
+| ~~O34~~ | ~~**none yet**~~ ~~built and not yet captured~~ `macro/conf/storage/latency_buffer/r50/w8192/*` and `.../w65536/*` ([F22](../features/row-size-benchmarks.md)). **Captured, and it settled the entry**: 1.22× at 64 KiB rows on disjoint intervals against 1.06× at the reference cell — and it corrected the shape, because crossing the buffer threshold at 8 KiB bought nothing while 8–32 records per buffer bought 6%. The sweep that could not see this now can, and the entry it settled has been **acted on** ([F23](../features/self-sizing-staging-buffer.md)). The same arms are what re-judge the fix, and the prediction is that the `w65536` rungs converge — a sweep whose knob is now a floor under a ceiling has less to say the wider the rows get, which is the shape of a knob that stopped mattering |
 | O35 | ~~none~~ ~~built, not captured~~ `macro/grid/depth/1/<width>` against the `r50` width sweep ([F22](../features/row-size-benchmarks.md)). **Captured, and it came back negative.** The test was the entry's own: a p99 that collapses at one outstanding query is a queue rather than a cost inside the relay. It collapses — 1.3–2.5× at every width against 37–52× at depth 32 — so the entry lost its evidence and left the queue |
 | O28, O30, O31 | none — **the client is not instrumented at all**. No `tracing` span, no `hotpath` scope, and no workload that isolates it. O30 is the only entry on this page whose cost is not even bounded by an argument |
 
@@ -728,20 +731,30 @@ per call, and unlike everything else the profile attributes, *that* cost is in t
 binary too. It is removed. The same reasoning applies to two more spans on hot paths and is filed as
 [O25](#o25-two-instrument-spans-remain-on-per-query-paths).
 
-### O34. A record wider than the staging buffer defeats intent-log batching
+### ~~O34. A record wider than the staging buffer defeats intent-log batching~~
+
+**Done**, by [F23](../features/self-sizing-staging-buffer.md). `latency_sensitive.buffer_size` is now
+a floor and a new `max_buffer_size` a ceiling, and between them `StreamWriter` sizes each staging
+buffer to hold about eight of the widest record the last one held. The entry is kept because what it
+got wrong is the useful part: it described a step and the behaviour is a slope, and that correction
+is what decided the fix. A bundle of 128 rows of 8 KiB took 128 DMA writes and 128 DMA allocations
+before the change and takes 16 after it. **The capture has not been re-taken** — the prediction is
+below.
 
 | | |
 | --- | --- |
-| **Rank** | **A1** — the head of the queue. The only entry that moved from argued to measured with a contained fix |
+| **Rank** | ~~**A1** — the head of the queue. The only entry that moved from argued to measured with a contained fix~~ — done |
 | **Impact** | **Measured** — **1.22×** across the sweep at 64 KiB rows (`256Ki` 2.46 ms against `4Ki` 2.82 ms, run intervals disjoint), against 1.06× at the reference cell. It grows with the row width, which is a quantity the caller chooses |
 | **Difficulty** | S–M — `prep`, `write` and `alloc_buffer` are one file, but whether the buffer should size itself from observed records or stay a configured floor is a decision rather than a patch |
 | **Depends on** | ~~a `latency_buffer` sweep taken at a width above the buffer~~ — **discharged** by `f22-row-size` |
 | **Blocks** | any tuning advice about wide rows |
-| **Tradeoff** | Contained if the fix is a larger default — padding on a partial flush, and a larger DMA allocation per shard. A self-sizing buffer is a behaviour change and needs the decision above |
+| **Tradeoff** | Contained if the fix is a larger default — padding on a partial flush, and a larger DMA allocation per shard. A self-sizing buffer is a behaviour change and needs the decision above. **It was the self-sizing buffer**, and the tradeoff it actually carries is the one the ceiling bounds: up to `write_behind + 1` buffers of `max_buffer_size` per table per shard |
 | **Benchmark** | `macro/conf/storage/latency_buffer/r50/w8192/*` and `.../w65536/*`, the same five rungs above the staging buffer ([F22](../features/row-size-benchmarks.md)). **Captured**, and it corrected the shape of this entry as well as sizing it |
 
-`StreamWriter::prep` flushes the staging buffer whenever the next record will not fit
-(`.../fs/stream.rs:655-665`):
+`StreamWriter::prep` flushes the staging buffer whenever the next record will not fit. **What it
+allocated when this entry was filed and measured**, kept with its original line numbers the way this
+page keeps every struck entry's original text (`.../fs/stream.rs:655-665`, now
+`self.staging_target(size)`):
 
 ```rust
 pub async fn prep(&mut self, size: usize) -> &mut [u8] {
@@ -788,6 +801,32 @@ write. What matters is how many records share an aligned write, not whether the 
 expected row" is the obvious patch and the measurement says it would buy nothing. The default has to
 be a multiple of the row, or the buffer has to size itself from what it observes — which is the
 decision in the *Difficulty* row, and it is now a decision with a number attached.
+
+**It was decided as the self-sizing buffer** ([F23](../features/self-sizing-staging-buffer.md)). The
+number this paragraph asked for became `TARGET_RECORDS_PER_BUFFER = 8`, taken from the rung where the
+table above says the gain arrives, and the memory the *Tradeoff* row worried about became a
+configured ceiling rather than an unbounded consequence. What the fix does **not** change is
+anything above that ceiling: a 4 MiB row still gets one write and one allocation to itself, which is
+this entry's mechanism still fully in force at widths the sweep never reached.
+
+**Reproduced before it was fixed**, which this entry never was while it was open — it was filed from
+source reading and sized by a capture, and neither of those is a reproduction.
+`intent_log_batching::wide_records_share_an_aligned_write` sends one bundle of 128 rows of 8 KiB at a
+4096 byte buffer and reads the shard's intent log back off disk:
+
+```
+128 rows were written in 128 flushes, which is one record per write
+```
+
+16 flushes afterwards, of eight records each, and 5.1% fewer bytes on disk because the per-record pad
+regions are gone.
+
+**What the re-capture should say**, and it has not been taken: the five
+`macro/conf/storage/latency_buffer/r50/w65536/*` rungs now all resolve to the same 256 KiB ceiling,
+so they should **converge**, at or above the 22,701 that `256Ki` alone reached. The `w8192` rungs
+should converge near 38,619. The reference cell moves from 4096 to 8192 usable and this capture says
+that width is flat, so a change there beyond a couple of percent is a finding rather than a
+confirmation.
 
 The width axis corroborates the mechanism from the other side: over 1 KiB → 8 KiB the persistent
 arms lose 31% of their throughput while the ephemeral arms — the same tables with `NoStorage` and

@@ -219,8 +219,15 @@ partition is paged through without reading all of it.
 
 **Sorted table** — `PersistentSortedTable`. Many rows per partition, ordered by sort key.
 
+**Staging buffer** — The one `DmaBuffer` a `StreamWriter` fills before writing it out. How many
+records share it is what the group commit below has to amortize an `fdatasync` across, which is why
+it sizes itself rather than being a constant. See
+[The Intent Log](../storage/intent-log.md#how-wide-the-buffer-is).
+
 **StreamWriter** — The DMA-aware append writer behind the intent log. Hands out buffer slices
-via `prep`/`consume` and writes full buffers through detached background tasks.
+via `prep`/`consume` and writes full buffers through detached background tasks. Sizes each staging
+buffer to hold about eight of the widest record the last one held, between the `buffer_size` floor
+and the `max_buffer_size` ceiling ([F23](../features/self-sizing-staging-buffer.md)).
 
 **Tombstone** — A `MaybeRow::Tombstone` marking a deleted row. Necessary because a delete may
 target a row still sitting in an unread archive, so the deletion must be recorded in a form

@@ -35,7 +35,7 @@ hours.
 | | What it answers | Cost |
 | --- | --- | ---: |
 | A width axis on `wire_codec` | The per-byte half of [O1](../appendix/optimizations.md) and [O2](../appendix/optimizations.md), with a confidence interval | 50 micro ids |
-| `latency_buffer` above the buffer | [O34](../appendix/optimizations.md) outright: is the setting a step, and is the step at the buffer | 10 arms |
+| `latency_buffer` above the buffer | [O34](../appendix/optimizations.md) outright: is the setting a step, and is the step at the buffer — the one row here that has since been [acted on](self-sizing-staging-buffer.md) | 10 arms |
 | The 64× hole filled | Where the knee is, as a measurement rather than an inference | 20 arms |
 | A depth-1 arm at each width | How much of a wide arm's latency was queue rather than service | 15 arms |
 | The width axis at `r0` and `r100` | Which half of the mixture the per-byte cost is on | 120 arms |
@@ -223,7 +223,7 @@ target. What it makes newly *adjudicable* is the point:
 | Entry | What can now decide it |
 | --- | --- |
 | [O1](../appendix/optimizations.md), [O2](../appendix/optimizations.md) | `wire_codec/width/request/decode/{access,deserialize}/*` and `wire_codec/width/response/encode/*`, with a confidence interval |
-| [O34](../appendix/optimizations.md) | `macro/conf/storage/latency_buffer/r50/w8192/*` against `.../r50/*` — the same five rungs either side of the buffer |
+| [O34](../appendix/optimizations.md) | `macro/conf/storage/latency_buffer/r50/w8192/*` against `.../r50/*` — the same five rungs either side of the buffer. **It did decide it, and the entry has since been built** ([F23](self-sizing-staging-buffer.md)): the capture both sized O34 and corrected its shape, and the correction is what chose the fix. The same arms now re-judge that fix, with no identifier moved |
 | [O11](../appendix/optimizations.md), [O29](../appendix/optimizations.md) | The `r0` width sweep against the `r100` one, and the per-stage breakdown at three widths |
 | [O35](../appendix/optimizations.md) | The depth-1 ladder: a p99 that collapses at depth 1 and not at 32 is a queue in front of the relay |
 
@@ -265,4 +265,5 @@ target. What it makes newly *adjudicable* is the point:
 - [Resolved #73](../appendix/resolved/stage-artifact-overwrite.md),
   [#74](../appendix/resolved/conf-knob-dropped.md) — the two defects found on the way, both a doc
   comment describing a guarantee nothing enforced
+- [F23](self-sizing-staging-buffer.md) — what the `latency_buffer` repeats turned into: O34 built, on the shape this capture corrected rather than the one it was filed with
 - [Optimizations](../appendix/optimizations.md) — O1, O2, O11, O29, O34, O35

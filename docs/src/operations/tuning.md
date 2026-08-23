@@ -42,19 +42,27 @@ the durability barrier says so, and everything else is behind that.
   until a completion drains once this many writes are outstanding, so a low value serialises the
   write path outright. The shipped 128 is not a number anybody measured before F20; read the
   write-behind ladder and take the value where it flattens.
-- **`latency_sensitive.buffer_size`** is a **minimum** that gets rounded up to your device's O_DIRECT
-  alignment, so setting it below the block size does nothing at all. Above it, a larger buffer means
-  fewer, larger writes and more padding per partial flush — **and a record larger than the buffer is
-  never batched with another one at all.** `StreamWriter::prep` flushes whenever the next record will
-  not fit, so a table whose rows exceed the buffer gets one DMA write and one DMA allocation per
-  insert, and the group commit above has nothing left to group. ~~That is a step at the buffer size,
-  not a slope~~ — **it is a slope**, and the correction matters for what you set. The same five rungs
-  now run at 8 KiB and 64 KiB as well ([F22](../features/row-size-benchmarks.md)) and have been
-  captured: the setting is worth **1.22× at 64 KiB rows** (`256Ki` against `4Ki`, on run intervals
-  that do not overlap) against 1.06× at 1 KiB. But at 8 KiB rows, a buffer that holds *two* records
-  is worth nothing over one that holds none — the gain arrives at 8 to 32 records per buffer. **Size
-  it to a multiple of your widest row, not just past it**
+- **`latency_sensitive.buffer_size`** is a **floor** that gets rounded up to your device's O_DIRECT
+  alignment, so setting it below the block size does nothing at all. It is no longer the buffer
+  size: `StreamWriter` sizes each staging buffer to hold about eight of the widest record the last
+  one held, between this floor and the `max_buffer_size` ceiling below
+  ([F23](../features/self-sizing-staging-buffer.md)). ~~A record larger than the buffer is never
+  batched with another one at all.~~ ~~Size it to a multiple of your widest row, not just past
+  it.~~ **That is what the writer now does for you**, so raising this is only worth it if you want
+  a larger *minimum* write at low load. The measurement behind the rule is the same five rungs run
+  at 8 KiB and 64 KiB ([F22](../features/row-size-benchmarks.md)): the setting was worth **1.22× at
+  64 KiB rows** (`256Ki` against `4Ki`, on run intervals that do not overlap) against 1.06× at
+  1 KiB, and at 8 KiB rows a buffer holding *two* records was worth nothing over one holding none —
+  the gain arrived at 8 to 32 records per buffer, which is why the rule is eight
   ([O34](../appendix/optimizations.md), [Row size](../tables/row-size.md)).
+- **`latency_sensitive.max_buffer_size`** is the ceiling that sizing stops at, 256 KiB by default,
+  and it is the setting that matters if your rows are wide. Above it the writer is back to one
+  record per DMA write and one DMA allocation per insert, with nothing left for the group commit to
+  group — so if your rows are wider than a quarter of a mebibyte, this is the first setting to move.
+  What it costs is memory: a writer may hold up to `write_behind + 1` buffers of this size at once,
+  per table, per shard, and `write_behind` defaults to 128. Setting it equal to `buffer_size` turns
+  the sizing off entirely, which is the way back to the pre-[F23](../features/self-sizing-staging-buffer.md)
+  behaviour. **Neither this interaction nor the sizing itself has been captured yet.**
 
 ## If you are ingesting in bulk
 
@@ -78,7 +86,9 @@ measured and which are argued. ~~For this section the honest answer is *none of 
 width it matters at*.~~ **Most of it is measured now**, by `f22-row-size`: the width axis with its
 64× hole filled, swept at three mixtures and two load depths, plus the `latency_buffer` rungs above
 the buffer ([F22](../features/row-size-benchmarks.md)). The order of these two bullets has swapped,
-because the capture said the second one is much the larger lever.
+because the capture said the second one is much the larger lever — and the second one has since
+mostly stopped being your job at all
+([F23](../features/self-sizing-staging-buffer.md)), which is what the numbers behind it bought.
 
 - **Keep the load depth down — this is the biggest thing on the page.** At 512 KiB rows, going from
   thirty-two outstanding queries to one takes the read p50 from 360.04 µs to 119.37 µs and the p99
@@ -88,10 +98,16 @@ because the capture said the second one is much the larger lever.
   before you look at the server. (This bullet used to blame the response relay
   ([O35](../appendix/optimizations.md)); the depth ladder showed the queue accounts for all of it,
   and that entry has been demoted.)
-- **Size `latency_sensitive.buffer_size` to a multiple of your widest row.** ~~Above your widest
-  row.~~ Above is not enough — at 8 KiB rows, `16Ki` and `4Ki` are within noise of each other, and
-  the gain shows up at `64Ki` and `256Ki`. Worth **1.22×** at 64 KiB rows. The cost is padding on a
-  partial flush and a larger DMA allocation per shard.
+- ~~**Size `latency_sensitive.buffer_size` to a multiple of your widest row.**~~ ~~Above your widest
+  row.~~ **The writer sizes its own buffer now** ([F23](../features/self-sizing-staging-buffer.md)),
+  to about eight of the widest record it last held. What is left for you is
+  `latency_sensitive.max_buffer_size`, the ceiling that sizing stops at — **and only if your rows
+  are wider than its 256 KiB default**, because above the ceiling the old behaviour is still exactly
+  what happens: one DMA write and one DMA allocation per insert. Raising it costs up to
+  `write_behind + 1` buffers of that size per table per shard. The measurement that produced the
+  rule is the same one this bullet used to quote: above your widest row is not enough — at 8 KiB
+  rows `16Ki` and `4Ki` are within noise of each other and the gain shows up at `64Ki` and `256Ki`,
+  worth **1.22×** at 64 KiB rows.
 - **Read `payload/s`, not `queries/s`.** Past the point where the per-byte cost dominates, queries a
   second must fall as the rows widen and that is arithmetic rather than a regression. A falling
   `queries/s` with a flat `payload/s` is the system working.

@@ -757,7 +757,10 @@ Two arms at 2 KiB and 4 KiB on the persistent unsorted table would bracket the b
 whether there is a discontinuity there at all — which is the one thing
 [O34](optimizations.md#o34-a-record-wider-than-the-staging-buffer-defeats-intent-log-batching) still
 cannot state, now that the `latency_buffer` sweep has established the setting is worth 1.22× at
-64 KiB. Two arms, appended after the existing widths so no identifier moves.
+64 KiB. **Still open, and now open on the other side of the fix**: O34 was
+[built](../features/self-sizing-staging-buffer.md) without it, so these two arms would now measure
+whether the self-sizing buffer has a discontinuity at the floor rather than whether the old writer
+had one at the buffer. The question is the same and the code under it is not. Two arms, appended after the existing widths so no identifier moves.
 
 ~~**A width axis on `wire_codec`.** The cheapest item in this whole section. `shoal/benches/wire.rs`
 sweeps *bundle size* (1, 10, 100 queries) and *response cardinality* (16, 256, 1024, 4096 rows) with
@@ -981,6 +984,13 @@ inherits one gap the grid does not have: it measures a machine as much as it mea
   find one is a second reference for the storage half — the write-behind ladder repeated at
   `latency_buffer/64Ki` — which is five more arms rather than the twenty-five a full cross of those
   two costs. As with the grid: the claim that there is no interaction is an assumption.
+  **[F23](../features/self-sizing-staging-buffer.md) made one of these pairs matter rather than
+  merely possible.** `max_buffer_size` and `write_behind` multiply: the staging half of a writer's
+  memory is `(write_behind + 1) × max_buffer_size`, per table, per shard, and with the shipped 128
+  and 256Ki that is 33 MiB a writer at its worst. Nothing measures whether a deep queue of large
+  buffers beats a shallow one, and nothing sweeps `max_buffer_size` at all — it is the first knob
+  added to the configuration since this page was written that has no sweep. Adding one is five arms
+  and it changes no existing identifier; adding a *cross* against `write_behind` is twenty-five.
 - **The storage knobs are swept at `r50` only.** A setting that only bites under sustained writing
   is being asked half a question. Repeating the six storage sweeps at `r0` is twenty-three more
   arms and would say whether the barrier's group-commit behaviour changes the shape of any of them.
@@ -988,14 +998,17 @@ inherits one gap the grid does not have: it measures a machine as much as it mea
   than the mixture gap above. The sweep runs at the reference cell's 1 KiB rows against a 4096 byte
   staging buffer, where three records already share an aligned write — so it is measuring the flat
   side of a step. `StreamWriter::prep` stops batching entirely once a record exceeds the buffer
-  ([O34](optimizations.md)), which is where the setting's whole effect lives and where the sweep
-  never goes. The 1.06× it reports is a `yes` in the *Real?* column for a question asked at the one
+  ([O34](optimizations.md)), which is where the setting's whole effect lived and where the sweep
+  never went. The 1.06× it reports is a `yes` in the *Real?* column for a question asked at the one
   width whose answer is no. ~~The five rungs repeated at 8 KiB are
   [filed above](#the-row-size-axis).~~ **Built** ([F22](../features/row-size-benchmarks.md)), at
   8 KiB and at 64 KiB, and the configuration page now labels every sweep with the width it ran at so
   the 1.06× row no longer stands alone. What this bullet did not say, and what building it showed:
   the *other* five storage knobs are still swept at 1 KiB alone, and nothing has asked whether any
-  of them is a step too.
+  of them is a step too. **And what building the answer showed**: those ten arms settled O34, O34 was
+  [built](../features/self-sizing-staging-buffer.md), and the knob they sweep is now a floor rather
+  than the buffer size — so a future capture of them is expected to be flatter than the one that
+  justified them, for the good reason rather than the bad one.
 - **The memory sweep brackets one working set.** Its rungs are sized against the reference cell's
   own — about 1.6 MiB a shard from the seed plus half as much again from the run — so `1Mi` and
   `4Mi` straddle it and the rest are flat. What that cannot say is whether the *ratio* it finds

@@ -20,6 +20,18 @@ fn default_latency_buffer_size() -> usize {
     512
 }
 
+/// Set the default ceiling the latency staging buffer sizes itself up to, 256 Kibibytes
+///
+/// The staging buffer grows to hold several records so they share one aligned write, and this
+/// is where that growth stops. 256 Kibibytes holds thirty two of the kilobyte rows the
+/// benchmarks use as a reference and four of a sixty four kilobyte row, which is the widest
+/// point [O34]'s capture measured a gain at.
+///
+/// [O34]: ../../../../../../docs/src/appendix/optimizations.md
+fn default_latency_max_buffer_size() -> usize {
+    256 << 10
+}
+
 /// Set default write behind for latency files
 fn default_latency_write_behind() -> usize {
     128
@@ -60,10 +72,25 @@ pub struct FileSystemLatencyWriterConf {
     /// The path to write too (table name will be added before the final filename)
     #[serde(default = "default_path")]
     pub path: PathBuf,
-    /// The buffer size to use when writting data
+    /// The smallest buffer size to use when writting data
+    ///
+    /// A floor rather than the size itself: the writer sizes each staging buffer to hold
+    /// several of the widest record the last one held, so that records share an aligned write.
+    /// This is where that sizing starts and [`FileSystemLatencyWriterConf::max_buffer_size`] is
+    /// where it stops.
     #[serde(default = "default_latency_buffer_size")]
     #[serde(deserialize_with = "utils::deserialize_byte_size")]
     pub buffer_size: usize,
+    /// The largest buffer size the writer will size itself up to
+    ///
+    /// A writer may hold up to `write_behind + 1` buffers of this size at once, per table, per
+    /// shard, so this is the memory bound on the staging half of the write path. Setting it
+    /// equal to `buffer_size` turns the sizing off entirely: every buffer is then the floor, or
+    /// one record if a record is wider than the floor, which is what the writer did before it
+    /// sized itself.
+    #[serde(default = "default_latency_max_buffer_size")]
+    #[serde(deserialize_with = "utils::deserialize_byte_size")]
+    pub max_buffer_size: usize,
     /// The number of write behind buffers to use
     #[serde(default = "default_latency_write_behind")]
     pub write_behind: usize,
@@ -82,6 +109,7 @@ impl Default for FileSystemLatencyWriterConf {
         FileSystemLatencyWriterConf {
             path: default_path(),
             buffer_size: default_latency_buffer_size(),
+            max_buffer_size: default_latency_max_buffer_size(),
             write_behind: default_latency_write_behind(),
             intent_log_size: default_intent_log_size(),
             durability: default_durability(),
@@ -101,9 +129,19 @@ impl FileSystemLatencyWriterConf {
         self
     }
 
-    /// Set the buffer size for writing data
+    /// Set the smallest buffer size to use when writing data
     pub fn buffer_size(mut self, buffer_size: usize) -> Self {
         self.buffer_size = buffer_size;
+        self
+    }
+
+    /// Set the largest buffer size the writer may size itself up to
+    ///
+    /// # Arguments
+    ///
+    /// * `max_buffer_size` - The ceiling to set in bytes
+    pub fn max_buffer_size(mut self, max_buffer_size: usize) -> Self {
+        self.max_buffer_size = max_buffer_size;
         self
     }
 

@@ -79,7 +79,11 @@ Two things the design expected to find were not there:
 - **The staging buffer is not the p50.** `StreamWriter::sync` only runs when the shard's channel
   is empty, so the plan for this feature named `durable_staged` as a live suspect for the insert
   p50. It is **0.6% at p99** and does not appear in the top six anywhere. Under sustained load
-  the 4 KiB buffer fills long before the channel drains.
+  the 4 KiB buffer fills long before the channel drains. *(That buffer is no longer 4 KiB — it
+  sizes itself between a floor and a ceiling ([F23](self-sizing-staging-buffer.md)), so it holds
+  more records before it fills. The measurement above was taken on a `tmdb` row against the old
+  fixed buffer and has not been re-taken; the direction the change pushes `durable_staged` is
+  **up**, from a starting point of 0.6%.)*
 - **`reply_serialize` is not the get path.** A whole wide `Movie` through `rkyv::to_bytes` was
   the largest unmeasured get-side suspect. It is **666 ns**, 0.8% of an 80 µs get. The get path
   is `socket_write` 21.4 µs, `net_out` 17.9 µs, `exec_queue` 15.8 µs, `net_in` 15.3 µs — network

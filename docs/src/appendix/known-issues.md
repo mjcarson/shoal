@@ -38,10 +38,13 @@ in the other direction — it had one row left open, that row was fixed, and the
 [moved](resolved/claude-md-drift.md).
 
 **Baseline as of writing:** `cargo check --workspace --all-targets` passes with warnings;
-`cargo test --workspace` passes — 1,036 tests, two ignored, plus 8 more behind
+`cargo test --workspace` passes — 1,043 tests, two ignored, plus 8 more behind
 `--features stage-profile` that a default run does not reach ([Test Coverage](test-coverage.md)).
 [F22](../features/row-size-benchmarks.md) added 21, two of which reproduce items 73 and 74 and fails against
-the tree before its fix.
+the tree before its fix. [F23](../features/self-sizing-staging-buffer.md) added 7, one of which
+reproduces [O34](optimizations.md) and fails against the tree before its fix — the first entry from
+the optimizations page ever reproduced by a test rather than argued from source and sized by a
+capture.
 **Unchanged by the `f22-row-size` capture**, which added no tests and moved no count, and which is
 where items [75](#75-a-control-that-was-measured-at-every-width-is-not-drawn-and-the-caption-says-it-is)
 and [76](#76-the-stage-layer-joins-nothing-for-any-grid-arm-and-reports-it-as-a-layer-that-ran)
@@ -321,6 +324,14 @@ traffic before its client is answered.
 
 Not a durability bug: nothing is acknowledged that is not durable. It is an unbounded
 acknowledgement delay for the last writes before a lull.
+
+**[F23](../features/self-sizing-staging-buffer.md) widened this without changing its bound.** The
+staging buffer now sizes itself to hold about eight records rather than however many of them
+happened to fit in 4096 bytes, so more writes can be sitting in it when a lull does not come. The
+worst case is still `intent_log_size` of other traffic, because the escape is still a rotation — but
+the number of clients waiting behind it goes up with the buffer, and for a table with 8 KiB rows it
+goes from one to eight. Recorded here rather than as a new item, since it is this defect being worse
+rather than a second one.
 
 ### 38. Integration test binaries all bind the same ports
 

@@ -50,13 +50,25 @@ moved:
 reference cell's **1 KiB** rows, and for one of them that is the one width whose answer is no: the
 intent log stages records into a 4096 byte buffer and flushes when the next one will not fit, so at
 1 KiB three records already share an aligned write and the sweep measures the flat side of a step.
-`StreamWriter::prep` stops batching entirely once a record exceeds the buffer
-([O34](../appendix/optimizations.md)), which is where the setting's whole effect lives.
+`StreamWriter::prep` ~~stops batching entirely once a record exceeds the buffer~~ *stopped* batching
+entirely once a record exceeded the buffer ([O34](../appendix/optimizations.md)), which is where the
+setting's whole effect lived — until that entry was [built](self-sizing-staging-buffer.md), on the
+strength of these very arms. See below.
 
 | Repeat | Values | Read shares | Arms |
 | --- | --- | --- | ---: |
 | `latency_buffer` at 8 KiB rows | 512, 4Ki, 16Ki, 64Ki, 256Ki | r50 | 5 |
 | `latency_buffer` at 64 KiB rows | 512, 4Ki, 16Ki, 64Ki, 256Ki | r50 | 5 |
+
+**What those ten arms mean has since changed under them**, and it is worth knowing before reading a
+future capture of them. They were built to adjudicate [O34](../appendix/optimizations.md); they did,
+and the entry was then [built](self-sizing-staging-buffer.md). `latency_sensitive.buffer_size` is now
+a **floor** under a `max_buffer_size` ceiling rather than the buffer size itself, so the knob these
+ten arms move no longer decides how many records share a write once it is below the size the writer
+would have chosen anyway. **The prediction is that the 64 KiB row rungs converge**, since all five
+now resolve to the same 256 KiB ceiling — a sweep flattening because its knob stopped mattering,
+which reads identically to a sweep that never mattered and is the reason this paragraph exists. No
+identifier moved and no arm was added, so the comparison against `f22-row-size` is a clean join.
 
 Identifiers are `macro/conf/<section>/<knob>/r<share>/<value>`, and the value is spelled the way
 `shoal.yml` spells it — `4Ki`, not `4096` — because that is what a reader has to type afterwards.

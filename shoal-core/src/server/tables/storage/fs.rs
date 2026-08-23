@@ -310,6 +310,7 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
         // build the writer for this shards intent log
         let intent_log2 = StreamWriter::builder(&intent_path, shard_local_tx.clone())
             .buffer_size(table_conf.latency_sensitive.buffer_size)
+            .max_buffer_size(table_conf.latency_sensitive.max_buffer_size)
             .write_behind(table_conf.latency_sensitive.write_behind)
             .durability(table_conf.latency_sensitive.durability)
             .build()

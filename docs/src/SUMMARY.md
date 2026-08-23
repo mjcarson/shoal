@@ -84,6 +84,7 @@
   - [F20. What each setting is worth](features/configuration-sweeps.md)
   - [F21. Benchmark groups](features/benchmark-groups.md)
   - [F22. The benchmarks the row size page asked for](features/row-size-benchmarks.md)
+  - [F23. The intent log's staging buffer sizes itself](features/self-sizing-staging-buffer.md)
 
 # Direction
 
