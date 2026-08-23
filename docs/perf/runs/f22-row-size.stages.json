@@ -1,0 +1,880 @@
+{
+  "version": 2,
+  "reports": {
+    "macro/grid/unsorted/r50/1024": {
+      "version": 1,
+      "label": "f22-row-size",
+      "workload": "macro/grid/unsorted/r50/1024",
+      "clock": "std::time::Instant",
+      "clock_overhead_ns": 20,
+      "join": {
+        "joined": 0,
+        "server_only": 40001,
+        "client_only": 0,
+        "duplicates": 0,
+        "saturated": 0,
+        "window_missing": 0
+      },
+      "ops": {}
+    },
+    "macro/grid/unsorted/r50/524288": {
+      "version": 1,
+      "label": "f22-row-size",
+      "workload": "macro/grid/unsorted/r50/524288",
+      "clock": "std::time::Instant",
+      "clock_overhead_ns": 20,
+      "join": {
+        "joined": 0,
+        "server_only": 1025,
+        "client_only": 0,
+        "duplicates": 0,
+        "saturated": 0,
+        "window_missing": 0
+      },
+      "ops": {}
+    },
+    "macro/grid/unsorted/r50/8192": {
+      "version": 1,
+      "label": "f22-row-size",
+      "workload": "macro/grid/unsorted/r50/8192",
+      "clock": "std::time::Instant",
+      "clock_overhead_ns": 20,
+      "join": {
+        "joined": 0,
+        "server_only": 40001,
+        "client_only": 0,
+        "duplicates": 0,
+        "saturated": 0,
+        "window_missing": 0
+      },
+      "ops": {}
+    },
+    "macro/insert_unsorted": {
+      "version": 1,
+      "label": "f22-row-size",
+      "workload": "macro/insert_unsorted",
+      "clock": "std::time::Instant",
+      "clock_overhead_ns": 20,
+      "join": {
+        "joined": 200000,
+        "server_only": 1,
+        "client_only": 0,
+        "duplicates": 0,
+        "saturated": 0,
+        "window_missing": 0
+      },
+      "ops": {
+        "insert": {
+          "count": 200000,
+          "rotated": 0,
+          "buckets": [
+            {
+              "rank": "all",
+              "total_ns": 31533215,
+              "samples": 200000,
+              "stages": {
+                "client_pool": {
+                  "mean_ns": 868,
+                  "share": 0.00002752653035854416,
+                  "per_batch": true,
+                  "at_floor": false,
+                  "samples": 200000
+                },
+                "client_serialize": {
+                  "mean_ns": 2967,
+                  "share": 0.00009409126218179784,
+                  "per_batch": true,
+                  "at_floor": false,
+                  "samples": 200000
+                },
+                "client_write": {
+                  "mean_ns": 4462,
+                  "share": 0.00014150158808735487,
+                  "per_batch": true,
+                  "at_floor": false,
+                  "samples": 200000
+                },
+                "decode": {
+                  "mean_ns": 6009,
+                  "share": 0.00019056096880701824,
+                  "per_batch": true,
+                  "at_floor": false,
+                  "samples": 200000
+                },
+                "durable_staged": {
+                  "mean_ns": 6648,
+                  "share": 0.00021082531546497875,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 200000
+                },
+                "durable_sync": {
+                  "mean_ns": 4475946,
+                  "share": 0.14194385190346115,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 200000
+                },
+                "durable_sync_wait": {
+                  "mean_ns": 2715331,
+                  "share": 0.08611018572004155,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 200000
+                },
+                "durable_write": {
+                  "mean_ns": 24044850,
+                  "share": 0.7625245316723969,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 200000
+                },
+                "exec_queue": {
+                  "mean_ns": 40707,
+                  "share": 0.0012909245061120472,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 200000
+                },
+                "execute": {
+                  "mean_ns": 266,
+                  "share": 8.435549626005468e-6,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 200000
+                },
+                "net_in": {
+                  "mean_ns": 52736,
+                  "share": 0.0016723952822444523,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 200000
+                },
+                "net_out": {
+                  "mean_ns": 4421,
+                  "share": 0.0001402013717916172,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 200000
+                },
+                "release_wake": {
+                  "mean_ns": 7501,
+                  "share": 0.0002378761569348384,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 200000
+                },
+                "reply_queue": {
+                  "mean_ns": 38,
+                  "share": 1.205078518000781e-6,
+                  "per_batch": false,
+                  "at_floor": true,
+                  "samples": 200000
+                },
+                "reply_serialize": {
+                  "mean_ns": 12782,
+                  "share": 0.000405350358344368,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 200000
+                },
+                "route": {
+                  "mean_ns": 21729,
+                  "share": 0.000689082924148394,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 200000
+                },
+                "shard_queue_in": {
+                  "mean_ns": 53274,
+                  "share": 0.0016894566570519372,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 200000
+                },
+                "socket_write": {
+                  "mean_ns": 82719,
+                  "share": 0.002623233945539647,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 200000
+                }
+              },
+              "unaccounted_ns": -39
+            },
+            {
+              "rank": "p50",
+              "total_ns": 24730166,
+              "samples": 1000,
+              "stages": {
+                "client_pool": {
+                  "mean_ns": 695,
+                  "share": 0.00002810332935088264,
+                  "per_batch": true,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "client_serialize": {
+                  "mean_ns": 2947,
+                  "share": 0.00011916620373676424,
+                  "per_batch": true,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "client_write": {
+                  "mean_ns": 4568,
+                  "share": 0.00018471368125875097,
+                  "per_batch": true,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "decode": {
+                  "mean_ns": 5387,
+                  "share": 0.00021783112980317237,
+                  "per_batch": true,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "durable_staged": {
+                  "mean_ns": 2829,
+                  "share": 0.00011439470321388058,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "durable_sync": {
+                  "mean_ns": 598383,
+                  "share": 0.024196481333768644,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "durable_sync_wait": {
+                  "mean_ns": 959102,
+                  "share": 0.038782675377108264,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "durable_write": {
+                  "mean_ns": 22944717,
+                  "share": 0.9278027895162532,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "exec_queue": {
+                  "mean_ns": 14296,
+                  "share": 0.0005780794192808896,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "execute": {
+                  "mean_ns": 255,
+                  "share": 0.000010311293502841832,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "net_in": {
+                  "mean_ns": 34661,
+                  "share": 0.001401567623929415,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "net_out": {
+                  "mean_ns": 4479,
+                  "share": 0.0001811148376440336,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "release_wake": {
+                  "mean_ns": 4884,
+                  "share": 0.00019749159791325295,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "reply_queue": {
+                  "mean_ns": 37,
+                  "share": 1.4961484690397954e-6,
+                  "per_batch": false,
+                  "at_floor": true,
+                  "samples": 1000
+                },
+                "reply_serialize": {
+                  "mean_ns": 3158,
+                  "share": 0.00012769829365480198,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "route": {
+                  "mean_ns": 20634,
+                  "share": 0.0008343656083828956,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "shard_queue_in": {
+                  "mean_ns": 65943,
+                  "share": 0.002666500499834898,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "socket_write": {
+                  "mean_ns": 63210,
+                  "share": 0.002555987695351499,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                }
+              },
+              "unaccounted_ns": -19
+            },
+            {
+              "rank": "p90",
+              "total_ns": 39569273,
+              "samples": 1000,
+              "stages": {
+                "client_pool": {
+                  "mean_ns": 894,
+                  "share": 0.00002259328848422361,
+                  "per_batch": true,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "client_serialize": {
+                  "mean_ns": 3055,
+                  "share": 0.00007720637172181557,
+                  "per_batch": true,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "client_write": {
+                  "mean_ns": 4441,
+                  "share": 0.0001122335505127931,
+                  "per_batch": true,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "decode": {
+                  "mean_ns": 6160,
+                  "share": 0.0001556763501821224,
+                  "per_batch": true,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "durable_staged": {
+                  "mean_ns": 8553,
+                  "share": 0.00021615256868631375,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "durable_sync": {
+                  "mean_ns": 612937,
+                  "share": 0.015490226469412264,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "durable_sync_wait": {
+                  "mean_ns": 1415270,
+                  "share": 0.03576689417569032,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "durable_write": {
+                  "mean_ns": 36815330,
+                  "share": 0.9304019813555836,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "exec_queue": {
+                  "mean_ns": 250010,
+                  "share": 0.0063182864138039635,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "execute": {
+                  "mean_ns": 237,
+                  "share": 5.98949594044854e-6,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "net_in": {
+                  "mean_ns": 120273,
+                  "share": 0.0030395554651711696,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "net_out": {
+                  "mean_ns": 3792,
+                  "share": 0.00009583193504717663,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "release_wake": {
+                  "mean_ns": 8609,
+                  "share": 0.00021756780823342395,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "reply_queue": {
+                  "mean_ns": 38,
+                  "share": 9.603411212533523e-7,
+                  "per_batch": false,
+                  "at_floor": true,
+                  "samples": 1000
+                },
+                "reply_serialize": {
+                  "mean_ns": 4340,
+                  "share": 0.00010968106490104075,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "route": {
+                  "mean_ns": 25769,
+                  "share": 0.000651237640883622,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "shard_queue_in": {
+                  "mean_ns": 103999,
+                  "share": 0.0026282767439270364,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "socket_write": {
+                  "mean_ns": 185584,
+                  "share": 0.004690103859123214,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                }
+              },
+              "unaccounted_ns": -18
+            },
+            {
+              "rank": "p99",
+              "total_ns": 150699103,
+              "samples": 1000,
+              "stages": {
+                "client_pool": {
+                  "mean_ns": 800,
+                  "share": 5.308591651006708e-6,
+                  "per_batch": true,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "client_serialize": {
+                  "mean_ns": 2933,
+                  "share": 0.000019462624140503343,
+                  "per_batch": true,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "client_write": {
+                  "mean_ns": 4561,
+                  "share": 0.000030265608150301997,
+                  "per_batch": true,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "decode": {
+                  "mean_ns": 5852,
+                  "share": 0.00003883234792711407,
+                  "per_batch": true,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "durable_staged": {
+                  "mean_ns": 60510,
+                  "share": 0.00040152860100301993,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "durable_sync": {
+                  "mean_ns": 52569977,
+                  "share": 0.34884067624476833,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "durable_sync_wait": {
+                  "mean_ns": 45792902,
+                  "share": 0.3038697715407105,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "durable_write": {
+                  "mean_ns": 51604545,
+                  "share": 0.34243432092625,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "exec_queue": {
+                  "mean_ns": 131029,
+                  "share": 0.0008694743192996975,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "execute": {
+                  "mean_ns": 224,
+                  "share": 1.4864056622818785e-6,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "net_in": {
+                  "mean_ns": 40941,
+                  "share": 0.00027167381347983205,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "net_out": {
+                  "mean_ns": 4459,
+                  "share": 0.00002958876271479864,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "release_wake": {
+                  "mean_ns": 11812,
+                  "share": 0.00007838135572711405,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "reply_queue": {
+                  "mean_ns": 36,
+                  "share": 2.3888662429530186e-7,
+                  "per_batch": false,
+                  "at_floor": true,
+                  "samples": 1000
+                },
+                "reply_serialize": {
+                  "mean_ns": 177276,
+                  "share": 0.0011763573669048314,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "route": {
+                  "mean_ns": 20926,
+                  "share": 0.00013885948611120795,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "shard_queue_in": {
+                  "mean_ns": 41344,
+                  "share": 0.00027434801652402666,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "socket_write": {
+                  "mean_ns": 228982,
+                  "share": 0.0015194649167885226,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                }
+              },
+              "unaccounted_ns": -6
+            },
+            {
+              "rank": "p999",
+              "total_ns": 160199462,
+              "samples": 1000,
+              "stages": {
+                "client_pool": {
+                  "mean_ns": 700,
+                  "share": 4.369552751681526e-6,
+                  "per_batch": true,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "client_serialize": {
+                  "mean_ns": 2847,
+                  "share": 0.000017771595262910432,
+                  "per_batch": true,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "client_write": {
+                  "mean_ns": 4236,
+                  "share": 0.00002644203636588992,
+                  "per_batch": true,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "decode": {
+                  "mean_ns": 5908,
+                  "share": 0.00003687902522419208,
+                  "per_batch": true,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "durable_staged": {
+                  "mean_ns": 48425,
+                  "share": 0.00030227941714311126,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "durable_sync": {
+                  "mean_ns": 53337164,
+                  "share": 0.3329422167472697,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "durable_sync_wait": {
+                  "mean_ns": 51010302,
+                  "share": 0.3184174363831509,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "durable_write": {
+                  "mean_ns": 54758471,
+                  "share": 0.34181432519417576,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "exec_queue": {
+                  "mean_ns": 277281,
+                  "share": 0.001730848509341436,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "execute": {
+                  "mean_ns": 229,
+                  "share": 1.4294679716215276e-6,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "net_in": {
+                  "mean_ns": 166922,
+                  "share": 0.0010419635491659765,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "net_out": {
+                  "mean_ns": 2580,
+                  "share": 0.000016104922999054767,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "release_wake": {
+                  "mean_ns": 9817,
+                  "share": 0.00006127985623322505,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "reply_queue": {
+                  "mean_ns": 33,
+                  "share": 2.059932011507005e-7,
+                  "per_batch": false,
+                  "at_floor": true,
+                  "samples": 1000
+                },
+                "reply_serialize": {
+                  "mean_ns": 203650,
+                  "share": 0.0012712277398284897,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "route": {
+                  "mean_ns": 29664,
+                  "share": 0.00018516916117982968,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "shard_queue_in": {
+                  "mean_ns": 103309,
+                  "share": 0.0006448773217478096,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "socket_write": {
+                  "mean_ns": 237951,
+                  "share": 0.001485342066879101,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                }
+              },
+              "unaccounted_ns": -27
+            },
+            {
+              "rank": "max",
+              "total_ns": 160199462,
+              "samples": 1000,
+              "stages": {
+                "client_pool": {
+                  "mean_ns": 700,
+                  "share": 4.369552751681526e-6,
+                  "per_batch": true,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "client_serialize": {
+                  "mean_ns": 2847,
+                  "share": 0.000017771595262910432,
+                  "per_batch": true,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "client_write": {
+                  "mean_ns": 4236,
+                  "share": 0.00002644203636588992,
+                  "per_batch": true,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "decode": {
+                  "mean_ns": 5908,
+                  "share": 0.00003687902522419208,
+                  "per_batch": true,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "durable_staged": {
+                  "mean_ns": 48425,
+                  "share": 0.00030227941714311126,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "durable_sync": {
+                  "mean_ns": 53337164,
+                  "share": 0.3329422167472697,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "durable_sync_wait": {
+                  "mean_ns": 51010302,
+                  "share": 0.3184174363831509,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "durable_write": {
+                  "mean_ns": 54758471,
+                  "share": 0.34181432519417576,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "exec_queue": {
+                  "mean_ns": 277281,
+                  "share": 0.001730848509341436,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "execute": {
+                  "mean_ns": 229,
+                  "share": 1.4294679716215276e-6,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "net_in": {
+                  "mean_ns": 166922,
+                  "share": 0.0010419635491659765,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "net_out": {
+                  "mean_ns": 2580,
+                  "share": 0.000016104922999054767,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "release_wake": {
+                  "mean_ns": 9817,
+                  "share": 0.00006127985623322505,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "reply_queue": {
+                  "mean_ns": 33,
+                  "share": 2.059932011507005e-7,
+                  "per_batch": false,
+                  "at_floor": true,
+                  "samples": 1000
+                },
+                "reply_serialize": {
+                  "mean_ns": 203650,
+                  "share": 0.0012712277398284897,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "route": {
+                  "mean_ns": 29664,
+                  "share": 0.00018516916117982968,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "shard_queue_in": {
+                  "mean_ns": 103309,
+                  "share": 0.0006448773217478096,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                },
+                "socket_write": {
+                  "mean_ns": 237951,
+                  "share": 0.001485342066879101,
+                  "per_batch": false,
+                  "at_floor": false,
+                  "samples": 1000
+                }
+              },
+              "unaccounted_ns": -27
+            }
+          ]
+        }
+      }
+    }
+  }
+}
