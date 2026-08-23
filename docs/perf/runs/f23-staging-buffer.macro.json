@@ -1,0 +1,7086 @@
+{
+  "version": 2,
+  "label": "f23-staging-buffer",
+  "workloads": {
+    "macro/conf/storage/latency_buffer/r50/16Ki": {
+      "timing": "per_query",
+      "seed": 42,
+      "scale": {
+        "scale": "full",
+        "rows": 20000,
+        "row_bytes": 1024,
+        "keys": 20000,
+        "concurrency": 32,
+        "read_pct": 50,
+        "table_kind": "persistent_unsorted"
+      },
+      "conf": {
+        "shards": 12,
+        "memory": "4Gi",
+        "durability": "fsync",
+        "tls": false,
+        "latency_buffer_size": 16384,
+        "latency_write_behind": 128,
+        "intent_log_size": "10Mi",
+        "throughput_buffer_size": 131072,
+        "throughput_write_behind": 4,
+        "max_frame_bytes": 67108864,
+        "digest": "f7f8eeb4e7a6"
+      },
+      "counters": {
+        "inserted": 9997,
+        "reads": 10003,
+        "retrieved": 10003,
+        "writes": 9997
+      },
+      "ops": {
+        "read": {
+          "count": 9520,
+          "max": {
+            "secs": 0,
+            "nanos": 161880
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 78841
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 62048
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 55617
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 38855
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 40822
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 10601
+          }
+        },
+        "write": {
+          "count": 9480,
+          "max": {
+            "secs": 0,
+            "nanos": 3938302
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 2521309
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 1879529
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 1659228
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 1131937
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 1190943
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 233577
+          }
+        }
+      },
+      "runs": 5,
+      "wall_clock_ns": [
+        375741473,
+        378648541,
+        385633138,
+        387016908,
+        388629687
+      ],
+      "spread_pct": 3.4300749121723912,
+      "runs_detail": [
+        {
+          "wall_clock_ns": 388629687,
+          "ops": {
+            "read": {
+              "count": 9520,
+              "max": {
+                "secs": 0,
+                "nanos": 219781
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 79752
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 62259
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 55697
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 38914
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 40864
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 10711
+              }
+            },
+            "write": {
+              "count": 9480,
+              "max": {
+                "secs": 0,
+                "nanos": 4622873
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 2522411
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 1881202
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 1657784
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 1132369
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 1197433
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 296348
+              }
+            }
+          },
+          "counters": {
+            "inserted": 9997,
+            "reads": 10003,
+            "retrieved": 10003,
+            "writes": 9997
+          }
+        },
+        {
+          "wall_clock_ns": 378648541,
+          "ops": {
+            "read": {
+              "count": 9520,
+              "max": {
+                "secs": 0,
+                "nanos": 157492
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 79312
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 63231
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 55707
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 38494
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 40173
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 11391
+              }
+            },
+            "write": {
+              "count": 9480,
+              "max": {
+                "secs": 0,
+                "nanos": 3737098
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 2523452
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 1843741
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 1631314
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 1111730
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 1167009
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 266330
+              }
+            }
+          },
+          "counters": {
+            "inserted": 9997,
+            "reads": 10003,
+            "retrieved": 10003,
+            "writes": 9997
+          }
+        },
+        {
+          "wall_clock_ns": 375741473,
+          "ops": {
+            "read": {
+              "count": 9520,
+              "max": {
+                "secs": 0,
+                "nanos": 164515
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 79513
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 63232
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 56368
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 38644
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 40768
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 10440
+              }
+            },
+            "write": {
+              "count": 9480,
+              "max": {
+                "secs": 0,
+                "nanos": 4020109
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 2442498
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 1836417
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 1625914
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 1099877
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 1157565
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 210523
+              }
+            }
+          },
+          "counters": {
+            "inserted": 9997,
+            "reads": 10003,
+            "retrieved": 10003,
+            "writes": 9997
+          }
+        },
+        {
+          "wall_clock_ns": 385633138,
+          "ops": {
+            "read": {
+              "count": 9520,
+              "max": {
+                "secs": 0,
+                "nanos": 161880
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 78841
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 62048
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 55617
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 38855
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 40822
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 10601
+              }
+            },
+            "write": {
+              "count": 9480,
+              "max": {
+                "secs": 0,
+                "nanos": 3938302
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 2521309
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 1879529
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 1659228
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 1131937
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 1190943
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 233577
+              }
+            }
+          },
+          "counters": {
+            "inserted": 9997,
+            "reads": 10003,
+            "retrieved": 10003,
+            "writes": 9997
+          }
+        },
+        {
+          "wall_clock_ns": 387016908,
+          "ops": {
+            "read": {
+              "count": 9520,
+              "max": {
+                "secs": 0,
+                "nanos": 194824
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 79111
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 62459
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 56077
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 39255
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 41085
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 11492
+              }
+            },
+            "write": {
+              "count": 9480,
+              "max": {
+                "secs": 0,
+                "nanos": 4097076
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 2533562
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 1884599
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 1666822
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 1129864
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 1195175
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 288222
+              }
+            }
+          },
+          "counters": {
+            "inserted": 9997,
+            "reads": 10003,
+            "retrieved": 10003,
+            "writes": 9997
+          }
+        }
+      ]
+    },
+    "macro/conf/storage/latency_buffer/r50/256Ki": {
+      "timing": "per_query",
+      "seed": 42,
+      "scale": {
+        "scale": "full",
+        "rows": 20000,
+        "row_bytes": 1024,
+        "keys": 20000,
+        "concurrency": 32,
+        "read_pct": 50,
+        "table_kind": "persistent_unsorted"
+      },
+      "conf": {
+        "shards": 12,
+        "memory": "4Gi",
+        "durability": "fsync",
+        "tls": false,
+        "latency_buffer_size": 262144,
+        "latency_write_behind": 128,
+        "intent_log_size": "10Mi",
+        "throughput_buffer_size": 131072,
+        "throughput_write_behind": 4,
+        "max_frame_bytes": 67108864,
+        "digest": "3e129ca3f76b"
+      },
+      "counters": {
+        "inserted": 9997,
+        "reads": 10003,
+        "retrieved": 10003,
+        "writes": 9997
+      },
+      "ops": {
+        "read": {
+          "count": 9520,
+          "max": {
+            "secs": 0,
+            "nanos": 189242
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 77789
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 62189
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 55467
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 38874
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 40640
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 11663
+          }
+        },
+        "write": {
+          "count": 9480,
+          "max": {
+            "secs": 0,
+            "nanos": 3544629
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 2572066
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 1868438
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 1637917
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 1086050
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 1161535
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 207508
+          }
+        }
+      },
+      "runs": 5,
+      "wall_clock_ns": [
+        375265795,
+        375983218,
+        376992070,
+        380557879,
+        385900061
+      ],
+      "spread_pct": 2.833795710051325,
+      "runs_detail": [
+        {
+          "wall_clock_ns": 380557879,
+          "ops": {
+            "read": {
+              "count": 9520,
+              "max": {
+                "secs": 0,
+                "nanos": 925182
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 81125
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 63362
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 56118
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 39115
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 41246
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 11432
+              }
+            },
+            "write": {
+              "count": 9480,
+              "max": {
+                "secs": 0,
+                "nanos": 3676511
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 2439593
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 1846216
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 1636554
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 1111108
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 1173352
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 281739
+              }
+            }
+          },
+          "counters": {
+            "inserted": 9997,
+            "reads": 10003,
+            "retrieved": 10003,
+            "writes": 9997
+          }
+        },
+        {
+          "wall_clock_ns": 385900061,
+          "ops": {
+            "read": {
+              "count": 9520,
+              "max": {
+                "secs": 0,
+                "nanos": 158684
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 79893
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 62891
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 55958
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 38644
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 40551
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 10230
+              }
+            },
+            "write": {
+              "count": 9480,
+              "max": {
+                "secs": 0,
+                "nanos": 4387934
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 2661857
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 1896862
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 1659688
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 1125666
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 1190726
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 289985
+              }
+            }
+          },
+          "counters": {
+            "inserted": 9997,
+            "reads": 10003,
+            "retrieved": 10003,
+            "writes": 9997
+          }
+        },
+        {
+          "wall_clock_ns": 376992070,
+          "ops": {
+            "read": {
+              "count": 9520,
+              "max": {
+                "secs": 0,
+                "nanos": 189242
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 77789
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 62189
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 55467
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 38874
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 40640
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 11663
+              }
+            },
+            "write": {
+              "count": 9480,
+              "max": {
+                "secs": 0,
+                "nanos": 3544629
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 2572066
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 1868438
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 1637917
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 1086050
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 1161535
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 207508
+              }
+            }
+          },
+          "counters": {
+            "inserted": 9997,
+            "reads": 10003,
+            "retrieved": 10003,
+            "writes": 9997
+          }
+        },
+        {
+          "wall_clock_ns": 375983218,
+          "ops": {
+            "read": {
+              "count": 9520,
+              "max": {
+                "secs": 0,
+                "nanos": 280317
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 78821
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 61347
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 54805
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 37942
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 39764
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 8776
+              }
+            },
+            "write": {
+              "count": 9480,
+              "max": {
+                "secs": 0,
+                "nanos": 3345166
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 2468828
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 1846456
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 1619080
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 1101540
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 1161877
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 227586
+              }
+            }
+          },
+          "counters": {
+            "inserted": 9997,
+            "reads": 10003,
+            "retrieved": 10003,
+            "writes": 9997
+          }
+        },
+        {
+          "wall_clock_ns": 375265795,
+          "ops": {
+            "read": {
+              "count": 9520,
+              "max": {
+                "secs": 0,
+                "nanos": 138385
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 81205
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 63632
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 56559
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 39165
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 41034
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 11452
+              }
+            },
+            "write": {
+              "count": 9480,
+              "max": {
+                "secs": 0,
+                "nanos": 5557594
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 2644314
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 1869099
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 1630383
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 1088234
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 1155904
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 266641
+              }
+            }
+          },
+          "counters": {
+            "inserted": 9997,
+            "reads": 10003,
+            "retrieved": 10003,
+            "writes": 9997
+          }
+        }
+      ]
+    },
+    "macro/conf/storage/latency_buffer/r50/4Ki": {
+      "timing": "per_query",
+      "seed": 42,
+      "scale": {
+        "scale": "full",
+        "rows": 20000,
+        "row_bytes": 1024,
+        "keys": 20000,
+        "concurrency": 32,
+        "read_pct": 50,
+        "table_kind": "persistent_unsorted"
+      },
+      "conf": {
+        "shards": 12,
+        "memory": "4Gi",
+        "durability": "fsync",
+        "tls": false,
+        "latency_buffer_size": 4096,
+        "latency_write_behind": 128,
+        "intent_log_size": "10Mi",
+        "throughput_buffer_size": 131072,
+        "throughput_write_behind": 4,
+        "max_frame_bytes": 67108864,
+        "digest": "b50746a29924"
+      },
+      "counters": {
+        "inserted": 9997,
+        "reads": 10003,
+        "retrieved": 10003,
+        "writes": 9997
+      },
+      "ops": {
+        "read": {
+          "count": 9520,
+          "max": {
+            "secs": 0,
+            "nanos": 126883
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 80213
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 64093
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 56659
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 39045
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 41027
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 11101
+          }
+        },
+        "write": {
+          "count": 9480,
+          "max": {
+            "secs": 0,
+            "nanos": 3798715
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 2605480
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 1876654
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 1618059
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 1095939
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 1159224
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 282291
+          }
+        }
+      },
+      "runs": 5,
+      "wall_clock_ns": [
+        374722993,
+        375934083,
+        376253754,
+        377215697,
+        383529929
+      ],
+      "spread_pct": 2.3502523636173027,
+      "runs_detail": [
+        {
+          "wall_clock_ns": 377215697,
+          "ops": {
+            "read": {
+              "count": 9520,
+              "max": {
+                "secs": 0,
+                "nanos": 131843
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 76767
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 61598
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 54555
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 37992
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 39662
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 10791
+              }
+            },
+            "write": {
+              "count": 9480,
+              "max": {
+                "secs": 0,
+                "nanos": 4417179
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 2629235
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 1868348
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 1611747
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 1100558
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 1163756
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 299173
+              }
+            }
+          },
+          "counters": {
+            "inserted": 9997,
+            "reads": 10003,
+            "retrieved": 10003,
+            "writes": 9997
+          }
+        },
+        {
+          "wall_clock_ns": 374722993,
+          "ops": {
+            "read": {
+              "count": 9520,
+              "max": {
+                "secs": 0,
+                "nanos": 134878
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 73711
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 59003
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 52851
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 36740
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 38257
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 10841
+              }
+            },
+            "write": {
+              "count": 9480,
+              "max": {
+                "secs": 0,
+                "nanos": 5632046
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 2698558
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 1866936
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 1608311
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 1093614
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 1157092
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 301989
+              }
+            }
+          },
+          "counters": {
+            "inserted": 9997,
+            "reads": 10003,
+            "retrieved": 10003,
+            "writes": 9997
+          }
+        },
+        {
+          "wall_clock_ns": 376253754,
+          "ops": {
+            "read": {
+              "count": 9520,
+              "max": {
+                "secs": 0,
+                "nanos": 126883
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 80213
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 64093
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 56659
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 39045
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 41027
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 11101
+              }
+            },
+            "write": {
+              "count": 9480,
+              "max": {
+                "secs": 0,
+                "nanos": 3798715
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 2605480
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 1876654
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 1618059
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 1095939
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 1159224
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 282291
+              }
+            }
+          },
+          "counters": {
+            "inserted": 9997,
+            "reads": 10003,
+            "retrieved": 10003,
+            "writes": 9997
+          }
+        },
+        {
+          "wall_clock_ns": 383529929,
+          "ops": {
+            "read": {
+              "count": 9520,
+              "max": {
+                "secs": 0,
+                "nanos": 136982
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 78811
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 62660
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 55596
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 38914
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 40426
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 10720
+              }
+            },
+            "write": {
+              "count": 9480,
+              "max": {
+                "secs": 0,
+                "nanos": 3679738
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 2498706
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 1888717
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 1659368
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 1117260
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 1184628
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 309813
+              }
+            }
+          },
+          "counters": {
+            "inserted": 9997,
+            "reads": 10003,
+            "retrieved": 10003,
+            "writes": 9997
+          }
+        },
+        {
+          "wall_clock_ns": 375934083,
+          "ops": {
+            "read": {
+              "count": 9520,
+              "max": {
+                "secs": 0,
+                "nanos": 134097
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 81697
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 63782
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 56658
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 38884
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 40692
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 11442
+              }
+            },
+            "write": {
+              "count": 9480,
+              "max": {
+                "secs": 0,
+                "nanos": 4154857
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 2669542
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 1857929
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 1617728
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 1094526
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 1158445
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 268104
+              }
+            }
+          },
+          "counters": {
+            "inserted": 9997,
+            "reads": 10003,
+            "retrieved": 10003,
+            "writes": 9997
+          }
+        }
+      ]
+    },
+    "macro/conf/storage/latency_buffer/r50/512": {
+      "timing": "per_query",
+      "seed": 42,
+      "scale": {
+        "scale": "full",
+        "rows": 20000,
+        "row_bytes": 1024,
+        "keys": 20000,
+        "concurrency": 32,
+        "read_pct": 50,
+        "table_kind": "persistent_unsorted"
+      },
+      "conf": {
+        "shards": 12,
+        "memory": "4Gi",
+        "durability": "fsync",
+        "tls": false,
+        "latency_buffer_size": 512,
+        "latency_write_behind": 128,
+        "intent_log_size": "10Mi",
+        "throughput_buffer_size": 131072,
+        "throughput_write_behind": 4,
+        "max_frame_bytes": 67108864,
+        "digest": "36701077ac74"
+      },
+      "counters": {
+        "inserted": 9997,
+        "reads": 10003,
+        "retrieved": 10003,
+        "writes": 9997
+      },
+      "ops": {
+        "read": {
+          "count": 9520,
+          "max": {
+            "secs": 0,
+            "nanos": 162221
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 78881
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 64002
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 57209
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 39326
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 41356
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 11922
+          }
+        },
+        "write": {
+          "count": 9480,
+          "max": {
+            "secs": 0,
+            "nanos": 3779829
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 2395428
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 1839082
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 1630553
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 1097672
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 1163427
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 293282
+          }
+        }
+      },
+      "runs": 5,
+      "wall_clock_ns": [
+        375594842,
+        375721285,
+        377407564,
+        377472218,
+        379062945
+      ],
+      "spread_pct": 0.9233627867552027,
+      "runs_detail": [
+        {
+          "wall_clock_ns": 377407564,
+          "ops": {
+            "read": {
+              "count": 9520,
+              "max": {
+                "secs": 0,
+                "nanos": 162221
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 78881
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 64002
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 57209
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 39326
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 41356
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 11922
+              }
+            },
+            "write": {
+              "count": 9480,
+              "max": {
+                "secs": 0,
+                "nanos": 3779829
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 2395428
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 1839082
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 1630553
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 1097672
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 1163427
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 293282
+              }
+            }
+          },
+          "counters": {
+            "inserted": 9997,
+            "reads": 10003,
+            "retrieved": 10003,
+            "writes": 9997
+          }
+        },
+        {
+          "wall_clock_ns": 379062945,
+          "ops": {
+            "read": {
+              "count": 9520,
+              "max": {
+                "secs": 0,
+                "nanos": 136912
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 81947
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 63722
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 56197
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 38754
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 40716
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 11252
+              }
+            },
+            "write": {
+              "count": 9480,
+              "max": {
+                "secs": 0,
+                "nanos": 4543962
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 2515979
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 1879229
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 1653727
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 1105768
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 1168727
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 214911
+              }
+            }
+          },
+          "counters": {
+            "inserted": 9997,
+            "reads": 10003,
+            "retrieved": 10003,
+            "writes": 9997
+          }
+        },
+        {
+          "wall_clock_ns": 375721285,
+          "ops": {
+            "read": {
+              "count": 9520,
+              "max": {
+                "secs": 0,
+                "nanos": 206866
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 81816
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 63291
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 56047
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 38925
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 40874
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 11802
+              }
+            },
+            "write": {
+              "count": 9480,
+              "max": {
+                "secs": 0,
+                "nanos": 4589660
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 2446375
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 1853891
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 1625974
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 1102992
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 1158582
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 201686
+              }
+            }
+          },
+          "counters": {
+            "inserted": 9997,
+            "reads": 10003,
+            "retrieved": 10003,
+            "writes": 9997
+          }
+        },
+        {
+          "wall_clock_ns": 375594842,
+          "ops": {
+            "read": {
+              "count": 9520,
+              "max": {
+                "secs": 0,
+                "nanos": 191657
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 80594
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 63442
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 56578
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 39545
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 41349
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 9919
+              }
+            },
+            "write": {
+              "count": 9480,
+              "max": {
+                "secs": 0,
+                "nanos": 3931881
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 2426878
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 1836277
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 1615644
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 1099256
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 1158712
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 230692
+              }
+            }
+          },
+          "counters": {
+            "inserted": 9997,
+            "reads": 10003,
+            "retrieved": 10003,
+            "writes": 9997
+          }
+        },
+        {
+          "wall_clock_ns": 377472218,
+          "ops": {
+            "read": {
+              "count": 9520,
+              "max": {
+                "secs": 0,
+                "nanos": 126503
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 79903
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 62199
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 55356
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 38183
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 39909
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 9719
+              }
+            },
+            "write": {
+              "count": 9480,
+              "max": {
+                "secs": 0,
+                "nanos": 3563936
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 2446085
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 1840084
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 1621656
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 1110838
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 1165028
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 288883
+              }
+            }
+          },
+          "counters": {
+            "inserted": 9997,
+            "reads": 10003,
+            "retrieved": 10003,
+            "writes": 9997
+          }
+        }
+      ]
+    },
+    "macro/conf/storage/latency_buffer/r50/64Ki": {
+      "timing": "per_query",
+      "seed": 42,
+      "scale": {
+        "scale": "full",
+        "rows": 20000,
+        "row_bytes": 1024,
+        "keys": 20000,
+        "concurrency": 32,
+        "read_pct": 50,
+        "table_kind": "persistent_unsorted"
+      },
+      "conf": {
+        "shards": 12,
+        "memory": "4Gi",
+        "durability": "fsync",
+        "tls": false,
+        "latency_buffer_size": 65536,
+        "latency_write_behind": 128,
+        "intent_log_size": "10Mi",
+        "throughput_buffer_size": 131072,
+        "throughput_write_behind": 4,
+        "max_frame_bytes": 67108864,
+        "digest": "aa3a67dc2361"
+      },
+      "counters": {
+        "inserted": 9997,
+        "reads": 10003,
+        "retrieved": 10003,
+        "writes": 9997
+      },
+      "ops": {
+        "read": {
+          "count": 9520,
+          "max": {
+            "secs": 0,
+            "nanos": 129318
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 75695
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 59344
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 52982
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 36971
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 38399
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 11311
+          }
+        },
+        "write": {
+          "count": 9480,
+          "max": {
+            "secs": 0,
+            "nanos": 3937771
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 2451956
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 1869179
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 1661111
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 1111750
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 1176357
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 266590
+          }
+        }
+      },
+      "runs": 5,
+      "wall_clock_ns": [
+        372414833,
+        378133617,
+        380580571,
+        383161664,
+        383563143
+      ],
+      "spread_pct": 2.993519326336822,
+      "runs_detail": [
+        {
+          "wall_clock_ns": 372414833,
+          "ops": {
+            "read": {
+              "count": 9520,
+              "max": {
+                "secs": 0,
+                "nanos": 139677
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 75945
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 59644
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 52882
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 35938
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 37823
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 10631
+              }
+            },
+            "write": {
+              "count": 9480,
+              "max": {
+                "secs": 0,
+                "nanos": 5629681
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 2686305
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 1873227
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 1623018
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 1085829
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 1148912
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 257754
+              }
+            }
+          },
+          "counters": {
+            "inserted": 9997,
+            "reads": 10003,
+            "retrieved": 10003,
+            "writes": 9997
+          }
+        },
+        {
+          "wall_clock_ns": 380580571,
+          "ops": {
+            "read": {
+              "count": 9520,
+              "max": {
+                "secs": 0,
+                "nanos": 129318
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 75695
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 59344
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 52982
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 36971
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 38399
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 11311
+              }
+            },
+            "write": {
+              "count": 9480,
+              "max": {
+                "secs": 0,
+                "nanos": 3937771
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 2451956
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 1869179
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 1661111
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 1111750
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 1176357
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 266590
+              }
+            }
+          },
+          "counters": {
+            "inserted": 9997,
+            "reads": 10003,
+            "retrieved": 10003,
+            "writes": 9997
+          }
+        },
+        {
+          "wall_clock_ns": 383161664,
+          "ops": {
+            "read": {
+              "count": 9520,
+              "max": {
+                "secs": 0,
+                "nanos": 306607
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 80704
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 63221
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 56688
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 38855
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 40928
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 11412
+              }
+            },
+            "write": {
+              "count": 9480,
+              "max": {
+                "secs": 0,
+                "nanos": 3793876
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 2500979
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 1872646
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 1652475
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 1120866
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 1182200
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 225271
+              }
+            }
+          },
+          "counters": {
+            "inserted": 9997,
+            "reads": 10003,
+            "retrieved": 10003,
+            "writes": 9997
+          }
+        },
+        {
+          "wall_clock_ns": 383563143,
+          "ops": {
+            "read": {
+              "count": 9520,
+              "max": {
+                "secs": 0,
+                "nanos": 140399
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 76898
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 60526
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 53963
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 37602
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 39173
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 10631
+              }
+            },
+            "write": {
+              "count": 9480,
+              "max": {
+                "secs": 0,
+                "nanos": 3658496
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 2555975
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 1902895
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 1661982
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 1117791
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 1186317
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 276520
+              }
+            }
+          },
+          "counters": {
+            "inserted": 9997,
+            "reads": 10003,
+            "retrieved": 10003,
+            "writes": 9997
+          }
+        },
+        {
+          "wall_clock_ns": 378133617,
+          "ops": {
+            "read": {
+              "count": 9520,
+              "max": {
+                "secs": 0,
+                "nanos": 156630
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 81256
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 62410
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 54966
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 37302
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 39324
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 10159
+              }
+            },
+            "write": {
+              "count": 9480,
+              "max": {
+                "secs": 0,
+                "nanos": 5083376
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 2815552
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 1911170
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 1643889
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 1097883
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 1168388
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 335933
+              }
+            }
+          },
+          "counters": {
+            "inserted": 9997,
+            "reads": 10003,
+            "retrieved": 10003,
+            "writes": 9997
+          }
+        }
+      ]
+    },
+    "macro/conf/storage/latency_buffer/r50/w65536/16Ki": {
+      "timing": "per_query",
+      "seed": 42,
+      "scale": {
+        "scale": "full",
+        "rows": 4096,
+        "row_bytes": 65536,
+        "keys": 4096,
+        "concurrency": 32,
+        "read_pct": 50,
+        "table_kind": "persistent_unsorted"
+      },
+      "conf": {
+        "shards": 12,
+        "memory": "4Gi",
+        "durability": "fsync",
+        "tls": false,
+        "latency_buffer_size": 16384,
+        "latency_write_behind": 128,
+        "intent_log_size": "10Mi",
+        "throughput_buffer_size": 131072,
+        "throughput_write_behind": 4,
+        "max_frame_bytes": 67108864,
+        "digest": "70a78e0c20a0"
+      },
+      "counters": {
+        "inserted": 2052,
+        "reads": 2044,
+        "retrieved": 2044,
+        "writes": 2052
+      },
+      "ops": {
+        "read": {
+          "count": 1950,
+          "max": {
+            "secs": 0,
+            "nanos": 3067037
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 1145933
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 125699
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 101592
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 63551
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 93149
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 19327
+          }
+        },
+        "write": {
+          "count": 1942,
+          "max": {
+            "secs": 0,
+            "nanos": 7532175
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 6199368
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 4074778
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 3598204
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 2507897
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 2711641
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 674780
+          }
+        }
+      },
+      "runs": 5,
+      "wall_clock_ns": [
+        176891019,
+        179608182,
+        180723136,
+        180796546,
+        181332323
+      ],
+      "spread_pct": 2.510757202433211,
+      "runs_detail": [
+        {
+          "wall_clock_ns": 180723136,
+          "ops": {
+            "read": {
+              "count": 1950,
+              "max": {
+                "secs": 0,
+                "nanos": 3067037
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 1145933
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 125699
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 101592
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 63551
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 93149
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 19327
+              }
+            },
+            "write": {
+              "count": 1942,
+              "max": {
+                "secs": 0,
+                "nanos": 7532175
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 6199368
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 4074778
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 3598204
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 2507897
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 2711641
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 674780
+              }
+            }
+          },
+          "counters": {
+            "inserted": 2052,
+            "reads": 2044,
+            "retrieved": 2044,
+            "writes": 2052
+          }
+        },
+        {
+          "wall_clock_ns": 176891019,
+          "ops": {
+            "read": {
+              "count": 1950,
+              "max": {
+                "secs": 0,
+                "nanos": 2932151
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 1623359
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 118755
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 96503
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 62128
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 100991
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 21270
+              }
+            },
+            "write": {
+              "count": 1942,
+              "max": {
+                "secs": 0,
+                "nanos": 7068226
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 5093330
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 4114223
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 3542218
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 2417986
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 2635127
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 1118281
+              }
+            }
+          },
+          "counters": {
+            "inserted": 2052,
+            "reads": 2044,
+            "retrieved": 2044,
+            "writes": 2052
+          }
+        },
+        {
+          "wall_clock_ns": 181332323,
+          "ops": {
+            "read": {
+              "count": 1950,
+              "max": {
+                "secs": 0,
+                "nanos": 3531799
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 1298062
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 125458
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 103205
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 62759
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 95646
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 21411
+              }
+            },
+            "write": {
+              "count": 1942,
+              "max": {
+                "secs": 0,
+                "nanos": 8285104
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 5084904
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 4029583
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 3665803
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 2533766
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 2714978
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 743360
+              }
+            }
+          },
+          "counters": {
+            "inserted": 2052,
+            "reads": 2044,
+            "retrieved": 2044,
+            "writes": 2052
+          }
+        },
+        {
+          "wall_clock_ns": 180796546,
+          "ops": {
+            "read": {
+              "count": 1950,
+              "max": {
+                "secs": 0,
+                "nanos": 3761094
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 1479336
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 114808
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 92746
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 58952
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 93534
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 20549
+              }
+            },
+            "write": {
+              "count": 1942,
+              "max": {
+                "secs": 0,
+                "nanos": 8959533
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 5795151
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 4165581
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 3565032
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 2487037
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 2707769
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 727209
+              }
+            }
+          },
+          "counters": {
+            "inserted": 2052,
+            "reads": 2044,
+            "retrieved": 2044,
+            "writes": 2052
+          }
+        },
+        {
+          "wall_clock_ns": 179608182,
+          "ops": {
+            "read": {
+              "count": 1950,
+              "max": {
+                "secs": 0,
+                "nanos": 4099094
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 1648677
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 122161
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 96913
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 59122
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 98158
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 19467
+              }
+            },
+            "write": {
+              "count": 1942,
+              "max": {
+                "secs": 0,
+                "nanos": 8611623
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 5656619
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 4140523
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 3567366
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 2468172
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 2681425
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 503785
+              }
+            }
+          },
+          "counters": {
+            "inserted": 2052,
+            "reads": 2044,
+            "retrieved": 2044,
+            "writes": 2052
+          }
+        }
+      ]
+    },
+    "macro/conf/storage/latency_buffer/r50/w65536/256Ki": {
+      "timing": "per_query",
+      "seed": 42,
+      "scale": {
+        "scale": "full",
+        "rows": 4096,
+        "row_bytes": 65536,
+        "keys": 4096,
+        "concurrency": 32,
+        "read_pct": 50,
+        "table_kind": "persistent_unsorted"
+      },
+      "conf": {
+        "shards": 12,
+        "memory": "4Gi",
+        "durability": "fsync",
+        "tls": false,
+        "latency_buffer_size": 262144,
+        "latency_write_behind": 128,
+        "intent_log_size": "10Mi",
+        "throughput_buffer_size": 131072,
+        "throughput_write_behind": 4,
+        "max_frame_bytes": 67108864,
+        "digest": "bd5e6ce28555"
+      },
+      "counters": {
+        "inserted": 2052,
+        "reads": 2044,
+        "retrieved": 2044,
+        "writes": 2052
+      },
+      "ops": {
+        "read": {
+          "count": 1950,
+          "max": {
+            "secs": 0,
+            "nanos": 3323083
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 1527056
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 124697
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 101633
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 62469
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 97825
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 21832
+          }
+        },
+        "write": {
+          "count": 1942,
+          "max": {
+            "secs": 0,
+            "nanos": 9079089
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 5588539
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 4196128
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 3622520
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 2480504
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 2695712
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 685540
+          }
+        }
+      },
+      "runs": 5,
+      "wall_clock_ns": [
+        178102847,
+        178348213,
+        180508690,
+        181406092,
+        182340584
+      ],
+      "spread_pct": 2.3793763386612232,
+      "runs_detail": [
+        {
+          "wall_clock_ns": 178348213,
+          "ops": {
+            "read": {
+              "count": 1950,
+              "max": {
+                "secs": 0,
+                "nanos": 2968450
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 1876068
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 125679
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 97405
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 61878
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 101474
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 22081
+              }
+            },
+            "write": {
+              "count": 1942,
+              "max": {
+                "secs": 0,
+                "nanos": 10260771
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 5429798
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 4110165
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 3577555
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 2433165
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 2668474
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 417602
+              }
+            }
+          },
+          "counters": {
+            "inserted": 2052,
+            "reads": 2044,
+            "retrieved": 2044,
+            "writes": 2052
+          }
+        },
+        {
+          "wall_clock_ns": 178102847,
+          "ops": {
+            "read": {
+              "count": 1950,
+              "max": {
+                "secs": 0,
+                "nanos": 3794637
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 2051480
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 125718
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 97124
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 58381
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 106750
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 21350
+              }
+            },
+            "write": {
+              "count": 1942,
+              "max": {
+                "secs": 0,
+                "nanos": 8057081
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 5482699
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 4116448
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 3646166
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 2433706
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 2648009
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 787423
+              }
+            }
+          },
+          "counters": {
+            "inserted": 2052,
+            "reads": 2044,
+            "retrieved": 2044,
+            "writes": 2052
+          }
+        },
+        {
+          "wall_clock_ns": 182340584,
+          "ops": {
+            "read": {
+              "count": 1950,
+              "max": {
+                "secs": 0,
+                "nanos": 3053912
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 1475669
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 130247
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 99589
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 61496
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 99289
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 21992
+              }
+            },
+            "write": {
+              "count": 1942,
+              "max": {
+                "secs": 0,
+                "nanos": 9416840
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 6210469
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 4153157
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 3668448
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 2495263
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 2722731
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 511851
+              }
+            }
+          },
+          "counters": {
+            "inserted": 2052,
+            "reads": 2044,
+            "retrieved": 2044,
+            "writes": 2052
+          }
+        },
+        {
+          "wall_clock_ns": 181406092,
+          "ops": {
+            "read": {
+              "count": 1950,
+              "max": {
+                "secs": 0,
+                "nanos": 3524354
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 1729150
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 113094
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 87987
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 54443
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 93668
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 19838
+              }
+            },
+            "write": {
+              "count": 1942,
+              "max": {
+                "secs": 0,
+                "nanos": 7678743
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 5733494
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 4372123
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 3751565
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 2481397
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 2715627
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 878657
+              }
+            }
+          },
+          "counters": {
+            "inserted": 2052,
+            "reads": 2044,
+            "retrieved": 2044,
+            "writes": 2052
+          }
+        },
+        {
+          "wall_clock_ns": 180508690,
+          "ops": {
+            "read": {
+              "count": 1950,
+              "max": {
+                "secs": 0,
+                "nanos": 3323083
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 1527056
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 124697
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 101633
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 62469
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 97825
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 21832
+              }
+            },
+            "write": {
+              "count": 1942,
+              "max": {
+                "secs": 0,
+                "nanos": 9079089
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 5588539
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 4196128
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 3622520
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 2480504
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 2695712
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 685540
+              }
+            }
+          },
+          "counters": {
+            "inserted": 2052,
+            "reads": 2044,
+            "retrieved": 2044,
+            "writes": 2052
+          }
+        }
+      ]
+    },
+    "macro/conf/storage/latency_buffer/r50/w65536/4Ki": {
+      "timing": "per_query",
+      "seed": 42,
+      "scale": {
+        "scale": "full",
+        "rows": 4096,
+        "row_bytes": 65536,
+        "keys": 4096,
+        "concurrency": 32,
+        "read_pct": 50,
+        "table_kind": "persistent_unsorted"
+      },
+      "conf": {
+        "shards": 12,
+        "memory": "4Gi",
+        "durability": "fsync",
+        "tls": false,
+        "latency_buffer_size": 4096,
+        "latency_write_behind": 128,
+        "intent_log_size": "10Mi",
+        "throughput_buffer_size": 131072,
+        "throughput_write_behind": 4,
+        "max_frame_bytes": 67108864,
+        "digest": "5b1674f0f4c5"
+      },
+      "counters": {
+        "inserted": 2052,
+        "reads": 2044,
+        "retrieved": 2044,
+        "writes": 2052
+      },
+      "ops": {
+        "read": {
+          "count": 1950,
+          "max": {
+            "secs": 0,
+            "nanos": 3291312
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 1695686
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 128685
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 103436
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 62018
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 102536
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 23134
+          }
+        },
+        "write": {
+          "count": 1942,
+          "max": {
+            "secs": 0,
+            "nanos": 6326258
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 5192077
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 4302260
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 3656906
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 2495774
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 2697957
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 849972
+          }
+        }
+      },
+      "runs": 5,
+      "wall_clock_ns": [
+        177834227,
+        181056777,
+        181086976,
+        181466335,
+        183132978
+      ],
+      "spread_pct": 2.9796013339996694,
+      "runs_detail": [
+        {
+          "wall_clock_ns": 181056777,
+          "ops": {
+            "read": {
+              "count": 1950,
+              "max": {
+                "secs": 0,
+                "nanos": 4475121
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 1631378
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 117495
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 96475
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 60185
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 97321
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 22122
+              }
+            },
+            "write": {
+              "count": 1942,
+              "max": {
+                "secs": 0,
+                "nanos": 7612135
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 5197927
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 4111013
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 3629880
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 2480366
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 2703231
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 786568
+              }
+            }
+          },
+          "counters": {
+            "inserted": 2052,
+            "reads": 2044,
+            "retrieved": 2044,
+            "writes": 2052
+          }
+        },
+        {
+          "wall_clock_ns": 183132978,
+          "ops": {
+            "read": {
+              "count": 1950,
+              "max": {
+                "secs": 0,
+                "nanos": 2658236
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 1205812
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 118187
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 96204
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 59985
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 92658
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 21581
+              }
+            },
+            "write": {
+              "count": 1942,
+              "max": {
+                "secs": 0,
+                "nanos": 7463089
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 5770624
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 4479218
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 3861043
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 2527156
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 2754347
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 710523
+              }
+            }
+          },
+          "counters": {
+            "inserted": 2052,
+            "reads": 2044,
+            "retrieved": 2044,
+            "writes": 2052
+          }
+        },
+        {
+          "wall_clock_ns": 181466335,
+          "ops": {
+            "read": {
+              "count": 1950,
+              "max": {
+                "secs": 0,
+                "nanos": 4344199
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 1558977
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 128294
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 102294
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 63030
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 104318
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 22664
+              }
+            },
+            "write": {
+              "count": 1942,
+              "max": {
+                "secs": 0,
+                "nanos": 9733421
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 6159502
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 4398432
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 3690271
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 2485205
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 2709785
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 971984
+              }
+            }
+          },
+          "counters": {
+            "inserted": 2052,
+            "reads": 2044,
+            "retrieved": 2044,
+            "writes": 2052
+          }
+        },
+        {
+          "wall_clock_ns": 177834227,
+          "ops": {
+            "read": {
+              "count": 1950,
+              "max": {
+                "secs": 0,
+                "nanos": 3415207
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 1921525
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 132521
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 100972
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 61396
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 106148
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 21982
+              }
+            },
+            "write": {
+              "count": 1942,
+              "max": {
+                "secs": 0,
+                "nanos": 6158280
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 5085506
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 4242347
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 3721919
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 2436621
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 2655028
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 643200
+              }
+            }
+          },
+          "counters": {
+            "inserted": 2052,
+            "reads": 2044,
+            "retrieved": 2044,
+            "writes": 2052
+          }
+        },
+        {
+          "wall_clock_ns": 181086976,
+          "ops": {
+            "read": {
+              "count": 1950,
+              "max": {
+                "secs": 0,
+                "nanos": 3291312
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 1695686
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 128685
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 103436
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 62018
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 102536
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 23134
+              }
+            },
+            "write": {
+              "count": 1942,
+              "max": {
+                "secs": 0,
+                "nanos": 6326258
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 5192077
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 4302260
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 3656906
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 2495774
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 2697957
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 849972
+              }
+            }
+          },
+          "counters": {
+            "inserted": 2052,
+            "reads": 2044,
+            "retrieved": 2044,
+            "writes": 2052
+          }
+        }
+      ]
+    },
+    "macro/conf/storage/latency_buffer/r50/w65536/512": {
+      "timing": "per_query",
+      "seed": 42,
+      "scale": {
+        "scale": "full",
+        "rows": 4096,
+        "row_bytes": 65536,
+        "keys": 4096,
+        "concurrency": 32,
+        "read_pct": 50,
+        "table_kind": "persistent_unsorted"
+      },
+      "conf": {
+        "shards": 12,
+        "memory": "4Gi",
+        "durability": "fsync",
+        "tls": false,
+        "latency_buffer_size": 512,
+        "latency_write_behind": 128,
+        "intent_log_size": "10Mi",
+        "throughput_buffer_size": 131072,
+        "throughput_write_behind": 4,
+        "max_frame_bytes": 67108864,
+        "digest": "74114b360e32"
+      },
+      "counters": {
+        "inserted": 2052,
+        "reads": 2044,
+        "retrieved": 2044,
+        "writes": 2052
+      },
+      "ops": {
+        "read": {
+          "count": 1950,
+          "max": {
+            "secs": 0,
+            "nanos": 3915867
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 2100327
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 120370
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 95463
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 58362
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 107478
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 21641
+          }
+        },
+        "write": {
+          "count": 1942,
+          "max": {
+            "secs": 0,
+            "nanos": 8440794
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 6372809
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 4252795
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 3619580
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 2441051
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 2688796
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 821064
+          }
+        }
+      },
+      "runs": 5,
+      "wall_clock_ns": [
+        178194829,
+        179861836,
+        181306276,
+        182397388,
+        184751982
+      ],
+      "spread_pct": 3.6797661507899306,
+      "runs_detail": [
+        {
+          "wall_clock_ns": 179861836,
+          "ops": {
+            "read": {
+              "count": 1950,
+              "max": {
+                "secs": 0,
+                "nanos": 3975132
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 1781496
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 127464
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 99320
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 60686
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 106724
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 19988
+              }
+            },
+            "write": {
+              "count": 1942,
+              "max": {
+                "secs": 0,
+                "nanos": 8322146
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 5789340
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 4188882
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 3653715
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 2490595
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 2671658
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 695503
+              }
+            }
+          },
+          "counters": {
+            "inserted": 2052,
+            "reads": 2044,
+            "retrieved": 2044,
+            "writes": 2052
+          }
+        },
+        {
+          "wall_clock_ns": 181306276,
+          "ops": {
+            "read": {
+              "count": 1950,
+              "max": {
+                "secs": 0,
+                "nanos": 3915867
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 2100327
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 120370
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 95463
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 58362
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 107478
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 21641
+              }
+            },
+            "write": {
+              "count": 1942,
+              "max": {
+                "secs": 0,
+                "nanos": 8440794
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 6372809
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 4252795
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 3619580
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 2441051
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 2688796
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 821064
+              }
+            }
+          },
+          "counters": {
+            "inserted": 2052,
+            "reads": 2044,
+            "retrieved": 2044,
+            "writes": 2052
+          }
+        },
+        {
+          "wall_clock_ns": 178194829,
+          "ops": {
+            "read": {
+              "count": 1950,
+              "max": {
+                "secs": 0,
+                "nanos": 3784626
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 1863252
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 124479
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 102396
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 62660
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 103429
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 20449
+              }
+            },
+            "write": {
+              "count": 1942,
+              "max": {
+                "secs": 0,
+                "nanos": 10008520
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 5785192
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 4032933
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 3526842
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 2421443
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 2654612
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 972815
+              }
+            }
+          },
+          "counters": {
+            "inserted": 2052,
+            "reads": 2044,
+            "retrieved": 2044,
+            "writes": 2052
+          }
+        },
+        {
+          "wall_clock_ns": 182397388,
+          "ops": {
+            "read": {
+              "count": 1950,
+              "max": {
+                "secs": 0,
+                "nanos": 3210335
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 1874554
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 111644
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 87378
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 55697
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 98471
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 21452
+              }
+            },
+            "write": {
+              "count": 1942,
+              "max": {
+                "secs": 0,
+                "nanos": 9833945
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 6663606
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 4319653
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 3694002
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 2499753
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 2721540
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 706975
+              }
+            }
+          },
+          "counters": {
+            "inserted": 2052,
+            "reads": 2044,
+            "retrieved": 2044,
+            "writes": 2052
+          }
+        },
+        {
+          "wall_clock_ns": 184751982,
+          "ops": {
+            "read": {
+              "count": 1950,
+              "max": {
+                "secs": 0,
+                "nanos": 3632995
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 1837674
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 126593
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 101264
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 62019
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 108770
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 19778
+              }
+            },
+            "write": {
+              "count": 1942,
+              "max": {
+                "secs": 0,
+                "nanos": 8291708
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 6305570
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 4441576
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 3783725
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 2496096
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 2754702
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 758294
+              }
+            }
+          },
+          "counters": {
+            "inserted": 2052,
+            "reads": 2044,
+            "retrieved": 2044,
+            "writes": 2052
+          }
+        }
+      ]
+    },
+    "macro/conf/storage/latency_buffer/r50/w65536/64Ki": {
+      "timing": "per_query",
+      "seed": 42,
+      "scale": {
+        "scale": "full",
+        "rows": 4096,
+        "row_bytes": 65536,
+        "keys": 4096,
+        "concurrency": 32,
+        "read_pct": 50,
+        "table_kind": "persistent_unsorted"
+      },
+      "conf": {
+        "shards": 12,
+        "memory": "4Gi",
+        "durability": "fsync",
+        "tls": false,
+        "latency_buffer_size": 65536,
+        "latency_write_behind": 128,
+        "intent_log_size": "10Mi",
+        "throughput_buffer_size": 131072,
+        "throughput_write_behind": 4,
+        "max_frame_bytes": 67108864,
+        "digest": "2aef67024d29"
+      },
+      "counters": {
+        "inserted": 2052,
+        "reads": 2044,
+        "retrieved": 2044,
+        "writes": 2052
+      },
+      "ops": {
+        "read": {
+          "count": 1950,
+          "max": {
+            "secs": 0,
+            "nanos": 3622150
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 1623219
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 126921
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 98197
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 59953
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 97653
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 22753
+          }
+        },
+        "write": {
+          "count": 1942,
+          "max": {
+            "secs": 0,
+            "nanos": 8580494
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 5908536
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 4183856
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 3640164
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 2466939
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 2674463
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 563269
+          }
+        }
+      },
+      "runs": 5,
+      "wall_clock_ns": [
+        178984219,
+        179370702,
+        179549901,
+        180346422,
+        181976594
+      ],
+      "spread_pct": 1.671865272099771,
+      "runs_detail": [
+        {
+          "wall_clock_ns": 179370702,
+          "ops": {
+            "read": {
+              "count": 1950,
+              "max": {
+                "secs": 0,
+                "nanos": 3338743
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 1266162
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 122582
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 100050
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 63230
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 95178
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 22703
+              }
+            },
+            "write": {
+              "count": 1942,
+              "max": {
+                "secs": 0,
+                "nanos": 8944684
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 5629007
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 4165350
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 3646006
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 2430399
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 2681903
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 772435
+              }
+            }
+          },
+          "counters": {
+            "inserted": 2052,
+            "reads": 2044,
+            "retrieved": 2044,
+            "writes": 2052
+          }
+        },
+        {
+          "wall_clock_ns": 181976594,
+          "ops": {
+            "read": {
+              "count": 1950,
+              "max": {
+                "secs": 0,
+                "nanos": 3057850
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 2056610
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 124987
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 96743
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 61015
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 107364
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 20669
+              }
+            },
+            "write": {
+              "count": 1942,
+              "max": {
+                "secs": 0,
+                "nanos": 7764276
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 6572766
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 4584766
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 3838149
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 2456549
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 2719210
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 507593
+              }
+            }
+          },
+          "counters": {
+            "inserted": 2052,
+            "reads": 2044,
+            "retrieved": 2044,
+            "writes": 2052
+          }
+        },
+        {
+          "wall_clock_ns": 179549901,
+          "ops": {
+            "read": {
+              "count": 1950,
+              "max": {
+                "secs": 0,
+                "nanos": 3622150
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 1623219
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 126921
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 98197
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 59953
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 97653
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 22753
+              }
+            },
+            "write": {
+              "count": 1942,
+              "max": {
+                "secs": 0,
+                "nanos": 8580494
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 5908536
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 4183856
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 3640164
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 2466939
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 2674463
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 563269
+              }
+            }
+          },
+          "counters": {
+            "inserted": 2052,
+            "reads": 2044,
+            "retrieved": 2044,
+            "writes": 2052
+          }
+        },
+        {
+          "wall_clock_ns": 180346422,
+          "ops": {
+            "read": {
+              "count": 1950,
+              "max": {
+                "secs": 0,
+                "nanos": 4281030
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 1766079
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 126570
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 100861
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 62058
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 105923
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 21290
+              }
+            },
+            "write": {
+              "count": 1942,
+              "max": {
+                "secs": 0,
+                "nanos": 6798384
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 5301395
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 4266191
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 3670161
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 2488249
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 2686911
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 591953
+              }
+            }
+          },
+          "counters": {
+            "inserted": 2052,
+            "reads": 2044,
+            "retrieved": 2044,
+            "writes": 2052
+          }
+        },
+        {
+          "wall_clock_ns": 178984219,
+          "ops": {
+            "read": {
+              "count": 1950,
+              "max": {
+                "secs": 0,
+                "nanos": 3168740
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 1771921
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 123805
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 98396
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 60414
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 102098
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 19226
+              }
+            },
+            "write": {
+              "count": 1942,
+              "max": {
+                "secs": 0,
+                "nanos": 10388634
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 6937428
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 4303552
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 3609506
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 2407246
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 2666278
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 589508
+              }
+            }
+          },
+          "counters": {
+            "inserted": 2052,
+            "reads": 2044,
+            "retrieved": 2044,
+            "writes": 2052
+          }
+        }
+      ]
+    },
+    "macro/conf/storage/latency_buffer/r50/w8192/16Ki": {
+      "timing": "per_query",
+      "seed": 42,
+      "scale": {
+        "scale": "full",
+        "rows": 20000,
+        "row_bytes": 8192,
+        "keys": 20000,
+        "concurrency": 32,
+        "read_pct": 50,
+        "table_kind": "persistent_unsorted"
+      },
+      "conf": {
+        "shards": 12,
+        "memory": "4Gi",
+        "durability": "fsync",
+        "tls": false,
+        "latency_buffer_size": 16384,
+        "latency_write_behind": 128,
+        "intent_log_size": "10Mi",
+        "throughput_buffer_size": 131072,
+        "throughput_write_behind": 4,
+        "max_frame_bytes": 67108864,
+        "digest": "884c185113d4"
+      },
+      "counters": {
+        "inserted": 9997,
+        "reads": 10003,
+        "retrieved": 10003,
+        "writes": 9997
+      },
+      "ops": {
+        "read": {
+          "count": 9520,
+          "max": {
+            "secs": 0,
+            "nanos": 1966040
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 86115
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 65215
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 58331
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 41890
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 46354
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 11372
+          }
+        },
+        "write": {
+          "count": 9480,
+          "max": {
+            "secs": 0,
+            "nanos": 5972642
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 3601776
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 2519310
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 2228764
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 1523671
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 1630747
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 583629
+          }
+        }
+      },
+      "runs": 5,
+      "wall_clock_ns": [
+        506926659,
+        519994235,
+        523804551,
+        525088351,
+        533005654
+      ],
+      "spread_pct": 5.144530187353986,
+      "runs_detail": [
+        {
+          "wall_clock_ns": 519994235,
+          "ops": {
+            "read": {
+              "count": 9520,
+              "max": {
+                "secs": 0,
+                "nanos": 2171439
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 89101
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 66447
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 59644
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 42822
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 47817
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 13576
+              }
+            },
+            "write": {
+              "count": 9480,
+              "max": {
+                "secs": 0,
+                "nanos": 5624551
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 3285873
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 2455683
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 2176659
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 1513338
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 1610478
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 305255
+              }
+            }
+          },
+          "counters": {
+            "inserted": 9997,
+            "reads": 10003,
+            "retrieved": 10003,
+            "writes": 9997
+          }
+        },
+        {
+          "wall_clock_ns": 525088351,
+          "ops": {
+            "read": {
+              "count": 9520,
+              "max": {
+                "secs": 0,
+                "nanos": 2090263
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 87017
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 63101
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 56328
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 39545
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 45426
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 11361
+              }
+            },
+            "write": {
+              "count": 9480,
+              "max": {
+                "secs": 0,
+                "nanos": 5674117
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 3211610
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 2501210
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 2222196
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 1538897
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 1633770
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 339671
+              }
+            }
+          },
+          "counters": {
+            "inserted": 9997,
+            "reads": 10003,
+            "retrieved": 10003,
+            "writes": 9997
+          }
+        },
+        {
+          "wall_clock_ns": 533005654,
+          "ops": {
+            "read": {
+              "count": 9520,
+              "max": {
+                "secs": 0,
+                "nanos": 3796000
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 84882
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 63522
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 56929
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 40468
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 46326
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 12564
+              }
+            },
+            "write": {
+              "count": 9480,
+              "max": {
+                "secs": 0,
+                "nanos": 6374027
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 3576258
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 2594528
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 2283253
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 1547013
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 1657754
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 516640
+              }
+            }
+          },
+          "counters": {
+            "inserted": 9997,
+            "reads": 10003,
+            "retrieved": 10003,
+            "writes": 9997
+          }
+        },
+        {
+          "wall_clock_ns": 523804551,
+          "ops": {
+            "read": {
+              "count": 9520,
+              "max": {
+                "secs": 0,
+                "nanos": 1966040
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 86115
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 65215
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 58331
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 41890
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 46354
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 11372
+              }
+            },
+            "write": {
+              "count": 9480,
+              "max": {
+                "secs": 0,
+                "nanos": 5972642
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 3601776
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 2519310
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 2228764
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 1523671
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 1630747
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 583629
+              }
+            }
+          },
+          "counters": {
+            "inserted": 9997,
+            "reads": 10003,
+            "retrieved": 10003,
+            "writes": 9997
+          }
+        },
+        {
+          "wall_clock_ns": 506926659,
+          "ops": {
+            "read": {
+              "count": 9520,
+              "max": {
+                "secs": 0,
+                "nanos": 2027628
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 87988
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 66237
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 59815
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 42802
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 47202
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 13175
+              }
+            },
+            "write": {
+              "count": 9480,
+              "max": {
+                "secs": 0,
+                "nanos": 5845638
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 3135862
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 2402627
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 2118852
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 1473375
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 1572118
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 605612
+              }
+            }
+          },
+          "counters": {
+            "inserted": 9997,
+            "reads": 10003,
+            "retrieved": 10003,
+            "writes": 9997
+          }
+        }
+      ]
+    },
+    "macro/conf/storage/latency_buffer/r50/w8192/256Ki": {
+      "timing": "per_query",
+      "seed": 42,
+      "scale": {
+        "scale": "full",
+        "rows": 20000,
+        "row_bytes": 8192,
+        "keys": 20000,
+        "concurrency": 32,
+        "read_pct": 50,
+        "table_kind": "persistent_unsorted"
+      },
+      "conf": {
+        "shards": 12,
+        "memory": "4Gi",
+        "durability": "fsync",
+        "tls": false,
+        "latency_buffer_size": 262144,
+        "latency_write_behind": 128,
+        "intent_log_size": "10Mi",
+        "throughput_buffer_size": 131072,
+        "throughput_write_behind": 4,
+        "max_frame_bytes": 67108864,
+        "digest": "cddd991f81e4"
+      },
+      "counters": {
+        "inserted": 9997,
+        "reads": 10003,
+        "retrieved": 10003,
+        "writes": 9997
+      },
+      "ops": {
+        "read": {
+          "count": 9520,
+          "max": {
+            "secs": 0,
+            "nanos": 2339516
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 90433
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 67990
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 60486
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 42812
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 48671
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 13316
+          }
+        },
+        "write": {
+          "count": 9480,
+          "max": {
+            "secs": 0,
+            "nanos": 5166316
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 3357027
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 2454587
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 2189227
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 1527639
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 1620119
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 455394
+          }
+        }
+      },
+      "runs": 5,
+      "wall_clock_ns": [
+        512521286,
+        513637807,
+        522129729,
+        524974603,
+        525538374
+      ],
+      "spread_pct": 2.539814121983609,
+      "runs_detail": [
+        {
+          "wall_clock_ns": 512521286,
+          "ops": {
+            "read": {
+              "count": 9520,
+              "max": {
+                "secs": 0,
+                "nanos": 1852973
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 79533
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 61088
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 54855
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 38303
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 42665
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 10059
+              }
+            },
+            "write": {
+              "count": 9480,
+              "max": {
+                "secs": 0,
+                "nanos": 6267597
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 3181220
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 2387067
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 2140184
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 1505306
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 1595743
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 280277
+              }
+            }
+          },
+          "counters": {
+            "inserted": 9997,
+            "reads": 10003,
+            "retrieved": 10003,
+            "writes": 9997
+          }
+        },
+        {
+          "wall_clock_ns": 513637807,
+          "ops": {
+            "read": {
+              "count": 9520,
+              "max": {
+                "secs": 0,
+                "nanos": 2061122
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 86817
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 66447
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 58833
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 41720
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 47517
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 12565
+              }
+            },
+            "write": {
+              "count": 9480,
+              "max": {
+                "secs": 0,
+                "nanos": 5829617
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 3346476
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 2468403
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 2177185
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 1496269
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 1594505
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 530317
+              }
+            }
+          },
+          "counters": {
+            "inserted": 9997,
+            "reads": 10003,
+            "retrieved": 10003,
+            "writes": 9997
+          }
+        },
+        {
+          "wall_clock_ns": 524974603,
+          "ops": {
+            "read": {
+              "count": 9520,
+              "max": {
+                "secs": 0,
+                "nanos": 2175652
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 85755
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 67359
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 60266
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 42552
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 47495
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 13376
+              }
+            },
+            "write": {
+              "count": 9480,
+              "max": {
+                "secs": 0,
+                "nanos": 5408409
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 3194756
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 2504101
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 2231409
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 1541526
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 1632054
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 490100
+              }
+            }
+          },
+          "counters": {
+            "inserted": 9997,
+            "reads": 10003,
+            "retrieved": 10003,
+            "writes": 9997
+          }
+        },
+        {
+          "wall_clock_ns": 525538374,
+          "ops": {
+            "read": {
+              "count": 9520,
+              "max": {
+                "secs": 0,
+                "nanos": 1812826
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 86496
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 67088
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 59985
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 42982
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 47688
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 11883
+              }
+            },
+            "write": {
+              "count": 9480,
+              "max": {
+                "secs": 0,
+                "nanos": 5971369
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 3753296
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 2518869
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 2215969
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 1526647
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 1632000
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 494658
+              }
+            }
+          },
+          "counters": {
+            "inserted": 9997,
+            "reads": 10003,
+            "retrieved": 10003,
+            "writes": 9997
+          }
+        },
+        {
+          "wall_clock_ns": 522129729,
+          "ops": {
+            "read": {
+              "count": 9520,
+              "max": {
+                "secs": 0,
+                "nanos": 2339516
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 90433
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 67990
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 60486
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 42812
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 48671
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 13316
+              }
+            },
+            "write": {
+              "count": 9480,
+              "max": {
+                "secs": 0,
+                "nanos": 5166316
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 3357027
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 2454587
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 2189227
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 1527639
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 1620119
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 455394
+              }
+            }
+          },
+          "counters": {
+            "inserted": 9997,
+            "reads": 10003,
+            "retrieved": 10003,
+            "writes": 9997
+          }
+        }
+      ]
+    },
+    "macro/conf/storage/latency_buffer/r50/w8192/4Ki": {
+      "timing": "per_query",
+      "seed": 42,
+      "scale": {
+        "scale": "full",
+        "rows": 20000,
+        "row_bytes": 8192,
+        "keys": 20000,
+        "concurrency": 32,
+        "read_pct": 50,
+        "table_kind": "persistent_unsorted"
+      },
+      "conf": {
+        "shards": 12,
+        "memory": "4Gi",
+        "durability": "fsync",
+        "tls": false,
+        "latency_buffer_size": 4096,
+        "latency_write_behind": 128,
+        "intent_log_size": "10Mi",
+        "throughput_buffer_size": 131072,
+        "throughput_write_behind": 4,
+        "max_frame_bytes": 67108864,
+        "digest": "6a7ab7d43dca"
+      },
+      "counters": {
+        "inserted": 9997,
+        "reads": 10003,
+        "retrieved": 10003,
+        "writes": 9997
+      },
+      "ops": {
+        "read": {
+          "count": 9520,
+          "max": {
+            "secs": 0,
+            "nanos": 2385308
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 85484
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 65937
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 59434
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 42472
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 47082
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 13456
+          }
+        },
+        "write": {
+          "count": 9480,
+          "max": {
+            "secs": 0,
+            "nanos": 5667293
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 3249934
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 2472415
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 2200163
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 1513218
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 1614041
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 609778
+          }
+        }
+      },
+      "runs": 5,
+      "wall_clock_ns": [
+        514390904,
+        515824460,
+        519518935,
+        521917299,
+        524966698
+      ],
+      "spread_pct": 2.0559838670864212,
+      "runs_detail": [
+        {
+          "wall_clock_ns": 519518935,
+          "ops": {
+            "read": {
+              "count": 9520,
+              "max": {
+                "secs": 0,
+                "nanos": 2385308
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 85484
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 65937
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 59434
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 42472
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 47082
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 13456
+              }
+            },
+            "write": {
+              "count": 9480,
+              "max": {
+                "secs": 0,
+                "nanos": 5667293
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 3249934
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 2472415
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 2200163
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 1513218
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 1614041
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 609778
+              }
+            }
+          },
+          "counters": {
+            "inserted": 9997,
+            "reads": 10003,
+            "retrieved": 10003,
+            "writes": 9997
+          }
+        },
+        {
+          "wall_clock_ns": 515824460,
+          "ops": {
+            "read": {
+              "count": 9520,
+              "max": {
+                "secs": 0,
+                "nanos": 1643027
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 79492
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 62961
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 57380
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 40808
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 44245
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 13105
+              }
+            },
+            "write": {
+              "count": 9480,
+              "max": {
+                "secs": 0,
+                "nanos": 5206311
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 3506245
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 2442548
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 2152883
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 1507517
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 1603947
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 541447
+              }
+            }
+          },
+          "counters": {
+            "inserted": 9997,
+            "reads": 10003,
+            "retrieved": 10003,
+            "writes": 9997
+          }
+        },
+        {
+          "wall_clock_ns": 524966698,
+          "ops": {
+            "read": {
+              "count": 9520,
+              "max": {
+                "secs": 0,
+                "nanos": 2385489
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 89772
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 66748
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 59674
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 42712
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 48144
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 14017
+              }
+            },
+            "write": {
+              "count": 9480,
+              "max": {
+                "secs": 0,
+                "nanos": 5437463
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 3317934
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 2504878
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 2229961
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 1534749
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 1632289
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 516098
+              }
+            }
+          },
+          "counters": {
+            "inserted": 9997,
+            "reads": 10003,
+            "retrieved": 10003,
+            "writes": 9997
+          }
+        },
+        {
+          "wall_clock_ns": 521917299,
+          "ops": {
+            "read": {
+              "count": 9520,
+              "max": {
+                "secs": 0,
+                "nanos": 2076096
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 86746
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 66086
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 59374
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 42341
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 46872
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 13055
+              }
+            },
+            "write": {
+              "count": 9480,
+              "max": {
+                "secs": 0,
+                "nanos": 5177195
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 3318796
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 2437317
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 2173392
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 1535430
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 1620475
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 359608
+              }
+            }
+          },
+          "counters": {
+            "inserted": 9997,
+            "reads": 10003,
+            "retrieved": 10003,
+            "writes": 9997
+          }
+        },
+        {
+          "wall_clock_ns": 514390904,
+          "ops": {
+            "read": {
+              "count": 9520,
+              "max": {
+                "secs": 0,
+                "nanos": 1907232
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 85584
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 65756
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 59184
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 42171
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 46196
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 12253
+              }
+            },
+            "write": {
+              "count": 9480,
+              "max": {
+                "secs": 0,
+                "nanos": 4624487
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 3157297
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 2420455
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 2174374
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 1513168
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 1598358
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 402991
+              }
+            }
+          },
+          "counters": {
+            "inserted": 9997,
+            "reads": 10003,
+            "retrieved": 10003,
+            "writes": 9997
+          }
+        }
+      ]
+    },
+    "macro/conf/storage/latency_buffer/r50/w8192/512": {
+      "timing": "per_query",
+      "seed": 42,
+      "scale": {
+        "scale": "full",
+        "rows": 20000,
+        "row_bytes": 8192,
+        "keys": 20000,
+        "concurrency": 32,
+        "read_pct": 50,
+        "table_kind": "persistent_unsorted"
+      },
+      "conf": {
+        "shards": 12,
+        "memory": "4Gi",
+        "durability": "fsync",
+        "tls": false,
+        "latency_buffer_size": 512,
+        "latency_write_behind": 128,
+        "intent_log_size": "10Mi",
+        "throughput_buffer_size": 131072,
+        "throughput_write_behind": 4,
+        "max_frame_bytes": 67108864,
+        "digest": "f3edb69f5c7e"
+      },
+      "counters": {
+        "inserted": 9997,
+        "reads": 10003,
+        "retrieved": 10003,
+        "writes": 9997
+      },
+      "ops": {
+        "read": {
+          "count": 9520,
+          "max": {
+            "secs": 0,
+            "nanos": 1721577
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 85313
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 66127
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 59995
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 42481
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 46810
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 13596
+          }
+        },
+        "write": {
+          "count": 9480,
+          "max": {
+            "secs": 0,
+            "nanos": 5913254
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 3300581
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 2484108
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 2204963
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 1513608
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 1615608
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 327097
+          }
+        }
+      },
+      "runs": 5,
+      "wall_clock_ns": [
+        513595451,
+        519541848,
+        519836594,
+        521063222,
+        533608077
+      ],
+      "spread_pct": 3.8965738425124794,
+      "runs_detail": [
+        {
+          "wall_clock_ns": 513595451,
+          "ops": {
+            "read": {
+              "count": 9520,
+              "max": {
+                "secs": 0,
+                "nanos": 1940647
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 79613
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 61879
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 55235
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 38754
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 43539
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 11472
+              }
+            },
+            "write": {
+              "count": 9480,
+              "max": {
+                "secs": 0,
+                "nanos": 5663917
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 3631495
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 2516880
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 2187028
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 1487418
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 1599039
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 426446
+              }
+            }
+          },
+          "counters": {
+            "inserted": 9997,
+            "reads": 10003,
+            "retrieved": 10003,
+            "writes": 9997
+          }
+        },
+        {
+          "wall_clock_ns": 521063222,
+          "ops": {
+            "read": {
+              "count": 9520,
+              "max": {
+                "secs": 0,
+                "nanos": 2431496
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 88269
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 68190
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 60917
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 43413
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 48009
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 13516
+              }
+            },
+            "write": {
+              "count": 9480,
+              "max": {
+                "secs": 0,
+                "nanos": 5357270
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 3142258
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 2463849
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 2205865
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 1519751
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 1616107
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 539403
+              }
+            }
+          },
+          "counters": {
+            "inserted": 9997,
+            "reads": 10003,
+            "retrieved": 10003,
+            "writes": 9997
+          }
+        },
+        {
+          "wall_clock_ns": 519836594,
+          "ops": {
+            "read": {
+              "count": 9520,
+              "max": {
+                "secs": 0,
+                "nanos": 1721577
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 85313
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 66127
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 59995
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 42481
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 46810
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 13596
+              }
+            },
+            "write": {
+              "count": 9480,
+              "max": {
+                "secs": 0,
+                "nanos": 5913254
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 3300581
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 2484108
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 2204963
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 1513608
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 1615608
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 327097
+              }
+            }
+          },
+          "counters": {
+            "inserted": 9997,
+            "reads": 10003,
+            "retrieved": 10003,
+            "writes": 9997
+          }
+        },
+        {
+          "wall_clock_ns": 533608077,
+          "ops": {
+            "read": {
+              "count": 9520,
+              "max": {
+                "secs": 0,
+                "nanos": 1535721
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 87388
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 67069
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 60226
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 42602
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 47040
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 12373
+              }
+            },
+            "write": {
+              "count": 9480,
+              "max": {
+                "secs": 0,
+                "nanos": 6677638
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 3347661
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 2551336
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 2286699
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 1552453
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 1659546
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 486412
+              }
+            }
+          },
+          "counters": {
+            "inserted": 9997,
+            "reads": 10003,
+            "retrieved": 10003,
+            "writes": 9997
+          }
+        },
+        {
+          "wall_clock_ns": 519541848,
+          "ops": {
+            "read": {
+              "count": 9520,
+              "max": {
+                "secs": 0,
+                "nanos": 2024697
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 88570
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 66447
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 59764
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 42542
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 47150
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 14188
+              }
+            },
+            "write": {
+              "count": 9480,
+              "max": {
+                "secs": 0,
+                "nanos": 6537360
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 3416613
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 2496381
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 2192699
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 1505232
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 1614487
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 516859
+              }
+            }
+          },
+          "counters": {
+            "inserted": 9997,
+            "reads": 10003,
+            "retrieved": 10003,
+            "writes": 9997
+          }
+        }
+      ]
+    },
+    "macro/conf/storage/latency_buffer/r50/w8192/64Ki": {
+      "timing": "per_query",
+      "seed": 42,
+      "scale": {
+        "scale": "full",
+        "rows": 20000,
+        "row_bytes": 8192,
+        "keys": 20000,
+        "concurrency": 32,
+        "read_pct": 50,
+        "table_kind": "persistent_unsorted"
+      },
+      "conf": {
+        "shards": 12,
+        "memory": "4Gi",
+        "durability": "fsync",
+        "tls": false,
+        "latency_buffer_size": 65536,
+        "latency_write_behind": 128,
+        "intent_log_size": "10Mi",
+        "throughput_buffer_size": 131072,
+        "throughput_write_behind": 4,
+        "max_frame_bytes": 67108864,
+        "digest": "6220b6cbffa0"
+      },
+      "counters": {
+        "inserted": 9997,
+        "reads": 10003,
+        "retrieved": 10003,
+        "writes": 9997
+      },
+      "ops": {
+        "read": {
+          "count": 9520,
+          "max": {
+            "secs": 0,
+            "nanos": 2371978
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 81506
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 64473
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 57300
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 40518
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 45962
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 13566
+          }
+        },
+        "write": {
+          "count": 9480,
+          "max": {
+            "secs": 0,
+            "nanos": 7442230
+          },
+          "p99": {
+            "secs": 0,
+            "nanos": 4157251
+          },
+          "p95": {
+            "secs": 0,
+            "nanos": 2568245
+          },
+          "p90": {
+            "secs": 0,
+            "nanos": 2232751
+          },
+          "p50": {
+            "secs": 0,
+            "nanos": 1530615
+          },
+          "avg": {
+            "secs": 0,
+            "nanos": 1648182
+          },
+          "min": {
+            "secs": 0,
+            "nanos": 500940
+          }
+        }
+      },
+      "runs": 5,
+      "wall_clock_ns": [
+        516575690,
+        521217741,
+        529554996,
+        536295229,
+        536809335
+      ],
+      "spread_pct": 3.916879054064662,
+      "runs_detail": [
+        {
+          "wall_clock_ns": 516575690,
+          "ops": {
+            "read": {
+              "count": 9520,
+              "max": {
+                "secs": 0,
+                "nanos": 1710850
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 84192
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 65495
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 59264
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 42382
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 46675
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 10981
+              }
+            },
+            "write": {
+              "count": 9480,
+              "max": {
+                "secs": 0,
+                "nanos": 5170704
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 3231056
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 2488952
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 2196221
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 1507280
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 1606425
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 477706
+              }
+            }
+          },
+          "counters": {
+            "inserted": 9997,
+            "reads": 10003,
+            "retrieved": 10003,
+            "writes": 9997
+          }
+        },
+        {
+          "wall_clock_ns": 536295229,
+          "ops": {
+            "read": {
+              "count": 9520,
+              "max": {
+                "secs": 0,
+                "nanos": 2121327
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 85414
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 66958
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 59635
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 42121
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 46827
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 12795
+              }
+            },
+            "write": {
+              "count": 9480,
+              "max": {
+                "secs": 0,
+                "nanos": 6026765
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 3464953
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 2534620
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 2271846
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 1562005
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 1665679
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 569362
+              }
+            }
+          },
+          "counters": {
+            "inserted": 9997,
+            "reads": 10003,
+            "retrieved": 10003,
+            "writes": 9997
+          }
+        },
+        {
+          "wall_clock_ns": 521217741,
+          "ops": {
+            "read": {
+              "count": 9520,
+              "max": {
+                "secs": 0,
+                "nanos": 1921324
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 85013
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 65135
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 58693
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 41078
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 46393
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 11362
+              }
+            },
+            "write": {
+              "count": 9480,
+              "max": {
+                "secs": 0,
+                "nanos": 5696512
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 3192581
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 2469315
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 2210418
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 1532969
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 1619678
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 364799
+              }
+            }
+          },
+          "counters": {
+            "inserted": 9997,
+            "reads": 10003,
+            "retrieved": 10003,
+            "writes": 9997
+          }
+        },
+        {
+          "wall_clock_ns": 536809335,
+          "ops": {
+            "read": {
+              "count": 9520,
+              "max": {
+                "secs": 0,
+                "nanos": 1758231
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 88069
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 68692
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 61558
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 43303
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 47771
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 12564
+              }
+            },
+            "write": {
+              "count": 9480,
+              "max": {
+                "secs": 0,
+                "nanos": 4995568
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 3554715
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 2587981
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 2279030
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 1566364
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 1667836
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 440745
+              }
+            }
+          },
+          "counters": {
+            "inserted": 9997,
+            "reads": 10003,
+            "retrieved": 10003,
+            "writes": 9997
+          }
+        },
+        {
+          "wall_clock_ns": 529554996,
+          "ops": {
+            "read": {
+              "count": 9520,
+              "max": {
+                "secs": 0,
+                "nanos": 2371978
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 81506
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 64473
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 57300
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 40518
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 45962
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 13566
+              }
+            },
+            "write": {
+              "count": 9480,
+              "max": {
+                "secs": 0,
+                "nanos": 7442230
+              },
+              "p99": {
+                "secs": 0,
+                "nanos": 4157251
+              },
+              "p95": {
+                "secs": 0,
+                "nanos": 2568245
+              },
+              "p90": {
+                "secs": 0,
+                "nanos": 2232751
+              },
+              "p50": {
+                "secs": 0,
+                "nanos": 1530615
+              },
+              "avg": {
+                "secs": 0,
+                "nanos": 1648182
+              },
+              "min": {
+                "secs": 0,
+                "nanos": 500940
+              }
+            }
+          },
+          "counters": {
+            "inserted": 9997,
+            "reads": 10003,
+            "retrieved": 10003,
+            "writes": 9997
+          }
+        }
+      ]
+    }
+  }
+}

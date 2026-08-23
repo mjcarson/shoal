@@ -62,7 +62,9 @@ the durability barrier says so, and everything else is behind that.
   What it costs is memory: a writer may hold up to `write_behind + 1` buffers of this size at once,
   per table, per shard, and `write_behind` defaults to 128. Setting it equal to `buffer_size` turns
   the sizing off entirely, which is the way back to the pre-[F23](../features/self-sizing-staging-buffer.md)
-  behaviour. **Neither this interaction nor the sizing itself has been captured yet.**
+  behaviour. **The sizing is captured** (`f23-staging-buffer`: +22.0% at 64 KiB rows for the shipped
+  floor, and the whole `latency_buffer` sweep flattening from 1.225× of spread to 1.010×). **Its
+  interaction with `write_behind` is not**, and nothing sweeps `max_buffer_size` at all.
 
 ## If you are ingesting in bulk
 

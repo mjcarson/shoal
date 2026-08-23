@@ -95,7 +95,7 @@ this page opens with. Ordered inside each tier.
 | --- | --- | --- | --- | --- | --- | --- |
 | ~~**A1**~~ | ~~[**O3** + **O23**](#o3-every-archived-read-is-fully-validated-inside-a-tracing-span)~~ — **done**, by [F4](../features/validated-archives.md) | Measured — 29.89 µs of a 30.43 µs cold single-row get | M | — | Contained | it was, and it was |
 | ~~**A2**~~ | ~~[**O17**](#o17-handle_flushed-runs-on-every-message)~~ — **done**, by [F5](../features/flushed-sweep-gate.md) | Profiled — 711,638 calls became 21,279 | S | — | Contained | it was, on the profile alone |
-| ~~**A3**~~ | ~~[**O34**](#o34-a-record-wider-than-the-staging-buffer-defeats-intent-log-batching)~~ — **done**, by [F23](../features/self-sizing-staging-buffer.md) | Measured — 1.22× at 64 KiB rows, disjoint intervals; 128 writes became 16 in the reproduction | S–M | ~~a `latency_buffer` sweep above the buffer~~ — discharged | Contained | it was, and it was |
+| ~~**A3**~~ | ~~[**O34**](#o34-a-record-wider-than-the-staging-buffer-defeats-intent-log-batching)~~ — **done**, by [F23](../features/self-sizing-staging-buffer.md) | Measured, before and after — 1.22× at 64 KiB rows became **+22.0%** at the shipped setting, on disjoint intervals, and the sweep's spread collapsed 1.225× → 1.010× | S–M | ~~a `latency_buffer` sweep above the buffer~~ — discharged | Contained | it was, and it was, twice |
 | **A4** | [**O13**](#o13-a-multi-partition-get-is-quadratic-in-the-partitions-it-names) (+ [**O12**](#o12-to_blocked-clones-the-whole-filter-set-per-blocked-partition) beside it) — the quadratic multi-partition get | Asymptotic — O(n²) in a caller-set n | S | — | None | no — still needs a bench over `PersistentSortedTable::get` |
 | **A5** | [**O5**](#o5-the-hottest-maps-use-siphash), [**O14**](#o14-fixed-thousand-element-preallocations-on-per-call-paths), [**O28**](#o28-the-client-takes-two-guards-on-its-response-map-for-every-query-it-sends) — hasher, allocation sizes, and a doubled map guard | Argued | S | — | None | no — needs a table-layer bench, and O28 needs the client measured at all |
 | **A6** | [**O25**](#o25-two-instrument-spans-remain-on-per-query-paths) — two `#[instrument]` spans on per-query paths | Argued — but the cost is in the *uninstrumented* binary | S | — | Contained | no — needs a with/without capture |
@@ -106,7 +106,9 @@ entry on this page whose cost was both measured and contained**, and was then ac
 cautions that came with it were carried into the fix rather than around it. The *shape* correction
 — the gain is in how many records share an aligned write, not in whether the record fits — is why
 F23 is a sizing rule and not a larger default: it became `TARGET_RECORDS_PER_BUFFER = 8`, read off
-the rung where the capture says the gain arrives. The boundary at 4096 is **still unbracketed**,
+the rung where the capture says the gain arrives. `f23-staging-buffer` then re-took the same fifteen
+arms and confirmed it: **+22.0%** at 64 KiB rows for the shipped setting, and a sweep whose spread
+collapsed from 1.225× to 1.010×. The boundary at 4096 is **still unbracketed**,
 because the width axis still jumps 1024 → 8192 around it, and that is the one thing this entry still
 cannot state.
 
@@ -204,7 +206,7 @@ come out as a code block.
 | O20 | none yet — a `routing` bench over `Ring::find_shard` and `split_by_shard` is unbuilt, and likewise belongs in the micro layer |
 | O11, O29 | the `r0` width sweep against the `r100` one — **captured**, and it says the write path owns the axis below ~64 KiB, which is where O11's three passes live. The per-stage breakdown that would say *which* stage they are in ran at three widths and **joined zero queries at all three** ([item 76](known-issues.md#76-the-stage-layer-joins-nothing-for-any-grid-arm-and-reports-it-as-a-layer-that-ran)), so the instrument is broken rather than missing. This is the only row in this table where a capture made things worse than an absent benchmark: an absent one is honest |
 | O21 | `hotpath` `fs::commit` and `stream::prep` only; no micro-benchmark of the write path exists, though [F8](../features/purpose-built-workloads.md) built the standalone binary that would host one |
-| ~~O34~~ | ~~**none yet**~~ ~~built and not yet captured~~ `macro/conf/storage/latency_buffer/r50/w8192/*` and `.../w65536/*` ([F22](../features/row-size-benchmarks.md)). **Captured, and it settled the entry**: 1.22× at 64 KiB rows on disjoint intervals against 1.06× at the reference cell — and it corrected the shape, because crossing the buffer threshold at 8 KiB bought nothing while 8–32 records per buffer bought 6%. The sweep that could not see this now can, and the entry it settled has been **acted on** ([F23](../features/self-sizing-staging-buffer.md)). The same arms are what re-judge the fix, and the prediction is that the `w65536` rungs converge — a sweep whose knob is now a floor under a ceiling has less to say the wider the rows get, which is the shape of a knob that stopped mattering |
+| ~~O34~~ | ~~**none yet**~~ ~~built and not yet captured~~ `macro/conf/storage/latency_buffer/r50/w8192/*` and `.../w65536/*` ([F22](../features/row-size-benchmarks.md)). **Captured, and it settled the entry**: 1.22× at 64 KiB rows on disjoint intervals against 1.06× at the reference cell — and it corrected the shape, because crossing the buffer threshold at 8 KiB bought nothing while 8–32 records per buffer bought 6%. The sweep that could not see this now can, and the entry it settled has been **acted on** ([F23](../features/self-sizing-staging-buffer.md)). The same arms re-judged the fix, in `f23-staging-buffer`, and the `w65536` rungs **converged**: 1.225× of spread became 1.010×, which is a sweep whose knob is now a floor under a ceiling having less to say the wider the rows get — the shape of a knob that stopped mattering |
 | O35 | ~~none~~ ~~built, not captured~~ `macro/grid/depth/1/<width>` against the `r50` width sweep ([F22](../features/row-size-benchmarks.md)). **Captured, and it came back negative.** The test was the entry's own: a p99 that collapses at one outstanding query is a queue rather than a cost inside the relay. It collapses — 1.3–2.5× at every width against 37–52× at depth 32 — so the entry lost its evidence and left the queue |
 | O28, O30, O31 | none — **the client is not instrumented at all**. No `tracing` span, no `hotpath` scope, and no workload that isolates it. O30 is the only entry on this page whose cost is not even bounded by an argument |
 
@@ -821,12 +823,31 @@ source reading and sized by a capture, and neither of those is a reproduction.
 16 flushes afterwards, of eight records each, and 5.1% fewer bytes on disk because the per-record pad
 regions are gone.
 
-**What the re-capture should say**, and it has not been taken: the five
-`macro/conf/storage/latency_buffer/r50/w65536/*` rungs now all resolve to the same 256 KiB ceiling,
-so they should **converge**, at or above the 22,701 that `256Ki` alone reached. The `w8192` rungs
-should converge near 38,619. The reference cell moves from 4096 to 8192 usable and this capture says
-that width is flat, so a change there beyond a couple of percent is a finding rather than a
-confirmation.
+**Re-captured as `f23-staging-buffer`**, the same fifteen arms at `57b44d7` on a clean tree, and it
+confirms the fix on the prediction written down before it ran — the `w65536` rungs converge at or
+above the 22,701 that `256Ki` alone reached, the `w8192` rungs converge near 38,619, and the
+reference cell does not move:
+
+| Buffer | 1 KiB before | after | 8 KiB before | after | 64 KiB before | after |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `512` | 50,492 | 52,993 | 36,433 | 38,474 | 20,885 | 22,592 |
+| `4Ki` | 53,285 | 53,156 | 36,465 | 38,497 | **18,537** | **22,619** |
+| `16Ki` | 52,587 | 51,863 | 36,319 | 38,182 | 19,726 | 22,665 |
+| `64Ki` | 53,222 | 52,551 | 38,419 | 37,768 | 20,535 | 22,813 |
+| `256Ki` | 52,499 | 53,052 | 38,619 | 38,305 | 22,701 | 22,691 |
+
+**The sweep's spread went 1.225× → 1.010× at 64 KiB rows**, 1.063× → 1.019× at 8 KiB, and
+1.055× → 1.025× at 1 KiB. For the shipped `buffer_size: 4096` that is **+22.0%** at 64 KiB rows
+(18,537 → 22,619, disjoint) and **+5.6%** at 8 KiB (36,465 → 38,497, disjoint), against −0.24% and
+overlapping intervals at the reference cell.
+
+**Read the shape rather than the headline.** The rungs that already held eight records did not move
+— `256Ki` at 64 KiB rows went 22,701 → 22,691, and `64Ki`/`256Ki` at 8 KiB rows are flat or a shade
+down — because at those widths the ceiling is what sizing resolves to anyway. The fix moved the bad
+rungs up to the good ones and left the good ones alone, which is a floor replacing a fixed size and
+not a general speedup. **The 1.22× this entry was ranked on was therefore real and is now
+unavailable to tune for**: it was the distance between a badly set knob and a well set one, and
+there is no longer a badly set setting of it at these widths.
 
 The width axis corroborates the mechanism from the other side: over 1 KiB → 8 KiB the persistent
 arms lose 31% of their throughput while the ephemeral arms — the same tables with `NoStorage` and

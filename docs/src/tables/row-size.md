@@ -196,7 +196,10 @@ to amortize the durability barrier across. Filed as
 **That line is now `self.staging_target(size)`** ([F23](../features/self-sizing-staging-buffer.md)).
 `buffer_size` is a floor, a new `max_buffer_size` is a ceiling, and the writer sizes each buffer to
 hold about eight of the widest record the last one held. **The numbers on this page were captured
-before that change** and describe the code above, which is what makes them the argument for it.
+before that change** and describe the code above, which is what makes them the argument for it —
+and `f23-staging-buffer` then re-took the fifteen `latency_buffer` arms against the new writer:
+**+22.0%** at 64 KiB rows for the shipped floor, on disjoint intervals, with the sweep's spread
+falling from 1.225× to 1.010×. The rest of this page has not been re-captured.
 
 **The mixture split confirms this octave is the write path.** Over 1 KiB → 8 KiB the pure-write arm
 falls to **58.8%** of its own 64 B rate while the pure-read arm is still at **96.7%**. The page
@@ -382,7 +385,7 @@ did not run at all.** Ordered as they were filed, cheapest first.
 | # | What it was to settle | What it said |
 | ---: | --- | --- |
 | 1 | The per-byte half of O1 and O2 | **Answered.** Response decode grows ×432.8 and encode ×72.2 over 64 B → 64 KiB, against a control flat to a quarter of a percent. `access` and `into_aligned` are 1.6 ns apart at 64 B and 2× apart at 64 KiB |
-| 2 | O34 — is `latency_buffer` a step, and is the step at the buffer | **Answered, and the shape was wrong.** Worth 1.22× at 64 KiB rows on disjoint intervals, but the gain is in records per buffer rather than at the threshold. **Then acted on** ([F23](../features/self-sizing-staging-buffer.md)), which is what the correction bought: the fix is a sizing rule and not the larger default the old shape implied |
+| 2 | O34 — is `latency_buffer` a step, and is the step at the buffer | **Answered, and the shape was wrong.** Worth 1.22× at 64 KiB rows on disjoint intervals, but the gain is in records per buffer rather than at the threshold. **Then acted on** ([F23](../features/self-sizing-staging-buffer.md)), which is what the correction bought: the fix is a sizing rule and not the larger default the old shape implied — and re-captured at **+22.0%** for the shipped floor, with the sweep flattening to 1.010× of spread |
 | 3 | Where the knee is | **Answered, and it was not where the question assumed.** Throughput falls smoothly; the tail peaks at 52× at 128 KiB and recovers past it |
 | 4 | How much of a wide arm was queue rather than service | **Answered, and it was most of it.** The p99/p50 spread is 1.3–2.5× at every width at depth 1. Eighteen nineteenths of the 4 MiB read latency was queue |
 | 5 | Which half of the mixture the per-byte cost is on | **Answered, and it is both, in different places.** Write below ~64 KiB, read above it |
@@ -390,9 +393,9 @@ did not run at all.** Ordered as they were filed, cheapest first.
 
 **What this changed in the priority queue.** O34 moved from argued to measured with a contained fix,
 became the head of Tier A, and has since been **built** as
-[F23](../features/self-sizing-staging-buffer.md) — the only entry that has ever left that tier by
-being acted on rather than by being reattributed. A4 is the head now, and it needs a benchmark that
-does not exist. O2 gained a measurement on the half that grows in what the caller
+[F23](../features/self-sizing-staging-buffer.md) and **re-captured** as `f23-staging-buffer` at
++22.0% for the shipped floor — the only entry that has ever left that tier by being acted on rather
+than by being reattributed. A4 is the head now, and it needs a benchmark that does not exist. O2 gained a measurement on the half that grows in what the caller
 controls, and `r100` says the read path owns the wide end, so it is the largest established win
 available — still behind a design pass, because it reaches the wire format. O35 lost its evidence
 and left the queue. O11 and O29 did not move, and their unblocker is now known to be broken rather

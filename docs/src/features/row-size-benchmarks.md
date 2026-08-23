@@ -223,7 +223,7 @@ target. What it makes newly *adjudicable* is the point:
 | Entry | What can now decide it |
 | --- | --- |
 | [O1](../appendix/optimizations.md), [O2](../appendix/optimizations.md) | `wire_codec/width/request/decode/{access,deserialize}/*` and `wire_codec/width/response/encode/*`, with a confidence interval |
-| [O34](../appendix/optimizations.md) | `macro/conf/storage/latency_buffer/r50/w8192/*` against `.../r50/*` — the same five rungs either side of the buffer. **It did decide it, and the entry has since been built** ([F23](self-sizing-staging-buffer.md)): the capture both sized O34 and corrected its shape, and the correction is what chose the fix. The same arms now re-judge that fix, with no identifier moved |
+| [O34](../appendix/optimizations.md) | `macro/conf/storage/latency_buffer/r50/w8192/*` against `.../r50/*` — the same five rungs either side of the buffer. **It did decide it, the entry has since been built** ([F23](self-sizing-staging-buffer.md)) **and these same arms then re-judged the fix**, in `f23-staging-buffer`, with no identifier moved: +22.0% at 64 KiB rows for the shipped floor and a sweep flattening from 1.225× of spread to 1.010×. The capture both sized O34 and corrected its shape, the correction chose the fix, and the arms measured it afterwards — which is the whole loop this feature was built to close, run once end to end |
 | [O11](../appendix/optimizations.md), [O29](../appendix/optimizations.md) | The `r0` width sweep against the `r100` one, and the per-stage breakdown at three widths |
 | [O35](../appendix/optimizations.md) | The depth-1 ladder: a p99 that collapses at depth 1 and not at 32 is a queue in front of the relay |
 

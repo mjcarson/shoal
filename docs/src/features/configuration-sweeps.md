@@ -65,10 +65,12 @@ future capture of them. They were built to adjudicate [O34](../appendix/optimiza
 and the entry was then [built](self-sizing-staging-buffer.md). `latency_sensitive.buffer_size` is now
 a **floor** under a `max_buffer_size` ceiling rather than the buffer size itself, so the knob these
 ten arms move no longer decides how many records share a write once it is below the size the writer
-would have chosen anyway. **The prediction is that the 64 KiB row rungs converge**, since all five
-now resolve to the same 256 KiB ceiling — a sweep flattening because its knob stopped mattering,
-which reads identically to a sweep that never mattered and is the reason this paragraph exists. No
-identifier moved and no arm was added, so the comparison against `f22-row-size` is a clean join.
+would have chosen anyway. **The 64 KiB row rungs converged**, in `f23-staging-buffer`: the spread
+across the five went 1.225× to **1.010×**, since all five now resolve to the same 256 KiB ceiling.
+That is a sweep flattening because its knob stopped mattering, which reads identically to a sweep
+that never mattered and is the reason this paragraph exists — anybody reading a future capture of
+these ten arms and finding them flat should read it as the fix working, not as the setting being
+inert. No identifier moved and no arm was added, so the join against `f22-row-size` was clean.
 
 Identifiers are `macro/conf/<section>/<knob>/r<share>/<value>`, and the value is spelled the way
 `shoal.yml` spells it — `4Ki`, not `4096` — because that is what a reader has to type afterwards.

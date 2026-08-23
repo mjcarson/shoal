@@ -148,9 +148,12 @@ below still has nothing to group, which is why a table with very wide rows behav
 one with narrow rows under the same settings. See
 [Row size and what it costs](../tables/row-size.md#the-intent-log-batches-fewer-records-as-rows-widen).
 
-**The re-capture has not been taken.** The five `latency_buffer` rungs at 8 KiB and 64 KiB
-([F22](../features/row-size-benchmarks.md)) are what judge the sizing, and the prediction is that
-they converge, since they now all resolve to the same ceiling.
+**The re-capture is `f23-staging-buffer`**, and it says the fix is worth **+22.0%** at 64 KiB rows
+for the shipped `buffer_size: 4096`, on disjoint run intervals, and +5.6% at 8 KiB. The five
+`latency_buffer` rungs at each width converged as predicted — the spread across them went 1.225× to
+**1.010×** at 64 KiB rows — because they now all resolve to the same ceiling. Nothing changed at the
+1 KiB reference cell, which is the width the capture behind
+[O34](../appendix/optimizations.md) already said was flat.
 
 `prep` returns a `&mut [u8]` of exactly the requested size; a caller that writes less than it
 asked for leaves uninitialised bytes in the log. `commit` is the only caller and it is

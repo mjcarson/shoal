@@ -758,9 +758,10 @@ whether there is a discontinuity there at all — which is the one thing
 [O34](optimizations.md#o34-a-record-wider-than-the-staging-buffer-defeats-intent-log-batching) still
 cannot state, now that the `latency_buffer` sweep has established the setting is worth 1.22× at
 64 KiB. **Still open, and now open on the other side of the fix**: O34 was
-[built](../features/self-sizing-staging-buffer.md) without it, so these two arms would now measure
-whether the self-sizing buffer has a discontinuity at the floor rather than whether the old writer
-had one at the buffer. The question is the same and the code under it is not. Two arms, appended after the existing widths so no identifier moves.
+[built](../features/self-sizing-staging-buffer.md) without it and re-captured at +22.0% without it,
+so these two arms would now measure whether the self-sizing buffer has a discontinuity at the floor
+rather than whether the old writer had one at the buffer. The question is the same and the code
+under it is not. Two arms, appended after the existing widths so no identifier moves.
 
 ~~**A width axis on `wire_codec`.** The cheapest item in this whole section. `shoal/benches/wire.rs`
 sweeps *bundle size* (1, 10, 100 queries) and *response cardinality* (16, 256, 1024, 4096 rows) with
@@ -1007,8 +1008,9 @@ inherits one gap the grid does not have: it measures a machine as much as it mea
   the *other* five storage knobs are still swept at 1 KiB alone, and nothing has asked whether any
   of them is a step too. **And what building the answer showed**: those ten arms settled O34, O34 was
   [built](../features/self-sizing-staging-buffer.md), and the knob they sweep is now a floor rather
-  than the buffer size — so a future capture of them is expected to be flatter than the one that
-  justified them, for the good reason rather than the bad one.
+  than the buffer size — so a capture of them is flatter than the one that justified them, for the
+  good reason rather than the bad one. `f23-staging-buffer` took exactly that capture: 1.225× of
+  spread at 64 KiB rows became 1.010×.
 - **The memory sweep brackets one working set.** Its rungs are sized against the reference cell's
   own — about 1.6 MiB a shard from the seed plus half as much again from the run — so `1Mi` and
   `4Mi` straddle it and the rest are flat. What that cannot say is whether the *ratio* it finds

@@ -125,9 +125,10 @@ memory budget and the control the tests are written against.
 
 ## Limitations
 
-- **Nothing here is captured.** The benchmark that would settle it exists and is named below; the
-  numbers in *Performance* are from a test, not from a capture. This page is in the same state
-  [F22](row-size-benchmarks.md)'s was: the ability to answer exists and the answer is not in.
+- **Only fifteen arms are captured.** `f23-staging-buffer` is the `latency_buffer` sweep at three
+  widths and nothing else, so what is measured is this knob against this reference cell. The grid,
+  the isolating pairs and the other five storage knobs all ran against the old writer and have not
+  been re-taken; a full capture would say whether sizing the buffer changed anything they measure.
 - **Rows above the ceiling behave exactly as before.** A 4 MiB row still gets one write and one DMA
   allocation per insert. That is deliberate — it is where the memory cost of batching would be
   worst — but it means O34's mechanism is still fully in force above 256 KiB unless an operator
@@ -165,8 +166,36 @@ memory budget and the control the tests are written against.
 
 ## Performance
 
-**Measured by a test, not by a capture.** The capture that would settle it is named at the end of
-this section and has not been taken.
+**Captured, as `f23-staging-buffer`** — the fifteen `latency_buffer` arms at all three row widths,
+taken on a clean tree at `57b44d7` with the `performance` governor, and joined against
+`f22-row-size` with no identifier moved.
+
+| Buffer | 1 KiB before | after | 8 KiB before | after | 64 KiB before | after |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `512` | 50,492 | 52,993 | 36,433 | 38,474 | 20,885 | 22,592 |
+| `4Ki` | 53,285 | 53,156 | 36,465 | 38,497 | **18,537** | **22,619** |
+| `16Ki` | 52,587 | 51,863 | 36,319 | 38,182 | 19,726 | 22,665 |
+| `64Ki` | 53,222 | 52,551 | 38,419 | 37,768 | 20,535 | 22,813 |
+| `256Ki` | 52,499 | 53,052 | 38,619 | 38,305 | 22,701 | 22,691 |
+
+**The sweep converged, which is what a knob that stopped mattering looks like.** Across the five
+rungs the spread went 1.225× → **1.010×** at 64 KiB rows, 1.063× → 1.019× at 8 KiB, and
+1.055× → 1.025× at 1 KiB. Every rung is now within one percent of the rung that used to be the only
+good one.
+
+**For the shipped configuration — `buffer_size: 4096` — that is +22.0% at 64 KiB rows** (18,537 →
+22,619, run intervals disjoint) and **+5.6% at 8 KiB rows** (36,465 → 38,497, disjoint). At the 1 KiB
+reference cell it is −0.24%, intervals overlapping: no change, which is the important null. The
+capture that settled O34 said that width is flat and it still is.
+
+**Three shapes in that table are worth reading, because each is a prediction that held.** The
+`256Ki` rung at 64 KiB rows did not move at all (22,701 → 22,691) — at that width the ceiling is
+what sizing resolves to anyway, so there was nothing to change. The `64Ki` and `256Ki` rungs at
+8 KiB rows did not move either (within noise, and slightly down), for the same reason: eight 8 KiB
+records is 64 KiB, so those two rungs already held eight. And the `512` rung improved at every
+width, because a floor below one record is where the old writer had the least to work with. **The
+fix moved the bad rungs up to the good ones and left the good ones alone**, which is the signature
+of a floor replacing a fixed size rather than of a general speedup.
 
 The reproduction is `shoal/tests/intent_log_batching.rs`: one shard, a table with 8 KiB rows, one
 bundle of 128 inserts arriving in a single frame, and then the shard's intent log read off disk.
@@ -185,16 +214,21 @@ The write count is the point rather than the byte count. Each of those writes is
 commit in `start_sync` has to amortize an `fdatasync` across, and a buffer holding one record leaves
 it nothing to group.
 
-**What the capture should say.** `macro/conf/storage/latency_buffer/r50/w65536/*` is five rungs that
-now all resolve to the same 256 KiB ceiling, so **they should converge** — at or above the 22,701
-that `256Ki` alone reached in `f22-row-size`, which was the best rung. The `w8192` rungs should
-converge near 38,619. The 1 KiB reference cell moves from 4096 to 8192 usable and the capture says
-that width is flat, so a change there beyond a couple of percent is a finding rather than a
-confirmation.
+**What the capture was predicted to say**, written down before it was taken: the five
+`w65536` rungs all resolve to the same 256 KiB ceiling, so they should converge at or above the
+22,701 that `256Ki` alone reached; the `w8192` rungs should converge near 38,619; and the 1 KiB
+reference cell should not move beyond a couple of percent. All three held — 22,592–22,813,
+37,768–38,497, and −0.24%. Recorded because a prediction that is only written down afterwards is
+not one.
+
+**What it is still not:** a capture of anything but these fifteen arms. Nothing here says what the
+sizing does to a workload that is not the reference cell with one knob moved, and in particular
+nothing measures it against `write_behind`, which is the other half of the memory this feature
+spends.
 
 ```bash
 cargo run -p shoal-bench --release -- run --label <label> --group conf/storage latency_buffer
-cargo run -p shoal-bench --release -- compare <label>
+cargo run -p shoal-bench --release -- compare <label> --against f23-staging-buffer --layer macro
 ```
 
 ## Tests
