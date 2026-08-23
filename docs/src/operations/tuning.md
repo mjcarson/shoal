@@ -47,12 +47,13 @@ the durability barrier says so, and everything else is behind that.
   fewer, larger writes and more padding per partial flush — **and a record larger than the buffer is
   never batched with another one at all.** `StreamWriter::prep` flushes whenever the next record will
   not fit, so a table whose rows exceed the buffer gets one DMA write and one DMA allocation per
-  insert, and the group commit above has nothing left to group. That is a step at the buffer size,
-  not a slope, and ~~the sweep cannot see it because it runs at 1 KiB~~ the sweep at 1 KiB cannot see
-  it. The same five rungs now also run at 8 KiB and 64 KiB
-  ([F22](../features/row-size-benchmarks.md)) — **and have not been captured**, so the 1.06× on
-  [Configuration](../performance/configuration.md) is still the only number, and it is still the
-  answer at the one width where the answer is no
+  insert, and the group commit above has nothing left to group. ~~That is a step at the buffer size,
+  not a slope~~ — **it is a slope**, and the correction matters for what you set. The same five rungs
+  now run at 8 KiB and 64 KiB as well ([F22](../features/row-size-benchmarks.md)) and have been
+  captured: the setting is worth **1.22× at 64 KiB rows** (`256Ki` against `4Ki`, on run intervals
+  that do not overlap) against 1.06× at 1 KiB. But at 8 KiB rows, a buffer that holds *two* records
+  is worth nothing over one that holds none — the gain arrives at 8 to 32 records per buffer. **Size
+  it to a multiple of your widest row, not just past it**
   ([O34](../appendix/optimizations.md), [Row size](../tables/row-size.md)).
 
 ## If you are ingesting in bulk
@@ -73,25 +74,24 @@ Throughput, not service time, so read the `queries/s` column rather than the per
 ## If your rows are wide
 
 Read [Row size and what it costs](../tables/row-size.md) first — it says which parts of this are
-measured and which are argued, and for this section the honest answer is *none of it is measured at
-the width it matters at*. Nothing below has a number behind it. Treat it as a hypothesis to test on
-your own workload.
+measured and which are argued. ~~For this section the honest answer is *none of it is measured at the
+width it matters at*.~~ **Most of it is measured now**, by `f22-row-size`: the width axis with its
+64× hole filled, swept at three mixtures and two load depths, plus the `latency_buffer` rungs above
+the buffer ([F22](../features/row-size-benchmarks.md)). The order of these two bullets has swapped,
+because the capture said the second one is much the larger lever.
 
-The benchmarks that would put numbers here now exist — the width axis with the 8 KiB → 512 KiB hole
-filled, swept at three mixtures and at two load depths, plus the `latency_buffer` rungs above the
-buffer ([F22](../features/row-size-benchmarks.md)). **None of them has been captured**, so this
-section is unchanged in substance: what moved is that the next capture will decide it rather than
-leave it argued.
-
-- **Size `latency_sensitive.buffer_size` above your widest row.** This is the one recommendation on
-  the page that contradicts what its own sweep reports, and the reason is in the bullet above: the
-  sweep runs at 1 KiB, on the flat side of a step at 4096. Setting the buffer to 256Ki when your rows
-  are 64 KiB restores batching that the shipped 4096 removes entirely. The cost is padding on a
+- **Keep the load depth down — this is the biggest thing on the page.** At 512 KiB rows, going from
+  thirty-two outstanding queries to one takes the read p50 from 360.04 µs to 119.37 µs and the p99
+  from **16.85 ms to 201.54 µs**. At 4 MiB it is 20.72 ms down to 1.15 ms. Nothing else here is worth
+  a factor of eighteen. The p99/p50 spread at depth 32 peaks at **52×** around 128 KiB rows and is
+  1.3–2.5× at every width at depth 1, so if your wide-row tail looks pathological, look at your queue
+  before you look at the server. (This bullet used to blame the response relay
+  ([O35](../appendix/optimizations.md)); the depth ladder showed the queue accounts for all of it,
+  and that entry has been demoted.)
+- **Size `latency_sensitive.buffer_size` to a multiple of your widest row.** ~~Above your widest
+  row.~~ Above is not enough — at 8 KiB rows, `16Ki` and `4Ki` are within noise of each other, and
+  the gain shows up at `64Ki` and `256Ki`. Worth **1.22×** at 64 KiB rows. The cost is padding on a
   partial flush and a larger DMA allocation per shard.
-- **Keep the load depth down.** Thirty-two outstanding 4 MiB queries is 128 MiB in flight on one
-  connection, in front of a relay that writes one response to completion before starting the next
-  ([O35](../appendix/optimizations.md)). Wide rows and deep queues interact badly, and the p99 is
-  where you will see it rather than the median.
 - **Read `payload/s`, not `queries/s`.** Past the point where the per-byte cost dominates, queries a
   second must fall as the rows widen and that is arithmetic rather than a regression. A falling
   `queries/s` with a flat `payload/s` is the system working.
@@ -164,5 +164,5 @@ worth.
 - [Configuration and what each setting is worth](../performance/configuration.md) — the measurements
 - [F20. What each setting is worth](../features/configuration-sweeps.md) — how the sweep is built
 - [Memory and eviction](../tables/memory-and-eviction.md) — what the limit actually governs
-- [Row size and what it costs](../tables/row-size.md) — why the advice above has no number behind it
+- [Row size and what it costs](../tables/row-size.md) — where the numbers behind the advice above come from, and which parts still have none
 - [Benchmarking](../performance/benchmarking.md) — how to take a capture that means something

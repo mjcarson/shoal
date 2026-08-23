@@ -119,7 +119,7 @@ fits shares an aligned write with the records around it; a record that does not 
 write and one `alloc_dma_buffer` to itself, and the group commit below has nothing left to
 group. The transition is a step at the configured buffer size, not a slope, and it is why a
 table with wide rows behaves differently from one with narrow rows under the same settings —
-see [Row size and what it costs](../tables/row-size.md#the-intent-log-stops-batching-past-the-staging-buffer)
+see [Row size and what it costs](../tables/row-size.md#the-intent-log-batches-fewer-records-as-rows-widen)
 and [O34](../appendix/optimizations.md).
 
 **This is read from the source and has never been measured.** The configuration sweep ran

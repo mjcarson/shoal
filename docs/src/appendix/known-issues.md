@@ -3,10 +3,13 @@
 A severity-ranked index of open defects on the `ZeroCopyResponses` branch. Each entry names
 the symptom, the cause, and a `file:line`.
 
-**How these were established.** Everything currently here comes from reading the source. Entries
+**How these were established.** Almost everything here comes from reading the source. Entries
 that were later confirmed by reproduction say so on their resolved page, and item 14 was the last
 one on this page to carry that note before it moved
-([Resolved #14](resolved/empty-rotated-logs.md#evidence)).
+([Resolved #14](resolved/empty-rotated-logs.md#evidence)). Items 75 and 76 are the exception and
+say so in their own **Evidence** notes: both were found by reading a committed capture artifact
+against the page generated from it, which is a third way of finding a defect that this list had no
+instance of until `f22-row-size` was taken.
 
 **Line numbers drift, and they had.** Every citation on this page was re-resolved against the tree
 in August 2026 ([Review](review-2026-08.md)) and most of them had moved — item 16's whole table by
@@ -28,7 +31,7 @@ Defects that have been fixed move to [Resolved Issues](resolved-issues.md), one 
 carrying the reasoning and the invariants the fix depends on. Item numbers are shared between
 the two pages and never reused, so a number appears on exactly one of them — which is why this
 list starts at 15 and skips 25, 26, 31, 34, 39, 44, 45, 48, 51, 56, 57, 61, 67, 68 and 74, and
-why item 74 is the newest number and item 73 the newest entry here. The exceptions are items 16, 17, 20, 24, 54 and 73, which were only
+why item 76 is both the newest number and the newest entry here. The exceptions are items 16, 17, 20, 24, 54 and 73, which were only
 partly fixed: the open remainder is here and the rest is there. Items 9 and 51 were each one such
 exception until their second half was fixed, and are now on the resolved page alone; item 25 was one
 in the other direction — it had one row left open, that row was fixed, and the whole item
@@ -39,7 +42,12 @@ in the other direction — it had one row left open, that row was fixed, and the
 `--features stage-profile` that a default run does not reach ([Test Coverage](test-coverage.md)).
 [F22](../features/row-size-benchmarks.md) added 21, two of which reproduce items 73 and 74 and fails against
 the tree before its fix.
-**Unchanged by the `F20-conf` capture**, which added no tests and moved no count: a capture is
+**Unchanged by the `f22-row-size` capture**, which added no tests and moved no count, and which is
+where items [75](#75-a-control-that-was-measured-at-every-width-is-not-drawn-and-the-caption-says-it-is)
+and [76](#76-the-stage-layer-joins-nothing-for-any-grid-arm-and-reports-it-as-a-layer-that-ran)
+came from — both read out of the committed artifact rather than out of the source, which is the
+reverse of how everything above them was found and the reason neither was caught earlier.
+**Unchanged by the `F20-conf` capture** before it, which added no tests and moved no count: a capture is
 evidence rather than a test, and what it produced was a reproduction for
 [item 71](#71-throughput_sensitive-is-configured-documented-and-mostly-unused), a second and worse
 reproduction for [item 58](#58-a-shard-that-dies-is-not-reported-to-whoever-started-the-pool), and
@@ -1523,3 +1531,95 @@ accepted as version 1 so the committed captures keep rendering; and `collect::ho
 scratch files rather than only checking one. The awkward part is that a hotpath profile arrives as
 the last line of stdout rather than as a file the run writes, so `Stdout::LastLine` has to take a
 per-workload path and the collector has to parse each one.
+
+### 75. A control that was measured at every width is not drawn, and the caption says it is
+
+`shoal-bench/src/render/chart/micro_scaling.rs`, the width series selection
+
+[Micro benchmarks](../performance/micro.md#how-the-cost-grows-with-the-width-of-one-row) opens its
+width chart by naming its own control:
+
+> A **flat** line is a fixed per-call cost - the header decode is here as exactly that control,
+> since eight bytes is eight bytes at every width.
+
+It is not here. `chart-micro-scaling-width` draws eight series and its `aria-label` says so
+(`Cost of 8 operations against row width`), while [F22](../features/row-size-benchmarks.md) swept
+**ten** `wire_codec/width/*` groups. The two it drops are `request/decode/header` — the control the
+caption points at — and `request/decode/access_unchecked`. The growth table underneath the chart has
+the same eight rows and the same two omissions.
+
+The measurement itself is fine, which is what makes this a documentation defect rather than a
+benchmark one. From `f22-row-size.micro.json`, `request/decode/header` runs 0.7071 ns at 64 B and
+0.7088 ns at 64 KiB — a quarter of a percent across a thousand-fold change in row width, which is
+exactly the flat control the axis needs to be read against. A reader who trusts the caption
+concludes the axis has been validated against a control they can see; a reader who counts the series
+finds it has not.
+
+**Evidence: established from the committed artifact**, not from reading the source — the ten swept
+identifiers are in `f22-row-size.micro.json` and eight of them are on the page. That is the reverse
+of how most entries here were found, and it is why it survived review: nothing compares the number
+of series a chart draws against the number its data contains.
+
+**Fix direction:** two choices, and they are not equivalent. Drawing all ten makes the caption true
+and costs a reader two more curves on a chart that already has eight — which is the palette's cap
+([F19](../features/chart-legends.md)), so ten would need a decision about colour rather than a
+selection change. Naming the control in the table but not on the chart is cheaper and keeps the
+chart at eight, but then the caption has to say where the control is. The third option is the one to
+avoid: quietly deleting the sentence, which loses the fact that the axis *has* a control and that it
+holds. This is also the second instance of what [F18](../features/results-pages.md) filed as a
+limitation — nothing checks that a page's prose still describes what it draws — after the four
+caption drift found by grep in `0851a22`.
+
+### 76. The stage layer joins nothing for any grid arm, and reports it as a layer that ran
+
+`shoal-bench/src/workloads/harness/driver.rs:180-261`, `drive_with`; `shoal-bench/src/workloads/grid.rs:839`, `:863`
+
+[F22](../features/row-size-benchmarks.md) pointed the stage layer at three widths of the grid so
+that something could say **which** of the nineteen stages grows with the row. All three produced
+nothing. From `f22-row-size.stages.json`:
+
+| Report | joined | server only | client only | ops |
+| --- | ---: | ---: | ---: | --- |
+| `macro/grid/unsorted/r50/1024` | **0** | 40,001 | 0 | `{}` |
+| `macro/grid/unsorted/r50/8192` | **0** | 40,001 | 0 | `{}` |
+| `macro/grid/unsorted/r50/524288` | **0** | 1,025 | 0 | `{}` |
+| `macro/insert_unsorted` | 200,000 | 1 | 0 | `insert` |
+
+Every server-side record was discarded for want of a client half, and the capture's `join` block
+sums to `joined: 200000` — all of it from the one workload that is not on the width axis, and none
+of it from the three that are.
+
+The client half of a stage record is built in exactly one place. `drive_with` keeps a `submitted`
+map, fills it as each bundle is sent and closes each record out when the matching response arrives
+(`driver.rs:212-261`); every `#[cfg(feature = "stage-profile")]` block in that file is inside it. A
+grid arm's *measured* phase does not go through it — it calls `drive_mixed_per_query`
+(`grid.rs:863`), which has no stage wiring at all, so `measured.stage_records` comes back empty. The
+arm's *seed* phase does call `drive_with` (`grid.rs:839`), but the call site discards the
+`Measurement` it returns, so those records are dropped before anything can join them.
+
+The server is unaffected and keeps stamping every sampled query, which is why the failure looks like
+a layer that ran. The artifact has the right schema, four reports with the right workload names, a
+plausible join block, and no data in three of them.
+
+**This is the same class of defect as [item 73](#73-the-hotpath-layers-artifact-is-shared-between-the-workloads-that-write-it)**
+and was missed for the same reason: the check that a stage report exists is not a check that it
+contains anything. `STAGED_WORKLOADS` and `Workload::stage_profiles` were split from the hotpath
+list so the stage layer could see three widths, and a test asserts the runner's copy of that list
+matches what the workloads say — but no test asserts that a workload on that list can actually
+produce a joined record.
+
+**Evidence: established from the committed artifact**, then traced to the two call sites. Not
+reproduced against a fresh run, because a `stage-profile` capture of these three arms is what would
+reproduce it and that is the thing that does not work.
+
+**Fix direction:** move the stage-record bookkeeping out of `drive_with` and into something both
+drivers use, rather than copying the block into `drive_mixed_per_query` — there are four `drive_*`
+entry points and the next one added would have the same hole. The seed phase's records should be
+dropped deliberately rather than incidentally: they are untimed setup, and folding them into a
+report about the measured phase would be worse than having none. Then the test that is missing is
+the one that would have caught this — a smoke-scale `stage-profile` run of one grid arm asserting
+`joined > 0`, which is cheap and needs no capture. Until then, every **Benchmark** row in
+[Optimizations](optimizations.md) that names the per-stage breakdown is naming something that
+cannot answer, and [O11](optimizations.md#o11-a-fresh-alignedvec-per-write-and-per-response) and
+[O29](optimizations.md#o29-a-request-body-is-zeroed-and-then-immediately-overwritten) are blocked on
+a broken instrument rather than on a missing one.

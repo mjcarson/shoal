@@ -724,7 +724,7 @@ layer with nothing fetched ([F8](../features/purpose-built-workloads.md)). Still
 has neither `tracing` spans nor `hotpath` scopes, so the share of measured latency that is the
 harness's own is unknown.
 
-### The row-size axis — all six built, none captured
+### The row-size axis
 
 Six benchmarks that between them would turn most of
 [Row size and what it costs](../tables/row-size.md) from an argument into a measurement. That page
@@ -733,10 +733,31 @@ because the axis had a 64× hole in it, ran at one load depth, ran at one mixtur
 per-stage attribution at more than one width. Ordered cheapest first, which is also the order they
 were worth reaching for.
 
-**All six are built** ([F22](../features/row-size-benchmarks.md)) and **none has been captured**,
-which is the distinction to keep: the ability to answer these questions exists and no answer does.
+**All six are built** ([F22](../features/row-size-benchmarks.md)) and `f22-row-size` **captured
+them**. Five answered; the sixth joined zero queries and answered nothing
+([item 76](known-issues.md#76-the-stage-layer-joins-nothing-for-any-grid-arm-and-reports-it-as-a-layer-that-ran)).
 Each entry below is struck through with what it turned out to cost, including the two places it cost
-more than it said. What none of the six closes is at the end.
+more than it said, and now with what it said. What none of the six closes is at the end.
+
+**What they came back with**, shortest form — the argument is on
+[Row size and what it costs](../tables/row-size.md#what-it-settled--five-of-six-ran):
+
+| # | Verdict |
+| ---: | --- |
+| 1 | Answered. Response decode ×432.8, encode ×72.2 over 64 B → 64 KiB, against a control flat to 0.25% |
+| 2 | Answered, **and the entry's shape was wrong** — 1.22× at 64 KiB rows, but the gain is in records per buffer, not at the threshold |
+| 3 | Answered, and the knee is in the *tail* rather than in throughput: 52× p99/p50 at 128 KiB, recovering to 7.4× at 4 MiB |
+| 4 | Answered, and it was most of the wide-arm latency — 1.3–2.5× spread at every width at depth 1 |
+| 5 | Answered. Write path owns below ~64 KiB, read path above it |
+| 6 | **Did not run.** Zero joined records at all three widths |
+
+**The new gap, and it is cheap.** Filling the 8 KiB → 512 KiB hole left the *other* one: the fixed
+widths still jump 1024 → 8192, and the intent log's staging buffer sits at 4096 in the middle of it.
+Two arms at 2 KiB and 4 KiB on the persistent unsorted table would bracket the boundary and say
+whether there is a discontinuity there at all — which is the one thing
+[O34](optimizations.md#o34-a-record-wider-than-the-staging-buffer-defeats-intent-log-batching) still
+cannot state, now that the `latency_buffer` sweep has established the setting is worth 1.22× at
+64 KiB. Two arms, appended after the existing widths so no identifier moves.
 
 ~~**A width axis on `wire_codec`.** The cheapest item in this whole section. `shoal/benches/wire.rs`
 sweeps *bundle size* (1, 10, 100 queries) and *response cardinality* (16, 256, 1024, 4096 rows) with
@@ -910,8 +931,13 @@ every entry below.
   See [Row size and what it costs](../tables/row-size.md). ~~The `r0` sweep this bullet proposes is
   exactly what would size it~~ — **that sweep is built**
   ([F22](../features/row-size-benchmarks.md)), at both ends of the mixture and on all four tables
-  rather than the eleven arms per table this bullet costed. It has not been captured, so the
-  interaction is still known to exist and still unsized.
+  rather than the eleven arms per table this bullet costed. ~~It has not been captured, so the
+  interaction is still known to exist and still unsized.~~ **Captured and sized**: over 1 KiB →
+  8 KiB the pure-write arm falls to 58.8% of its own 64 B rate while the pure-read arm holds at
+  96.7%, so that octave is the write path and essentially nothing else. Past ~64 KiB the two cross
+  and the read path falls about three times as fast. The interaction is real, it is now measured at
+  both ends of the mixture, and what remains unmeasured is the *cube* — a cost that needs a pure
+  write mixture **and** a particular load depth together is still invisible.
 - **YCSB workload E (short range scans) and F (read-modify-write) are not built.** E needs a scan
   over a sorted table whose partitions hold many rows, which is a different seeding shape from
   anything the grid does — every grid arm writes one row per partition so that the four tables stay

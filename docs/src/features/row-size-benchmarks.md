@@ -151,10 +151,20 @@ any of them holds. There are two version constants now, and they move independen
 
 ## Limitations
 
-- **Nothing here has been captured.** Every arm is built and proven to run; the numbers on
-  [Row size](../performance/row-size.md) are still `F20-conf`'s, and every new section on it
-  currently prints the sentence saying so. Until a capture is taken this feature has added the
-  ability to answer the six questions and answered none of them.
+- ~~**Nothing here has been captured.**~~ **Captured as `f22-row-size`**, and five of the six
+  questions came back with an answer — see
+  [What it settled](../tables/row-size.md#what-it-settled--five-of-six-ran). Two of the five
+  contradicted what the page they were built for expected: the `latency_buffer` gain is in records
+  per buffer rather than at the buffer threshold, and the 45× tail the response relay was blamed for
+  is load depth.
+- **The sixth benchmark did not run at all, and reported that it had.** All three stage reports
+  carry `joined: 0` and no ops; the client half of a stage record is written only by `drive_with`,
+  and a grid arm's measured phase uses `drive_mixed_per_query`, which has none of that wiring
+  ([item 76](../appendix/known-issues.md#76-the-stage-layer-joins-nothing-for-any-grid-arm-and-reports-it-as-a-layer-that-ran)).
+  This is the failure this feature was least guarded against: `STAGED_WORKLOADS` has a test
+  asserting it matches what the workloads say, and nothing asserts that a workload on that list can
+  produce a joined record. **The pattern is worth taking from this**: every check written here was
+  about the *selection* being right, and the thing that broke was the *collection*.
 - **Every existing grid capture stops describing the current code**, correctly: `grid.rs` moved, so
   the source fingerprint of every grid workload moved with it. That is the freshness table working,
   not breakage, and it is why the todo page said to batch these three items rather than take them

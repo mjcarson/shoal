@@ -239,9 +239,14 @@ write amplification at low load — see [pad regions](../storage/intent-log.md#p
 Setting it below your **row** size costs more than that: a record larger than the buffer is
 never batched with another one, so every insert becomes its own aligned write and its own DMA
 allocation. If your rows are wider than a few kilobytes, this is the first setting to move —
-see [Row size and what it costs](../tables/row-size.md). That advice is read from `StreamWriter::prep`
-and not from a measurement: the sweep that would decide it exists
-([F22](../features/row-size-benchmarks.md)) and has not been run.
+see [Row size and what it costs](../tables/row-size.md).
+
+~~That advice is read from `StreamWriter::prep` and not from a measurement.~~ **It is measured
+now**, and it needs one correction: setting the buffer merely *above* your row size is not enough.
+The sweep at 8 KiB rows shows a buffer holding two records is worth nothing over one holding none,
+and the gain arrives where 8 to 32 records share a write — **1.22×** at 64 KiB rows. Size this to a
+**multiple** of your widest row, not just past it
+([F22](../features/row-size-benchmarks.md), captured as `f22-row-size`).
 
 #### `durability`
 

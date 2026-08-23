@@ -72,8 +72,16 @@ determinism, or a compatibility break). A `Major` entry is not a worse entry —
 here — but it is one that needs a decision rather than a patch.
 
 **Depends on** and **Blocks** carry hard edges only. **A missing benchmark is a dependency**, since
-this page forbids acting without one, and it is the most common one: five entries are blocked on a
-benchmark rather than on any code.
+this page forbids acting without one, and it is the most common one: ~~five~~ four entries are
+blocked on a benchmark rather than on any code, after `f22-row-size` discharged O34's.
+
+**A benchmark that runs is not the same as a benchmark that answers**, and this page now has one
+instance of each failure. O35's ran and came back *negative* — it reattributed the entry's evidence
+to load depth and cost it its rank, which is the dependency working. O11 and O29's ran and returned
+*nothing*, because the layer it lives in joins no records for the workloads it was pointed at
+([item 76](known-issues.md#76-the-stage-layer-joins-nothing-for-any-grid-arm-and-reports-it-as-a-layer-that-ran)).
+The second is worse than having no benchmark, because the artifact it produced has the right shape
+and an empty middle. When a **Benchmark** row here says a capture exists, check that it joined.
 
 ## The priority queue
 
@@ -87,30 +95,34 @@ this page opens with. Ordered inside each tier.
 | --- | --- | --- | --- | --- | --- | --- |
 | ~~**A1**~~ | ~~[**O3** + **O23**](#o3-every-archived-read-is-fully-validated-inside-a-tracing-span)~~ — **done**, by [F4](../features/validated-archives.md) | Measured — 29.89 µs of a 30.43 µs cold single-row get | M | — | Contained | it was, and it was |
 | ~~**A2**~~ | ~~[**O17**](#o17-handle_flushed-runs-on-every-message)~~ — **done**, by [F5](../features/flushed-sweep-gate.md) | Profiled — 711,638 calls became 21,279 | S | — | Contained | it was, on the profile alone |
-| **A3** | [**O13**](#o13-a-multi-partition-get-is-quadratic-in-the-partitions-it-names) (+ [**O12**](#o12-to_blocked-clones-the-whole-filter-set-per-blocked-partition) beside it) — the quadratic multi-partition get | Asymptotic — O(n²) in a caller-set n | S | — | None | no — still needs a bench over `PersistentSortedTable::get` |
-| **A4** | [**O5**](#o5-the-hottest-maps-use-siphash), [**O14**](#o14-fixed-thousand-element-preallocations-on-per-call-paths), [**O28**](#o28-the-client-takes-two-guards-on-its-response-map-for-every-query-it-sends) — hasher, allocation sizes, and a doubled map guard | Argued | S | — | None | no — needs a table-layer bench, and O28 needs the client measured at all |
-| **A5** | [**O25**](#o25-two-instrument-spans-remain-on-per-query-paths) — two `#[instrument]` spans on per-query paths | Argued — but the cost is in the *uninstrumented* binary | S | — | Contained | no — needs a with/without capture |
-| **A6** | [**O34**](#o34-a-record-wider-than-the-staging-buffer-defeats-intent-log-batching) — a record wider than the intent log's staging buffer | **Asymptotic** — a step function of the row width | S–M | a `latency_buffer` sweep above the buffer | Contained | no — the sweep that names the setting runs at the one width where it cannot matter |
+| **A3** | [**O34**](#o34-a-record-wider-than-the-staging-buffer-defeats-intent-log-batching) — the intent log batches fewer records as rows widen | **Measured** — 1.22× at 64 KiB rows, disjoint intervals | S–M | ~~a `latency_buffer` sweep above the buffer~~ — discharged | Contained | **yes, it already has been** |
+| **A4** | [**O13**](#o13-a-multi-partition-get-is-quadratic-in-the-partitions-it-names) (+ [**O12**](#o12-to_blocked-clones-the-whole-filter-set-per-blocked-partition) beside it) — the quadratic multi-partition get | Asymptotic — O(n²) in a caller-set n | S | — | None | no — still needs a bench over `PersistentSortedTable::get` |
+| **A5** | [**O5**](#o5-the-hottest-maps-use-siphash), [**O14**](#o14-fixed-thousand-element-preallocations-on-per-call-paths), [**O28**](#o28-the-client-takes-two-guards-on-its-response-map-for-every-query-it-sends) — hasher, allocation sizes, and a doubled map guard | Argued | S | — | None | no — needs a table-layer bench, and O28 needs the client measured at all |
+| **A6** | [**O25**](#o25-two-instrument-spans-remain-on-per-query-paths) — two `#[instrument]` spans on per-query paths | Argued — but the cost is in the *uninstrumented* binary | S | — | Contained | no — needs a with/without capture |
 
-**A3 is now the head of the queue**, and it is the first one there that a profile cannot settle: it
-needs a benchmark over `PersistentSortedTable::get` that does not exist yet. A1 and A2 are struck
-rather than deleted because what each got wrong is the useful part — A1 claimed the narrow form
-needed no `unsafe`, and there is no such form; A2 accepted a rotation delay that turned out not to be
-necessary, and would have quietly changed what four tests exercise if it had been. See
-[O3](#o3-every-archived-read-is-fully-validated-inside-a-tracing-span) and
+**Do O34 first.** It moved from the bottom of this tier to the top on the strength of one capture,
+and it is now **the only entry on this page whose cost is both measured and contained**. Everything
+above it in the old ordering is still argued or asymptotic; everything with a comparable measurement
+behind it is XL, Major, or both. 1.22× on 64 KiB rows, S–M, one file, and part of the fix is a
+number in `shoal.yml`.
+
+Two cautions that come with it, both from the same capture. The measurement says the *shape* of the
+entry was wrong — the gain is in how many records share an aligned write, not in whether the record
+fits — so a default sized just above the widest expected row buys nothing and the fix has to be a
+multiple of the row or a self-sizing buffer. And the boundary at 4096 is still unbracketed, because
+the width axis jumps 1024 → 8192 around it.
+
+**A4 was the head of the queue until `f22-row-size`**, and it is the first one there that a profile
+cannot settle: it needs a benchmark over `PersistentSortedTable::get` that does not exist yet. A1
+and A2 are struck rather than deleted because what each got wrong is the useful part — A1 claimed
+the narrow form needed no `unsafe`, and there is no such form; A2 accepted a rotation delay that
+turned out not to be necessary, and would have quietly changed what four tests exercise if it had
+been. See [O3](#o3-every-archived-read-is-fully-validated-inside-a-tracing-span) and
 [O17](#o17-handle_flushed-runs-on-every-message).
 
-**A5 is new and comes out of doing A2.** It is ranked last in the tier despite being the smallest
-diff, because unlike everything else here its impact is argued rather than profiled — a span's cost
-is invisible to the profile that would normally rank it, which is precisely what makes it worth
-filing.
-
-**A6 is new and comes out of reading the row-size sweep.** It is the only entry in this tier whose
-impact is *Asymptotic*, and it is last because the quantity it grows in is one most callers never
-reach: below about four kilobytes a row it costs nothing at all. What makes it worth a slot rather
-than a footnote is that the sweep which appears to cover it does not — `latency_buffer` is swept at
-1 KiB, on the flat side of a step at 4096. See
-[Row size and what it costs](../tables/row-size.md).
+**A6 is ranked last despite being the smallest diff**, because unlike everything else here its
+impact is argued rather than profiled — a span's cost is invisible to the profile that would
+normally rank it, which is precisely what makes it worth filing.
 
 **Tier B — argued, contained, waiting on its benchmark.** The profile is what orders this tier:
 `write_helper` is 30.5 ms per call against roughly 350 ns for the insert it persists, so a write-path
@@ -131,15 +143,24 @@ so they get worse by existing longer rather than under load.
 | # | Entry | Impact | Diff | Depends on | Tradeoff | Adjudicable today |
 | --- | --- | --- | --- | --- | --- | --- |
 | **C1** | [**O1**](#o1-queries-are-fully-deserialized-on-arrival) — zero-copy the request half | Argued | L | a `wire_codec` bench; the `BytesMut` reaching the shard | Contained | no |
-| **C2** | [**O2**](#o2-every-returned-row-is-copied-at-least-twice) + [**O18**](#o18-the-gathered-reorder-rehashes-every-rows-partition-key), together | Argued — the largest read-path win available | **XL** | each other; a `wire_codec` bench | **Major** — wire format and the client | no |
+| **C1a** | [**O2**](#o2-every-returned-row-is-copied-at-least-twice) + [**O18**](#o18-the-gathered-reorder-rehashes-every-rows-partition-key), together — **now the largest established win** | **Measured per byte** — the response codec grows ×432.8 on decode, and `r100` says the read path owns the wide end | **XL** | each other; ~~a `wire_codec` bench~~ — discharged | **Major** — wire format and the client | **yes, on the per-byte half** |
 | **C3** | [**O30**](#o30-nothing-can-see-what-a-connection-costs-to-open) — the connect path is unmeasured | **Unknown, and that is the entry** | S for the workload, unknown for whatever it finds | a `connect` workload | — | **no, and that is the point** |
 | **C4** | [**O31**](#o31-the-disjointness-rule-cannot-tell-a-result-from-a-saturated-workload) — a saturated workload passes the rule that decides what is real | **Measured** — four points report encryption making queries faster | S to detect, M to decide | nothing | Contained | **yes, it already has been** |
-| **C5** | [**O35**](#o35-the-per-connection-response-relay-writes-one-response-at-a-time) — one response written at a time, per connection | Argued, indicated — a 45× p50-to-p99 spread at 512 KiB | M to reorder, **XL** to interleave | [D2](../direction/framing.md), for the interleaving form only | Contained, or **Major** | no — nothing separates it from the fixed load depth |
+| ~~**C5**~~ | ~~[**O35**](#o35-the-per-connection-response-relay-writes-one-response-at-a-time) — one response written at a time, per connection~~ — **moved to Tier D**, its evidence reattributed to load depth | ~~Argued, indicated — a 45× p50-to-p99 spread at 512 KiB~~ | M to reorder, **XL** to interleave | [D2](../direction/framing.md), for the interleaving form only | Contained, or **Major** | it was, and it came back negative |
+
+**C1a is where the largest win now sits, and it is still not actionable.** `f22-row-size` gave O2 a
+measurement on exactly the half that grows in what a caller controls, and the mixture sweep put the
+wide end of the axis on the read path — so for anyone storing rows of hundreds of kilobytes, the
+response copies are the thing. It stays in Tier C because nothing about the difficulty changed: it
+reaches the wire format and the client, it has to land with O18 or the format break is paid twice,
+and that is a design pass rather than a patch. **What changed is that the design pass is now worth
+scheduling**, which it was not while the entry was argued.
 
 **Tier D — declined, kept with the reason.** A rejected optimization is recorded, not dropped.
 
 | Entry | Why it is not in the queue |
 | --- | --- |
+| [**O35**](#o35-the-per-connection-response-relay-writes-one-response-at-a-time) | Was **C5** until `f22-row-size`. The 45× p50-to-p99 spread it was ranked on is queueing, not the relay: at one outstanding query the spread collapses to 1.3–2.5× at *every* width, including the 512 KiB arm the entry quoted. The mechanism is real and the entry keeps its reasoning, but it has no evidence of its own and nothing separates reordering the relay from simply not queueing thirty-two wide queries — which [Row size](../tables/row-size.md#what-to-do-today) now recommends with a factor of eighteen behind it. Declined on evidence, not on difficulty |
 | [**O20**](#o20-a-sort-key-get-reads-a-partition-it-may-not-need) | Makes the cost of a query depend on what happens to be resident, which turns a reproducible latency into a flaky one. Declined on determinism, not on difficulty |
 | [**O22**](#o22-recovery-loads-the-partitions-it-scanned-one-await-at-a-time) standalone | Startup path, and the set is normally small. It rides along with O8 in **B1** or it does not happen |
 | [**O16**](#o16-compaction-shares-the-shards-executor) | Not an actionable entry — it is a consequence of thread-per-core. Its effect on this page is that it **raises O8 and O9**, since it means their cost lands on query serving rather than in the background |
@@ -162,24 +183,26 @@ come out as a code block.
 | **`wire_codec` bench → O1, O2, O18** | Unbuilt ([TODOs](todos.md#benchmark-coverage-the-harness-does-not-have)) |
 | **table-layer bench → O5, O12, O13** | Unbuilt, and until recently believed to exist — see below. [F4](../features/validated-archives.md) closed half the gap by making `MaybeLoaded` constructible, but all three of these live a layer above it in `PersistentSortedTable` |
 | **write-path bench → O11, O21** | Unbuilt, and it is the layer that dominates the profile |
-| **a width-aware `latency_buffer` sweep → O34** | Unbuilt. The existing sweep runs at 1 KiB, below the step it would measure ([TODOs](todos.md#the-row-size-axis)) |
+| ~~**a width-aware `latency_buffer` sweep → O34**~~ | **Discharged.** Built by [F22](../features/row-size-benchmarks.md) and captured in `f22-row-size`; O34 is measured and O34's *shape* was corrected by it |
 | **O35 ↔ D2** | Only the interleaving form. Reordering the relay's queue needs no format change; splitting a response across frames is [D2](../direction/framing.md) |
-| **row width raises O1, O2, O11, O29** | All four are per-byte costs filed as constants. They do not get worse under load — they get worse per query as the caller's rows widen ([Row size](../tables/row-size.md)) |
+| **row width raises O1, O2, O11, O29** | All four are per-byte costs filed as constants. They do not get worse under load — they get worse per query as the caller's rows widen ([Row size](../tables/row-size.md)). **Measured for O1 and O2** by the codec width axis; still argued for O11 and O29, whose instrument is broken rather than absent |
+| **item 76 → O11, O29** | The per-stage breakdown is what would say which stage their copies live in. It ran at three widths and joined nothing ([item 76](known-issues.md#76-the-stage-layer-joins-nothing-for-any-grid-arm-and-reports-it-as-a-layer-that-ran)), so both are blocked on a defect rather than on unbuilt work |
+| **load depth → O35** | Not a dependency so much as the reason O35 left the queue: the depth-1 ladder explains its whole observation, so nothing can rank it until something measures the relay under a bounded queue |
 
 ### Which entries a benchmark can currently adjudicate
 
 | Entry | Benchmark that would show it |
 | --- | --- |
-| O1, O18, O19 | ~~none yet~~ `wire_codec/request/decode/{access,deserialize}/*` and the **width** axis beside it, `wire_codec/width/request/decode/*` ([F22](../features/row-size-benchmarks.md)) — the second is what measures the per-byte half, which is the half that grows in a quantity the caller controls. O18 and O19 are still uncovered: neither is about a payload width |
-| O2 | `partition_sorted/maybe_loaded/get_all` and `archived/walk_all`, with `get_all` for the resident twin; and `wire_codec/width/response/encode/*` for the per-byte half of the response build ([F22](../features/row-size-benchmarks.md)) |
+| O1, O18, O19 | ~~none yet~~ `wire_codec/request/decode/{access,deserialize}/*` and the **width** axis beside it, `wire_codec/width/request/decode/*` ([F22](../features/row-size-benchmarks.md)). **Captured.** The per-byte half is ×61.5 for `deserialize` and ×171.5 for `access` over 64 B → 64 KiB, against a control flat to 0.25%. O18 and O19 are still uncovered: neither is about a payload width |
+| O2 | `partition_sorted/maybe_loaded/get_all` and `archived/walk_all`, with `get_all` for the resident twin; and `wire_codec/width/response/*` for the per-byte half ([F22](../features/row-size-benchmarks.md)). **Captured, and it is the steepest curve in the micro layer** — decode ×432.8, encode ×72.2. The `r100` width sweep adds which half of the mixture pays it: the read path owns everything past ~64 KiB |
 | ~~O3, O23~~ | `partition_sorted/maybe_loaded/get_key` and `exists_key`, against `codec/access` — **settled**, see [F4](../features/validated-archives.md#performance) |
 | O5, O12 | **none yet** — an isolated bench over `PersistentSortedTable::get` is still unbuilt ([TODOs](todos.md#benchmark-coverage-the-harness-does-not-have)). `maybe_loaded/*` reaches `MaybeLoaded`, one layer below where both live |
 | O13 | ~~none yet~~ `macro/fanout/{resident,evicted}/n` since [F8](../features/purpose-built-workloads.md) — **the question, not the isolated cost**. See the note below |
 | O20 | none yet — a `routing` bench over `Ring::find_shard` and `split_by_shard` is unbuilt, and likewise belongs in the micro layer |
-| O11, O29 | the per-stage breakdown at 1 KiB, 8 KiB and 512 KiB ([F22](../features/row-size-benchmarks.md)), which says whether the copies they name are in `decode`, `durable_write` or `reply_serialize`; and the `r0` width sweep against the `r100` one, which says which half of the mixture they are on. Neither captured |
+| O11, O29 | the `r0` width sweep against the `r100` one — **captured**, and it says the write path owns the axis below ~64 KiB, which is where O11's three passes live. The per-stage breakdown that would say *which* stage they are in ran at three widths and **joined zero queries at all three** ([item 76](known-issues.md#76-the-stage-layer-joins-nothing-for-any-grid-arm-and-reports-it-as-a-layer-that-ran)), so the instrument is broken rather than missing. This is the only row in this table where a capture made things worse than an absent benchmark: an absent one is honest |
 | O21 | `hotpath` `fs::commit` and `stream::prep` only; no micro-benchmark of the write path exists, though [F8](../features/purpose-built-workloads.md) built the standalone binary that would host one |
-| O34 | ~~**none yet**~~ `macro/conf/storage/latency_buffer/r50/w8192/*` and `.../w65536/*` — the same five rungs above the staging buffer, against the five at 1 KiB below it ([F22](../features/row-size-benchmarks.md)). **Built and not yet captured**, so the 1.06× on [Configuration](../performance/configuration.md) is still the only number anywhere and is still measured at the one width whose answer is no |
-| O35 | ~~none~~ `macro/grid/depth/1/<width>` against the `r50` width sweep ([F22](../features/row-size-benchmarks.md)): a p99 that collapses at one outstanding query and not at thirty two is a queue in front of the relay rather than a cost inside it. Built, not captured — until then the sweep's percentiles are consistent with it and isolate nothing, because load depth was fixed at 32 at every width |
+| O34 | ~~**none yet**~~ ~~built and not yet captured~~ `macro/conf/storage/latency_buffer/r50/w8192/*` and `.../w65536/*` ([F22](../features/row-size-benchmarks.md)). **Captured, and it settled the entry**: 1.22× at 64 KiB rows on disjoint intervals against 1.06× at the reference cell — and it corrected the shape, because crossing the buffer threshold at 8 KiB bought nothing while 8–32 records per buffer bought 6%. The sweep that could not see this now can |
+| O35 | ~~none~~ ~~built, not captured~~ `macro/grid/depth/1/<width>` against the `r50` width sweep ([F22](../features/row-size-benchmarks.md)). **Captured, and it came back negative.** The test was the entry's own: a p99 that collapses at one outstanding query is a queue rather than a cost inside the relay. It collapses — 1.3–2.5× at every width against 37–52× at depth 32 — so the entry lost its evidence and left the queue |
 | O28, O30, O31 | none — **the client is not instrumented at all**. No `tracing` span, no `hotpath` scope, and no workload that isolates it. O30 is the only entry on this page whose cost is not even bounded by an argument |
 
 > This table previously claimed that `partition_sorted/insert` and `get_key` adjudicated **O5**,
@@ -225,12 +248,12 @@ come out as a code block.
 | | |
 | --- | --- |
 | **Rank** | **C1** — blocked on a design pass |
-| **Impact** | Argued — every `String`, `Vec` and filter in a bundle, per request |
+| **Impact** | **Measured per byte**, argued per call — `request/decode/deserialize` grows ×61.5 and `request/decode/access` ×171.5 over 64 B → 64 KiB, against a header-decode control flat to a quarter of a percent. The request half is the smaller one: the response's decode grows ×432.8 |
 | **Difficulty** | L — the `BytesMut` has to survive as far as the shard that executes the query |
 | **Depends on** | ~~A `wire_codec` bench~~ (built, [F10](../features/framing-and-protocol-evolution.md)); `ServerMsg::Query` giving up its owned `QueryKinds` |
 | **Blocks** | nothing |
 | **Tradeoff** | Contained — a lifetime on the query type, not a format change |
-| **Benchmark** | `wire_codec/request/decode`, which runs the validated `access`, the unchecked `access_unchecked` and the full `deserialize` as three separate functions at 1, 10 and 100 queries per bundle — so the gap between the second and the third is what this entry is worth |
+| **Benchmark** | `wire_codec/request/decode`, which runs the validated `access`, the unchecked `access_unchecked` and the full `deserialize` as three separate functions at 1, 10 and 100 queries per bundle — so the gap between the second and the third is what this entry is worth. **Plus `wire_codec/width/request/decode/*`** ([F22](../features/row-size-benchmarks.md)), which sweeps the same three at five row widths and is the half that grows in what the caller controls. Both captured in `f22-row-size` |
 
 ```rust
 // load our arhived query from buffer
@@ -271,12 +294,12 @@ a quantity the caller chooses — rather than as the *Argued* constant above. Se
 | | |
 | --- | --- |
 | **Rank** | **C2**, with O18 — the largest read-path win, and the largest change |
-| **Impact** | Argued — two copies per returned row, on every get |
+| **Impact** | **Measured per byte**, argued per row — the response codec grows ×432.8 on decode and ×72.2 on encode over 64 B → 64 KiB. And the `r100` sweep says the read path owns the wide end of the axis: at 4 MiB a pure-read mixture runs at 0.3% of its own 64 B rate against a pure write's 0.9% |
 | **Difficulty** | **XL** — `ResponseAction::Get` reaches the wire format and the client |
 | **Depends on** | O18, which changes the same shape; ~~a `wire_codec` bench~~ (built, [F10](../features/framing-and-protocol-evolution.md)) |
 | **Blocks** | O18 |
 | **Tradeoff** | **Major** — a wire-format break, and `FromShoal::retrieve`'s signature with it. **Cheaper than it was**: [F10](../features/framing-and-protocol-evolution.md) put a version byte and a schema fingerprint on the wire, so a format change is now a refused connection naming both sides rather than undefined behaviour |
-| **Benchmark** | `partition_sorted/archived/walk_all` and `get_all` bound the copies; `wire_codec/response/encode` and `/decode` at 16, 256, 1024 and 4096 rows are the wire half, which used to be uncovered |
+| **Benchmark** | `partition_sorted/archived/walk_all` and `get_all` bound the copies; `wire_codec/response/encode` and `/decode` at 16, 256, 1024 and 4096 rows are the wire half. **Plus `wire_codec/width/response/*`** at five row widths ([F22](../features/row-size-benchmarks.md)), which is the per-byte half and the steepest curve in the micro layer. Captured in `f22-row-size` |
 
 `SortedPartition::get` copies out of the `BTreeMap`:
 
@@ -636,7 +659,7 @@ instead of being owned by one.
 | **Depends on** | a storage write-path bench, which is [the biggest gap in the harness](todos.md#benchmark-coverage-the-harness-does-not-have) |
 | **Blocks** | nothing |
 | **Tradeoff** | None |
-| **Benchmark** | none — the layer that dominates the profile is the one with no confidence interval |
+| **Benchmark** | none usable. The per-stage breakdown at three widths was built and **run**, and joined zero queries at all three — [item 76](known-issues.md#76-the-stage-layer-joins-nothing-for-any-grid-arm-and-reports-it-as-a-layer-that-ran). Blocked on a broken instrument rather than a missing one |
 
 - `FileSystem::commit` (`.../fs.rs:367`) allocates via `RkyvSupport::serialize`, then copies the
   bytes a second time into the DMA buffer (`.../fs.rs:386`) — and hashes the whole record in
@@ -709,13 +732,13 @@ binary too. It is removed. The same reasoning applies to two more spans on hot p
 
 | | |
 | --- | --- |
-| **Rank** | **A6** — contained, and the cost grows in something the caller chooses |
-| **Impact** | **Asymptotic** — a step function of the row width. Below the buffer several records share one aligned write; at or above it, every record is its own DMA write and its own DMA allocation |
+| **Rank** | **A1** — the head of the queue. The only entry that moved from argued to measured with a contained fix |
+| **Impact** | **Measured** — **1.22×** across the sweep at 64 KiB rows (`256Ki` 2.46 ms against `4Ki` 2.82 ms, run intervals disjoint), against 1.06× at the reference cell. It grows with the row width, which is a quantity the caller chooses |
 | **Difficulty** | S–M — `prep`, `write` and `alloc_buffer` are one file, but whether the buffer should size itself from observed records or stay a configured floor is a decision rather than a patch |
-| **Depends on** | a `latency_buffer` sweep taken at a width above the buffer, which does not exist |
+| **Depends on** | ~~a `latency_buffer` sweep taken at a width above the buffer~~ — **discharged** by `f22-row-size` |
 | **Blocks** | any tuning advice about wide rows |
 | **Tradeoff** | Contained if the fix is a larger default — padding on a partial flush, and a larger DMA allocation per shard. A self-sizing buffer is a behaviour change and needs the decision above |
-| **Benchmark** | **none.** `macro/conf/storage/latency_buffer/*` exists and is swept at the reference cell's 1 KiB, which is the one width where the setting cannot matter |
+| **Benchmark** | `macro/conf/storage/latency_buffer/r50/w8192/*` and `.../w65536/*`, the same five rungs above the staging buffer ([F22](../features/row-size-benchmarks.md)). **Captured**, and it corrected the shape of this entry as well as sizing it |
 
 `StreamWriter::prep` flushes the staging buffer whenever the next record will not fit
 (`.../fs/stream.rs:655-665`):
@@ -738,22 +761,44 @@ and the committed `shoal.yml` sets `latency_sensitive.buffer_size: 4096`.
 
 So a table whose rows exceed about four kilobytes gets **one DMA write and one DMA buffer allocation
 per insert**, and the group commit that amortizes the durability barrier across concurrent writers
-has nothing left to group. The transition is a step at the buffer size, not a slope.
+has nothing left to group. ~~The transition is a step at the buffer size, not a slope.~~ **It is a
+slope, in records per buffer** — see below.
 
-**Why the sweep that names this setting says nothing about it.** `latency_buffer` comes back at
-1.06× with a `yes` in the *Real?* column, which reads as "worth six percent". It was swept at
-`macro/grid/unsorted/r50/1024` — 1 KiB rows against a 4096 byte buffer, where three records already
-share a write and growing the buffer buys the fourth. Every arm of the row-size sweep at 8 KiB and
-above is on the other side of the step, and none of them varies this setting. **The sweep is not
-wrong; it answers a question at the one width where the answer is no**, and that is a
-[gap in F20](todos.md#what-f20-left-undone) rather than a defect in the sweep.
+~~**Why the sweep that names this setting says nothing about it.**~~ It was swept at
+`macro/grid/unsorted/r50/1024` — 1 KiB rows against a 4096 byte buffer, which is the one width where
+the setting cannot bite — and came back at 1.06× with a `yes` in the *Real?* column. **The same five
+rungs now run at 8 KiB and 64 KiB** ([F22](../features/row-size-benchmarks.md)), and they settle it:
 
-The capture is consistent with the mechanism and does not isolate it: over the octave 1 KiB → 8 KiB
-the persistent arms lose 31% of their throughput while the ephemeral arms — the same tables with
-`NoStorage` and nothing else changed — lose 6%. That brackets a storage-side cost in the right place
-and does not prove it is this one, because the persistent half also pays more per byte for
-everything in [O11](#o11-a-fresh-alignedvec-per-write-and-per-response). See
-[Row size and what it costs](../tables/row-size.md#the-intent-log-stops-batching-past-the-staging-buffer).
+| Buffer | 1 KiB rows | 8 KiB rows | 64 KiB rows |
+| ---: | ---: | ---: | ---: |
+| `512` | 50,492 | 36,433 | 20,885 |
+| `4Ki` | 53,285 | 36,465 | 18,537 |
+| `16Ki` | 52,587 | 36,319 | 19,726 |
+| `64Ki` | 53,222 | 38,419 | 20,535 |
+| `256Ki` | 52,499 | 38,619 | **22,701** |
+
+**The entry is confirmed and its shape is wrong.** Confirmed: the setting is worth 1.22× at 64 KiB
+rows on disjoint run intervals, against 1.06× at the reference cell, so it does grow with the row
+exactly as the entry claimed. Wrong: the gain is not at the threshold. At 8 KiB rows, going from a
+buffer that cannot hold one record (`4Ki`) to one that holds two (`16Ki`) buys **nothing** — 36,465
+against 36,319 — and the gain arrives only at `64Ki` and `256Ki`, where 8 and 32 records share a
+write. What matters is how many records share an aligned write, not whether the record fits.
+
+**This changes the fix, not just the description.** A larger default sized to "just above the widest
+expected row" is the obvious patch and the measurement says it would buy nothing. The default has to
+be a multiple of the row, or the buffer has to size itself from what it observes — which is the
+decision in the *Difficulty* row, and it is now a decision with a number attached.
+
+The width axis corroborates the mechanism from the other side: over 1 KiB → 8 KiB the persistent
+arms lose 31% of their throughput while the ephemeral arms — the same tables with `NoStorage` and
+nothing else changed — lose 5%, and the `r0`/`r100` split says that octave is the **write** path
+(58.8% of its own 64 B rate against the read path's 96.7%). See
+[Row size and what it costs](../tables/row-size.md#the-intent-log-batches-fewer-records-as-rows-widen).
+
+**What is still not measured** is the boundary itself. The fixed widths jump 1024 → 8192 with
+nothing between them and the staging buffer sits at 4096 inside that gap, so a discontinuity there
+would be invisible. Two arms at 2 KiB and 4 KiB would bracket it
+([TODOs](todos.md#the-row-size-axis)).
 
 ---
 
@@ -1290,7 +1335,7 @@ below what the macro layer can see at all, and the honest place to adjudicate it
 | **Depends on** | nothing |
 | **Blocks** | nothing |
 | **Tradeoff** | Contained — a shape change inside the server, no format change |
-| **Benchmark** | none — `wire_codec` measures the codec, not the relay's allocation |
+| **Benchmark** | none usable — `wire_codec` measures the codec, not the relay's allocation, and the per-stage breakdown that would have located it joined nothing ([item 76](known-issues.md#76-the-stage-layer-joins-nothing-for-any-grid-arm-and-reports-it-as-a-layer-that-ran)) |
 
 ```rust
 // allocate a buffer that is exactly the right size
@@ -1325,13 +1370,13 @@ a quantity the caller chooses — rather than as the *Argued* constant above. Se
 
 | | |
 | --- | --- |
-| **Rank** | **C5** — blocked on the same design pass as the framing, and for the same reason |
-| **Impact** | Argued from the source, **indicated** by the capture — a 45× p50-to-p99 spread at 512 KiB on a fully resident table |
+| **Rank** | **Tier D** — declined for now. ~~**C5** — blocked on the same design pass as the framing.~~ The capture took its evidence away |
+| **Impact** | **Argued from the source only.** ~~Indicated by the capture — a 45× p50-to-p99 spread at 512 KiB on a fully resident table.~~ That spread is **queueing**: at one outstanding query it collapses to 1.7× at the same width, and to 1.3–2.5× at every width on the axis |
 | **Difficulty** | M as a scheduling change; **XL** if it reaches the framing |
 | **Depends on** | nothing to reorder; [D2](../direction/framing.md) to interleave |
 | **Blocks** | nothing |
 | **Tradeoff** | Contained while it stays a scheduling change. **Major** if the fix is chunking, because the protocol frames a response whole and splitting one is a format change |
-| **Benchmark** | none that isolates it. The row-size sweep's percentiles are consistent with it and the fixed load depth is an alternative explanation for part of the spread |
+| **Benchmark** | `macro/grid/depth/1/<width>` against the `r50` width sweep ([F22](../features/row-size-benchmarks.md)). **Captured, and it came back negative** — the alternative explanation turned out to be the whole explanation |
 
 `client_tx_relay` (`shard.rs:200`) is one task per client connection, and it is a serial loop: take a
 response off the channel, `write_vectored` it to completion, then look at the next one. Every shard's
@@ -1344,9 +1389,32 @@ while !bufs.is_empty() {
 ```
 
 So a response's wall clock is its own write plus every write already queued in front of it, and
-nothing orders that queue by size. At the reference width this is invisible — a 1 KiB response is
-gone in one syscall. At 512 KiB the persistent unsorted arm reads at a **333.55 µs p50 and a 15.19 ms
-p99**, against 2× at 8 KiB, on a table with nothing to load from disk.
+nothing orders that queue by size. ~~At 512 KiB the persistent unsorted arm reads at a 333.55 µs p50
+and a 15.19 ms p99, against 2× at 8 KiB, on a table with nothing to load from disk.~~
+
+**The depth-1 ladder refutes that reading.** The p50-to-p99 spread this entry was ranked on exists
+only at a load depth of 32:
+
+| Row | depth 1 | depth 32 |
+| ---: | ---: | ---: |
+| 8 KiB | 1.3× | 2.0× |
+| 32 KiB | 1.5× | 6.7× |
+| 64 KiB | 1.8× | **37.4×** |
+| 128 KiB | 1.8× | **52.0×** |
+| 512 KiB | 1.7× | 46.8× |
+| 4 MiB | 2.5× | 7.4× |
+
+A cost *inside* the relay would survive the collapse — one outstanding query still writes a 512 KiB
+response through the same serial loop, and it comes back at 119.37 µs p50 and 201.54 µs p99. It does
+not survive. The tail belongs to the queue thirty-two outstanding queries build in front of the
+relay, and this entry has no evidence of its own left.
+
+**Kept rather than deleted, and moved to Tier D.** The mechanism is still real — a wide response
+does block narrow ones behind it whenever a queue exists — and the reasoning that produced the entry
+was sound. What is gone is any reason to believe it is worth paying for: nothing separates the
+benefit of reordering the relay's queue from simply not queueing thirty-two wide queries, and
+[Row size](../tables/row-size.md#what-to-do-today) now recommends the latter with a factor of
+eighteen behind it. Reopen this when something measures the relay under a bounded queue.
 
 **Two fixes, and they are not the same size.** Reordering — serving the shortest queued response
 first, or round-robining across shards — is contained to this function and changes no format, but it
@@ -1355,7 +1423,7 @@ large response so a small one can pass it — actually removes the blocking and 
 a partial response, which is [D2](../direction/framing.md)'s territory. The cheap fix is worth
 measuring first, and neither is worth doing before something can see the difference.
 
-See [Row size and what it costs](../tables/row-size.md#a-wide-response-blocks-every-narrow-one-behind-it).
+See [Row size and what it costs](../tables/row-size.md#a-wide-response-blocks-every-narrow-one-behind-it--the-tail-was-the-queue).
 
 ---
 
