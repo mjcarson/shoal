@@ -158,13 +158,16 @@ any of them holds. There are two version constants now, and they move independen
   per buffer rather than at the buffer threshold, and the 45× tail the response relay was blamed for
   is load depth.
 - **The sixth benchmark did not run at all, and reported that it had.** All three stage reports
-  carry `joined: 0` and no ops; the client half of a stage record is written only by `drive_with`,
-  and a grid arm's measured phase uses `drive_mixed_per_query`, which has none of that wiring
-  ([item 76](../appendix/known-issues.md#76-the-stage-layer-joins-nothing-for-any-grid-arm-and-reports-it-as-a-layer-that-ran)).
+  carry `joined: 0` and no ops; the client half of a stage record was written only by `drive_with`,
+  and a grid arm's measured phase uses `drive_mixed_per_query`, which had none of that wiring
+  ([Resolved #76](../appendix/resolved/stage-join.md)).
   This is the failure this feature was least guarded against: `STAGED_WORKLOADS` has a test
-  asserting it matches what the workloads say, and nothing asserts that a workload on that list can
+  asserting it matches what the workloads say, and nothing asserted that a workload on that list can
   produce a joined record. **The pattern is worth taking from this**: every check written here was
-  about the *selection* being right, and the thing that broke was the *collection*.
+  about the *selection* being right, and the thing that broke was the *collection*. The fix took the
+  bookkeeping out of the one driver that had it and put it behind a type every driver holds, and
+  added the test that was missing — one that starts a server, runs a grid arm and reads what it
+  wrote. `f22-row-size`'s three reports are still empty; the instrument is not.
 - **Every existing grid capture stops describing the current code**, correctly: `grid.rs` moved, so
   the source fingerprint of every grid workload moved with it. That is the freshness table working,
   not breakage, and it is why the todo page said to batch these three items rather than take them

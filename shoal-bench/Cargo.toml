@@ -114,5 +114,12 @@ mimalloc = { workspace = true, optional = true }
 # so that nothing in the repository expires and invalidates a capture
 rcgen = { version = "0.13", default-features = false, features = ["crypto", "aws_lc_rs", "pem"], optional = true }
 
+# The stage layer against a live server. Feature gated the same way the report builder's own
+# eight tests are, because it needs a build that records stages at all - and because it starts a
+# server and drives it, which is not something a default `cargo test --workspace` should pay for.
+[[test]]
+name = "stage_join"
+required-features = ["stage-profile"]
+
 [dev-dependencies]
 tempfile = "3"

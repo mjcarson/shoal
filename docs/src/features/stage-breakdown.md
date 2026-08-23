@@ -124,10 +124,16 @@ while being none. Buckets are windows (0.5% of records, floor 100) around each r
 bucket states `unaccounted_ns` — the part of its mean total the stages did not explain. In the
 smoke capture that residual is under 100 ns on totals of 57 ms.
 
-**A warmup's records are dropped by epoch.** Threads buffer records before handing them over, so
-by the time the warmup ends most of its records are not yet reachable. Each record carries the
-epoch it was emitted in; `reset()` bumps the epoch, and records from an old one are discarded
-whenever they arrive.
+**A phase's records are dropped by epoch.** Threads buffer records before handing them over, so by
+the time a phase ends most of its records are not yet reachable. Each record carries the epoch it
+was emitted in; `reset()` bumps the epoch, and records from an old one are discarded whenever they
+arrive.
+
+~~This is what drops a warmup's records.~~ **`reset()` had no caller anywhere in the tree** until
+[Resolved #76](../appendix/resolved/stage-join.md), so the epoch stayed at zero and nothing was ever
+dropped. It is called now, once, between a workload's seed phase and its measured phase — which is
+what keeps tens of thousands of untimed setup writes out of a report about the measured queries. The
+warmup is still included; see **Limitations**.
 
 ## Alternatives rejected
 
@@ -155,7 +161,10 @@ portable. Every reading goes through a `Stamp` newtype instead, so buying it lat
 to one file.
 
 **Sampling independently on each side.** Nothing would join. `--stage-sample` is taken on the
-query index, and the server reads the same rate from `SHOAL_STAGE_SAMPLE`.
+query index, and the server reads the same rate from `SHOAL_STAGE_SAMPLE`. That is also why the flag
+does not bind on the one shot path, where a bundle holds one query whose index is always zero: both
+halves keep everything there, which is agreement rather than sampling
+([Resolved #76](../appendix/resolved/stage-join.md)).
 
 ## Limitations
 
@@ -177,7 +186,13 @@ query index, and the server reads the same rate from `SHOAL_STAGE_SAMPLE`.
   latencies are not comparable to a shipping build's, exactly as with `hotpath`. It must never be
   the source of a baseline number.
 - **Memory.** About 2.6 M records at ~96 bytes is roughly 250 MB for a full 100k-row run, plus
-  the client side. `--stage-sample 4` brings that under 65 MB.
+  the client side. `--stage-sample 4` brings that under 65 MB — **on the streaming path only**. A
+  workload driven a query at a time sends bundles of one, whose index is always zero, so both halves
+  keep every query however the flag is set. Filed in [TODOs](../appendix/todos.md).
+- **The warmup is included.** Both halves start recording with the first query, and there is no hook
+  between the warmup and the measured queries for `reset()` to hang off — the drivers do not expose
+  one. A report therefore covers the whole run rather than the part its latency samples cover.
+  Also in [TODOs](../appendix/todos.md).
 - **`durable_write` is not device latency.** With `write_behind` at 128 it is mostly queue depth.
   Reading it as "the SSD took 32 ms" would be wrong.
 
@@ -195,6 +210,11 @@ query index, and the server reads the same rate from `SHOAL_STAGE_SAMPLE`.
   join.
 - **The report is built after `pool.exit()`.** Before that, the shards' tails are still in
   thread-local buffers.
+- **`reset()` goes after the last server restart and before the measured phase.** Earlier and it
+  discards nothing; later and it discards the phase it was meant to keep.
+- **Every driver hands its halves to the `StageLog` on its `Measurement`.** The client side of a
+  record used to be gathered inline in one driver, and every workload measured through any other one
+  produced an empty report ([Resolved #76](../appendix/resolved/stage-join.md)).
 - **A build without the feature must refuse `--stage-json`, not write an empty file.** A stage
   report missing its entries reads as "this code was never called" — the same failure the
   `hotpath` `limit = 0` note records.

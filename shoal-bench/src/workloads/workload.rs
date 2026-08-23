@@ -165,9 +165,12 @@ pub struct Measurement {
     /// Handed back with the measurement rather than pushed to a global, so a workload that fails
     /// partway cannot leave half its records behind for the next one to pick up. The server half
     /// is drained from the shards after they shut down, and the two are joined by
-    /// [`crate::workloads::stages::build_report`].
-    #[cfg(feature = "stage-profile")]
-    pub stage_records: Vec<crate::workloads::stages::ClientRecord>,
+    /// `crate::workloads::stages::build_report`.
+    ///
+    /// Unconditional, and a zero sized type unless this is a profiling build. It was a
+    /// `#[cfg]`-gated `Vec` until [Resolved #76](../../../../docs/src/appendix/resolved/stage-join.md),
+    /// and a field only some builds have is a field only some drivers remember to fill.
+    pub stages: crate::workloads::stage_log::StageLog,
 }
 
 impl Measurement {
@@ -213,8 +216,7 @@ impl Measurement {
             self.count(&name, count);
         }
         // and keep every stage record both sides gathered
-        #[cfg(feature = "stage-profile")]
-        self.stage_records.extend(other.stage_records);
+        self.stages.absorb(other.stages);
     }
 }
 

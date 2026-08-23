@@ -123,6 +123,15 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
         stop(pool.take())?;
         pool = start(conf.clone(), &runtime, &addr)?;
     }
+    // throw away everything the seed phase stamped, so the report describes the measured phase
+    //
+    // seeding is untimed setup and its client half is already discarded - a workload's `seed`
+    // returns no measurement and has nowhere to put one. Without this the server's half of it
+    // survives into the report as tens of thousands of server only records, which reads like a
+    // join that failed rather than like a phase nobody asked about. It has to come after the
+    // restart above, or it throws away the phase it was meant to keep.
+    #[cfg(feature = "stage-profile")]
+    shoal::server::stage_profile::reset();
     // drive the workload, keeping the result rather than unwrapping it, so the server is stopped
     // on the failing path as well as the succeeding one
     let outcome = seeded.and_then(|()| {
@@ -280,20 +289,26 @@ fn write_stage_report(
     // join the two halves and summarize them
     let report = crate::workloads::stages::build_report(
         &server_records,
-        &measured.stage_records,
+        measured.stages.records(),
         request.label.clone(),
         Some(workload.id().to_string()),
         overhead,
     );
     // report what the join actually managed, since a report that matched half a run is not a
     // report about that run
+    //
+    // the unanswered count is printed beside them because it explains the server only ones: a
+    // query the driver sent and never saw a response for leaves the server's half of it with
+    // nothing to join to, which otherwise reads like a join that failed
     println!(
-        "stage profile: {} joined, {} server only, {} client only, {} duplicates, {} saturated",
+        "stage profile: {} joined, {} server only, {} client only, {} duplicates, {} saturated, \
+         {} unanswered",
         report.join.joined,
         report.join.server_only,
         report.join.client_only,
         report.join.duplicates,
-        report.join.saturated
+        report.join.saturated,
+        measured.stages.unanswered()
     );
     crate::workloads::stages::write_report(&report, path)
         .with_context(|| format!("failed to write {}", path.display()))?;

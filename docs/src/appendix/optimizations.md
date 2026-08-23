@@ -78,10 +78,11 @@ blocked on a benchmark rather than on any code, after `f22-row-size` discharged 
 **A benchmark that runs is not the same as a benchmark that answers**, and this page now has one
 instance of each failure. O35's ran and came back *negative* — it reattributed the entry's evidence
 to load depth and cost it its rank, which is the dependency working. O11 and O29's ran and returned
-*nothing*, because the layer it lives in joins no records for the workloads it was pointed at
-([item 76](known-issues.md#76-the-stage-layer-joins-nothing-for-any-grid-arm-and-reports-it-as-a-layer-that-ran)).
-The second is worse than having no benchmark, because the artifact it produced has the right shape
-and an empty middle. When a **Benchmark** row here says a capture exists, check that it joined.
+*nothing*, because the layer it lives in joined no records for the workloads it was pointed at
+([Resolved #76](resolved/stage-join.md)). The second is worse than having no benchmark, because the
+artifact it produced has the right shape and an empty middle. **When a Benchmark row here says a
+capture exists, check that it joined** — the collector checks that per report now rather than across
+the artifact, so a future capture cannot repeat it, but the committed ones were taken before that.
 
 ## The priority queue
 
@@ -191,7 +192,7 @@ come out as a code block.
 | ~~**a width-aware `latency_buffer` sweep → O34**~~ | **Discharged.** Built by [F22](../features/row-size-benchmarks.md) and captured in `f22-row-size`; O34 is measured and O34's *shape* was corrected by it |
 | **O35 ↔ D2** | Only the interleaving form. Reordering the relay's queue needs no format change; splitting a response across frames is [D2](../direction/framing.md) |
 | **row width raises O1, O2, O11, O29** | All four are per-byte costs filed as constants. They do not get worse under load — they get worse per query as the caller's rows widen ([Row size](../tables/row-size.md)). **Measured for O1 and O2** by the codec width axis; still argued for O11 and O29, whose instrument is broken rather than absent |
-| **item 76 → O11, O29** | The per-stage breakdown is what would say which stage their copies live in. It ran at three widths and joined nothing ([item 76](known-issues.md#76-the-stage-layer-joins-nothing-for-any-grid-arm-and-reports-it-as-a-layer-that-ran)), so both are blocked on a defect rather than on unbuilt work |
+| **a stage capture → O11, O29** | The per-stage breakdown is what would say which stage their copies live in. It ran at three widths and joined nothing, which was a defect and is [fixed](resolved/stage-join.md); the committed reports are still the empty ones, so both are blocked on a capture taken with the repaired instrument |
 | **load depth → O35** | Not a dependency so much as the reason O35 left the queue: the depth-1 ladder explains its whole observation, so nothing can rank it until something measures the relay under a bounded queue |
 
 ### Which entries a benchmark can currently adjudicate
@@ -204,7 +205,7 @@ come out as a code block.
 | O5, O12 | **none yet** — an isolated bench over `PersistentSortedTable::get` is still unbuilt ([TODOs](todos.md#benchmark-coverage-the-harness-does-not-have)). `maybe_loaded/*` reaches `MaybeLoaded`, one layer below where both live |
 | O13 | ~~none yet~~ `macro/fanout/{resident,evicted}/n` since [F8](../features/purpose-built-workloads.md) — **the question, not the isolated cost**. See the note below |
 | O20 | none yet — a `routing` bench over `Ring::find_shard` and `split_by_shard` is unbuilt, and likewise belongs in the micro layer |
-| O11, O29 | the `r0` width sweep against the `r100` one — **captured**, and it says the write path owns the axis below ~64 KiB, which is where O11's three passes live. The per-stage breakdown that would say *which* stage they are in ran at three widths and **joined zero queries at all three** ([item 76](known-issues.md#76-the-stage-layer-joins-nothing-for-any-grid-arm-and-reports-it-as-a-layer-that-ran)), so the instrument is broken rather than missing. This is the only row in this table where a capture made things worse than an absent benchmark: an absent one is honest |
+| O11, O29 | the `r0` width sweep against the `r100` one — **captured**, and it says the write path owns the axis below ~64 KiB, which is where O11's three passes live. The per-stage breakdown that would say *which* stage they are in ran at three widths and **joined zero queries at all three**; ~~so the instrument is broken rather than missing~~ that instrument is [repaired](resolved/stage-join.md) and a grid arm now reports all nineteen stages, so what is left is a capture. This was the only row in this table where a capture made things worse than an absent benchmark: an absent one is honest |
 | O21 | `hotpath` `fs::commit` and `stream::prep` only; no micro-benchmark of the write path exists, though [F8](../features/purpose-built-workloads.md) built the standalone binary that would host one |
 | ~~O34~~ | ~~**none yet**~~ ~~built and not yet captured~~ `macro/conf/storage/latency_buffer/r50/w8192/*` and `.../w65536/*` ([F22](../features/row-size-benchmarks.md)). **Captured, and it settled the entry**: 1.22× at 64 KiB rows on disjoint intervals against 1.06× at the reference cell — and it corrected the shape, because crossing the buffer threshold at 8 KiB bought nothing while 8–32 records per buffer bought 6%. The sweep that could not see this now can, and the entry it settled has been **acted on** ([F23](../features/self-sizing-staging-buffer.md)). The same arms re-judged the fix, in `f23-staging-buffer`, and the `w65536` rungs **converged**: 1.225× of spread became 1.010×, which is a sweep whose knob is now a floor under a ceiling having less to say the wider the rows get — the shape of a knob that stopped mattering |
 | O35 | ~~none~~ ~~built, not captured~~ `macro/grid/depth/1/<width>` against the `r50` width sweep ([F22](../features/row-size-benchmarks.md)). **Captured, and it came back negative.** The test was the entry's own: a p99 that collapses at one outstanding query is a queue rather than a cost inside the relay. It collapses — 1.3–2.5× at every width against 37–52× at depth 32 — so the entry lost its evidence and left the queue |
@@ -664,7 +665,7 @@ instead of being owned by one.
 | **Depends on** | a storage write-path bench, which is [the biggest gap in the harness](todos.md#benchmark-coverage-the-harness-does-not-have) |
 | **Blocks** | nothing |
 | **Tradeoff** | None |
-| **Benchmark** | none usable. The per-stage breakdown at three widths was built and **run**, and joined zero queries at all three — [item 76](known-issues.md#76-the-stage-layer-joins-nothing-for-any-grid-arm-and-reports-it-as-a-layer-that-ran). Blocked on a broken instrument rather than a missing one |
+| **Benchmark** | none usable yet. The per-stage breakdown at three widths was built and **run**, and joined zero queries at all three — ~~blocked on a broken instrument rather than a missing one~~. The instrument is [fixed](resolved/stage-join.md) and a grid arm now reports `client_serialize`, `client_pool` and `client_write` alongside the sixteen server side stages; the committed reports predate the fix, so this is blocked on a stage capture |
 
 - `FileSystem::commit` (`.../fs.rs:367`) allocates via `RkyvSupport::serialize`, then copies the
   bytes a second time into the DMA buffer (`.../fs.rs:386`) — and hashes the whole record in
@@ -1395,7 +1396,7 @@ below what the macro layer can see at all, and the honest place to adjudicate it
 | **Depends on** | nothing |
 | **Blocks** | nothing |
 | **Tradeoff** | Contained — a shape change inside the server, no format change |
-| **Benchmark** | none usable — `wire_codec` measures the codec, not the relay's allocation, and the per-stage breakdown that would have located it joined nothing ([item 76](known-issues.md#76-the-stage-layer-joins-nothing-for-any-grid-arm-and-reports-it-as-a-layer-that-ran)) |
+| **Benchmark** | none usable yet — `wire_codec` measures the codec, not the relay's allocation, and the per-stage breakdown that would have located it joined nothing. That is [fixed](resolved/stage-join.md); the committed reports predate the fix, so this is blocked on a stage capture |
 
 ```rust
 // allocate a buffer that is exactly the right size

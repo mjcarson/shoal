@@ -724,6 +724,26 @@ layer with nothing fetched ([F8](../features/purpose-built-workloads.md)). Still
 has neither `tracing` spans nor `hotpath` scopes, so the share of measured latency that is the
 harness's own is unknown.
 
+**`--stage-sample` does not bind on the per query path.** Both halves of a stage record sample on
+the query index, which is what makes them keep the same queries and gives the join something to work
+with. A workload driven a query at a time sends bundles of one, and a one query bundle's index is
+always zero — so `index % rate == 0` for every query however the rate is set, and both halves keep
+everything. That is agreement rather than a defect, and it is not what the flag says: the memory
+figure in [F6](../features/stage-breakdown.md)'s limitations does not apply to a grid arm at all.
+Fixing it properly means a key both halves can derive that is not the index — the driver's own
+sequence number would have to reach the server, which means the wire format. Cheaper and probably
+enough: refuse `--stage-sample` above 1 for a workload whose timing is `PerQuery`, so the flag fails
+rather than silently doing nothing. Found while fixing
+[item 76](resolved/stage-join.md).
+
+**A stage report covers the warmup as well as the measured queries.** Both halves start recording
+with the first query, and the latency samples start after the warmup, so the two describe different
+populations of the same run. `stage_profile::reset()` is exactly the mechanism that would fix it —
+it now has a caller, between a workload's seed phase and its measured phase — but there is no hook
+between the warmup and the queries after it, because the drivers count the warmup inline rather than
+announcing when it ends. Adding one means the drivers gaining a notion of a phase boundary, which
+nothing else currently wants. Also found while fixing [item 76](resolved/stage-join.md).
+
 ### The row-size axis
 
 Six benchmarks that between them would turn most of
@@ -735,7 +755,8 @@ were worth reaching for.
 
 **All six are built** ([F22](../features/row-size-benchmarks.md)) and `f22-row-size` **captured
 them**. Five answered; the sixth joined zero queries and answered nothing
-([item 76](known-issues.md#76-the-stage-layer-joins-nothing-for-any-grid-arm-and-reports-it-as-a-layer-that-ran)).
+([Resolved #76](resolved/stage-join.md)) — that instrument is fixed now, and the sixth answer is
+waiting on a capture taken with it rather than on the defect.
 Each entry below is struck through with what it turned out to cost, including the two places it cost
 more than it said, and now with what it said. What none of the six closes is at the end.
 

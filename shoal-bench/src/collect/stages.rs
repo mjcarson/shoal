@@ -69,41 +69,54 @@ pub fn collect(wrote: &[PathBuf], into: &Path) -> Result<StageReports> {
 
 /// Checks a stage artifact and describes what it holds
 ///
+/// **Each report is judged on its own count, not on the artifact's sum.** This used to take the
+/// sum, and the sum is what let a capture in which three of four workloads joined nothing pass:
+/// the one that worked contributed two hundred thousand joins, the three that did not contributed
+/// zero, and 71% of the records seen had a client half
+/// ([Resolved #76](../../../docs/src/appendix/resolved/stage-join.md)). A layer is only as good as
+/// its emptiest report, because every report in it is drawn as though it were a measurement.
+///
 /// # Arguments
 ///
 /// * `path` - The artifact to check
 pub fn check(path: &Path) -> Result<String> {
     let reports = crate::store::read_stage_reports(path)?;
-    let join = reports.join();
-    // a report that joined nothing is not a report
-    if join.joined == 0 {
-        bail!(
-            "{} joined no queries at all, so it is not a report about this run \
-             ({} server only, {} client only)",
-            path.display(),
-            join.server_only,
-            join.client_only
-        );
-    }
-    // and one that joined a small fraction of what it saw is describing a subset nobody chose
-    let seen = join.joined + join.server_only + join.client_only;
-    let ratio = join.joined as f64 / seen as f64;
-    if ratio < MIN_JOIN_RATIO {
-        bail!(
-            "{} joined only {} of {seen} records ({}), which is too few for the report to \
-             describe this run",
-            path.display(),
+    // describe each report as it is judged, so the caller prints one line per workload rather
+    // than one line for the whole layer
+    let mut described = Vec::with_capacity(reports.reports.len());
+    for (workload, report) in &reports.reports {
+        let join = &report.join;
+        // a report that joined nothing is not a report
+        if join.joined == 0 {
+            bail!(
+                "{} joined no queries at all for {workload}, so it is not a report about this \
+                 run ({} server only, {} client only)",
+                path.display(),
+                join.server_only,
+                join.client_only
+            );
+        }
+        // and one that joined a small fraction of what it saw is describing a subset nobody chose
+        let seen = join.joined + join.server_only + join.client_only;
+        let ratio = join.joined as f64 / seen as f64;
+        if ratio < MIN_JOIN_RATIO {
+            bail!(
+                "{} joined only {} of {seen} records for {workload} ({}), which is too few for \
+                 the report to describe this run",
+                path.display(),
+                crate::fmt::thousands(join.joined as u128),
+                crate::fmt::share_pct(ratio)
+            );
+        }
+        described.push(format!(
+            "{workload}: joined {}, server only {}, client only {}, duplicates {}",
             crate::fmt::thousands(join.joined as u128),
-            crate::fmt::share_pct(ratio)
-        );
+            join.server_only,
+            join.client_only,
+            join.duplicates
+        ));
     }
-    Ok(format!(
-        "joined {}, server only {}, client only {}, duplicates {}",
-        crate::fmt::thousands(join.joined as u128),
-        join.server_only,
-        join.client_only,
-        join.duplicates
-    ))
+    Ok(described.join("\n  "))
 }
 
 #[cfg(test)]
@@ -241,6 +254,44 @@ mod tests {
         let path = write_report(dir.path(), 100, 900, 0);
         let err = check(&path).expect_err("a mostly unjoined report is not about this run");
         assert!(format!("{err}").contains("too few"), "{err}");
+    }
+
+    /// A report that joined nothing is refused even beside one that joined everything
+    ///
+    /// This is `f22-row-size`'s shape, rebuilt: one workload joined two hundred thousand records
+    /// and three joined none, and the check took the sum, so 71% of the records seen had a client
+    /// half and the layer reported as healthy. Three of its four reports had an empty middle
+    /// ([item 76](../../../docs/src/appendix/resolved/stage-join.md)).
+    #[test]
+    fn a_report_that_joined_nothing_fails_beside_one_that_did() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let wrote = vec![
+            write_named(dir.path(), Some("macro/insert_unsorted"), 200_000),
+            write_named(dir.path(), Some("macro/grid/unsorted/r50/1024"), 0),
+        ];
+        let into = dir.path().join("L.stages.json");
+        collect(&wrote, &into).expect("collecting keeps both reports");
+        // the sum is healthy, and that is exactly what used to be checked
+        let artifact = crate::store::read_stage_reports(&into).expect("it reads back");
+        assert_eq!(artifact.join().joined, 200_000);
+        // the emptiest report is what decides, and it names itself
+        let err = check(&into).expect_err("a layer is only as good as its emptiest report");
+        assert!(format!("{err}").contains("macro/grid/unsorted/r50/1024"), "{err}");
+    }
+
+    /// Every report is described, not just whichever one the sum came from
+    #[test]
+    fn each_report_is_described_on_its_own() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let wrote = vec![
+            write_named(dir.path(), Some("macro/grid/unsorted/r50/1024"), 10),
+            write_named(dir.path(), Some("macro/insert_unsorted"), 20),
+        ];
+        let into = dir.path().join("L.stages.json");
+        collect(&wrote, &into).expect("it collects");
+        let described = check(&into).expect("both joined");
+        assert!(described.contains("macro/grid/unsorted/r50/1024"), "{described}");
+        assert!(described.contains("macro/insert_unsorted"), "{described}");
     }
 
     /// A handful of unmatched records is not a failure

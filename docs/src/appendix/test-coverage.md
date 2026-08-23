@@ -3,7 +3,20 @@
 What the test suite reaches, what it does not, and the one place where it is unsound.
 
 **Established by running it.** `cargo check --workspace --all-targets` passes with warnings and
-`cargo test --workspace` passes: **1,043 tests**, two ignored.
+`cargo test --workspace` passes: **1,045 tests**, two ignored, plus **12** behind
+`--features stage-profile` that a default run does not reach.
+
+**[Resolved #76](resolved/stage-join.md) added 6**, and it is the only change here to move the two
+counts in opposite proportions: 2 in a default run and 4 behind the feature. The default two are
+over `collect::stages::check`, which judged the stage layer on the artifact's summed join and now
+judges each report on its own — one of them rebuilds `f22-row-size`'s shape, where 200,000 joins
+from one workload carried three zeros past the threshold, and it passes against the tree before the
+fix. Three of the feature-gated four are unit tests over the `StageLog` every driver now gathers
+through. The fourth is `stage_join.rs`, a new integration binary and **the first test anywhere that
+starts a server under `stage-profile` and reads what it wrote**: it runs one grid arm at smoke scale
+and asserts the report has a join in it. The eight tests that existed before it are pure functions
+over `build_report` fed fabricated halves, which is why all eight passed while three of the layer's
+four reports were empty. The total went 1,043 → 1,045, and the feature-gated count 8 → 12.
 
 **[F23](../features/self-sizing-staging-buffer.md) added 7**, and the total went 1,036 → 1,043. Five
 are pure functions over `staging_target`, the rule that decides how wide a staging buffer is: that
@@ -118,11 +131,11 @@ should read this table rather than assume it was.
 | `shoal-proto` unit | 171 | the protocol, the SHQL parser, SCRAM, the TLS config — moved out of `shoal-core` |
 | `shoal-core` unit | 151 | the engine: partitions, storage, the shard. Was 323 before the split. Up 5 with [F23](../features/self-sizing-staging-buffer.md), all of them over the staging buffer's sizing rule |
 | `shoal-client` unit | 18 | the client read loop and its error routing, and — new with [F16](../features/client-builder.md) — the builder, the pool defaults and the endpoint order |
-| `shoal-bench` unit | 397 | the harness, the workloads, the charts, and — new with [F17](../features/workload-grid.md) and [F18](../features/results-pages.md) — the grid, the row-width and key generators, the family and page registries, and the two new chart kinds; and — new with [F19](../features/chart-legends.md) — the shared legend, the data-derived axis ticks, and the encryption charts in nanoseconds; and — new with [F20](../features/configuration-sweeps.md) and [F21](../features/benchmark-groups.md) — the configuration sweep, the group table, and `--group` in the registry; and — new with [F22](../features/row-size-benchmarks.md) — the three width passes, the configuration sweep's width repeats, both runner-side lists of profiled workloads, and the per-workload stage artifact |
+| `shoal-bench` unit | 399 | the harness, the workloads, the charts, and — new with [F17](../features/workload-grid.md) and [F18](../features/results-pages.md) — the grid, the row-width and key generators, the family and page registries, and the two new chart kinds; and — new with [F19](../features/chart-legends.md) — the shared legend, the data-derived axis ticks, and the encryption charts in nanoseconds; and — new with [F20](../features/configuration-sweeps.md) and [F21](../features/benchmark-groups.md) — the configuration sweep, the group table, and `--group` in the registry; and — new with [F22](../features/row-size-benchmarks.md) — the three width passes, the configuration sweep's width repeats, both runner-side lists of profiled workloads, and the per-workload stage artifact; and — new with [Resolved #76](resolved/stage-join.md) — that the stage layer's collector judges each report rather than their sum. **410 with `--features stage-profile`**, which adds the 8 over the report builder and 3 over the `StageLog` |
 | `shoal` integration | 199 | 15 binaries against a live server, one ignored. `pool.rs` is **new** with [F16](../features/client-builder.md) and `intent_log_batching.rs` with [F23](../features/self-sizing-staging-buffer.md) |
 | `shoalctl` integration | 34 | the completion menu, driven the way the key handler does |
 | `shoal-client-check` integration | 7 | **new.** A schema compiling and running against the client alone |
-| `shoal-bench` integration | 21 | committed artifacts, chart geometry, CSS sync. Up 2 with [F17](../features/workload-grid.md), both guarding the committed corpus against the four fields it added, and 2 more with [F19](../features/chart-legends.md) over the legend's layout |
+| `shoal-bench` integration | 21 | committed artifacts, chart geometry, CSS sync. Up 2 with [F17](../features/workload-grid.md), both guarding the committed corpus against the four fields it added, and 2 more with [F19](../features/chart-legends.md) over the legend's layout. **22 with `--features stage-profile`**, which adds `stage_join.rs` — the only test here that starts a server ([Resolved #76](resolved/stage-join.md)) |
 | doctests | 45 | up 9 with [F17](../features/workload-grid.md): the row profile's five, `Seeded::at`, `queries_for`, and the two byte formatters; one with [F19](../features/chart-legends.md) over the third; and 3 with [F21](../features/benchmark-groups.md) and [F20](../features/configuration-sweeps.md) over `human_duration`, `numeric` and the page's list formatter |
 
 The 8 added are the 7 in `shoal-client-check` and one in `hotpath_scopes`
@@ -147,7 +160,7 @@ config section, and 4 new doctests (`TlsClientOptions::new`, `Networking::tls`,
 `ClientOptions::tls`, and `Shoal::with_options`, the last `no_run` because it needs a server).
 5 more workload unit tests landed in `shoal-bench` over the encrypted transport arms.
 
-**Nine of these need the `tls` kernel module and skip loudly without it**, the same way the
+**Nine of these need the `tls` kernel module and skip loudly without it**, the same way the twelve
 `stage-profile` tests sit outside a default run: the 8 in `tls.rs` and
 `a_socket_reports_the_tls_ulp_once_it_is_attached`. That last one is the only assertion anywhere
 that can tell a kTLS socket from a plaintext one, which makes it the one that would catch the
@@ -220,7 +233,10 @@ tests to `shoal-bench` and removed 19 from `shoal`, and the removal is not lost 
   them is now `cargo test -p shoal-bench --features stage-profile` rather than
   `cargo test -p shoal --features stage-profile`, which is the crate a person working on the
   harness already runs. **That is a change of address, not a fix**: a default
-  `cargo test --workspace` still does not run them, and still would not notice if they broke.
+  `cargo test --workspace` still does not run them, and still would not notice if they broke. Nor
+  were they, on their own, coverage of the layer — all eight passed against a tree where three of
+  the four stage reports a capture produced had nothing in them, because all eight fabricate the
+  halves they join ([Resolved #76](resolved/stage-join.md), which added the four that do not).
 
 Before F8 it was up from 172, 219, and 11 with the 187 tests and 5 doctests
 [F7](../features/bench-runner.md) added — the whole of `shoal-bench`, which is testable in a way
@@ -292,7 +308,9 @@ are in [Optimizations](optimizations.md).
 | `committed_artifacts.rs` (`shoal-bench`) | 9 | that every artifact committed under `docs/perf/` still parses, that the frozen and trailing baselines differ by exactly the 24 `maybe_loaded` ids, that every pre-[F8](../features/purpose-built-workloads.md) macro capture still lifts to the single `macro/tmdb` workload with what it recorded intact, and that a field added to the version 1 shape fails a test naming it rather than being silently dropped. The drift alarm now applies to version 1 only: version 2 is written by the workloads in this crate out of these very structs, so there is no mirror left to drift |
 | `css_sync.rs` (`shoal-bench`) | 4 | that every chart colour sentinel has a `fill` and a `stroke` rule in `docs/theme/charts.css` and every rule there matches a sentinel — a sentinel with no rule is drawn literally, bright red on a navy page — and that the stylesheet is still registered in `book.toml` |
 | `chart_geometry.rs` (`shoal-bench`) | 6 | that no chart drawn from the real artifacts puts two labels on top of each other or draws outside its canvas. plotters is built without a font backend and estimates text extents, so this is the failure that no other test can see. Up 2 with [F19](../features/chart-legends.md): that a series is named exactly once, which is what an end label surviving would break, and that a legend entry's name stays with its own swatch rather than running under the next column — the only check anywhere on the width estimate the columns are laid out from |
-| `stages.rs` (`shoal-bench`) | 8, **feature gated** | the stage report: that a bucket's stage means reconcile with its total, that a bucket is a window rather than one record, that an unreached stage is not reported as an instant one, that a write reports its four durability stages, that every record is accounted for as joined, one-sided or duplicate, that a stage the size of a clock read is marked rather than reported, that a batch level cost is labelled, and that a report from another schema version is refused. **Only built with `--features stage-profile`** — a default `cargo test --workspace` does not run any of them. Run them with `cargo test -p shoal-bench --features stage-profile` |
+| `stages.rs` (`shoal-bench`) | 8, **feature gated** | the stage report: that a bucket's stage means reconcile with its total, that a bucket is a window rather than one record, that an unreached stage is not reported as an instant one, that a write reports its four durability stages, that every record is accounted for as joined, one-sided or duplicate, that a stage the size of a clock read is marked rather than reported, that a batch level cost is labelled, and that a report from another schema version is refused. **Only built with `--features stage-profile`** — a default `cargo test --workspace` does not run any of them. Run them with `cargo test -p shoal-bench --features stage-profile`. Every one of these passed while three of the layer's four reports were empty, because every one of them fabricates the halves it joins |
+| `stage_log.rs` (`shoal-bench`) | 3, **feature gated** | **new** with [Resolved #76](resolved/stage-join.md): that a query sent and never answered is counted rather than dropped when the driver returns, that two slots' logs pool into one — which every per query driver depends on — and that the streaming path keeps one query in every `--stage-sample`, the same rule the server applies |
+| `stage_join.rs` (`shoal-bench`) | 1, **feature gated** | **new** with [Resolved #76](resolved/stage-join.md), and the one test here that starts a server: one grid arm at smoke scale under `stage-profile`, asserting the report has a join in it, that neither half is one-sided, that both halves of the mixture produced a breakdown, and that a bucket has stages in it. It fails against the tree before the fix with `joined: 0`, which is the whole defect. This is the check the layer never had — that a workload on `STAGED_WORKLOADS` can actually produce a joined record, as opposed to being correctly listed |
 
 The restart, eviction, and `SIGKILL` tests are the valuable ones: they are the only tests that
 exercise durability end to end, and they exist because

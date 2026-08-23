@@ -371,6 +371,14 @@ impl Transport {
     /// [`driver::drive_per_query`] sends one query at a time, so neither of them exercises the call
     /// this mode is about: a bundle handed to `send` and drained to its end.
     ///
+    /// **It is also the one loop here that gathers no stage records.** Every driver in
+    /// [`driver`](crate::workloads::harness::driver) hands its halves to a
+    /// [`StageLog`](crate::workloads::stage_log::StageLog); this one does not, because no
+    /// transport arm is on `STAGED_WORKLOADS` and `Shoal::send` would have to be swapped for
+    /// `send_stamped` to give it one. Putting an arm on that list means doing that first, or the
+    /// layer reports an arm that ran and joined nothing
+    /// ([Resolved #76](../../../../docs/src/appendix/resolved/stage-join.md)).
+    ///
     /// # Arguments
     ///
     /// * `client` - The client to send on

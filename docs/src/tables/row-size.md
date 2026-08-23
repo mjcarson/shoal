@@ -15,8 +15,11 @@ the benchmark that would settle it was built and had not been run. `f22-row-size
 six ([F22](../features/row-size-benchmarks.md)). Two of the four mechanisms survive with a
 measurement behind them, one survives with its *shape* corrected, one is **refuted** — the tail it
 was filed on turns out to be queueing — and the sixth benchmark did not run at all
-([item 76](../appendix/known-issues.md#76-the-stage-layer-joins-nothing-for-any-grid-arm-and-reports-it-as-a-layer-that-ran)).
-Where a claim changed, the old one is struck through and kept beside what replaced it.
+([Resolved #76](../appendix/resolved/stage-join.md)). That sixth instrument has since been
+**repaired**, and a grid arm's stage report now has a breakdown in it — but no capture has been
+taken with the repaired one, so everything below that waited on it is waiting on a capture rather
+than on a defect. Where a claim changed, the old one is struck through and kept beside what
+replaced it.
 
 ## The shape
 
@@ -166,12 +169,14 @@ copies, for anyone whose rows are hundreds of kilobytes.
 
 *Evidence: the per-byte growth of the codec is **measured**, with criterion's confidence interval,
 and the mixture split is measured against the persistent unsorted table. Which of the nineteen
-stages the remaining copies live in is still unknown, and worse than unknown: the per-stage
+stages the remaining copies live in is still unknown. ~~And worse than unknown: the per-stage
 breakdown at three widths was built, was run, and **joined nothing** — all three reports carry
 `joined: 0` and no ops at all, because the client half of a stage record is only written by a driver
-the grid arms do not use. Filed as
-[item 76](../appendix/known-issues.md#76-the-stage-layer-joins-nothing-for-any-grid-arm-and-reports-it-as-a-layer-that-ran).
-O11 and O29 are therefore blocked on a broken instrument rather than a missing one.*
+the grid arms do not use.~~ That was [item 76](../appendix/resolved/stage-join.md) and it is
+**fixed**: a grid arm profiled today reports all nineteen stages for both halves of its mixture. The
+three reports in `f22-row-size` are still empty, because the fix repairs the instrument and not the
+artifacts taken with the broken one, so O11 and O29 are now blocked on a capture rather than on a
+defect.*
 
 ### The intent log batches fewer records as rows widen
 
@@ -328,10 +333,12 @@ At 4 MiB, roughly eighteen nineteenths of the observed read latency was queue ra
 ~~**The axis is swept at `r50` only.**~~ **Answered.** Swept at `r0` and `r100` on all four tables,
 and the two halves own different parts of the axis — write below ~64 KiB, read above it.
 
-~~**Nothing says which of the nineteen stages grows with the bytes.**~~ **Still nothing does**, and
-for a worse reason than before: the stage layer ran at three widths and joined *zero* queries at all
-three, so the question was never asked rather than asked and unanswered
-([item 76](../appendix/known-issues.md#76-the-stage-layer-joins-nothing-for-any-grid-arm-and-reports-it-as-a-layer-that-ran)).
+~~**Nothing says which of the nineteen stages grows with the bytes.**~~ **Still nothing does**, but
+no longer for a worse reason than before: the stage layer ran at three widths and joined *zero*
+queries at all three, so the question was never asked rather than asked and unanswered. That was a
+defect and it is [fixed](../appendix/resolved/stage-join.md) — a grid arm profiled against the
+current tree reports all nineteen stages — so this is back to being an unanswered question waiting
+on a capture, which is the ordinary kind.
 
 What still stands:
 
@@ -389,7 +396,7 @@ did not run at all.** Ordered as they were filed, cheapest first.
 | 3 | Where the knee is | **Answered, and it was not where the question assumed.** Throughput falls smoothly; the tail peaks at 52× at 128 KiB and recovers past it |
 | 4 | How much of a wide arm was queue rather than service | **Answered, and it was most of it.** The p99/p50 spread is 1.3–2.5× at every width at depth 1. Eighteen nineteenths of the 4 MiB read latency was queue |
 | 5 | Which half of the mixture the per-byte cost is on | **Answered, and it is both, in different places.** Write below ~64 KiB, read above it |
-| 6 | **Which** of the nineteen stages grows with bytes | **Did not run.** All three reports joined zero queries — [item 76](../appendix/known-issues.md#76-the-stage-layer-joins-nothing-for-any-grid-arm-and-reports-it-as-a-layer-that-ran) |
+| 6 | **Which** of the nineteen stages grows with bytes | **Did not run.** All three reports joined zero queries — a defect, since [fixed](../appendix/resolved/stage-join.md). Waiting on a capture taken with the repaired instrument |
 
 **What this changed in the priority queue.** O34 moved from argued to measured with a contained fix,
 became the head of Tier A, and has since been **built** as

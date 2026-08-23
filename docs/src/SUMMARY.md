@@ -132,6 +132,7 @@
   - [67, 68. Chart labels collided, and the scope prefix strip never matched](appendix/resolved/chart-labels.md)
   - [73. Two instrumented runs wrote to one artifact, and the last one won](appendix/resolved/stage-artifact-overwrite.md)
   - [74. A configuration knob the page did not name disappeared from it](appendix/resolved/conf-knob-dropped.md)
+  - [76. The stage layer joined nothing for any grid arm](appendix/resolved/stage-join.md)
 - [TODOs and Unbuilt Work](appendix/todos.md)
 - [Review, August 2026](appendix/review-2026-08.md)
 - [Glossary](appendix/glossary.md)

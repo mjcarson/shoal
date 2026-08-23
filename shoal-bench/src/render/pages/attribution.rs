@@ -135,9 +135,17 @@ fn stages(page: &Page) -> Result<String> {
             out.push_str(&format!("{shown}\n\n"));
         }
     }
+    // the drawn report's own join, not the artifact's sum. the sum is across every workload the
+    // layer profiled and this page draws one of them, so a capture whose other reports joined
+    // nothing would have this page reporting their absence as its own evidence
+    // ([Resolved #76](../../../docs/src/appendix/resolved/stage-join.md))
     out.push_str(&format!(
-        "The client and server halves joined on {} queries.\n\n",
-        fmt::thousands(reports.join().joined as u128)
+        "The client and server halves of `{}` joined on {} queries.\n\n",
+        report
+            .workload
+            .as_deref()
+            .unwrap_or(crate::model::stages::LEGACY_STAGE_WORKLOAD),
+        fmt::thousands(report.join.joined as u128)
     ));
     // one chart and one table per operation the report covers
     for op in ["insert", "get"] {

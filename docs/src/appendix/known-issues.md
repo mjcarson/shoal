@@ -6,10 +6,11 @@ the symptom, the cause, and a `file:line`.
 **How these were established.** Almost everything here comes from reading the source. Entries
 that were later confirmed by reproduction say so on their resolved page, and item 14 was the last
 one on this page to carry that note before it moved
-([Resolved #14](resolved/empty-rotated-logs.md#evidence)). Items 75 and 76 are the exception and
-say so in their own **Evidence** notes: both were found by reading a committed capture artifact
-against the page generated from it, which is a third way of finding a defect that this list had no
-instance of until `f22-row-size` was taken.
+([Resolved #14](resolved/empty-rotated-logs.md#evidence)). Item 75 is the exception and says so in
+its own **Evidence** note: it was found by reading a committed capture artifact against the page
+generated from it, which is a third way of finding a defect that this list had no instance of until
+`f22-row-size` was taken. Item 76 was found the same way and is now
+[resolved](resolved/stage-join.md), where its note records the run that reproduced it.
 
 **Line numbers drift, and they had.** Every citation on this page was re-resolved against the tree
 in August 2026 ([Review](review-2026-08.md)) and most of them had moved — item 16's whole table by
@@ -30,7 +31,7 @@ test suite does and does not reach is in [Test Coverage](test-coverage.md).
 Defects that have been fixed move to [Resolved Issues](resolved-issues.md), one page each,
 carrying the reasoning and the invariants the fix depends on. Item numbers are shared between
 the two pages and never reused, so a number appears on exactly one of them — which is why this
-list starts at 15 and skips 25, 26, 31, 34, 39, 44, 45, 48, 51, 56, 57, 61, 67, 68 and 74, and
+list starts at 15 and skips 25, 26, 31, 34, 39, 44, 45, 48, 51, 56, 57, 61, 67, 68, 74 and 76, and
 why item 77 is both the newest number and the newest entry here. The exceptions are items 16, 17, 20, 24, 54 and 73, which were only
 partly fixed: the open remainder is here and the rest is there. Items 9 and 51 were each one such
 exception until their second half was fixed, and are now on the resolved page alone; item 25 was one
@@ -38,18 +39,22 @@ in the other direction — it had one row left open, that row was fixed, and the
 [moved](resolved/claude-md-drift.md).
 
 **Baseline as of writing:** `cargo check --workspace --all-targets` passes with warnings;
-`cargo test --workspace` passes — 1,043 tests, two ignored, plus 8 more behind
+`cargo test --workspace` passes — 1,045 tests, two ignored, plus 12 more behind
 `--features stage-profile` that a default run does not reach ([Test Coverage](test-coverage.md)).
+[Resolved #76](resolved/stage-join.md) added 6, and moved the count in both directions at once: 2
+in a default run and 4 behind the feature, including the first test anywhere that starts a server
+under `stage-profile` and reads what it wrote. That is the test the stage layer never had, and its
+absence is why three of four reports in `f22-row-size` were empty.
 [F22](../features/row-size-benchmarks.md) added 21, two of which reproduce items 73 and 74 and fails against
 the tree before its fix. [F23](../features/self-sizing-staging-buffer.md) added 7, one of which
 reproduces [O34](optimizations.md) and fails against the tree before its fix — the first entry from
 the optimizations page ever reproduced by a test rather than argued from source and sized by a
 capture.
 **Unchanged by the `f22-row-size` capture**, which added no tests and moved no count, and which is
-where items [75](#75-a-control-that-was-measured-at-every-width-is-not-drawn-and-the-caption-says-it-is)
-and [76](#76-the-stage-layer-joins-nothing-for-any-grid-arm-and-reports-it-as-a-layer-that-ran)
-came from — both read out of the committed artifact rather than out of the source, which is the
-reverse of how everything above them was found and the reason neither was caught earlier.
+where item [75](#75-a-control-that-was-measured-at-every-width-is-not-drawn-and-the-caption-says-it-is)
+and [item 76](resolved/stage-join.md) came from — both read out of the committed artifact rather
+than out of the source, which is the reverse of how everything above them was found and the reason
+neither was caught earlier.
 **Unchanged by `f23-staging-buffer` too**, which is where
 [item 77](#77-a-macro-only-capture-can-never-reach-the-pages-it-was-taken-for) came from — found by
 rendering the pages with that capture committed and noticing that none of them drew it. A third way
@@ -1585,60 +1590,6 @@ avoid: quietly deleting the sentence, which loses the fact that the axis *has* a
 holds. This is also the second instance of what [F18](../features/results-pages.md) filed as a
 limitation — nothing checks that a page's prose still describes what it draws — after the four
 caption drift found by grep in `0851a22`.
-
-### 76. The stage layer joins nothing for any grid arm, and reports it as a layer that ran
-
-`shoal-bench/src/workloads/harness/driver.rs:180-261`, `drive_with`; `shoal-bench/src/workloads/grid.rs:839`, `:863`
-
-[F22](../features/row-size-benchmarks.md) pointed the stage layer at three widths of the grid so
-that something could say **which** of the nineteen stages grows with the row. All three produced
-nothing. From `f22-row-size.stages.json`:
-
-| Report | joined | server only | client only | ops |
-| --- | ---: | ---: | ---: | --- |
-| `macro/grid/unsorted/r50/1024` | **0** | 40,001 | 0 | `{}` |
-| `macro/grid/unsorted/r50/8192` | **0** | 40,001 | 0 | `{}` |
-| `macro/grid/unsorted/r50/524288` | **0** | 1,025 | 0 | `{}` |
-| `macro/insert_unsorted` | 200,000 | 1 | 0 | `insert` |
-
-Every server-side record was discarded for want of a client half, and the capture's `join` block
-sums to `joined: 200000` — all of it from the one workload that is not on the width axis, and none
-of it from the three that are.
-
-The client half of a stage record is built in exactly one place. `drive_with` keeps a `submitted`
-map, fills it as each bundle is sent and closes each record out when the matching response arrives
-(`driver.rs:212-261`); every `#[cfg(feature = "stage-profile")]` block in that file is inside it. A
-grid arm's *measured* phase does not go through it — it calls `drive_mixed_per_query`
-(`grid.rs:863`), which has no stage wiring at all, so `measured.stage_records` comes back empty. The
-arm's *seed* phase does call `drive_with` (`grid.rs:839`), but the call site discards the
-`Measurement` it returns, so those records are dropped before anything can join them.
-
-The server is unaffected and keeps stamping every sampled query, which is why the failure looks like
-a layer that ran. The artifact has the right schema, four reports with the right workload names, a
-plausible join block, and no data in three of them.
-
-**This is the same class of defect as [item 73](#73-the-hotpath-layers-artifact-is-shared-between-the-workloads-that-write-it)**
-and was missed for the same reason: the check that a stage report exists is not a check that it
-contains anything. `STAGED_WORKLOADS` and `Workload::stage_profiles` were split from the hotpath
-list so the stage layer could see three widths, and a test asserts the runner's copy of that list
-matches what the workloads say — but no test asserts that a workload on that list can actually
-produce a joined record.
-
-**Evidence: established from the committed artifact**, then traced to the two call sites. Not
-reproduced against a fresh run, because a `stage-profile` capture of these three arms is what would
-reproduce it and that is the thing that does not work.
-
-**Fix direction:** move the stage-record bookkeeping out of `drive_with` and into something both
-drivers use, rather than copying the block into `drive_mixed_per_query` — there are four `drive_*`
-entry points and the next one added would have the same hole. The seed phase's records should be
-dropped deliberately rather than incidentally: they are untimed setup, and folding them into a
-report about the measured phase would be worse than having none. Then the test that is missing is
-the one that would have caught this — a smoke-scale `stage-profile` run of one grid arm asserting
-`joined > 0`, which is cheap and needs no capture. Until then, every **Benchmark** row in
-[Optimizations](optimizations.md) that names the per-stage breakdown is naming something that
-cannot answer, and [O11](optimizations.md#o11-a-fresh-alignedvec-per-write-and-per-response) and
-[O29](optimizations.md#o29-a-request-body-is-zeroed-and-then-immediately-overwritten) are blocked on
-a broken instrument rather than on a missing one.
 
 ### 77. A macro-only capture can never reach the pages it was taken for
 

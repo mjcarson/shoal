@@ -15,6 +15,17 @@
 //! two a number came from, and a comparison never joins one to the other.
 //!
 //! The number worth reading off a per batch workload is its wall clock.
+//!
+//! # Every driver here gathers its stage records the same way
+//!
+//! Each of them hands what it sent and what came back to
+//! [`Measurement::stages`](crate::workloads::workload::Measurement::stages), which is a
+//! [`StageLog`](crate::workloads::stage_log::StageLog) and is a zero sized type unless this is a
+//! profiling build. That is deliberate and it is load bearing: the bookkeeping used to live inline
+//! in [`drive_with`] and nowhere else, so every workload whose measured phase ran through one of
+//! the per query drivers produced a stage report with nothing in it
+//! ([Resolved #76](../../../../docs/src/appendix/resolved/stage-join.md)). A driver added here
+//! that forgets to call the log has the same hole, so calling it is part of writing one.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -176,16 +187,9 @@ where
     let mut measured = Measurement::default();
     // when each outstanding batch was sent, keyed by the index of its first query
     let mut sent_at: std::collections::BTreeMap<usize, Instant> = std::collections::BTreeMap::new();
-    // the client half of each sampled query, waiting for its response to close it out
-    #[cfg(feature = "stage-profile")]
-    let mut submitted: std::collections::HashMap<usize, crate::workloads::stages::ClientRecord> =
-        std::collections::HashMap::new();
     // every query this driver sends shares one stream id, so it is the index beside it that makes
     // a record's key unique
-    #[cfg(feature = "stage-profile")]
     let stream_id = queries_tx.id;
-    #[cfg(feature = "stage-profile")]
-    let stage_sample = crate::workloads::stages::sample_rate();
     let mut in_flight = 0usize;
     let mut answered = 0u64;
     let mut drained = false;
@@ -200,36 +204,12 @@ where
                     sent_at.insert(base, Instant::now());
                     // these stamps are a zero sized type unless this is a profiling build, so a
                     // caller that ignores them pays nothing for them
-                    #[cfg_attr(not(feature = "stage-profile"), allow(unused_variables))]
                     let stamps = queries_tx
                         .send(batch.queries)
                         .await
                         .context("failed to send a batch")?;
-                    // record the client side of every sampled query in this bundle
-                    //
-                    // every stage in `stamps` is paid once for the whole bundle and shared by
-                    // every query in it, which is why the report labels them as batch level
-                    #[cfg(feature = "stage-profile")]
-                    for offset in 0..count {
-                        let index = base + offset;
-                        // sample on the index, so the server keeps the same queries and the two
-                        // halves still have something to join on
-                        if index % stage_sample == 0 {
-                            submitted.insert(
-                                index,
-                                crate::workloads::stages::ClientRecord {
-                                    id: stream_id,
-                                    index,
-                                    submitted: stamps.entered,
-                                    serialized: stamps.serialized,
-                                    pooled: stamps.pooled,
-                                    written: stamps.written,
-                                    // filled in when this query's response comes back
-                                    arrived: stamps.written,
-                                },
-                            );
-                        }
-                    }
+                    // open the client side record of every sampled query in this bundle
+                    measured.stages.sent(stream_id, base, count, stamps);
                     in_flight += count;
                 }
                 // no more work, so stop topping up and drain what is outstanding
@@ -251,15 +231,7 @@ where
         };
         in_flight = in_flight.saturating_sub(1);
         // close out this query's client side record
-        //
-        // the arrival stamp comes off the response itself rather than being read here, so a
-        // response that waited in a channel is charged for that wait rather than having it hidden
-        // in the gap between the socket and this loop picking it up
-        #[cfg(feature = "stage-profile")]
-        if let Some(mut record) = submitted.remove(&response.get_index()) {
-            record.arrived = response.stamps().arrived();
-            measured.stage_records.push(record);
-        }
+        measured.stages.answered(&response);
         // a query that failed makes every number after it meaningless, so stop rather than
         // recording a fast response that did nothing
         response
@@ -382,11 +354,16 @@ where
                 }
                 // one timestamp either side of one query, which is what makes this a service time
                 let started = Instant::now();
-                let response = client
-                    .send_one(build(index))
+                // the stamps are a zero sized type unless this is a profiling build, so the
+                // stamped call costs a caller that is not profiling nothing over the plain one
+                let (response, stamps) = client
+                    .send_one_stamped(build(index))
                     .await
                     .context("a query failed")?;
                 let elapsed = started.elapsed();
+                // this query's client side record, opened and closed in one call because a bundle
+                // of one is answered by exactly one response
+                measured.stages.one(stamps, &response);
                 // count the rows that came back, whatever kind of row they are
                 let rows = rows_in(&response);
                 measured.count("retrieved", rows);
@@ -470,8 +447,16 @@ where
                 let (op, query) = build(index);
                 // one timestamp either side of one query, which is what makes this a service time
                 let started = Instant::now();
-                let response = client.send_one(query).await.context("a query failed")?;
+                // the stamps are a zero sized type unless this is a profiling build, so the
+                // stamped call costs a caller that is not profiling nothing over the plain one
+                let (response, stamps) = client
+                    .send_one_stamped(query)
+                    .await
+                    .context("a query failed")?;
                 let elapsed = started.elapsed();
+                // this query's client side record, opened and closed in one call because a bundle
+                // of one is answered by exactly one response
+                measured.stages.one(stamps, &response);
                 // count the queries by what they were, and the rows by what came back
                 match response.kind() {
                     ResponseActionNames::Insert => {

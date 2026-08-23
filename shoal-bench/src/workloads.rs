@@ -35,6 +35,10 @@ pub mod insert_ephemeral;
 pub mod insert_unsorted;
 pub mod keyed_get;
 pub mod schema;
+// the client half of a run's stage records, which every driver gathers the same way. always
+// compiled, unlike the report builder below it: it is a zero sized type without the feature, and
+// that is what lets a `Measurement` hold one and a driver call into it with no `#[cfg]` of its own
+pub mod stage_log;
 // only a build with the feature has any stage records to report on. the artifact it writes is
 // modelled in `crate::model::stages`, which is always compiled, because the runner has to read a
 // committed report whether or not this build could have produced one.

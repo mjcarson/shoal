@@ -836,7 +836,20 @@ impl Workload for Grid {
             // the gate is bounded in bytes rather than queries, since a bundle of wide rows holds
             // as much memory as a get's responses do
             let gate = (BUDGET_BYTES / profile.widest().max(1)).clamp(8, 1024) as usize;
-            driver::drive_with(&client, batches, "seed", 0, StreamMode::Unordered, gate).await?;
+            // the measurement is dropped on purpose, stage records and all. seeding is untimed
+            // setup, and folding its records into a report about the measured phase would be worse
+            // than having none - the harness throws the server's half of them away for the same
+            // reason, just before the measured phase starts
+            // (`docs/src/appendix/resolved/stage-join.md`)
+            let _seeding = driver::drive_with(
+                &client,
+                batches,
+                "seed",
+                0,
+                StreamMode::Unordered,
+                gate,
+            )
+            .await?;
             Ok(())
         })
     }

@@ -985,15 +985,49 @@ impl<S: QuerySupport> Shoal<S> {
     }
 
     /// Send a query to our server
+    ///
+    /// The stamps this bundle cost on the way out are dropped. A caller that wants them - which
+    /// is the stage profiler and nothing else - calls [`Shoal::send_stamped`] instead.
     #[instrument(name = "Shoal::send", skip_all, err(Debug))]
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
-    pub async fn send(&self, mut queries: Queries<S>) -> Result<ShoalResultStream<S>, Errors> {
+    pub async fn send(&self, queries: Queries<S>) -> Result<ShoalResultStream<S>, Errors> {
+        // the stamps are a zero sized type unless this is a profiling build, so dropping them
+        // here costs nothing
+        self.send_stamped(queries).await.map(|(stream, _)| stream)
+    }
+
+    /// Send a query to our server, keeping what sending it cost
+    ///
+    /// The four stamps returned beside the stream are batch level costs shared by every query in
+    /// the bundle, the same ones [`ShoalQueryStream::send`] hands back. They are a zero sized type
+    /// unless the `stage-profile` feature is on, which is what lets [`Shoal::send`] delegate here
+    /// without paying for anything.
+    ///
+    /// This exists because the one shot path could not be stage profiled at all: every driver
+    /// that sends a query at a time went through [`Shoal::send_one`], and no client side stamp
+    /// survived it
+    /// ([Resolved #76](../../../docs/src/appendix/resolved/stage-join.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `queries` - The queries to execute
+    #[instrument(name = "Shoal::send_stamped", skip_all, err(Debug))]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    pub async fn send_stamped(
+        &self,
+        mut queries: Queries<S>,
+    ) -> Result<(ShoalResultStream<S>, BatchStamps), Errors> {
+        // start timing this bundle
+        let mut stamps = BatchStamps::entered_now();
         // archive our queries
         let archived = rkyv::to_bytes::<_>(&queries)?;
+        // record what serializing this bundle cost
+        stamps.mark_serialized();
         // build the header that goes ahead of this bundle
         //
         // this is done before we take a connection from the pool, so a bundle too large to frame
-        // fails without ever consuming a pool slot
+        // fails without ever consuming a pool slot. it is attributed to serialization rather than
+        // to the pool wait, the same way the streaming path attributes it
         let preamble = protocol::request_preamble(archived.len(), self.peer_max_frame_bytes())?;
         // start tracking this response
         let (response_tx, response_rx) = self.track_response(&mut queries.id)?;
@@ -1001,6 +1035,10 @@ impl<S: QuerySupport> Shoal<S> {
         let mut conn = self.pool.get().await.map_err(|e| {
             Errors::ConnectionPool(format!("failed to get connection from pool: {e}"))
         })?;
+        // record what waiting on the connection pool cost
+        //
+        // this is where client side backpressure shows up once enough queries are in flight
+        stamps.mark_pooled();
         // build our vectored byte slices to send
         let mut bufs = &mut [IoSlice::new(&preamble), IoSlice::new(&archived)][..];
         // keep sending our data until all of this archive has been sent
@@ -1018,6 +1056,8 @@ impl<S: QuerySupport> Shoal<S> {
                 n => IoSlice::advance_slices(&mut bufs, n),
             }
         }
+        // record that this bundle is now the sockets problem
+        stamps.mark_written();
         // record which connection this bundle is owed an answer on
         //
         // this is done after the write rather than before it, because a bundle that never
@@ -1057,7 +1097,7 @@ impl<S: QuerySupport> Shoal<S> {
             pending: BTreeMap::default(),
             phantom: PhantomData,
         };
-        Ok(result_stream)
+        Ok((result_stream, stamps))
     }
 
     /// Execute a query and wait for all responses.
@@ -1113,6 +1153,9 @@ impl<S: QuerySupport> Shoal<S> {
 
     /// Send a single query and wait for the response.
     ///
+    /// The stamps this query cost on the way out are dropped. A caller that wants them - which is
+    /// the stage profiler and nothing else - calls [`Shoal::send_one_stamped`] instead.
+    ///
     /// # Arguments
     ///
     /// * `query` - The query to execute
@@ -1139,10 +1182,54 @@ impl<S: QuerySupport> Shoal<S> {
                 >,
             >,
     {
+        // the stamps are a zero sized type unless this is a profiling build, so dropping them
+        // here costs nothing
+        self.send_one_stamped(query)
+            .await
+            .map(|(response, _)| response)
+    }
+
+    /// Send a single query and wait for the response, keeping what sending it cost
+    ///
+    /// The stamps come back beside the response rather than on it, because they describe the
+    /// bundle on its way out and the response knows only about its own arrival. Together with
+    /// [`ShoalResponse::stamps`] they are the whole client side of one query's journey, which is
+    /// what the stage report joins against the server's half.
+    ///
+    /// A bundle of one is still a bundle: its query id is minted inside the send and its index is
+    /// always zero, so [`ShoalResponse::get_query_id`] and [`ShoalResponse::get_index`] are how a
+    /// caller learns the key to file these stamps under.
+    ///
+    /// # Arguments
+    ///
+    /// * `query` - The query to execute
+    ///
+    /// # Returns
+    ///
+    /// * `Ok((ShoalResponse, BatchStamps))` - The query succeeded
+    /// * `Err(Errors)` - The query failed
+    pub async fn send_one_stamped<Q: Into<S::QueryKinds>>(
+        &self,
+        query: Q,
+    ) -> Result<(ShoalResponse<S>, BatchStamps), Errors>
+    where
+        <S::ResponseKinds as Archive>::Archived:
+            rkyv::Deserialize<S::ResponseKinds, Strategy<Pool, rkyv::rancor::Error>>,
+        for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived:
+            rkyv::bytecheck::CheckBytes<
+                Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'a>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            >,
+    {
         // build a query bundle with our single query
         let queries = self.query().add(query);
-        // send our query
-        let mut stream = self.send(queries).await?;
+        // send our query, keeping what sending it cost
+        let (mut stream, stamps) = self.send_stamped(queries).await?;
         // wait for our single response
         let response = stream
             .next()
@@ -1150,8 +1237,8 @@ impl<S: QuerySupport> Shoal<S> {
             .ok_or(Errors::StreamAlreadyTerminated)?;
         // check if this query succeeded
         response.suceeded(QuerySuceededOpts::default())?;
-        // return our response
-        Ok(response)
+        // return our response and what it cost to send
+        Ok((response, stamps))
     }
 
     /// Check if data exists in the database

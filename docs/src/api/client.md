@@ -212,6 +212,13 @@ Convenience wrappers:
 | `exec(queries)` | Drains the stream, collects failures into `Errors::BulkError` |
 | `exists(query)` | Returns `bool`; missing data is not an error |
 
+`send` and `send_one` each have a `_stamped` twin returning `(…, BatchStamps)` — when the bundle
+entered, when it finished serializing, when a pooled connection was acquired, and when its last
+byte was written. The plain forms delegate and drop them. `BatchStamps` is a zero sized type unless
+the crate is built with `stage-profile`, so this is free for everyone who is not the benchmark
+harness's stage layer, which is the only caller
+([Resolved #76](../appendix/resolved/stage-join.md)).
+
 `exists` is constrained by a marker trait so only exists queries can be passed:
 
 ```rust
