@@ -135,8 +135,14 @@ pub const GROUPS: &[Group] = &[
                 "macro/encryption/depth/plain/4096/32",
                 "macro/grid/unsorted/r50/1024",
                 "macro/grid/depth/32",
+                // the width ladder at one query outstanding, which is its own family and would
+                // otherwise be the one family a smoke run never touched
+                "macro/grid/depth/1/8192",
                 "macro/skew/zipfian/unsorted",
                 "macro/conf/storage/durability/r50/fsync",
+                // and a configuration sweep repeated above the reference width, which is a
+                // different arm shape from the one above it and worth proving runs
+                "macro/conf/storage/latency_buffer/r50/w8192/4Ki",
             ],
         },
     },
@@ -598,7 +604,7 @@ mod tests {
             );
             halves += 1;
         }
-        assert_eq!(halves, 48, "the configuration sweep changed size");
+        assert_eq!(halves, 58, "the configuration sweep changed size");
     }
 
     /// The isolating group holds no mixture, since a mixture attributes nothing

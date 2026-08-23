@@ -205,7 +205,13 @@ pub fn micro_scaling(families: &[Family]) -> String {
     sizes.sort_unstable();
     sizes.dedup();
     let mut headers = vec!["Operation".to_string()];
-    headers.extend(sizes.iter().map(|size| format!("{size} rows")));
+    // the heading is written in the units the axis is in, since these are row counts on one chart
+    // and byte widths on the other. an empty set has no axis to ask, and draws no table either
+    let axis = families
+        .first()
+        .map(|family| family.axis)
+        .unwrap_or(crate::render::chart::micro_scaling::ScalingAxis::Rows);
+    headers.extend(sizes.iter().map(|size| axis.column(*size as f64)));
     // and how much dearer the largest is than the smallest, which is the shape the chart shows
     headers.push("Growth".to_string());
     let rows: Vec<Vec<String>> = families
@@ -423,6 +429,7 @@ mod tests {
     fn the_scaling_table_covers_every_size() {
         let families = vec![Family {
             name: "a/insert".to_string(),
+            axis: crate::render::chart::micro_scaling::ScalingAxis::Rows,
             points: vec![(16.0, 100.0), (4096.0, 200.0)],
         }];
         let rendered = micro_scaling(&families);
@@ -438,10 +445,12 @@ mod tests {
         let families = vec![
             Family {
                 name: "a".to_string(),
+                axis: crate::render::chart::micro_scaling::ScalingAxis::Rows,
                 points: vec![(16.0, 100.0), (256.0, 100.0)],
             },
             Family {
                 name: "b".to_string(),
+                axis: crate::render::chart::micro_scaling::ScalingAxis::Rows,
                 points: vec![(16.0, 100.0), (4096.0, 100.0)],
             },
         ];

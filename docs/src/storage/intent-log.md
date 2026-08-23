@@ -114,6 +114,20 @@ the remaining space, the current buffer is flushed and a new one allocated — s
 `max(default_buffer_size, size)`, so a record larger than the configured buffer gets a buffer
 of its own. Records are never split across buffers.
 
+**That last sentence is a performance cliff as well as a correctness property.** A record that
+fits shares an aligned write with the records around it; a record that does not gets one DMA
+write and one `alloc_dma_buffer` to itself, and the group commit below has nothing left to
+group. The transition is a step at the configured buffer size, not a slope, and it is why a
+table with wide rows behaves differently from one with narrow rows under the same settings —
+see [Row size and what it costs](../tables/row-size.md#the-intent-log-stops-batching-past-the-staging-buffer)
+and [O34](../appendix/optimizations.md).
+
+**This is read from the source and has never been measured.** The configuration sweep ran
+`buffer_size` across five values at 1 KiB rows against a 4096 byte buffer, which is entirely on the
+flat side of the step. The same five rungs now also run at 8 KiB and 64 KiB rows
+([F22](../features/row-size-benchmarks.md)) and no capture has been taken at either, so the step
+above is still a claim about `prep` rather than a curve anybody has drawn.
+
 `prep` returns a `&mut [u8]` of exactly the requested size; a caller that writes less than it
 asked for leaves uninitialised bytes in the log. `commit` is the only caller and it is
 consistent.

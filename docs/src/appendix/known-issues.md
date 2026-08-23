@@ -27,16 +27,18 @@ test suite does and does not reach is in [Test Coverage](test-coverage.md).
 Defects that have been fixed move to [Resolved Issues](resolved-issues.md), one page each,
 carrying the reasoning and the invariants the fix depends on. Item numbers are shared between
 the two pages and never reused, so a number appears on exactly one of them — which is why this
-list starts at 15 and skips 25, 26, 31, 34, 39, 44, 45, 48, 51, 56, 57, 61, 67 and 68, and why
-item 72 is the newest. The exceptions are items 16, 17, 20, 24 and 54, which were only
+list starts at 15 and skips 25, 26, 31, 34, 39, 44, 45, 48, 51, 56, 57, 61, 67, 68 and 74, and
+why item 74 is the newest number and item 73 the newest entry here. The exceptions are items 16, 17, 20, 24, 54 and 73, which were only
 partly fixed: the open remainder is here and the rest is there. Items 9 and 51 were each one such
 exception until their second half was fixed, and are now on the resolved page alone; item 25 was one
 in the other direction — it had one row left open, that row was fixed, and the whole item
 [moved](resolved/claude-md-drift.md).
 
 **Baseline as of writing:** `cargo check --workspace --all-targets` passes with warnings;
-`cargo test --workspace` passes — 1,015 tests, two ignored, plus 8 more behind
+`cargo test --workspace` passes — 1,036 tests, two ignored, plus 8 more behind
 `--features stage-profile` that a default run does not reach ([Test Coverage](test-coverage.md)).
+[F22](../features/row-size-benchmarks.md) added 21, two of which reproduce items 73 and 74 and fails against
+the tree before its fix.
 **Unchanged by the `F20-conf` capture**, which added no tests and moved no count: a capture is
 evidence rather than a test, and what it produced was a reproduction for
 [item 71](#71-throughput_sensitive-is-configured-documented-and-mostly-unused), a second and worse
@@ -1480,3 +1482,44 @@ the op exists before asking for its spread, and return `–` when it does not. T
 this recurring is for `stat_interval_ns` to return something with three cases rather than an
 `Option`, since every caller that formats it has the same choice to make and two of the three
 call sites (`tables.rs:59`, `:492`) already make it independently.
+
+### 73. The hotpath layer's artifact is shared between the workloads that write it
+
+`shoal-bench/src/run/plan.rs:461-482`, `build_plan`
+
+**Half of this is fixed.** The stage layer had the same defect and is
+[resolved](resolved/stage-artifact-overwrite.md) under this number; what stays here is the hotpath
+half, which the fix deliberately did not take.
+
+The hotpath phase loops over the workloads that opted into attribution and directs every one of
+their profiles to the same file:
+
+```rust
+// plan.rs:466 - the hotpath phase
+for id in instrumented_for(inputs, Layer::Hotpath) {
+    steps.extend(wipe_steps(inputs));
+    steps.push(Step::Command(workload(
+        inputs,
+        id,
+        vec![/* ... */],
+        Stdout::LastLine(artifact(inputs, Layer::Hotpath)),
+    )));
+}
+```
+
+A second profiled workload would overwrite the first, and the artifact that resulted would be
+indistinguishable from a correct one — right schema, plausible scopes, and silently describing one
+workload where it claims to describe the capture.
+
+Nothing reaches it today: `PROFILED_WORKLOADS` holds one workload, and it stopped being the list the
+stage layer reads, so growing the stage layer no longer grows this one. That is why this is filed
+rather than fixed — it is latent in exactly the way the stage half was, and the moment somebody adds
+a second hotpath workload it is live.
+
+**Fix direction:** the same three pieces the stage half took, and
+[Resolved #73](resolved/stage-artifact-overwrite.md#the-fix) has them written down. A scratch path
+per workload; a `HotpathProfiles` artifact keyed by workload, with the current single-profile shape
+accepted as version 1 so the committed captures keep rendering; and `collect::hotpath` folding the
+scratch files rather than only checking one. The awkward part is that a hotpath profile arrives as
+the last line of stdout rather than as a file the run writes, so `Stdout::LastLine` has to take a
+per-workload path and the collector has to parse each one.

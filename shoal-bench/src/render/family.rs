@@ -196,10 +196,12 @@ pub const FAMILIES: &[Family] = &[
         title: "Row size",
         surface: Surface::RowSize,
         what_it_measures:
-            "The same even mixture as the grid, swept across eleven row widths: eight fixed widths \
-             from 64 bytes to 4 MiB, and three declared mixtures of widths. The mixtures are \
-             named distributions rather than ranges - `mixed_small` is always the same four widths \
-             in the same proportion - so two captures of one measure the same thing.",
+            "Row width, swept sixteen ways against all four tables: thirteen fixed widths from 64 \
+             bytes to 4 MiB, and three declared mixtures of widths. The mixtures are named \
+             distributions rather than ranges - `mixed_small` is always the same four widths in the \
+             same proportion - so two captures of one measure the same thing. The whole axis is run \
+             at three mixtures rather than one - an even split, a pure write and a pure read - and \
+             again on one table with a single query outstanding.",
         how_to_read_it:
             "The x axis is logarithmic, so the *shape* is what to read rather than the magnitude. \
              A cost that is flat across the narrow widths and rises past a kilobyte is a fixed \
@@ -215,10 +217,43 @@ pub const FAMILIES: &[Family] = &[
              also seed a small key space - sixty four partitions at 4 MiB - so every read there is \
              answered from a table that is entirely resident.",
         what_it_cannot_say:
-            "What a wide row costs under a write-heavy mixture. This axis is swept at the reference \
-             mixture only, so an interaction between width and mixture would be invisible to both \
-             sweeps. The cross was chosen over the full cube deliberately; the gap is recorded in \
+            "What a wide row costs at a *depth* other than the two measured. The mixture axis is \
+             swept fully here, so an interaction between width and read share is now visible - but \
+             the `r0` and `r100` sweeps run at the grid's depth of 32 and the depth-1 ladder runs at \
+             an even mixture, so a cost that appears only at one query outstanding under a pure \
+             write mixture is still invisible. The cross was chosen over the full cube \
+             deliberately; what remains of the gap is recorded in \
              [todos](../appendix/todos.md).",
+    },
+    Family {
+        name: "width-depth",
+        title: "Row width at one query outstanding",
+        surface: Surface::RowSize,
+        what_it_measures:
+            "The same width axis as above, on the persistent unsorted table, with **one** query \
+             outstanding instead of thirty two. Everything else about these arms - the mixture, the \
+             key distribution, the byte budget, the seed - is what the arms above use, so a rung \
+             here and the arm above it at the same width differ in the load depth and in nothing \
+             else.",
+        how_to_read_it:
+            "Read it against the curve above, width by width. Where the two lie close together, the \
+             wider arm's latency is a **service time** and the throughput figure beside it is what \
+             the server can do. Where they diverge, the depth-32 arm is queueing, and the gap is \
+             how much of its latency was spent waiting rather than being served. The wide end is \
+             where this bites: at 4 MiB a depth of 32 is 128 MiB outstanding on one connection \
+             against a key space of sixty four partitions.",
+        what_would_make_it_wrong:
+            "Reading a depth-1 throughput as a capacity. One query outstanding leaves eleven of the \
+             twelve shards idle for most of every round trip, so the throughput here is a floor and \
+             not a measure of what the server can do - it is the *latency* that is the honest \
+             number on this ladder. The two curves answer different halves of the same question and \
+             neither answers it alone.",
+        what_it_cannot_say:
+            "Whether the ephemeral half behaves the same way. This ladder is one table, so the \
+             pair subtraction that makes a width effect attributable to storage \
+             ([F9](../features/ephemeral-tables.md)) does not exist for the depth axis. It also \
+             says nothing about depths between 1 and 32; the four-rung ladder on [Access \
+             patterns](access-patterns.md) covers those at the reference width alone.",
     },
     Family {
         name: "tables",
@@ -271,8 +306,9 @@ pub const FAMILIES: &[Family] = &[
         what_it_cannot_say:
             "Where the knee of the throughput curve is for any arm but the reference cell. The depth \
              ladder below is measured on one table at one width, and every other arm in the grid is \
-             assumed to sit at the same point on its own curve. That assumption has not been \
-             checked at the wide end.",
+             assumed to sit at the same point on its own curve. That assumption is checked at one \
+             other point and nowhere else: [Row size](row-size.md) runs the whole width axis at a \
+             single outstanding query, which bounds how much of a wide arm's latency was queueing.",
     },
     Family {
         name: "depth",
@@ -298,7 +334,10 @@ pub const FAMILIES: &[Family] = &[
             "What a second client would do. Depth and client count are separate axes - eight queries \
              outstanding on one client share a connection pool, a response map and one set of \
              handshakes, where one query on each of eight clients has eight of each. The client axis \
-             is swept on [Transport and encryption](transport.md), not here.",
+             is swept on [Transport and encryption](transport.md), not here. It also says nothing \
+             about any width but the reference one; the ladder at one query outstanding across the \
+             whole width axis is on [Row size](row-size.md), and the two cross at the rung drawn \
+             here at a depth of one.",
     },
     Family {
         name: "write",
@@ -445,7 +484,11 @@ pub const FAMILIES: &[Family] = &[
              to the archive map's intent log and *not* to the archive writers themselves, so a flat \
              line there is evidence about the wiring and not about the device. The other one is the \
              mixture: these arms are swept at an even read/write share, so a setting that only bites \
-             under sustained writing is being asked half a question.",
+             under sustained writing is being asked half a question. And reading a sweep at one row \
+             width as a fact about the setting: `latency_buffer` measured at 1 KiB alone reported a \
+             confident small number, because at 1 KiB three records already share an aligned write \
+             and the arm was on the flat side of the step. Its rows above are labelled with the \
+             width they ran at for that reason.",
         what_it_cannot_say:
             "What two settings are worth together. One knob moves at a time against a fixed \
              reference of every other, which is the same cross-not-cube choice \
@@ -529,7 +572,11 @@ pub const FAMILIES: &[Family] = &[
 /// ```
 pub fn family_for(id: &str) -> Option<&'static Family> {
     // longest prefix first, so a more specific family wins over the one it sits inside
-    let name = if id.starts_with("macro/grid/depth/") {
+    let name = if id.starts_with("macro/grid/depth/1/") {
+        // longer than the ladder's own prefix, and checked first for that reason: these sweep the
+        // width at one depth where the ladder sweeps the depth at one width
+        "width-depth"
+    } else if id.starts_with("macro/grid/depth/") {
         "depth"
     } else if id.starts_with("macro/grid/") {
         // a cell is placed in the grid family whichever sweep drew it; the row size page selects

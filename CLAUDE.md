@@ -110,14 +110,16 @@ Not on every change. Take one when:
 Do **not** take one for a docs-only change, a renderer change, or a test-only change. For a renderer
 change, `render` and `render --check` are the verification; the artifacts underneath are untouched.
 
-A full capture is **seventy-five minutes**, measured by `F20-conf` on 2026-08-22 — the first one
+A full capture was **seventy-five minutes**, measured by `F20-conf` on 2026-08-22 — the first one
 anybody timed. This file said four to five hours until then, and that figure was never a
-measurement. While iterating, `--scale smoke --runs 2` runs the whole set at a hundredth of the
+measurement. [F22](docs/src/features/row-size-benchmarks.md) then added 165 macro arms, so the
+projection is now **about two hours** — and that figure is a projection again, scaled from the
+measured one by arm count, until somebody times a capture of the current set. While iterating, `--scale smoke --runs 2` runs the whole set at a hundredth of the
 data and proves every workload still runs — which is what you want before spending the hour on the
 real one. Budget twenty minutes for a macro-only smoke pass; the criterion layer is what makes a
 full smoke run take longer than you expect.
 
-The macro layer is two hundred and nine **workloads** living in `shoal-bench/src/workloads/`,
+The macro layer is three hundred and seventy four **workloads** living in `shoal-bench/src/workloads/`,
 each generating its own rows from `--seed` — there is no dataset to fetch
 ([F8](docs/src/features/purpose-built-workloads.md)). They come in three kinds and the differences
 matter:
@@ -128,12 +130,15 @@ matter:
   ([F9](docs/src/features/ephemeral-tables.md)) — a pair differs in the storage engine and in
   nothing else, and each pair has a test asserting that, so a constant changed in one half has to
   change in the other.
-- **The grid** is seventy-four workloads driving a *mixture* of reads and writes, swept across row
-  width, read share, key distribution and load depth
-  ([F17](docs/src/features/workload-grid.md)). It answers what a caller's workload costs.
+- **The grid** is two hundred and twenty-nine workloads driving a *mixture* of reads and writes,
+  swept across row width, read share, key distribution and load depth
+  ([F17](docs/src/features/workload-grid.md), extended by
+  [F22](docs/src/features/row-size-benchmarks.md)). It answers what a caller's workload costs. The
+  width axis is sixteen widths against all four tables at three mixtures, plus a rung at each width
+  with one query outstanding.
   **A regression is never attributed to a grid arm** — the grid says a mixture got slower, the
   isolating pairs say which half.
-- **The configuration sweep** is forty-eight workloads under `macro/conf/`, each one the grid's
+- **The configuration sweep** is fifty-eight workloads under `macro/conf/`, each one the grid's
   reference cell `macro/grid/unsorted/r50/1024` with **exactly one field** of the server
   configuration moved ([F20](docs/src/features/configuration-sweeps.md)). It answers what a setting
   in `shoal.yml` is worth. Every sweep contains the value the committed `shoal.yml` resolves to, and
@@ -149,11 +154,12 @@ and deprecate instead — and **append**, never interleave: a workload's positio
 line in `workloads::all()`, one line in `workload_ids::IDS`, and a family in
 `shoal-bench/src/render/family.rs` — a test fails if you forget any of the last three.
 
-A full capture is seventy-five minutes and its macro layer is sixty of them, so **use a group**
+A full capture is about two hours and its macro layer is most of it, so **use a group**
 rather than a prefix ([F21](docs/src/features/benchmark-groups.md)) when a question is narrower than
 the whole set. `list --groups` prints the twelve declared sets, what each answers, and what a
-capture of it would cost — now projected onto a measured hour rather than a guessed four and a half,
-so the numbers it prints dropped by more than four times without anything getting faster; `--group grid` is the grid alone, `--group
+capture of it would cost — projected onto `FULL_MACRO_CAPTURE_SECS`, which is hand-maintained and
+has not been re-measured since the macro layer grew by 165 arms, so every projection it prints is
+currently low; `--group grid` is the grid alone, `--group
 isolating` is everything that drives one path, `--group conf/storage` is the writer knobs. A group
 **selects and never schedules** — a capture still runs one `shoal-workload` process at a time, and
 must, because two servers at once share a page cache, a device queue and a set of cores. `--scale

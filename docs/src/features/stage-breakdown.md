@@ -31,6 +31,16 @@ between the client handing it to `send` and the response coming back. ~~`scripts
 `docs/perf/runs/<label>.stages.json`, where [Benchmark
 Results](../performance/overview.md) draws it as a stacked bar per latency rank.
 
+~~One workload, `macro/insert_unsorted`, at 256 byte rows.~~ Since
+[F22](row-size-benchmarks.md) the layer profiles **four** workloads — that one plus the grid's width
+axis at 1 KiB, 8 KiB and 512 KiB — because a breakdown at one width cannot say which of the nineteen
+stages grows with the bytes, which is the question [Row size and what it costs](../tables/row-size.md)
+most wanted answered. The artifact is a `StageReports` keyed by workload rather than a single
+report; the old single-report shape is still accepted on read, which is what keeps the nine captures
+taken before it rendering. `stage_profiles()` is asked separately from `profiles()` for the same
+reason: the hotpath layer wants one workload and this one wants a curve. See
+[Resolved #73](../appendix/resolved/stage-artifact-overwrite.md).
+
 | Stage | From → to | Per |
 | --- | --- | --- |
 | `client_serialize` | `send` entry → after `rkyv::to_bytes` | batch |

@@ -23,11 +23,104 @@ const MAX_FAMILIES: usize = 8;
 /// How tall the plotting area is, before the legend is added under it
 const PLOT_HEIGHT: u32 = 420;
 
-/// One operation measured at several partition sizes
+/// What the number at the end of a benchmark id counts
+///
+/// Every id in this layer ends in a number and the chart plots it, so until there was more than one
+/// kind of number the axis could be labelled once and forgotten. `wire_codec/width/*` ends in a row
+/// **width in bytes** rather than a count of rows, which is a different quantity on the same shaped
+/// axis - so the two are drawn as two charts rather than as one chart whose label is wrong for half
+/// of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ScalingAxis {
+    /// The number counts rows: a partition's size, or a response's cardinality
+    Rows,
+    /// The number is a row width in bytes
+    Bytes,
+}
+
+impl ScalingAxis {
+    /// The id the chart drawn on this axis is given
+    ///
+    /// Distinct per axis, because two charts on one page cannot share an element id.
+    pub fn chart_id(self) -> &'static str {
+        match self {
+            ScalingAxis::Rows => "chart-micro-scaling",
+            ScalingAxis::Bytes => "chart-micro-scaling-width",
+        }
+    }
+
+    /// What the x axis is called under the chart
+    pub fn x_desc(self) -> &'static str {
+        match self {
+            ScalingAxis::Rows => "rows in the partition",
+            ScalingAxis::Bytes => "bytes in one row",
+        }
+    }
+
+    /// What one point on this axis is called in prose
+    pub fn noun(self) -> &'static str {
+        match self {
+            ScalingAxis::Rows => "size",
+            ScalingAxis::Bytes => "row width",
+        }
+    }
+
+    /// How a value on this axis is written on an axis tick
+    ///
+    /// # Arguments
+    ///
+    /// * `value` - The value to write
+    pub fn tick(self, value: f64) -> String {
+        match self {
+            ScalingAxis::Rows => crate::fmt::thousands(value.round() as u128),
+            ScalingAxis::Bytes => fmt::bytes(value.round() as u64),
+        }
+    }
+
+    /// How a value on this axis is written as a table heading
+    ///
+    /// Separate from [`ScalingAxis::tick`] and not merely a wrapper of it: a tick is grouped with
+    /// separators to be read at a glance, and a heading is not, which is what the committed pages
+    /// have always said. Rendering them the same way would rewrite every scaling table for a
+    /// cosmetic reason and fail `render --check` on captures nothing touched.
+    ///
+    /// # Arguments
+    ///
+    /// * `value` - The value to write
+    pub fn column(self, value: f64) -> String {
+        match self {
+            ScalingAxis::Rows => format!("{} rows", value.round() as u64),
+            // no noun, because the section this table sits under says the number is a row width
+            // and "8 KiB rows" reads as a count of rows rather than as the width of one
+            ScalingAxis::Bytes => fmt::bytes(value.round() as u64),
+        }
+    }
+
+    /// Which axis a benchmark's trailing number belongs to
+    ///
+    /// Read from the identifier, because that is the only thing the micro artifact carries - a
+    /// criterion capture is a map from `full_id` to four numbers and records nothing about what was
+    /// swept. The `wire_codec/width/` prefix exists to make this readable rather than guessed.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The benchmark id, with or without its trailing number
+    pub fn of(name: &str) -> Self {
+        if name.starts_with("wire_codec/width/") {
+            ScalingAxis::Bytes
+        } else {
+            ScalingAxis::Rows
+        }
+    }
+}
+
+/// One operation measured at several sizes
 #[derive(Debug, Clone)]
 pub struct Family {
     /// The benchmark id with its size suffix removed
     pub name: String,
+    /// What the sizes it was measured at count
+    pub axis: ScalingAxis,
     /// Each size measured, and what it cost, sorted by size
     pub points: Vec<(f64, f64)>,
 }
@@ -65,7 +158,8 @@ pub fn families(capture: &MicroCapture) -> Vec<Family> {
             points.sort_by(|left, right| {
                 left.0.partial_cmp(&right.0).unwrap_or(std::cmp::Ordering::Equal)
             });
-            Family { name, points }
+            let axis = ScalingAxis::of(&name);
+            Family { name, axis, points }
         })
         .collect();
     // the most expensive first, so the eye lands on the lines that matter and the tail is what
@@ -86,16 +180,39 @@ pub fn families(capture: &MicroCapture) -> Vec<Family> {
     families
 }
 
-/// Draws how each operation's cost grows with the partition size
+/// The families measured along one axis, in the order [`families`] put them
 ///
 /// # Arguments
 ///
-/// * `families` - The operations to draw
-pub fn draw(families: &[Family]) -> Result<String> {
+/// * `families` - Every family a capture produced
+/// * `axis` - The axis to keep
+pub fn on_axis(families: &[Family], axis: ScalingAxis) -> Vec<Family> {
+    families
+        .iter()
+        .filter(|family| family.axis == axis)
+        .cloned()
+        .collect()
+}
+
+/// Draws how each operation's cost grows along one axis
+///
+/// Every family drawn must share an axis, since the two label it differently and mean different
+/// quantities by the same number. [`on_axis`] is what splits them.
+///
+/// # Arguments
+///
+/// * `families` - The operations to draw, all on one axis
+/// * `axis` - What the number they were measured at counts
+pub fn draw(families: &[Family], axis: ScalingAxis) -> Result<String> {
     // nothing to draw is not a chart
     if families.is_empty() {
         anyhow::bail!("no benchmark families were measured at more than one size");
     }
+    // and a mixed set would be drawn under one label meaning two things
+    debug_assert!(
+        families.iter().all(|family| family.axis == axis),
+        "a scaling chart was given families from two axes"
+    );
     // a chart with too many lines says nothing, so the cheap tail is dropped rather than drawn
     let shown: Vec<Family> = families.iter().take(MAX_FAMILIES).cloned().collect();
     let dropped = families.len().saturating_sub(shown.len());
@@ -120,8 +237,9 @@ pub fn draw(families: &[Family]) -> Result<String> {
         anyhow::bail!("no benchmark family had a positive cost to draw");
     }
     let aria = format!(
-        "Cost of {} operations against partition size, from {} to {}, both axes logarithmic",
+        "Cost of {} operations against {}, from {} to {}, both axes logarithmic",
         shown.len(),
+        axis.noun(),
         fmt::duration_ns(min_y),
         fmt::duration_ns(max_y)
     );
@@ -132,7 +250,7 @@ pub fn draw(families: &[Family]) -> Result<String> {
         .map(|(index, family)| legend::Entry::new(family.name.clone(), palette::series(index)))
         .collect();
     let height = PLOT_HEIGHT + legend::height(&entries);
-    super::draw("chart-micro-scaling", &aria, height, move |root| {
+    super::draw(axis.chart_id(), &aria, height, move |root| {
         // the plot, and the strip under it that says what each colour is
         let (area, strip) = root.split_vertically(PLOT_HEIGHT);
         let mut chart = ChartBuilder::on(&area)
@@ -146,8 +264,8 @@ pub fn draw(families: &[Family]) -> Result<String> {
                 (min_y * 0.7..max_y * 1.4).log_scale(),
             )?;
         crate::themed_mesh!(chart)
-            .x_desc("rows in the partition")
-            .x_label_formatter(&|value: &f64| crate::fmt::thousands(value.round() as u128))
+            .x_desc(axis.x_desc())
+            .x_label_formatter(&|value: &f64| axis.tick(*value))
             .y_desc("mean time")
             .y_label_formatter(&|value: &f64| fmt::duration_ns(*value))
             .draw()?;
@@ -272,7 +390,7 @@ mod tests {
             ("b/get_all/16", 500.0),
             ("b/get_all/256", 12000.0),
         ]);
-        let svg = draw(&families(&capture)).expect("it draws");
+        let svg = draw(&families(&capture), ScalingAxis::Rows).expect("it draws");
         assert!(svg.contains("a/insert"));
         assert!(svg.contains("b/get_all"));
         assert!(!svg.contains("NaN"));
@@ -291,7 +409,7 @@ mod tests {
             .iter()
             .map(|(name, cost)| (name.as_str(), *cost))
             .collect();
-        let svg = draw(&families(&capture(&refs))).expect("it draws");
+        let svg = draw(&families(&capture(&refs)), ScalingAxis::Rows).expect("it draws");
         assert!(svg.contains("4 cheaper families not drawn"), "the tail was not declared");
     }
 
@@ -299,16 +417,16 @@ mod tests {
     #[test]
     fn a_zero_cost_does_not_break_the_log_axis() {
         let all_zero = capture(&[("a/16", 0.0), ("a/256", 0.0)]);
-        assert!(draw(&families(&all_zero)).is_err());
+        assert!(draw(&families(&all_zero), ScalingAxis::Rows).is_err());
         // and one real point alongside a zero still draws
         let one_real = capture(&[("a/16", 0.0), ("a/256", 100.0)]);
-        let svg = draw(&families(&one_real)).expect("it draws");
+        let svg = draw(&families(&one_real), ScalingAxis::Rows).expect("it draws");
         assert!(!svg.contains("NaN"));
     }
 
     /// Nothing to draw is an error rather than an empty chart
     #[test]
     fn nothing_to_draw_is_an_error() {
-        assert!(draw(&[]).is_err());
+        assert!(draw(&[], ScalingAxis::Rows).is_err());
     }
 }

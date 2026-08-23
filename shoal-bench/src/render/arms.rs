@@ -80,9 +80,18 @@ impl<'a> Arm<'a> {
         self.id.starts_with("macro/grid/") && !self.is_depth()
     }
 
-    /// Whether this arm is a rung of the depth ladder
+    /// Whether this arm is a rung of either depth ladder
     pub fn is_depth(&self) -> bool {
         self.id.starts_with("macro/grid/depth/")
+    }
+
+    /// Whether this arm is a rung of the width ladder measured at one outstanding query
+    ///
+    /// A narrower case of [`Arm::is_depth`], and it has to be: the two ladders sweep different axes
+    /// and are drawn on different pages, but they share an identifier prefix because they also
+    /// share the cell `macro/grid/depth/1`, which is a rung of both.
+    pub fn is_width_depth(&self) -> bool {
+        self.id.starts_with("macro/grid/depth/1/")
     }
 
     /// Whether this arm is a point of the key distribution sweep
@@ -200,11 +209,36 @@ pub fn grid(capture: &MacroCaptureV2) -> Vec<Arm<'_>> {
 
 /// Every rung of the depth ladder in a capture
 ///
+/// The ladder proper: four depths at the reference width. The width ladder shares its prefix and is
+/// excluded here, because the two are one axis each and plotting them together would draw fifteen
+/// points at a depth of one on a chart whose x axis is the depth.
+///
 /// # Arguments
 ///
 /// * `capture` - The capture to walk
 pub fn depth_ladder(capture: &MacroCaptureV2) -> Vec<Arm<'_>> {
-    all(capture).into_iter().filter(Arm::is_depth).collect()
+    all(capture)
+        .into_iter()
+        .filter(|arm| arm.is_depth() && !arm.is_width_depth())
+        .collect()
+}
+
+/// Every rung of the width axis measured with one query outstanding
+///
+/// Selected by the **fact** rather than by the prefix, which is what pulls `macro/grid/depth/1` in
+/// alongside the fifteen arms named `macro/grid/depth/1/...`. That arm is the reference width's
+/// rung of this ladder and the depth ladder's rung at a depth of one - the same measurement, minted
+/// once, belonging to both curves. Selecting on the prefix alone would leave this ladder with a
+/// hole exactly where the two cross.
+///
+/// # Arguments
+///
+/// * `capture` - The capture to walk
+pub fn width_depth(capture: &MacroCaptureV2) -> Vec<Arm<'_>> {
+    all(capture)
+        .into_iter()
+        .filter(|arm| arm.is_depth() && arm.depth() == 1)
+        .collect()
 }
 
 /// Every point of the key distribution sweep in a capture
@@ -225,12 +259,26 @@ pub fn conf(capture: &MacroCaptureV2) -> Vec<Arm<'_>> {
     all(capture).into_iter().filter(Arm::is_conf).collect()
 }
 
+/// The width every configuration sweep runs at unless it says otherwise
+///
+/// The grid's reference cell. A sweep at any other width is a separate sweep and is named as one -
+/// see [`conf_sweeps`].
+const REFERENCE_WIDTH: u64 = 1024;
+
 /// The configuration arms of a capture, gathered into one list per knob
 ///
 /// Ordered by the knob name and, within a knob, by the read share and then by the order the arms
 /// appear in the capture - which is identifier order, since a capture is a `BTreeMap`. Deterministic
 /// on purpose: a page whose series changed order between two renders of the same artifact would fail
 /// `render --check` for no reason.
+///
+/// # The row width is part of the key
+///
+/// A knob swept at two row widths is **two sweeps**, not one sweep with more points in it. Merging
+/// them would put a 1 KiB arm and an 8 KiB arm in the same ladder and let a comparison read the
+/// difference between the two widths as the difference between two values of the setting, which is
+/// the one thing the whole sweep is built to prevent. So a sweep away from the reference width
+/// carries the width in its name, and the arms it holds never mix with the reference sweep's.
 ///
 /// # Arguments
 ///
@@ -243,10 +291,14 @@ pub fn conf_sweeps(capture: &MacroCaptureV2) -> Vec<(String, u32, Vec<Arm<'_>>)>
         let (Some(knob), Some(read_pct)) = (arm.conf_knob(), arm.read_pct()) else {
             continue;
         };
-        grouped
-            .entry((knob.to_string(), read_pct))
-            .or_default()
-            .push(arm);
+        // the reference width is unnamed, so the forty eight sweeps that existed before any knob
+        // was repeated read exactly as they always did
+        let name = if arm.row_bytes() == REFERENCE_WIDTH {
+            knob.to_string()
+        } else {
+            format!("{knob} @ {}", crate::fmt::bytes(arm.row_bytes()))
+        };
+        grouped.entry((name, read_pct)).or_default().push(arm);
     }
     grouped
         .into_iter()

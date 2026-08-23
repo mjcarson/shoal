@@ -3,7 +3,41 @@
 What the test suite reaches, what it does not, and the one place where it is unsound.
 
 **Established by running it.** `cargo check --workspace --all-targets` passes with warnings and
-`cargo test --workspace` passes: **1,015 tests**, two ignored.
+`cargo test --workspace` passes: **1,023 tests**, two ignored.
+
+**[F22](../features/row-size-benchmarks.md) added 21**, every one of them a `shoal-bench` unit test,
+and the total went 1,015 → 1,036. Four over the grid — that the two width arrays do not overlap,
+that the two depth ladders cross at exactly one arm rather than minting it twice, that the width
+axis is swept at all three mixtures on all four tables, and that the three arms the stage layer
+profiles are three arms that exist. Two over the configuration sweep's width repeats: that a repeat
+names a declared knob at a width it does not already run, and that it runs every rung its sweep
+does. One that reproduces [item 73](known-issues.md) — two stage runs getting two artifacts. And
+one that should have existed already: `the_runners_copy_of_the_profiled_workloads_is_current`
+asserts the runner's two lists of profiled workloads match what the workloads say, which two doc
+comments claimed a test did before one did. Five more over the stage artifact: that a version 1
+bare report still reads and is filed under the only workload that could have written one, that a
+report naming its own workload keeps that name, that an artifact of several reads as several and
+sums their joins, that the report a page draws when it wants one is chosen deterministically, and
+that an artifact from a future version is refused rather than rendered. And three over the
+configuration page's reading order, which reproduce and pin
+[item 74](resolved/conf-knob-dropped.md): that a knob the order does not name reaches the
+recommendation table anyway, that a *section* still takes only its own half, and that a sweep
+repeated at another row width sorts beside the sweep it repeats. And four over the stage
+collector: that several reports fold into one artifact keyed by the workload each names, that an
+unnamed report is refused rather than filed under a guess, that two reports claiming one workload
+are refused, and that a file the plan named and no run wrote is an error rather than a shorter
+artifact — which is what stops the never-cleared scratch directory leaking a previous capture's
+reports into this one's. And one that guards something the identifiers had only been getting
+right by luck: `no_two_workloads_share_a_slug` asserts no two of the 374 flatten to the same file
+name, which is what names both a workload's scratch results and its storage directory —
+`macro/grid/depth/1/512`, new with this feature, is one character from colliding with
+`macro/grid/depth/128`.
+
+**The one that carries the feature is `grid::the_width_axis_is_swept_at_every_declared_mixture`.**
+The whole point of the `r0` and `r100` sweeps is that a width effect can be attributed to the write
+path by subtracting one from the other; a sweep short of a width or short of a table is a pair that
+cannot be subtracted, and the arms would still be minted, still run, and still render. Counting per
+mixture per table is what catches it.
 
 **[F20](../features/configuration-sweeps.md) and [F21](../features/benchmark-groups.md) added 29**,
 every one of them in `shoal-bench`, and the split says what each feature rests on. Twenty-six unit
@@ -71,7 +105,7 @@ should read this table rather than assume it was.
 | `shoal-proto` unit | 171 | the protocol, the SHQL parser, SCRAM, the TLS config — moved out of `shoal-core` |
 | `shoal-core` unit | 146 | the engine: partitions, storage, the shard. Was 323 before the split |
 | `shoal-client` unit | 18 | the client read loop and its error routing, and — new with [F16](../features/client-builder.md) — the builder, the pool defaults and the endpoint order |
-| `shoal-bench` unit | 376 | the harness, the workloads, the charts, and — new with [F17](../features/workload-grid.md) and [F18](../features/results-pages.md) — the grid, the row-width and key generators, the family and page registries, and the two new chart kinds; and — new with [F19](../features/chart-legends.md) — the shared legend, the data-derived axis ticks, and the encryption charts in nanoseconds; and — new with [F20](../features/configuration-sweeps.md) and [F21](../features/benchmark-groups.md) — the configuration sweep, the group table, and `--group` in the registry |
+| `shoal-bench` unit | 397 | the harness, the workloads, the charts, and — new with [F17](../features/workload-grid.md) and [F18](../features/results-pages.md) — the grid, the row-width and key generators, the family and page registries, and the two new chart kinds; and — new with [F19](../features/chart-legends.md) — the shared legend, the data-derived axis ticks, and the encryption charts in nanoseconds; and — new with [F20](../features/configuration-sweeps.md) and [F21](../features/benchmark-groups.md) — the configuration sweep, the group table, and `--group` in the registry; and — new with [F22](../features/row-size-benchmarks.md) — the three width passes, the configuration sweep's width repeats, both runner-side lists of profiled workloads, and the per-workload stage artifact |
 | `shoal` integration | 197 | 14 binaries against a live server, one ignored. `pool.rs` is **new** with [F16](../features/client-builder.md) |
 | `shoalctl` integration | 34 | the completion menu, driven the way the key handler does |
 | `shoal-client-check` integration | 7 | **new.** A schema compiling and running against the client alone |

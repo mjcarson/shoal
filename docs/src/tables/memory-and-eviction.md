@@ -316,3 +316,8 @@ and keeps the eviction path synchronous — at the cost of the generation trap.
   counted toward the limit. That is a safety property — there is no disk to re-read an evicted
   ephemeral partition from — and it means `resources.memory` does not bound an ephemeral table at
   all ([F9](../features/ephemeral-tables.md#limitations)).
+- **Eviction is not what makes a wide row slow**, which is worth saying because this is the first
+  page people look at when throughput falls as rows grow. The row-size sweep's widest arms hold
+  256 MiB against a `4Gi` limit and never evict anything, and the memory sweep is flat across six
+  rungs for the same reason. The cost of a wide row is in the copies and in the intent log's
+  staging buffer, not here — see [Row size and what it costs](row-size.md).

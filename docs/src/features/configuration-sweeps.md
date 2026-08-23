@@ -46,8 +46,30 @@ moved:
 | `memory` | 1Mi, 4Mi, 16Mi, 64Mi, 1Gi, 4Gi | r50, r100 | 12 |
 | `frame` | 1Mi, 8Mi, 64Mi | r50 | 3 |
 
+**~~Forty-eight~~ fifty-eight, since [F22](row-size-benchmarks.md).** Every sweep above runs at the
+reference cell's **1 KiB** rows, and for one of them that is the one width whose answer is no: the
+intent log stages records into a 4096 byte buffer and flushes when the next one will not fit, so at
+1 KiB three records already share an aligned write and the sweep measures the flat side of a step.
+`StreamWriter::prep` stops batching entirely once a record exceeds the buffer
+([O34](../appendix/optimizations.md)), which is where the setting's whole effect lives.
+
+| Repeat | Values | Read shares | Arms |
+| --- | --- | --- | ---: |
+| `latency_buffer` at 8 KiB rows | 512, 4Ki, 16Ki, 64Ki, 256Ki | r50 | 5 |
+| `latency_buffer` at 64 KiB rows | 512, 4Ki, 16Ki, 64Ki, 256Ki | r50 | 5 |
+
 Identifiers are `macro/conf/<section>/<knob>/r<share>/<value>`, and the value is spelled the way
 `shoal.yml` spells it — `4Ki`, not `4096` — because that is what a reader has to type afterwards.
+A repeat at a width other than the reference one carries it as `w<width>` before the value:
+`macro/conf/storage/latency_buffer/r50/w8192/4Ki`. The asymmetry is deliberate — an identifier is
+the join key of every comparison, so adding a segment to the forty-eight that already existed would
+have orphaned every capture taken before them.
+
+**A knob at two widths is two sweeps.** `arms::conf_sweeps` keys on the row width as well as the
+knob and the read share, and the page labels a repeat with its width. Merging them would put a 1 KiB
+arm and an 8 KiB arm in one ladder and let the difference between two *widths* be read as the
+difference between two *values of the setting*, which is the one thing this whole family exists to
+prevent.
 
 **`ConfOverrides` reaches the whole configuration.** It carried `shards`, `memory` and `tls`; it now
 also carries the durability barrier, both writers' buffer size and write-behind depth, the intent log

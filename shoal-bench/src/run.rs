@@ -52,15 +52,24 @@ pub fn run_capture(store: &Store, args: &RunArgs) -> Result<i32> {
         .map(|entry| entry.id.clone())
         .collect();
     // and the workloads each instrumented layer should run, mapped back from the instrumented
-    // identifier a filter selects on to the workload the runner has to invoke
-    let instrumented: Vec<String> = [Layer::Hotpath, Layer::Stages]
-        .into_iter()
-        .filter(|layer| layers.contains(layer))
-        .flat_map(|layer| registry.instrumented_workloads(layer))
-        .map(String::from)
-        .collect::<std::collections::BTreeSet<String>>()
-        .into_iter()
-        .collect();
+    // identifier a filter selects on to the workload the runner has to invoke. kept per layer
+    // rather than unioned: the two profile different sets, and a union would have run the stage
+    // layer's three widths under the hotpath layer as well
+    let instrumented: std::collections::BTreeMap<Layer, Vec<String>> =
+        [Layer::Hotpath, Layer::Stages]
+            .into_iter()
+            .filter(|layer| layers.contains(layer))
+            .map(|layer| {
+                (
+                    layer,
+                    registry
+                        .instrumented_workloads(layer)
+                        .into_iter()
+                        .map(String::from)
+                        .collect(),
+                )
+            })
+            .collect();
     let partial = selected.len() != registry.len();
     // refuse a dirty tree unless the caller has accepted it. every capture in this tree today was
     // taken on one, so this will bite immediately - which is the point: a measurement of bytes
@@ -337,13 +346,25 @@ fn collect_layer(
             })
         }
         Layer::Stages => {
-            // likewise written by the run, since only it can join the two halves of a record
+            // each run wrote its own report, because only it can join the two halves of a record.
+            // what is left is to fold them into one artifact and check the joins they describe.
+            // named from the plan rather than found by walking scratch: scratch is never cleared,
+            // so it holds every run of every capture ever taken in this tree
+            let wrote: Vec<PathBuf> = crate::run::plan::instrumented_for(inputs, Layer::Stages)
+                .iter()
+                .map(|id| crate::run::plan::scratch_stages(inputs, id))
+                .collect();
+            let reports = collect::stages::collect(&wrote, into)?;
             println!("  {}", collect::stages::check(into)?);
-            let report = crate::store::read_json::<crate::model::stages::StageReport>(into)?;
+            println!(
+                "  {} workload(s) profiled -> {}",
+                reports.reports.len(),
+                into.display()
+            );
             Ok(LayerRecord {
                 complete: true,
                 artifact: file_name(into),
-                join: Some(report.join),
+                join: Some(reports.join()),
                 ..LayerRecord::default()
             })
         }

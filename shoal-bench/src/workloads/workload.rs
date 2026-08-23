@@ -272,13 +272,29 @@ pub trait Workload: Send + Sync {
     /// How this workload's samples are taken
     fn timing(&self) -> Timing;
 
-    /// Whether the instrumented layers may run this workload
+    /// Whether the hotpath layer may run this workload
     ///
     /// `hotpath` emits one profile per process, so attributing a profile to a workload means one
-    /// instrumented run per workload that opts in. Every workload opting in would make the two
+    /// instrumented run per workload that opts in. Every workload opting in would make the
     /// attribution layers cost as much as the whole rest of a capture, for profiles that mostly
     /// repeat each other.
     fn profiles(&self) -> bool;
+
+    /// Whether the stage layer may run this workload
+    ///
+    /// Asked separately from [`Workload::profiles`] because the two instrumented layers answer
+    /// different questions at the same price. A hotpath profile attributes process time to scopes,
+    /// and a second workload's profile mostly repeats the first's - which is why one workload opts
+    /// into it. A stage breakdown attributes *one query's* latency to nineteen points along its
+    /// path, and the thing worth learning from it is which of those points grows with the row
+    /// width. That is a question about the same workload at several widths, so the two lists are
+    /// not the same list and pretending they were meant the stage layer could only ever see one.
+    ///
+    /// Defaults to whatever a workload told the hotpath layer, so every workload that opted into
+    /// attribution before this existed still gets both.
+    fn stage_profiles(&self) -> bool {
+        self.profiles()
+    }
 
     /// What this workload needs before it can run
     ///

@@ -218,14 +218,27 @@ fn every_committed_stage_report_parses() {
     let store = repo();
     // each one must parse and must have joined the client and server halves of some queries
     for path in files_ending_with(&store.runs_dir(), ".stages.json") {
-        let report = store
+        let reports = store
             .read_stages(&path)
             .unwrap_or_else(|err| panic!("{}: {err:#}", path.display()));
         assert!(
-            report.join.joined > 0,
+            !reports.reports.is_empty(),
+            "{} holds no report at all",
+            path.display()
+        );
+        // summed across every workload the capture profiled, which is one for every artifact
+        // written before the layer profiled the width axis and three afterwards
+        assert!(
+            reports.join().joined > 0,
             "{} joined no queries, so it is not a report about that run",
             path.display()
         );
+        // and every report says which workload it came from, or the artifact cannot be keyed. a
+        // version 1 artifact is filled in on the way through, so this holds for those too
+        for (name, report) in &reports.reports {
+            assert!(!name.is_empty(), "{}: a report is keyed on nothing", path.display());
+            let _ = report;
+        }
     }
 }
 

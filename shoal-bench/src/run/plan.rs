@@ -195,8 +195,13 @@ pub struct PlanInputs {
     pub criterion_filter: Option<String>,
     /// The workloads the macro layer should run, in the order they run
     pub workloads: Vec<String>,
-    /// The workloads each instrumented layer should run
-    pub instrumented: Vec<String>,
+    /// The workloads each instrumented layer should run, keyed by the layer that runs them
+    ///
+    /// Per layer rather than one list, because the two instrumented layers profile different sets:
+    /// the hotpath layer runs one workload and the stage layer runs the width axis. A single list
+    /// meant the union of the two, so pointing the stage layer at three more workloads would have
+    /// silently tripled the hotpath phase as well.
+    pub instrumented: std::collections::BTreeMap<Layer, Vec<String>>,
     /// How many times to run each workload
     pub runs: u32,
     /// The server configuration to run against
@@ -333,6 +338,37 @@ fn scratch_result(inputs: &PlanInputs, id: &str, run: u32) -> PathBuf {
         .join(format!("run-{}-{run}.json", slug(id)))
 }
 
+/// The workloads one instrumented layer should run
+///
+/// # Arguments
+///
+/// * `inputs` - What the capture was asked for
+/// * `layer` - The instrumented layer to ask
+pub fn instrumented_for(inputs: &PlanInputs, layer: Layer) -> &[String] {
+    // a layer nobody selected has no entry, which is an empty phase rather than a missing key
+    inputs
+        .instrumented
+        .get(&layer)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+}
+
+/// Where one workload's stage report goes before the layer's artifact is assembled
+///
+/// One file per workload, in scratch, the same shape the macro layer's per-run results take. Every
+/// instrumented run used to be handed the layer's own artifact path, so a second profiled workload
+/// wrote over the first and the capture kept whichever ran last
+/// ([item 73](../../../docs/src/appendix/resolved-issues.md)). The stage layer runs the same
+/// workload at three row widths now, so that is three reports and one of them.
+///
+/// # Arguments
+///
+/// * `inputs` - What the capture was asked for
+/// * `id` - The workload whose report this is
+pub fn scratch_stages(inputs: &PlanInputs, id: &str) -> PathBuf {
+    inputs.scratch.join(format!("stages-{}.json", slug(id)))
+}
+
 /// Turns a workload identifier into something that can be a file name
 ///
 /// # Arguments
@@ -460,7 +496,7 @@ pub fn build_plan(inputs: &PlanInputs) -> Plan {
     // the hotpath profile, from its own build, whose profile is the last line it prints
     if wants(Layer::Hotpath) {
         let mut steps = vec![Step::Command(build(inputs, Some("hotpath")))];
-        for id in &inputs.instrumented {
+        for id in instrumented_for(inputs, Layer::Hotpath) {
             steps.extend(wipe_steps(inputs));
             steps.push(Step::Command(workload(
                 inputs,
@@ -486,7 +522,7 @@ pub fn build_plan(inputs: &PlanInputs) -> Plan {
     // the client and server halves of a record
     if wants(Layer::Stages) {
         let mut steps = vec![Step::Command(build(inputs, Some("stage-profile")))];
-        for id in &inputs.instrumented {
+        for id in instrumented_for(inputs, Layer::Stages) {
             steps.extend(wipe_steps(inputs));
             steps.push(Step::Command(workload(
                 inputs,
@@ -497,7 +533,7 @@ pub fn build_plan(inputs: &PlanInputs) -> Plan {
                     "--json".to_string(),
                     scratch_result(inputs, id, 0).display().to_string(),
                     "--stage-json".to_string(),
-                    artifact(inputs, Layer::Stages).display().to_string(),
+                    scratch_stages(inputs, id).display().to_string(),
                 ],
                 Stdout::Capture,
             )));
@@ -559,9 +595,17 @@ mod tests {
                 .iter()
                 .map(|id| id.to_string())
                 .collect(),
-            instrumented: crate::registry::PROFILED_WORKLOADS
-                .iter()
-                .map(|id| id.to_string())
+            instrumented: [Layer::Hotpath, Layer::Stages]
+                .into_iter()
+                .map(|layer| {
+                    (
+                        layer,
+                        crate::registry::profiled_for(layer)
+                            .iter()
+                            .map(|id| id.to_string())
+                            .collect(),
+                    )
+                })
                 .collect(),
             runs: 5,
             conf: PathBuf::from("shoal.yml"),
@@ -779,6 +823,87 @@ mod tests {
             .map(|id| port_for(id))
             .collect();
         assert_eq!(ports.len(), crate::workload_ids::IDS.len());
+    }
+
+    /// Each stage-profiled workload writes to an artifact of its own
+    ///
+    /// The stage phase loops over the workloads that opted in and used to hand each of them the
+    /// *same* output path, so the second workload's report landed on top of the first's and the
+    /// capture kept whichever ran last. It never bit, because one workload opted in; it bites the
+    /// moment a second does, silently, and the artifact that results looks exactly like a correct
+    /// one. The layer runs three row widths now.
+    ///
+    /// The hotpath phase has the same shape and is **not** covered here: it directs a profile with
+    /// `Stdout::LastLine` rather than a flag, and its list still holds one workload. That half is
+    /// the open remainder of [item 73](../../../docs/src/appendix/known-issues.md).
+    #[test]
+    fn each_staged_workload_writes_to_its_own_artifact() {
+        let mut two = inputs(&[Layer::Stages]);
+        // two workloads rather than the one that used to opt in, because that is the condition the
+        // defect needs. the real list holds four
+        two.instrumented.insert(
+            Layer::Stages,
+            vec![
+                "macro/insert_unsorted".to_string(),
+                "macro/get_resident".to_string(),
+            ],
+        );
+        let plan = build_plan(&two);
+        // every path a stage run was told to write to, read off the plan rather than off a
+        // rendered command line
+        let mut written: Vec<&String> = Vec::new();
+        for phase in &plan.phases {
+            for step in &phase.steps {
+                let Step::Command(command) = step else {
+                    continue;
+                };
+                let mut args = command.args.iter();
+                while let Some(arg) = args.next() {
+                    if arg == "--stage-json" {
+                        written.extend(args.next());
+                    }
+                }
+            }
+        }
+        assert_eq!(written.len(), 2, "a stage run was planned without an artifact");
+        let mut unique = written.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(
+            written.len(),
+            unique.len(),
+            "two stage runs write to one artifact: {written:?}"
+        );
+        // and none of them is the layer's own artifact, which the collector assembles from these
+        for path in written {
+            assert_ne!(
+                std::path::Path::new(path),
+                artifact(&two, Layer::Stages),
+                "a stage run writes straight to the layer artifact"
+            );
+        }
+    }
+
+    /// No two workloads flatten to the same file name
+    ///
+    /// [`slug`] replaces every `/` with `-`, and the same mapping names a workload's scratch results
+    /// and its storage directory. Two workloads that slug alike would therefore share both: one
+    /// would read the other's rows and overwrite the other's results, and the capture would report
+    /// two measurements of whichever ran second.
+    ///
+    /// The identifiers are injective under that mapping today by luck rather than by construction -
+    /// `macro/grid/depth/1/512` and `macro/grid/depth/128` are one character apart from colliding,
+    /// and [F22](../../../docs/src/features/row-size-benchmarks.md) added the first of those. This
+    /// is what turns the next near miss into a failing test instead of a capture nobody can explain.
+    #[test]
+    fn no_two_workloads_share_a_slug() {
+        let mut seen: std::collections::BTreeMap<String, &str> = std::collections::BTreeMap::new();
+        for id in crate::workload_ids::IDS {
+            if let Some(other) = seen.insert(slug(id), id) {
+                panic!("{id} and {other} both flatten to {}", slug(id));
+            }
+        }
+        assert_eq!(seen.len(), crate::workload_ids::IDS.len());
     }
 
     /// A smaller scale reaches every run of every workload

@@ -160,6 +160,41 @@ impl fmt::Display for BenchId {
 /// under the `workloads` feature asserts the two agree.
 pub const PROFILED_WORKLOADS: &[&str] = &["macro/insert_unsorted"];
 
+/// Which workloads the stage layer runs
+///
+/// A separate list from [`PROFILED_WORKLOADS`], and it has to be. The two instrumented layers cost
+/// the same and answer different questions: a hotpath profile attributes process time to scopes and
+/// a second workload's mostly repeats the first's, while a stage breakdown attributes *one query's*
+/// latency to nineteen points on its path - and the thing worth asking of it is which of those
+/// nineteen grows with the row width. That is the same workload at several widths, so a shared list
+/// meant the stage layer could only ever see one of them.
+///
+/// Three points on the width axis: the reference cell, the first width above the intent log's 4096
+/// byte staging buffer, and one well past the knee. Every one of them is an arm the grid already
+/// mints, so this costs three instrumented runs and no new workload.
+///
+/// This is the runner's copy of `Workload::stage_profiles`, for the same reason
+/// [`crate::workload_ids::IDS`] exists: the runner has to know it without the engine linked. A test
+/// under the `workloads` feature asserts the two agree.
+pub const STAGED_WORKLOADS: &[&str] = &[
+    "macro/insert_unsorted",
+    "macro/grid/unsorted/r50/1024",
+    "macro/grid/unsorted/r50/8192",
+    "macro/grid/unsorted/r50/524288",
+];
+
+/// Which workloads an instrumented layer runs
+///
+/// # Arguments
+///
+/// * `layer` - The instrumented layer to ask
+pub fn profiled_for(layer: Layer) -> &'static [&'static str] {
+    match layer {
+        Layer::Stages => STAGED_WORKLOADS,
+        _ => PROFILED_WORKLOADS,
+    }
+}
+
 /// The identifier an instrumented layer runs a workload under
 ///
 /// The workload identifiers are `macro/...` because that is the layer they produce numbers for.
@@ -243,7 +278,7 @@ impl Registry {
         // separate entries because they are separate builds measuring separate things - selecting
         // `hotpath/insert_unsorted` must not also select the macro run of the same workload
         for layer in [Layer::Hotpath, Layer::Stages] {
-            for id in PROFILED_WORKLOADS {
+            for id in profiled_for(layer) {
                 entries.push(BenchId::new(layer, instrumented_id(layer, id)));
             }
         }
@@ -274,7 +309,7 @@ impl Registry {
             .iter()
             .filter(|entry| entry.layer == layer)
             .filter_map(|entry| {
-                PROFILED_WORKLOADS
+                profiled_for(layer)
                     .iter()
                     .find(|id| instrumented_id(layer, id) == entry.id)
                     .copied()
@@ -589,9 +624,10 @@ mod tests {
         assert_eq!(registry.micro_ids().len(), 6);
         // every declared workload is in the macro layer and is addressable
         assert_eq!(registry.workload_ids(), crate::workload_ids::IDS.to_vec());
-        // and every workload that opted into attribution is there once per instrumented layer
+        // and every workload that opted into attribution is there once per instrumented layer.
+        // the two layers ask different lists, which is why this asks per layer rather than once
         for layer in [Layer::Hotpath, Layer::Stages] {
-            for id in PROFILED_WORKLOADS {
+            for id in profiled_for(layer) {
                 let instrumented = instrumented_id(layer, id);
                 assert!(
                     registry.entries().iter().any(|entry| entry.id == instrumented),
@@ -601,7 +637,9 @@ mod tests {
         }
         assert_eq!(
             registry.len(),
-            6 + crate::workload_ids::IDS.len() + PROFILED_WORKLOADS.len() * 2
+            6 + crate::workload_ids::IDS.len()
+                + PROFILED_WORKLOADS.len()
+                + STAGED_WORKLOADS.len()
         );
     }
 

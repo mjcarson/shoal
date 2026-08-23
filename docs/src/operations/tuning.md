@@ -44,7 +44,16 @@ the durability barrier says so, and everything else is behind that.
   write-behind ladder and take the value where it flattens.
 - **`latency_sensitive.buffer_size`** is a **minimum** that gets rounded up to your device's O_DIRECT
   alignment, so setting it below the block size does nothing at all. Above it, a larger buffer means
-  fewer, larger writes and more padding per partial flush.
+  fewer, larger writes and more padding per partial flush — **and a record larger than the buffer is
+  never batched with another one at all.** `StreamWriter::prep` flushes whenever the next record will
+  not fit, so a table whose rows exceed the buffer gets one DMA write and one DMA allocation per
+  insert, and the group commit above has nothing left to group. That is a step at the buffer size,
+  not a slope, and ~~the sweep cannot see it because it runs at 1 KiB~~ the sweep at 1 KiB cannot see
+  it. The same five rungs now also run at 8 KiB and 64 KiB
+  ([F22](../features/row-size-benchmarks.md)) — **and have not been captured**, so the 1.06× on
+  [Configuration](../performance/configuration.md) is still the only number, and it is still the
+  answer at the one width where the answer is no
+  ([O34](../appendix/optimizations.md), [Row size](../tables/row-size.md)).
 
 ## If you are ingesting in bulk
 
@@ -60,6 +69,35 @@ Throughput, not service time, so read the `queries/s` column rather than the per
   before the body arrives — so it is a bound on what one client can make a shard allocate as much as
   it is a bound on a batch. Lower it if you do not trust your clients; the sweep says what it costs
   a client that batches.
+
+## If your rows are wide
+
+Read [Row size and what it costs](../tables/row-size.md) first — it says which parts of this are
+measured and which are argued, and for this section the honest answer is *none of it is measured at
+the width it matters at*. Nothing below has a number behind it. Treat it as a hypothesis to test on
+your own workload.
+
+The benchmarks that would put numbers here now exist — the width axis with the 8 KiB → 512 KiB hole
+filled, swept at three mixtures and at two load depths, plus the `latency_buffer` rungs above the
+buffer ([F22](../features/row-size-benchmarks.md)). **None of them has been captured**, so this
+section is unchanged in substance: what moved is that the next capture will decide it rather than
+leave it argued.
+
+- **Size `latency_sensitive.buffer_size` above your widest row.** This is the one recommendation on
+  the page that contradicts what its own sweep reports, and the reason is in the bullet above: the
+  sweep runs at 1 KiB, on the flat side of a step at 4096. Setting the buffer to 256Ki when your rows
+  are 64 KiB restores batching that the shipped 4096 removes entirely. The cost is padding on a
+  partial flush and a larger DMA allocation per shard.
+- **Keep the load depth down.** Thirty-two outstanding 4 MiB queries is 128 MiB in flight on one
+  connection, in front of a relay that writes one response to completion before starting the next
+  ([O35](../appendix/optimizations.md)). Wide rows and deep queues interact badly, and the p99 is
+  where you will see it rather than the median.
+- **Read `payload/s`, not `queries/s`.** Past the point where the per-byte cost dominates, queries a
+  second must fall as the rows widen and that is arithmetic rather than a regression. A falling
+  `queries/s` with a flat `payload/s` is the system working.
+- **Consider a projection instead of a narrower row.** [Projections](../features/projections.md)
+  reduce what a get copies and what the wire carries without changing what is stored, and they are
+  the only lever here that is measured.
 
 ## If you are read-mostly with a working set larger than memory
 
@@ -126,4 +164,5 @@ worth.
 - [Configuration and what each setting is worth](../performance/configuration.md) — the measurements
 - [F20. What each setting is worth](../features/configuration-sweeps.md) — how the sweep is built
 - [Memory and eviction](../tables/memory-and-eviction.md) — what the limit actually governs
+- [Row size and what it costs](../tables/row-size.md) — why the advice above has no number behind it
 - [Benchmarking](../performance/benchmarking.md) — how to take a capture that means something

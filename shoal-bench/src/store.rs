@@ -27,7 +27,7 @@ use crate::model::hotpath::HotpathProfile;
 use crate::model::macro_layer::MacroCaptureV2;
 use crate::model::meta::CaptureMeta;
 use crate::model::micro::MicroCapture;
-use crate::model::stages::StageReport;
+use crate::model::stages::StageReports;
 use crate::registry::Layer;
 
 /// The default baseline a run is judged against, frozen and never overwritten
@@ -249,12 +249,10 @@ impl Store {
     /// # Arguments
     ///
     /// * `path` - The file to read
-    pub fn read_stages(&self, path: &Path) -> Result<StageReport> {
+    pub fn read_stages(&self, path: &Path) -> Result<StageReports> {
         // read it, then refuse a version this tool was not written against - the stage list could
         // have changed underneath, and every chart segment is labelled from it
-        let report: StageReport = read_json(path)?;
-        report.check_version(path).map_err(|err| anyhow!(err))?;
-        Ok(report)
+        read_stage_reports(path)
     }
 
     /// Reads a capture's provenance, if it has any
@@ -429,4 +427,19 @@ mod tests {
         assert_eq!(strip_known_infix("notes"), None);
         assert_eq!(strip_known_infix("o17-after.profile"), None);
     }
+}
+
+/// Reads a stage artifact of either shape
+///
+/// Version 2 holds one report per workload. Version 1 was a single bare report, and is accepted so
+/// that every capture taken before the stage layer profiled more than one workload keeps rendering -
+/// see [`StageReports::read`](crate::model::stages::StageReports::read).
+///
+/// # Arguments
+///
+/// * `path` - The artifact to read
+pub fn read_stage_reports(path: &Path) -> Result<StageReports> {
+    let body = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    StageReports::read(&body, path).map_err(|err| anyhow!(err))
 }

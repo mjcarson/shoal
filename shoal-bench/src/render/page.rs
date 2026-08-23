@@ -26,7 +26,7 @@
 use crate::model::hotpath::HotpathProfile;
 use crate::model::macro_layer::MacroCaptureV2;
 use crate::model::micro::MicroCapture;
-use crate::model::stages::StageReport;
+use crate::model::stages::StageReports;
 use crate::stale::{CaptureStatus, CodeVerdict};
 
 /// Everything one capture produced
@@ -43,7 +43,7 @@ pub struct Snapshot {
     /// Its hotpath profile, if it captured one
     pub hotpath: Option<HotpathProfile>,
     /// Its stage report, if it captured one
-    pub stages: Option<StageReport>,
+    pub stages: Option<StageReports>,
 }
 
 /// Everything the page is built from

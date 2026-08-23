@@ -187,12 +187,24 @@ fn every_chart() -> Vec<(String, String)> {
         "micro_delta".to_string(),
         chart::micro_delta::draw(&comparison.rows, "B1-performance").expect("it draws"),
     ));
-    // and how the cost scales, whose labels sit in the right hand margin
+    // and how the cost scales, whose labels sit in the right hand margin. one chart per axis, since
+    // the two mean different quantities by the same number and are drawn apart for that reason
     let families = chart::micro_scaling::families(&trailing);
-    charts.push((
-        "micro_scaling".to_string(),
-        chart::micro_scaling::draw(&families).expect("it draws"),
-    ));
+    for axis in [
+        chart::micro_scaling::ScalingAxis::Rows,
+        chart::micro_scaling::ScalingAxis::Bytes,
+    ] {
+        let on_axis = chart::micro_scaling::on_axis(&families, axis);
+        // a capture taken before the width axis existed has nothing on that half, which is not a
+        // reason for the geometry check to fail
+        if on_axis.is_empty() {
+            continue;
+        }
+        charts.push((
+            format!("micro_scaling/{axis:?}"),
+            chart::micro_scaling::draw(&on_axis, axis).expect("it draws"),
+        ));
+    }
     // the profile, whose scope names are the longest strings anywhere on the page
     for label in store.labels().expect("labels are readable") {
         let path = store.run_artifact(&label, shoal_bench::registry::Layer::Hotpath);
@@ -210,10 +222,14 @@ fn every_chart() -> Vec<(String, String)> {
     for label in store.labels().expect("labels are readable") {
         let path = store.run_artifact(&label, shoal_bench::registry::Layer::Stages);
         if path.is_file() {
-            let report = store.read_stages(&path).expect("the report reads");
-            for op in ["insert", "get"] {
-                if let Ok(svg) = chart::stages_stacked::draw(&report, op) {
-                    charts.push((format!("stages_{op}/{label}"), svg));
+            let reports = store.read_stages(&path).expect("the report reads");
+            // every workload the capture profiled, since the stage layer runs the width axis and
+            // a legend that collides does so per workload
+            for (workload, report) in &reports.reports {
+                for op in ["insert", "get"] {
+                    if let Ok(svg) = chart::stages_stacked::draw(report, op) {
+                        charts.push((format!("stages_{op}/{workload}/{label}"), svg));
+                    }
                 }
             }
             break;

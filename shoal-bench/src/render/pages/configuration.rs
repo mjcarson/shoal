@@ -82,7 +82,13 @@ pub fn build(page: &Page) -> Result<String> {
 ///
 /// Anything the order does not name is appended rather than dropped, so a knob added to the sweep
 /// without this list being updated is late rather than missing - the same rule
-/// [`arms::table_kinds`] follows.
+/// [`arms::table_kinds`] follows. It said that before it did it: the loop below used to take only
+/// the named knobs, so a knob absent from the list vanished from the recommendation table entirely
+/// and nothing said so.
+///
+/// A sweep repeated at another row width is named `<knob> @ <width>`
+/// ([`arms::conf_sweeps`]), which is why the match is a prefix rather than an equality - it keeps a
+/// repeat next to the sweep it repeats instead of at the end of the page.
 ///
 /// # Arguments
 ///
@@ -92,16 +98,56 @@ fn in_order<'a>(
     sweeps: &'a [(String, u32, Vec<Arm<'a>>)],
     order: &[&str],
 ) -> Vec<&'a (String, u32, Vec<Arm<'a>>)> {
+    /// Whether a sweep's name is this knob, at the reference width or at any other
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The sweep's name
+    /// * `knob` - The knob being looked for
+    fn is_knob(name: &str, knob: &str) -> bool {
+        name == knob || name.starts_with(&format!("{knob} @"))
+    }
     let mut picked: Vec<&(String, u32, Vec<Arm<'_>>)> = Vec::new();
-    // the named knobs first, and within a knob the read shares in ascending order
+    // the named knobs first, and within a knob the read shares in ascending order. the name is the
+    // secondary key so a repeat at a width follows the reference sweep rather than interleaving
     for knob in order {
         let mut matching: Vec<&(String, u32, Vec<Arm<'_>>)> = sweeps
             .iter()
-            .filter(|(name, _, _)| name == knob)
+            .filter(|(name, _, _)| is_knob(name, knob))
             .collect();
-        matching.sort_by_key(|(_, read_pct, _)| *read_pct);
+        matching.sort_by(|left, right| left.1.cmp(&right.1).then_with(|| left.0.cmp(&right.0)));
         picked.extend(matching);
     }
+    picked
+}
+
+/// The knobs a set of sweeps covers, in a declared reading order, with nothing left out
+///
+/// [`in_order`] keeps only what its order names, which is what the two section functions want -
+/// each of them is handed one half of the configuration on purpose. This is for the caller that
+/// wants the whole set: anything the order does not name is appended rather than dropped, so a knob
+/// added to the sweep without the lists being updated reads last instead of not at all.
+///
+/// # Arguments
+///
+/// * `sweeps` - Every sweep in the capture
+/// * `order` - The knobs to put first, in the order to put them
+fn in_order_with_rest<'a>(
+    sweeps: &'a [(String, u32, Vec<Arm<'a>>)],
+    order: &[&str],
+) -> Vec<&'a (String, u32, Vec<Arm<'a>>)> {
+    let mut picked = in_order(sweeps, order);
+    // whatever the first pass did not take, in the capture's own order. compared by name and share
+    // rather than by address, since that is what identifies a sweep
+    let taken: Vec<(&str, u32)> = picked
+        .iter()
+        .map(|(name, read_pct, _)| (name.as_str(), *read_pct))
+        .collect();
+    picked.extend(
+        sweeps
+            .iter()
+            .filter(|(name, read_pct, _)| !taken.contains(&(name.as_str(), *read_pct))),
+    );
     picked
 }
 
@@ -117,7 +163,7 @@ fn what_to_set(sweeps: &[(String, u32, Vec<Arm<'_>>)]) -> String {
     // rather than choosing a section
     let mut ordered: Vec<&str> = STORAGE_KNOBS.to_vec();
     ordered.extend(RESOURCE_KNOBS);
-    let verdicts: Vec<Verdict<'_>> = in_order(sweeps, &ordered)
+    let verdicts: Vec<Verdict<'_>> = in_order_with_rest(sweeps, &ordered)
         .into_iter()
         .map(|(knob, read_pct, arms)| tables::verdict(knob, *read_pct, arms))
         .collect();
@@ -513,7 +559,64 @@ pub fn numeric(value: &str) -> Option<f64> {
 
 #[cfg(test)]
 mod tests {
-    use super::numeric;
+    use super::{in_order, in_order_with_rest, numeric};
+    use crate::render::arms::Arm;
+
+    /// A sweep with a name and a read share, holding no arms
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - What the sweep is called
+    /// * `read_pct` - The read share it ran at
+    fn sweep(name: &str, read_pct: u32) -> (String, u32, Vec<Arm<'static>>) {
+        (name.to_string(), read_pct, Vec::new())
+    }
+
+    /// A knob the reading order does not name is appended rather than dropped
+    ///
+    /// The doc comment on `in_order` said this before the code did: the loop took only what its
+    /// order named, so a knob added to the sweep without the lists being updated vanished from the
+    /// recommendation table with nothing to say it had.
+    #[test]
+    fn a_knob_the_order_does_not_name_is_appended() {
+        let sweeps = vec![sweep("memory", 50), sweep("brand_new_knob", 50), sweep("shards", 50)];
+        let picked = in_order_with_rest(&sweeps, &["shards", "memory"]);
+        let names: Vec<&str> = picked.iter().map(|(name, _, _)| name.as_str()).collect();
+        assert_eq!(names, vec!["shards", "memory", "brand_new_knob"]);
+    }
+
+    /// The section helpers still take only their own half
+    ///
+    /// `in_order` is what the two section functions use, and each is handed one half of the
+    /// configuration on purpose. Appending there would put the resource sweeps on the storage
+    /// section's chart, which has a hard cap on how many groups it can draw.
+    #[test]
+    fn a_section_takes_only_the_knobs_it_names() {
+        let sweeps = vec![sweep("memory", 50), sweep("latency_buffer", 50)];
+        let picked = in_order(&sweeps, &["latency_buffer"]);
+        let names: Vec<&str> = picked.iter().map(|(name, _, _)| name.as_str()).collect();
+        assert_eq!(names, vec!["latency_buffer"]);
+    }
+
+    /// A sweep repeated at another row width sorts next to the sweep it repeats
+    ///
+    /// It is a separate sweep - the width is part of the key, or the difference between two widths
+    /// reads as a difference between two values of the setting - and it still belongs beside its
+    /// own knob rather than at the end of the page.
+    #[test]
+    fn a_width_repeat_follows_the_sweep_it_repeats() {
+        let sweeps = vec![
+            sweep("latency_buffer", 50),
+            sweep("latency_buffer @ 8 KiB", 50),
+            sweep("shards", 50),
+        ];
+        let picked = in_order(&sweeps, &["latency_buffer", "shards"]);
+        let names: Vec<&str> = picked.iter().map(|(name, _, _)| name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["latency_buffer", "latency_buffer @ 8 KiB", "shards"]
+        );
+    }
 
     /// Every spelling a sweep writes comes back as the number behind it
     #[test]

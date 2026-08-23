@@ -53,6 +53,7 @@ use shoal::server::tables::storage::fs::conf::Durability;
 use crate::workloads::grid::{DEPTH, Grid, REFERENCE_MIX, REFERENCE_WIDTH, Sweep, Table};
 use crate::workloads::harness::conf::binary_size;
 use crate::workloads::harness::keys::KeyDistribution;
+use crate::workloads::harness::rows::RowProfile;
 use crate::workloads::workload::ConfOverrides;
 
 /// The mixture a sweep runs at when one mixture is enough
@@ -329,23 +330,87 @@ pub const SWEEPS: &[KnobSweep] = &[
     },
 ];
 
+/// One knob repeated at a row width other than the reference one
+///
+/// A sweep runs at the grid's reference cell, which is 1 KiB rows. For most knobs that is the right
+/// place to ask the question. For `latency_buffer` it is the one width whose answer is no: the
+/// intent log stages records into a 4096 byte buffer and flushes when the next record will not fit,
+/// so at 1 KiB three records already share an aligned write and the sweep is measuring the flat side
+/// of a step. `StreamWriter::prep` stops batching *entirely* once a record exceeds the buffer, which
+/// is where the whole effect lives and where the reference cell never goes.
+///
+/// So the same rungs are run again above the buffer. Nothing else about an arm changes.
+pub struct WideRepeat {
+    /// Which sweep is being repeated, named the same way [`KnobSweep::knob`] names it
+    pub knob: &'static str,
+    /// The widths to repeat it at, none of which may be the reference width
+    pub widths: &'static [RowProfile],
+}
+
+/// Every knob repeated above the reference width, in the order the repeats are minted
+///
+/// A second table rather than a `widths` field on [`KnobSweep`], and the reason is ports: `all()`
+/// mints this table in a pass of its own after the whole of [`SWEEPS`], so every arm that existed
+/// before these do keeps the port it has always had. Folding the widths into the sweep would have
+/// interleaved ten arms into the middle of the storage half.
+pub const WIDE_REPEATS: &[WideRepeat] = &[WideRepeat {
+    knob: "latency_buffer",
+    // the first width in the grid above the 4096 byte buffer, and one well above it. two points
+    // rather than one because a single width above the step says the step exists and not whether
+    // the setting still does anything once a record is far larger than any value of it
+    widths: &[RowProfile::Fixed(8 * 1024), RowProfile::Fixed(64 * 1024)],
+}];
+
+/// The sweep a knob names
+///
+/// Panics rather than returning an option, because [`WIDE_REPEATS`] naming a knob that no sweep
+/// declares is a table that has drifted from the one beside it rather than a condition to handle.
+/// A test walks the same path, so it fails there before it can panic in a capture.
+///
+/// # Arguments
+///
+/// * `knob` - The identifier segment naming the sweep
+fn sweep_of(knob: &str) -> &'static KnobSweep {
+    SWEEPS
+        .iter()
+        .find(|sweep| sweep.knob == knob)
+        .expect("a width repeat names a sweep that does not exist")
+}
+
 /// Every arm of every configuration sweep
 ///
-/// **Sweep outermost, then mixture, then value.** That order is the order
-/// [`crate::workload_ids::IDS`] declares them and therefore the order their ports are assigned in,
-/// so neither may be reshuffled to read better.
+/// **Sweep outermost, then mixture, then value**, and then the width repeats in a pass of their
+/// own. That order is the order [`crate::workload_ids::IDS`] declares them and therefore the order
+/// their ports are assigned in, so neither may be reshuffled to read better.
 pub fn all() -> Vec<Grid> {
     // one arm per (sweep, mixture, value), which is the whole table flattened
     let mut built = Vec::with_capacity(
         SWEEPS
             .iter()
             .map(|sweep| sweep.mixes.len() * sweep.values.len())
-            .sum(),
+            .sum::<usize>()
+            + WIDE_REPEATS
+                .iter()
+                .map(|repeat| repeat.widths.len() * sweep_of(repeat.knob).mixes.len()
+                    * sweep_of(repeat.knob).values.len())
+                .sum::<usize>(),
     );
     for sweep in SWEEPS {
         for mix in sweep.mixes {
             for value in sweep.values {
-                built.push(arm(sweep, *value, *mix));
+                built.push(arm(sweep, *value, *mix, REFERENCE_WIDTH));
+            }
+        }
+    }
+    // and then the same rungs again at the widths a knob's effect actually lives at, minted last so
+    // that no arm above keeps a different port than it had. see `WIDE_REPEATS`
+    for repeat in WIDE_REPEATS {
+        let sweep = sweep_of(repeat.knob);
+        for width in repeat.widths {
+            for mix in sweep.mixes {
+                for value in sweep.values {
+                    built.push(arm(sweep, *value, *mix, *width));
+                }
             }
         }
     }
@@ -359,20 +424,38 @@ pub fn all() -> Vec<Grid> {
 /// * `sweep` - The knob being swept
 /// * `value` - The value this arm sets it to
 /// * `read_pct` - What share of this arm's queries are reads
-fn arm(sweep: &'static KnobSweep, value: Setting, read_pct: u32) -> Grid {
+/// * `rows` - How wide this arm's rows are, which is the reference width unless it is a repeat
+fn arm(sweep: &'static KnobSweep, value: Setting, read_pct: u32, rows: RowProfile) -> Grid {
     let label = value.label();
+    // the width is in the identifier only when it is not the reference one. that asymmetry is
+    // deliberate: an identifier is the join key of every comparison, so adding a segment to the
+    // forty eight arms that already exist would orphan every capture taken before this
+    let width = if rows == REFERENCE_WIDTH {
+        String::new()
+    } else {
+        format!("w{}/", rows.segment())
+    };
     // the section is a segment rather than something to be derived, so that the two halves of the
     // sweep are separable by anything holding only the identifier
     let id: &'static str = Box::leak(
         format!(
-            "macro/conf/{}/{}/r{read_pct}/{label}",
+            "macro/conf/{}/{}/r{read_pct}/{width}{label}",
             sweep.section.as_str(),
             sweep.knob
         )
         .into_boxed_str(),
     );
     let summary: &'static str = Box::leak(
-        format!("the reference mixture with {} set to {label}", sweep.knob).into_boxed_str(),
+        if rows == REFERENCE_WIDTH {
+            format!("the reference mixture with {} set to {label}", sweep.knob)
+        } else {
+            format!(
+                "the reference mixture at {} rows with {} set to {label}",
+                crate::fmt::bytes(rows.mean()),
+                sweep.knob
+            )
+        }
+        .into_boxed_str(),
     );
     // exactly one field of the base configuration moves, which is what the arm is about
     let mut conf = ConfOverrides::default();
@@ -383,7 +466,7 @@ fn arm(sweep: &'static KnobSweep, value: Setting, read_pct: u32) -> Grid {
         // the filesystem writers are actually exercised through
         table: Table::Unsorted,
         read_pct,
-        rows: REFERENCE_WIDTH,
+        rows,
         distribution: KeyDistribution::Uniform,
         depth: DEPTH,
         conf,
@@ -394,9 +477,10 @@ fn arm(sweep: &'static KnobSweep, value: Setting, read_pct: u32) -> Grid {
 
 #[cfg(test)]
 mod tests {
-    use super::{SWEEPS, Section, Setting, all};
+    use super::{SWEEPS, Section, Setting, WIDE_REPEATS, all, sweep_of};
     use crate::workloads::grid::{DEPTH, REFERENCE_MIX, REFERENCE_WIDTH, Sweep, Table};
     use crate::workloads::harness::keys::KeyDistribution;
+    use crate::workloads::harness::rows::RowProfile;
     use crate::workloads::harness::seed::Scale;
     use crate::workloads::workload::{ConfOverrides, Workload};
 
@@ -428,9 +512,16 @@ mod tests {
         let expected: usize = SWEEPS
             .iter()
             .map(|sweep| sweep.mixes.len() * sweep.values.len())
-            .sum();
+            .sum::<usize>()
+            + WIDE_REPEATS
+                .iter()
+                .map(|repeat| {
+                    let sweep = sweep_of(repeat.knob);
+                    repeat.widths.len() * sweep.mixes.len() * sweep.values.len()
+                })
+                .sum::<usize>();
         assert_eq!(arms.len(), expected);
-        assert_eq!(arms.len(), 48, "the capture's cost changed");
+        assert_eq!(arms.len(), 58, "the capture's cost changed");
         let mut ids: Vec<&str> = arms.iter().map(|arm| arm.id()).collect();
         ids.sort_unstable();
         let before = ids.len();
@@ -473,12 +564,73 @@ mod tests {
     /// The reason an arm is comparable to `macro/grid/unsorted/r50/1024` at all.
     #[test]
     fn an_arm_is_the_reference_cell_with_one_setting_moved() {
+        // the widths a repeat is allowed to hold instead of the reference one, which is the only
+        // respect in which an arm may differ from the cell beyond its own knob and its mixture
+        let repeated: Vec<RowProfile> = WIDE_REPEATS
+            .iter()
+            .flat_map(|repeat| repeat.widths.iter().copied())
+            .collect();
         for arm in all() {
             assert_eq!(arm.table, Table::Unsorted, "{}", arm.id());
-            assert_eq!(arm.rows, REFERENCE_WIDTH, "{}", arm.id());
+            assert!(
+                arm.rows == REFERENCE_WIDTH || repeated.contains(&arm.rows),
+                "{} runs at a width nothing declared",
+                arm.id()
+            );
             assert_eq!(arm.distribution, KeyDistribution::Uniform, "{}", arm.id());
             assert_eq!(arm.depth, DEPTH, "{}", arm.id());
             assert!(matches!(arm.sweep, Sweep::Conf { .. }), "{}", arm.id());
+        }
+    }
+
+    /// A width repeat names a sweep that exists, and never the reference width
+    ///
+    /// Two ways the two tables drift apart. A knob nobody declares would panic inside `all()`
+    /// during a capture rather than here; a repeat at the reference width would mint an identifier
+    /// the sweep proper already holds, which is a collision and not a second measurement.
+    #[test]
+    fn a_width_repeat_names_a_real_sweep_at_a_new_width() {
+        for repeat in WIDE_REPEATS {
+            let sweep = sweep_of(repeat.knob);
+            assert_eq!(sweep.knob, repeat.knob);
+            assert!(!repeat.widths.is_empty(), "{} repeats at no width", repeat.knob);
+            for width in repeat.widths {
+                assert_ne!(
+                    *width, REFERENCE_WIDTH,
+                    "{} is repeated at the width it already runs at",
+                    repeat.knob
+                );
+            }
+        }
+    }
+
+    /// A repeat runs every rung its sweep runs, so the two are the same ladder at two widths
+    ///
+    /// The point of the repeat is a comparison between one width and another at every value of the
+    /// knob. A repeat short of a rung would be a ladder with a missing step, and the two widths
+    /// would only be comparable where they happened to overlap.
+    #[test]
+    fn a_repeat_runs_every_rung_its_sweep_does() {
+        let arms = all();
+        for repeat in WIDE_REPEATS {
+            let sweep = sweep_of(repeat.knob);
+            for width in repeat.widths {
+                for mix in sweep.mixes {
+                    for value in sweep.values {
+                        let expected = format!(
+                            "macro/conf/{}/{}/r{mix}/w{}/{}",
+                            sweep.section.as_str(),
+                            sweep.knob,
+                            width.segment(),
+                            value.label()
+                        );
+                        assert!(
+                            arms.iter().any(|arm| arm.id() == expected),
+                            "{expected} was never minted"
+                        );
+                    }
+                }
+            }
         }
     }
 

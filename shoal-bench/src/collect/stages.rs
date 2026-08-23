@@ -9,11 +9,11 @@
 //! built from a tenth of the queries looks exactly like a report built from all of them once it
 //! is a chart.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 
-use crate::model::stages::StageReport;
+use crate::model::stages::{StageReport, StageReports};
 
 /// The fraction of records that must have joined for a report to be about the run it names
 ///
@@ -21,17 +21,60 @@ use crate::model::stages::StageReport;
 /// that arrived after the shards handed over their tail.
 const MIN_JOIN_RATIO: f64 = 0.5;
 
+/// Gathers the per-workload reports a capture's instrumented runs wrote into one artifact
+///
+/// Each run writes its own file, because they used to share one and the last one won
+/// ([item 73](../../../docs/src/appendix/resolved-issues.md)). This folds them back together,
+/// keyed by the workload each report names itself with rather than by the file it was found in -
+/// a file name is a thing the runner chose and the workload is a thing the run knows.
+///
+/// **The caller names the files rather than this walking the directory.** Scratch is created and
+/// never cleared, so it holds every run of every capture ever taken in this tree; a glob over it
+/// would fold a previous capture's stage reports into this one's artifact, under the same workload
+/// keys, and the result would look exactly like a correct capture. That is the same failure item 73
+/// is about, one directory up.
+///
+/// # Arguments
+///
+/// * `wrote` - The reports this capture's runs were told to write, in the order they ran
+/// * `into` - Where the layer's artifact goes
+pub fn collect(wrote: &[PathBuf], into: &Path) -> Result<StageReports> {
+    let mut reports: std::collections::BTreeMap<String, StageReport> =
+        std::collections::BTreeMap::new();
+    for path in wrote {
+        let report: StageReport = crate::store::read_json(path)
+            .with_context(|| format!("failed to read the stage report at {}", path.display()))?;
+        report
+            .check_version(path)
+            .map_err(|err| anyhow::anyhow!(err))?;
+        // a report with no workload name cannot be keyed, and silently filing it under a guess
+        // would put one workload's breakdown under another's name
+        let workload = report.workload.clone().ok_or_else(|| {
+            anyhow::anyhow!("{} does not say which workload it describes", path.display())
+        })?;
+        // and two reports claiming one workload is a run that was planned twice, which would leave
+        // the artifact describing whichever ran last - the defect this whole change is about
+        if let Some(existing) = reports.insert(workload.clone(), report) {
+            let _ = existing;
+            bail!("two stage reports both describe {workload}");
+        }
+    }
+    if reports.is_empty() {
+        bail!("no stage report was written, so there is nothing to collect");
+    }
+    let artifact = StageReports::new(reports);
+    crate::store::write_json(into, &artifact)?;
+    Ok(artifact)
+}
+
 /// Checks a stage artifact and describes what it holds
 ///
 /// # Arguments
 ///
 /// * `path` - The artifact to check
 pub fn check(path: &Path) -> Result<String> {
-    let report: StageReport = crate::store::read_json(path)?;
-    report
-        .check_version(path)
-        .map_err(|err| anyhow::anyhow!(err))?;
-    let join = report.join;
+    let reports = crate::store::read_stage_reports(path)?;
+    let join = reports.join();
     // a report that joined nothing is not a report
     if join.joined == 0 {
         bail!(
@@ -93,6 +136,84 @@ mod tests {
         )
         .expect("writing a report");
         path
+    }
+
+    /// Writes a stage report naming a workload
+    ///
+    /// # Arguments
+    ///
+    /// * `dir` - Where to write it
+    /// * `workload` - What the report says it describes, if anything
+    /// * `joined` - How many records joined
+    fn write_named(dir: &Path, workload: Option<&str>, joined: usize) -> std::path::PathBuf {
+        let named = match workload {
+            Some(name) => format!(r#""workload":"{name}","#),
+            None => String::new(),
+        };
+        let path = dir.join(format!("stages-{}.json", workload.unwrap_or("anon").replace('/', "-")));
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{"version":1,"label":"L",{named}"clock":"CLOCK_MONOTONIC",
+                   "clock_overhead_ns":20,
+                   "join":{{"joined":{joined},"server_only":0,"client_only":0,
+                   "duplicates":0,"saturated":0,"window_missing":0}},"ops":{{}}}}"#
+            ),
+        )
+        .expect("writing a report");
+        path
+    }
+
+    /// Several reports fold into one artifact, keyed by the workload each one names
+    #[test]
+    fn the_reports_fold_into_one_artifact() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let wrote = vec![
+            write_named(dir.path(), Some("macro/grid/unsorted/r50/1024"), 10),
+            write_named(dir.path(), Some("macro/grid/unsorted/r50/8192"), 20),
+        ];
+        let into = dir.path().join("L.stages.json");
+        let artifact = collect(&wrote, &into).expect("it collects");
+        assert_eq!(artifact.reports.len(), 2);
+        assert!(artifact.get("macro/grid/unsorted/r50/8192").is_some());
+        // and the joins are summed, which is what the provenance records
+        assert_eq!(artifact.join().joined, 30);
+        // written where it was asked to write it, and it reads back
+        assert!(crate::store::read_stage_reports(&into).is_ok());
+    }
+
+    /// A report that does not say which workload it describes is refused
+    ///
+    /// Filing it under a guess would put one workload's breakdown under another's name, which is
+    /// the shape of the defect this collector exists to fix rather than an inconvenience.
+    #[test]
+    fn an_unnamed_report_is_refused() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let wrote = vec![write_named(dir.path(), None, 10)];
+        let into = dir.path().join("L.stages.json");
+        assert!(collect(&wrote, &into).is_err());
+    }
+
+    /// Two reports claiming one workload is refused rather than silently deduplicated
+    #[test]
+    fn two_reports_for_one_workload_are_refused() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let one = write_named(dir.path(), Some("macro/insert_unsorted"), 10);
+        let wrote = vec![one.clone(), one];
+        let into = dir.path().join("L.stages.json");
+        assert!(collect(&wrote, &into).is_err());
+    }
+
+    /// A file the plan named and no run wrote is an error, not a shorter artifact
+    ///
+    /// Scratch is never cleared, so a missing file cannot be told apart from a stale one by looking
+    /// at the directory. Naming what was expected is what makes the absence visible.
+    #[test]
+    fn a_report_the_run_never_wrote_is_an_error() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let wrote = vec![dir.path().join("stages-never-ran.json")];
+        let into = dir.path().join("L.stages.json");
+        assert!(collect(&wrote, &into).is_err());
     }
 
     /// A report whose halves lined up passes, and says how well

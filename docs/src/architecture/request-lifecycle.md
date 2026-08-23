@@ -385,6 +385,14 @@ whole lifecycle including the asynchronous flush.
 ## Limitations
 
 - The request path deserializes and then clones per shard; it is not zero-copy.
+  **Every copy on this path is O(bytes), and there are about six of them per round trip** — the
+  zeroed request buffer, the bundle deserialization, the row copied into a partition and out of
+  one, the intent log's serialize/checksum/copy, and the response serialization. None of that is
+  visible at a 64 byte row and it is most of the cost at 4 MiB; see
+  [Row size and what it costs](../tables/row-size.md#the-payload-is-walked-about-six-times-per-round-trip).
+- **The response relay is serial per connection.** `client_tx_relay` writes one response to
+  completion before starting the next, so a wide response blocks every narrow one queued behind it
+  on that socket ([O35](../appendix/optimizations.md)).
 - ~~The length prefix is unvalidated, so a bad length is an unbounded allocation.~~ Bounded by
   `max_frame_bytes` since [F10](../features/framing-and-protocol-evolution.md).
 - ~~Socket and channel errors are panics rather than per-connection teardown.~~ Both relays tear

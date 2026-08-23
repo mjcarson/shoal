@@ -202,11 +202,13 @@ fn span(from: Option<Stamp>, to: Option<Stamp>) -> Option<u64> {
 /// * `server` - The records the shards emitted
 /// * `client` - The records the workers recorded
 /// * `label` - The name this run was captured under
+/// * `workload` - Which workload produced these records
 /// * `clock_overhead_ns` - What one clock reading costs on this machine
 pub fn build_report(
     server: &[StageRecord],
     client: &[ClientRecord],
     label: Option<String>,
+    workload: Option<String>,
     clock_overhead_ns: u64,
 ) -> StageReport {
     // count everything the join does rather than dropping any of it
@@ -292,6 +294,9 @@ pub fn build_report(
     StageReport {
         version: REPORT_VERSION,
         label,
+        // the report names the workload it came from, so the collector keys the artifact on what
+        // the run said rather than on the name of the file it happened to be written to
+        workload,
         clock: "std::time::Instant".to_string(),
         clock_overhead_ns,
         join,
@@ -670,7 +675,7 @@ mod tests {
     /// that away would hide the bug instead of showing it.
     fn bucket_means_reconcile() {
         let (server, client) = run(1000, StageOp::Get);
-        let report = build_report(&server, &client, None, 20);
+        let report = build_report(&server, &client, None, None, 20);
         let get = report.ops.get("get").expect("no get records were reported");
         for bucket in &get.buckets {
             // the stages have to explain the total to within a rounding error per stage
@@ -689,7 +694,7 @@ mod tests {
     /// A bucket is a window of records, not the single record at its rank
     fn a_bucket_is_a_window_not_a_point() {
         let (server, client) = run(10_000, StageOp::Get);
-        let report = build_report(&server, &client, None, 20);
+        let report = build_report(&server, &client, None, None, 20);
         let get = report.ops.get("get").expect("no get records were reported");
         // every rank has to summarize a population, or its "mean" is one query
         let expected = std::cmp::max((10_000.0 * BUCKET_FRACTION).ceil() as usize, MIN_BUCKET);
@@ -710,7 +715,7 @@ mod tests {
     /// A stage a query never reached is absent rather than reported as instant
     fn unset_is_not_zero() {
         let (server, client) = run(500, StageOp::Get);
-        let report = build_report(&server, &client, None, 20);
+        let report = build_report(&server, &client, None, None, 20);
         let get = report.ops.get("get").expect("no get records were reported");
         let all = &get.buckets[0];
         // a get never touches the intent log, so it has no durability stages at all -
@@ -735,7 +740,7 @@ mod tests {
     /// A write reports the durability stages a get does not
     fn a_write_reports_its_durability_stages() {
         let (server, client) = run(500, StageOp::Insert);
-        let report = build_report(&server, &client, None, 20);
+        let report = build_report(&server, &client, None, None, 20);
         let insert = report
             .ops
             .get("insert")
@@ -768,7 +773,7 @@ mod tests {
         // a duplicate of a key we already have, which is what a double reply looks like
         let duplicate = server[0];
         server.push(duplicate);
-        let report = build_report(&server, &client, None, 20);
+        let report = build_report(&server, &client, None, None, 20);
         assert_eq!(report.join.joined, 300);
         assert_eq!(report.join.server_only, 1);
         assert_eq!(report.join.client_only, 1);
@@ -780,7 +785,7 @@ mod tests {
     fn a_stage_at_the_clock_floor_is_marked() {
         let (server, client) = run(500, StageOp::Get);
         // claim a clock overhead far above every stage in this run, so all of them are floor
-        let report = build_report(&server, &client, None, 1_000_000);
+        let report = build_report(&server, &client, None, None, 1_000_000);
         let get = report.ops.get("get").expect("no get records were reported");
         for stage in get.buckets[0].stages.values() {
             assert!(
@@ -794,7 +799,7 @@ mod tests {
     /// A batch level stage is labelled as one
     fn batch_stages_are_labelled() {
         let (server, client) = run(500, StageOp::Get);
-        let report = build_report(&server, &client, None, 20);
+        let report = build_report(&server, &client, None, None, 20);
         let all = &report.ops.get("get").unwrap().buckets[0];
         // charging a batch level cost to a query without saying so reads as a per query cost
         assert!(all.stages.get("decode").unwrap().per_batch);
@@ -812,7 +817,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("stages.json");
         let (server, client) = run(200, StageOp::Get);
-        let mut report = build_report(&server, &client, Some("round-trip".into()), 20);
+        let mut report = build_report(&server, &client, Some("round-trip".into()), None, 20);
         // a report of our own version round trips
         write_report(&report, &path).unwrap();
         let read = read_report(&path).expect("a freshly written report did not load");

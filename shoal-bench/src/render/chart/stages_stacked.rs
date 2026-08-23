@@ -238,6 +238,7 @@ mod tests {
             },
         );
         StageReport {
+            workload: None,
             version: STAGE_REPORT_VERSION,
             label: Some("L".to_string()),
             clock: "CLOCK_MONOTONIC".to_string(),

@@ -139,7 +139,7 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
     // this has to come after the server has stopped. shards flush their buffered records in
     // batches as the run proceeds and hand the tail over on shutdown, so building the report any
     // earlier silently omits that tail.
-    write_stage_report(request, &measured)?;
+    write_stage_report(workload, request, &measured)?;
     // a workload that recorded nothing has not measured anything, and an artifact saying so
     // reads exactly like one from a workload that was fast
     if measured.ops.values().all(|samples| samples.is_empty()) {
@@ -259,10 +259,15 @@ fn stop(pool: Option<ShoalPool<Bench>>) -> Result<()> {
 ///
 /// # Arguments
 ///
+/// * `workload` - The workload these records came from, which the report names
 /// * `request` - What this run was asked for
 /// * `measured` - What the workload produced, carrying the client half of the records
 #[cfg(feature = "stage-profile")]
-fn write_stage_report(request: &RunRequest, measured: &crate::workloads::workload::Measurement) -> Result<()> {
+fn write_stage_report(
+    workload: &dyn Workload,
+    request: &RunRequest,
+    measured: &crate::workloads::workload::Measurement,
+) -> Result<()> {
     // nothing to do unless this run was asked for a report
     let Some(path) = request.stage_json.as_deref() else {
         return Ok(());
@@ -277,6 +282,7 @@ fn write_stage_report(request: &RunRequest, measured: &crate::workloads::workloa
         &server_records,
         &measured.stage_records,
         request.label.clone(),
+        Some(workload.id().to_string()),
         overhead,
     );
     // report what the join actually managed, since a report that matched half a run is not a
@@ -299,15 +305,17 @@ fn write_stage_report(request: &RunRequest, measured: &crate::workloads::workloa
 ///
 /// # Arguments
 ///
+/// * `workload` - Unused
 /// * `request` - Unused
 /// * `measured` - Unused
 #[cfg(not(feature = "stage-profile"))]
 fn write_stage_report(
+    workload: &dyn Workload,
     request: &RunRequest,
     measured: &crate::workloads::workload::Measurement,
 ) -> Result<()> {
     // the request was already refused by `check_stage_support` before anything started
-    let _ = (request, measured);
+    let _ = (workload, request, measured);
     Ok(())
 }
 

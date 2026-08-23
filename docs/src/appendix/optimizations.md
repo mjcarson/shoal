@@ -90,6 +90,7 @@ this page opens with. Ordered inside each tier.
 | **A3** | [**O13**](#o13-a-multi-partition-get-is-quadratic-in-the-partitions-it-names) (+ [**O12**](#o12-to_blocked-clones-the-whole-filter-set-per-blocked-partition) beside it) — the quadratic multi-partition get | Asymptotic — O(n²) in a caller-set n | S | — | None | no — still needs a bench over `PersistentSortedTable::get` |
 | **A4** | [**O5**](#o5-the-hottest-maps-use-siphash), [**O14**](#o14-fixed-thousand-element-preallocations-on-per-call-paths), [**O28**](#o28-the-client-takes-two-guards-on-its-response-map-for-every-query-it-sends) — hasher, allocation sizes, and a doubled map guard | Argued | S | — | None | no — needs a table-layer bench, and O28 needs the client measured at all |
 | **A5** | [**O25**](#o25-two-instrument-spans-remain-on-per-query-paths) — two `#[instrument]` spans on per-query paths | Argued — but the cost is in the *uninstrumented* binary | S | — | Contained | no — needs a with/without capture |
+| **A6** | [**O34**](#o34-a-record-wider-than-the-staging-buffer-defeats-intent-log-batching) — a record wider than the intent log's staging buffer | **Asymptotic** — a step function of the row width | S–M | a `latency_buffer` sweep above the buffer | Contained | no — the sweep that names the setting runs at the one width where it cannot matter |
 
 **A3 is now the head of the queue**, and it is the first one there that a profile cannot settle: it
 needs a benchmark over `PersistentSortedTable::get` that does not exist yet. A1 and A2 are struck
@@ -103,6 +104,13 @@ necessary, and would have quietly changed what four tests exercise if it had bee
 diff, because unlike everything else here its impact is argued rather than profiled — a span's cost
 is invisible to the profile that would normally rank it, which is precisely what makes it worth
 filing.
+
+**A6 is new and comes out of reading the row-size sweep.** It is the only entry in this tier whose
+impact is *Asymptotic*, and it is last because the quantity it grows in is one most callers never
+reach: below about four kilobytes a row it costs nothing at all. What makes it worth a slot rather
+than a footnote is that the sweep which appears to cover it does not — `latency_buffer` is swept at
+1 KiB, on the flat side of a step at 4096. See
+[Row size and what it costs](../tables/row-size.md).
 
 **Tier B — argued, contained, waiting on its benchmark.** The profile is what orders this tier:
 `write_helper` is 30.5 ms per call against roughly 350 ns for the insert it persists, so a write-path
@@ -126,6 +134,7 @@ so they get worse by existing longer rather than under load.
 | **C2** | [**O2**](#o2-every-returned-row-is-copied-at-least-twice) + [**O18**](#o18-the-gathered-reorder-rehashes-every-rows-partition-key), together | Argued — the largest read-path win available | **XL** | each other; a `wire_codec` bench | **Major** — wire format and the client | no |
 | **C3** | [**O30**](#o30-nothing-can-see-what-a-connection-costs-to-open) — the connect path is unmeasured | **Unknown, and that is the entry** | S for the workload, unknown for whatever it finds | a `connect` workload | — | **no, and that is the point** |
 | **C4** | [**O31**](#o31-the-disjointness-rule-cannot-tell-a-result-from-a-saturated-workload) — a saturated workload passes the rule that decides what is real | **Measured** — four points report encryption making queries faster | S to detect, M to decide | nothing | Contained | **yes, it already has been** |
+| **C5** | [**O35**](#o35-the-per-connection-response-relay-writes-one-response-at-a-time) — one response written at a time, per connection | Argued, indicated — a 45× p50-to-p99 spread at 512 KiB | M to reorder, **XL** to interleave | [D2](../direction/framing.md), for the interleaving form only | Contained, or **Major** | no — nothing separates it from the fixed load depth |
 
 **Tier D — declined, kept with the reason.** A rejected optimization is recorded, not dropped.
 
@@ -153,18 +162,24 @@ come out as a code block.
 | **`wire_codec` bench → O1, O2, O18** | Unbuilt ([TODOs](todos.md#benchmark-coverage-the-harness-does-not-have)) |
 | **table-layer bench → O5, O12, O13** | Unbuilt, and until recently believed to exist — see below. [F4](../features/validated-archives.md) closed half the gap by making `MaybeLoaded` constructible, but all three of these live a layer above it in `PersistentSortedTable` |
 | **write-path bench → O11, O21** | Unbuilt, and it is the layer that dominates the profile |
+| **a width-aware `latency_buffer` sweep → O34** | Unbuilt. The existing sweep runs at 1 KiB, below the step it would measure ([TODOs](todos.md#the-row-size-axis)) |
+| **O35 ↔ D2** | Only the interleaving form. Reordering the relay's queue needs no format change; splitting a response across frames is [D2](../direction/framing.md) |
+| **row width raises O1, O2, O11, O29** | All four are per-byte costs filed as constants. They do not get worse under load — they get worse per query as the caller's rows widen ([Row size](../tables/row-size.md)) |
 
 ### Which entries a benchmark can currently adjudicate
 
 | Entry | Benchmark that would show it |
 | --- | --- |
-| O1, O18, O19 | none yet — a `wire_codec` bench over `Queries` and `ResponseKinds` is unbuilt. It belongs in the **micro** layer, not the macro one ([TODOs](todos.md#benchmark-coverage-the-harness-does-not-have)) |
-| O2 | `partition_sorted/maybe_loaded/get_all` and `archived/walk_all`, with `get_all` for the resident twin |
+| O1, O18, O19 | ~~none yet~~ `wire_codec/request/decode/{access,deserialize}/*` and the **width** axis beside it, `wire_codec/width/request/decode/*` ([F22](../features/row-size-benchmarks.md)) — the second is what measures the per-byte half, which is the half that grows in a quantity the caller controls. O18 and O19 are still uncovered: neither is about a payload width |
+| O2 | `partition_sorted/maybe_loaded/get_all` and `archived/walk_all`, with `get_all` for the resident twin; and `wire_codec/width/response/encode/*` for the per-byte half of the response build ([F22](../features/row-size-benchmarks.md)) |
 | ~~O3, O23~~ | `partition_sorted/maybe_loaded/get_key` and `exists_key`, against `codec/access` — **settled**, see [F4](../features/validated-archives.md#performance) |
 | O5, O12 | **none yet** — an isolated bench over `PersistentSortedTable::get` is still unbuilt ([TODOs](todos.md#benchmark-coverage-the-harness-does-not-have)). `maybe_loaded/*` reaches `MaybeLoaded`, one layer below where both live |
 | O13 | ~~none yet~~ `macro/fanout/{resident,evicted}/n` since [F8](../features/purpose-built-workloads.md) — **the question, not the isolated cost**. See the note below |
 | O20 | none yet — a `routing` bench over `Ring::find_shard` and `split_by_shard` is unbuilt, and likewise belongs in the micro layer |
+| O11, O29 | the per-stage breakdown at 1 KiB, 8 KiB and 512 KiB ([F22](../features/row-size-benchmarks.md)), which says whether the copies they name are in `decode`, `durable_write` or `reply_serialize`; and the `r0` width sweep against the `r100` one, which says which half of the mixture they are on. Neither captured |
 | O21 | `hotpath` `fs::commit` and `stream::prep` only; no micro-benchmark of the write path exists, though [F8](../features/purpose-built-workloads.md) built the standalone binary that would host one |
+| O34 | ~~**none yet**~~ `macro/conf/storage/latency_buffer/r50/w8192/*` and `.../w65536/*` — the same five rungs above the staging buffer, against the five at 1 KiB below it ([F22](../features/row-size-benchmarks.md)). **Built and not yet captured**, so the 1.06× on [Configuration](../performance/configuration.md) is still the only number anywhere and is still measured at the one width whose answer is no |
+| O35 | ~~none~~ `macro/grid/depth/1/<width>` against the `r50` width sweep ([F22](../features/row-size-benchmarks.md)): a p99 that collapses at one outstanding query and not at thirty two is a queue in front of the relay rather than a cost inside it. Built, not captured — until then the sweep's percentiles are consistent with it and isolate nothing, because load depth was fixed at 32 at every width |
 | O28, O30, O31 | none — **the client is not instrumented at all**. No `tracing` span, no `hotpath` scope, and no workload that isolates it. O30 is the only entry on this page whose cost is not even bounded by an argument |
 
 > This table previously claimed that `partition_sorted/insert` and `get_key` adjudicated **O5**,
@@ -244,6 +259,13 @@ both read loops, and it is the point at which the server's `BytesMut::zeroed(len
 anyway. Taking this in the same pass costs one visit to that code instead of two, and the
 `wire_codec` bench both are blocked on is the same bench.
 
+**This cost is proportional to the row, not constant.** It was filed against the reference cell's
+1 KiB rows, where it is small. The [row-size sweep](../performance/row-size.md) is where it stops
+being small: a 4 MiB bundle is 4 MiB of `String` and `Vec` allocated and copied out of
+a buffer that already holds them. Its *Impact* grade should be read as **Asymptotic** in the row width —
+a quantity the caller chooses — rather than as the *Argued* constant above. See
+[Row size and what it costs](../tables/row-size.md#the-payload-is-walked-about-six-times-per-round-trip).
+
 ### O2. Every returned row is copied at least twice
 
 | | |
@@ -293,6 +315,13 @@ the flag day, and it is paid per break rather than per field** — so if D2 is t
 two later, the cost is two. Whether they can realistically be designed together is the open
 question, since D2 is a header change and these are a payload change; but the sequencing decision
 should be made deliberately rather than by whichever is picked up first.
+
+**This cost is proportional to the row, not constant.** It was filed against the reference cell's
+1 KiB rows, where it is small. The [row-size sweep](../performance/row-size.md) is where it stops
+being small: two copies of a 4 MiB row is 8 MiB of memory traffic for one get, and the
+archive path's `from_archived` materialization is a third. Its *Impact* grade should be read as **Asymptotic** in the row width —
+a quantity the caller chooses — rather than as the *Argued* constant above. See
+[Row size and what it costs](../tables/row-size.md#the-payload-is-walked-about-six-times-per-round-trip).
 
 ### ~~O3. Every archived read is fully validated, inside a tracing span~~
 
@@ -609,8 +638,10 @@ instead of being owned by one.
 | **Tradeoff** | None |
 | **Benchmark** | none — the layer that dominates the profile is the one with no confidence interval |
 
-- `FileSystem::commit` (`.../fs.rs:366`) allocates via `RkyvSupport::serialize`, then copies the
-  bytes a second time into the DMA buffer (`.../fs.rs:385`).
+- `FileSystem::commit` (`.../fs.rs:367`) allocates via `RkyvSupport::serialize`, then copies the
+  bytes a second time into the DMA buffer (`.../fs.rs:386`) — and hashes the whole record in
+  between (`.../fs.rs:372`), so that one function walks the payload **three** times. The checksum
+  is a separate pass only because the copy it could ride along with happens five lines later.
 - `Shard::reply` (`shard.rs:663`) allocates one per response.
 - `Shoal::send` (`shoal-core/src/client.rs:211`) allocates one per bundle on the **client** side,
   which this entry never mentioned and which is on the same round trip.
@@ -620,6 +651,13 @@ instead of being owned by one.
 rkyv can serialize into a caller-supplied buffer, so all three could reuse one. `commit` is the
 interesting one, because the destination buffer it copies into is already there — `prep` hands
 back a `&mut [u8]` sized for the record (`.../fs/stream.rs:655-672`).
+
+**This cost is proportional to the row, not constant.** It was filed against the reference cell's
+1 KiB rows, where it is small. The [row-size sweep](../performance/row-size.md) is where it stops
+being small: `commit` alone walks the record three times at 4 MiB — serialize,
+checksum, copy into the DMA buffer — before the device sees a byte. Its *Impact* grade should be read as **Asymptotic** in the row width —
+a quantity the caller chooses — rather than as the *Argued* constant above. See
+[Row size and what it costs](../tables/row-size.md#the-payload-is-walked-about-six-times-per-round-trip).
 
 ### ~~O17. `handle_flushed` runs on every message~~
 
@@ -666,6 +704,56 @@ green.
 per call, and unlike everything else the profile attributes, *that* cost is in the uninstrumented
 binary too. It is removed. The same reasoning applies to two more spans on hot paths and is filed as
 [O25](#o25-two-instrument-spans-remain-on-per-query-paths).
+
+### O34. A record wider than the staging buffer defeats intent-log batching
+
+| | |
+| --- | --- |
+| **Rank** | **A6** — contained, and the cost grows in something the caller chooses |
+| **Impact** | **Asymptotic** — a step function of the row width. Below the buffer several records share one aligned write; at or above it, every record is its own DMA write and its own DMA allocation |
+| **Difficulty** | S–M — `prep`, `write` and `alloc_buffer` are one file, but whether the buffer should size itself from observed records or stay a configured floor is a decision rather than a patch |
+| **Depends on** | a `latency_buffer` sweep taken at a width above the buffer, which does not exist |
+| **Blocks** | any tuning advice about wide rows |
+| **Tradeoff** | Contained if the fix is a larger default — padding on a partial flush, and a larger DMA allocation per shard. A self-sizing buffer is a behaviour change and needs the decision above |
+| **Benchmark** | **none.** `macro/conf/storage/latency_buffer/*` exists and is swept at the reference cell's 1 KiB, which is the one width where the setting cannot matter |
+
+`StreamWriter::prep` flushes the staging buffer whenever the next record will not fit
+(`.../fs/stream.rs:655-665`):
+
+```rust
+pub async fn prep(&mut self, size: usize) -> &mut [u8] {
+    // if we don't have enough usable space then write our current buffer out
+    if self.usable() < size + self.buff_pos {
+        // we won't have enough space to write this new data to out buffer so get a new one
+        // make this new buffer big enough for our next write or bigger
+        let new_usable = std::cmp::max(self.default_buffer_size, size);
+        // write but not sync our current buffer to disk
+        self.write(new_usable).await.unwrap();
+    }
+```
+
+and `write` then calls `alloc_buffer(new_usable)` (`:617`), a fresh `alloc_dma_buffer` sized to the
+record. `default_buffer_size` is `align_up(max(conf.buffer_size, alignment), alignment)` (`:149`),
+and the committed `shoal.yml` sets `latency_sensitive.buffer_size: 4096`.
+
+So a table whose rows exceed about four kilobytes gets **one DMA write and one DMA buffer allocation
+per insert**, and the group commit that amortizes the durability barrier across concurrent writers
+has nothing left to group. The transition is a step at the buffer size, not a slope.
+
+**Why the sweep that names this setting says nothing about it.** `latency_buffer` comes back at
+1.06× with a `yes` in the *Real?* column, which reads as "worth six percent". It was swept at
+`macro/grid/unsorted/r50/1024` — 1 KiB rows against a 4096 byte buffer, where three records already
+share a write and growing the buffer buys the fourth. Every arm of the row-size sweep at 8 KiB and
+above is on the other side of the step, and none of them varies this setting. **The sweep is not
+wrong; it answers a question at the one width where the answer is no**, and that is a
+[gap in F20](todos.md#what-f20-left-undone) rather than a defect in the sweep.
+
+The capture is consistent with the mechanism and does not isolate it: over the octave 1 KiB → 8 KiB
+the persistent arms lose 31% of their throughput while the ephemeral arms — the same tables with
+`NoStorage` and nothing else changed — lose 6%. That brackets a storage-side cost in the right place
+and does not prove it is this one, because the persistent half also pays more per byte for
+everything in [O11](#o11-a-fresh-alignedvec-per-write-and-per-response). See
+[Row size and what it costs](../tables/row-size.md#the-intent-log-stops-batching-past-the-staging-buffer).
 
 ---
 
@@ -1226,6 +1314,48 @@ The reason it was left is worth stating, because the fix looks like a one-line s
 becomes a property of a message type that several call sites construct. Doing this with `MaybeUninit`
 or an `unsafe` `set_len` needs the read that fills it to be the only way that message can be built,
 which `server/messages.rs` does not currently guarantee.
+
+**This cost is proportional to the row, not constant.** It was filed against the reference cell's
+1 KiB rows, where it is small. The [row-size sweep](../performance/row-size.md) is where it stops
+being small: a bundle of 4 MiB rows is a 4 MiB `memset` per request, for nothing. Its *Impact* grade should be read as **Asymptotic** in the row width —
+a quantity the caller chooses — rather than as the *Argued* constant above. See
+[Row size and what it costs](../tables/row-size.md#the-payload-is-walked-about-six-times-per-round-trip).
+
+### O35. The per-connection response relay writes one response at a time
+
+| | |
+| --- | --- |
+| **Rank** | **C5** — blocked on the same design pass as the framing, and for the same reason |
+| **Impact** | Argued from the source, **indicated** by the capture — a 45× p50-to-p99 spread at 512 KiB on a fully resident table |
+| **Difficulty** | M as a scheduling change; **XL** if it reaches the framing |
+| **Depends on** | nothing to reorder; [D2](../direction/framing.md) to interleave |
+| **Blocks** | nothing |
+| **Tradeoff** | Contained while it stays a scheduling change. **Major** if the fix is chunking, because the protocol frames a response whole and splitting one is a format change |
+| **Benchmark** | none that isolates it. The row-size sweep's percentiles are consistent with it and the fixed load depth is an alternative explanation for part of the spread |
+
+`client_tx_relay` (`shard.rs:200`) is one task per client connection, and it is a serial loop: take a
+response off the channel, `write_vectored` it to completion, then look at the next one. Every shard's
+replies for that client funnel through it.
+
+```rust
+let mut bufs = &mut [IoSlice::new(&preamble), IoSlice::new(&archived)][..];
+while !bufs.is_empty() {
+    match tcp_tx.write_vectored(bufs).await {
+```
+
+So a response's wall clock is its own write plus every write already queued in front of it, and
+nothing orders that queue by size. At the reference width this is invisible — a 1 KiB response is
+gone in one syscall. At 512 KiB the persistent unsorted arm reads at a **333.55 µs p50 and a 15.19 ms
+p99**, against 2× at 8 KiB, on a table with nothing to load from disk.
+
+**Two fixes, and they are not the same size.** Reordering — serving the shortest queued response
+first, or round-robining across shards — is contained to this function and changes no format, but it
+only redistributes the wait and starves nothing only if it is bounded. Interleaving — chunking a
+large response so a small one can pass it — actually removes the blocking and needs the wire to carry
+a partial response, which is [D2](../direction/framing.md)'s territory. The cheap fix is worth
+measuring first, and neither is worth doing before something can see the difference.
+
+See [Row size and what it costs](../tables/row-size.md#a-wide-response-blocks-every-narrow-one-behind-it).
 
 ---
 

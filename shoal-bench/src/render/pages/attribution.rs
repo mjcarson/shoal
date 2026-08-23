@@ -103,10 +103,17 @@ fn stages(page: &Page) -> Result<String> {
         out.push_str(&nothing_measured("a stage report"));
         return Ok(out);
     };
-    let report = snapshot
+    let reports = snapshot
         .stages
         .as_ref()
         .expect("the snapshot was selected for having one");
+    // the write path workload, which is the one this page has always drawn. the layer profiles the
+    // width axis as well now, and that breakdown belongs beside the widths it is about rather than
+    // here - see `pages::row_size`
+    let Some(report) = reports.primary() else {
+        out.push_str(&nothing_measured("a stage report"));
+        return Ok(out);
+    };
     out.push_str(&format!(
         "From `{}`, built with the `stage-profile` feature. Every query records when it reached \
          each of nineteen points between the client's `send` and the response coming back. See \
@@ -130,7 +137,7 @@ fn stages(page: &Page) -> Result<String> {
     }
     out.push_str(&format!(
         "The client and server halves joined on {} queries.\n\n",
-        fmt::thousands(report.join.joined as u128)
+        fmt::thousands(reports.join().joined as u128)
     ));
     // one chart and one table per operation the report covers
     for op in ["insert", "get"] {

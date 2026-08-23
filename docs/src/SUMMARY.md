@@ -29,6 +29,7 @@
 - [Partitions](tables/partitions.md)
 - [Query Execution](tables/query-execution.md)
 - [Memory and Eviction](tables/memory-and-eviction.md)
+- [Row size and what it costs](tables/row-size.md)
 
 # API
 
@@ -82,6 +83,7 @@
   - [F19. Charts that name their colours in one place](features/chart-legends.md)
   - [F20. What each setting is worth](features/configuration-sweeps.md)
   - [F21. Benchmark groups](features/benchmark-groups.md)
+  - [F22. The benchmarks the row size page asked for](features/row-size-benchmarks.md)
 
 # Direction
 
@@ -127,6 +129,8 @@
   - [56, 61. A response cannot say that a read failed](appendix/resolved/response-error-channel.md)
   - [54. `#[shoal::db]` needed crates the caller had never heard of](appendix/resolved/macro-emits-three-crates.md)
   - [67, 68. Chart labels collided, and the scope prefix strip never matched](appendix/resolved/chart-labels.md)
+  - [73. Two instrumented runs wrote to one artifact, and the last one won](appendix/resolved/stage-artifact-overwrite.md)
+  - [74. A configuration knob the page did not name disappeared from it](appendix/resolved/conf-knob-dropped.md)
 - [TODOs and Unbuilt Work](appendix/todos.md)
 - [Review, August 2026](appendix/review-2026-08.md)
 - [Glossary](appendix/glossary.md)

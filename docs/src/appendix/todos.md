@@ -724,6 +724,97 @@ layer with nothing fetched ([F8](../features/purpose-built-workloads.md)). Still
 has neither `tracing` spans nor `hotpath` scopes, so the share of measured latency that is the
 harness's own is unknown.
 
+### The row-size axis — all six built, none captured
+
+Six benchmarks that between them would turn most of
+[Row size and what it costs](../tables/row-size.md) from an argument into a measurement. That page
+names four mechanisms behind the throughput fall past a kilobyte and could isolate none of them,
+because the axis had a 64× hole in it, ran at one load depth, ran at one mixture, and had no
+per-stage attribution at more than one width. Ordered cheapest first, which is also the order they
+were worth reaching for.
+
+**All six are built** ([F22](../features/row-size-benchmarks.md)) and **none has been captured**,
+which is the distinction to keep: the ability to answer these questions exists and no answer does.
+Each entry below is struck through with what it turned out to cost, including the two places it cost
+more than it said. What none of the six closes is at the end.
+
+~~**A width axis on `wire_codec`.** The cheapest item in this whole section. `shoal/benches/wire.rs`
+sweeps *bundle size* (1, 10, 100 queries) and *response cardinality* (16, 256, 1024, 4096 rows) with
+a fixed row of about thirty bytes, so it never varies payload **width** at all. Adding a width axis
+measures the per-byte half of [O1](optimizations.md) and [O2](optimizations.md) directly, in the
+micro layer, with criterion's confidence interval rather than a wall clock — and it needs no server,
+no executor and no storage backend. Seconds of machine time, one file.~~ **Built**
+([F22](../features/row-size-benchmarks.md)), as a second row type and four `wire_codec/width/*`
+groups rather than a width added to the existing ones — widening `TitleByKeyword` would have kept
+all thirty nine existing identifiers and changed what every one of them measured, against a frozen
+baseline. Right that it was one file and seconds of machine time. Not yet captured.
+
+~~**The `latency_buffer` sweep repeated above the buffer.** `macro/conf/storage/latency_buffer/*` runs
+its five rungs at the grid's reference cell of 1 KiB, which is below the step at 4096 that
+[O34](optimizations.md) is about, so it reports 1.06× and a `yes` in the *Real?* column for a setting
+whose actual effect it cannot see. The same five rungs at 8 KiB — and ideally again at 64 KiB —
+adjudicate O34 outright. Ten arms.~~ **Built** ([F22](../features/row-size-benchmarks.md)), at
+exactly ten arms. A repeat carries its width in its identifier and the existing forty eight do not,
+so no capture was orphaned, and `arms::conf_sweeps` keys on the width as well as the knob — a knob
+at two widths is two sweeps, or the difference between the widths reads as a difference between two
+values of the setting. Not yet captured.
+
+~~**Fill the 64× hole: 16, 32, 64, 128 and 256 KiB.** The width sweep goes 8 KiB → 512 KiB with nothing
+between, so the knee's location and sharpness are inferred rather than measured, and a step at 4096
+is indistinguishable from a slope that starts near it. Twenty arms across the four tables. **Note
+what it costs:** this edits `grid.rs`, which moves the source fingerprint of *every* grid workload,
+so every existing capture is correctly reported as no longer describing them. That is a reason to
+batch it with the two items below rather than to skip it.~~ **Built**
+([F22](../features/row-size-benchmarks.md)), batched with the two below exactly as this entry said
+to, at twenty arms. The widths are a second array rather than five entries spliced into `WIDTHS`,
+because a workload's position in `workload_ids::IDS` decides its port. This entry was right about
+the fingerprint cost and it did not mention the other one: the grid growing in front of the
+configuration sweep re-ported all forty eight of its arms. Not yet captured.
+
+~~**A depth-1 arm at each width.** Every grid arm runs at 32 outstanding queries, at every width. At
+4 MiB that is 128 MiB in flight against a key space of sixty four partitions, so the arm measures
+queueing and partition contention as much as service time — and a latency past the knee of a
+throughput curve is a measure of queue depth, which is the condition
+[Tuning](../operations/tuning.md#start-here) says invalidates everything else. Eleven arms on one
+table separate the two. This is [what F17 left undone](#what-f17-left-undone)'s depth-ladder entry,
+and the wide end is where it bites hardest.~~ **Built**
+([F22](../features/row-size-benchmarks.md)), at fifteen arms rather than eleven — the axis had grown
+by the time it was taken, and the reference width was already `macro/grid/depth/1`, which the two
+ladders now share rather than mint twice.
+
+~~**The width axis repeated at `r0` and `r100`.** The 1 KiB → 8 KiB divergence between the persistent
+and ephemeral halves is a *write*-path effect measured under a mixture that is half reads. Sweeping
+width at `r0` says how large it is when the whole mixture is writes, and at `r100` isolates the
+read-path per-byte cost with no intent log in the way. Twenty-two arms per table, or eleven if only
+`r0` is taken. This is the concrete case behind
+[what F17 left undone](#what-f17-left-undone)'s "no interaction between axes".~~ **Built**
+([F22](../features/row-size-benchmarks.md)), at both ends and on all four tables rather than the one
+this entry costed — 120 arms. It needed no renderer change to be *selected* correctly, because the
+existing charts filter on the read share an arm recorded rather than on its name.
+
+~~**The stage breakdown at more than one width.** The one that would change the most. The stages layer
+records nineteen points per query and runs against a single workload, so nothing says *which* stage
+grows with bytes. Running it at 1 KiB, 8 KiB and 512 KiB would attribute the fall to `decode`,
+`durable_write`, `reply` or the socket, and would replace most of the argument on the row-size page
+with a measurement. It needs no new workload — only the `stage-profile` build pointed at three
+existing arms instead of one.~~ **Built** ([F22](../features/row-size-benchmarks.md)). Right that it
+needed no new workload and wrong that it needed nothing else: the two instrumented layers shared one
+list, so pointing the stage layer at three arms would have tripled the hotpath phase, and both
+layers handed every workload the *same* artifact path, so the second report would have landed on top
+of the first. That second half is [item 73](known-issues.md), half fixed and half still open. The
+list and the artifact are now per layer and per workload.
+
+**What the six do not close.** The grid is still a cross rather than a cube: `r0` and `r100` are
+swept at a load depth of 32 and the depth-1 ladder is swept at `r50`, so a cost that appears only at
+one query outstanding under a pure write mixture is invisible to both. The depth-1 ladder is one
+table, so the persistent-against-ephemeral subtraction that makes a width effect attributable to
+storage ([F9](../features/ephemeral-tables.md)) does not exist for the depth axis — the cheapest
+thing that would fix it is the same fifteen arms on `unsorted_mem`. The `wire_codec` width axis
+stops at 64 KiB, because every criterion sample builds a response and sixteen 64 KiB rows is already
+a megabyte of it. And the per-stage breakdown is drawn at the mean of every query rather than at a
+rank, so *which* stage makes the tail is a question nobody has asked yet; the report already holds
+six ranks, so this is a renderer change and not a capture.
+
 ### What F8 left undone
 
 Workloads were specified and deliberately not built, to keep the first set reviewable. **Five of
@@ -810,8 +901,17 @@ every entry below.
   write-heavy mixture* is invisible to both sweeps, because the width sweep runs at `r50` and the
   mixture sweep runs at 1 KiB. The cheapest thing that would find one is a third sweep at a second
   reference — say the width axis again at `r0` — which is eleven more arms per table rather than the
-  two hundred and sixty four a full cube costs. Nobody has looked for such an interaction; the claim
-  that there is none is an assumption, not a finding.
+  two hundred and sixty four a full cube costs. ~~Nobody has looked for such an interaction; the
+  claim that there is none is an assumption, not a finding.~~ **Somebody has now looked, and the
+  assumption is wrong.** Over the octave 1 KiB → 8 KiB the persistent arms lose 31% of their
+  throughput and the ephemeral arms lose 6%, which is a width effect that lives entirely in the
+  write path and is being measured under a mixture that is half reads. The `r0` sweep this bullet
+  proposes is exactly what would size it, and is [filed above](#the-row-size-axis) with the reason.
+  See [Row size and what it costs](../tables/row-size.md). ~~The `r0` sweep this bullet proposes is
+  exactly what would size it~~ — **that sweep is built**
+  ([F22](../features/row-size-benchmarks.md)), at both ends of the mixture and on all four tables
+  rather than the eleven arms per table this bullet costed. It has not been captured, so the
+  interaction is still known to exist and still unsized.
 - **YCSB workload E (short range scans) and F (read-modify-write) are not built.** E needs a scan
   over a sorted table whose partitions hold many rows, which is a different seeding shape from
   anything the grid does — every grid arm writes one row per partition so that the four tables stay
@@ -825,7 +925,15 @@ every entry below.
 - **The depth ladder covers one cell.** Every other arm in the grid is assumed to sit at the same
   point on its own throughput curve as the reference cell does, and that assumption has not been
   checked at the wide end, where the byte budget makes an arm's query count two orders of magnitude
-  smaller.
+  smaller. **The wide end is now known to be where this bites.** At 4 MiB the depth of 32
+  is 128 MiB outstanding against a key space of sixty four partitions — fewer keys than the load is
+  deep — so those arms measure queueing and partition contention as much as service time, and
+  [Row size and what it costs](../tables/row-size.md#what-the-capture-cannot-tell-you) cannot
+  attribute its own percentiles because of it. ~~A depth-1 arm at each width is
+  [filed above](#the-row-size-axis).~~ **Built** ([F22](../features/row-size-benchmarks.md)): the
+  whole width axis at one outstanding query, on the persistent unsorted table, crossing the ladder
+  at `macro/grid/depth/1`. Every arm that is not on that table is still assumed to sit where the
+  reference cell does.
 - **The skew sweep measures a resident table.** Its gap is locality inside a table that fits in
   memory, not a hit rate against disk, so it is a floor on what skew is worth rather than an
   estimate of it. Measuring the other case needs a working set deliberately larger than
@@ -850,6 +958,18 @@ inherits one gap the grid does not have: it measures a machine as much as it mea
 - **The storage knobs are swept at `r50` only.** A setting that only bites under sustained writing
   is being asked half a question. Repeating the six storage sweeps at `r0` is twenty-three more
   arms and would say whether the barrier's group-commit behaviour changes the shape of any of them.
+- **The storage knobs are swept at one row width as well**, and for `latency_buffer` that is worse
+  than the mixture gap above. The sweep runs at the reference cell's 1 KiB rows against a 4096 byte
+  staging buffer, where three records already share an aligned write — so it is measuring the flat
+  side of a step. `StreamWriter::prep` stops batching entirely once a record exceeds the buffer
+  ([O34](optimizations.md)), which is where the setting's whole effect lives and where the sweep
+  never goes. The 1.06× it reports is a `yes` in the *Real?* column for a question asked at the one
+  width whose answer is no. ~~The five rungs repeated at 8 KiB are
+  [filed above](#the-row-size-axis).~~ **Built** ([F22](../features/row-size-benchmarks.md)), at
+  8 KiB and at 64 KiB, and the configuration page now labels every sweep with the width it ran at so
+  the 1.06× row no longer stands alone. What this bullet did not say, and what building it showed:
+  the *other* five storage knobs are still swept at 1 KiB alone, and nothing has asked whether any
+  of them is a step too.
 - **The memory sweep brackets one working set.** Its rungs are sized against the reference cell's
   own — about 1.6 MiB a shard from the seed plus half as much again from the run — so `1Mi` and
   `4Mi` straddle it and the rest are flat. What that cannot say is whether the *ratio* it finds

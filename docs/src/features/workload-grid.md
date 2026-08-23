@@ -30,6 +30,18 @@ Seventy-four workloads under `macro/grid/` and `macro/skew/`, in four sweeps.
 | Key distribution | `macro/skew/<dist>/<table>` | 6 | three distributions × two tables |
 | Load depth | `macro/grid/depth/<depth>` | 4 | four depths |
 
+**~~Seventy-four~~ two hundred and twenty-nine, since
+[F22](row-size-benchmarks.md).** The four sweeps above are unchanged and every one of their
+identifiers still means what it meant; three further passes were appended to `Grid::all` to answer
+the questions [Row size and what it costs](../tables/row-size.md) could not. The counts in the table
+above are what F17 shipped and are kept as that record.
+
+| Pass | Identifier | Arms | What varies |
+|---|---|---|---|
+| The widths that close the 8 KiB → 512 KiB hole | `macro/grid/<table>/r50/<width>` | 20 | five widths × four tables |
+| The width axis at each end of the mixture | `macro/grid/<table>/r{0,100}/<width>` | 120 | fifteen widths × two shares × four tables |
+| The width axis at one outstanding query | `macro/grid/depth/1/<width>` | 15 | fifteen widths, one table |
+
 [F20](configuration-sweeps.md) added a fifth user of this driver. `Grid` gained a
 `conf: ConfOverrides` field and a `Sweep::Conf` naming variant, and forty-eight arms under
 `macro/conf/` are the reference cell `macro/grid/unsorted/r50/1024` with exactly one field of the
@@ -37,7 +49,8 @@ server configuration moved. They are minted by `conf_sweep.rs` rather than by `G
 counts in this table are unchanged — but a change to the driver now moves both families, and the
 reference cell is a control for both.
 
-**Row widths**: 64 B, 128 B, 512 B, 1 KiB, 8 KiB, 512 KiB, 1 MiB, 4 MiB, plus three named
+**Row widths**: 64 B, 128 B, 512 B, 1 KiB, 8 KiB, ~~512 KiB~~ 16 KiB, 32 KiB, 64 KiB, 128 KiB,
+256 KiB, 512 KiB, 1 MiB, 4 MiB, plus three named
 *distributions* of widths — `mixed_small` (four widths under a kilobyte), `mixed_mid` (1 KiB to
 8 KiB) and `mixed_large` (512 KiB to 1 MiB).
 
@@ -59,6 +72,12 @@ capture. Each axis is swept fully against a fixed reference of the others instea
 sweeps share their four `r50/1024` cells and the total is 74. What this cannot see is an
 *interaction* — a cost appearing only at a wide row under a write-heavy mixture would be missed by
 both sweeps. That is recorded in [todos](../appendix/todos.md) rather than papered over.
+
+~~Nobody has looked for such an interaction.~~ **Somebody did, and there is one**: over 1 KiB → 8 KiB
+the persistent arms lose far more throughput than the ephemeral ones, which is a write path effect
+that the `r50` sweep can only ever see half of. [F22](row-size-benchmarks.md) sweeps the width axis
+at `r0` and `r100` as well, so *that* interaction is now covered — at 120 arms rather than the 264 a
+cube costs, and still against a fixed load depth. It is a bigger cross, not a cube.
 
 **YCSB's specification, natively; not YCSB's harness.** `r50` is YCSB workload **A**, `r95` is **B**,
 `r100` is **C**; the reference row is YCSB's 1 KiB record; `zipfian` is YCSB's

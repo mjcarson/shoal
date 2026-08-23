@@ -105,11 +105,15 @@ Alongside them it writes `<label>.meta.json`, which is what lets a committed num
 whether it still describes the current code: the commit, whether the tree was dirty, a content
 hash of the sources each layer measures, and the machine, governor and toolchain it ran on.
 
-A full capture is now **two hundred and nine workloads times five runs**, and ~~budget six to
-seven hours~~ **takes seventy-five minutes** — one minute building, fourteen in the micro layer,
-sixty in the macro layer, and under a minute in the two instrumented ones. That is the first
-capture anybody put a clock on, `F20-conf` on 2026-08-22; every figure this page carried before it
-was an estimate, and the estimate was over by more than four times. Eight of them are the
+A full capture is now **three hundred and seventy four workloads times five runs**. At two hundred
+and nine it ~~budget six to seven hours~~ **took seventy-five minutes** — one minute building,
+fourteen in the micro layer, sixty in the macro layer, and under a minute in the two instrumented
+ones. That is the first capture anybody put a clock on, `F20-conf` on 2026-08-22; every figure this
+page carried before it was an estimate, and the estimate was over by more than four times.
+[F22](../features/row-size-benchmarks.md) then added 165 macro arms and 50 micro benchmarks, so the
+current figure is **about two hours** and is a projection again — scaled from the measured one by
+arm count, and low if the new arms are wider than average, which the ones above 8 KiB are. Nobody
+has timed a capture of the current set. Eight of them are the
 storage-free controls [F9](../features/ephemeral-tables.md)
 added, and they are the cheapest of the set: they have no disk to wait on. Sixteen are the
 transport modes [F13](../features/transport-workloads.md) added and
@@ -119,13 +123,19 @@ Forty-eight are F14's encryption sweeps, which are wide but not slow: each holds
 budget rather than a fixed query count, so a MiB arm runs 256 queries where a 256-byte arm runs
 20,000 and no width dominates.
 
-**Seventy-four are [F17](../features/workload-grid.md)'s grid**, which is the largest and slowest
-phase and roughly doubled a capture on its own. It holds the same byte budget the encryption sweeps
-do, for the same reason. **Forty-eight are [F20](../features/configuration-sweeps.md)'s configuration
-sweeps**, which ~~add about ninety minutes~~ are 31% of the macro layer, about nineteen minutes —
+**~~Seventy-four~~ two hundred and twenty-nine are [F17](../features/workload-grid.md)'s grid**,
+which is the largest and slowest phase and roughly doubled a capture on its own before
+[F22](../features/row-size-benchmarks.md) tripled it — the width axis is now sixteen widths against
+four tables at three mixtures, plus a rung at each width with one query outstanding. It holds the
+same byte budget the encryption sweeps do, for the same reason, which is what keeps 120 new arms
+from costing what their widths suggest. **~~Forty-eight~~ fifty-eight are
+[F20](../features/configuration-sweeps.md)'s configuration
+sweeps**, which ~~add about ninety minutes~~ were 31% of the macro layer, about nineteen minutes —
 they are wide but each one is the 1 KiB reference cell, and the expensive arms in a capture are the
-MiB ones. `list --groups` is where that number comes from and it is now measured rather than
-projected onto a guess.
+MiB ones. Ten of them are no longer the reference cell: `latency_buffer` is repeated at 8 KiB and
+64 KiB, which is where its effect lives. `list --groups` is where that share comes from, and
+`FULL_MACRO_CAPTURE_SECS` behind it has not been re-measured since the layer grew — so every
+projection it prints is currently low.
 
 While iterating on anything else, ask for a **group** rather than a prefix
 ([F21](../features/benchmark-groups.md)) — it is the difference between a coffee and an afternoon,

@@ -94,6 +94,55 @@ pub const WIDTHS: [RowProfile; 11] = [
     RowProfile::large(),
 ];
 
+/// The row widths that close the gap the first sweep left between 8 KiB and 512 KiB
+///
+/// Declared apart from [`WIDTHS`] rather than spliced into it, and the split is bookkeeping rather
+/// than meaning: a workload's position in [`crate::workload_ids::IDS`] decides the port a capture
+/// gives it, so inserting 16 KiB between `8 * 1024` and `512 * 1024` would move every grid arm
+/// after it onto a different port. These are minted in their own pass at the end of [`Grid::all`],
+/// which leaves every arm that existed before them exactly where it was.
+///
+/// What they buy is the knee. The axis went 8 KiB to 512 KiB with nothing in between, so a step at
+/// the staging buffer and a slope that starts near it were indistinguishable, and everything the
+/// row size page said about *where* the curve bends was an inference from two points either side of
+/// a 64x hole.
+pub const INFILL_WIDTHS: [RowProfile; 5] = [
+    RowProfile::Fixed(16 * 1024),
+    RowProfile::Fixed(32 * 1024),
+    RowProfile::Fixed(64 * 1024),
+    RowProfile::Fixed(128 * 1024),
+    RowProfile::Fixed(256 * 1024),
+];
+
+/// The mixtures the width axis is repeated at, beyond the reference one
+///
+/// The two ends, and `r0` is the one that matters. Over 1 KiB to 8 KiB the persistent arms lose
+/// far more throughput than the ephemeral ones, which is a *write* path effect being measured under
+/// a mixture that is half reads - so the reference sweep asks it half a question. `r100` is its
+/// control: a pure read sweep has no intent log on the path at all, so the per-byte cost it shows
+/// is the read path's alone and the difference between the two is the write path's.
+pub const WIDE_MIXES: [u32; 2] = [0, 100];
+
+/// The arms the stage layer profiles, which is the width axis seen three times
+///
+/// A stage breakdown at one width cannot say which of the nineteen stages grows with bytes, and one
+/// at every width would cost more than the rest of a capture. Three points answer the question: the
+/// reference cell, the first width above the 4096 byte staging buffer, and one well past the knee.
+pub const STAGED_ARMS: [&str; 3] = [
+    "macro/grid/unsorted/r50/1024",
+    "macro/grid/unsorted/r50/8192",
+    "macro/grid/unsorted/r50/524288",
+];
+
+/// Every width the grid sweeps, in the order arms are minted in
+///
+/// [`WIDTHS`] then [`INFILL_WIDTHS`], which is mint order rather than ascending width. A page that
+/// wants the axis in width order sorts by the width each arm *recorded*, because a mixture's place
+/// on a numeric axis is its mean and only the artifact knows what that came out at.
+fn every_width() -> impl Iterator<Item = RowProfile> {
+    WIDTHS.into_iter().chain(INFILL_WIDTHS)
+}
+
 /// The read shares the mixture sweep covers, as percentages
 ///
 /// The two ends, the even split, both seventy/thirty leanings, and YCSB's ninety five. Six points
@@ -307,6 +356,13 @@ pub enum Sweep {
     Skew,
     /// A rung of the load depth ladder
     Depth,
+    /// A rung of the width axis measured with one query outstanding
+    ///
+    /// Its own variant rather than a [`Sweep::Depth`] rung that happens to carry a width, because
+    /// the two ladders are named apart and drawn apart: `Depth` walks the depth at the reference
+    /// width, this walks the width at depth one. They cross at `macro/grid/depth/1`, which is
+    /// minted by the ladder and not here.
+    WidthDepth,
     /// A point of a configuration sweep, holding the name of the setting that moved
     ///
     /// Minted by [`conf_sweep`](super::conf_sweep) rather than by [`Grid::all`], because the two
@@ -355,11 +411,17 @@ impl Grid {
     /// `workload_ids::IDS` decides the port a capture gives it, so this order is the order that
     /// list declares and neither may be reshuffled to read better.
     pub fn all() -> Vec<Grid> {
+        // every width but the reference one, which is what the two passes added after the first
+        // capture sweep - the reference width is already minted for them by the sweeps above
+        let widened = every_width().count() - 1;
         let mut built = Vec::with_capacity(
             TABLES.len() * WIDTHS.len()
                 + TABLES.len() * (MIXES.len() - 1)
                 + SKEWS.len() * SKEW_TABLES.len()
-                + DEPTHS.len(),
+                + DEPTHS.len()
+                + TABLES.len() * INFILL_WIDTHS.len()
+                + WIDE_MIXES.len() * TABLES.len() * widened
+                + widened,
         );
         // the width sweep, at the reference mixture
         for table in TABLES {
@@ -386,6 +448,36 @@ impl Grid {
         // the depth ladder, at both references, on one table
         for depth in DEPTHS {
             built.push(Grid::depth(depth));
+        }
+        // everything below this line was added after the first capture and is minted in its own
+        // pass for one reason: an arm's position here decides its port, so extending a sweep in
+        // place would move every arm after it. see `INFILL_WIDTHS`.
+        //
+        // the widths that close the 64x hole, at the reference mixture, on every table
+        for table in TABLES {
+            for width in INFILL_WIDTHS {
+                built.push(Grid::cell(table, REFERENCE_MIX, width));
+            }
+        }
+        // the whole width axis again at each end of the mixture, on every table. the reference
+        // width is skipped at both ends because the mixture sweep already minted it there, and a
+        // duplicate identifier is a collision rather than a second measurement
+        for mix in WIDE_MIXES {
+            for table in TABLES {
+                for width in every_width() {
+                    if width != REFERENCE_WIDTH {
+                        built.push(Grid::cell(table, mix, width));
+                    }
+                }
+            }
+        }
+        // and the width axis at one query outstanding, on one table, which is what separates a
+        // service time from a queue length along it. the reference width is skipped for the same
+        // reason as above: `macro/grid/depth/1` already is that arm
+        for width in every_width() {
+            if width != REFERENCE_WIDTH {
+                built.push(Grid::width_depth(width));
+            }
         }
         built
     }
@@ -465,6 +557,38 @@ impl Grid {
             conf: ConfOverrides::default(),
             id,
             summary: "the reference mixture at one load depth",
+        }
+    }
+
+    /// Builds one rung of the width axis at a single outstanding query
+    ///
+    /// Every other arm in the grid runs at [`DEPTH`], at every width. At four megabytes that is 128
+    /// MiB outstanding on one client against a key space of sixty four partitions, so those arms
+    /// measure queueing and partition contention as much as service time - and a latency past the
+    /// knee of a throughput curve is a measure of how long the queue is rather than of how long the
+    /// work took. This ladder is the same axis with nothing queued, so the difference between the
+    /// two at one width is what the depth was costing there.
+    ///
+    /// One table, because the point is the depth and not the table, and the persistent unsorted
+    /// table is the one every other page's reference cell drives.
+    ///
+    /// # Arguments
+    ///
+    /// * `rows` - How wide this rung's rows are
+    fn width_depth(rows: RowProfile) -> Self {
+        let id: &'static str =
+            Box::leak(format!("macro/grid/depth/1/{}", rows.segment()).into_boxed_str());
+        Grid {
+            sweep: Sweep::WidthDepth,
+            table: Table::Unsorted,
+            read_pct: REFERENCE_MIX,
+            rows,
+            distribution: KeyDistribution::Uniform,
+            // the whole point of the ladder, and the one field that separates it from a cell
+            depth: 1,
+            conf: ConfOverrides::default(),
+            id,
+            summary: "the reference mixture at one row width, with one query outstanding",
         }
     }
 
@@ -617,11 +741,23 @@ impl Workload for Grid {
         Timing::PerQuery
     }
 
-    /// Whether the instrumented layers may run this workload
+    /// Whether the hotpath layer may run this workload
     fn profiles(&self) -> bool {
-        // seventy four workloads under two attribution layers would cost more than the rest of a
-        // capture put together, for profiles that would mostly repeat each other
+        // two hundred and twenty nine workloads under an attribution layer would cost more than the
+        // rest of a capture put together, for profiles that would mostly repeat each other
         false
+    }
+
+    /// Whether the stage layer may run this workload
+    ///
+    /// Three arms of the width axis say yes, and they are the reason the two instrumented layers
+    /// stopped sharing one list. A hotpath profile attributes time to scopes and one arm's mostly
+    /// repeats another's; a stage breakdown attributes one query's latency to nineteen points on
+    /// its path, and the question worth asking of it is which of the nineteen grows with the row
+    /// width - which is a question about several widths of the same workload and about nothing
+    /// else. See [`STAGED_ARMS`].
+    fn stage_profiles(&self) -> bool {
+        STAGED_ARMS.contains(&self.id)
     }
 
     /// What this workload needs before it can run
@@ -783,8 +919,9 @@ fn frame_bytes(ctx: &Context) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        DEPTH, DEPTHS, Grid, MIXES, REFERENCE_MIX, REFERENCE_WIDTH, SKEWS, SKEW_TABLES, Sweep,
-        TABLES, WIDTHS, is_read, queries_for, rows_for, seed_batch,
+        DEPTH, DEPTHS, Grid, INFILL_WIDTHS, MIXES, REFERENCE_MIX, REFERENCE_WIDTH, SKEWS,
+        SKEW_TABLES, STAGED_ARMS, Sweep, TABLES, WIDE_MIXES, WIDTHS, every_width, is_read,
+        queries_for, rows_for, seed_batch,
     };
     use crate::model::macro_layer::Timing;
     use crate::workloads::harness::keys::KeyDistribution;
@@ -798,12 +935,16 @@ mod tests {
     #[test]
     fn every_arm_is_minted_exactly_once() {
         let all = Grid::all();
+        let widened = every_width().count() - 1;
         let expected = TABLES.len() * WIDTHS.len()
             + TABLES.len() * (MIXES.len() - 1)
             + SKEWS.len() * SKEW_TABLES.len()
-            + DEPTHS.len();
+            + DEPTHS.len()
+            + TABLES.len() * INFILL_WIDTHS.len()
+            + WIDE_MIXES.len() * TABLES.len() * widened
+            + widened;
         assert_eq!(all.len(), expected);
-        assert_eq!(all.len(), 74, "the capture's cost changed");
+        assert_eq!(all.len(), 229, "the capture's cost changed");
         let mut ids: Vec<&str> = all.iter().map(|arm| arm.id()).collect();
         ids.sort_unstable();
         let before = ids.len();
@@ -831,6 +972,7 @@ mod tests {
                     arm.table.as_str()
                 ),
                 Sweep::Depth => format!("macro/grid/depth/{}", arm.depth),
+                Sweep::WidthDepth => format!("macro/grid/depth/1/{}", arm.rows.segment()),
                 // the configuration sweep is minted by `conf_sweep`, which names its own arms and
                 // tests them there. `Grid::all` producing one would mean a sweep had moved house.
                 Sweep::Conf { knob } => {
@@ -1029,7 +1171,7 @@ mod tests {
     #[test]
     fn a_seed_bundle_fits_in_a_frame_at_every_width() {
         let frame = u64::from(shoal::shared::protocol::DEFAULT_MAX_FRAME_BYTES);
-        for profile in WIDTHS {
+        for profile in every_width() {
             let widest = profile.widest();
             let bundle = seed_batch(widest, frame) as u64 * widest;
             assert!(
@@ -1048,7 +1190,7 @@ mod tests {
     #[test]
     fn a_seed_bundle_fits_inside_a_narrowed_frame() {
         for frame in [1u64 << 20, 8 << 20, u64::from(shoal::shared::protocol::DEFAULT_MAX_FRAME_BYTES)] {
-            for profile in WIDTHS {
+            for profile in every_width() {
                 let widest = profile.widest();
                 let bundle = seed_batch(widest, frame) as u64 * widest;
                 assert!(
@@ -1059,10 +1201,96 @@ mod tests {
         }
     }
 
-    /// Nothing in the family opts into the instrumented layers
+    /// Nothing in the family opts into the hotpath layer
     #[test]
     fn no_arm_asks_to_be_profiled() {
         assert!(Grid::all().iter().all(|arm| !arm.profiles()));
+    }
+
+    /// Exactly the three declared arms opt into the stage layer, and all three exist
+    ///
+    /// The second half is the one worth having. [`STAGED_ARMS`] is a list of identifier strings, so
+    /// a width renamed or a sweep reordered would leave it naming an arm nobody mints - and the
+    /// stage layer would quietly profile two widths instead of three.
+    #[test]
+    fn the_staged_arms_are_the_three_declared_ones() {
+        let all = Grid::all();
+        let staged: Vec<&str> = all
+            .iter()
+            .filter(|arm| arm.stage_profiles())
+            .map(|arm| arm.id())
+            .collect();
+        assert_eq!(staged, STAGED_ARMS, "the stage layer's width axis moved");
+    }
+
+    /// The two width arrays are one axis rather than two overlapping ones
+    ///
+    /// They are declared apart only so that ports do not move. A width in both would be minted
+    /// twice at the reference mixture, which is the collision `every_arm_is_minted_exactly_once`
+    /// catches - this says which array to look in when it fires.
+    #[test]
+    fn the_width_arrays_do_not_overlap() {
+        let mut widths: Vec<u64> = every_width().map(|profile| profile.mean()).collect();
+        let before = widths.len();
+        widths.sort_unstable();
+        widths.dedup();
+        assert_eq!(before, widths.len(), "a width is declared in both arrays");
+    }
+
+    /// The width ladder at depth one crosses the depth ladder at the reference width
+    ///
+    /// The two ladders share `macro/grid/depth/1`, and sharing it is what lets either be read
+    /// against the other: without a common point they are two curves with no origin in common.
+    #[test]
+    fn the_two_ladders_cross_at_one_arm() {
+        let all = Grid::all();
+        let shared = all
+            .iter()
+            .find(|arm| arm.sweep == Sweep::Depth && arm.depth == 1)
+            .expect("the ladder rung at one query outstanding");
+        assert_eq!(shared.rows, REFERENCE_WIDTH);
+        // and no rung of the width ladder claims that cell a second time
+        assert!(
+            all.iter()
+                .filter(|arm| arm.sweep == Sweep::WidthDepth)
+                .all(|arm| arm.rows != REFERENCE_WIDTH),
+            "the width ladder minted the reference width the depth ladder already holds"
+        );
+        for scale in [Scale::Smoke, Scale::Full] {
+            for arm in all.iter().filter(|arm| arm.sweep == Sweep::WidthDepth) {
+                // every rung of the width ladder differs from the shared cell in the width alone
+                let plan = arm.plan(scale);
+                assert_eq!(plan.scale.concurrency, 1, "{}", arm.id());
+                assert_eq!(plan.scale.read_pct, Some(REFERENCE_MIX), "{}", arm.id());
+                assert_eq!(plan.scale.table_kind, shared.plan(scale).scale.table_kind);
+            }
+        }
+    }
+
+    /// The width axis is swept at all three mixtures, on every table
+    ///
+    /// The reference sweep measures a write path effect under a mixture that is half reads. This
+    /// asserts the other two ends exist to compare it against, and that neither is missing a table
+    /// - a sweep short of one table is a pair that cannot be subtracted.
+    #[test]
+    fn the_width_axis_is_swept_at_every_declared_mixture() {
+        let all = Grid::all();
+        for mix in [REFERENCE_MIX, WIDE_MIXES[0], WIDE_MIXES[1]] {
+            for table in TABLES {
+                let widths = all
+                    .iter()
+                    .filter(|arm| {
+                        arm.sweep == Sweep::Cell && arm.read_pct == mix && arm.table == table
+                    })
+                    .count();
+                assert_eq!(
+                    widths,
+                    every_width().count(),
+                    "r{mix} on {} is short a width",
+                    table.as_str()
+                );
+            }
+        }
     }
 
     /// Every arm is timed per query, since every one of them reports a latency

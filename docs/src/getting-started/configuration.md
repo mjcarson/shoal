@@ -236,6 +236,13 @@ device's direct IO alignment, because every write to the intent log has to be bl
 Setting it below the device block size therefore has no effect, and setting it small costs
 write amplification at low load — see [pad regions](../storage/intent-log.md#pad-regions).
 
+Setting it below your **row** size costs more than that: a record larger than the buffer is
+never batched with another one, so every insert becomes its own aligned write and its own DMA
+allocation. If your rows are wider than a few kilobytes, this is the first setting to move —
+see [Row size and what it costs](../tables/row-size.md). That advice is read from `StreamWriter::prep`
+and not from a measurement: the sweep that would decide it exists
+([F22](../features/row-size-benchmarks.md)) and has not been run.
+
 #### `durability`
 
 How durable a write has to be before its response is released to the client.

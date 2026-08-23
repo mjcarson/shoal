@@ -149,6 +149,40 @@ mod tests {
         assert!(find("macro/does_not_exist").is_none());
     }
 
+    /// The runner's copy of who opts into attribution is what the workloads actually say
+    ///
+    /// Two lists naming one set is how they drift, the same problem [`crate::workload_ids::IDS`]
+    /// has. The runner cannot ask a workload anything - it builds with no engine at all - so it
+    /// keeps its own copy and this is what stops the copy going stale. Both layers are checked,
+    /// because they stopped sharing a list the moment the stage layer needed three workloads and
+    /// the hotpath layer still wanted one.
+    ///
+    /// The doc comments on both constants claimed this test existed before it did.
+    #[test]
+    fn the_runners_copy_of_the_profiled_workloads_is_current() {
+        let registered = all();
+        let hotpath: Vec<&str> = registered
+            .iter()
+            .filter(|workload| workload.profiles())
+            .map(|workload| workload.id())
+            .collect();
+        assert_eq!(
+            hotpath,
+            crate::registry::PROFILED_WORKLOADS.to_vec(),
+            "PROFILED_WORKLOADS is not what the workloads say"
+        );
+        let staged: Vec<&str> = registered
+            .iter()
+            .filter(|workload| workload.stage_profiles())
+            .map(|workload| workload.id())
+            .collect();
+        assert_eq!(
+            staged,
+            crate::registry::STAGED_WORKLOADS.to_vec(),
+            "STAGED_WORKLOADS is not what the workloads say"
+        );
+    }
+
     /// Every workload says what it is for, since `list` prints it
     #[test]
     fn every_workload_has_a_summary() {

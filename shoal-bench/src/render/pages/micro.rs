@@ -165,7 +165,10 @@ fn list_code(names: &[String]) -> String {
         .join(", ")
 }
 
-/// How each operation's cost grows with the partition
+/// How each operation's cost grows with what it was measured over
+///
+/// Two charts rather than one, because the number at the end of a benchmark id counts rows on one
+/// of them and bytes on the other. See [`chart::micro_scaling::ScalingAxis`].
 ///
 /// # Arguments
 ///
@@ -177,28 +180,82 @@ fn scaling(page: &Page) -> Result<String> {
         out.push_str("The current capture has no micro layer.\n\n");
         return Ok(out);
     };
-    let families = chart::micro_scaling::families(measured);
-    if families.is_empty() {
+    let all = chart::micro_scaling::families(measured);
+    let rows = chart::micro_scaling::on_axis(&all, chart::micro_scaling::ScalingAxis::Rows);
+    if rows.is_empty() {
         out.push_str("No benchmark was measured at more than one partition size.\n\n");
-        return Ok(out);
+    } else {
+        out.push_str(
+            "Both axes are logarithmic, which makes the *shape* of the growth readable rather than \
+             the magnitude: a cost proportional to the number of rows is a straight diagonal, a \
+             cost independent of it is flat, and anything between is a slope. This is the chart \
+             that says whether an operation seeks into a partition or walks it, which is a \
+             different question from whether it is fast, and one the noise band has no bearing \
+             on.\n\n",
+        );
+        out.push_str(&chart::micro_scaling::draw(
+            &rows,
+            chart::micro_scaling::ScalingAxis::Rows,
+        )?);
+        out.push('\n');
+        out.push_str(&caption(
+            "Mean time against partition size, both axes logarithmic: a cost proportional to the \
+             partition is a straight diagonal, a cost independent of it is flat, and the table \
+             below carries the same numbers for anyone the colours do not separate.",
+        ));
+        out.push_str(&tables::micro_scaling(&rows));
+        out.push('\n');
+    }
+    out.push_str(&width_scaling(&all));
+    Ok(out)
+}
+
+/// How each operation's cost grows with the width of one row
+///
+/// The axis the codec benchmarks did not have. `wire_codec` swept how many queries a bundle carries
+/// and how many rows a response answers with, both over a row of about thirty bytes, so the
+/// **per-byte** half of [O1](../appendix/optimizations.md) and [O2](../appendix/optimizations.md)
+/// was unmeasured here entirely - and those two are most of what
+/// [Row size and what it costs](../tables/row-size.md) argues about.
+///
+/// # Arguments
+///
+/// * `all` - Every family the capture produced, on either axis
+fn width_scaling(all: &[chart::micro_scaling::Family]) -> String {
+    let mut out = String::new();
+    out.push_str("## How the cost grows with the width of one row\n\n");
+    let widths = chart::micro_scaling::on_axis(all, chart::micro_scaling::ScalingAxis::Bytes);
+    if widths.is_empty() {
+        out.push_str("No benchmark was measured at more than one row width.\n\n");
+        return out;
     }
     out.push_str(
-        "Both axes are logarithmic, which makes the *shape* of the growth readable rather than the \
-         magnitude: a cost proportional to the number of rows is a straight diagonal, a cost \
-         independent of it is flat, and anything between is a slope. This is the chart that says \
-         whether an operation seeks into a partition or walks it, which is a different question \
-         from whether it is fast, and one the noise band has no bearing on.\n\n",
+        "The same log-log reading as above, over a different quantity: how wide one row is rather \
+         than how many of them there are. A **flat** line is a fixed per-call cost - the header \
+         decode is here as exactly that control, since eight bytes is eight bytes at every width. \
+         A **diagonal** is a cost that walks the payload, and the gap between `access` and \
+         `deserialize` is the one that matters: `access` validates an archive in place while \
+         `deserialize` copies every string out of a buffer that already held it in a readable \
+         layout.\n\n",
     );
-    out.push_str(&chart::micro_scaling::draw(&families)?);
+    match chart::micro_scaling::draw(&widths, chart::micro_scaling::ScalingAxis::Bytes) {
+        Ok(chart) => {
+            out.push_str(&chart);
+            out.push('\n');
+            out.push_str(&caption(
+                "Mean time against the width of one row, both axes logarithmic. The bundle size \
+                 and the response cardinality are held fixed here, so the width is the only thing \
+                 moving - which is what makes a diagonal a per-byte cost rather than a per-row \
+                 one.",
+            ));
+        }
+        // a chart that could not be built is not a reason for the page to fail, the same way the
+        // rest of this file treats one
+        Err(err) => out.push_str(&format!("The width chart could not be drawn: {err}.\n\n")),
+    }
+    out.push_str(&tables::micro_scaling(&widths));
     out.push('\n');
-    out.push_str(&caption(
-        "Mean time against partition size, both axes logarithmic: a cost proportional to the \
-         partition is a straight diagonal, a cost independent of it is flat, and the table below \
-         carries the same numbers for anyone the colours do not separate.",
-    ));
-    out.push_str(&tables::micro_scaling(&families));
-    out.push('\n');
-    Ok(out)
+    out
 }
 
 /// What the micro layer can resolve

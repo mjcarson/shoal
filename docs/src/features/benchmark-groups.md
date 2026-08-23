@@ -6,6 +6,12 @@ A full capture is four to five hours, and [F20](configuration-sweeps.md) adds an
 half to it. Long before that, the practical question stopped being "run the benchmarks" and became
 "run the part of the benchmarks that could possibly answer this".
 
+*Both figures above were guesses, and this page was written before anybody checked them.* `F20-conf`
+timed a full capture at **seventy-five minutes** on 2026-08-22 — the first one anybody measured —
+and [F22](row-size-benchmarks.md) then added 165 arms, putting it at roughly two hours. The argument
+this page makes does not change; the numbers in it were never measurements, which is the same thing
+`FULL_MACRO_CAPTURE_SECS` is still true of.
+
 [F7](bench-runner.md) gave the runner `cargo test`'s filtering: a positional argument is a substring
 of an identifier, `--exact` switches to equality, `--layer` intersects. That is the right primitive
 and it is a poor way to express an *intention*. Three things go wrong once the registry is 307
