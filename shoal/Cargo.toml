@@ -78,3 +78,9 @@ required-features = ["bench"]
 [[bench]]
 name = "wire"
 harness = false
+
+# routing is public API too - `server::ring` and `ShardRouting` both are - so this needs no
+# features either. It is the layer the query path had no benchmark of at all
+[[bench]]
+name = "routing"
+harness = false

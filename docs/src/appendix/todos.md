@@ -594,10 +594,25 @@ and the reference cell is the one every other page already quotes. `macro/conf/s
 duplicates that cell deliberately, since an arm that ran in a different storage directory under a
 different port is not a control for one that did not.
 
-**`wire_codec` and `routing` benches.** `rkyv` round trips over `Queries` and `ResponseKinds`,
+~~**`wire_codec` and `routing` benches.** `rkyv` round trips over `Queries` and `ResponseKinds`,
 and `Ring::find_shard` / `split_by_shard`. Between them they are what O1, O18, O19 and O20 are
 about, and none of those four can currently be adjudicated at all
-([Optimizations](optimizations.md#which-entries-a-benchmark-can-currently-adjudicate)).
+([Optimizations](optimizations.md#which-entries-a-benchmark-can-currently-adjudicate)).~~ **Both are
+built** — `wire_codec` by [F10](../features/framing-and-protocol-evolution.md), `routing` by
+[F24](../features/routing-benchmarks.md).
+
+**Right that nothing blocked them, wrong about what they would adjudicate.** Of the four entries
+this paragraph named, `routing` settles **none**. O18 and O19 are not about a payload width, so
+`wire_codec` does not reach them; O20 is about *residency* — whether a get should read a partition it
+may not need — and nothing in the micro layer varies what happens to be resident. **A benchmark
+specified by the code it touches is not the same as one specified by the question it answers**, and
+this entry named four `O` numbers by pointing at two functions rather than at four questions.
+
+What it did buy was larger than the list: `find_shard` is now known to be **constant** — 392 ps flat
+to 0.4% across a 64× change in the ring, which is the property the tablet ring was built for and
+which nothing had checked — and `split_by_shard` turned out to be **quadratic in the key count**,
+filed as [O39](optimizations.md). That second one also qualifies a curve already in use, since
+`macro/fanout/n` now has two known quadratics under it and cannot attribute a bend to either.
 
 **Correction, filed while building [F8](../features/purpose-built-workloads.md).** These were
 listed here, under the heading about macro coverage, as though they needed the workload harness.
@@ -712,7 +727,13 @@ running criterion several times over, which costs minutes rather than seconds.
 
 **Provenance drift in `docs/perf/sources.json`.** [F7](../features/bench-runner.md) decides whether
 a capture still describes the current code by hashing the sources each layer measures, and the
-list of those sources is maintained by hand. It will drift. The design makes drifting safe in one
+list of those sources is maintained by hand. ~~It will drift.~~ **It did** — six of its seventeen
+paths named files [F15](../features/client-server-split.md) had moved, including the protocol module
+`wire.rs` measures, and a missing path is skipped silently
+([Resolved #78](resolved/sources-manifest-drift.md),
+fixed). **The cheapest thing that would have caught it is a test asserting every path in the file
+resolves**, which costs nothing and does not exist; that is the first thing to build here, ahead of
+the mode below. The design makes drifting safe in one
 direction only — a missing path yields a capture wrongly called *unaffected*, never one wrongly
 called *fresh* — but a `--strict-stale` mode that treats any commit move as stale regardless of
 digests would give a way to distrust the list deliberately.
@@ -720,9 +741,15 @@ digests would give a way to distrust the list deliberately.
 ~~Two smaller things: the macro layer needs a 65 MB dataset that is not in the repository and that
 no script fetches, so a clean checkout cannot reproduce that layer at all;~~ **the dataset is
 gone** — every workload generates its rows from `--seed`, so a clean checkout reproduces the macro
-layer with nothing fetched ([F8](../features/purpose-built-workloads.md)). Still open: `client.rs`
-has neither `tracing` spans nor `hotpath` scopes, so the share of measured latency that is the
-harness's own is unknown.
+layer with nothing fetched ([F8](../features/purpose-built-workloads.md)). ~~Still open: `client.rs`
+has neither `tracing` spans nor `hotpath` scopes~~ — **it has both**, since
+[F16](../features/client-builder.md), and `f22-row-size.hotpath.json` reports five of them
+(`read_frame` 200,022 calls, `next` 200,001, `send` 2,001, `connect_to` 35, `track_response` 2).
+**What is still open is the subtraction it was asked for**: a macro sample bounds the client and the
+server together, and having a scope on each end does not separate them — that needs the two halves
+measured against a common clock, which is what the stage layer does and what no macro number does.
+So the share of measured latency that is the harness's own is still unknown, for a narrower reason
+than this entry gave.
 
 **`--stage-sample` does not bind on the per query path.** Both halves of a stage record sample on
 the query index, which is what makes them keep the same queries and gives the join something to work

@@ -85,6 +85,7 @@
   - [F21. Benchmark groups](features/benchmark-groups.md)
   - [F22. The benchmarks the row size page asked for](features/row-size-benchmarks.md)
   - [F23. The intent log's staging buffer sizes itself](features/self-sizing-staging-buffer.md)
+  - [F24. Routing benchmarks](features/routing-benchmarks.md)
 
 # Direction
 
@@ -133,6 +134,7 @@
   - [73. Two instrumented runs wrote to one artifact, and the last one won](appendix/resolved/stage-artifact-overwrite.md)
   - [74. A configuration knob the page did not name disappeared from it](appendix/resolved/conf-knob-dropped.md)
   - [76. The stage layer joined nothing for any grid arm](appendix/resolved/stage-join.md)
+  - [78. Sources manifest drift](appendix/resolved/sources-manifest-drift.md)
 - [TODOs and Unbuilt Work](appendix/todos.md)
 - [Review, August 2026](appendix/review-2026-08.md)
 - [Glossary](appendix/glossary.md)

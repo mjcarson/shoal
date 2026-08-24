@@ -111,14 +111,49 @@ pair, and therefore the one that explains why the ephemeral arms fall too.
 | `shard.rs:105` — `BytesMut::zeroed(header.body_len())` | a `memset` of the whole request body, overwritten by the `read_exact` on the next line | [O29](../appendix/optimizations.md#o29-a-request-body-is-zeroed-and-then-immediately-overwritten) |
 | `shard.rs:1184` — `Queries::deserialize` | every `String` and `Vec` in the bundle allocated and copied out of a buffer that already holds them in a readable layout | [O1](../appendix/optimizations.md#o1-queries-are-fully-deserialized-on-arrival) |
 | `partitions.rs:585`, `:293` — `P::from_row` | the row copied into the partition, and copied again on the way out of a get | [O2](../appendix/optimizations.md#o2-every-returned-row-is-copied-at-least-twice) |
-| `fs.rs:367` — `RkyvSupport::serialize` | the row serialized back into a fresh `AlignedVec` for the intent log | [O11](../appendix/optimizations.md#o11-a-fresh-alignedvec-per-write-and-per-response) |
-| `fs.rs:372` — `hasher.write(archived.as_slice())` | a second full pass over the record, for its checksum | [O11](../appendix/optimizations.md#o11-a-fresh-alignedvec-per-write-and-per-response) |
-| `fs.rs:386` — `buff.write_all(archived.as_slice())` | a third pass, copying it into the DMA buffer | [O11](../appendix/optimizations.md#o11-a-fresh-alignedvec-per-write-and-per-response) |
+| `fs.rs:368` — `RkyvSupport::serialize` | the row serialized back into a fresh `AlignedVec` for the intent log | [O11](../appendix/optimizations.md#o11-a-fresh-alignedvec-per-write-and-per-response) |
+| `fs.rs:373` — `hasher.write(archived.as_slice())` | a second full pass over the record, for its checksum | [O11](../appendix/optimizations.md#o11-a-fresh-alignedvec-per-write-and-per-response) |
+| `fs.rs:387` — `buff.write_all(archived.as_slice())` | a third pass, copying it into the DMA buffer | [O11](../appendix/optimizations.md#o11-a-fresh-alignedvec-per-write-and-per-response) |
 | `shard.rs:1212` — `rkyv::to_bytes(&response)` | the response serialized into another fresh `AlignedVec` | [O2](../appendix/optimizations.md#o2-every-returned-row-is-copied-at-least-twice), [O11](../appendix/optimizations.md#o11-a-fresh-alignedvec-per-write-and-per-response) |
 
 A read served from an archived partition is worse still: `P::from_archived`
 (`partitions.rs:1092`, `:363`) materializes an owned row from bytes, so the path is **bytes → owned
 rows → bytes** rather than **rows → copied rows → bytes**.
+
+**The table above is a *mixture*, and a read never pays most of it.** Three of its seven rows are
+inside `FileSystem::commit`, which only a write enters, and the first two are the request half. That
+was the right accounting for the `r50` arms this page is built on, and it is the wrong one for
+anybody reading the section to find out what a *get* costs. Traced in code against the tree — which
+nobody had done, the table having been derived from reading the source — a single-shard get of a
+resident partition walks the payload like this:
+
+| # | Hop | Kind | Filed as |
+| ---: | --- | --- | --- |
+| 1 | `P::from_row` deep clone out of the `BTreeMap` (`partitions.rs:585`, `:293`) | copy + alloc | [O2](../appendix/optimizations.md#o2-every-returned-row-is-copied-at-least-twice) |
+| 2 | `PendingGet::finish` re-collects the slots (`persistent.rs:196`) | alloc + walk | **[O36](../appendix/optimizations.md#o36-every-get-re-collects-its-rows-into-a-fresh-vec-even-when-it-read-one-partition)** — was unfiled |
+| 3 | `rkyv::to_bytes` of the response (`shard.rs:1212`) | serialize + alloc | [O2](../appendix/optimizations.md#o2-every-returned-row-is-copied-at-least-twice), [O11](../appendix/optimizations.md#o11-a-fresh-alignedvec-per-write-and-per-response) |
+| 4 | `write_vectored` of `[preamble][archive]` | kernel copy | **unavoidable** |
+| 5 | `read_exact` on the client | kernel copy | **unavoidable** |
+| 6 | `resize(len, 0)` before that read (`client.rs:1491`) | memset, discarded | **[O37](../appendix/optimizations.md#o37-the-client-zeroes-a-response-buffer-and-immediately-overwrites-it)** — was unfiled |
+| 7 | validating `rkyv::access` (`client.rs:1794`) — **twice** if the response arrives out of order | walk | **[O38](../appendix/optimizations.md#o38-a-response-that-arrives-out-of-order-is-validated-twice)** — was unfiled |
+
+So the count survives and its composition does not. Seven hops, five of them real touches of the
+payload and two of them kernel copies that no amount of work removes. **Three were not filed
+anywhere**, and one of those — the double validation — is the only hop on the list that can be paid
+*twice* for one response.
+
+**Two hops this section implies are already gone**, and saying so matters as much as the ones that
+remain. On `main` the client ran a full `ResponseKinds::deserialize` on every response, allocating
+every string, with a `// TODO do we have to do this?` beside it; `ShoalResponse` now owns the
+`AlignedVec` and hands out `&Archived<T>`, so that hop does not exist. And the wire write was a
+`send_to` over UDP with no framing; it is a `write_vectored` of a stack preamble and the serializer's
+own buffer, so there is no staging copy to remove. **This branch is named for work that is partly
+done and nowhere recorded as done** — which is how a reader ends up looking for a copy that was
+removed before they arrived.
+
+A fan-out get adds three more: the cross-shard `ServerMsg::Gathered` move, `ResponseAction::merge`'s
+`extend`, and the `sort_by_cached_key` rehash that is
+[O18](../appendix/optimizations.md#o18-the-gathered-reorder-rehashes-every-rows-partition-key).
 
 **What the row-size axis adds to those entries.** Each of them was filed as a small constant cost on
 a hot path, and ranked accordingly. They are not constant. Their cost grows in the row width, which

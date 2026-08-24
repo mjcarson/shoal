@@ -486,6 +486,41 @@ fn scan_rustc_commit(version: &str) -> String {
 mod tests {
     use super::*;
 
+    /// Every path the manifest names still exists in the tree
+    ///
+    /// A path that does not exist is skipped silently, which cannot make a stale capture look
+    /// fresh but can make an affected one look **unaffected** — so a rename quietly stops a layer
+    /// being watched at all. That is [item 78](../../docs/src/appendix/known-issues.md): F15 moved
+    /// the client into `shoal-client` and the wire format into `shoal-proto`, and six of the
+    /// seventeen paths here named files that had stopped existing, including the protocol module
+    /// `wire.rs` measures. Nothing noticed for eight captures. This is the check that would have.
+    #[test]
+    fn every_source_the_manifest_names_exists() {
+        // the manifest lives beside the artifacts, and both sit under the repo root
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("the crate is a workspace member, so it has a parent")
+            .to_path_buf();
+        // read the manifest the same way a verdict does
+        let store = Store::new(&root);
+        let (manifest, _) = read_manifest(&store).expect("the committed manifest parses");
+        // collect every path that does not resolve, so one failure names all of them
+        let mut missing = Vec::new();
+        for (layer, paths) in &manifest.layers {
+            for path in paths {
+                // a path may name a file or a directory, and either has to be there
+                if !root.join(path).exists() {
+                    missing.push(format!("{layer:?}: {path}"));
+                }
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "docs/perf/sources.json names paths that do not exist, so those layers are not being \
+             watched: {missing:#?}"
+        );
+    }
+
     /// The flags are read out of the array, in order, ignoring comments
     #[test]
     fn rustflags_are_scanned_out_of_a_cargo_config() {

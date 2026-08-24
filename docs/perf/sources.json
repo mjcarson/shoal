@@ -19,25 +19,28 @@
     "",
     "F8 moved the workloads out of shoal/examples/tmdb.rs and into shoal-bench/src/workloads, and the stage report builder out of shoal/src/stages.rs into the same place. The three workload layers point at that directory now. This changes the manifest hash, so every capture taken before F8 is correctly reported as no longer describing the current macro layer - which is true, and is not something to engineer around.",
     "",
-    "F10 added shoal/benches/wire.rs and the protocol module it measures to the micro layer. The client is deliberately not listed here: wire.rs exercises the framing, not the client, and shoal-core/src/client.rs is already in the macro layer. This changes the manifest hash, so every micro capture taken before F10 is correctly reported as no longer describing the current micro layer."
+    "F10 added shoal/benches/wire.rs and the protocol module it measures to the micro layer. The client is deliberately not listed here: wire.rs exercises the framing, not the client, and shoal-core/src/client.rs is already in the macro layer. This changes the manifest hash, so every micro capture taken before F10 is correctly reported as no longer describing the current micro layer.",
+    "F15 split the crates and six of the seventeen paths below stopped existing: the client moved to shoal-client/src/, and shared/ - including the protocol module wire.rs measures - moved to shoal-proto/src/. A missing path is silently dropped, so the micro layer was hashing two benches and one source rather than the protocol module it is half about, and the macro layer was not hashing the client at all. That is the drift this file's own note says is safe in one direction: those captures were reported as unaffected by changes that did affect them. Corrected here, together with F24 adding shoal/benches/routing.rs and the routing and ring sources it measures. Both changes move the manifest hash, so every capture taken before this is correctly reported as no longer describing the layers it names."
   ],
   "layers": {
     "micro": [
       "shoal/benches/partitions.rs",
       "shoal/benches/wire.rs",
+      "shoal/benches/routing.rs",
       "shoal-core/src/server/tables/partitions.rs",
-      "shoal-core/src/server/tables/partitions",
-      "shoal-core/src/shared/protocol.rs",
-      "shoal-core/src/shared/protocol"
+      "shoal-core/src/server/ring.rs",
+      "shoal-core/src/server/routing.rs",
+      "shoal-proto/src/shared/protocol.rs",
+      "shoal-proto/src/shared/protocol"
     ],
     "macro": [
       "shoal-bench/src/workloads",
       "shoal-core/src/server.rs",
       "shoal-core/src/server",
-      "shoal-core/src/client.rs",
-      "shoal-core/src/client",
-      "shoal-core/src/shared.rs",
-      "shoal-core/src/shared"
+      "shoal-client/src/client.rs",
+      "shoal-client/src/client",
+      "shoal-proto/src/shared.rs",
+      "shoal-proto/src/shared"
     ],
     "hotpath": [
       "shoal-bench/src/workloads",

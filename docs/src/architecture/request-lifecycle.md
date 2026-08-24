@@ -360,7 +360,7 @@ match self.channel_map.pin_owned().get(&query_id) {
 }
 ```
 
-`shoal-core/src/client.rs:504-539`
+`shoal-client/src/client.rs:1485-1497`, `TcpProxy::read_frame`
 
 Reading straight into an `AlignedVec<16>` is what makes the response path genuinely
 zero-copy: the buffer is aligned for rkyv, so `ShoalResponse` can hold a pointer into it and
@@ -390,6 +390,10 @@ whole lifecycle including the asynchronous flush.
   one, the intent log's serialize/checksum/copy, and the response serialization. None of that is
   visible at a 64 byte row and it is most of the cost at 4 MiB; see
   [Row size and what it costs](../tables/row-size.md#the-payload-is-walked-about-six-times-per-round-trip).
+  **That list is a read/write mixture**, and three of its items are inside `FileSystem::commit`,
+  which a read never enters. A *get* walks the payload seven times, two of them kernel copies —
+  the same page now traces the read path hop by hop, and three of those hops went unfiled until it
+  was traced.
 - **The response relay is serial per connection.** `client_tx_relay` writes one response to
   completion before starting the next, so a wide response blocks every narrow one queued behind it
   on that socket ([O35](../appendix/optimizations.md)).

@@ -31,8 +31,8 @@ test suite does and does not reach is in [Test Coverage](test-coverage.md).
 Defects that have been fixed move to [Resolved Issues](resolved-issues.md), one page each,
 carrying the reasoning and the invariants the fix depends on. Item numbers are shared between
 the two pages and never reused, so a number appears on exactly one of them — which is why this
-list starts at 15 and skips 25, 26, 31, 34, 39, 44, 45, 48, 51, 56, 57, 61, 67, 68, 74 and 76, and
-why item 77 is both the newest number and the newest entry here. The exceptions are items 16, 17, 20, 24, 54 and 73, which were only
+list starts at 15 and skips 25, 26, 31, 34, 39, 44, 45, 48, 51, 56, 57, 61, 67, 68, 74, 76 and 78, and
+why item 77 is both the newest number and the newest entry here, and why 78 is on the resolved page. The exceptions are items 16, 17, 20, 24, 54 and 73, which were only
 partly fixed: the open remainder is here and the rest is there. Items 9 and 51 were each one such
 exception until their second half was fixed, and are now on the resolved page alone; item 25 was one
 in the other direction — it had one row left open, that row was fixed, and the whole item
@@ -422,8 +422,32 @@ debug leftover in the way the six removed ones were, which is why what remains o
 ### 20. Orphaned source files
 
 `shoal-core/src/server/cursor.rs` and `shoal-core/src/server/response.rs` are not declared in
-`shoal-core/src/server.rs:14-24` and are not compiled. They reference APIs that no longer
+`shoal-core/src/server.rs:14-27` and are not compiled. They reference APIs that no longer
 exist (`crate::ShoalRow`, `rkyv::AlignedVec`). Dead.
+
+**`response.rs` is not merely dead, and that changes what should be done with it.** It defines
+
+```rust
+pub struct Responses<'a, R> {
+    data: Vec<Option<Vec<&'a AlignedVec>>>,
+    ...
+}
+```
+
+— a response that **borrows** its rows instead of owning them, which is precisely the shape
+[O2](optimizations.md#o2-every-returned-row-is-copied-at-least-twice) is blocked on.
+`ResponseAction::Get(Option<Vec<T>>)` can only hold owned rows, and that is the whole of why the
+largest open entry on the optimizations page is an XL wire-format change. Somebody starting O2 will
+either rediscover this file by accident or reimplement it, and either way will not be able to tell
+whether it is a design that was tried and abandoned or one that was never finished — because nothing
+compiles it, so it cannot even be said whether it still type-checks.
+
+So the two files want different treatment. `cursor.rs` is leftover and should go. `response.rs`
+should be *decided*: folded into O2's entry as prior art and deleted, or declared behind
+`#[allow(dead_code)]` so the compiler keeps it honest. The third state it is in now — present,
+unreferenced, unchecked — is the only one that helps nobody. Found while tracing the response path
+for the copy accounting on
+[Row size and what it costs](../tables/row-size.md#the-payload-is-walked-about-six-times-per-round-trip).
 
 The other half of this item — `.../fs/tests.rs` being 429 lines of commented-out tests — is
 [fixed](resolved/storage-tests.md).
@@ -1249,7 +1273,10 @@ queues rather than compounds. Note the decoy path ([F12](../features/authenticat
 the shape of any fix: whatever is added must cost the same for a user that exists and one that does
 not, or it becomes the enumeration oracle the decoy exists to prevent.
 
-### 64. Four `direction/` pages cite the zero-copy read at a line it left two features ago
+### 64. Fifteen pages cite the client at a path it left when the crates were split
+
+**Filed as four `direction/` pages and it is fifteen pages across four chapters** — see the widened
+scope at the end of this item.
 
 Every page in the direction chapter that argues from the zero-copy response path quotes the same
 three lines and cites them as `shoal-core/src/client.rs:524-527`, `TcpProxy::start`. The read is now
@@ -1272,9 +1299,29 @@ stale citation and not the fifteen others on the same pages is the drift this it
 
 **Fix direction:** the same treatment this page already gives itself — a
 re-resolution pass over every `file:line` in `docs/src/direction/` and `docs/src/api/`, with the
-symbol name kept beside each one so the next drift is greppable. The August 2026 review did this
+symbol name kept beside each one so the next drift is greppable. ~~The August 2026 review did this
 for the appendix and did not cover the direction chapter, which had just been written and was
-correct at the time.
+correct at the time.~~
+
+**Both halves of that sentence are now wrong, and the item is larger than it was filed as.**
+
+*The appendix is no longer clean.* [F15](../features/client-server-split.md) moved the client into
+its own crate after the review, so the citations did not drift by lines — the file they name stopped
+existing. `shoal-core/src/client.rs` is cited **26 times across 15 pages**, and two of them are on
+[Optimizations](optimizations.md), the page whose whole function is to say where a cost lives.
+Those two, and six more that drifted the ordinary way, are corrected; the remaining pages are not.
+
+*And the line this item quotes is itself stale twice over.* It says the read "is now at
+`client.rs:1063-1066`". That was true of `shoal-core/src/client.rs` when this was written and there
+is no such file; the read is at `shoal-client/src/client.rs:1489-1492`, and it has since acquired a
+third defect worth naming —
+[O37](optimizations.md#o37-the-client-zeroes-a-response-buffer-and-immediately-overwrites-it), the
+`resize(len, 0)` that memsets a buffer the next line overwrites. **An item about stale citations
+went stale**, which is the strongest possible argument for the fix direction it proposes.
+
+The scope is therefore `docs/src/direction/`, `docs/src/api/`, `docs/src/architecture/` and the
+remainder of the appendix — and the pass is worth doing as one sweep with the symbol names added,
+rather than as fifteen incidental corrections, for the reason this item already gives.
 
 ### 65. Two `gxhash` majors, and partition keys hashed by the one without `deterministic`
 
@@ -1647,3 +1694,5 @@ keep one `current` and have a page *say* when a newer capture covers arms it is 
 freshness table says a layer is stale. A row that could be labelled "re-measured in
 `f23-staging-buffer`" would have made this visible without joining two machines' numbers into one
 table. Filed as work rather than fixed here, in [TODOs](todos.md).
+
+
