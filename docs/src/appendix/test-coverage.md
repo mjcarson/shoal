@@ -3,10 +3,10 @@
 What the test suite reaches, what it does not, and the one place where it is unsound.
 
 **Established by running it.** `cargo check --workspace --all-targets` passes with warnings and
-`cargo test --workspace` passes: **1,046 tests**, two ignored, plus **12** behind
+`cargo test --workspace` passes: **1,047 tests**, two ignored, plus **12** behind
 `--features stage-profile` that a default run does not reach.
 
-**[Resolved #78](resolved/sources-manifest-drift.md) added 1**, and the total went 1,045 → 1,046. It
+**[Resolved #78](resolved/sources-manifest-drift.md) and [F24](../features/routing-benchmarks.md) added 2**, and the total went 1,045 → 1,047. The first is
 is the cheapest test on this page and it is here as an argument about what tests are for:
 `every_source_the_manifest_names_exists` walks the paths in `docs/perf/sources.json` and asserts each
 one resolves. Six of the seventeen did not — the client and the wire protocol had moved crates in
@@ -15,6 +15,14 @@ hashing the protocol module `wire.rs` half exists to measure, and eight captures
 *unaffected* by changes that affected them. Nothing failed, nothing warned, and the table kept
 printing plausible verdicts for four months. **A hand-maintained list with no test is a list that is
 wrong and cannot say so**, and the check that catches it is nine lines.
+
+The second is the same lesson arriving twice in one change. `BENCH_TARGETS` is a second
+hand-maintained list — the one that makes `shoal-bench` discover a criterion bench at all — and
+[F24](../features/routing-benchmarks.md)'s new bench reached `shoal/Cargo.toml` and
+`docs/perf/sources.json` and not that. `cargo bench` ran it, `list --refresh` reported the same 527
+ids as before, and nothing said a bench target was missing, because a shorter list is a valid list.
+`every_bench_target_is_declared_and_exists` asserts every `[[bench]]` in `shoal/Cargo.toml` is named
+there and that every source named there is a file, and it fails against the tree before the fix.
 
 **[Resolved #76](resolved/stage-join.md) added 6**, and it is the only change here to move the two
 counts in opposite proportions: 2 in a default run and 4 behind the feature. The default two are
@@ -141,7 +149,7 @@ should read this table rather than assume it was.
 | `shoal-proto` unit | 171 | the protocol, the SHQL parser, SCRAM, the TLS config — moved out of `shoal-core` |
 | `shoal-core` unit | 151 | the engine: partitions, storage, the shard. Was 323 before the split. Up 5 with [F23](../features/self-sizing-staging-buffer.md), all of them over the staging buffer's sizing rule |
 | `shoal-client` unit | 18 | the client read loop and its error routing, and — new with [F16](../features/client-builder.md) — the builder, the pool defaults and the endpoint order |
-| `shoal-bench` unit | 400 | the harness, the workloads, the charts, and — new with [F17](../features/workload-grid.md) and [F18](../features/results-pages.md) — the grid, the row-width and key generators, the family and page registries, and the two new chart kinds; and — new with [F19](../features/chart-legends.md) — the shared legend, the data-derived axis ticks, and the encryption charts in nanoseconds; and — new with [F20](../features/configuration-sweeps.md) and [F21](../features/benchmark-groups.md) — the configuration sweep, the group table, and `--group` in the registry; and — new with [F22](../features/row-size-benchmarks.md) — the three width passes, the configuration sweep's width repeats, both runner-side lists of profiled workloads, and the per-workload stage artifact; and — new with [Resolved #76](resolved/stage-join.md) — that the stage layer's collector judges each report rather than their sum. **411 with `--features stage-profile`**, which adds the 8 over the report builder and 3 over the `StageLog` |
+| `shoal-bench` unit | 401 | the harness, the workloads, the charts, and — new with [F17](../features/workload-grid.md) and [F18](../features/results-pages.md) — the grid, the row-width and key generators, the family and page registries, and the two new chart kinds; and — new with [F19](../features/chart-legends.md) — the shared legend, the data-derived axis ticks, and the encryption charts in nanoseconds; and — new with [F20](../features/configuration-sweeps.md) and [F21](../features/benchmark-groups.md) — the configuration sweep, the group table, and `--group` in the registry; and — new with [F22](../features/row-size-benchmarks.md) — the three width passes, the configuration sweep's width repeats, both runner-side lists of profiled workloads, and the per-workload stage artifact; and — new with [Resolved #76](resolved/stage-join.md) — that the stage layer's collector judges each report rather than their sum. **412 with `--features stage-profile`**, which adds the 8 over the report builder and 3 over the `StageLog` |
 | `shoal` integration | 199 | 15 binaries against a live server, one ignored. `pool.rs` is **new** with [F16](../features/client-builder.md) and `intent_log_batching.rs` with [F23](../features/self-sizing-staging-buffer.md) |
 | `shoalctl` integration | 34 | the completion menu, driven the way the key handler does |
 | `shoal-client-check` integration | 7 | **new.** A schema compiling and running against the client alone |
