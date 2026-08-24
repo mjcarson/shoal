@@ -782,8 +782,9 @@ were worth reaching for.
 
 **All six are built** ([F22](../features/row-size-benchmarks.md)) and `f22-row-size` **captured
 them**. Five answered; the sixth joined zero queries and answered nothing
-([Resolved #76](resolved/stage-join.md)) — that instrument is fixed now, and the sixth answer is
-waiting on a capture taken with it rather than on the defect.
+([Resolved #76](resolved/stage-join.md)). ~~That instrument is fixed now, and the sixth answer is
+waiting on a capture taken with it rather than on the defect.~~ **`f24-routing` took that capture
+and the sixth answered**, so all six are closed.
 Each entry below is struck through with what it turned out to cost, including the two places it cost
 more than it said, and now with what it said. What none of the six closes is at the end.
 
@@ -797,7 +798,7 @@ more than it said, and now with what it said. What none of the six closes is at 
 | 3 | Answered, and the knee is in the *tail* rather than in throughput: 52× p99/p50 at 128 KiB, recovering to 7.4× at 4 MiB |
 | 4 | Answered, and it was most of the wide-arm latency — 1.3–2.5× spread at every width at depth 1 |
 | 5 | Answered. Write path owns below ~64 KiB, read path above it |
-| 6 | **Did not run.** Zero joined records at all three widths |
+| 6 | ~~**Did not run.** Zero joined records at all three widths~~ — **answered on the retake.** `f24-routing` joined every record at all three, and the answer is `reply_serialize` ×238 and `execute` ×65 on the read path, `client_serialize` ×503 on the write |
 
 **The new gap, and it is cheap.** Filling the 8 KiB → 512 KiB hole left the *other* one: the fixed
 widths still jump 1024 → 8192, and the intent log's staging buffer sits at 4096 in the middle of it.

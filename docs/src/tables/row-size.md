@@ -15,10 +15,10 @@ the benchmark that would settle it was built and had not been run. `f22-row-size
 six ([F22](../features/row-size-benchmarks.md)). Two of the four mechanisms survive with a
 measurement behind them, one survives with its *shape* corrected, one is **refuted** — the tail it
 was filed on turns out to be queueing — and the sixth benchmark did not run at all
-([Resolved #76](../appendix/resolved/stage-join.md)). That sixth instrument has since been
-**repaired**, and a grid arm's stage report now has a breakdown in it — but no capture has been
-taken with the repaired one, so everything below that waited on it is waiting on a capture rather
-than on a defect. Where a claim changed, the old one is struck through and kept beside what
+([Resolved #76](../appendix/resolved/stage-join.md)). ~~That sixth instrument has since been
+**repaired** … but no capture has been taken with the repaired one.~~ **`f24-routing` is that
+capture**, and the sixth question is answered: the stages that grow with the bytes are
+`reply_serialize` and `execute`, which are the two copies O2 is about. Where a claim changed, the old one is struck through and kept beside what
 replaced it.
 
 ## The shape
@@ -202,16 +202,38 @@ capture says about where to spend effort — and it points at
 [O2](../appendix/optimizations.md#o2-every-returned-row-is-copied-at-least-twice), the response
 copies, for anyone whose rows are hundreds of kilobytes.
 
-*Evidence: the per-byte growth of the codec is **measured**, with criterion's confidence interval,
-and the mixture split is measured against the persistent unsorted table. Which of the nineteen
-stages the remaining copies live in is still unknown. ~~And worse than unknown: the per-stage
-breakdown at three widths was built, was run, and **joined nothing** — all three reports carry
-`joined: 0` and no ops at all, because the client half of a stage record is only written by a driver
-the grid arms do not use.~~ That was [item 76](../appendix/resolved/stage-join.md) and it is
-**fixed**: a grid arm profiled today reports all nineteen stages for both halves of its mixture. The
-three reports in `f22-row-size` are still empty, because the fix repairs the instrument and not the
-artifacts taken with the broken one, so O11 and O29 are now blocked on a capture rather than on a
-defect.*
+**Which of the nineteen stages they live in is now measured.** `f24-routing` is the first capture
+taken with the repaired instrument, and all four of its reports join completely — zero server-only,
+zero client-only. At the p50 of a get, over 1 KiB → 512 KiB:
+
+| Stage | 1 KiB | 512 KiB | Growth | Share at 512 KiB |
+| --- | ---: | ---: | ---: | ---: |
+| `reply_serialize` | 364 ns | 86.8 µs | **×238** | 21.6% |
+| `execute` | 826 ns | 54.1 µs | **×65** | 13.5% |
+| `socket_write` | 12.3 µs | 127.0 µs | ×10.3 | 31.6% |
+| `net_out` | 4.56 µs | 50.8 µs | ×11.1 | 12.6% |
+| `exec_queue` | 7.99 µs | 34.0 µs | ×4.3 | 8.5% |
+| *whole get* | 36.9 µs | 401.8 µs | ×10.9 | — |
+
+`reply_serialize` is `rkyv::to_bytes(&response)` and `execute` is `P::from_row` — the seventh and
+third rows of the table above, and both of them [O2](../appendix/optimizations.md). **They are the
+only two stages that grow faster than the query around them**, and together they are 35% of a wide
+get. Everything else grows at or below the ×10.9 the whole query does, which is what makes the rest
+of the pipeline a control rather than a competing explanation.
+
+The write path is the same shape and a different conclusion. `client_serialize` grows **×503**,
+`decode` ×199 and `route` ×179 — but `durable_write` and `durable_sync` are 4.46 ms and 3.43 ms of a
+10.28 ms insert, so 86% of a wide write is the device and the copies growing around it are rounding.
+**The copies are worth attacking on the read path and not on the write path**, which is the opposite
+of where the `r0`/`r100` split alone would have pointed for the near knee.
+
+*Evidence: the per-byte growth of the codec is **measured**, with criterion's confidence interval;
+the mixture split is measured against the persistent unsorted table; and the per-stage attribution
+is measured at three widths with a complete join. ~~Which of the nineteen stages the remaining
+copies live in is still unknown.~~ ~~And worse than unknown: the per-stage breakdown at three widths
+was built, was run, and **joined nothing**.~~ That was
+[item 76](../appendix/resolved/stage-join.md), it is **fixed**, and `f24-routing` is the capture
+that collected the answer.*
 
 ### The intent log batches fewer records as rows widen
 
@@ -368,12 +390,14 @@ At 4 MiB, roughly eighteen nineteenths of the observed read latency was queue ra
 ~~**The axis is swept at `r50` only.**~~ **Answered.** Swept at `r0` and `r100` on all four tables,
 and the two halves own different parts of the axis — write below ~64 KiB, read above it.
 
-~~**Nothing says which of the nineteen stages grows with the bytes.**~~ **Still nothing does**, but
-no longer for a worse reason than before: the stage layer ran at three widths and joined *zero*
-queries at all three, so the question was never asked rather than asked and unanswered. That was a
-defect and it is [fixed](../appendix/resolved/stage-join.md) — a grid arm profiled against the
-current tree reports all nineteen stages — so this is back to being an unanswered question waiting
-on a capture, which is the ordinary kind.
+~~**Nothing says which of the nineteen stages grows with the bytes.**~~ ~~**Still nothing does**,
+but no longer for a worse reason than before.~~ **Answered**, by `f24-routing` — the first capture
+taken after [item 76](../appendix/resolved/stage-join.md) was fixed, and the first whose stage
+reports all join. It is `reply_serialize` at ×238 and `execute` at ×65, the two stages
+[O2](../appendix/optimizations.md) is about; see
+[the copy section](#the-payload-is-walked-about-six-times-per-round-trip). This caveat stood from the
+day the page was written until that capture, through one attempt that produced an artifact with the
+right shape and an empty middle.
 
 What still stands:
 
@@ -418,7 +442,7 @@ Two of these three now have a number behind them, and the first one has changed.
   the codec sweep now says what that is worth per byte: a response's encode grows ×72 and its decode
   ×433 between 64 B and 64 KiB, so narrowing what crosses the wire is a per-byte saving on both ends.
 
-## What it settled — five of six ran
+## What it settled — six of six, in the end
 
 Six benchmarks, none of which existed when this page was first written. All six were built
 ([F22](../features/row-size-benchmarks.md)); `f22-row-size` ran the capture. **Five answered and one
@@ -431,7 +455,7 @@ did not run at all.** Ordered as they were filed, cheapest first.
 | 3 | Where the knee is | **Answered, and it was not where the question assumed.** Throughput falls smoothly; the tail peaks at 52× at 128 KiB and recovers past it |
 | 4 | How much of a wide arm was queue rather than service | **Answered, and it was most of it.** The p99/p50 spread is 1.3–2.5× at every width at depth 1. Eighteen nineteenths of the 4 MiB read latency was queue |
 | 5 | Which half of the mixture the per-byte cost is on | **Answered, and it is both, in different places.** Write below ~64 KiB, read above it |
-| 6 | **Which** of the nineteen stages grows with bytes | **Did not run.** All three reports joined zero queries — a defect, since [fixed](../appendix/resolved/stage-join.md). Waiting on a capture taken with the repaired instrument |
+| 6 | **Which** of the nineteen stages grows with bytes | ~~**Did not run.**~~ **Answered**, on the second attempt. The first joined zero queries at all three widths — a defect, since [fixed](../appendix/resolved/stage-join.md) — and `f24-routing` re-took it with a complete join. `reply_serialize` ×238 and `execute` ×65 on the read path, both of them O2; `client_serialize` ×503 on the write path, which is O11. And the write path's answer is that it does not matter there: 86% of a wide insert is the device |
 
 **What this changed in the priority queue.** O34 moved from argued to measured with a contained fix,
 became the head of Tier A, and has since been **built** as
@@ -442,6 +466,12 @@ controls, and `r100` says the read path owns the wide end, so it is the largest 
 available — still behind a design pass, because it reaches the wire format. O35 lost its evidence
 and left the queue. O11 and O29 did not move, and their unblocker is now known to be broken rather
 than merely unbuilt. See [the priority queue](../appendix/optimizations.md#the-priority-queue).
+
+**What the sixth closed, late.** O11 and O29 were the last two entries on the optimizations page
+blocked on an instrument rather than on a decision, and the instrument existed and produced empty
+artifacts. Both now have per-stage evidence, and O11's is the strongest on that page: its two
+serialization buffers are the fastest-growing stage on each half of the mixture, ×503 on the write
+and ×238 on the read.
 
 **What none of the six closed** is in
 [What the capture cannot tell you](#what-the-capture-cannot-tell-you) above, and the new item is

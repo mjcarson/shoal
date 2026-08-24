@@ -80,19 +80,27 @@ write-path bench, unbuilt); **O25** (a with/without capture, which is a build ra
 **O27** (a workload over a schema that mixes table kinds, which none does); and **O30** (a `connect`
 workload, where the missing benchmark *is* the entry). That is **eight**, not four.
 
-**O11** and **O29** are blocked differently and should not be counted with them. Their instrument
-exists and is [repaired](resolved/stage-join.md); what they wait on is a *capture* taken with it. O11
-is on both lists, because the stage layer would say which stage its copies live in and only a
-write-path bench would say what removing one is worth.
+~~**O11** and **O29** are blocked differently and should not be counted with them. Their instrument
+exists and is [repaired](resolved/stage-join.md); what they wait on is a *capture* taken with it.~~
+**That capture was taken** — `f24-routing` — so what those two waited on is discharged. O11 stays on
+the list above, because the stage layer says *which* stage its copies live in and only a write-path
+bench says what removing one is worth; O29 comes off it entirely.
 
-**A benchmark that runs is not the same as a benchmark that answers**, and this page now has one
+**A benchmark that runs is not the same as a benchmark that answers**, and this page has had one
 instance of each failure. O35's ran and came back *negative* — it reattributed the entry's evidence
 to load depth and cost it its rank, which is the dependency working. O11 and O29's ran and returned
 *nothing*, because the layer it lives in joined no records for the workloads it was pointed at
 ([Resolved #76](resolved/stage-join.md)). The second is worse than having no benchmark, because the
 artifact it produced has the right shape and an empty middle. **When a Benchmark row here says a
 capture exists, check that it joined** — the collector checks that per report now rather than across
-the artifact, so a future capture cannot repeat it, but the committed ones were taken before that.
+the artifact, so a future capture cannot repeat it.
+
+**That second failure is now closed.** `f24-routing` is the first capture taken with the repaired
+instrument, and all four of its stage reports join completely — 20,000, 20,000, 512 and 200,000
+records, with **zero** server-only and **zero** client-only on every one. So the question the stage
+layer was pointed at three widths to answer, and could not, has an answer; it is quoted under
+[O2](#o2-every-returned-row-is-copied-at-least-twice) and
+[O11](#o11-a-fresh-alignedvec-per-write-and-per-response) rather than here.
 
 ## The priority queue
 
@@ -213,7 +221,7 @@ come out as a code block.
 | ~~**a width-aware `latency_buffer` sweep → O34**~~ | **Discharged.** Built by [F22](../features/row-size-benchmarks.md) and captured in `f22-row-size`; O34 is measured and O34's *shape* was corrected by it |
 | **O35 ↔ D2** | Only the interleaving form. Reordering the relay's queue needs no format change; splitting a response across frames is [D2](../direction/framing.md) |
 | **row width raises O1, O2, O11, O29** | All four are per-byte costs filed as constants. They do not get worse under load — they get worse per query as the caller's rows widen ([Row size](../tables/row-size.md)). **Measured for O1 and O2** by the codec width axis; still argued for O11 and O29, whose instrument is broken rather than absent |
-| **a stage capture → O11, O29** | The per-stage breakdown is what would say which stage their copies live in. It ran at three widths and joined nothing, which was a defect and is [fixed](resolved/stage-join.md); the committed reports are still the empty ones, so both are blocked on a capture taken with the repaired instrument |
+| ~~**a stage capture → O11, O29**~~ | **Discharged.** `f24-routing` is the first capture taken with the repaired instrument and all four reports join completely. The breakdown at 1 KiB, 8 KiB and 512 KiB says `reply_serialize` grows **238×** on the read path and `client_serialize` **503×** on the write path, which are O11's response buffer and its client-side bundle buffer respectively |
 | **load depth → O35** | Not a dependency so much as the reason O35 left the queue: the depth-1 ladder explains its whole observation, so nothing can rank it until something measures the relay under a bounded queue |
 
 ### Which entries a benchmark can currently adjudicate
@@ -226,7 +234,7 @@ come out as a code block.
 | O5, O12 | **none yet** — an isolated bench over `PersistentSortedTable::get` is still unbuilt ([TODOs](todos.md#benchmark-coverage-the-harness-does-not-have)). `maybe_loaded/*` reaches `MaybeLoaded`, one layer below where both live |
 | O13 | ~~none yet~~ `macro/fanout/{resident,evicted}/n` since [F8](../features/purpose-built-workloads.md) — **the question, not the isolated cost**. See the note below |
 | O20 | ~~none yet — a `routing` bench over `Ring::find_shard` and `split_by_shard` is unbuilt~~ — **built** ([F24](../features/routing-benchmarks.md)), and it does **not** adjudicate this entry. `routing/*` prices the placement decision; O20 is about *residency* — whether a get should read a partition it may not need — and nothing in the micro layer varies what happens to be resident. The bench this row asked for exists and the entry it was asked for is still uncovered, which is worth recording as a case of a benchmark being specified by the code it touches rather than by the question it answers |
-| O11, O29 | the `r0` width sweep against the `r100` one — **captured**, and it says the write path owns the axis below ~64 KiB, which is where O11's three passes live. The per-stage breakdown that would say *which* stage they are in ran at three widths and **joined zero queries at all three**; ~~so the instrument is broken rather than missing~~ that instrument is [repaired](resolved/stage-join.md) and a grid arm now reports all nineteen stages, so what is left is a capture. This was the only row in this table where a capture made things worse than an absent benchmark: an absent one is honest |
+| O11, O29 | the `r0` width sweep against the `r100` one — **captured**, and it says the write path owns the axis below ~64 KiB, which is where O11's three passes live. ~~The per-stage breakdown that would say *which* stage they are in ran at three widths and **joined zero queries at all three**~~ — **it has now run and answered**, in `f24-routing`, the first capture taken after [Resolved #76](resolved/stage-join.md). `client_serialize` ×503 and `reply_serialize` ×238 are O11's two buffers; `decode` ×199 contains O29's `memset`. This was for one release the only row in this table where a capture made things worse than an absent benchmark, because an absent one is honest; it is now the row with the most specific evidence on the page |
 | O21 | `hotpath` `fs::commit` and `stream::prep` only; no micro-benchmark of the write path exists, though [F8](../features/purpose-built-workloads.md) built the standalone binary that would host one |
 | ~~O34~~ | ~~**none yet**~~ ~~built and not yet captured~~ `macro/conf/storage/latency_buffer/r50/w8192/*` and `.../w65536/*` ([F22](../features/row-size-benchmarks.md)). **Captured, and it settled the entry**: 1.22× at 64 KiB rows on disjoint intervals against 1.06× at the reference cell — and it corrected the shape, because crossing the buffer threshold at 8 KiB bought nothing while 8–32 records per buffer bought 6%. The sweep that could not see this now can, and the entry it settled has been **acted on** ([F23](../features/self-sizing-staging-buffer.md)). The same arms re-judged the fix, in `f23-staging-buffer`, and the `w65536` rungs **converged**: 1.225× of spread became 1.010×, which is a sweep whose knob is now a floor under a ceiling having less to say the wider the rows get — the shape of a knob that stopped mattering |
 | O35 | ~~none~~ ~~built, not captured~~ `macro/grid/depth/1/<width>` against the `r50` width sweep ([F22](../features/row-size-benchmarks.md)). **Captured, and it came back negative.** The test was the entry's own: a p99 that collapses at one outstanding query is a queue rather than a cost inside the relay. It collapses — 1.3–2.5× at every width against 37–52× at depth 32 — so the entry lost its evidence and left the queue |
@@ -372,7 +380,26 @@ should be made deliberately rather than by whichever is picked up first.
 **This cost is proportional to the row, not constant.** It was filed against the reference cell's
 1 KiB rows, where it is small. The [row-size sweep](../performance/row-size.md) is where it stops
 being small: two copies of a 4 MiB row is 8 MiB of memory traffic for one get, and the
-archive path's `from_archived` materialization is a third. Its *Impact* grade should be read as **Asymptotic** in the row width —
+archive path's `from_archived` materialization is a third.
+
+**The stage layer now names both copies, and they are the two fastest-growing stages on the read
+path.** `f24-routing` profiled `macro/grid/unsorted/r50/{1024,8192,524288}` with a join on every
+record, which is what [Resolved #76](resolved/stage-join.md) had to be fixed for. Over 1 KiB →
+512 KiB, at the p50 of a get:
+
+| Stage | 1 KiB | 512 KiB | Growth | Share of a 512 KiB get |
+| --- | ---: | ---: | ---: | ---: |
+| `reply_serialize` — `rkyv::to_bytes(&response)` | 364 ns | 86.8 µs | **×238** | 21.6% |
+| `execute` — `P::from_row` out of the partition | 826 ns | 54.1 µs | **×65** | 13.5% |
+| `socket_write` | 12.3 µs | 127.0 µs | ×10.3 | 31.6% |
+| `net_out` | 4.56 µs | 50.8 µs | ×11.1 | 12.6% |
+| *whole get* | 36.9 µs | 401.8 µs | ×10.9 | — |
+
+**This entry's two copies are 35% of a wide get**, and they are the only two stages growing faster
+than the query around them — everything else on the path grows at or below the ×10.9 the whole query
+does. That is a sharper statement than the `r100` sweep could make: that said the read path owns the
+wide end of the axis, and this says which two stages inside it, by name, with the rest of the
+pipeline as the control. Its *Impact* grade should be read as **Asymptotic** in the row width —
 a quantity the caller chooses — rather than as the *Argued* constant above. See
 [Row size and what it costs](../tables/row-size.md#the-payload-is-walked-about-six-times-per-round-trip).
 
@@ -689,7 +716,7 @@ instead of being owned by one.
 | **Depends on** | a storage write-path bench, which is [the biggest gap in the harness](todos.md#benchmark-coverage-the-harness-does-not-have) |
 | **Blocks** | nothing |
 | **Tradeoff** | None |
-| **Benchmark** | none usable yet. The per-stage breakdown at three widths was built and **run**, and joined zero queries at all three — ~~blocked on a broken instrument rather than a missing one~~. The instrument is [fixed](resolved/stage-join.md) and a grid arm now reports `client_serialize`, `client_pool` and `client_write` alongside the sixteen server side stages; the committed reports predate the fix, so this is blocked on a stage capture |
+| **Benchmark** | ~~none usable yet~~ — **captured**, in `f24-routing`, the first capture taken with the repaired instrument ([Resolved #76](resolved/stage-join.md)). All four reports join completely. `client_serialize` grows **×503** over 1 KiB → 512 KiB on the write path and `reply_serialize` **×238** on the read path: this entry's two buffers are the two fastest-growing stages in the whole nineteen. What is still absent is a **write-path micro benchmark** that would say what reusing them is worth, as opposed to what they cost |
 
 - `FileSystem::commit` (`.../fs.rs:368`) allocates via `RkyvSupport::serialize`, then copies the
   bytes a second time into the DMA buffer (`.../fs.rs:387`) — and hashes the whole record in
@@ -1426,7 +1453,7 @@ below what the macro layer can see at all, and the honest place to adjudicate it
 | **Depends on** | nothing |
 | **Blocks** | nothing |
 | **Tradeoff** | Contained — a shape change inside the server, no format change |
-| **Benchmark** | none usable yet — `wire_codec` measures the codec, not the relay's allocation, and the per-stage breakdown that would have located it joined nothing. That is [fixed](resolved/stage-join.md); the committed reports predate the fix, so this is blocked on a stage capture |
+| **Benchmark** | ~~none usable yet~~ — **captured**, in `f24-routing`. `wire_codec` measures the codec and not the relay's allocation, but the stage breakdown now locates it: `decode`, the stage that contains this `memset` and the deserialize beside it, grows **×199** over 1 KiB → 512 KiB on the write path, against a `net_out` on the same path that grows ×1.9. It is 0.3% of a wide insert in absolute terms, which is this entry's honest size |
 
 ```rust
 // allocate a buffer that is exactly the right size
