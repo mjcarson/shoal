@@ -1107,6 +1107,38 @@ around it with zero-padded decimal strings, which is what makes lexicographic or
 numeric order for a range scan. This is a missing impl rather than a design decision: nothing about
 the sort path requires the key to be a string, and every sorted table in the wild will hit it.
 
+### What F25 left undone
+
+[F25](../features/read-buffers-are-filled-not-zeroed.md) stopped both ends of a round trip writing
+zeroes over a buffer the read on the next line overwrites. Two things it deliberately did not do.
+
+- **A `poll_read` over `MaybeUninit` on the glommio fork.** The client's half of that fix is sound
+  by a *check*: tokio's `ReadBuf` counts what a reader initialized, so the `set_len` after it is
+  discharged at runtime. The server's is sound by *construction* instead — `futures::io::AsyncRead`
+  takes a `&mut [u8]` and reports nothing, so the argument has to be that `RequestBody::read_from`
+  is the only way the value can be built. `glommio` is a path dependency at `../glommio` and its
+  `NonBuffered` stream already reads straight into the caller's slice with `yolo_recv`, so a
+  variant taking `&mut [MaybeUninit<u8>]` and returning how many bytes it wrote would let the
+  server discharge the same runtime check the client does and retire the structural argument
+  altogether. **Not taken because it is a change to another repository**, and because the
+  structural argument is one type with a private field rather than something spread across call
+  sites. Worth doing the next time that fork is touched for another reason.
+
+- **No stage covers the body read.** `base`, the stamp every stage offset is measured from, is
+  taken *after* `read_exact` returns, so the allocation and the read both fall in `net_in` —
+  `base.since(client.written)` — beside real wire time, and nothing separates them. That is why
+  `f24-routing`'s `decode` ×199 was read as locating O29 when it could not: there is no stage there
+  to look at. A `body_read` stamp taken before the allocation, with `base` kept where it is, would
+  make the read a stage of its own without moving the meaning of any existing offset. It is the
+  twentieth stage rather than a change to nineteen, and it would need a family entry and a column
+  on the stage tables. **Not taken here** because the entry it would have measured is now closed and
+  the micro layer answers it directly; it is worth building the next time something on that read
+  path is in question.
+
+- **The error frame's `vec![0u8; msg_len + ..]`.** The same shape on the client, bounded at four
+  kibibytes by the protocol's message bound, so it is not asymptotic in anything and not what
+  either entry was about. Left alone on purpose.
+
 ### Archive checksums
 
 Intent log records and the map snapshot are checksummed; archive payloads are not. Corruption

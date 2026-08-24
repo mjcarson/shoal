@@ -5,6 +5,7 @@
 
 use anyhow::Result;
 
+use crate::registry::Layer;
 use crate::fmt;
 use crate::render::arms::{self, Arm};
 use crate::render::chart::sweep::{self, Unit};
@@ -29,7 +30,7 @@ pub fn build(page: &Page) -> Result<String> {
          table. The three named mixtures at the end of the axis are declared distributions of \
          widths rather than ranges, so two captures of one measure the same thing.",
     );
-    let Some(capture) = page.current().and_then(|current| current.macro_layer.as_ref()) else {
+    let Some(capture) = page.current_for(Layer::Macro).and_then(|current| current.macro_layer.as_ref()) else {
         out.push_str(&nothing_measured("a row width sweep"));
         out.push_str(&footer(Surface::RowSize));
         return Ok(out);
@@ -293,12 +294,7 @@ const STAGE_RANK: &str = "all";
 fn by_stage(page: &Page, all: &[Arm<'_>]) -> Result<String> {
     let mut out = String::new();
     out.push_str("## Which stage grows with the bytes\n\n");
-    let Some(snapshot) = page
-        .timeline
-        .iter()
-        .rev()
-        .find(|snapshot| snapshot.stages.is_some())
-    else {
+    let Some(snapshot) = page.current_for(Layer::Stages) else {
         out.push_str(&nothing_measured("a stage report"));
         return Ok(out);
     };

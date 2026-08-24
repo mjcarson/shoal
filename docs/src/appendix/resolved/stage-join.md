@@ -134,7 +134,10 @@ honestly report them as not measured, touching no crate outside `shoal-bench`. R
 `client_serialize` and `client_write` at 1 KiB against 512 KiB rows is precisely what
 [O11](../optimizations.md#o11-a-fresh-alignedvec-per-write-and-per-response) and
 [O29](../optimizations.md#o29-a-request-body-is-zeroed-and-then-immediately-overwritten) are asking
-about. A fix that leaves the instrument dark exactly where it is wanted is not a fix.
+about. A fix that leaves the instrument dark exactly where it is wanted is not a fix. *(O29 turned
+out not to be asking about a stage at all — its buffer is filled before the bundle's clock starts,
+so it falls in `net_in`. See [F25](../../features/read-buffers-are-filled-not-zeroed.md). The
+argument stands for O11, which is where the reasoning came from.)*
 
 **Changing `Shoal::send` to return the stamps.** Symmetric with `ShoalQueryStream::send`, and a
 breaking change to the most used method on the client for the benefit of one profiler. A second
@@ -184,8 +187,10 @@ layer's first capture with data in it will come from whoever next needs the widt
 **The three grid reports in the committed captures are still empty**, and re-rendering does not
 change that: the fix repairs the instrument, not the artifacts taken with the broken one. Until
 somebody takes a stage capture, [Row size](../../performance/row-size.md) still says no stage was
-measured at more than one width, and O11 and O29 are blocked on a capture rather than on a defect —
-which is the ordinary state of an entry on that page rather than the pathological one they were in.
+measured at more than one width, and O11 ~~and O29 are~~ **is** blocked on a capture rather than on a
+defect — which is the ordinary state of an entry on that page rather than the pathological one they
+were in. *(`f24-routing` took that capture. It settled O11 and was then read as settling O29 too,
+which it could not: see [F25](../../features/read-buffers-are-filled-not-zeroed.md).)*
 
 **`--stage-sample` does not bind on the per query path.** See
 [TODOs](../todos.md). Every query is kept on both halves there, which is correct and is not what the
@@ -214,6 +219,8 @@ currently expose. Also in [TODOs](../todos.md).
 - [F6](../../features/stage-breakdown.md) — what the nineteen stages are
 - [Resolved #73](stage-artifact-overwrite.md) — the same class of defect one layer up, and the
   change that gave the stage layer its own workload list
-- [Optimizations](../optimizations.md) — O11 and O29, whose instrument this was
+- [Optimizations](../optimizations.md) — O11 and ~~O29~~, whose instrument this was — and
+  [F25](../../features/read-buffers-are-filled-not-zeroed.md), which found that O29 was never in
+  this instrument's reach
 - [Known Issues](../known-issues.md) — item 77, the other way a capture can be taken and not
   reported

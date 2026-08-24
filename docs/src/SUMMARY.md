@@ -86,6 +86,7 @@
   - [F22. The benchmarks the row size page asked for](features/row-size-benchmarks.md)
   - [F23. The intent log's staging buffer sizes itself](features/self-sizing-staging-buffer.md)
   - [F24. Routing benchmarks](features/routing-benchmarks.md)
+  - [F25. Read buffers are filled, not zeroed](features/read-buffers-are-filled-not-zeroed.md)
 
 # Direction
 
@@ -135,6 +136,7 @@
   - [74. A configuration knob the page did not name disappeared from it](appendix/resolved/conf-knob-dropped.md)
   - [76. The stage layer joined nothing for any grid arm](appendix/resolved/stage-join.md)
   - [78. Sources manifest drift](appendix/resolved/sources-manifest-drift.md)
+  - [79. A capture of one layer decided what every page drew](appendix/resolved/micro-only-capture-current.md)
 - [TODOs and Unbuilt Work](appendix/todos.md)
 - [Review, August 2026](appendix/review-2026-08.md)
 - [Glossary](appendix/glossary.md)

@@ -61,6 +61,10 @@ What the format does not carry:
 - **No maximum size.** The length is used as an allocation size before a byte of the body is read,
   on both sides — `BytesMut::zeroed(len)` at `shard.rs:69`, `AlignedVec::with_capacity(len)` at
   `client.rs:524` ([item 34](../appendix/resolved/unvalidated-length-prefix.md), closed by this).
+  *Both call sites are historical: the bound landed with [F10](../features/framing-and-protocol-evolution.md)
+  and the zeroing came off both ends with
+  [F25](../features/read-buffers-are-filled-not-zeroed.md), which leaves a `RequestBody` on the
+  server whose construction invariant this design has to keep.*
 - **No error path.** `ResponseAction` has five variants and none of them carries an error
   (`shoal-core/src/shared/responses.rs:26-40`), which is why the server expresses failure as a
   panic.

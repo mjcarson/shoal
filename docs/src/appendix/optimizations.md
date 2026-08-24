@@ -84,13 +84,20 @@ workload, where the missing benchmark *is* the entry). That is **eight**, not fo
 exists and is [repaired](resolved/stage-join.md); what they wait on is a *capture* taken with it.~~
 **That capture was taken** — `f24-routing` — so what those two waited on is discharged. O11 stays on
 the list above, because the stage layer says *which* stage its copies live in and only a write-path
-bench says what removing one is worth; O29 comes off it entirely.
+bench says what removing one is worth; ~~O29 comes off it entirely~~ **O29 came off it and has since
+been done**, by [F25](../features/read-buffers-are-filled-not-zeroed.md) — which also found that the
+stage reading of O29 was wrong, since the body read happens before the bundle's clock starts and no
+stage contains it at all.
 
 **A benchmark that runs is not the same as a benchmark that answers**, and this page has had one
 instance of each failure. O35's ran and came back *negative* — it reattributed the entry's evidence
 to load depth and cost it its rank, which is the dependency working. O11 and O29's ran and returned
 *nothing*, because the layer it lives in joined no records for the workloads it was pointed at
-([Resolved #76](resolved/stage-join.md)). The second is worse than having no benchmark, because the
+([Resolved #76](resolved/stage-join.md)) — and when it was re-run and did join, the reading taken
+off it for O29 named a stage that cannot contain what it was said to
+([F25](../features/read-buffers-are-filled-not-zeroed.md)). **A benchmark that answers is not the
+same as an answer to the question asked**, which is the third failure and the one this page had not
+had an instance of. The second is worse than having no benchmark, because the
 artifact it produced has the right shape and an empty middle. **When a Benchmark row here says a
 capture exists, check that it joined** — the collector checks that per report now rather than across
 the artifact, so a future capture cannot repeat it.
@@ -171,7 +178,7 @@ so they get worse by existing longer rather than under load.
 | **B1** | [**O9**](#o9-every-intent-log-rotation-walks-the-entire-on-disk-partition-set) → [**O8**](#o8-partitions-are-read-one-at-a-time-each-with-its-own-dup-and-close) (with [**O22**](#o22-recovery-loads-the-partitions-it-scanned-one-await-at-a-time) in the same change) | Argued — but O(data on disk) | M, then L | O9 before O8 | Contained | no |
 | **B2** | [**O4**](#o4-deep_size_of-is-a-recursive-walk-called-on-every-mutation) — carry a row's measured size | Argued | M | — | Contained | no — and it settles [item 22](known-issues.md#22-size-accounting-inconsistencies) either way |
 | **B3** | [**O10**](#o10-serializedmapsave-snapshots-by-cloning), [**O15**](#o15-one-partition-load-costs-a-dup-and-a-close), [**O21**](#o21-a-forced-rotation-of-an-empty-intent-log-does-the-whole-rotation-anyway) — contained cleanups | Argued | S–M | — | Contained | no |
-| **B4** | [**O11**](#o11-a-fresh-alignedvec-per-write-and-per-response) — reuse the serialization buffer; [**O29**](#o29-a-request-body-is-zeroed-and-then-immediately-overwritten) and [**O37**](#o37-the-client-zeroes-a-response-buffer-and-immediately-overwrites-it) beside it — a buffer zeroed and overwritten, on each end of the same round trip | Argued; O37 **asymptotic** in the row width | M | a storage write-path bench (O11); nothing (O29, O37) | None | no |
+| **B4** | [**O11**](#o11-a-fresh-alignedvec-per-write-and-per-response) — reuse the serialization buffer. ~~[**O29**](#o29-a-request-body-is-zeroed-and-then-immediately-overwritten) and [**O37**](#o37-the-client-zeroes-a-response-buffer-and-immediately-overwrites-it) beside it — a buffer zeroed and overwritten, on each end of the same round trip~~ — **both done**, by [F25](../features/read-buffers-are-filled-not-zeroed.md), which built the benchmark this row said neither had | Argued; ~~O37 **asymptotic** in the row width~~ measured, both ends | M | a storage write-path bench (O11); ~~nothing (O29, O37)~~ `wire_codec/width/{request,response}/body` | None | no |
 
 **Tier C — blocked on a design pass, not on effort.**
 
@@ -220,8 +227,8 @@ come out as a code block.
 | **write-path bench → O11, O21** | Unbuilt, and it is the layer that dominates the profile |
 | ~~**a width-aware `latency_buffer` sweep → O34**~~ | **Discharged.** Built by [F22](../features/row-size-benchmarks.md) and captured in `f22-row-size`; O34 is measured and O34's *shape* was corrected by it |
 | **O35 ↔ D2** | Only the interleaving form. Reordering the relay's queue needs no format change; splitting a response across frames is [D2](../direction/framing.md) |
-| **row width raises O1, O2, O11, O29** | All four are per-byte costs filed as constants. They do not get worse under load — they get worse per query as the caller's rows widen ([Row size](../tables/row-size.md)). **Measured for O1 and O2** by the codec width axis; still argued for O11 and O29, whose instrument is broken rather than absent |
-| ~~**a stage capture → O11, O29**~~ | **Discharged.** `f24-routing` is the first capture taken with the repaired instrument and all four reports join completely. The breakdown at 1 KiB, 8 KiB and 512 KiB says `reply_serialize` grows **238×** on the read path and `client_serialize` **503×** on the write path, which are O11's response buffer and its client-side bundle buffer respectively |
+| **row width raises O1, O2, O11, ~~O29~~** | ~~All four~~ **Three** are per-byte costs filed as constants. They do not get worse under load — they get worse per query as the caller's rows widen ([Row size](../tables/row-size.md)). **Measured for O1 and O2** by the codec width axis; still argued for O11. ~~and O29, whose instrument is broken rather than absent~~ **O29 does not belong on this row at all**: `BytesMut::zeroed` is `alloc_zeroed`, so it is a cost the allocator may decline to pay, and it is [done](#o29-a-request-body-is-zeroed-and-then-immediately-overwritten) either way |
+| ~~**a stage capture → O11, O29**~~ | **Discharged for O11, and never possible for O29.** `f24-routing` is the first capture taken with the repaired instrument and all four reports join completely. The breakdown at 1 KiB, 8 KiB and 512 KiB says `reply_serialize` grows **238×** on the read path and `client_serialize` **503×** on the write path, which are O11's response buffer and its client-side bundle buffer respectively. ~~and `decode` ×199 O29's `memset`~~ — O29's buffer is read *before* the bundle's clock starts, so it falls in `net_in` beside wire time and no stage isolates it ([F25](../features/read-buffers-are-filled-not-zeroed.md)) |
 | **load depth → O35** | Not a dependency so much as the reason O35 left the queue: the depth-1 ladder explains its whole observation, so nothing can rank it until something measures the relay under a bounded queue |
 
 ### Which entries a benchmark can currently adjudicate
@@ -234,12 +241,12 @@ come out as a code block.
 | O5, O12 | **none yet** — an isolated bench over `PersistentSortedTable::get` is still unbuilt ([TODOs](todos.md#benchmark-coverage-the-harness-does-not-have)). `maybe_loaded/*` reaches `MaybeLoaded`, one layer below where both live |
 | O13 | ~~none yet~~ `macro/fanout/{resident,evicted}/n` since [F8](../features/purpose-built-workloads.md) — **the question, not the isolated cost**. See the note below |
 | O20 | ~~none yet — a `routing` bench over `Ring::find_shard` and `split_by_shard` is unbuilt~~ — **built** ([F24](../features/routing-benchmarks.md)), and it does **not** adjudicate this entry. `routing/*` prices the placement decision; O20 is about *residency* — whether a get should read a partition it may not need — and nothing in the micro layer varies what happens to be resident. The bench this row asked for exists and the entry it was asked for is still uncovered, which is worth recording as a case of a benchmark being specified by the code it touches rather than by the question it answers |
-| O11, O29 | the `r0` width sweep against the `r100` one — **captured**, and it says the write path owns the axis below ~64 KiB, which is where O11's three passes live. ~~The per-stage breakdown that would say *which* stage they are in ran at three widths and **joined zero queries at all three**~~ — **it has now run and answered**, in `f24-routing`, the first capture taken after [Resolved #76](resolved/stage-join.md). `client_serialize` ×503 and `reply_serialize` ×238 are O11's two buffers; `decode` ×199 contains O29's `memset`. This was for one release the only row in this table where a capture made things worse than an absent benchmark, because an absent one is honest; it is now the row with the most specific evidence on the page |
+| O11, ~~O29~~, ~~O37~~ | the `r0` width sweep against the `r100` one — **captured**, and it says the write path owns the axis below ~64 KiB, which is where O11's three passes live. ~~The per-stage breakdown that would say *which* stage they are in ran at three widths and **joined zero queries at all three**~~ — **it has now run and answered**, in `f24-routing`, the first capture taken after [Resolved #76](resolved/stage-join.md). `client_serialize` ×503 and `reply_serialize` ×238 are O11's two buffers. ~~`decode` ×199 contains O29's `memset`~~ — **it does not**, and could not: that buffer is filled before the bundle's clock starts. **O29 and O37 have their own instrument now** — `wire_codec/width/{request,response}/body/{zeroed,uninit}`, which runs the old shape and the new one in one build ([F25](../features/read-buffers-are-filled-not-zeroed.md)) — and both entries are done. This was for one release the only row in this table where a capture made things worse than an absent benchmark, because an absent one is honest; the correction above is the second half of that lesson, since a capture that joins can still be read to say something it does not |
 | O21 | `hotpath` `fs::commit` and `stream::prep` only; no micro-benchmark of the write path exists, though [F8](../features/purpose-built-workloads.md) built the standalone binary that would host one |
 | ~~O34~~ | ~~**none yet**~~ ~~built and not yet captured~~ `macro/conf/storage/latency_buffer/r50/w8192/*` and `.../w65536/*` ([F22](../features/row-size-benchmarks.md)). **Captured, and it settled the entry**: 1.22× at 64 KiB rows on disjoint intervals against 1.06× at the reference cell — and it corrected the shape, because crossing the buffer threshold at 8 KiB bought nothing while 8–32 records per buffer bought 6%. The sweep that could not see this now can, and the entry it settled has been **acted on** ([F23](../features/self-sizing-staging-buffer.md)). The same arms re-judged the fix, in `f23-staging-buffer`, and the `w65536` rungs **converged**: 1.225× of spread became 1.010×, which is a sweep whose knob is now a floor under a ceiling having less to say the wider the rows get — the shape of a knob that stopped mattering |
 | O35 | ~~none~~ ~~built, not captured~~ `macro/grid/depth/1/<width>` against the `r50` width sweep ([F22](../features/row-size-benchmarks.md)). **Captured, and it came back negative.** The test was the entry's own: a p99 that collapses at one outstanding query is a queue rather than a cost inside the relay. It collapses — 1.3–2.5× at every width against 37–52× at depth 32 — so the entry lost its evidence and left the queue |
 | O36 | none — `macro/fanout/*` drives the many-partition path this entry is *not* about, and no isolated bench reaches a single-partition get. The table-layer bench O5, O12 and O13 want would cover it |
-| O37 | none — the client's socket read is measured by nothing. `wire_codec/width/response/decode` starts *after* the read this entry is about. A stage capture would place it in `net_in` |
+| ~~O37~~ | ~~none — the client's socket read is measured by nothing. `wire_codec/width/response/decode` starts *after* the read this entry is about.~~ — **built**, as `wire_codec/width/response/body/{zeroed,uninit}` ([F25](../features/read-buffers-are-filled-not-zeroed.md)), and the entry is **done**. A stage capture would place it in `net_in`, which is still true and is why one was never going to settle it: so is the whole of the server's socket read |
 | O38 | `macro/transport/stream/*` against `macro/transport/stream_unordered/*` — the unordered mode never reorders, so the pair is a control with the entry's cost in one half and not the other. **Built and captured**, but at one row width, so the per-byte half of it is invisible |
 | O28, O30, O31 | ~~none — **the client is not instrumented at all**. No `tracing` span, no `hotpath` scope, and no workload that isolates it.~~ **False against a committed artifact.** `shoal-client/src/client.rs` carries eleven instrumentation sites — `#[instrument]` spans on `connect_to`, `send`, `send_stamped` and `ShoalQueryStream::send`, and `hotpath::measure` on those plus `track_response`, `read_frame` and both `next` implementations — and `f22-row-size.hotpath.json` reports five of them: `read_frame` at 200,022 calls, `next` at 200,001, `send` at 2,001, `connect_to` at 35, `track_response` at **2**. What is still missing is the **subtraction**: a macro sample bounds client and server together and nothing separates them, and no workload isolates the connect path (O30). **And the scope O28 asked for does not measure O28**: `track_response` is entered twice in a run of 200,000 queries, so whatever it wraps, it is not the per-query double guard the entry is about |
 
@@ -316,9 +323,12 @@ executes the query, which means the `BytesMut` has to travel with it.
 
 **Sequencing, filed while writing [Direction](../direction/overview.md).** This is not a format
 change and does not need [D2](../direction/framing.md) — but D2 *is* a format change, it rewrites
-both read loops, and it is the point at which the server's `BytesMut::zeroed(len)` gets replaced
-anyway. Taking this in the same pass costs one visit to that code instead of two, and the
-`wire_codec` bench both are blocked on is the same bench.
+both read loops, and ~~it is the point at which the server's `BytesMut::zeroed(len)` gets replaced
+anyway~~ — the zeroing was replaced ahead of it, by
+[F25](../features/read-buffers-are-filled-not-zeroed.md), so what D2 now finds there is a
+`RequestBody` whose invariant it has to keep rather than a buffer to fix. Taking this in the same
+pass still costs one visit to that code instead of two, and the `wire_codec` bench both are blocked
+on is the same bench.
 
 **This cost is proportional to the row, not constant.** It was filed against the reference cell's
 1 KiB rows, where it is small. The [row-size sweep](../performance/row-size.md) is where it stops
@@ -1443,17 +1453,23 @@ below what the macro layer can see at all, and the honest place to adjudicate it
 
 ## The wire
 
-### O29. A request body is zeroed and then immediately overwritten
+### ~~O29. A request body is zeroed and then immediately overwritten~~
+
+**Done**, by [F25](../features/read-buffers-are-filled-not-zeroed.md), together with
+[O37](#o37-the-client-zeroes-a-response-buffer-and-immediately-overwrites-it) — the same defect on
+the other end of the same round trip. `ServerMsg::Client` carries a `RequestBody` whose field is
+private and whose only constructor is the read that fills it, which is the shape change the
+*Difficulty* grade below was about.
 
 | | |
 | --- | --- |
-| **Rank** | **B4** — free bytes on every request, behind a shape change that is not free |
-| **Impact** | Argued — one `memset` of the whole bundle per request, discarded on the next line |
+| **Rank** | ~~**B4** — free bytes on every request, behind a shape change that is not free~~ — **done** |
+| **Impact** | ~~Argued — one `memset` of the whole bundle per request, discarded on the next line~~ **and the shape was wrong.** `BytesMut::zeroed(len)` is `BytesMut::from_vec(vec![0; len])`, and `vec![0u8; n]` is `alloc_zeroed` — **calloc, not an unconditional `memset`**. A size the allocator serves out of its heap really is memset; one it serves with a fresh `mmap` arrives zeroed from the kernel. So this entry's cost was never asymptotic in the row width the way the note at the foot of it claimed, and [O37](#o37-the-client-zeroes-a-response-buffer-and-immediately-overwrites-it) — an unconditional write at every size, over the larger payload — is the half that is |
 | **Difficulty** | M — `ServerMsg::Client` has to stop carrying an owned `BytesMut` |
 | **Depends on** | nothing |
 | **Blocks** | nothing |
 | **Tradeoff** | Contained — a shape change inside the server, no format change |
-| **Benchmark** | ~~none usable yet~~ — **captured**, in `f24-routing`. `wire_codec` measures the codec and not the relay's allocation, but the stage breakdown now locates it: `decode`, the stage that contains this `memset` and the deserialize beside it, grows **×199** over 1 KiB → 512 KiB on the write path, against a `net_out` on the same path that grows ×1.9. It is 0.3% of a wide insert in absolute terms, which is this entry's honest size |
+| **Benchmark** | ~~none usable yet~~ ~~— **captured**, in `f24-routing`. `wire_codec` measures the codec and not the relay's allocation, but the stage breakdown now locates it: `decode`, the stage that contains this `memset` and the deserialize beside it, grows **×199** over 1 KiB → 512 KiB on the write path~~ — **that reading was wrong, and no stage contains this at all.** `base`, the stamp every offset is measured from, is taken in `client_rx_relay` *after* `read_exact` returns, and `decode` is the span from `bundle_dequeued` to `decoded`. The allocation and the read both happen before the bundle's clock starts, so they fall in **`net_in`** — `base.since(client.written)` — mixed in with real wire time. The instrument that does adjudicate it is `wire_codec/width/request/body/{zeroed,uninit}`, built by [F25](../features/read-buffers-are-filled-not-zeroed.md), which runs both shapes in one build |
 
 ```rust
 // allocate a buffer that is exactly the right size
@@ -1478,11 +1494,15 @@ becomes a property of a message type that several call sites construct. Doing th
 or an `unsafe` `set_len` needs the read that fills it to be the only way that message can be built,
 which `server/messages.rs` does not currently guarantee.
 
-**This cost is proportional to the row, not constant.** It was filed against the reference cell's
+~~**This cost is proportional to the row, not constant.** It was filed against the reference cell's
 1 KiB rows, where it is small. The [row-size sweep](../performance/row-size.md) is where it stops
 being small: a bundle of 4 MiB rows is a 4 MiB `memset` per request, for nothing. Its *Impact* grade should be read as **Asymptotic** in the row width —
-a quantity the caller chooses — rather than as the *Argued* constant above. See
-[Row size and what it costs](../tables/row-size.md#the-payload-is-walked-about-six-times-per-round-trip).
+a quantity the caller chooses — rather than as the *Argued* constant above.~~ **Not asymptotic, and
+`alloc_zeroed` is why** — see the *Impact* row above. A bundle of 4 MiB rows is not a 4 MiB
+`memset`; it is a 4 MiB allocation the allocator may or may not have to write, and a loaded server
+recycling that size is the case where it does. See
+[Row size and what it costs](../tables/row-size.md#the-payload-is-walked-about-six-times-per-round-trip)
+and [F25](../features/read-buffers-are-filled-not-zeroed.md).
 
 ### O35. The per-connection response relay writes one response at a time
 
@@ -1845,17 +1865,24 @@ unfiled while four entries were written about the bytes.
 **Found while tracing the response path end to end** for the row-size page's copy accounting, which
 had never been walked in code against the source it was derived from.
 
-### O37. The client zeroes a response buffer and immediately overwrites it
+### ~~O37. The client zeroes a response buffer and immediately overwrites it~~
+
+**Done**, by [F25](../features/read-buffers-are-filled-not-zeroed.md), with
+[O29](#o29-a-request-body-is-zeroed-and-then-immediately-overwritten). Taken as the second of the
+two options under *Difficulty*: `ReadBuf::uninit` over the allocation, and `set_len` only once
+`ReadBuf` reports the whole of it filled. **This was the larger half of the pair** — an
+unconditional write at every size over the larger payload, against a server side that was calloc
+and therefore only sometimes a write at all.
 
 | | |
 | --- | --- |
-| **Rank** | **B4**, beside O29 — the same defect on the other end of the same round trip |
+| **Rank** | ~~**B4**, beside O29 — the same defect on the other end of the same round trip~~ — **done** |
 | **Impact** | **Asymptotic** in the row width — one `memset` of the whole response payload per response, discarded by the `read_exact` on the next line |
 | **Difficulty** | S–M — `read_buf` over `MaybeUninit`, or `set_len` after a checked read |
 | **Depends on** | nothing |
 | **Blocks** | nothing |
 | **Tradeoff** | Contained — but it reaches `unsafe` if taken as `set_len` |
-| **Benchmark** | none yet, and the client is the half nothing measures. `wire_codec/width/response/decode` measures the decode and not the read that precedes it; a stage capture would put it in `net_in` |
+| **Benchmark** | ~~none yet, and the client is the half nothing measures. `wire_codec/width/response/decode` measures the decode and not the read that precedes it; a stage capture would put it in `net_in`~~ — **built**, as `wire_codec/width/response/body/{zeroed,uninit}`, which runs both shapes in one build so a single capture adjudicates it. The stage note was right about `net_in` and is worth keeping for that reason: it is where O29 turned out to live too, and no stage separates either of them from wire time |
 
 ```rust
 // Create an aligned vec to act as a pool of bytes

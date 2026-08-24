@@ -6,6 +6,7 @@
 
 use anyhow::Result;
 
+use crate::registry::Layer;
 use crate::fmt;
 use crate::model::macro_layer::MacroCaptureV2;
 use crate::render::arms::{self, Arm};
@@ -51,7 +52,7 @@ pub fn build(page: &Page) -> Result<String> {
         "Four tables under one mixture, and beside them the workloads that drive one path at a time \
          so that a difference between two of them can be attributed to something.",
     );
-    let Some(capture) = page.current().and_then(|current| current.macro_layer.as_ref()) else {
+    let Some(capture) = page.current_for(Layer::Macro).and_then(|current| current.macro_layer.as_ref()) else {
         out.push_str(&nothing_measured("any table"));
         out.push_str(&footer(Surface::TableTypes));
         return Ok(out);

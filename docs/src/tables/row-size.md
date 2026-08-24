@@ -108,7 +108,7 @@ pair, and therefore the one that explains why the ephemeral arms fall too.
 
 | Where | What it costs | Filed as |
 | --- | --- | --- |
-| `shard.rs:105` — `BytesMut::zeroed(header.body_len())` | a `memset` of the whole request body, overwritten by the `read_exact` on the next line | [O29](../appendix/optimizations.md#o29-a-request-body-is-zeroed-and-then-immediately-overwritten) |
+| ~~`shard.rs:105` — `BytesMut::zeroed(header.body_len())`~~ **gone** ([F25](../features/read-buffers-are-filled-not-zeroed.md)) | ~~a `memset` of the whole request body, overwritten by the `read_exact` on the next line~~ — and it was `alloc_zeroed` rather than a `memset`, so it was a cost the allocator sometimes declined to pay | ~~[O29](../appendix/optimizations.md#o29-a-request-body-is-zeroed-and-then-immediately-overwritten)~~ **done** |
 | `shard.rs:1184` — `Queries::deserialize` | every `String` and `Vec` in the bundle allocated and copied out of a buffer that already holds them in a readable layout | [O1](../appendix/optimizations.md#o1-queries-are-fully-deserialized-on-arrival) |
 | `partitions.rs:585`, `:293` — `P::from_row` | the row copied into the partition, and copied again on the way out of a get | [O2](../appendix/optimizations.md#o2-every-returned-row-is-copied-at-least-twice) |
 | `fs.rs:368` — `RkyvSupport::serialize` | the row serialized back into a fresh `AlignedVec` for the intent log | [O11](../appendix/optimizations.md#o11-a-fresh-alignedvec-per-write-and-per-response) |
@@ -134,7 +134,7 @@ resident partition walks the payload like this:
 | 3 | `rkyv::to_bytes` of the response (`shard.rs:1212`) | serialize + alloc | [O2](../appendix/optimizations.md#o2-every-returned-row-is-copied-at-least-twice), [O11](../appendix/optimizations.md#o11-a-fresh-alignedvec-per-write-and-per-response) |
 | 4 | `write_vectored` of `[preamble][archive]` | kernel copy | **unavoidable** |
 | 5 | `read_exact` on the client | kernel copy | **unavoidable** |
-| 6 | `resize(len, 0)` before that read (`client.rs:1491`) | memset, discarded | **[O37](../appendix/optimizations.md#o37-the-client-zeroes-a-response-buffer-and-immediately-overwrites-it)** — was unfiled |
+| ~~6~~ | ~~`resize(len, 0)` before that read (`client.rs:1491`)~~ **gone** ([F25](../features/read-buffers-are-filled-not-zeroed.md)) | ~~memset, discarded~~ — the larger of the pair, and unconditional at every size | ~~**[O37](../appendix/optimizations.md#o37-the-client-zeroes-a-response-buffer-and-immediately-overwrites-it)** — was unfiled~~ **done** |
 | 7 | validating `rkyv::access` (`client.rs:1794`) — **twice** if the response arrives out of order | walk | **[O38](../appendix/optimizations.md#o38-a-response-that-arrives-out-of-order-is-validated-twice)** — was unfiled |
 
 So the count survives and its composition does not. Seven hops, five of them real touches of the
@@ -158,8 +158,17 @@ A fan-out get adds three more: the cross-shard `ServerMsg::Gathered` move, `Resp
 **What the row-size axis adds to those entries.** Each of them was filed as a small constant cost on
 a hot path, and ranked accordingly. They are not constant. Their cost grows in the row width, which
 is a quantity **the caller controls**, and this axis is where that becomes the whole story. The
-ranking of O1, O2, O11 and O29 against each other does not change; what changes is that all four are
-much larger for a caller with wide rows than their scorecards suggest.
+ranking of O1, O2, O11 ~~and O29~~ against each other does not change; what changes is that ~~all
+four~~ **all three** are much larger for a caller with wide rows than their scorecards suggest.
+
+**One of the four turned out not to belong in that sentence**, and finding out why is the reason
+this paragraph is worth reading twice. O29's `BytesMut::zeroed(len)` is `vec![0; len]`, which is
+`alloc_zeroed` — calloc, not a `memset`. A size the allocator serves from its heap really is
+written; one it serves with a fresh `mmap` arrives zeroed from the kernel. So the cost this page
+attributed to the row width was a cost the allocator sometimes declined to pay, and the entry was
+graded asymptotic on an argument from the source that reading the source one layer further down
+would have corrected. Both it and O37 are now [done](../features/read-buffers-are-filled-not-zeroed.md);
+what settled which of them grew with the width was a benchmark rather than either reading.
 
 **Two of the copies are now measured, and the growth is steeper than the entries implied.** The
 micro layer sweeps the codec at five widths from 64 B to 64 KiB with the bundle size and the
@@ -464,14 +473,26 @@ became the head of Tier A, and has since been **built** as
 than by being reattributed. A4 is the head now, and it needs a benchmark that does not exist. O2 gained a measurement on the half that grows in what the caller
 controls, and `r100` says the read path owns the wide end, so it is the largest established win
 available — still behind a design pass, because it reaches the wire format. O35 lost its evidence
-and left the queue. O11 and O29 did not move, and their unblocker is now known to be broken rather
-than merely unbuilt. See [the priority queue](../appendix/optimizations.md#the-priority-queue).
+and left the queue. ~~O11 and O29 did not move, and their unblocker is now known to be broken rather
+than merely unbuilt.~~ O11 did not move; **O29 has since left the queue by being done**
+([F25](../features/read-buffers-are-filled-not-zeroed.md)), along with O37 beside it, and the
+unblocker they were waiting for turned out to be the wrong instrument rather than a broken one. See
+[the priority queue](../appendix/optimizations.md#the-priority-queue).
 
 **What the sixth closed, late.** O11 and O29 were the last two entries on the optimizations page
 blocked on an instrument rather than on a decision, and the instrument existed and produced empty
-artifacts. Both now have per-stage evidence, and O11's is the strongest on that page: its two
-serialization buffers are the fastest-growing stage on each half of the mixture, ×503 on the write
-and ×238 on the read.
+artifacts. ~~Both now have per-stage evidence~~ **O11 now has per-stage evidence**, and it is the
+strongest on that page: its two serialization buffers are the fastest-growing stage on each half of
+the mixture, ×503 on the write and ×238 on the read.
+
+**O29's did not, and the page said it had for one release.** `decode` ×199 was read as containing
+its `memset`. It cannot: `base`, the stamp every stage offset is measured from, is taken *after* the
+body read returns, so the allocation and the read both fall in `net_in` beside real wire time and
+no stage separates them from it. The sixth benchmark answered its question completely and was then
+read to answer one it never asked — which is a failure mode this page had no instance of before, and
+a different one from the empty artifact that preceded it. Corrected in
+[F25](../features/read-buffers-are-filled-not-zeroed.md), which built the instrument that does
+settle it.
 
 **What none of the six closed** is in
 [What the capture cannot tell you](#what-the-capture-cannot-tell-you) above, and the new item is
@@ -489,6 +510,8 @@ buffer in the middle of it. Two arms at 2 KiB and 4 KiB would bracket it, and ar
 - [Tuning](../operations/tuning.md) — what to set, and what rests on a measurement
 - [F22](../features/row-size-benchmarks.md) — the six benchmarks this page asked for, built
 - [F23](../features/self-sizing-staging-buffer.md) — what the second of those six turned into
+- [F25](../features/read-buffers-are-filled-not-zeroed.md) — two of the walks above removed, and
+  two of this page's claims about them corrected
 - [Optimizations](../appendix/optimizations.md) — O1, O2, O11, O29, O34, O35, and the queue they
   are ordered in
 - [Known Issues](../appendix/known-issues.md) — items 75 and 76, both found in this capture

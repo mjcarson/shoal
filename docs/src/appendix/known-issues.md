@@ -31,8 +31,11 @@ test suite does and does not reach is in [Test Coverage](test-coverage.md).
 Defects that have been fixed move to [Resolved Issues](resolved-issues.md), one page each,
 carrying the reasoning and the invariants the fix depends on. Item numbers are shared between
 the two pages and never reused, so a number appears on exactly one of them — which is why this
-list starts at 15 and skips 25, 26, 31, 34, 39, 44, 45, 48, 51, 56, 57, 61, 67, 68, 74, 76 and 78, and
-why item 77 is both the newest number and the newest entry here, and why 78 is on the resolved page. The exceptions are items 16, 17, 20, 24, 54 and 73, which were only
+list starts at 15 and skips 25, 26, 31, 34, 39, 44, 45, 48, 51, 56, 57, 61, 67, 68, 74, 76, 78 and 79, and
+why item 77 is both the newest number and the newest entry here, and why 78 and 79 are on the
+resolved page. **79 never appeared here at all**: it was found and fixed in the same change
+([Resolved #79](resolved/micro-only-capture-current.md)), which is allowed and is worth noting
+because it makes the numbering look like an entry went missing. The exceptions are items 16, 17, 20, 24, 54 and 73, which were only
 partly fixed: the open remainder is here and the rest is there. Items 9 and 51 were each one such
 exception until their second half was fixed, and are now on the resolved page alone; item 25 was one
 in the other direction — it had one row left open, that row was fixed, and the whole item
@@ -49,7 +52,9 @@ absence is why three of four reports in `f22-row-size` were empty.
 the tree before its fix. [F23](../features/self-sizing-staging-buffer.md) added 7, one of which
 reproduces [O34](optimizations.md) and fails against the tree before its fix — the first entry from
 the optimizations page ever reproduced by a test rather than argued from source and sized by a
-capture.
+capture. [F25](../features/read-buffers-are-filled-not-zeroed.md) and
+[Resolved #79](resolved/micro-only-capture-current.md) added 8, two of which fail against the tree
+before the fix.
 **Unchanged by the `f22-row-size` capture**, which added no tests and moved no count, and which is
 where item [75](#75-a-control-that-was-measured-at-every-width-is-not-drawn-and-the-caption-says-it-is)
 and [item 76](resolved/stage-join.md) came from — both read out of the committed artifact rather
@@ -1315,9 +1320,11 @@ Those two, and six more that drifted the ordinary way, are corrected; the remain
 `client.rs:1063-1066`". That was true of `shoal-core/src/client.rs` when this was written and there
 is no such file; the read is at `shoal-client/src/client.rs:1489-1492`, and it has since acquired a
 third defect worth naming —
-[O37](optimizations.md#o37-the-client-zeroes-a-response-buffer-and-immediately-overwrites-it), the
-`resize(len, 0)` that memsets a buffer the next line overwrites. **An item about stale citations
-went stale**, which is the strongest possible argument for the fix direction it proposes.
+~~[O37](optimizations.md#o37-the-client-zeroes-a-response-buffer-and-immediately-overwrites-it), the
+`resize(len, 0)` that memsets a buffer the next line overwrites~~ — since
+[done](../features/read-buffers-are-filled-not-zeroed.md), so that quoted read is now stale a third
+time and in a third way: the lines it names hold a different call. **An item about stale citations
+went stale**, twice, which is the strongest possible argument for the fix direction it proposes.
 
 The scope is therefore `docs/src/direction/`, `docs/src/api/`, `docs/src/architecture/` and the
 remainder of the appendix — and the pass is worth doing as one sweep with the symbol names added,
@@ -1640,9 +1647,18 @@ caption drift found by grep in `0851a22`.
 
 ### 77. A macro-only capture can never reach the pages it was taken for
 
-`shoal-bench/src/render.rs:211-221`
+`shoal-bench/src/render/page.rs`, `Page::current_for`
 
-The generated pages draw their current numbers from one capture, chosen like this:
+**The selection this item was filed against is gone.**
+[Resolved #79](resolved/micro-only-capture-current.md) found the same conflation from the other
+side — a *micro*-only capture becoming current and emptying the seven macro pages — and resolved the
+current capture **per layer**, so a macro-only capture can now become the macro pages' source.
+**That is half of what this item asks for and not the half it is about.** What is left is the part
+that matters: a page has no way to say *these rows in particular have been re-measured since*, so a
+correction that is committed, comparable and newer is still invisible to the reader looking at the
+figure it corrects.
+
+The selection it was filed against was this, one label shared by every page:
 
 ```rust
 // which capture the current numbers come from: the caller's choice, or the most recent one
@@ -1666,7 +1682,12 @@ sets and prices them precisely so a narrow question does not cost two hours, and
 that way lands in `docs/perf/runs/`, appears on the freshness table, appears on
 [Every workload](../performance/all-workloads.md) — and is not what any other page reports.
 
-**The live instance**, which is how this was found.
+~~**The live instance**, which is how this was found.~~ **Overtaken, and not by a fix.**
+`f24-routing` is a full capture taken after F23, so the configuration page now reports these arms
+at 22,486/s from a capture that describes the current writer, and the figures below no longer
+appear anywhere. The instance is kept because the *mechanism* it describes is untouched: it took a
+two hour capture of every layer to dislodge a stale number that a ninety second one had already
+corrected, which is exactly the cost this item is about.
 [Configuration and what each setting is worth](../performance/configuration.md) reports the
 `latency_buffer` sweep at `4Ki @ 64 KiB` as **18,537/s** and calls `256Ki` the best rung at 1.22×.
 Those come from `f22-row-size`, whose macro layer the same site marks **stale, four commits**,
@@ -1687,7 +1708,10 @@ page is unchanged apart from its provenance line and the staleness badges. Then 
 
 **Fix direction:** the choice conflates two questions — which capture is the *reference* for the
 micro layer's comparisons, and which capture most recently measured *this arm*. The first genuinely
-wants a full capture. The second is per-arm and has an answer here. Drawing each arm from the newest
+wants a full capture. ~~The second is per-arm and has an answer here.~~ The second turned out to be
+**two** questions rather than one: which capture measured this *layer*, which
+[Resolved #79](resolved/micro-only-capture-current.md) answered, and which capture measured this
+*arm*, which is what is still open. Drawing each arm from the newest
 capture that measured it would mix captures within a page, which is exactly what
 [Baseline](../performance/baseline.md) forbids and should stay forbidden — so the cheaper fix is to
 keep one `current` and have a page *say* when a newer capture covers arms it is drawing, the way the

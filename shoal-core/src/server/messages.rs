@@ -1,12 +1,12 @@
 //! The different messages that can be sent in shoal
 
-use bytes::BytesMut;
 use glommio::io::ReadResult;
 use kanal::AsyncSender;
 use rkyv::util::AlignedVec;
 use tracing::Span;
 use uuid::Uuid;
 
+use super::request_body::RequestBody;
 use super::shard::{ShardContact, ShardInfo};
 use super::stage_profile::{StageStamps, Stamp};
 use crate::shared::responses::ResponseError;
@@ -148,7 +148,11 @@ where
         /// This peers id
         peer: Uuid,
         /// The raw data for our request
-        data: BytesMut,
+        ///
+        /// This is a [`RequestBody`] rather than a bare buffer because the bytes in it are
+        /// never written twice: the read that fills it is the only way one can be built, and
+        /// that is what lets the relay hand a reader memory it has not zeroed first.
+        data: RequestBody,
         /// When the last byte of this request came off the socket
         ///
         /// Every stage offset a query in this bundle records is measured from here, since

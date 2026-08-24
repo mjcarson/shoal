@@ -212,10 +212,12 @@ It still proves nothing about identity, and it no longer has to:
 mechanism, and the exchange that follows is what proves identity. A server with no `auth` section
 is exactly as described above.
 
-**`BytesMut::zeroed` still zeroes a buffer that `read_exact` immediately overwrites.** It is now
-*bounded* waste, which is the part item 34 was about, but it is still waste. Removing it needs
-`ServerMsg::Client` to stop carrying a `BytesMut`, which ripples into `server/messages.rs` and
-`handle_client`. Filed as [O29](../appendix/optimizations.md#o29-a-request-body-is-zeroed-and-then-immediately-overwritten).
+~~**`BytesMut::zeroed` still zeroes a buffer that `read_exact` immediately overwrites.**~~ **Gone**,
+by [F25](read-buffers-are-filled-not-zeroed.md). It was *bounded* waste, which is the part item 34
+was about, and it was still waste. The ripple this paragraph predicted is what the fix is: the
+relay's buffer is a `RequestBody` whose only constructor is the read that fills it, so
+`ServerMsg::Client` no longer carries a bare `BytesMut` and no call site can build one without a
+read. Closed [O29](../appendix/optimizations.md#o29-a-request-body-is-zeroed-and-then-immediately-overwritten).
 
 **A client learns only one server's frame bound.** `peer_max_frame_bytes` is a single value shared
 across the pool, so a pool spanning servers configured differently would keep whichever bound was

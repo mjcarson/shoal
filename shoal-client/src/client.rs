@@ -16,10 +16,12 @@ use rkyv::Archive;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{ErrorKind, IoSlice};
 use std::marker::PhantomData;
+use std::mem::MaybeUninit;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, ReadBuf};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpStream, ToSocketAddrs};
 use tokio::task::JoinHandle;
@@ -1399,6 +1401,66 @@ enum Frame {
     Error(Uuid, ErrorCode, String),
 }
 
+/// Read a response payload of a known length into an aligned buffer
+///
+/// The buffer is **not** zeroed first. The old shape allocated it and then wrote zeroes over
+/// every byte of it with `resize(len, 0)`, all of which the read on the next line overwrote -
+/// a second full pass over the largest payload a round trip carries, for nothing.
+///
+/// Removing that means handing the reader memory Rust considers uninitialized, which is sound
+/// here because tokio's [`ReadBuf`] tracks how much of it a reader has actually written. That is
+/// the difference between this and the server's half of the same fix: `futures::io::AsyncRead`
+/// reports nothing about what it wrote, so `shoal-core`'s `RequestBody` has to make the read its
+/// only constructor instead of checking one.
+///
+/// # Arguments
+///
+/// * `reader` - The connection to read this payload from
+/// * `len` - How many bytes this payload is, from its already checked frame header
+///
+/// # Errors
+///
+/// Returns whatever the read failed with. A stream that ends mid payload is an `UnexpectedEof`
+/// rather than a shorter payload, because a partly filled buffer is never handed back.
+async fn read_payload(reader: &mut OwnedReadHalf, len: usize) -> Result<AlignedVec<16>, Errors> {
+    // an empty payload has nothing to read and no allocation to make
+    if len == 0 {
+        return Ok(AlignedVec::<16>::new());
+    }
+    // take exactly the bytes this payload needs, without writing any of them
+    let mut buff = AlignedVec::<16>::with_capacity(len);
+    // view the allocation we just took as the uninitialized memory it really is
+    //
+    // SAFETY: `with_capacity` reserved at least `len` bytes at this pointer, and this vec's
+    // length is still zero, so nothing else can be reading them. `MaybeUninit<u8>` is the type
+    // those bytes actually have, which is what makes handing them to a reader legal at all.
+    let spare =
+        unsafe { std::slice::from_raw_parts_mut(buff.as_mut_ptr().cast::<MaybeUninit<u8>>(), len) };
+    // fill it from the connection, a read at a time
+    //
+    // this is scoped so that the borrow of the allocation ends before the length below moves
+    {
+        let mut read_buf = ReadBuf::uninit(spare);
+        // a socket hands over whatever it has rather than whatever was asked for, so this loops
+        while read_buf.filled().len() < len {
+            // note how much had arrived before this read
+            let before = read_buf.filled().len();
+            // ask the connection for the rest of it
+            std::future::poll_fn(|cx| Pin::new(&mut *reader).poll_read(cx, &mut read_buf)).await?;
+            // a read that delivered nothing is the end of the stream, not a shorter payload
+            if read_buf.filled().len() == before {
+                return Err(Errors::IO(std::io::Error::from(ErrorKind::UnexpectedEof)));
+            }
+        }
+    }
+    // claim what the reader filled as the payload
+    //
+    // SAFETY: the loop above only ends once `ReadBuf` reports `len` filled bytes, and a byte is
+    // filled only once a reader has written it, so every byte of this allocation is initialized.
+    unsafe { buff.set_len(len) };
+    Ok(buff)
+}
+
 struct TcpProxy {
     /// The reader to read messages from the shoal server from
     reader: OwnedReadHalf,
@@ -1486,11 +1548,11 @@ impl TcpProxy {
         // read the rest of this frame according to what it turned out to be
         match frame.header.kind {
             MessageType::Response => {
-                // Create an aligned vec to act as a pool of bytes
-                let mut aligned_buff = AlignedVec::<16>::with_capacity(frame.rest_len);
-                // resize our aligned vec
-                aligned_buff.resize(frame.rest_len, 0);
-                self.reader.read_exact(&mut aligned_buff).await?;
+                // read the payload into an aligned buffer that is never written twice
+                //
+                // this used to `resize(rest_len, 0)` first, which is a full write of zeroes over
+                // a buffer whose every byte the read on the next line overwrote
+                let aligned_buff = read_payload(&mut self.reader, frame.rest_len).await?;
                 Ok(Some(Frame::Response(frame.query_id, aligned_buff)))
             }
             MessageType::Error => {
@@ -2619,6 +2681,105 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A payload that arrives in pieces is still read whole
+    ///
+    /// The read that fills the payload buffer no longer zeroes it first, so every byte of it has
+    /// to come from the socket. A socket hands over whatever it has rather than whatever was
+    /// asked for, and a fill loop that took the first read for the whole payload would leave a
+    /// tail nobody wrote - which is uninitialized memory reaching `rkyv::access`, not a short
+    /// buffer. This writes the payload in pieces with a flush between them so the loop really
+    /// loops.
+    #[tokio::test]
+    async fn a_payload_that_arrives_in_pieces_is_read_whole() {
+        // stand up a socket pair, letting the kernel pick the port
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("failed to bind a listener");
+        let addr = listener.local_addr().expect("listener had no address");
+        // build a payload with no zero byte in it, so an unwritten tail is visible rather than
+        // plausible - a byte the read never wrote reads back as a zero far more often than not
+        let len = 64 * 1024;
+        let query_id = Uuid::new_v4();
+        let payload: Vec<u8> = (0..len).map(|index| ((index % 255) + 1) as u8).collect();
+        let preamble =
+            protocol::response_preamble(&query_id, len, protocol::DEFAULT_MAX_FRAME_BYTES)
+                .expect("failed to build a response preamble");
+        // write it a few kibibytes at a time, flushing between the pieces
+        let written = payload.clone();
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.expect("failed to accept");
+            sock.write_all(&preamble).await.expect("failed to write");
+            for piece in written.chunks(4096) {
+                sock.write_all(piece).await.expect("failed to write");
+                sock.flush().await.expect("failed to flush");
+                tokio::task::yield_now().await;
+            }
+        });
+        // read it back through the same path a real response takes
+        let stream = TcpStream::connect(addr).await.expect("failed to connect");
+        let (reader, _writer) = stream.into_split();
+        let channel_map = Arc::new(HashMap::with_capacity(1));
+        let dead_conns = Arc::new(HashMap::with_capacity(1));
+        let is_shutting_down = Arc::new(AtomicBool::new(false));
+        let mut proxy = TcpProxy::new(reader, 1, &channel_map, &dead_conns, &is_shutting_down);
+        let frame = proxy
+            .read_frame()
+            .await
+            .expect("failed to read a frame")
+            .expect("the connection closed instead of yielding a frame");
+        server.await.expect("the writer task panicked");
+        // every byte of it is the byte that was sent, in the order it was sent
+        let super::Frame::Response(read_id, buff) = frame else {
+            panic!("a response frame read back as something else");
+        };
+        assert_eq!(read_id, query_id);
+        assert_eq!(buff.len(), len, "a payload delivered in pieces changed length");
+        assert_eq!(&buff[..], &payload[..], "a payload delivered in pieces changed content");
+    }
+
+    /// A connection that closes mid payload fails rather than handing back what arrived
+    ///
+    /// The buffer the payload is read into is uninitialized until the reader fills it, so a
+    /// partly filled one must never leave the read. This is the case that would hand a caller
+    /// bytes the allocator left behind if the fill loop treated a closed socket as the end of a
+    /// shorter payload.
+    #[tokio::test]
+    async fn a_connection_that_closes_mid_payload_is_an_error() {
+        // stand up a socket pair, letting the kernel pick the port
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("failed to bind a listener");
+        let addr = listener.local_addr().expect("listener had no address");
+        // promise a payload and then send half of it before hanging up
+        let len = 8192;
+        let preamble =
+            protocol::response_preamble(&Uuid::new_v4(), len, protocol::DEFAULT_MAX_FRAME_BYTES)
+                .expect("failed to build a response preamble");
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.expect("failed to accept");
+            sock.write_all(&preamble).await.expect("failed to write");
+            sock.write_all(&vec![7u8; len / 2]).await.expect("failed to write");
+            sock.flush().await.expect("failed to flush");
+        });
+        // the read has to fail rather than yield a frame carrying half a payload
+        let stream = TcpStream::connect(addr).await.expect("failed to connect");
+        let (reader, _writer) = stream.into_split();
+        let channel_map = Arc::new(HashMap::with_capacity(1));
+        let dead_conns = Arc::new(HashMap::with_capacity(1));
+        let is_shutting_down = Arc::new(AtomicBool::new(false));
+        let mut proxy = TcpProxy::new(reader, 1, &channel_map, &dead_conns, &is_shutting_down);
+        let error = proxy
+            .read_frame()
+            .await
+            .expect_err("a truncated payload read back as a whole frame");
+        server.await.expect("the writer task panicked");
+        // and it says the stream ended, which is what a half written payload is
+        let super::Errors::IO(io) = error else {
+            panic!("a truncated payload failed with the wrong error");
+        };
+        assert_eq!(io.kind(), std::io::ErrorKind::UnexpectedEof);
     }
 
     /// A frame larger than this client will accept is refused instead of allocated for

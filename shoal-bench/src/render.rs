@@ -200,6 +200,17 @@ fn gather(store: &Store, args: &RenderArgs) -> Result<Page> {
         if stages_path.is_file() {
             snapshot.stages = Some(store.read_stages(&stages_path)?);
         }
+        // which of those layers covered the whole registry rather than the part a filter selected
+        //
+        // a page drawn from a filtered capture silently loses every arm the filter excluded, so
+        // this is what keeps a narrow capture from outranking a whole one (item 79)
+        if let Some(meta) = store.read_meta(&label)? {
+            for (layer, record) in &meta.layers {
+                if record.complete {
+                    snapshot.complete.insert(*layer);
+                }
+            }
+        }
         timeline.push(snapshot);
     }
     // oldest first, breaking ties on the label so the order is always defined
@@ -208,17 +219,13 @@ fn gather(store: &Store, args: &RenderArgs) -> Result<Page> {
             .cmp(&right.captured)
             .then_with(|| left.label.cmp(&right.label))
     });
-    // which capture the current numbers come from: the caller's choice, or the most recent one
-    // that produced a micro layer
-    let current = match &args.current {
-        Some(label) => label.clone(),
-        None => timeline
-            .iter()
-            .rev()
-            .find(|snapshot| snapshot.micro.is_some())
-            .map(|snapshot| snapshot.label.clone())
-            .unwrap_or_default(),
-    };
+    // which capture the caller asked every page to draw from, if they asked at all
+    //
+    // the default is **not** resolved here any more. It used to be "the most recent capture with
+    // a micro layer", one label for all eleven pages, which is item 79: a capture that measured
+    // one layer decided what every page drew, and the pages it did not measure rendered as though
+    // nothing ever had. `Page::current_for` resolves it per layer instead
+    let current = args.current.clone().unwrap_or_default();
     // the two baselines, each optional so a tree without them still renders
     let frozen = store
         .resolve_micro(&args.baseline)

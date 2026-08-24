@@ -7,6 +7,7 @@
 
 use anyhow::Result;
 
+use crate::registry::Layer;
 use crate::render::arms::{self, Arm};
 use crate::render::chart::sweep::{self, Unit};
 use crate::render::family::Surface;
@@ -26,7 +27,7 @@ pub fn build(page: &Page) -> Result<String> {
         "One get naming one, two, four, sixteen, sixty four and two hundred and fifty six partition \
          keys, on a resident table, an evicted one and one with no storage under it at all.",
     );
-    let Some(capture) = page.current().and_then(|current| current.macro_layer.as_ref()) else {
+    let Some(capture) = page.current_for(Layer::Macro).and_then(|current| current.macro_layer.as_ref()) else {
         out.push_str(&nothing_measured("a fan-out curve"));
         out.push_str(&footer(Surface::Fanout));
         return Ok(out);

@@ -78,6 +78,9 @@ overwrites every byte of it on the next line — and the original entry says so.
 `handle_client`, and none of that is about the unbounded allocation. It is now *bounded* waste,
 which is the part this item was about, and the rest is filed as
 [O29](../optimizations.md#o29-a-request-body-is-zeroed-and-then-immediately-overwritten).
+**Since done**, by [F25](../../features/read-buffers-are-filled-not-zeroed.md), and the ripple is
+exactly the one predicted here — which is why splitting it off was right: it took a new type and a
+construction invariant, and neither belonged in a fix about a hostile length prefix.
 
 ## Invariants to uphold
 
@@ -103,8 +106,10 @@ Two things this fix deliberately did not do:
   error channel, filed as item 61.~~ **Built** —
   [Resolved #56, 61](response-error-channel.md). The relay writes an `Error` frame naming the query
   and keeps serving the connection.
-- **`BytesMut::zeroed` still zeroes a buffer `read_exact` immediately overwrites**, now bounded.
-  [O29](../optimizations.md#o29-a-request-body-is-zeroed-and-then-immediately-overwritten).
+- ~~**`BytesMut::zeroed` still zeroes a buffer `read_exact` immediately overwrites**, now bounded.
+  [O29](../optimizations.md#o29-a-request-body-is-zeroed-and-then-immediately-overwritten).~~
+  **Closed** by [F25](../../features/read-buffers-are-filled-not-zeroed.md), which also found that
+  `BytesMut::zeroed` is `alloc_zeroed` and therefore not always the write this line called it.
 
 The rest of [item 16](../known-issues.md#16-panics-on-the-hot-path) is also still open — this
 removed five of its sites, all in the two relays, and the table there is still long.

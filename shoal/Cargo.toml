@@ -60,6 +60,9 @@ futures = "0.3"
 # the example builds its config in code and stores it under a temp dir, so it needs no shoal.yml
 tempfile = "3"
 criterion = { workspace = true }
+# the wire bench allocates a request body both of the ways the relay can, so it needs the same
+# buffer type the relay uses rather than a stand-in for it
+bytes = "1.5"
 # the scram_credential example prints the yaml stanza a shoal.yml carries
 serde_yaml = "0.9"
 # the tls tests generate a certificate per run rather than committing one, so nothing expires

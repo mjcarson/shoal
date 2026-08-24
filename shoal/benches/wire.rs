@@ -23,6 +23,7 @@
 //! it builds and runs with no features at all, which is what somebody debugging a framing change
 //! wants.
 
+use bytes::BytesMut;
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use deepsize2::DeepSizeOf;
 use rkyv::util::AlignedVec;
@@ -579,6 +580,102 @@ fn bench_width_response_decode(c: &mut Criterion) {
     group.finish();
 }
 
+/// What zeroing a buffer that is about to be overwritten costs, on the request path
+///
+/// Both ends of a round trip used to allocate a buffer, write zeroes over every byte of it, and
+/// then overwrite every one of those bytes with a `read_exact`
+/// ([O29](../../docs/src/appendix/optimizations.md),
+/// [O37](../../docs/src/appendix/optimizations.md)). This measures the two shapes side by side in
+/// one build, so a single capture says what the second write was worth and the `zeroed` arm keeps
+/// saying it afterwards - it is a control for a shape the server no longer has, the way
+/// `wire_codec/request/decode/header` is a control for a cost that does not grow.
+///
+/// The fill is in both arms and is the read the relay would do, so the arms differ in the zeroing
+/// and in nothing else. The body sizes are the archived widths the rest of this file sweeps, so
+/// this reads against the decode groups beside it.
+///
+/// **`BytesMut::zeroed` is `vec![0; len]`, which is `alloc_zeroed`** - calloc, not an
+/// unconditional `memset`. A size the allocator serves out of the heap really is memset; one it
+/// serves with a fresh `mmap` arrives zeroed from the kernel. Criterion's iteration loop
+/// allocates and frees the same size over and over, which is what a loaded server does and what
+/// drives glibc's mmap threshold up, so this measures the steady state rather than the first
+/// allocation.
+///
+/// # Arguments
+///
+/// * `c` - The criterion harness to register with
+fn bench_width_request_body(c: &mut Criterion) {
+    let mut group = c.benchmark_group("wire_codec/width/request/body");
+    for width in WIDTHS {
+        // a body of the size a bundle of rows this wide really is
+        let bundle = wide_bundle(width);
+        let archived = rkyv::to_bytes::<rkyv::rancor::Error>(&bundle).expect("failed to archive");
+        let len = archived.len();
+        group.throughput(Throughput::Bytes(len as u64));
+        // what the relay did: allocate zeroed, then overwrite every byte of it
+        group.bench_with_input(BenchmarkId::new("zeroed", width), &width, |b, _| {
+            b.iter(|| {
+                let mut data = BytesMut::zeroed(black_box(len));
+                data.copy_from_slice(black_box(&archived[..]));
+                black_box(data)
+            });
+        });
+        // what it does now: allocate, claim the allocation, and let the read be the only write
+        group.bench_with_input(BenchmarkId::new("uninit", width), &width, |b, _| {
+            b.iter(|| {
+                let mut data = BytesMut::with_capacity(black_box(len));
+                // SAFETY: the copy below writes every one of these bytes before anything reads
+                // them, which is the same argument `RequestBody::read_from` makes about its read
+                unsafe { data.set_len(len) };
+                data.copy_from_slice(black_box(&archived[..]));
+                black_box(data)
+            });
+        });
+    }
+    group.finish();
+}
+
+/// The same, on the response path, where the buffer is the client's aligned one
+///
+/// The client's half of this is the larger of the two payloads and has no calloc nuance:
+/// `AlignedVec::resize(len, 0)` is an unconditional write of zeroes at every size, so this pair
+/// is the one that grows with the row width without qualification.
+///
+/// # Arguments
+///
+/// * `c` - The criterion harness to register with
+fn bench_width_response_body(c: &mut Criterion) {
+    let mut group = c.benchmark_group("wire_codec/width/response/body");
+    for width in WIDTHS {
+        // a payload of the size a response carrying rows this wide really is
+        let response = wide_response(width);
+        let archived = rkyv::to_bytes::<rkyv::rancor::Error>(&response).expect("failed to archive");
+        let len = archived.len();
+        group.throughput(Throughput::Bytes(len as u64));
+        // what the client did: allocate, resize it to zeroes, then overwrite every byte of it
+        group.bench_with_input(BenchmarkId::new("zeroed", width), &width, |b, _| {
+            b.iter(|| {
+                let mut buff = AlignedVec::<16>::with_capacity(black_box(len));
+                buff.resize(len, 0);
+                buff.copy_from_slice(black_box(&archived[..]));
+                black_box(buff)
+            });
+        });
+        // what it does now: allocate, and let the read be the only write
+        group.bench_with_input(BenchmarkId::new("uninit", width), &width, |b, _| {
+            b.iter(|| {
+                let mut buff = AlignedVec::<16>::with_capacity(black_box(len));
+                // SAFETY: the copy below writes every one of these bytes before anything reads
+                // them, which is the check `read_payload` makes with `ReadBuf` instead
+                unsafe { buff.set_len(len) };
+                buff.copy_from_slice(black_box(&archived[..]));
+                black_box(buff)
+            });
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     wire_codec,
     bench_header,
@@ -590,6 +687,8 @@ criterion_group!(
     bench_width_request_decode,
     bench_width_response_encode,
     bench_width_response_decode,
+    bench_width_request_body,
+    bench_width_response_body,
 );
 criterion_main!(wire_codec);
 

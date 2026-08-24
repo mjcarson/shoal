@@ -1,6 +1,5 @@
 //! A single shard in Shoal
 
-use bytes::BytesMut;
 use futures::{
     io::{ReadHalf, WriteHalf},
     AsyncReadExt, AsyncWriteExt,
@@ -34,6 +33,7 @@ use tracing::{event, instrument, Level, Span};
 use uuid::Uuid;
 
 use super::messages::{QueryMetadata, ServerMsg};
+use super::request_body::RequestBody;
 use super::database::ShoalDatabase;
 use super::ring::Ring;
 use super::routing::ShardRouting;
@@ -101,13 +101,18 @@ async fn client_rx_relay<S: ShoalDatabase>(
                 break;
             }
         };
-        // allocate a buffer that is exactly the right size
-        let mut data = BytesMut::zeroed(header.body_len());
-        // wait for messages from our client
-        if let Err(error) = tcp_rx.read_exact(&mut data).await {
-            event!(Level::ERROR, msg = "failed to read a frame body", %peer, ?error);
-            break;
-        }
+        // read this frame's body into a buffer that is exactly the right size
+        //
+        // the buffer is not zeroed first, because every byte of it is about to be overwritten.
+        // that is what `RequestBody` is for: the read is its only constructor, so a body that
+        // exists is a body a read filled
+        let data = match RequestBody::read_from(&mut tcp_rx, header.body_len()).await {
+            Ok(data) => data,
+            Err(error) => {
+                event!(Level::ERROR, msg = "failed to read a frame body", %peer, ?error);
+                break;
+            }
+        };
         // start this bundles clock now that all of its bytes are here
         //
         // every stage offset a query in this bundle records is measured from here, since
@@ -1165,7 +1170,7 @@ where
     async fn handle_client<'a>(
         &mut self,
         peer: Uuid,
-        data: BytesMut,
+        data: RequestBody,
         base: Stamp,
     ) -> Result<(), ServerError>
     where

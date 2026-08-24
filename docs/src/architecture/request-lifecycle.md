@@ -96,8 +96,7 @@ per-connection task, before the stream is split, under one deadline.
 let mut preamble = [0u8; protocol::REQUEST_PREAMBLE_LEN];
 tcp_rx.read_exact(&mut preamble).await // EOF ⇒ client died, break
 let header = protocol::decode_request(&preamble, max_frame_bytes)?; // else log and break
-let mut data = BytesMut::zeroed(header.body_len());
-tcp_rx.read_exact(&mut data).await // else log and break
+let data = RequestBody::read_from(&mut tcp_rx, header.body_len()).await // else log and break
 kanal_tx.send(ServerMsg::Client { peer, data, base }).await // else log and break
 ```
 
@@ -385,9 +384,12 @@ whole lifecycle including the asynchronous flush.
 ## Limitations
 
 - The request path deserializes and then clones per shard; it is not zero-copy.
-  **Every copy on this path is O(bytes), and there are about six of them per round trip** — the
-  zeroed request buffer, the bundle deserialization, the row copied into a partition and out of
-  one, the intent log's serialize/checksum/copy, and the response serialization. None of that is
+  **Every copy on this path is O(bytes), and there are about six of them per round trip** — ~~the
+  zeroed request buffer,~~ the bundle deserialization, the row copied into a partition and out of
+  one, the intent log's serialize/checksum/copy, and the response serialization. The request
+  buffer's zeroing came off this list with
+  [F25](../features/read-buffers-are-filled-not-zeroed.md), along with the client's matching one;
+  the kernel copy that fills it is still here and always will be. None of that is
   visible at a 64 byte row and it is most of the cost at 4 MiB; see
   [Row size and what it costs](../tables/row-size.md#the-payload-is-walked-about-six-times-per-round-trip).
   **That list is a read/write mixture**, and three of its items are inside `FileSystem::commit`,

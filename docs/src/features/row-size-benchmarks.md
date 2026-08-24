@@ -227,7 +227,7 @@ target. What it makes newly *adjudicable* is the point:
 | --- | --- |
 | [O1](../appendix/optimizations.md), [O2](../appendix/optimizations.md) | `wire_codec/width/request/decode/{access,deserialize}/*` and `wire_codec/width/response/encode/*`, with a confidence interval |
 | [O34](../appendix/optimizations.md) | `macro/conf/storage/latency_buffer/r50/w8192/*` against `.../r50/*` — the same five rungs either side of the buffer. **It did decide it, the entry has since been built** ([F23](self-sizing-staging-buffer.md)) **and these same arms then re-judged the fix**, in `f23-staging-buffer`, with no identifier moved: +22.0% at 64 KiB rows for the shipped floor and a sweep flattening from 1.225× of spread to 1.010×. The capture both sized O34 and corrected its shape, the correction chose the fix, and the arms measured it afterwards — which is the whole loop this feature was built to close, run once end to end |
-| [O11](../appendix/optimizations.md), [O29](../appendix/optimizations.md) | The `r0` width sweep against the `r100` one, and the per-stage breakdown at three widths |
+| [O11](../appendix/optimizations.md), ~~[O29](../appendix/optimizations.md)~~ | The `r0` width sweep against the `r100` one, and the per-stage breakdown at three widths. **For O29 that was the wrong instrument**, and the capture that ran it was read as settling an entry it cannot reach: the request body is filled before the bundle's clock starts, so it falls in `net_in`. Corrected, and given an instrument that does settle it, in [F25](read-buffers-are-filled-not-zeroed.md) |
 | [O35](../appendix/optimizations.md) | The depth-1 ladder: a p99 that collapses at depth 1 and not at 32 is a queue in front of the relay |
 
 ## Tests
@@ -270,3 +270,5 @@ target. What it makes newly *adjudicable* is the point:
   comment describing a guarantee nothing enforced
 - [F23](self-sizing-staging-buffer.md) — what the `latency_buffer` repeats turned into: O34 built, on the shape this capture corrected rather than the one it was filed with
 - [Optimizations](../appendix/optimizations.md) — O1, O2, O11, O29, O34, O35
+- [F25](read-buffers-are-filled-not-zeroed.md) — where the per-stage breakdown this built was read
+  to say more than it could, and what was built instead

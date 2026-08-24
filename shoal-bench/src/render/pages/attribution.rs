@@ -44,13 +44,9 @@ pub fn build(page: &Page) -> Result<String> {
 fn hotpath(page: &Page) -> Result<String> {
     let mut out = String::new();
     out.push_str("## Which scopes the time is inside\n\n");
-    // the most recent capture that produced a profile, which may not be the current one
-    let Some(snapshot) = page
-        .timeline
-        .iter()
-        .rev()
-        .find(|snapshot| snapshot.hotpath.is_some())
-    else {
+    // the most recent capture that produced a whole profile, which may not be the one the
+    // micro or macro pages draw - each layer resolves its own current capture (item 79)
+    let Some(snapshot) = page.current_for(Layer::Hotpath) else {
         out.push_str(&nothing_measured("a hotpath profile"));
         return Ok(out);
     };
@@ -93,13 +89,8 @@ fn hotpath(page: &Page) -> Result<String> {
 fn stages(page: &Page) -> Result<String> {
     let mut out = String::new();
     out.push_str("## Where one query's latency goes\n\n");
-    // the most recent capture that produced a stage report
-    let Some(snapshot) = page
-        .timeline
-        .iter()
-        .rev()
-        .find(|snapshot| snapshot.stages.is_some())
-    else {
+    // the most recent capture that produced a whole stage report
+    let Some(snapshot) = page.current_for(Layer::Stages) else {
         out.push_str(&nothing_measured("a stage report"));
         return Ok(out);
     };

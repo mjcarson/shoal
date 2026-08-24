@@ -18,6 +18,7 @@ pub mod database;
 pub mod errors;
 pub mod messages;
 pub mod meta;
+pub mod request_body;
 pub mod ring;
 pub mod routing;
 pub mod shard;

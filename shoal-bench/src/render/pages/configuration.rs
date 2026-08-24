@@ -18,6 +18,7 @@
 
 use anyhow::Result;
 
+use crate::registry::Layer;
 use crate::fmt;
 use crate::render::arms::{self, Arm};
 use crate::render::chart::bars;
@@ -56,7 +57,7 @@ pub fn build(page: &Page) -> Result<String> {
          mixture, 1 KiB rows, the persistent unsorted table - with exactly one field of the server \
          configuration moved. What it answers is what that field is worth.",
     );
-    let Some(capture) = page.current().and_then(|current| current.macro_layer.as_ref()) else {
+    let Some(capture) = page.current_for(Layer::Macro).and_then(|current| current.macro_layer.as_ref()) else {
         out.push_str(&nothing_measured("a configuration sweep"));
         out.push_str(&footer(Surface::Configuration));
         return Ok(out);

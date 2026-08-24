@@ -5,6 +5,7 @@
 
 use anyhow::Result;
 
+use crate::registry::Layer;
 use crate::render::arms;
 use crate::render::chart::encryption;
 use crate::render::family::Surface;
@@ -25,7 +26,7 @@ pub fn build(page: &Page) -> Result<String> {
          encryption sweeps that say how the cost of TLS behaves across row width, load depth and \
          client count rather than merely whether it exists.",
     );
-    let Some(capture) = page.current().and_then(|current| current.macro_layer.as_ref()) else {
+    let Some(capture) = page.current_for(Layer::Macro).and_then(|current| current.macro_layer.as_ref()) else {
         out.push_str(&nothing_measured("the transport modes or encryption"));
         out.push_str(&footer(Surface::Transport));
         return Ok(out);
