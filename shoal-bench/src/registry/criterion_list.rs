@@ -40,7 +40,7 @@ pub struct BenchTarget {
 ///
 /// Adding a third bench target is one line here. The order is the order the ids come back in, so
 /// appending keeps every existing id where it was.
-pub const BENCH_TARGETS: [BenchTarget; 2] = [
+pub const BENCH_TARGETS: [BenchTarget; 3] = [
     BenchTarget {
         name: "partitions",
         source: "shoal/benches/partitions.rs",
@@ -48,6 +48,10 @@ pub const BENCH_TARGETS: [BenchTarget; 2] = [
     BenchTarget {
         name: "wire",
         source: "shoal/benches/wire.rs",
+    },
+    BenchTarget {
+        name: "routing",
+        source: "shoal/benches/routing.rs",
     },
 ];
 
@@ -249,6 +253,66 @@ pub fn is_bench_source(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every `[[bench]]` in `shoal/Cargo.toml` has an entry here, and every entry has a file
+    ///
+    /// [`BENCH_TARGETS`] is hand maintained, and a bench target missing from it is not discovered,
+    /// not listed, not captured and not compared — silently, because a shorter list is a valid
+    /// list. `routing` was added to `shoal/Cargo.toml` and to `docs/perf/sources.json` and left
+    /// out of here, so a `list --refresh` reported the same 527 ids as before and gave no reason
+    /// to think anything was missing. That is the same failure as
+    /// [item 78](../../../docs/src/appendix/resolved/sources-manifest-drift.md) on a different
+    /// hand-maintained list, and it wants the same kind of check.
+    #[test]
+    fn every_bench_target_is_declared_and_exists() {
+        // the workspace root is the parent of this crate
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("the crate is a workspace member, so it has a parent")
+            .to_path_buf();
+        // read the manifest that declares the bench targets cargo knows about
+        let manifest = std::fs::read_to_string(root.join("shoal/Cargo.toml"))
+            .expect("the shoal crate has a manifest");
+        // pull the name out of every [[bench]] stanza in it
+        let mut declared = Vec::new();
+        let mut in_bench = false;
+        for line in manifest.lines() {
+            let line = line.trim();
+            // a new table ends whatever stanza we were in
+            if line.starts_with('[') {
+                in_bench = line == "[[bench]]";
+                continue;
+            }
+            // inside a bench stanza, the name is the field we are after
+            if in_bench {
+                if let Some(rest) = line.strip_prefix("name") {
+                    declared.push(rest.trim_start_matches([' ', '=']).trim().trim_matches('"').to_string());
+                }
+            }
+        }
+        // a manifest with no bench targets would make this test vacuous
+        assert!(
+            !declared.is_empty(),
+            "no [[bench]] stanzas were found in shoal/Cargo.toml, so this test proves nothing"
+        );
+        // every target cargo builds has to be one this module knows how to discover
+        for name in &declared {
+            assert!(
+                BENCH_TARGETS.iter().any(|target| target.name == name),
+                "shoal/Cargo.toml declares the bench target {name:?} and BENCH_TARGETS does not, \
+                 so none of its benchmarks is discovered, listed, captured or compared"
+            );
+        }
+        // and every source this module names has to be a file that is really there
+        for target in &BENCH_TARGETS {
+            assert!(
+                root.join(target.source).is_file(),
+                "BENCH_TARGETS names {:?} for the target {:?} and no such file exists",
+                target.source,
+                target.name
+            );
+        }
+    }
 
     /// The list criterion actually prints parses into exactly the ids it named
     ///

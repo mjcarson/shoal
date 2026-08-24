@@ -141,6 +141,12 @@ benchmark host's `shoal.yml` resolves to and is the ring every other number on t
 - **The keys must stay distinct**, or the benchmark measures the opposite of what it is for.
 - **This file must not acquire a required feature.** The layer went unmeasured for four features
   partly because measuring it looked like it needed machinery it does not.
+- **A micro bench is registered in three places, and two of them are silent.** `shoal/Cargo.toml`
+  makes cargo build it; `registry::criterion_list::BENCH_TARGETS` makes `shoal-bench` discover it;
+  `docs/perf/sources.json` makes a capture of it go stale when it changes. Missing either of the
+  last two costs nothing at compile time and everything afterwards — this bench was built, run by
+  hand, and reported by `list --refresh` as not existing, because `BENCH_TARGETS` had two entries
+  and the comment above it said adding a third was one line. Both lists now have a test.
 
 ## Performance
 
@@ -155,6 +161,8 @@ moves.
 | `cargo bench -p shoal --bench routing` | the routing layer has no coverage at all again |
 | `routing/split_by_shard/write` | the get arm's curve has no control, so a change in the binary's shape reads as a change in the dedup scan |
 | `routing/find_shard` | nothing checks that the tablet ring still answers in constant time, which is the entire property it was built for |
+| `registry::criterion_list::tests::every_bench_target_is_declared_and_exists` | a bench target in `shoal/Cargo.toml` that `BENCH_TARGETS` does not name is silently undiscoverable — which is what happened to this one |
+| `fingerprint::tests::every_source_the_manifest_names_exists` | the sources a layer measures can move without the staleness list following, as they did in [Resolved #78](../appendix/resolved/sources-manifest-drift.md) |
 
 ## Related
 
