@@ -120,7 +120,7 @@ flush completing, a shutdown order — is a variant of one enum:
 pub enum ServerMsg<D: ShoalDatabase> {
     Join(ShardInfo),
     NewClient { client: Uuid, client_tx: AsyncSender<(Uuid, Span, AlignedVec)> },
-    Client { peer: Uuid, data: BytesMut },
+    Client { peer: Uuid, data: RequestBody, base: Stamp },
     Query { meta: QueryMetadata, query: <D::ClientType as QuerySupport>::QueryKinds },
     Partition(LoadedPartitionKinds<D>),
     Gathered { meta: QueryMetadata, response: <D::ClientType as QuerySupport>::ResponseKinds },

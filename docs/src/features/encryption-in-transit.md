@@ -53,12 +53,14 @@ kernel**. From that moment rustls is out of the data path: the kernel owns the r
 `read()` returns plaintext into whatever buffer the caller names, and
 
 ```rust
-let mut aligned_buff = AlignedVec::<16>::with_capacity(frame.rest_len);
-aligned_buff.resize(frame.rest_len, 0);
-self.reader.read_exact(&mut aligned_buff).await?;
+let aligned_buff = read_payload(&mut self.reader, frame.rest_len).await?;
 ```
 
-`shoal-core/src/client.rs`, `TcpProxy::read_frame` — is **unchanged**. So are `TcpProxy`,
+`shoal-client/src/client.rs`, `TcpProxy::read_frame` — is **unchanged** by TLS. *(It has since
+changed for an unrelated reason: it used to `resize(frame.rest_len, 0)` before the read, and
+[F25](read-buffers-are-filled-not-zeroed.md) took that out. The claim this paragraph makes is about
+encryption, and it still holds — under kTLS the kernel writes plaintext into whatever buffer the
+caller names, and it does not care whether the caller wrote zeroes there first.)* So are `TcpProxy`,
 `ShoalResponse`, `client_rx_relay` and `client_tx_relay`. The zero-copy property survives because
 nothing on the response path had to learn that TLS exists.
 

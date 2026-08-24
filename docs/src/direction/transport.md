@@ -84,12 +84,14 @@ byte is decrypted in userspace into a buffer the QUIC implementation owns and th
 application, so the client can no longer do this:
 
 ```rust
-let mut aligned_buff = AlignedVec::<16>::with_capacity(len);
-aligned_buff.resize(len, 0);
-self.reader.read_exact(&mut aligned_buff).await?;
+let aligned_buff = read_payload(&mut self.reader, frame.rest_len).await?;
 ```
 
-`shoal-core/src/client.rs:524-527`, `TcpProxy::start`
+`shoal-client/src/client.rs`, `TcpProxy::read_frame`. *(This read used to allocate, `resize(len, 0)`
+and then `read_exact`; the zeroing came off with
+[F25](../features/read-buffers-are-filled-not-zeroed.md) and the argument below is unaffected —
+what matters here is that the payload lands in aligned memory the application owns, whoever wrote
+it.)*
 
 That read, and the pointer into it that `ShoalResponse` holds, is the entire zero-copy property of
 the response path. Under QUIC the payload arrives in stream-reassembly buffers and has to be copied

@@ -356,13 +356,14 @@ payload into a freshly allocated `AlignedVec<16>`:
 ```rust
 let mut preamble = [0u8; protocol::RESPONSE_PREAMBLE_LEN];
 self.reader.read_exact(&mut preamble).await?;
-let frame = protocol::decode_response(&preamble, self.max_frame_bytes)?;
-let mut aligned_buff = AlignedVec::<16>::with_capacity(frame.payload_len);
-aligned_buff.resize(frame.payload_len, 0);
-self.reader.read_exact(&mut aligned_buff).await?;
+let frame = protocol::decode_server_frame(&preamble, self.max_frame_bytes)?;
+let aligned_buff = read_payload(&mut self.reader, frame.rest_len).await?;
 ```
 
-`TcpProxy::read_frame`, `shoal-core/src/client.rs`
+`TcpProxy::read_frame`, `shoal-client/src/client.rs`. The payload read is a helper rather than a
+`read_exact` because the buffer is no longer zeroed before it
+([F25](../features/read-buffers-are-filled-not-zeroed.md)); it fills the allocation through tokio's
+`ReadBuf` and claims the length only once the reader has reported every byte written.
 
 **That two-read structure is the zero-copy read path, and it must not be merged into one.** It puts
 the archive at offset zero of a sixteen-byte-aligned allocation, which is what makes
@@ -373,9 +374,13 @@ looks like an obvious optimization, which is why
 `the_response_payload_lands_on_a_sixteen_byte_boundary` parameterises over seven awkward payload
 lengths rather than one.
 
-The server does not do this. It reads requests into a `BytesMut`, which carries no alignment
-guarantee, and then calls `Queries::access` — which succeeds because rkyv's `access` validates and
-because in practice the allocator returns suitably aligned memory. The request path also fully
+The server does not do this. It reads requests into a `RequestBody` — a `BytesMut` behind a private
+field, so that the read that fills it is the only way one can be built
+([F25](../features/read-buffers-are-filled-not-zeroed.md)) — which carries no alignment guarantee,
+and then calls `Queries::access` on it, which succeeds because rkyv's `access` validates and because
+in practice the allocator returns suitably aligned memory. **That is why the removal of the zeroing
+could not change the allocation path**: `with_capacity` and `zeroed` allocate the same way, and
+anything that did not would end this paragraph's "in practice". The request path also fully
 deserializes anyway, so it gains nothing from alignment today.
 
 ## Validation
