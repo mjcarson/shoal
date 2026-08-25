@@ -712,7 +712,7 @@ The original entry read:
 | **Depends on** | O2; ~~a `wire_codec` bench~~ — built ([F10](../features/framing-and-protocol-evolution.md)), and it does not reach this entry. See the Benchmark row |
 | **Blocks** | [F2](../features/projections.md#limitations) — a projection must carry its partition key only because of this |
 | **Tradeoff** | **Major** — wire format, shared with O2 |
-| **Benchmark** | ~~none — `wire_codec` is unbuilt~~ ~~**Uncovered, not unbuilt.**~~ **Built**, by [F27](../features/grouped-responses.md): `wire_codec/response/gather/{hash,groups}` runs both shapes in one build over 1024 rows swept across 1 → 256 partitions. It says the entry had the axis right and the direction wrong — the win is ×16 at four partitions and ×1.15 at 256, because ranking groups only beats ranking rows while there are many fewer groups than rows |
+| **Benchmark** | ~~none — `wire_codec` is unbuilt~~ ~~**Uncovered, not unbuilt.**~~ **Built**, by [F27](../features/grouped-responses.md): `wire_codec/response/gather/{hash,groups}` runs both shapes in one build over 1024 rows swept across 1 → 256 partitions. It says the entry had the axis right and the direction wrong — the win is ×15.5 at four partitions and ×1.15 at 256, because ranking groups only beats ranking rows while there are many fewer groups than rows. Captured as `f27-grouped-responses` |
 
 `ResponseAction::order_by_partitions` (`shared/responses.rs:109`) sorts the merged rows of a split
 query by where their partition was named. A `Response` carries rows and nothing else, so the only
@@ -2238,9 +2238,9 @@ for group in self.groups.iter().rev() {
 O(n) in the rows and unavoidable — the rows genuinely have to be permuted — but the allocations are
 O(*groups*) and are not.
 
-**This is the whole of what is left at the wide end.** The smoke numbers on
-[F27](../features/grouped-responses.md#performance) put the grouped reorder at 1.00 µs against the
-hashing one's 15.9 µs over four partitions, and at 15.7 µs against 18.1 µs over 256 — same rows,
+**This is the whole of what is left at the wide end.** The captured numbers on
+[F27](../features/grouped-responses.md#performance) put the grouped reorder at 1.03 µs against the
+hashing one's 15.95 µs over four partitions, and at 15.70 µs against 18.01 µs over 256 — same rows,
 same total moves, 256 allocations instead of four.
 
 **Two ways out, and the obvious one is worse than it looks.** Collecting into a `Vec<Option<T>>`

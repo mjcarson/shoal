@@ -212,11 +212,12 @@ what keeps a stage capture comparable across this change, and it is the thing th
 
 ## Performance
 
-**Nothing here has been captured**, and the two numbers below are from a *smoke* run of the new
-micro arms — ten samples over two seconds each, on a tree that was clean but with no governor
-check. They are indicative and are not a capture; nothing on the results pages draws them. They are
-recorded because one of them contradicts the entry it was built for, and that is worth knowing
-before somebody spends two hours on the real thing.
+**Captured as `f27-grouped-responses`** — micro layer only, 218 benchmarks, on a clean tree with
+the `performance` governor. The macro half is a separate step and has not been taken; see the last
+prediction below for why it may say nothing.
+
+One of these numbers contradicts the entry it was built for, which is the more useful half of the
+capture.
 
 **The reorder: the win shrinks as the partition count rises, which is the opposite of what O18
 expected.** `wire_codec/response/gather/{hash,groups}`, 1024 rows spread over a sweeping number of
@@ -224,11 +225,11 @@ partitions:
 
 | Partitions | rows each | `hash` | `groups` | |
 | ---: | ---: | ---: | ---: | ---: |
-| 1 | 1024 | 16.3 µs | 10 ns | early return — a single run has no order to fix |
-| 4 | 256 | 15.9 µs | 1.00 µs | **×16** |
-| 16 | 64 | 16.1 µs | 1.53 µs | ×10 |
-| 64 | 16 | 16.5 µs | 2.66 µs | ×6 |
-| 256 | 4 | 18.1 µs | 15.7 µs | **×1.15** |
+| 1 | 1024 | 15.97 µs | 18.3 ns | early return — a single run has no order to fix |
+| 4 | 256 | 15.95 µs | 1.03 µs | **×15.5** |
+| 16 | 64 | 15.96 µs | 1.65 µs | ×9.7 |
+| 64 | 16 | 16.38 µs | 2.70 µs | ×6.1 |
+| 256 | 4 | 18.01 µs | 15.70 µs | **×1.15** |
 
 O18's entry said what would show it was "a response of many rows drawn from many partitions against
 one drawn from a few", which reads as a prediction that the win grows with the partition count. It
@@ -242,16 +243,20 @@ Filed as [O41](../appendix/optimizations.md#o41-reordering-a-gathered-get-alloca
 get over many single-row partitions — which is what `macro/fanout/n` drives — gains almost nothing
 here. A get over a few partitions holding many rows each gains an order of magnitude.
 
-**Building the reply: ×9 at a thousand rows.** `wire_codec/response/build/{owned,borrowed}`, where
+**Building the reply: ×8.6 at a thousand rows.** `wire_codec/response/build/{owned,borrowed}`, where
 each arm includes the step in front of the serialize, because timing the serialize alone would
 compare the two shapes at the one thing they do identically:
 
 | Rows | `owned` (clone, then serialize) | `borrowed` (point, then serialize) | |
 | ---: | ---: | ---: | ---: |
-| 16 | 585 ns | 217 ns | ×2.7 |
-| 256 | 14.4 µs | 1.76 µs | ×8.2 |
-| 1024 | 57.1 µs | 6.30 µs | **×9.1** |
-| 4096 | 224 µs | 24.4 µs | ×9.2 |
+| 16 | 751 ns | 202 ns | ×3.7 |
+| 256 | 14.49 µs | 1.83 µs | ×7.9 |
+| 1024 | 57.54 µs | 6.73 µs | **×8.6** |
+| 4096 | 230.9 µs | 25.74 µs | ×9.0 |
+
+**The ratio grows with the row count and then stops**, which is what says the win is the clone
+rather than anything about the serialize: the clone is O(rows) and so is the serialize, so past a
+few hundred rows the two scale together and the ratio settles just under ×9.
 
 The predictions written down before the capture, which stand:
 
