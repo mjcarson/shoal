@@ -169,6 +169,8 @@ fn wide_bundle(width: usize) -> Queries<WireDbClient> {
 /// * `width` - How many bytes of payload each row carries
 fn wide_response(width: usize) -> WireDbResponseKinds {
     let found = (0..WIDTH_ROWS).map(|index| wide(index, width)).collect::<Vec<_>>();
+    // one partition, which is what the width axis is about - the group sweep varies that
+    let found = shoal::shared::responses::GetRows::single(0, found);
     WireDbResponseKinds::WideRow(shoal::shared::responses::Response {
         id: Uuid::new_v4(),
         index: 0,
@@ -365,8 +367,9 @@ fn bench_request_decode(c: &mut Criterion) {
 ///
 /// * `rows` - The number of rows this response should carry
 fn response(rows: usize) -> WireDbResponseKinds {
-    // build the rows this response answers with
+    // build the rows this response answers with, all from one partition
     let found = (0..rows).map(row).collect::<Vec<_>>();
+    let found = shoal::shared::responses::GetRows::single(0, found);
     WireDbResponseKinds::TitleByKeyword(shoal::shared::responses::Response {
         id: Uuid::new_v4(),
         index: 0,

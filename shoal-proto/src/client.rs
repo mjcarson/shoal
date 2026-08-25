@@ -6,8 +6,8 @@
 
 use rkyv::Archive;
 use rkyv::option::ArchivedOption;
-use rkyv::vec::ArchivedVec;
 
+use crate::shared::responses::ArchivedGetRows;
 use crate::shared::traits::QuerySupport;
 
 mod errors;
@@ -21,12 +21,17 @@ pub trait FromShoal<S: QuerySupport>: Sized + Archive {
 
     /// Retrieve a type from a [`ShoalStream`]
     ///
+    /// This answers with the whole of what a get found — its rows and the index naming which
+    /// partition each run of them came from. Callers that only want the rows go through
+    /// `ShoalResponse::access`, which is why that signature did not have to move when the index
+    /// was added ([O18](../../docs/src/appendix/optimizations.md)).
+    ///
     /// # Arguments
     ///
     /// * `kind` - The response kind to try to cast
     fn retrieve(
         archived: &<S::ResponseKinds as Archive>::Archived,
-    ) -> Result<&ArchivedOption<ArchivedVec<<Self as Archive>::Archived>>, Errors>;
+    ) -> Result<&ArchivedOption<ArchivedGetRows<Self>>, Errors>;
 }
 
 /// The options for determining if a query suceeded or not

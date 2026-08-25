@@ -42,7 +42,16 @@ mod tests;
 use handshake::RefusalReason;
 
 /// The version of the wire protocol this build speaks
-pub const PROTOCOL_VERSION: u8 = 1;
+///
+/// Went to 2 when a get's answer started carrying the index of the partitions its rows came
+/// from ([F27](../../../docs/src/features/grouped-responses.md)). That is a change to the
+/// payload of one response variant rather than to any header field, so nothing about framing
+/// moved — but a peer built before it reads `ArchivedGetRows` as `ArchivedVec`, which is a
+/// pointer into the wrong place rather than an error, so the two must never speak. The version
+/// byte is refused in [`RawHeader::validate`] before a frame is read, and this constant is also
+/// mixed into every schema fingerprint, so a mismatch is a refused connection naming both sides
+/// twice over.
+pub const PROTOCOL_VERSION: u8 = 2;
 
 /// The size of the frame header in bytes
 pub const HEADER_LEN: usize = 8;

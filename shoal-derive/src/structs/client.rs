@@ -143,7 +143,7 @@ pub fn add(
                         match opt {
                             ::shoal::rkyv::option::ArchivedOption::Some(rows) => {
                                 let headers = <#archived_inner as ::shoal::shared::traits::TableRowFormat>::headers();
-                                let values: Vec<Vec<String>> = rows.iter().map(|row| {
+                                let values: Vec<Vec<String>> = rows.rows.iter().map(|row| {
                                     <#archived_inner as ::shoal::shared::traits::TableRowFormat>::row_values(row)
                                 }).collect();
                                 Some((headers, values))

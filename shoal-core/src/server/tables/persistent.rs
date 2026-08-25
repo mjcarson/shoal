@@ -16,7 +16,7 @@ pub use unsorted::PersistentUnsortedTable;
 use crate::server::messages::QueryMetadata;
 use crate::server::stage_profile::StageStamps;
 use crate::shared::protocol::error::ErrorCode;
-use crate::shared::responses::{Response, ResponseAction, ResponseError};
+use crate::shared::responses::{GetRows, Response, ResponseAction, ResponseError};
 
 /// Replace what a query answered with the failure it was released with, if it was released by one
 ///
@@ -188,14 +188,26 @@ impl<R> PendingGet<R> {
         self.slots.iter().any(Option::is_none)
     }
 
-    /// Flatten our slots into the rows this get answers with
+    /// Fold our slots into the rows this get answers with, and the index naming their partitions
     ///
     /// The slots are in the order the query named its partitions, so this is where that order
     /// becomes the order of the rows. Each partition stopped at the limit on its own, so their
     /// total can still be over it and is trimmed here.
-    pub fn finish(self) -> Vec<R> {
-        // collect every row we found, partition by partition, in the order they were named
-        let mut data: Vec<R> = self.slots.into_iter().flatten().flatten().collect();
+    ///
+    /// **The grouping is kept rather than flattened away.** This used to collect every row into
+    /// one fresh `Vec` and throw away which partition each came from, after which the shard
+    /// collecting a split get had to hash every row's partition key to work it back out
+    /// ([O18](../../../docs/src/appendix/optimizations.md)). The slots already hold exactly that
+    /// index, in exactly the right order.
+    pub fn finish(self) -> GetRows<R> {
+        // pair each slot with the partition it was read from, in the order they were named
+        let slots = self
+            .keys
+            .iter()
+            .copied()
+            .zip(self.slots)
+            .map(|(key, rows)| (key, rows.unwrap_or_default()));
+        let mut data = GetRows::from_slots(slots);
         // drop anything past the limit this get asked for
         if let Some(limit) = self.limit {
             data.truncate(limit);

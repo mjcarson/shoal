@@ -44,7 +44,7 @@ use shoal_proto::shared::auth::{AuthError, Credentials};
 use shoal_proto::shared::protocol::auth::{self as proto_auth, AuthMechanism, AuthStatus};
 use shoal_proto::shared::protocol::error::{self, ErrorCode};
 use shoal_proto::shared::protocol::{self, handshake, MessageType, ProtocolError};
-use shoal_proto::shared::responses::{ArchivedResponseError, ResponseActionNames};
+use shoal_proto::shared::responses::{ArchivedResponseError, ArchivedRowGroup, ResponseActionNames};
 use shoal_proto::shared::tls::{self as shared_tls, TlsClientOptions};
 use shoal_proto::shared::traits::{
     ExistsQuery, QuerySupport, RkyvSupport, ShoalQuerySupport, ShoalResponseSupport,
@@ -1923,14 +1923,35 @@ impl<S: QuerySupport> ShoalResponse<S> {
     }
 
     /// Get an Archived version of this response from the DB
-    pub fn access<T: FromShoal<S>>(
-        &self,
-    ) -> Result<Option<&ArchivedVec<<T as Archive>::Archived>>, Errors> {
+    ///
+    /// A get's answer carries an index naming which partition each run of its rows came from,
+    /// and this hands back the rows alone, which is what a caller almost always wants. Reach for
+    /// [`Self::groups`] on the rare occasion the index itself is the question.
+    pub fn access<'a, T: FromShoal<S> + 'a>(
+        &'a self,
+    ) -> Result<Option<&'a ArchivedVec<<T as Archive>::Archived>>, Errors> {
         // get a reference to our archived data
         let archived = unsafe { &*self.archived };
         // retrieve our rows type
         match T::retrieve(archived)? {
-            ArchivedOption::Some(accessed) => Ok(Some(accessed)),
+            ArchivedOption::Some(accessed) => Ok(Some(&accessed.rows)),
+            ArchivedOption::None => Ok(None),
+        }
+    }
+
+    /// Get which partitions the rows of this response came from, in the order they were named
+    ///
+    /// Each entry covers a run of the rows [`Self::access`] hands back: the first group covers
+    /// the first `len` of them, the second the `len` after those, and so on. A response whose
+    /// get found nothing has no groups, and neither does one that answered anything but a get.
+    pub fn groups<'a, T: FromShoal<S> + 'a>(
+        &'a self,
+    ) -> Result<Option<&'a ArchivedVec<ArchivedRowGroup>>, Errors> {
+        // get a reference to our archived data
+        let archived = unsafe { &*self.archived };
+        // retrieve the index beside the rows it describes
+        match T::retrieve(archived)? {
+            ArchivedOption::Some(accessed) => Ok(Some(&accessed.groups)),
             ArchivedOption::None => Ok(None),
         }
     }

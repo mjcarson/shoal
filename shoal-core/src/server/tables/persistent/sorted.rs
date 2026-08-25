@@ -712,7 +712,8 @@ where
             // we have blocked partitions so return None
             return None;
         }
-        // flatten our slots back into the order this get named its partitions
+        // fold our slots into the rows this get answers with, keeping which partition each
+        // run came from so the gather never has to ask a row where it belongs
         let data = pending.finish();
         // add this data to our response
         let action = if data.is_empty() {
