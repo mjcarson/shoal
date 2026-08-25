@@ -1,0 +1,239 @@
+//! A row that is answered with where it already is, rather than copied to be answered with
+//!
+//! A get finds its rows in a partition the shard already holds, and then had to clone every one
+//! of them into an owned `Vec` purely so that the response type had something to own — after
+//! which they were serialized straight back into bytes and the clones dropped. That is
+//! [O2](../../../docs/src/appendix/optimizations.md), and the whole of what stands between the
+//! rows and the wire is the response needing to own them.
+//!
+//! [`RowRef`] removes that requirement without changing a single byte of the wire format, and the
+//! reason it can is worth stating plainly, because it is the property everything else here rests
+//! on: **its archived type is not a copy of the row's archived type, it *is* the row's archived
+//! type.** `<RowRef<'_, T> as Archive>::Archived` resolves to `<T as Archive>::Archived`, so a
+//! `Vec<RowRef<'_, T>>` archives to the identical `ArchivedVec<Archived<T>>` a `Vec<T>` does, in
+//! an identical position, through the identical resolver. Byte identity is a consequence of the
+//! type definitions rather than a property somebody has to keep true.
+//!
+//! The alternative was `#[rkyv(with = Map<Inline>)]` on a mirror struct. That produces a
+//! *structurally similar but distinct* archived type, which is a much weaker guarantee — one that
+//! could only ever be asserted empirically, and that a field reordered on one of the two shapes
+//! would break silently.
+use rkyv::{rancor::Fallible, Archive, Place, Serialize};
+
+/// A row that is still where the table put it, archived as though it were owned
+///
+/// Serializing one of these writes exactly what serializing the row it points at would have
+/// written. It exists so that a response can be built out of rows a partition still holds
+/// instead of out of copies of them.
+///
+/// There is deliberately no `Deserialize`. A `RowRef` cannot be read back into, because there is
+/// nothing for the borrow to point at on the far side — the wire carries the row, and the client
+/// reads it as the row's own archived type, which is what it always was.
+#[derive(Debug)]
+pub struct RowRef<'a, T>(pub &'a T);
+
+impl<'a, T> RowRef<'a, T> {
+    /// Point at a row without copying it
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to answer with, wherever it currently lives
+    #[must_use]
+    pub fn new(row: &'a T) -> Self {
+        RowRef(row)
+    }
+}
+
+impl<T> Clone for RowRef<'_, T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T> Copy for RowRef<'_, T> {}
+
+impl<T: Archive> Archive for RowRef<'_, T> {
+    /// The row's own archived type, not a second type shaped like it
+    ///
+    /// This one line is the whole guarantee. Everything downstream — that a borrowed response
+    /// is byte identical to an owned one, that `FromShoal::retrieve` reads back what the server
+    /// wrote, that no wire version has to move for this — follows from the two sides naming the
+    /// same type rather than two types that happen to agree.
+    type Archived = <T as Archive>::Archived;
+
+    /// Likewise the row's own resolver, so nothing has to be translated between the two
+    type Resolver = <T as Archive>::Resolver;
+
+    /// Write the archived row, exactly as the row itself would have written it
+    ///
+    /// # Arguments
+    ///
+    /// * `resolver` - What serializing the row produced
+    /// * `out` - Where the archived row belongs
+    fn resolve(&self, resolver: Self::Resolver, out: Place<Self::Archived>) {
+        // the row resolves itself - this type adds nothing to the bytes and must not
+        self.0.resolve(resolver, out);
+    }
+}
+
+impl<T, S> Serialize<S> for RowRef<'_, T>
+where
+    T: Archive + Serialize<S>,
+    S: Fallible + ?Sized,
+{
+    /// Serialize the row this points at, writing whatever the row would have written
+    ///
+    /// # Arguments
+    ///
+    /// * `serializer` - The serializer to write this row's out of line data into
+    fn serialize(&self, serializer: &mut S) -> Result<Self::Resolver, S::Error> {
+        // forward to the row, so its out of line data lands where it always did
+        self.0.serialize(serializer)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RowRef;
+    use rkyv::{rancor::Error, Archive, Deserialize, Serialize};
+
+    /// A row whose fields all live out of line, so serializing it writes in two places
+    #[derive(Debug, Archive, Serialize, Deserialize, PartialEq, Eq)]
+    struct Strings {
+        /// A field whose bytes are written before the struct that names them
+        title: String,
+        /// A second one, so their relative order is observable
+        overview: String,
+    }
+
+    /// A row carrying a collection, which archives as a relative pointer and a length
+    #[derive(Debug, Archive, Serialize, Deserialize, PartialEq, Eq)]
+    struct Collections {
+        /// A key, so the struct is not made only of pointers
+        id: u64,
+        /// A field that is itself a run of out of line data
+        keywords: Vec<String>,
+    }
+
+    /// A row of nothing but scalars, which is the shape the two serializers disagree on
+    ///
+    /// rkyv enables a `memcpy` for a type it can prove has no padding, and takes that branch in
+    /// `serialize_from_slice` but never in `serialize_from_iter`. So this row is the one that
+    /// exercises *both* code paths against each other rather than the same path twice, and it is
+    /// the only reason this test needs three types instead of one.
+    #[derive(Debug, Archive, Serialize, Deserialize, PartialEq, Eq)]
+    struct Scalars {
+        /// A key
+        id: u64,
+        /// A second scalar of the same width, so the struct has no padding to preserve
+        runtime: u64,
+    }
+
+    #[test]
+    /// Serializing borrowed rows writes the same bytes as serializing owned ones
+    ///
+    /// This is the property the whole optimization rests on: `RowRef`'s archived type is the
+    /// row's archived type, so a response built out of borrows is not merely compatible with one
+    /// built out of owned rows, it is identical. If this ever fails, the wire format has silently
+    /// forked in two and the client is reading one of them with the other's layout.
+    fn a_borrowed_row_is_byte_identical_to_an_owned_one() {
+        // the three shapes, each of which reaches a different part of rkyv's writer
+        let strings = vec![
+            Strings {
+                title: "Arrival".to_owned(),
+                overview: "Linguists meet a heptapod".to_owned(),
+            },
+            Strings {
+                title: "Primer".to_owned(),
+                overview: "Two engineers build a box".to_owned(),
+            },
+        ];
+        let collections = vec![
+            Collections {
+                id: 7,
+                keywords: vec!["first contact".to_owned(), "linguistics".to_owned()],
+            },
+            Collections {
+                id: 9,
+                keywords: Vec::new(),
+            },
+        ];
+        let scalars = vec![
+            Scalars { id: 7, runtime: 116 },
+            Scalars { id: 9, runtime: 77 },
+        ];
+        // check each shape by serializing the rows and then borrows of the same rows
+        assert_eq!(
+            rkyv::to_bytes::<Error>(&strings).unwrap().as_slice(),
+            rkyv::to_bytes::<Error>(&borrow(&strings)).unwrap().as_slice(),
+            "a row of out of line fields archived differently when it was borrowed"
+        );
+        assert_eq!(
+            rkyv::to_bytes::<Error>(&collections).unwrap().as_slice(),
+            rkyv::to_bytes::<Error>(&borrow(&collections))
+                .unwrap()
+                .as_slice(),
+            "a row carrying a collection archived differently when it was borrowed"
+        );
+        assert_eq!(
+            rkyv::to_bytes::<Error>(&scalars).unwrap().as_slice(),
+            rkyv::to_bytes::<Error>(&borrow(&scalars)).unwrap().as_slice(),
+            "a row rkyv can memcpy archived differently when it was borrowed"
+        );
+    }
+
+    #[test]
+    /// The scalar row really does take two different writers, which is what makes the test above
+    /// a comparison rather than a tautology
+    ///
+    /// `a_borrowed_row_is_byte_identical_to_an_owned_one` is only worth anything if the two sides
+    /// reach rkyv's writer by different routes. A `Vec<T>` serializes through
+    /// `serialize_from_slice`, which `memcpy`s a type it has proved has no padding; a
+    /// `Vec<RowRef<'_, T>>` cannot take that branch, because `RowRef` leaves the optimization at
+    /// its default. If rkyv ever stopped enabling it for `Scalars`, both sides would quietly walk
+    /// the same field-by-field path and the comparison would pass without proving anything.
+    fn the_two_serializers_the_identity_test_compares_are_different_ones() {
+        // the owned row is copyable in one shot, which is the branch we want on one side
+        assert!(
+            <Scalars as Archive>::COPY_OPTIMIZATION.is_enabled(),
+            "a row of two u64s stopped being memcpy-able, so the identity test now compares one \
+             code path against itself"
+        );
+        // and the borrow of it is not, which is the branch we want on the other
+        assert!(
+            !<RowRef<'_, Scalars> as Archive>::COPY_OPTIMIZATION.is_enabled(),
+            "a borrowed row became memcpy-able, which would copy the reference rather than the row"
+        );
+    }
+
+    #[test]
+    /// A borrowed row is read back as the row it borrowed, by the row's own archived type
+    ///
+    /// Byte identity is only half of what the client needs. The other half is that the bytes are
+    /// reachable through `Archived<T>` rather than through some `ArchivedRowRef`, which is what
+    /// lets `FromShoal::retrieve` keep its return type across this change.
+    fn a_borrowed_row_reads_back_as_the_row_itself() {
+        let rows = vec![
+            Strings {
+                title: "Solaris".to_owned(),
+                overview: "A station above an ocean".to_owned(),
+            },
+        ];
+        // serialize the borrows, and read them back as though they had been owned all along
+        let bytes = rkyv::to_bytes::<Error>(&borrow(&rows)).unwrap();
+        let archived = rkyv::access::<rkyv::vec::ArchivedVec<ArchivedStrings>, Error>(&bytes)
+            .expect("borrowed rows are readable as the rows they borrowed");
+        assert_eq!(archived.len(), 1);
+        assert_eq!(archived[0].title.as_str(), "Solaris");
+        assert_eq!(archived[0].overview.as_str(), "A station above an ocean");
+    }
+
+    /// Point at every row of a slice without copying any of them
+    ///
+    /// # Arguments
+    ///
+    /// * `rows` - The rows to borrow
+    fn borrow<T>(rows: &[T]) -> Vec<RowRef<'_, T>> {
+        rows.iter().map(RowRef::new).collect()
+    }
+}
