@@ -32,4 +32,6 @@ pub mod bench_exports {
         MaybeLoaded, MaybeRow, PartitionSupport, SeekBytes, SortedPartition, UnsortedPartition,
         ValidatedArchive,
     };
+    // what a scan fills, since F27 - a scan benchmark has to build one to call `get`
+    pub use super::persistent::RowSink;
 }

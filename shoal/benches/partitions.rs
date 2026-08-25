@@ -21,7 +21,7 @@ use shoal::shared::traits::RkyvSupport;
 use shoal::traits::ShoalProjection;
 use shoal::{FileSystem, PersistentSortedTable, ShoalSortedTable};
 use shoal::server::tables::bench_exports::{
-    MaybeLoaded, SeekBytes, SortedPartition, ValidatedArchive,
+    MaybeLoaded, RowSink, SeekBytes, SortedPartition, ValidatedArchive,
 };
 
 /// The partition sizes every scan benchmark is run at
@@ -186,7 +186,7 @@ fn bench_get_key(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, _| {
             b.iter(|| {
                 // collect into a fresh vec so we are not measuring a growing allocation
-                let mut found: Vec<TitleByKeyword> = Vec::with_capacity(1);
+                let mut found: RowSink<'_, TitleByKeyword> = RowSink::default();
                 partition.get(black_box(&get), &mut found);
                 black_box(found)
             });
@@ -209,7 +209,7 @@ fn bench_get_all(c: &mut Criterion) {
         group.throughput(Throughput::Elements(size as u64));
         group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &size| {
             b.iter(|| {
-                let mut found: Vec<TitleByKeyword> = Vec::with_capacity(size);
+                let mut found: RowSink<'_, TitleByKeyword> = RowSink::default();
                 partition.get(black_box(&get), &mut found);
                 black_box(found)
             });
@@ -241,7 +241,7 @@ fn bench_get_range(c: &mut Criterion) {
         group.throughput(Throughput::Elements(64));
         group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, _| {
             b.iter(|| {
-                let mut found: Vec<TitleByKeyword> = Vec::with_capacity(64);
+                let mut found: RowSink<'_, TitleByKeyword> = RowSink::default();
                 partition.get(black_box(&get), &mut found);
                 black_box(found)
             });
@@ -344,7 +344,7 @@ fn bench_maybe_loaded(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("get_key", size), &size, |b, _| {
             b.iter(|| {
                 let mut seek = None;
-                let mut found: Vec<TitleByKeyword> = Vec::with_capacity(1);
+                let mut found: RowSink<'_, TitleByKeyword> = RowSink::default();
                 archived.get(black_box(&keyed), &mut seek, &mut found);
                 black_box(found)
             });
@@ -356,7 +356,7 @@ fn bench_maybe_loaded(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("loaded_get_key", size), &size, |b, _| {
             b.iter(|| {
                 let mut seek = None;
-                let mut found: Vec<TitleByKeyword> = Vec::with_capacity(1);
+                let mut found: RowSink<'_, TitleByKeyword> = RowSink::default();
                 loaded.get(black_box(&keyed), &mut seek, &mut found);
                 black_box(found)
             });
@@ -378,7 +378,7 @@ fn bench_maybe_loaded(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("get_all", size), &size, |b, &size| {
             b.iter(|| {
                 let mut seek = None;
-                let mut found: Vec<TitleByKeyword> = Vec::with_capacity(size);
+                let mut found: RowSink<'_, TitleByKeyword> = RowSink::default();
                 archived.get(black_box(&all), &mut seek, &mut found);
                 black_box(found)
             });
@@ -407,7 +407,7 @@ fn bench_maybe_loaded(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("get_range_64", size), &size, |b, _| {
             b.iter(|| {
                 let mut seek = None;
-                let mut found: Vec<TitleByKeyword> = Vec::with_capacity(64);
+                let mut found: RowSink<'_, TitleByKeyword> = RowSink::default();
                 archived.get(black_box(&ranged), &mut seek, &mut found);
                 black_box(found)
             });
