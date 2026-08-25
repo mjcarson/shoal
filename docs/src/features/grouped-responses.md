@@ -154,15 +154,18 @@ that, and is not worth writing today.
 
 ## Limitations
 
-**The sorted table does not reach the borrowing path at all, and this is the finding that matters
-most.** `SortedPartition::check_disk` starts `true` and is only cleared by a partition arriving
-from a read. When `block_on_load` asks storage and is told there is nothing on disk, it returns
-without recording that answer — so a sorted partition that has only ever been written to is judged
-possibly-non-resident for ever, and refused the borrowing path correctly but permanently. Filed as
-[item 80](../appendix/known-issues.md#80-a-sorted-partition-that-was-never-on-disk-asks-storage-about-it-on-every-get).
-**The unsorted table does take it**, ten times over its integration suite. This was found by
-putting a probe on the path and watching it never fire, not by reasoning — both paths answer
-identically, so nothing failed and no test would have caught it.
+~~**The sorted table does not reach the borrowing path at all, and this is the finding that matters
+most.**~~ **Fixed** — [Resolved #80](../appendix/resolved/never-flushed-partitions.md). It was
+true when this page was written and is worth keeping, because it is what a limitation looks like
+when the feature is correct and the path is unreachable anyway.
+`SortedPartition::check_disk` started `true` and was only cleared by a partition arriving
+from a read. When `block_on_load` asked storage and was told there was nothing on disk, it returned
+without recording that answer — so a sorted partition that had only ever been written to was judged
+possibly-non-resident for ever, and refused the borrowing path correctly but permanently. It now
+records the answer, and a sorted partition asks once rather than once per query.
+**The unsorted table always took the path**, ten times over its integration suite. The
+defect was found by putting a probe on the path and watching it never fire, not by reasoning —
+both paths answer identically, so nothing failed and no test would have caught it.
 
 **A row read out of an archive is still materialized.** [O40](../appendix/optimizations.md), above.
 
@@ -329,7 +332,10 @@ The predictions written down before the capture, which stand:
 - **The macro layer may not move at all**, and this is the claim most likely to fail. The grid's
   read arms are sorted-table arms, and the sorted table does not reach the borrowing path — see
   the first limitation. Until item 80 is fixed, the capture that would show this feature working is
-  a capture of the unsorted table.
+  a capture of the unsorted table. **Item 80 is now fixed**
+  ([Resolved #80](../appendix/resolved/never-flushed-partitions.md)), so the prediction is live
+  rather than moot: the grid's read arms are eligible for the borrowing path for the first time,
+  and no capture has been taken since.
 
 Nothing under `shoal-bench/src/workloads/` changed, `shoal.yml` is untouched, no workload
 identifier moved, and `STAGE_NAMES` is unchanged — so every existing capture still joins for
@@ -379,8 +385,8 @@ suites — pass **unchanged**, which is what says the reorder still does what it
   — closed
 - [O40](../appendix/optimizations.md#o40-a-row-read-out-of-an-archive-is-materialized-before-it-is-re-serialized)
   — the archived half, and why it is not effort but rkyv
-- [Item 80](../appendix/known-issues.md#80-a-sorted-partition-that-was-never-on-disk-asks-storage-about-it-on-every-get)
-  — why the sorted table does not reach any of this yet
+- [Resolved #80](../appendix/resolved/never-flushed-partitions.md) — why the sorted table did not
+  reach any of this, and what it took to establish that clearing one flag was safe
 - [Resolved #20](../appendix/resolved/orphaned-sources.md) — `response.rs`, kept for years as this
   entry's prior art, opened at last and found to be a stub
 - [F26](archive-routed-requests.md) — the request half, and the pattern this follows

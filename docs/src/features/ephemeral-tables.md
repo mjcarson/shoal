@@ -151,7 +151,12 @@ means the memory limit does not bound an ephemeral table — see *Limitations*.
   thing separating an ephemeral table from what a bare in-memory map would cost.
 - **`MaybeLoaded`, `PendingGets` and the `check_disk` probe are still paid.** A get on a partition
   this table has never seen still asks the engine whether it might be on disk; `NoStorage` answers
-  `false` without doing anything, but the call happens.
+  `false` without doing anything, but the call happens. It happened on **every** get of every
+  partition until [Resolved #80](../appendix/resolved/never-flushed-partitions.md); a resident
+  partition is now asked once, which also means an ephemeral sorted table can be answered in
+  place ([F27](grouped-responses.md)) — it never could before. A partition this table has never
+  held is still asked on every get, and removing the last call is the fast path still filed in
+  [TODOs](../appendix/todos.md).
 - **Memory is not bounded.** `resources.memory` drives eviction, and ephemeral partitions are
   never evictable, so an ephemeral table grows until the process does. Bounding it is the caller's
   problem.

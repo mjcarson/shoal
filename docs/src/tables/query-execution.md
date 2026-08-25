@@ -222,10 +222,15 @@ if self.block_on_load(*partition_key, &meta, blocked_get).await {
 should answer now — in two cases, and they are different in kind:
 
 - the archive map has no entry for the key, so the partition does not exist and there is no IO
-  to do ([Storage Overview](../storage/overview.md#the-archive-map));
+  to do ([Storage Overview](../storage/overview.md#the-archive-map)). **The sorted table records
+  that answer**, clearing `check_disk` on the partition if it is holding one, so the question is
+  asked once per partition rather than once per query
+  ([Resolved #80](../appendix/resolved/never-flushed-partitions.md));
 - this query is a replay released by a read that *failed*, and is carrying `meta.skip_disk` for
   this partition. Asking for that read again would park it on the same failure without end
-  ([Resolved #16, 51](../appendix/resolved/partition-load-failure.md)).
+  ([Resolved #16, 51](../appendix/resolved/partition-load-failure.md)). **This case records
+  nothing** — it returns before storage is asked at all, because a partition whose archive could
+  not be read is still on disk.
 
 `to_blocked` narrows the query to the single partition being waited on
 (`shared/queries/sorted.rs:91-98`), so when it resumes it does not redo work already

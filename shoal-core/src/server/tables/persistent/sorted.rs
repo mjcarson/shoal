@@ -499,6 +499,10 @@ where
             .unwrap();
         // if this partition has no data on disk then there is nothing to wait for
         if !will_load {
+            // and nothing will be until this shard writes it, at which point what it writes
+            // is what this partition is already holding - so remember this answer instead of
+            // asking again on every query that touches this partition
+            self.mark_absent_from_disk(partition_key);
             return false;
         }
         // park this query until its partition has been loaded from disk
@@ -507,6 +511,37 @@ where
             .or_default()
             .push((meta.clone(), query));
         true
+    }
+
+    /// Record that storage has told us a partition has nothing on disk
+    ///
+    /// A sorted partition starts out assuming it may have rows in an archive nobody has read
+    /// yet, and only a completed read ever cleared that. A read that found no archive at all
+    /// cleared nothing, so the partition asked again on every get - and, because a partition
+    /// that might have rows on disk can never be answered in place, never took the borrowing
+    /// path [F27](../../../docs/src/features/grouped-responses.md) built for it
+    /// ([Resolved #80](../../../docs/src/appendix/resolved/never-flushed-partitions.md)).
+    ///
+    /// This is only sound because **every row that reaches an archive passed through this copy
+    /// first**: an archive is built by compacting this shard's own intent log over this
+    /// partition's previous archive, and every intent in that log was applied to the partition
+    /// in memory when it was accepted. A partition dropped from memory takes this answer with
+    /// it, since eviction removes the whole entry and the next write rebuilds it from
+    /// [`SortedPartition::new`], which assumes disk again.
+    ///
+    /// # Arguments
+    ///
+    /// * `partition_key` - The partition storage had nothing for
+    fn mark_absent_from_disk(&mut self, partition_key: u64) {
+        // a partition we are not holding has nowhere to record this
+        //
+        // an accessible partition is already the copy from disk and never asks in the first
+        // place, so a loaded one is the only kind that can be told this
+        if let Some(MaybeLoaded::Loaded { partition, .. }) = self.partitions.get_mut(&partition_key)
+        {
+            // nothing is on disk, so nothing is left for a read to find
+            partition.check_disk = false;
+        }
     }
 
     /// Cast and handle a serialized query
@@ -618,6 +653,10 @@ where
                 let accessable = read.archived();
                 // deserialize our accessible partition
                 let mut partition = SortedPartition::<R>::deserialize(accessable).unwrap();
+                // since this partition is accessible it must have been the full partition from
+                // disk, so we don't need to check disk again - the flag an archive carries is
+                // whatever the compactor happened to write and says nothing about this copy
+                partition.check_disk = false;
                 // insert this new row into our loaded partition
                 let (size_diff, action) = partition.insert(row);
                 // replace our loaded partition
@@ -1210,6 +1249,9 @@ where
                         let accessible = read.archived();
                         // deserialize our partition so we can update it
                         let mut partition = SortedPartition::<R>::deserialize(accessible).unwrap();
+                        // since this partition is accessible it must have been the full partition
+                        // from disk so we don't need to check disk again
+                        partition.check_disk = false;
                         // try to update this partitions data
                         if let Some(diff) = partition.update(&update) {
                             // we were able to update this partition so get its key

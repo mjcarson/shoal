@@ -3,8 +3,19 @@
 What the test suite reaches, what it does not, and the one place where it is unsound.
 
 **Established by running it.** `cargo check --workspace --all-targets` passes with warnings and
-`cargo test --workspace` passes: **1,073 tests**, two ignored, plus **13** behind
+`cargo test --workspace` passes: **1,074 tests**, two ignored, plus **13** behind
 `--features stage-profile` that a default run does not reach.
+
+**[Resolved #80](resolved/never-flushed-partitions.md) added 1**, and the total went 1,073 → 1,074.
+It is one test in a new binary, `disk_lookups.rs`, and it is the first test in the suite that
+counts what the engine **asked storage** rather than what it answered a client. It has to: the
+defect it reproduces changed nothing about any answer — a partition that had only ever been
+written to asked its storage engine about an archive that did not exist, on every single get, and
+both the wasteful path and the fixed one return the same rows in the same order. The count comes
+from the `PersistentTable::block_on_load` tracing span, which is in the shipping code rather than
+added for the test, so what it measures is the lookups the engine actually makes. Six gets over
+two never-flushed partitions: six lookups before the fix, two after. **That binary holds one test
+and must** — the counter and the subscriber that feeds it are process wide.
 
 **[F27](../features/grouped-responses.md) added 13**, and the total went 1,060 → 1,073. Three sit
 in `shoal-proto` over `RowRef` — and the third of those is the reason the other two mean anything:
@@ -21,12 +32,13 @@ and state [O2](optimizations.md)'s claim as a **count**: a resident unprojected 
 copies zero of them, and an archived scan of the same three builds all three. One is an
 integration test in `persistent_sorted_table.rs`.
 
-**That last one is a test whose own doc comment records that it does not do what it was written to
+**That last one was a test whose own doc comment recorded that it did not do what it was written to
 do**, which is unusual enough to say here. It was meant to compare the two reply paths against each
-other, and does not, because the sorted table never reaches the borrowing one — see
-[item 80](known-issues.md#80-a-sorted-partition-that-was-never-on-disk-asks-storage-about-it-on-every-get).
-It was kept, with the claim corrected, because what it does check is still worth checking. It was
-only known to be vacuous because the path was probed rather than reasoned about.
+other, and did not, because the sorted table never reached the borrowing one — see
+[Resolved #80](resolved/never-flushed-partitions.md), which has since fixed that, so the test now
+does what it was written for. It was kept, with the claim corrected, because what it does check was
+still worth checking. It was only known to be vacuous because the path was probed rather than
+reasoned about — and the probe is what the lookup count in `disk_lookups.rs` replaced.
 
 **[F26](../features/archive-routed-requests.md) added 5**, and the total went 1,055 → 1,060. It
 added a sixth that a default run does not reach, taking the `stage-profile` extras from 12 to 13:
@@ -201,7 +213,7 @@ should read this table rather than assume it was.
 | `shoal-core` unit | 156 | the engine: partitions, storage, the shard. Was 323 before the split. Up 5 with [F23](../features/self-sizing-staging-buffer.md), all of them over the staging buffer's sizing rule, and 3 with [F25](../features/read-buffers-are-filled-not-zeroed.md) over `RequestBody` — a body delivered in pieces, a stream that ends early, and an empty one |
 | `shoal-client` unit | 20 | the client read loop and its error routing, and — new with [F16](../features/client-builder.md) — the builder, the pool defaults and the endpoint order; and — new with [F25](../features/read-buffers-are-filled-not-zeroed.md) — a response payload arriving in pieces and a connection that closes halfway through one |
 | `shoal-bench` unit | 404 | the harness, the workloads, the charts, and — new with [F17](../features/workload-grid.md) and [F18](../features/results-pages.md) — the grid, the row-width and key generators, the family and page registries, and the two new chart kinds; and — new with [F19](../features/chart-legends.md) — the shared legend, the data-derived axis ticks, and the encryption charts in nanoseconds; and — new with [F20](../features/configuration-sweeps.md) and [F21](../features/benchmark-groups.md) — the configuration sweep, the group table, and `--group` in the registry; and — new with [F22](../features/row-size-benchmarks.md) — the three width passes, the configuration sweep's width repeats, both runner-side lists of profiled workloads, and the per-workload stage artifact; and — new with [Resolved #76](resolved/stage-join.md) — that the stage layer's collector judges each report rather than their sum; and — new with [Resolved #79](resolved/micro-only-capture-current.md) — that each page resolves the current capture of the layer it draws. **416 with `--features stage-profile`**, which adds the 9 over the report builder — one of them new with [F26](../features/archive-routed-requests.md), over a parked get's stages — and 3 over the `StageLog` |
-| `shoal` integration | 208 | 17 binaries, one ignored. `grouped_responses.rs` is **new** with [F27](../features/grouped-responses.md) and starts no server, for the same reason `archive_routing.rs` does not: it asserts what the derive generates and what rkyv does with it. `pool.rs` is **new** with [F16](../features/client-builder.md), `intent_log_batching.rs` with [F23](../features/self-sizing-staging-buffer.md), and `archive_routing.rs` with [F26](../features/archive-routed-requests.md). All but the last run against a live server; `archive_routing.rs` starts nothing, because `Ring`, the routing traits and rkyv are pure CPU over plain data — the same property `shoal/benches/routing.rs` relies on |
+| `shoal` integration | 209 | 18 binaries, one ignored. `disk_lookups.rs` is **new** with [Resolved #80](resolved/never-flushed-partitions.md) and holds exactly one test, because what it asserts is a process-wide count. `grouped_responses.rs` is **new** with [F27](../features/grouped-responses.md) and starts no server, for the same reason `archive_routing.rs` does not: it asserts what the derive generates and what rkyv does with it. `pool.rs` is **new** with [F16](../features/client-builder.md), `intent_log_batching.rs` with [F23](../features/self-sizing-staging-buffer.md), and `archive_routing.rs` with [F26](../features/archive-routed-requests.md). All but the last run against a live server; `archive_routing.rs` starts nothing, because `Ring`, the routing traits and rkyv are pure CPU over plain data — the same property `shoal/benches/routing.rs` relies on |
 | `shoalctl` integration | 34 | the completion menu, driven the way the key handler does |
 | `shoal-client-check` integration | 7 | **new.** A schema compiling and running against the client alone |
 | `shoal-bench` integration | 21 | committed artifacts, chart geometry, CSS sync. Up 2 with [F17](../features/workload-grid.md), both guarding the committed corpus against the four fields it added, and 2 more with [F19](../features/chart-legends.md) over the legend's layout. **22 with `--features stage-profile`**, which adds `stage_join.rs` — the only test here that starts a server ([Resolved #76](resolved/stage-join.md)) |
@@ -358,6 +370,7 @@ are in [Optimizations](optimizations.md).
 | Binary | Count | What it reaches |
 | --- | --- | --- |
 | `persistent_sorted_table.rs` | 59, one ignored | insert; `exists` true and false; delete; delete after restart; delete surviving restart; delete and update when the partition is not resident; delete and writes surviving eviction; update; update intent replay; multi-log recovery; empty rotated log cleanup; acknowledgement surviving `SIGKILL`; five limit tests; two cross-shard tests; five row-order tests; six sort-key selection tests; two sort-key `exists` tests; six range tests including the archived seek and the memory/disk span; the paging walk; two range `exists` tests; three end-to-end SHQL tests; nine projection tests including the archived scan, the blocked disk read, the cross-partition order, and a projected and an unprojected get in one batch; and the two tests that reach the loader's failure path — a get whose archive cannot be opened ([Resolved #16, 51](resolved/partition-load-failure.md)), and a get whose archive is not on disk at all, which also asserts that the read did not create the archive it could not find ([Resolved #57](resolved/missing-archive.md)) |
+| `disk_lookups.rs` | 1 | **new** with [Resolved #80](resolved/never-flushed-partitions.md): that a sorted partition which was never on disk is asked about **once**, not once per get. Six gets over two never-flushed partitions — one persistent, one ephemeral — must open exactly two `PersistentTable::block_on_load` spans; the tree before the fix opens six. The only test here that asserts on what the engine asked its storage engine rather than on an answer, which it has to be: both paths return the same rows, which is why nothing caught this for as long as it did. It holds one test on purpose, since the counter and the subscriber feeding it are process wide |
 | `persistent_unsorted_table.rs` | 17 | insert; delete; update; delete and update when not resident; delete surviving eviction; insert after delete when not resident; zero limit; three multi-partition tests; three projection tests; and the unsorted twins of the unreadable-archive and missing-archive tests, because the two tables park and release blocked queries through different code |
 | `ephemeral_sorted_table.rs` | 15 | the sorted read and write paths with no storage engine beneath them ([F9](../features/ephemeral-tables.md)): insert; `exists` true and false; delete; update; a limit; cross-shard row order; named sort-key selection; a range and its bounds; a range `exists`; an end-to-end SHQL range; a projection. Plus the three that are about the table rather than about sorted tables — that nothing is written to the storage directory, that nothing survives a restart, and that memory pressure evicts none of it |
 | `ephemeral_unsorted_table.rs` | 12 | the same for the unsorted table, over a schema that also holds a persistent one and declares the ephemeral table **first** — which is what pins that a persistent table declared after an ephemeral one still gets its loader spawned, and therefore can still read a partition off disk |
@@ -582,8 +595,9 @@ line (`conf.rs:166`) from each binary in turn:
 | `framing` | 13000-13005 |
 | `handshake` | 13000-13001 |
 | `pool` | 13000-13002 |
+| `disk_lookups` | 13000 |
 
-**It is eight binaries now, not two.** This table listed the two persistent ones; the two ephemeral
+**It is nine binaries now, not two.** This table listed the two persistent ones; the two ephemeral
 binaries arrived with [F9](../features/ephemeral-tables.md), `storage_meta` was never counted, and
 `framing` and `handshake` arrived with
 [F10](../features/framing-and-protocol-evolution.md) — which made this worse in a way worth
@@ -595,7 +609,11 @@ answering on what it believes to be a dead port would turn `a_client_with_no_liv
 into a flake. It avoids that by taking its dead ports from the kernel — bind port 0, read the
 assignment back, release it — rather than from the shared counter, which is also the fix
 [item 38](known-issues.md#38-integration-test-binaries-all-bind-the-same-ports) proposes for every
-binary here.
+binary here. `disk_lookups` arrived with
+[Resolved #80](resolved/never-flushed-partitions.md) and binds one port, 13000 — the *most*
+contended number in the table, and the one where a server from another binary answering its client
+would take its partitions somewhere it is not counting and turn the count it asserts on into a
+zero.
 Every range grows with every test that restarts a server — the sorted binary was 13034 when this
 was first measured and 13100 at the last one. Re-measure them with `-- --nocapture` rather than
 trusting the numbers above; the overlap is the point, not the endpoints.

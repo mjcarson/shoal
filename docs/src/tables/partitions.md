@@ -343,10 +343,26 @@ pub struct SortedPartition<T: ShoalSortedTable> {
 `check_disk` answers: *might there be more of this partition on disk?*
 
 It starts `true` for a newly created partition (`.../tables/partitions.rs:294-303`), because a
-partition created by an insert may be shadowing an archive copy. It is set to `false` once the
-full archive copy has been merged in (`.../tables/partitions.rs:445`) or a partition has been
-deserialized from an `Accessible` read (`.../persistent/sorted.rs:739`, `:1164`, `:1210`,
-`:1250`).
+partition created by an insert may be shadowing an archive copy. It is set to `false` in three
+kinds of place, and the third of them is the newest:
+
+- once the full archive copy has been merged in (`SortedPartition::merge_from_disk`);
+- when a partition has been deserialized from an `Accessible` read, in `insert`, `update` and
+  `delete` — an accessible partition **is** the copy from disk, so the loaded partition built out
+  of it inherits nothing to check. `insert` and `update` did not do this until
+  [Resolved #80](../appendix/resolved/never-flushed-partitions.md), so an update to a partition
+  read from disk could send it back to consulting disk once more;
+- when storage answers that there is no archive at all (`mark_absent_from_disk`, reached from the
+  one place either sorted path asks). This is the answer the flag used to throw away, which meant
+  a partition that had only ever been written to asked on every single query for the rest of its
+  life — and, because a partition that might have rows on disk may not be answered in place, was
+  refused [F27](../features/grouped-responses.md)'s borrowing path permanently
+  ([Resolved #80](../appendix/resolved/never-flushed-partitions.md)).
+
+**Clearing it on an absent archive is only sound because an archive can only be built from this
+shard's own intent log over this partition's previous archive**, and every one of those intents was
+applied to the copy in memory when it was accepted. A compaction that could pull rows in from
+anywhere else would have to set the flag back.
 
 Every sorted read consults it before answering:
 
@@ -370,7 +386,9 @@ alone when a read gives up, and why a later query tries the archive again
 Without it, an insert into a partition that also exists on disk would make subsequent reads
 return only the newly inserted rows. `load_partition` on the storage engine is cheap when
 there is nothing to load — one hash lookup in the archive map, no IO
-([Storage Overview](../storage/overview.md#the-archive-map)).
+([Storage Overview](../storage/overview.md#the-archive-map)) — but it is asked **once per
+partition** now rather than once per query, which is what makes the flag's other job, deciding
+whether a get can be answered in place, reachable at all.
 
 `UnsortedPartition` has no `check_disk` because a partition holds exactly one row: if it is in
 memory, it is complete.

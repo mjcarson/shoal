@@ -140,6 +140,7 @@
   - [76. The stage layer joined nothing for any grid arm](appendix/resolved/stage-join.md)
   - [78. Sources manifest drift](appendix/resolved/sources-manifest-drift.md)
   - [79. A capture of one layer decided what every page drew](appendix/resolved/micro-only-capture-current.md)
+  - [80. A sorted partition that was never on disk asked storage about it on every get](appendix/resolved/never-flushed-partitions.md)
 - [TODOs and Unbuilt Work](appendix/todos.md)
 - [Review, August 2026](appendix/review-2026-08.md)
 - [Glossary](appendix/glossary.md)

@@ -44,7 +44,11 @@ narrowed when it first arrived and is never decoded again
 [Query Execution](../tables/query-execution.md).
 
 **check_disk** — A flag on `SortedPartition` meaning "there may be more of this partition in
-an archive". Set on creation, cleared once the full archive copy has been merged in.
+an archive". Set on creation; cleared once the full archive copy has been merged in, when a
+partition is built out of an archive that was already read, or when storage answers that there is
+no archive at all ([Resolved #80](resolved/never-flushed-partitions.md)). It decides two things:
+whether a query is parked on a disk read, and whether a get may be answered out of the rows the
+shard is already holding ([F27](../features/grouped-responses.md)).
 
 **Compaction** — Two distinct operations sharing one background task. *Intent compaction*
 folds a sealed intent log into archives. *Archive compaction* reclaims space from archives

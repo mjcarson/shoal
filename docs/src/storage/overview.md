@@ -152,7 +152,11 @@ match self.map.find_partition(partition_id) {
 
 `.../fs/fs.rs:499-517`
 
-A get for a partition that has never been written costs one hash lookup and no IO.
+A get for a partition that has never been written costs one hash lookup and no IO — and, for a
+sorted partition this shard is already holding, it costs that once rather than once per query,
+because the sorted table records the `None`
+([Resolved #80](../appendix/resolved/never-flushed-partitions.md)). A partition nothing is holding
+is still looked up on every get.
 
 The check is deliberately made against the map rather than against the archive the read will
 open, which allows a race: the compactor can prune the entry between this `Some(_)` and the read

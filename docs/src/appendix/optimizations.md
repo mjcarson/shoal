@@ -400,14 +400,20 @@ against a projected control that builds all three.
 `shoal-derive` cannot write one for a field type whose definition it never sees. Those rows are
 still materialized. That is [O40](#o40-a-row-read-out-of-an-archive-is-materialized-before-it-is-re-serialized).
 
-**And one thing neither half reached, which is the finding that matters.** The sorted table never
-takes the new path at all, because `check_disk` is set when a partition is created and nothing
-clears it when storage reports there was never anything on disk to read. So a sorted partition that
-has only ever been written to is judged non-resident for ever, and refused the borrowing path
-correctly but permanently. Found by probing the path rather than by reasoning about it — both
-paths answer identically, so nothing failed. Filed as
-[item 80](known-issues.md#80-a-sorted-partition-that-was-never-on-disk-asks-storage-about-it-on-every-get).
-**The unsorted table does take it**, throughout its integration suite.
+~~**And one thing neither half reached, which is the finding that matters.**~~ **Reached now**, by
+[Resolved #80](resolved/never-flushed-partitions.md). The sorted table did not take the new path
+at all, because `check_disk` was set when a partition was created and nothing cleared it when
+storage reported there was never anything on disk to read. So a sorted partition that had only
+ever been written to was judged non-resident for ever, and refused the borrowing path correctly
+but permanently. Found by probing the path rather than by reasoning about it — both paths answer
+identically, so nothing failed. **The unsorted table always took it**, throughout its integration
+suite.
+
+**So the resident half of this entry is now closed for both tables, and neither is measured.** The
+count test is over `RowSink` rather than over a running server, and no capture has been taken since
+the sorted table became eligible — which is precisely the capture
+[F27](../features/grouped-responses.md) said would show the feature working, and predicted would
+show nothing while item 80 stood.
 
 The rest of this entry stands as written, and describes the archived path and the split-get path
 that still pay it:

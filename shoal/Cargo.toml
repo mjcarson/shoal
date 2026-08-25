@@ -67,6 +67,11 @@ bytes = "1.5"
 serde_yaml = "0.9"
 # the tls tests generate a certificate per run rather than committing one, so nothing expires
 rcgen = { version = "0.13", default-features = false, features = ["crypto", "aws_lc_rs", "pem"] }
+# `disk_lookups` counts the partition lookups a sorted table makes, and the only place the shipping
+# code says it made one is the span `block_on_load` opens - so the test subscribes to those rather
+# than adding a counter to the engine that only a test would ever read
+tracing = "0.1"
+tracing-subscriber = "0.3"
 
 # the micro benchmarks reach crate private internals of shoal-core through its `bench`
 # feature, so they cannot be built without it

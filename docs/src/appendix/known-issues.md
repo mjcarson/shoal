@@ -31,18 +31,22 @@ test suite does and does not reach is in [Test Coverage](test-coverage.md).
 Defects that have been fixed move to [Resolved Issues](resolved-issues.md), one page each,
 carrying the reasoning and the invariants the fix depends on. Item numbers are shared between
 the two pages and never reused, so a number appears on exactly one of them — which is why this
-list starts at 15 and skips 25, 26, 31, 34, 39, 44, 45, 48, 51, 56, 57, 61, 67, 68, 74, 76, 78 and 79, and
-why item 77 is both the newest number and the newest entry here, and why 78 and 79 are on the
+list starts at 15 and skips 25, 26, 31, 34, 39, 44, 45, 48, 51, 56, 57, 61, 67, 68, 74, 76, 78, 79
+and 80, and
+why item 81 is both the newest number and the newest entry here, and why 78, 79 and 80 are on the
 resolved page. **79 never appeared here at all**: it was found and fixed in the same change
 ([Resolved #79](resolved/micro-only-capture-current.md)), which is allowed and is worth noting
-because it makes the numbering look like an entry went missing. The exceptions are items 16, 17, 20, 24, 54 and 73, which were only
+because it makes the numbering look like an entry went missing. Item 80 is the other way round —
+it was filed here rather than fixed, because the fix turned on a question about the storage layer
+that reading `block_on_load` alone could not answer, and stayed here until somebody answered it
+([Resolved #80](resolved/never-flushed-partitions.md)). The exceptions are items 16, 17, 20, 24, 54 and 73, which were only
 partly fixed: the open remainder is here and the rest is there. Items 9 and 51 were each one such
 exception until their second half was fixed, and are now on the resolved page alone; item 25 was one
 in the other direction — it had one row left open, that row was fixed, and the whole item
 [moved](resolved/claude-md-drift.md).
 
 **Baseline as of writing:** `cargo check --workspace --all-targets` passes with warnings;
-`cargo test --workspace` passes — **1,073 tests**, two ignored, plus 13 more behind
+`cargo test --workspace` passes — **1,074 tests**, two ignored, plus 13 more behind
 `--features stage-profile` that a default run does not reach ([Test Coverage](test-coverage.md)).
 ~~1,045~~ — this figure had gone stale by two features while the sentences below it kept naming
 what each added, which is what a running total is supposed to prevent. It is re-derived from a run
@@ -57,6 +61,9 @@ the tree before its fix. [F23](../features/self-sizing-staging-buffer.md) added 
 reproduces [O34](optimizations.md) and fails against the tree before its fix — the first entry from
 the optimizations page ever reproduced by a test rather than argued from source and sized by a
 capture. [F25](../features/read-buffers-are-filled-not-zeroed.md) and
+[Resolved #80](resolved/never-flushed-partitions.md) added 1, which fails against the tree before
+the fix and is the first test anywhere that counts what the engine asked storage rather than what
+it answered a client.
 [Resolved #79](resolved/micro-only-capture-current.md) added 8, two of which fail against the tree
 before the fix. [F26](../features/archive-routed-requests.md) added 5, four of which were confirmed
 by breaking the code under them rather than by being written after it.
@@ -1692,50 +1699,41 @@ freshness table says a layer is stale. A row that could be labelled "re-measured
 table. Filed as work rather than fixed here, in [TODOs](todos.md).
 
 
+### 81. A stage flag saying a query waited on disk is defined, never set and never read
 
-### 80. A sorted partition that was never on disk asks storage about it on every get
-
-`PersistentTable::block_on_load` (`shoal-core/src/server/tables/persistent/sorted.rs:476`) asks
-storage to load a partition, and when it is told there is nothing to load it returns `false` and
-**does not record that answer**:
+`StageFlags::loaded_from_disk` (`shoal-core/src/server/stage_profile.rs:110`) is documented as
+"whether this query had to wait on a partition being read from disk", and the setter for it is
+generated beside every other flag's:
 
 ```rust
-// if this partition has no data on disk then there is nothing to wait for
-if !will_load {
-    return false;
-}
+set_loaded_from_disk(bool) => loaded_from_disk
 ```
 
-`SortedPartition::check_disk` starts `true` (`partitions.rs:474`) and is only ever cleared by
-`merge` (`:799`) or by a partition arriving from a read (`sorted.rs:1062`, `:1513`). None of those
-happens when the answer was "there is nothing on disk". So a sorted partition that has only ever
-been written to keeps `check_disk` set for its whole life, and **every get of it makes a
-`load_partition` call that can only ever fail**.
+`stage_profile.rs:423`
 
-Two costs, and the second is the larger one.
+**Nothing calls it.** A repository-wide search for the name finds the field, its `Default`, the
+generated setter, and one integration test whose name happens to contain the words. No query
+anywhere sets it, so every stage record ever written says `false` — including the records of
+queries that did park on a disk read, which is exactly the population the flag exists to separate.
+Nothing reads it either: no report in `shoal-bench` joins on it, so the wrong answer has never
+been printed.
 
-- The lookup itself, on every get of every unflushed partition, for an answer that cannot change
-  until something writes that partition to disk.
-- **It is what stops the sorted table ever answering a get in place.**
-  [F27](../features/grouped-responses.md) serializes a get's reply out of the rows the partition
-  is holding, and refuses to when a partition might still have rows on disk — correctly, since
-  such a get is about to park. A flag that is set and never cleared makes that refusal permanent,
-  so the sorted half of [O2](optimizations.md#o2-every-returned-row-is-copied-at-least-twice) is
-  built, tested and unreachable in the one case it was built for. The unsorted table has no such
-  flag and does answer in place.
+That is what makes this worth filing rather than deleting. The stage layer's job is to say where a
+query spent its time, and *whether it waited on IO* is the single largest fork in that answer — a
+report that pooled parked and unparked gets would put the boundary between two distributions
+wherever the mixture happened to fall, which is the same mistake `StageOp` exists to avoid
+([Resolved #76](resolved/stage-join.md) is what happens when a stage layer is trusted without
+being read back).
 
-**Evidence: reproduced.** A probe on the borrowing path, then
-`a_repeated_get_answers_the_same_rows_and_names_their_partition` in
-`shoal/tests/persistent_sorted_table.rs` — which inserts four rows and gets them twice — reached
-it **zero** times. The same probe on the unsorted table's borrowing path is reached **ten** times
-across `persistent_unsorted_table.rs`. Found while checking that F27's new path was taken at all
-rather than merely compiled, which is the only reason it was noticed: nothing fails, and both
-paths answer identically.
+**Evidence: established by reading the source**, and by the search above rather than by running
+anything — a flag that is never set produces no failure to reproduce.
 
-**Fix direction:** clearing `check_disk` when `load_partition` reports nothing to load is the
-obvious move and is **not obviously correct**, which is why it is filed rather than done. The
-question is whether a partition can acquire rows on disk that the in-memory copy does not already
-have. A flush writes rows that were inserted through this partition, so the copy in memory is a
-superset — but compaction and archive rotation also write, and whether either can produce an
-archive holding a row this partition never saw is the thing to establish before flipping it. If it
-cannot, the flag should be cleared here and the sorted table gains the borrowing path for free.
+**Fix direction:** `block_on_load` returning `true` is the moment a query becomes one that waited,
+and `PersistentTable::load_partition` releasing it is the moment it stops. The flag belongs on the
+`QueryMetadata` that is parked in `blocked` and carried into the replay, which already survives
+that round trip — `skip_disk` and `failed` are set on exactly that path
+([Resolved #16, 51](resolved/partition-load-failure.md)). Setting it is small; the part worth
+doing carefully is the report, which has to treat the two populations as two rather than
+subtracting one from the other. Found while fixing
+[Resolved #80](resolved/never-flushed-partitions.md), which is about the other side of the same
+call.

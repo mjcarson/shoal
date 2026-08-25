@@ -195,7 +195,11 @@ delete/update asymmetry happened. The version worth having instead is inside the
 guarded on the engine: `commit` could report that its response needs no parking, and the
 `check_disk` probe could be skipped for an engine that never has anything on disk. Both are
 measurable against `macro/insert_ephemeral` and `macro/get_ephemeral`, which is what makes them
-worth attempting at all.
+worth attempting at all. **The probe half is now much smaller than it was.**
+[Resolved #80](resolved/never-flushed-partitions.md) records the engine's answer, so a resident
+partition is asked once rather than once per query — what is left is the first get of each
+partition, and every get of a partition the table has never held. That last case is the one this
+would still remove, and it is the same case the persistent table also pays.
 
 **A projection that leaves out the partition key.** A projection has to carry its table's partition
 key, because the shard collecting the shares of a split get asks each row which partition it came

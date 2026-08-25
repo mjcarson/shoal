@@ -155,6 +155,12 @@ has no entry for the key — which is the case where "the row does not exist" is
 It also queues behind an existing `blocked` entry rather than requesting a second read of a
 partition already in flight.
 
+**The sorted one remembers that answer**, which is why the heading above is now a little
+generous: a sorted partition this shard is holding and that storage says has no archive is asked
+once and never again, rather than on every operation
+([Resolved #80](../appendix/resolved/never-flushed-partitions.md)). A partition that is *not*
+resident is still asked every time, in both tables.
+
 It returns `false` in one other case, where that answer is *not* truthful: a query released by a
 read that failed carries `meta.skip_disk` for the partition it failed on, and answers from what
 is resident rather than asking for the same read again
