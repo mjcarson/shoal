@@ -202,7 +202,19 @@ fn bundle(size: usize) -> Queries<WireDbClient> {
 const BUNDLE_10_BYTES: usize = 812;
 
 /// How many bytes a response of 256 rows archives to
-const RESPONSE_256_BYTES: usize = 7724;
+///
+/// **Re-pinned by [F27](../../docs/src/features/grouped-responses.md)**, 7,724 → 7,748. A get's
+/// answer gained the index of the partitions its rows came from, and this response is drawn from
+/// one partition, so what those 24 bytes buy is an `ArchivedVec` header and a single `RowGroup`.
+/// That is the floor of what the index costs and it is charged to every get, including the
+/// single-partition one that never needed it — which is a limitation on that feature's page rather
+/// than a surprise here.
+///
+/// The important half is what the number moving *means*: every `wire_codec/response/*` figure
+/// captured before F27 measures a different payload, and comparing across it silently compares
+/// two shapes. The guard below is what forces that to be noticed, and it did — it fired during the
+/// capture rather than being reasoned about in advance.
+const RESPONSE_256_BYTES: usize = 7748;
 
 /// Fails the run if the archives the original groups measure have changed size
 ///
