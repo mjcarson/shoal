@@ -212,15 +212,57 @@ what keeps a stage capture comparable across this change, and it is the thing th
 
 ## Performance
 
-**Nothing here has been captured.** The prediction is written down first, so a capture can disagree
-with it:
+**Nothing here has been captured**, and the two numbers below are from a *smoke* run of the new
+micro arms — ten samples over two seconds each, on a tree that was clean but with no governor
+check. They are indicative and are not a capture; nothing on the results pages draws them. They are
+recorded because one of them contradicts the entry it was built for, and that is worth knowing
+before somebody spends two hours on the real thing.
+
+**The reorder: the win shrinks as the partition count rises, which is the opposite of what O18
+expected.** `wire_codec/response/gather/{hash,groups}`, 1024 rows spread over a sweeping number of
+partitions:
+
+| Partitions | rows each | `hash` | `groups` | |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 1024 | 16.3 µs | 10 ns | early return — a single run has no order to fix |
+| 4 | 256 | 15.9 µs | 1.00 µs | **×16** |
+| 16 | 64 | 16.1 µs | 1.53 µs | ×10 |
+| 64 | 16 | 16.5 µs | 2.66 µs | ×6 |
+| 256 | 4 | 18.1 µs | 15.7 µs | **×1.15** |
+
+O18's entry said what would show it was "a response of many rows drawn from many partitions against
+one drawn from a few", which reads as a prediction that the win grows with the partition count. It
+falls. The reason is visible once stated: ranking groups instead of rows only helps while there are
+many fewer groups than rows, and at 256 partitions of 4 rows the two counts have nearly converged.
+What is left at that end is not the ranking at all but `order_by`'s per-run bookkeeping — it splits
+the rows into one `Vec` per group and concatenates them back, so 256 groups is 256 allocations.
+Filed as [O41](../appendix/optimizations.md#o41-reordering-a-gathered-get-allocates-a-vec-per-partition).
+
+**So the entry was right that the axis matters and wrong about which end of it pays.** A fan-out
+get over many single-row partitions — which is what `macro/fanout/n` drives — gains almost nothing
+here. A get over a few partitions holding many rows each gains an order of magnitude.
+
+**Building the reply: ×9 at a thousand rows.** `wire_codec/response/build/{owned,borrowed}`, where
+each arm includes the step in front of the serialize, because timing the serialize alone would
+compare the two shapes at the one thing they do identically:
+
+| Rows | `owned` (clone, then serialize) | `borrowed` (point, then serialize) | |
+| ---: | ---: | ---: | ---: |
+| 16 | 585 ns | 217 ns | ×2.7 |
+| 256 | 14.4 µs | 1.76 µs | ×8.2 |
+| 1024 | 57.1 µs | 6.30 µs | **×9.1** |
+| 4096 | 224 µs | 24.4 µs | ×9.2 |
+
+The predictions written down before the capture, which stand:
 
 - `execute` falls on the read arms of the width sweep — the `P::from_row` clone is gone — and
   **`reply_serialize` does not move**, because the same bytes are still written. A reader expecting
   the ×238 stage to fall will misread the capture.
-- The `wire_codec/response/encode/{owned,borrowed}` pair is **within noise**. The borrowing shape
-  does not make the serialize cheaper; it makes the clone before it disappear. Slower at narrow
-  widths would be the lost `memcpy`, and is expected.
+- ~~The `wire_codec/response/encode/{owned,borrowed}` pair is **within noise**.~~ Wrong, and wrong
+  because the prediction was about a benchmark that was not built: the pair that exists is
+  `build/{owned,borrowed}` and each arm includes the clone or the pointing in front of the
+  serialize, which is the comparison that means something. The serialize halves really are
+  identical work; the arms differ by what happens before them, and that is ×9.
 - **The macro layer may not move at all**, and this is the claim most likely to fail. The grid's
   read arms are sorted-table arms, and the sorted table does not reach the borrowing path — see
   the first limitation. Until item 80 is fixed, the capture that would show this feature working is
@@ -254,6 +296,7 @@ the paths named there resolve.
 | `the_groups_a_get_returns_name_its_partitions_in_the_order_it_asked_for` | the index is built in arrival order rather than named order |
 | `a_gathered_get_orders_its_rows_without_hashing_any_of_them` | the grouped reorder disagrees with the hashing one, over six arrival orders of four shares |
 | `a_limit_trims_the_group_index_with_the_rows_it_trims` | a limit trims one half and not the other |
+| `wire_codec/response/gather/{hash,groups}` | not a test — the benchmark [O18](../appendix/optimizations.md) never had, and the arm that found [O41](../appendix/optimizations.md) |
 | `a_repeated_get_answers_the_same_rows_and_names_their_partition` | a get answered twice against the same rows answers differently |
 
 Four were confirmed by breaking the code under them: dropping the index trim fails two on
@@ -280,5 +323,7 @@ suites — pass **unchanged**, which is what says the reorder still does what it
 - [F26](archive-routed-requests.md) — the request half, and the pattern this follows
 - [F2](projections.md) — whose partition-key limitation this lifts, and whose rejected alternative
   turned out to be the right design
+- [O41](../appendix/optimizations.md#o41-reordering-a-gathered-get-allocates-a-vec-per-partition)
+  — found by the benchmark this built, and the reason O18's win falls away at high partition counts
 - [F10](framing-and-protocol-evolution.md) — the version byte and fingerprint that make the flag
   day a refused connection rather than undefined behaviour

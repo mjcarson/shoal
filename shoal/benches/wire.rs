@@ -33,7 +33,9 @@ use uuid::Uuid;
 
 use shoal::shared::protocol::{self, Flags, Header, MessageType};
 use shoal::shared::queries::Queries;
-use shoal::shared::traits::RkyvSupport;
+use shoal::shared::responses::{GetRows, Response as ShoalResponse};
+use shoal::shared::row_ref::RowRef;
+use shoal::shared::traits::{PartitionKeySupport, RkyvSupport};
 use shoal::{
     FileSystem, PersistentSortedTable, PersistentUnsortedTable, ShoalSortedTable, ShoalUnsortedTable,
 };
@@ -679,8 +681,172 @@ fn bench_width_response_body(c: &mut Criterion) {
     group.finish();
 }
 
+/// How many partitions a gathered response is drawn from, for the reorder sweep
+///
+/// The row count is held fixed across these, so the only thing that varies is how many partitions
+/// those rows came from. That is the axis the entry this measures is about, and no benchmark
+/// varied it before.
+const GATHER_PARTITIONS: [usize; 5] = [1, 4, 16, 64, 256];
+
+/// How many rows a gathered response carries, whatever it is drawn from
+const GATHER_ROWS: usize = 1024;
+
+/// Build a merged response drawn from a given number of partitions, in the order shares arrived
+///
+/// The partitions are numbered so that the order a query named them in is not the order they
+/// merged in — otherwise a reorder that did nothing at all would look correct.
+///
+/// # Arguments
+///
+/// * `partitions` - How many partitions these rows came from
+fn gathered(partitions: usize) -> (GetRows<TitleByKeyword>, Vec<u64>) {
+    // spread a fixed number of rows evenly over the partitions they came from
+    let per_partition = GATHER_ROWS / partitions;
+    let mut merged: Option<GetRows<TitleByKeyword>> = None;
+    // merge the shares in reverse of the order the query named them, which is the worst case
+    // and the one a reorder actually has to undo
+    for partition in (0..partitions).rev() {
+        let rows = (0..per_partition)
+            .map(|index| row(partition * per_partition + index))
+            .collect::<Vec<_>>();
+        let share = GetRows::single(partition as u64, rows);
+        match &mut merged {
+            Some(merged) => merged.absorb(share),
+            None => merged = Some(share),
+        }
+    }
+    // the order the query named its partitions in
+    let order = (0..partitions as u64).collect();
+    (merged.expect("a gathered response has at least one share"), order)
+}
+
+/// Put a gathered response back in order the way it was done before the index existed
+///
+/// This is the implementation [O18](../../docs/src/appendix/optimizations.md) was filed against,
+/// kept here so the change has something to be read against rather than only a number of its own.
+/// It hashes every row's partition key; the arm beside it ranks the groups instead.
+///
+/// # Arguments
+///
+/// * `rows` - The merged rows to reorder
+/// * `order` - The partitions the query named, in the order it named them
+fn order_by_hashing(rows: &mut [TitleByKeyword], order: &[u64]) {
+    let ranks: std::collections::HashMap<u64, usize> = order
+        .iter()
+        .enumerate()
+        .map(|(rank, key)| (*key, rank))
+        .collect();
+    // one hash per row, which is the cost the index exists to remove
+    rows.sort_by_cached_key(|row| {
+        ranks
+            .get(&row.get_partition_key())
+            .copied()
+            .unwrap_or(usize::MAX)
+    });
+}
+
+/// Measure putting a split get's rows back in the order its partitions were named
+///
+/// **The benchmark [O18](../../docs/src/appendix/optimizations.md) never had.** Its own entry said
+/// so: what would show it is "a response of many rows drawn from many partitions against one drawn
+/// from a few", and no arm of `wire_codec` varied that. The row count is fixed at 1024 and the
+/// partition count sweeps 1 → 256, so the only thing changing is how much information the index
+/// carries.
+///
+/// Both shapes run in one build, the way
+/// [F25](../../docs/src/features/read-buffers-are-filled-not-zeroed.md) ran the zeroed and
+/// uninitialized reads: `hash` is what the code did before
+/// [F27](../../docs/src/features/grouped-responses.md) and stays afterwards as the control.
+///
+/// # Arguments
+///
+/// * `c` - The criterion harness to register with
+fn bench_response_gather(c: &mut Criterion) {
+    let mut group = c.benchmark_group("wire_codec/response/gather");
+    for partitions in GATHER_PARTITIONS {
+        let (merged, order) = gathered(partitions);
+        group.throughput(Throughput::Elements(GATHER_ROWS as u64));
+        // the shape that hashes every row, which is what this replaced
+        group.bench_with_input(BenchmarkId::new("hash", partitions), &partitions, |b, _| {
+            b.iter_batched(
+                || merged.rows.clone(),
+                |mut rows| {
+                    order_by_hashing(black_box(&mut rows), black_box(&order));
+                    rows
+                },
+                criterion::BatchSize::LargeInput,
+            );
+        });
+        // and the shape that ranks the groups, which hashes nothing
+        group.bench_with_input(BenchmarkId::new("groups", partitions), &partitions, |b, _| {
+            b.iter_batched(
+                || GetRows {
+                    rows: merged.rows.clone(),
+                    groups: merged.groups.clone(),
+                },
+                |mut found| {
+                    found.order_by(|partition| {
+                        black_box(&order).iter().position(|key| *key == partition)
+                    });
+                    found
+                },
+                criterion::BatchSize::LargeInput,
+            );
+        });
+    }
+    group.finish();
+}
+
+/// Measure serializing a response out of rows that are owned against rows that are borrowed
+///
+/// **Each arm includes the step in front of the serialize**, and that is the whole design: the
+/// owned arm clones every row the way `P::from_row` did and then serializes, and the borrowed arm
+/// points at the rows where they lie and then serializes. Timing the serialize alone would compare
+/// the two shapes at the one thing they do identically and report no difference, which is true and
+/// useless.
+///
+/// So this measures what a get pays to turn rows it has found into bytes, both ways round. The
+/// shape that is no longer used stays here as the control, the way
+/// [F25](../../docs/src/features/read-buffers-are-filled-not-zeroed.md) kept its zeroed reads.
+///
+/// A row of scalars is the interesting case and is deliberately not what this measures: rkyv
+/// copies a padding-free type in one go through `serialize_from_slice`, and a `Vec<RowRef>` cannot
+/// take that branch. `TitleByKeyword` is two `String`s, so neither side gets that optimization and
+/// this measures the shapes rather than the branch. The branch itself is covered by a unit test.
+///
+/// # Arguments
+///
+/// * `c` - The criterion harness to register with
+fn bench_response_build(c: &mut Criterion) {
+    let mut group = c.benchmark_group("wire_codec/response/build");
+    for rows in ROW_COUNTS {
+        let owned = (0..rows).map(row).collect::<Vec<_>>();
+        let response = response(rows);
+        let archived = rkyv::to_bytes::<rkyv::rancor::Error>(&response).expect("failed to archive");
+        group.throughput(Throughput::Bytes(archived.len() as u64));
+        // the shape a get used to answer with: rows copied out of the partition, then serialized
+        group.bench_with_input(BenchmarkId::new("owned", rows), &rows, |b, _| {
+            b.iter(|| {
+                let found = GetRows::single(0, black_box(&owned).clone());
+                black_box(rkyv::to_bytes::<rkyv::rancor::Error>(&found).unwrap())
+            });
+        });
+        // and the shape it answers with now: pointed at where they lie, then serialized
+        group.bench_with_input(BenchmarkId::new("borrowed", rows), &rows, |b, _| {
+            b.iter(|| {
+                let found =
+                    GetRows::single(0, black_box(&owned).iter().map(RowRef::new).collect());
+                black_box(rkyv::to_bytes::<rkyv::rancor::Error>(&found).unwrap())
+            });
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     wire_codec,
+    bench_response_gather,
+    bench_response_build,
     bench_header,
     bench_request_encode,
     bench_request_decode,

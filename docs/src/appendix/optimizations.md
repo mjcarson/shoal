@@ -712,7 +712,7 @@ The original entry read:
 | **Depends on** | O2; ~~a `wire_codec` bench~~ — built ([F10](../features/framing-and-protocol-evolution.md)), and it does not reach this entry. See the Benchmark row |
 | **Blocks** | [F2](../features/projections.md#limitations) — a projection must carry its partition key only because of this |
 | **Tradeoff** | **Major** — wire format, shared with O2 |
-| **Benchmark** | ~~none — `wire_codec` is unbuilt~~ **Uncovered, not unbuilt.** `wire_codec` was built by [F10](../features/framing-and-protocol-evolution.md) and captured in `f22-row-size`; no arm of it reaches this entry, because a rehash per row is not about a payload width. What would show it is a response of many rows drawn from *many partitions* against one drawn from a few — no bench varies that |
+| **Benchmark** | ~~none — `wire_codec` is unbuilt~~ ~~**Uncovered, not unbuilt.**~~ **Built**, by [F27](../features/grouped-responses.md): `wire_codec/response/gather/{hash,groups}` runs both shapes in one build over 1024 rows swept across 1 → 256 partitions. It says the entry had the axis right and the direction wrong — the win is ×16 at four partitions and ×1.15 at 256, because ranking groups only beats ranking rows while there are many fewer groups than rows |
 
 `ResponseAction::order_by_partitions` (`shared/responses.rs:109`) sorts the merged rows of a split
 query by where their partition was named. A `Response` carries rows and nothing else, so the only
@@ -2203,3 +2203,56 @@ keeps `check_disk` set on any sorted partition that was never written to disk, w
 table the resident path as well. Fixing that is `S` and would be worth doing before anyone prices
 this one, because until it is fixed the sorted table's archived path is the *only* path it has and
 the comparison has no control.
+
+---
+
+### O41. Reordering a gathered get allocates a `Vec` per partition
+
+| | |
+| --- | --- |
+| **Rank** | **A5**, beside the other near-free entries on paths every split get takes |
+| **Impact** | **Measured** — it is what is left of `order_by` at high group counts, and it is why [O18](#o18-the-gathered-reorder-rehashes-every-rows-partition-key)'s win falls from ×16 at four partitions to ×1.15 at 256 |
+| **Difficulty** | **S** — a different way of moving the runs, in one function |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | None |
+| **Benchmark** | **Built and it is what found this**: `wire_codec/response/gather/{hash,groups}`, 1024 rows swept across 1, 4, 16, 64 and 256 partitions ([F27](../features/grouped-responses.md)) |
+
+`GetRows::order_by` puts the runs of a merged get back into the order the query named their
+partitions in. It ranks the groups — which is the part that replaced hashing every row — and then
+moves the rows, like this:
+
+```rust
+// cut the rows into their runs, from the back so each cut is the tail of what is left
+let mut rows = std::mem::take(&mut self.rows);
+let mut runs: Vec<Vec<T>> = Vec::with_capacity(self.groups.len());
+for group in self.groups.iter().rev() {
+    let at = rows.len() - group.len as usize;
+    runs.push(rows.split_off(at));
+}
+```
+
+`shoal-proto/src/shared/responses.rs`, `GetRows::order_by`
+
+**One allocation per group**, plus one per `append` back into the output. The moves themselves are
+O(n) in the rows and unavoidable — the rows genuinely have to be permuted — but the allocations are
+O(*groups*) and are not.
+
+**This is the whole of what is left at the wide end.** The smoke numbers on
+[F27](../features/grouped-responses.md#performance) put the grouped reorder at 1.00 µs against the
+hashing one's 15.9 µs over four partitions, and at 15.7 µs against 18.1 µs over 256 — same rows,
+same total moves, 256 allocations instead of four.
+
+**Two ways out, and the obvious one is worse than it looks.** Collecting into a `Vec<Option<T>>`
+and taking each row out in ranked order is one allocation total, and costs `size_of::<Option<T>>()`
+per row instead of `size_of::<T>()` — for a wide row with a niche that is free, and for one without
+it is a whole extra tag per row on a path that exists to stop copying wide rows about. The better
+shape is probably to compute the permutation and apply it in place with a cycle walk, which needs
+no second buffer at all and is a well-known routine; the reason it is filed rather than done is
+that it is fiddly to get right and the payoff is bounded by a case — many partitions holding few
+rows each — that the fan-out workload drives and the grid does not.
+
+**Worth taking with whatever next touches this function**, which is the same argument
+[O36](#o36-every-get-re-collects-its-rows-into-a-fresh-vec-even-when-it-read-one-partition) was
+eventually closed under: it was `S` for four features and was done in an afternoon by the change
+that rewrote the code around it.
