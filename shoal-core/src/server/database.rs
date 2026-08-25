@@ -23,7 +23,7 @@ use std::hash::BuildHasherDefault;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::server::messages::{LoadedPartitionKinds, QueryMetadata, ServerMsg};
+use crate::server::messages::{Answer, LoadedPartitionKinds, QueryMetadata, ServerMsg};
 use crate::server::routing::{ArchivedShardRouting, ShardRouting};
 use crate::server::{Conf, ServerError};
 use crate::shared::queries::{ArchivedQueries, Queries};
@@ -144,6 +144,11 @@ pub trait ShoalDatabase: 'static + Sized {
     ) -> Result<<Self::ClientType as QuerySupport>::QueryKinds, rkyv::rancor::Error>;
 
     /// Handle messages for different table types
+    ///
+    /// The answer comes back as an [`Answer`] rather than a response, because a get whose
+    /// partitions are all resident is serialized inside the table that found its rows rather
+    /// than after ([O2](../../../docs/src/appendix/optimizations.md)). Those rows cannot outlive
+    /// the scan, so the bytes come back where the response would have.
     #[allow(async_fn_in_trait)]
     async fn handle(
         &mut self,
@@ -153,7 +158,7 @@ pub trait ShoalDatabase: 'static + Sized {
         Uuid,
         Uuid,
         crate::server::stage_profile::StageStamps,
-        <Self::ClientType as QuerySupport>::ResponseKinds,
+        Answer<<Self::ClientType as QuerySupport>::ResponseKinds>,
     )>;
 
     /// Mark partitions as evictable if they are no longer in the intent log

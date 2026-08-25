@@ -26,6 +26,8 @@ pub fn add(
     let table_names_ident = format_ident!("{}TableNames", struct_ident);
     let query_ident = format_ident!("{struct_ident}QueryKinds");
     let response_ident = format_ident!("{struct_ident}ResponseKinds");
+    // the borrowed mirror, which a reply built out of resident rows is serialized through
+    let response_ref_ident = format_ident!("{struct_ident}ResponseKindsRef");
     // build our new table arms
     // get the field idents
     let new_arms = fields.named.iter().zip(variants.iter()).map(|(field, variant)| {
@@ -97,9 +99,34 @@ pub fn add(
             let projection_arms = declared.iter().map(|projection| {
                 quote! {
                     #projection_ident::#projection => {
-                        match self.#field_ident.handle::<#projection>(meta, query).await {
-                            Some((client, query_id, stamps, response)) => {
-                                let wrapped = #response_ident::#projection(response);
+                        // how to serialize a reply whose rows are still in the partitions
+                        // holding them, into the variant this projection answers in
+                        //
+                        // the table calls this while the scan's borrow is alive, which is why
+                        // it is handed down rather than the borrowed reply being handed up:
+                        // an answer carrying a lifetime cannot leave the table that found it
+                        // while `self` is still borrowed for the reply after it
+                        fn seal(
+                            response: ::shoal::shared::responses::Response<
+                                ::shoal::shared::row_ref::RowRef<'_, #projection>,
+                            >,
+                        ) -> Result<::shoal::rkyv::util::AlignedVec<16>, ::shoal::rkyv::rancor::Error> {
+                            ::shoal::rkyv::to_bytes(&#response_ref_ident::#projection(response))
+                        }
+                        match self.#field_ident.handle::<#projection>(meta, query, seal).await {
+                            Some((client, query_id, stamps, answer)) => {
+                                // an answer that is still a value is wrapped here; one that is
+                                // already bytes was wrapped by `seal` before it became them
+                                let wrapped = match answer {
+                                    ::shoal::server::messages::Answer::Open(response) => {
+                                        ::shoal::server::messages::Answer::Open(
+                                            #response_ident::#projection(response),
+                                        )
+                                    }
+                                    ::shoal::server::messages::Answer::Sealed(bytes) => {
+                                        ::shoal::server::messages::Answer::Sealed(bytes)
+                                    }
+                                };
                                 Some((client, query_id, stamps, wrapped))
                             }
                             None => None,
@@ -117,10 +144,30 @@ pub fn add(
                         // a get that named no projection, and every query that is not a get,
                         // answers with whole rows
                         _ => {
-                            match self.#field_ident.handle::<#variant_ident>(meta, query).await {
-                                Some((client, query_id, stamps, response)) => {
-                                    // wrap our response with the right table kind
-                                    let wrapped = #response_ident::#variant_ident(response);
+                            // the identity projection's sealer, which is the one that matters:
+                            // a get that named no projection is the one whose rows can be
+                            // answered with where they lie rather than copied first
+                            fn seal(
+                                response: ::shoal::shared::responses::Response<
+                                    ::shoal::shared::row_ref::RowRef<'_, #variant_ident>,
+                                >,
+                            ) -> Result<::shoal::rkyv::util::AlignedVec<16>, ::shoal::rkyv::rancor::Error> {
+                                ::shoal::rkyv::to_bytes(&#response_ref_ident::#variant_ident(response))
+                            }
+                            match self.#field_ident.handle::<#variant_ident>(meta, query, seal).await {
+                                Some((client, query_id, stamps, answer)) => {
+                                    // wrap our response with the right table kind, unless the
+                                    // table already sealed it into those bytes itself
+                                    let wrapped = match answer {
+                                        ::shoal::server::messages::Answer::Open(response) => {
+                                            ::shoal::server::messages::Answer::Open(
+                                                #response_ident::#variant_ident(response),
+                                            )
+                                        }
+                                        ::shoal::server::messages::Answer::Sealed(bytes) => {
+                                            ::shoal::server::messages::Answer::Sealed(bytes)
+                                        }
+                                    };
                                     Some((client, query_id, stamps, wrapped))
                                 }
                                 None => None,
@@ -379,7 +426,9 @@ pub fn add(
                 ::shoal::uuid::Uuid,
                 ::shoal::uuid::Uuid,
                 ::shoal::server::stage_profile::StageStamps,
-                <Self::ClientType as ::shoal::shared::traits::QuerySupport>::ResponseKinds,
+                ::shoal::server::messages::Answer<
+                    <Self::ClientType as ::shoal::shared::traits::QuerySupport>::ResponseKinds,
+                >,
             )> {
                 // match on the right query and execute it
                 match typed_query {

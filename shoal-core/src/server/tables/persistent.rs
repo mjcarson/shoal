@@ -13,10 +13,11 @@ use uuid::Uuid;
 pub use sorted::PersistentSortedTable;
 pub use unsorted::PersistentUnsortedTable;
 
-use crate::server::messages::QueryMetadata;
+use crate::server::messages::{Answer, QueryMetadata};
 use crate::server::stage_profile::StageStamps;
 use crate::shared::protocol::error::ErrorCode;
-use crate::shared::responses::{GetRows, Response, ResponseAction, ResponseError};
+use crate::shared::responses::{GetRows, Response, ResponseAction, ResponseError, RowGroup};
+use crate::shared::row_ref::RowRef;
 
 /// Replace what a query answered with the failure it was released with, if it was released by one
 ///
@@ -32,20 +33,45 @@ use crate::shared::responses::{GetRows, Response, ResponseAction, ResponseError}
 ///
 /// * `answered` - What executing the query produced, if anything
 /// * `failed` - The failure this query was released with, if it was released by one
-pub(crate) fn apply_failure<P>(
+/// Wrap an answer that was always a value in the shape every query now answers in
+///
+/// Only a get can answer with rows, so only a get can answer with rows it did not copy. Every
+/// other query already held its whole answer in a `bool`, and goes through here rather than
+/// through a match at each of its call sites.
+///
+/// # Arguments
+///
+/// * `answered` - What the query produced, if it produced anything
+pub(crate) fn open<P>(
     answered: Option<(Uuid, Uuid, StageStamps, Response<P>)>,
+) -> Option<(Uuid, Uuid, StageStamps, Answer<Response<P>>)> {
+    answered.map(|(client, id, stamps, response)| (client, id, stamps, Answer::Open(response)))
+}
+
+pub(crate) fn apply_failure<P>(
+    answered: Option<(Uuid, Uuid, StageStamps, Answer<Response<P>>)>,
     failed: Option<ResponseError>,
-) -> Option<(Uuid, Uuid, StageStamps, Response<P>)> {
+) -> Option<(Uuid, Uuid, StageStamps, Answer<Response<P>>)> {
     // only a query that produced a response has anything to swap
     match answered {
-        Some((client, id, stamps, mut response)) => {
+        Some((client, id, stamps, Answer::Open(mut response))) => {
             // a read that gave up is a failure whatever kind of query was waiting on it - a
             // get that could not read its partition and a delete that could not read the row
             // it was deleting are both failures, not "found nothing" and "deleted nothing"
             if let Some(error) = failed {
                 response.data = ResponseAction::Error(error);
             }
-            Some((client, id, stamps, response))
+            Some((client, id, stamps, Answer::Open(response)))
+        }
+        // a sealed answer cannot be carrying a failure, and the two conditions are exclusive by
+        // construction rather than by luck: a failure reaches a query only when a read it was
+        // parked on gave up, and a query that has parked is never answered in place
+        sealed @ Some((_, _, _, Answer::Sealed(_))) => {
+            debug_assert!(
+                failed.is_none(),
+                "a query answered in place was released with a failure, which means it parked"
+            );
+            sealed
         }
         // this query is still parked somewhere else, so its failure travels on with it
         None => None,
@@ -216,6 +242,175 @@ impl<R> PendingGet<R> {
     }
 }
 
+/// Where a row a get found currently lives
+///
+/// A get that named no projection and landed on a resident partition can answer with the row the
+/// partition is holding. Anything else — a projection, or a partition that is still the archive
+/// it was read from — has to build the row it answers with, and that built row lives in the
+/// sink's own scratch space until the reply is serialized.
+#[derive(Debug)]
+enum Found<'a, P> {
+    /// Still in the partition that holds it
+    Resident(&'a P),
+    /// Built by this get, and held at this index of the scratch space
+    ///
+    /// An index rather than a reference, because the scratch space is a `Vec` that grows as the
+    /// scan runs and a reference into it would dangle the moment it reallocated.
+    Built(usize),
+}
+
+/// The rows one execution of a get found, borrowed wherever they could be
+///
+/// This is what makes [O2](../../../docs/src/appendix/optimizations.md)'s resident half work for
+/// a get that names several partitions of which only some are resident. The alternative was a
+/// homogeneity rule — borrow only when *every* named partition is resident — which is simpler and
+/// gives up the common case, because a partition read from disk stays an archive and a long lived
+/// table is a mixture.
+#[derive(Debug)]
+pub struct RowSink<'a, P> {
+    /// Where each row this get found currently lives, in the order it was found
+    found: Vec<Found<'a, P>>,
+    /// The rows this get had to build, in the order it built them
+    scratch: Vec<P>,
+    /// Which partition each run of those rows came from, in the order they were scanned
+    groups: Vec<RowGroup>,
+    /// How many rows had been found when the run being scanned started
+    run_started_at: usize,
+}
+
+impl<P> Default for RowSink<'_, P> {
+    fn default() -> Self {
+        RowSink {
+            found: Vec::new(),
+            scratch: Vec::new(),
+            groups: Vec::new(),
+            run_started_at: 0,
+        }
+    }
+}
+
+impl<'a, P> RowSink<'a, P> {
+    /// Answer with a row the partition is already holding
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row to answer with, where it lies
+    pub fn push_resident(&mut self, row: &'a P) {
+        self.found.push(Found::Resident(row));
+    }
+
+    /// Answer with a row this get had to build
+    ///
+    /// # Arguments
+    ///
+    /// * `row` - The row this get built
+    pub fn push_built(&mut self, row: P) {
+        self.found.push(Found::Built(self.scratch.len()));
+        self.scratch.push(row);
+    }
+
+    /// How many rows this get has found so far
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.found.len()
+    }
+
+    /// Whether this get has found no rows at all
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.found.is_empty()
+    }
+
+    /// Record that everything found since the last call came from this partition
+    ///
+    /// Called once per partition the get visited, whether or not it gave anything, so the caller
+    /// does not have to remember where each run started. A partition that gave nothing closes no
+    /// group, which is the same rule [`GetRows::from_slots`] follows.
+    ///
+    /// # Arguments
+    ///
+    /// * `partition` - The partition the rows found since the last close came from
+    pub fn close_group(&mut self, partition: u64) {
+        // a partition that gave nothing is an absence rather than an empty group
+        let len = self.found.len() - self.run_started_at;
+        if len > 0 {
+            self.groups.push(RowGroup {
+                partition,
+                len: len as u64,
+            });
+        }
+        self.run_started_at = self.found.len();
+    }
+
+    /// How many of the rows this get found it had to build rather than point at
+    ///
+    /// This is the number [O2](../../../docs/src/appendix/optimizations.md) is about. A get that
+    /// named no projection and read only resident partitions builds **none** of its rows, and a
+    /// test asserts exactly that — the entry's claim is a count, so it is checked as one rather
+    /// than inferred from a benchmark.
+    #[must_use]
+    pub fn built(&self) -> usize {
+        self.scratch.len()
+    }
+
+    /// Visit every row this get found, wherever it lives
+    ///
+    /// # Arguments
+    ///
+    /// * `self` - The sink to walk
+    pub fn iter(&self) -> impl Iterator<Item = &P> {
+        self.found.iter().map(|found| match found {
+            Found::Resident(row) => *row,
+            Found::Built(at) => &self.scratch[*at],
+        })
+    }
+
+    /// Take every row this get found as an owned row, cloning the ones it borrowed
+    ///
+    /// This is what a get that cannot answer where its rows lie uses — one that parked on a disk
+    /// read, or one answering a share of a split get. Cloning a borrowed row here costs exactly
+    /// what `P::from_row` cost before it was borrowed, so the path this feeds is no worse than it
+    /// was; it is simply no better either.
+    #[must_use]
+    pub fn into_owned(self) -> Vec<P>
+    where
+        P: Clone,
+    {
+        // the built rows come out in the order they went in, which is the order they are named in
+        let mut built = self.scratch.into_iter();
+        self.found
+            .into_iter()
+            .map(|found| match found {
+                Found::Resident(row) => row.clone(),
+                Found::Built(_) => built
+                    .next()
+                    .expect("every built row was pushed to the scratch space it is indexed into"),
+            })
+            .collect()
+    }
+
+    /// Point at every row this get found, wherever it lives, with the index naming its partitions
+    ///
+    /// The borrow is the sink's rather than the partition's, because a built row lives in the
+    /// sink. That is what obliges the reply to be serialized while the sink is still alive, and
+    /// is the reason a get that has to park cannot take this path at all.
+    #[must_use]
+    pub fn rows(&self) -> GetRows<RowRef<'_, P>> {
+        let rows = self
+            .found
+            .iter()
+            .map(|found| match found {
+                Found::Resident(row) => RowRef::new(*row),
+                Found::Built(at) => RowRef::new(&self.scratch[*at]),
+            })
+            .collect();
+        GetRows {
+            rows,
+            groups: self.groups.clone(),
+        }
+    }
+}
+
 /// The gets a table has parked while it waits for their partitions to be read from disk
 ///
 /// A get can be answered with whole rows or with any of its tables projections, so what a
@@ -282,6 +477,19 @@ impl PendingGets {
             // this query has never been executed before so start it off
             None => PendingGet::new(partition_keys, limit),
         }
+    }
+
+    /// Whether this get has already run once and parked on a partition read
+    ///
+    /// A get that has parked cannot be answered out of borrowed rows: what it found on its
+    /// earlier passes is owned and outlives the execution that found it, which is the whole
+    /// reason it could be parked at all.
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The query id and index of the get being executed
+    pub fn is_parked(&self, key: &(Uuid, usize)) -> bool {
+        self.parked.contains_key(key)
     }
 
     /// Park a get until the partitions it is still waiting on have been read

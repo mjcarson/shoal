@@ -137,6 +137,14 @@ pub(super) fn add(
             /// The whole row is the projection a get gets when it names none
             const PROJECTION: #projection_enum = #projection_enum::Full;
 
+            /// A row is its own identity projection, so a resident one is answered where it lies
+            ///
+            /// This is the one impl in the system that can set this, because it is the one where
+            /// `Self::Row` and `Self` are the same type. A get that named no projection therefore
+            /// answers with the rows the partition already holds rather than with clones of them
+            /// ([O2](../../../docs/src/appendix/optimizations.md)).
+            const IDENTITY: Option<fn(&#name) -> &Self> = Some(|row| row);
+
             /// Build a whole row from a resident one, which is a clone
             ///
             /// # Arguments

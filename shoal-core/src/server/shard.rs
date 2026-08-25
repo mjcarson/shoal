@@ -33,7 +33,7 @@ use std::{collections::HashMap, io::IoSlice};
 use tracing::{event, instrument, Level, Span};
 use uuid::Uuid;
 
-use super::messages::{QueryMetadata, ServerMsg};
+use super::messages::{Answer, QueryMetadata, ServerMsg};
 use super::request_body::RequestBody;
 use super::database::ShoalDatabase;
 use super::ring::Ring;
@@ -1262,6 +1262,35 @@ where
         // this is a whole row through rkyv rather than a queue hop, so it is one of the few
         // stages on the get path large enough to be worth measuring on its own
         stamps.mark_replied();
+        // and hand the bytes on the same way an answer serialized in the table is
+        self.reply_sealed(client, query_id, span, stamps, archived)
+            .await
+    }
+
+    /// Send a reply that has already been serialized back to the client
+    ///
+    /// A get whose partitions are all resident is serialized inside the table that found its
+    /// rows, because those rows cannot outlive the scan
+    /// ([O2](../../../docs/src/features/grouped-responses.md)). Its bytes arrive here having
+    /// already been stamped `exec_done` and `replied`, so this is [`Self::reply`] with the
+    /// serialize taken out - and [`Self::reply`] is now written in terms of it, so there is one
+    /// path to the relay rather than two.
+    ///
+    /// # Arguments
+    ///
+    /// * `client` - The client to send this reply to
+    /// * `query_id` - The id of the query being answered
+    /// * `span` - The span to reply under
+    /// * `stamps` - When this query reached each stage so far, and its index
+    /// * `archived` - The serialized response
+    async fn reply_sealed(
+        &mut self,
+        client: Uuid,
+        query_id: Uuid,
+        span: Span,
+        mut stamps: StageStamps,
+        archived: rkyv::util::AlignedVec<16>,
+    ) -> Result<(), ServerError> {
         // get this clients channel to send replies over
         match self.client_map.get(&client) {
             Some(client_tx) => {
@@ -1405,8 +1434,20 @@ where
         gathered_meta: Option<QueryMetadata>,
     ) -> Result<(), ServerError> {
         // try to handle this query
-        if let Some((addr, query_id, mut stamps, response)) = self.tables.handle(meta, query).await
-        {
+        if let Some((addr, query_id, mut stamps, answer)) = self.tables.handle(meta, query).await {
+            // an answer the table already serialized has nothing left to do here but be sent
+            //
+            // it stamped `exec_done` and `replied` itself, on either side of the serialize it
+            // ran while the rows were still in the partitions holding them
+            // ([O2](../../../docs/src/features/grouped-responses.md)). And it can only be a
+            // whole answer owed to a client, never a share, because a share has to be merged
+            // somewhere else and bytes cannot be
+            let Answer::Open(response) = answer else {
+                let Answer::Sealed(archived) = answer else {
+                    unreachable!("an answer is either open or sealed")
+                };
+                return self.reply_sealed(addr, query_id, span, stamps, archived).await;
+            };
             // record that this queries synchronous work is finished
             //
             // a query that parks on the intent log returns nothing here and stamps its own

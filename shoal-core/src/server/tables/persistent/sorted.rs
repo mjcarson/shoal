@@ -23,7 +23,10 @@ use std::sync::Arc;
 use tracing::{event, instrument, Level, Span};
 use uuid::Uuid;
 
-use crate::server::messages::{LoadedPartition, QueryMetadata, ServerMsg};
+use crate::server::messages::{Answer, LoadedPartition, QueryMetadata, SealReply, ServerMsg};
+use crate::server::tables::persistent::{open, PendingGet, RowSink};
+use crate::shared::protocol::error::ErrorCode;
+use crate::shared::row_ref::RowRef;
 use crate::server::stage_profile::{StageOp, StageStamps};
 use crate::server::tables::partitions::SortedPartition;
 use crate::server::tables::persistent::{
@@ -518,7 +521,8 @@ where
         &mut self,
         mut meta: QueryMetadata,
         query: SortedQuery<R>,
-    ) -> Option<(Uuid, Uuid, StageStamps, Response<P>)> {
+        seal: SealReply<P>,
+    ) -> Option<(Uuid, Uuid, StageStamps, Answer<Response<P>>)> {
         // tag this record with what kind of query it came from
         //
         // this is the only layer that knows for certain which op ran, and the kinds are kept
@@ -539,15 +543,18 @@ where
         // execute the correct query type
         let answered = match query {
             // insert a row into this partition
-            SortedQuery::Insert { row, .. } => self.insert(meta, row).await,
+            SortedQuery::Insert { row, .. } => open(self.insert(meta, row).await),
             // get a row from this partition
-            SortedQuery::Get(get) => self.get(meta, &get).await,
+            //
+            // the only query that can answer with rows, and so the only one that can answer
+            // with rows it did not have to copy first
+            SortedQuery::Get(get) => self.get(meta, &get, seal).await,
             // delete a row from this partition
-            SortedQuery::Delete { key, sort_key } => self.delete(meta, key, sort_key).await,
+            SortedQuery::Delete { key, sort_key } => open(self.delete(meta, key, sort_key).await),
             // update a row in this partition
-            SortedQuery::Update(update) => self.update(meta, update).await,
+            SortedQuery::Update(update) => open(self.update(meta, update).await),
             // check if data exists in this partition
-            SortedQuery::Exists(exists) => self.exists(meta, &exists).await,
+            SortedQuery::Exists(exists) => open(self.exists(meta, &exists).await),
         };
         // swap the answer this execution produced for the failure it was released with
         //
@@ -645,7 +652,13 @@ where
         &mut self,
         meta: QueryMetadata,
         get: &SortedGet<R>,
-    ) -> Option<(Uuid, Uuid, StageStamps, Response<P>)> {
+        seal: SealReply<P>,
+    ) -> Option<(Uuid, Uuid, StageStamps, Answer<Response<P>>)> {
+        // a get this shard can answer out of the rows it is already holding is serialized where
+        // they lie, rather than copied into a response and serialized from that
+        if self.can_answer_in_place(&meta, get) {
+            return Some(self.get_sealed::<P>(meta, get, seal));
+        }
         // pick this get up where its last execution left off, or start it fresh
         //
         // a get blocked on a partition is replayed once that partition has been read, so the
@@ -695,7 +708,7 @@ where
             // these rows are this partitions alone, so the limit stops each partition after
             // its own first `limit` rows rather than stopping the get at the first partition
             // that happens to fill it
-            let mut rows = Vec::default();
+            let mut rows = RowSink::default();
             // a partition we have never seen and that is not on disk has no rows to give
             if resident {
                 // SAFETY: we looked this partition up above and have not touched the map since
@@ -703,7 +716,9 @@ where
                     partition.get(get, &mut seek, &mut rows);
                 }
             }
-            pending.fill(rank, rows);
+            // this get has to outlive the scan that found these rows, so they are taken as owned
+            // rows here rather than pointed at
+            pending.fill(rank, rows.into_owned());
         }
         // hold this get until every partition it named has been read
         if pending.is_pending() {
@@ -730,7 +745,138 @@ where
             data: action,
             end: meta.end,
         };
-        Some((meta.client, meta.id, meta.stamps, response))
+        Some((meta.client, meta.id, meta.stamps, Answer::Open(response)))
+    }
+
+    /// Whether this get can be answered out of the rows this shard is already holding
+    ///
+    /// Four things stop it, and each of them for the same reason: the rows would have to outlive
+    /// the scan that found them.
+    ///
+    /// * a **share of a split get** travels to the shard collecting it, to be merged there;
+    /// * a **parked get** is picked back up on a later execution, carrying what it already found;
+    /// * a get naming a partition that **is not resident** is about to park on reading it;
+    /// * so is one naming a resident partition that **may still have rows on disk**.
+    ///
+    /// The last two are read out of the map with the same expression the scan below uses, so the
+    /// decision and the scan cannot come to different conclusions about the same partition.
+    ///
+    /// # Arguments
+    ///
+    /// * `meta` - The metadata of the get being executed
+    /// * `get` - The get being executed
+    fn can_answer_in_place(&self, meta: &QueryMetadata, get: &SortedGet<R>) -> bool {
+        // a share of a split get is owed to another shard rather than to a client
+        if meta.gather.is_some() {
+            return false;
+        }
+        // a get that has already parked holds rows from an execution that has ended
+        if self.pending_data.is_parked(&(meta.id, meta.index)) {
+            return false;
+        }
+        // and none of the partitions it names may still have rows we have not read
+        get.partition_keys
+            .iter()
+            .all(|key| !self.partition_needs_disk(key))
+    }
+
+    /// Whether a partition this get named might still have rows on disk
+    ///
+    /// The one place either path decides this, so that
+    /// [`Self::can_answer_in_place`] and the scan it guards cannot disagree about a partition.
+    ///
+    /// # Arguments
+    ///
+    /// * `partition_key` - The partition to judge
+    fn partition_needs_disk(&self, partition_key: &u64) -> bool {
+        match self.partitions.get(partition_key) {
+            // a loaded partition may still have rows in an archive we have not read yet
+            Some(MaybeLoaded::Loaded { partition, .. }) => partition.check_disk,
+            // an accessible partition is already the copy from disk
+            Some(MaybeLoaded::Accessible(_)) => false,
+            // a partition we have never seen may still be on disk
+            None => true,
+        }
+    }
+
+    /// Answer a get out of the rows this shard is already holding
+    ///
+    /// The rows never become owned values: they are pointed at where the partitions hold them,
+    /// and the reply is serialized from those pointers while the scan's borrow is still alive.
+    /// That is [O2](../../../docs/src/appendix/optimizations.md)'s resident half — a row a get
+    /// returns is copied once, into the buffer that goes to the client, rather than once into a
+    /// response and again into that buffer.
+    ///
+    /// A partition that is still an archive is the exception, and the half of that entry this
+    /// does not close: what it holds is `Archived<R>`, and there is no `R` to point at, so those
+    /// rows are built as they always were. A get mixing the two answers with the rows it can
+    /// borrow and the rows it had to build, side by side.
+    ///
+    /// Only [`Self::can_answer_in_place`] may send a get here, and it is the reason nothing in
+    /// this function can park, block or take `&mut self`.
+    ///
+    /// # Arguments
+    ///
+    /// * `meta` - The metadata of the get being answered
+    /// * `get` - The get to answer
+    /// * `seal` - How to serialize the reply into the response kind this table answers in
+    fn get_sealed<'a, P: ShoalProjection<Row = R>>(
+        &'a self,
+        mut meta: QueryMetadata,
+        get: &'a SortedGet<R>,
+        seal: SealReply<P>,
+    ) -> (Uuid, Uuid, StageStamps, Answer<Response<P>>) {
+        // the archived forms of this gets keys, built the first time one is needed
+        let mut seek = None;
+        // point at the rows each named partition holds, in the order they were named
+        let mut sink = RowSink::default();
+        for partition_key in &get.partition_keys {
+            // once we hold every row this get asked for, nothing later can reach the answer
+            if get.limit_reached(sink.len()) {
+                break;
+            }
+            // a partition that needs a disk read cannot be here - can_answer_in_place checked
+            if let Some(partition) = self.partitions.get(partition_key) {
+                partition.get(get, &mut seek, &mut sink);
+            }
+            // close this partitions run, whether or not it gave anything
+            sink.close_group(*partition_key);
+        }
+        // build the answer out of what we found, still where we found it
+        let mut rows = sink.rows();
+        if let Some(limit) = get.limit {
+            rows.truncate(limit);
+        }
+        let action = if rows.is_empty() {
+            ResponseAction::Get(None)
+        } else {
+            ResponseAction::Get(Some(rows))
+        };
+        // this get's synchronous work ends here, before the serialize rather than after it
+        meta.stamps.mark_exec_done();
+        // serialize the reply while the rows are still where this scan found them
+        let sealed = seal(Response {
+            id: meta.id,
+            index: meta.index,
+            data: action,
+            end: meta.end,
+        });
+        // record what serializing this response cost, the same stage `Shard::reply` stamps
+        meta.stamps.mark_replied();
+        // a reply that cannot be serialized is answered as a failure rather than dropped
+        let answer = match sealed {
+            Ok(bytes) => Answer::Sealed(bytes),
+            Err(error) => Answer::Open(Response {
+                id: meta.id,
+                index: meta.index,
+                data: ResponseAction::Error(ResponseError::new(
+                    ErrorCode::Internal,
+                    format!("a response could not be serialized: {error}"),
+                )),
+                end: meta.end,
+            }),
+        };
+        (meta.client, meta.id, meta.stamps, answer)
     }
 
     /// Check if data exists in some partitions

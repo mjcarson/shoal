@@ -1725,3 +1725,50 @@ freshness table says a layer is stale. A row that could be labelled "re-measured
 table. Filed as work rather than fixed here, in [TODOs](todos.md).
 
 
+
+### 80. A sorted partition that was never on disk asks storage about it on every get
+
+`PersistentTable::block_on_load` (`shoal-core/src/server/tables/persistent/sorted.rs:476`) asks
+storage to load a partition, and when it is told there is nothing to load it returns `false` and
+**does not record that answer**:
+
+```rust
+// if this partition has no data on disk then there is nothing to wait for
+if !will_load {
+    return false;
+}
+```
+
+`SortedPartition::check_disk` starts `true` (`partitions.rs:474`) and is only ever cleared by
+`merge` (`:799`) or by a partition arriving from a read (`sorted.rs:1062`, `:1513`). None of those
+happens when the answer was "there is nothing on disk". So a sorted partition that has only ever
+been written to keeps `check_disk` set for its whole life, and **every get of it makes a
+`load_partition` call that can only ever fail**.
+
+Two costs, and the second is the larger one.
+
+- The lookup itself, on every get of every unflushed partition, for an answer that cannot change
+  until something writes that partition to disk.
+- **It is what stops the sorted table ever answering a get in place.**
+  [F27](../features/grouped-responses.md) serializes a get's reply out of the rows the partition
+  is holding, and refuses to when a partition might still have rows on disk — correctly, since
+  such a get is about to park. A flag that is set and never cleared makes that refusal permanent,
+  so the sorted half of [O2](optimizations.md#o2-every-returned-row-is-copied-at-least-twice) is
+  built, tested and unreachable in the one case it was built for. The unsorted table has no such
+  flag and does answer in place.
+
+**Evidence: reproduced.** A probe on the borrowing path, then
+`a_repeated_get_answers_the_same_rows_and_names_their_partition` in
+`shoal/tests/persistent_sorted_table.rs` — which inserts four rows and gets them twice — reached
+it **zero** times. The same probe on the unsorted table's borrowing path is reached **ten** times
+across `persistent_unsorted_table.rs`. Found while checking that F27's new path was taken at all
+rather than merely compiled, which is the only reason it was noticed: nothing fails, and both
+paths answer identically.
+
+**Fix direction:** clearing `check_disk` when `load_partition` reports nothing to load is the
+obvious move and is **not obviously correct**, which is why it is filed rather than done. The
+question is whether a partition can acquire rows on disk that the in-memory copy does not already
+have. A flush writes rows that were inserted through this partition, so the copy in memory is a
+superset — but compaction and archive rotation also write, and whether either can produce an
+archive holding a row this partition never saw is the thing to establish before flipping it. If it
+cannot, the flag should be cleared here and the sorted table gains the borrowing path for free.

@@ -10,7 +10,8 @@ use uuid::Uuid;
 use super::request_body::RequestBody;
 use super::shard::{ShardContact, ShardInfo};
 use super::stage_profile::{StageStamps, Stamp};
-use crate::shared::responses::ResponseError;
+use crate::shared::responses::{Response, ResponseError};
+use crate::shared::row_ref::RowRef;
 use crate::server::database::ShoalDatabase;
 use crate::shared::traits::{QuerySupport};
 
@@ -123,6 +124,37 @@ impl QueryMetadata {
         )
     }
 }
+/// How to turn a borrowed reply into the bytes a client is sent
+///
+/// A reply built out of rows the table is still holding has to be serialized before that borrow
+/// ends, and only the generated response enum knows which variant the rows belong in. So the
+/// derive hands one of these down into the table, which calls it while the rows are still where
+/// it found them.
+/// The lifetime is universal on purpose: the rows a reply borrows live only as long as the scan
+/// that found them, and a sealer bound to one particular borrow could not be called with the one
+/// the scan actually produces.
+pub type SealReply<P> = for<'row> fn(
+    Response<RowRef<'row, P>>,
+) -> Result<AlignedVec<16>, rkyv::rancor::Error>;
+
+/// What a query produced, and whether it is still a value or already bytes
+///
+/// A get whose partitions are all resident is answered out of the rows the shard already holds
+/// rather than out of copies of them ([O2](../../../docs/src/appendix/optimizations.md)). Those
+/// rows cannot outlive the scan that found them, so the table serializes the reply itself and
+/// hands back the bytes. Every other answer is still a value, because it has somewhere else to
+/// be first: a share has to be merged, and a parked get has to be picked back up.
+#[derive(Debug)]
+pub enum Answer<R> {
+    /// Serialized where the rows lay, and never copied out of it
+    ///
+    /// The stamps that come with this already carry `exec_done` and `replied`, because the
+    /// serialize those bracket happened inside the table rather than in `Shard::reply`.
+    Sealed(AlignedVec<16>),
+    /// An answer that is still a value, for a share to merge or a client to be answered with
+    Open(R),
+}
+
 
 /// The messages that can be sent over of node local mesh
 ///

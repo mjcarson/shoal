@@ -412,18 +412,19 @@ impl<R: ShoalSortedTable> SortedGet<R> {
     /// produced. A limit of zero is reached before a single row is read, so a `LIMIT 0`
     /// get scans nothing and loads nothing.
     ///
-    /// The rows are counted rather than inspected, so this is generic in what a get is being
-    /// answered with: a projected get fills its limit with the same number of rows an
-    /// unprojected one does.
+    /// The rows are counted rather than inspected, so this says nothing about what a get is
+    /// being answered with: a projected get fills its limit with the same number of rows an
+    /// unprojected one does, and a get answering with rows it borrowed fills it with the same
+    /// number as one answering with copies.
     ///
     /// # Arguments
     ///
-    /// * `found` - The rows this get has found so far
-    pub fn limit_reached<P>(&self, found: &[P]) -> bool {
+    /// * `found` - How many rows this get has found so far
+    pub fn limit_reached(&self, found: usize) -> bool {
         // check whether this get was given a limit at all
         match self.limit {
             // we are done once we hold as many rows as we were asked for
-            Some(limit) => found.len() >= limit,
+            Some(limit) => found >= limit,
             // a get with no limit can never fill
             None => false,
         }

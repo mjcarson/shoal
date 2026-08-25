@@ -403,9 +403,12 @@ pub trait ShoalTableSupport:
 /// row is the deserialize a get has always done, so the unprojected path costs what it always
 /// did once these are inlined.
 ///
-/// A projection has to carry its rows partition key, because the shard collecting the shares of
+/// ~~A projection has to carry its rows partition key, because the shard collecting the shares of
 /// a split get puts the rows back in the order the query named their partitions in, and it asks
-/// each row which partition it came from to do it.
+/// each row which partition it came from to do it.~~ **No longer true.** A get's answer carries
+/// the index of the partitions its rows came from
+/// ([F27](../../../docs/src/features/grouped-responses.md)), so nothing asks a row where it came
+/// from and a projection is free to leave its table's partition key out.
 pub trait ShoalProjection:
     std::fmt::Debug + Clone + RkyvSupport + PartitionKeySupport + Sized + Send + 'static
 {
@@ -425,6 +428,19 @@ pub trait ShoalProjection:
     /// This is what a get carries over the wire, and what the database matches on to pick this
     /// type back up when the query reaches the shard that answers it.
     const PROJECTION: <Self::Row as ShoalTableSupport>::Projection;
+
+    /// How to borrow this projection out of a resident row, when it *is* that row
+    ///
+    /// The identity projection of a row is the row, so a get that named no projection can be
+    /// answered with the rows a partition already holds instead of with copies of them — which
+    /// is the whole of [O2](../../../docs/src/appendix/optimizations.md)'s resident half. Every
+    /// other projection is a strict subset of its row and has to be built, so this is `None`.
+    ///
+    /// **A projection cannot lie about this.** The only impl that sets it is the one the table
+    /// derive writes on the row itself, where `Self::Row = Self` is what makes `|row| row`
+    /// type-check at all. A projection that tried would not compile, so this is a claim the
+    /// compiler checks rather than one a reviewer has to.
+    const IDENTITY: Option<fn(&Self::Row) -> &Self> = None;
 
     /// Build this projection from a resident row
     ///

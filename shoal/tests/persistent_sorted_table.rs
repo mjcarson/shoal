@@ -114,6 +114,77 @@ async fn insert() -> Result<(), TestError> {
     Ok(())
 }
 
+/// A repeated get answers the same rows, and says which partition they came from
+///
+/// **This does not currently cross the two reply paths, and the reason is worth writing down.**
+/// A get whose partitions are all resident is serialized inside the table that found its rows
+/// ([F27](../../docs/src/features/grouped-responses.md)), and a sorted partition is only ever
+/// judged resident once something has cleared `check_disk`. Nothing clears it when the partition
+/// was never on disk in the first place: `block_on_load` asks storage, is told there is nothing
+/// to load, and returns without recording that answer, so the next get asks again. A sorted
+/// partition that has only ever been written to therefore takes the copying path for ever.
+///
+/// That was found by putting a probe on the borrowing path and watching this test never reach
+/// it. It is filed as [item 80](../../docs/src/appendix/known-issues.md), because a repeated
+/// storage lookup that can never succeed costs something on every get whether or not anything
+/// borrows rows. The unsorted table has no such flag and its borrowing path runs throughout
+/// `persistent_unsorted_table.rs`.
+///
+/// What this does check is still worth having: that a get repeated against the same rows answers
+/// the same way twice, and that the index naming their partitions survives the round trip.
+#[tokio::test]
+async fn a_repeated_get_answers_the_same_rows_and_names_their_partition() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = utils::test_dir();
+    // start a shoal server and build a client
+    let (client, pool) = utils::start::<TestDb>(&temp_dir).await?;
+    // insert several rows into one partition, so the answer has an order to get wrong
+    for sort_key in ["a", "b", "c", "d"] {
+        client
+            .send_one(TestRecord::new("partition_key", sort_key, "woot"))
+            .await?;
+    }
+    // get it once
+    let first = client
+        .send_one(TestRecordGet::new(vec!["partition_key".to_owned()]))
+        .await?;
+    let first_rows: Vec<TestRecord> = first
+        .access::<TestRecord>()?
+        .unwrap()
+        .iter()
+        .map(|row| TestRecord::deserialize(row).unwrap())
+        .collect();
+    // and again
+    let second = client
+        .send_one(TestRecordGet::new(vec!["partition_key".to_owned()]))
+        .await?;
+    let second_rows: Vec<TestRecord> = second
+        .access::<TestRecord>()?
+        .unwrap()
+        .iter()
+        .map(|row| TestRecord::deserialize(row).unwrap())
+        .collect();
+    // every row came back both times, in sort order
+    let sort_keys: Vec<&str> = first_rows.iter().map(|row| row.sort_key.as_str()).collect();
+    assert_eq!(sort_keys, vec!["a", "b", "c", "d"]);
+    // and the two answers agree about every one of them
+    assert_eq!(
+        first_rows, second_rows,
+        "the same get against the same rows answered differently the second time"
+    );
+    // and the index naming where those rows came from survived the round trip
+    let groups: Vec<u64> = second
+        .groups::<TestRecord>()?
+        .unwrap()
+        .iter()
+        .map(|group| group.len.to_native())
+        .collect();
+    assert_eq!(groups, vec![4]);
+    // Shutdown server
+    pool.exit()?;
+    Ok(())
+}
+
 /// Test inserting and exists queries work in shoal
 #[tokio::test]
 async fn exists_true() -> Result<(), TestError> {
