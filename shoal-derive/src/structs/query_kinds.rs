@@ -75,6 +75,8 @@ pub fn add(
     let query_ident = format_ident!("{}QueryKinds", struct_ident);
     let response_ident = format_ident!("{}ResponseKinds", struct_ident);
     let archived_response_ident = format_ident!("Archived{}ResponseKinds", struct_ident);
+    // the borrowed mirror of the response enum, which a shard serializes a resident get through
+    let response_ref_ident = format_ident!("{}ResponseKindsRef", struct_ident);
     let archived_query_ident = format_ident!("Archived{}QueryKinds", struct_ident);
     // Generate QueryKinds enum variants
     let query_variants = tables.iter().map(|table| {
@@ -111,6 +113,26 @@ pub fn add(
         .chain(projected.iter().map(|projection| {
             quote! {
                 #projection(::shoal::shared::responses::Response<#projection>)
+            }
+        }));
+    // Generate the borrowed mirror of those variants, in the same order
+    //
+    // Each one holds `Response<RowRef<'a, X>>` where the owned enum holds `Response<X>`. Because
+    // `RowRef`'s archived type *is* the row's archived type, the two enums archive to the same
+    // bytes - same discriminants, since the variants are generated from one list in one order,
+    // and same payload, since the row type only ever appears through its archived form
+    let response_ref_variants = tables
+        .iter()
+        .map(|table| {
+            let variant = &table.variant_ident;
+            let inner = &table.inner_type;
+            quote! {
+                #variant(::shoal::shared::responses::Response<::shoal::shared::row_ref::RowRef<'a, #inner>>)
+            }
+        })
+        .chain(projected.iter().map(|projection| {
+            quote! {
+                #projection(::shoal::shared::responses::Response<::shoal::shared::row_ref::RowRef<'a, #projection>>)
             }
         }));
     // Generate response_query_id match arms
@@ -383,6 +405,26 @@ pub fn add(
         #[derive(Debug, ::shoal::rkyv::Archive, ::shoal::rkyv::Serialize, ::shoal::rkyv::Deserialize)]
         pub enum #response_ident {
             #(#response_variants),*
+        }
+
+        /// The same responses, borrowing their rows from wherever the table already holds them
+        ///
+        /// A get whose partitions are all resident is answered out of the rows the shard is
+        /// holding rather than out of copies of them, which is
+        /// [O2](../../../docs/src/appendix/optimizations.md). Serializing one of these writes
+        /// exactly what serializing the owned enum above would have written, because every
+        /// variant differs from its twin only in `RowRef`, whose archived type is the row's own.
+        ///
+        /// There is no `Deserialize`, and there must not be: nothing reads this shape back. The
+        /// client reads the owned enum, which is what these bytes are.
+        ///
+        /// **The two enums must keep the same variants in the same order.** rkyv writes a
+        /// variant's position as its discriminant, so a variant added to one and not the other
+        /// silently renames every variant after it. They are generated from one list here, and a
+        /// test archives every variant of both and compares the bytes.
+        #[derive(Debug, ::shoal::rkyv::Archive, ::shoal::rkyv::Serialize)]
+        pub enum #response_ref_ident<'a> {
+            #(#response_ref_variants),*
         }
 
         #[automatically_derived]
