@@ -258,6 +258,31 @@ compare the two shapes at the one thing they do identically:
 rather than anything about the serialize: the clone is O(rows) and so is the serialize, so past a
 few hundred rows the two scale together and the ratio settles just under ×9.
 
+**And the scan itself, which is the number this feature is actually about.** Against the trailing
+capture, the resident partition scans:
+
+| Benchmark | before | after | |
+| --- | ---: | ---: | ---: |
+| `partition_sorted/get_all/4096` | 210.66 µs | 7.55 µs | **−96.4%** |
+| `partition_sorted/get_all/1024` | 52.17 µs | 1.89 µs | −96.4% |
+| `partition_sorted/get_all/256` | 12.87 µs | 0.57 µs | −95.6% |
+| `partition_sorted/get_range_64/1024` | 3.05 µs | 0.19 µs | −93.9% |
+| `partition_sorted/get_all/16` | 536.07 ns | 74.99 ns | −86.0% |
+| `partition_sorted/get_key/1024` | 35.22 ns | 28.79 ns | −18.3% |
+
+A scan that no longer clones the rows it returns costs a twenty-eighth of what it did at 4096
+rows. The floor it is approaching is the filter and the walk, which is all that is left once the
+copy is gone — which is also why the single-key gets move by 18% rather than by 96%: one row's
+clone against the seek that found it is a much smaller share.
+
+**The same capture found a regression, on the path that gains nothing.** The archived scans rose
+5–14% — `maybe_loaded/get_range_64/16` +14.0%, `get_key/256` +11.3%, `archived/walk_all/16` +9.3%
+— because `RowSink::push_built` wrote to two vectors where the old code wrote to one. An archive
+holds no row to point at, so every row there is built, and the index recording that carries
+nothing. It is now not written until a row is actually pointed at. Measured again as
+`f27-row-sink`; `f27-grouped-responses` is kept as the capture that shows the regression, because
+a fix with no before is an assertion.
+
 The predictions written down before the capture, which stand:
 
 - `execute` falls on the read arms of the width sweep — the `P::from_row` clone is gone — and
