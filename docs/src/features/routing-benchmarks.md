@@ -32,9 +32,18 @@ are both public API, so unlike `partitions` this needs no `bench` feature and ru
 | `routing/ring_new` | the same | what building a ring costs, once per server start |
 | `routing/split_by_shard/get` | 1, 2, 4, 16, 64, 256 keys | what splitting a multi-partition get costs, as a curve in the key count |
 | `routing/split_by_shard/write` | the same key counts | **the control** — a write names one partition whatever the get beside it named |
+| `routing/route_archived/get` | the same key counts | the same split, off the archive rather than off a deserialized query — **the live path** since [F26](archive-routed-requests.md) |
+| `routing/route_archived/write` | the same key counts | the control for that one, and the cleanest reading of what F26 is worth |
 
 The key counts are `macro/fanout/{resident,evicted}/n`'s own values, deliberately, so the isolated
 cost measured here and the end-to-end curve measured there describe the same points.
+
+**The last two arms were added by [F26](archive-routed-requests.md)**, which made the coordinator
+route a bundle without deserializing it. They are deliberately the same shape and the same axis as
+the `split_by_shard` pair above, because the value is in the difference between the pairs — what
+routing from the archive costs per query, before the deserialize F26 moved off the coordinator is
+counted at all. Both pairs sit on the same `group_by_shard`, so [O39](../appendix/optimizations.md)
+bends all four curves and a fix to the dedup scan has to show in all four.
 
 ### What it found
 
@@ -133,9 +142,14 @@ benchmark host's `shoal.yml` resolves to and is the ring every other number on t
 
 ## Invariants to uphold
 
-- **The control must stay flat.** If `routing/split_by_shard/write` starts moving with its
-  parameter, it has stopped being a control and no reading of the get arm is safe until it is
-  understood. Its parameter is deliberately ignored by the code under it.
+- **The control must stay flat.** If `routing/split_by_shard/write` — or
+  `routing/route_archived/write` beside it — starts moving with its parameter, it has stopped
+  being a control and no reading of the get arm is safe until it is understood. Its parameter is
+  deliberately ignored by the code under it.
+- **The two pairs must keep measuring the same decision.** `split_by_shard` is no longer on the
+  live path ([F26](archive-routed-requests.md)) and is kept precisely so that `route_archived` has
+  something to be read against. Deleting it, or letting the two drift apart, costs this file its
+  only baseline and costs `shoal/tests/archive_routing.rs` its oracle.
 - **The key counts must stay `macro/fanout`'s.** The value of these two curves is that they describe
   the same points; changing one axis and not the other silently ends that.
 - **The keys must stay distinct**, or the benchmark measures the opposite of what it is for.
@@ -154,12 +168,17 @@ This benchmark measures; it changes no shipped code. `shoal/benches/routing.rs` 
 `shoal/Cargo.toml` are the whole diff, so no capture is invalidated and no workload fingerprint
 moves.
 
+[F26](archive-routed-requests.md) later added two arms to this file. That *does* invalidate micro
+captures of it — the file is in the micro layer's source list — which is correct, since the set of
+benchmarks it holds changed.
+
 ## Tests
 
 | Test | What breaks if this is reverted |
 | --- | --- |
 | `cargo bench -p shoal --bench routing` | the routing layer has no coverage at all again |
 | `routing/split_by_shard/write` | the get arm's curve has no control, so a change in the binary's shape reads as a change in the dedup scan |
+| `routing/route_archived/{get,write}` | the live routing path has no isolated measurement, and F26's cost can only be read end to end |
 | `routing/find_shard` | nothing checks that the tablet ring still answers in constant time, which is the entire property it was built for |
 | `registry::criterion_list::tests::every_bench_target_is_declared_and_exists` | a bench target in `shoal/Cargo.toml` that `BENCH_TARGETS` does not name is silently undiscoverable — which is what happened to this one |
 | `fingerprint::tests::every_source_the_manifest_names_exists` | the sources a layer measures can move without the staleness list following, as they did in [Resolved #78](../appendix/resolved/sources-manifest-drift.md) |

@@ -129,7 +129,11 @@ answer as a union — the defect being fixed.
 
 - **Partition keys reaching a table are unique.** `group_by_shard` deduplicates, and
   `PendingGet::rank` relies on a key naming at most one slot. A new path that hands a get to a
-  table without going through `split_by_shard` has to deduplicate for itself.
+  table without going through it has to deduplicate for itself.
+  [F26](../../features/archive-routed-requests.md) added a second caller — `route_archived`, which
+  is now the live one — and it calls the same `group_by_shard`, so the guarantee is unchanged and
+  comes from the same place. ~~without going through `split_by_shard`~~ was the wording when there
+  was only one caller.
 - **A slot is filled exactly once, and every slot is filled before answering.** `is_pending`
   gates the response on it. A path that leaves a slot unfilled without registering a read for it
   hangs the query; one that fills a slot whose read is still in flight answers twice.

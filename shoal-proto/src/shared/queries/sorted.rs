@@ -367,8 +367,11 @@ impl<R: ShoalSortedTable> SortedGet<R> {
     /// narrowed get that is handed a partly filled response vec still stops in the
     /// right place.
     ///
-    /// The selection is passed in rather than copied because it is normalized once, where
-    /// this query entered the server, instead of once per shard it is split to.
+    /// The selection is passed in rather than copied because the caller has already normalized
+    /// it. That used to happen once, on the coordinator, where the query entered the server;
+    /// since F26 the coordinator does not deserialize a query and so has no selection to
+    /// normalize, and `ArchivedShardRouting::narrow_to` does it on the shard that executes the
+    /// query instead - which is once per shard a get was split to rather than once per get.
     ///
     /// # Arguments
     ///

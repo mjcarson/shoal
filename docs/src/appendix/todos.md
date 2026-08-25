@@ -1129,15 +1129,55 @@ zeroes over a buffer the read on the next line overwrites. Two things it deliber
   `base.since(client.written)` — beside real wire time, and nothing separates them. That is why
   `f24-routing`'s `decode` ×199 was read as locating O29 when it could not: there is no stage there
   to look at. A `body_read` stamp taken before the allocation, with `base` kept where it is, would
-  make the read a stage of its own without moving the meaning of any existing offset. It is the
-  twentieth stage rather than a change to nineteen, and it would need a family entry and a column
-  on the stage tables. **Not taken here** because the entry it would have measured is now closed and
+  make the read a stage of its own without moving the meaning of any existing offset. ~~It is the
+  twentieth stage rather than a change to nineteen~~ ~~— it is the **twenty-first** now, since
+  [F26](../features/archive-routed-requests.md) took the twentieth for `query_decode`.~~ It is the
+  **twenty-second**: F26 took the twentieth for `query_decode` and the twenty-first went to
+  `partition_wait`, the disk wait that splitting the decode out of `execute` left with no stage to
+  belong to. It would
+  need a family entry and a column on the stage tables. **Not taken here** because the entry it would have measured is now closed and
   the micro layer answers it directly; it is worth building the next time something on that read
   path is in question.
 
 - **The error frame's `vec![0u8; msg_len + ..]`.** The same shape on the client, bounded at four
   kibibytes by the protocol's message bound, so it is not asymptotic in anything and not what
   either entry was about. Left alone on purpose.
+
+### What F26 left undone
+
+[F26](../features/archive-routed-requests.md) closed
+[O1](optimizations.md#o1-queries-are-fully-deserialized-on-arrival) by making the coordinator route
+a bundle without deserializing it. The query is still deserialized — once, on the shard that
+executes it, instead of once plus a clone on the coordinator.
+
+**Executing against the archive.** The full form of O1: the table layer reads filters, sort keys
+and rows straight out of `&ArchivedQueryKinds` and a query is never deserialized at all. This is
+where the rest of that entry's cost lives, and it is a different size of change — `XL` rather than
+`L`. It reaches every table method, both partition kinds, and the derive's filter and update
+codegen, because each of those names the owned type today.
+
+Three things are worth knowing before anyone starts:
+
+- **The ceiling is lower than it looks.** An insert needs an owned row to put in its partition map
+  whatever the query layer does, so the write path's copy does not go away — it moves to the point
+  of insertion. What this would buy is on the *read* path, where a get's filters and sort keys are
+  read and discarded.
+- **It wants [O2](optimizations.md) beside it.** O2 is the response half and is the larger entry;
+  a design pass that makes the table layer archive-aware in one direction and not the other is
+  doing the harder half of the work twice.
+- **`narrow_to` becomes the awkward part.** Narrowing an archived query means either building an
+  owned one after all — which is what this is trying to avoid — or carrying the shard's key set
+  alongside the archive and having every scan filter against it. The second is probably right and
+  is a change to how a get names its partitions, not just to where it is decoded.
+
+Filed rather than kept on the optimizations page, because it is a missing capability with a design
+attached rather than a defect: the code does what it means to do.
+
+**The fan-out get is now deserialized once per shard.** Stated as a limitation on F26's page rather
+than as work, because it is close to a wash — a filter-set clone and a filter-set deserialize are
+the same allocations — and because measuring it needs a workload that fans one *wide-filtered* get
+across many shards, which none does. If the capture shows fan-out arms regressing, this is the
+first place to look.
 
 ### Archive checksums
 

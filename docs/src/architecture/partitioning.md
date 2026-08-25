@@ -145,32 +145,46 @@ Full reasoning in [items 11, 12 and 37](../appendix/resolved/tablet-ring.md).
 
 ## Query fan-out
 
-Routing happens in the coordinator shard, per query in the bundle:
+Routing happens in the coordinator shard, per query in the bundle, and it happens **without
+deserializing the query** ([F26](../features/archive-routed-requests.md)):
 
 ```rust
-kind.split_by_shard(&self.ring, &mut found);
+QueryKinds::route_archived(kind, &self.ring, &mut found);
 ```
 
-`shoal-core/src/server/shard.rs:505`
+`shoal-core/src/server/shard.rs`, `Shard::send_to_shard`
 
-`split_by_shard` takes a `&mut Vec` rather than returning, because one query may be answered by
-several shards. A query naming several partition keys is **narrowed** to each shard's own keys
-rather than sent whole to every one of them:
+`route_archived` takes a `&mut Vec` rather than returning, because one query may be answered by
+several shards. It hands back, per shard, the partition keys that shard owns:
 
 ```rust
-SortedQuery::Get(get) => {
-    let sort_select = get.sort_select.normalized();
-    for (shard, keys) in group_by_shard(ring, &get.partition_keys) {
-        found.push((shard, SortedQuery::Get(get.for_partitions(keys, sort_select.clone()))));
+ArchivedSortedQuery::Get(get) => {
+    for (shard, keys) in group_by_shard(ring, &native_keys(&get.partition_keys)) {
+        found.push((shard, Some(keys)));
     }
 }
 ```
 
-`shoal-core/src/shared/queries/sorted.rs:298-327`
+`shoal-core/src/server/routing.rs`
 
-`group_by_shard` (`shared/queries.rs:61-87`) is what calls `find_shard`, once per partition key.
-It deduplicates on `mesh_id()`, so a shard owning two of a get's keys receives one query naming
-both rather than the same query twice, and a key named twice is grouped once.
+A query naming several partition keys is still **narrowed** to each shard's own keys rather than
+sent whole to every one of them — but the narrowing happens on the shard that executes it, in
+`narrow_to`, after that shard has deserialized its own query out of the shared bundle. The
+coordinator only decides.
+
+`group_by_shard` is what calls `find_shard`, once per partition key. It is unchanged and is shared
+by both routing paths. It deduplicates on `mesh_id()`, so a shard owning two of a get's keys
+receives one message naming both rather than the same query twice, and a key named twice is
+grouped once.
+
+`native_keys` is the only new cost here: a `u64` is stored little endian in an archive whatever
+the host is, so there is no slice of native keys to borrow and each one is read out. They are
+scalars sitting inline in the buffer, which is why routing a bundle of megabyte rows costs its
+keys rather than its rows.
+
+`ShardRouting::split_by_shard`, which does all of this over a deserialized query, is still there.
+It is no longer on the live path and is kept as the reference implementation the archived path is
+tested and benchmarked against.
 
 When a query is split across more than one shard, the shares come back to the splitting shard to
 be merged rather than going straight to the client, so the client is owed exactly one response

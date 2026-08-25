@@ -155,7 +155,8 @@ nothing in the copy in memory says nothing about the copy in an archive, so a pa
 `check_disk` is read before it is answered about however narrow the get is.
 
 Keys arrive sorted and deduplicated, which `SortSelect::normalized` does inside
-`SortedQuery::split_by_shard` once as the query enters the server, so seeking them in order
+`ArchivedShardRouting::narrow_to` — on the shard that executes the query, ~~once as the query
+enters the server~~ ([F26](../features/archive-routed-requests.md)) — so seeking them in order
 produces sort order. A range needs no normalizing — it is already an ordered pair — but it *is*
 checked for emptiness before either scan seeks with it, because `BTreeMap::range` panics on a range
 whose start is past its end.
@@ -239,14 +240,21 @@ if let Some((unblocked, generation)) = self.#field_ident.load_partition(loaded_k
     let mark_evict_msg = ServerMsg::MarkEvictable { generation, table, partitions: vec![id] };
     for (meta, unwrapped) in unblocked {
         let query = #query_ident::#variant_ident(unwrapped);
-        shard_local_tx.send(ServerMsg::Query { meta, query }).await.unwrap();
+        shard_local_tx.send(ServerMsg::Released { meta, query }).await.unwrap();
     }
     shard_local_tx.send(mark_evict_msg).await.unwrap();
 }
 ```
 
-Unblocked queries are re-injected as ordinary `ServerMsg::Query` messages — they take the
-normal path again, and this time the partition is resident.
+Unblocked queries are re-injected as `ServerMsg::Released` messages — they take the normal path
+again, and this time the partition is resident.
+
+~~as ordinary `ServerMsg::Query` messages~~ — they were, until
+[F26](../features/archive-routed-requests.md) made `ServerMsg::Query` carry the *bundle* a query
+arrived in rather than the query itself. A released query has no bundle to be read out of: it was
+deserialized and narrowed when it first arrived and has been sitting in the table's `blocked` map
+ever since. So the two ways into `handle_query` became two messages, and what separates them is
+which costs have already been paid — a released query is never decoded or narrowed a second time.
 
 The `MarkEvictable` is deliberately sent *after* the replayed queries:
 

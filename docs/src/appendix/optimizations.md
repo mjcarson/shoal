@@ -182,9 +182,19 @@ so they get worse by existing longer rather than under load.
 
 **Tier C — blocked on a design pass, not on effort.**
 
+**One entry has now left this tier by being built**, which is the first time that has happened
+here — Tier A's A3 was the only other entry on this page ever to leave a tier that way.
+[F26](../features/archive-routed-requests.md) did O1, and what it cost is worth recording next to
+what the tier means. "Blocked on a design pass" turned out to be accurate: the change is four
+files of plumbing and one new trait, and none of it was hard, but deciding *where* the deserialize
+should happen — on the coordinator, on the executing shard, or nowhere — was a decision no amount
+of effort substitutes for. It also found a second copy nobody had filed, which is an argument for
+scheduling the design pass rather than waiting for the entry to look actionable: the entry never
+would have, because what made it worth doing was not in the entry.
+
 | # | Entry | Impact | Diff | Depends on | Tradeoff | Adjudicable today |
 | --- | --- | --- | --- | --- | --- | --- |
-| **C1** | [**O1**](#o1-queries-are-fully-deserialized-on-arrival) — zero-copy the request half | Argued | L | a `wire_codec` bench; the `BytesMut` reaching the shard | Contained | no |
+| ~~**C1**~~ | ~~[**O1**](#o1-queries-are-fully-deserialized-on-arrival) — zero-copy the request half~~ — **done**, by [F26](../features/archive-routed-requests.md) | Argued — and **understated**: there were two copies per write, not one | L | ~~a `wire_codec` bench~~ (built, [F10](../features/framing-and-protocol-evolution.md)); ~~the `BytesMut` reaching the shard~~ — it reaches it as a `Bytes` | Contained | it was not, and it was taken anyway — the design pass is what found the second copy |
 | **C1a** | [**O2**](#o2-every-returned-row-is-copied-at-least-twice) + [**O18**](#o18-the-gathered-reorder-rehashes-every-rows-partition-key), together — **now the largest established win** | **Measured per byte** — the response codec grows ×432.8 on decode, and `r100` says the read path owns the wide end | **XL** | each other; ~~a `wire_codec` bench~~ — discharged | **Major** — wire format and the client | **yes, on the per-byte half** |
 | **C3** | [**O30**](#o30-nothing-can-see-what-a-connection-costs-to-open) — the connect path is unmeasured | **Unknown, and that is the entry** | S for the workload, unknown for whatever it finds | a `connect` workload | — | **no, and that is the point** |
 | **C4** | [**O31**](#o31-the-disjointness-rule-cannot-tell-a-result-from-a-saturated-workload) — a saturated workload passes the rule that decides what is real | **Measured** — four points report encryption making queries faster | S to detect, M to decide | nothing | Contained | **yes, it already has been** |
@@ -222,12 +232,12 @@ come out as a code block.
 | **O4 → item 22** | The mismatched size bases exist *because* the size is re-derived at each site. One edit closes both |
 | **O16 raises O8, O9** | Compaction shares the query executor, so their cost is not background cost |
 | **O3 → archive checksums** | Only for the *drop validation outright* form, which [F4](../features/validated-archives.md) did **not** take. Still unpaid: validation, now once per read rather than once per query, is still the only thing between a corrupt archive and a bad pointer |
-| ~~**`wire_codec` bench → O1, O2, O18**~~ | ~~Unbuilt~~ **Discharged for O1 and O2** — built by [F10](../features/framing-and-protocol-evolution.md) and captured in `f22-row-size`. **O18 was never really on this edge**: it is *uncovered* rather than unbuilt, because no arm of `wire_codec` varies the thing it is about |
+| ~~**`wire_codec` bench → O1, O2, O18**~~ | ~~Unbuilt~~ **Discharged for O1 and O2** — built by [F10](../features/framing-and-protocol-evolution.md) and captured in `f22-row-size`. O1 has since been [done](#o1-queries-are-fully-deserialized-on-arrival). **O18 was never really on this edge**: it is *uncovered* rather than unbuilt, because no arm of `wire_codec` varies the thing it is about |
 | **table-layer bench → O5, O12, O13** | Unbuilt, and until recently believed to exist — see below. [F4](../features/validated-archives.md) closed half the gap by making `MaybeLoaded` constructible, but all three of these live a layer above it in `PersistentSortedTable` |
 | **write-path bench → O11, O21** | Unbuilt, and it is the layer that dominates the profile |
 | ~~**a width-aware `latency_buffer` sweep → O34**~~ | **Discharged.** Built by [F22](../features/row-size-benchmarks.md) and captured in `f22-row-size`; O34 is measured and O34's *shape* was corrected by it |
 | **O35 ↔ D2** | Only the interleaving form. Reordering the relay's queue needs no format change; splitting a response across frames is [D2](../direction/framing.md) |
-| **row width raises O1, O2, O11, ~~O29~~** | ~~All four~~ **Three** are per-byte costs filed as constants. They do not get worse under load — they get worse per query as the caller's rows widen ([Row size](../tables/row-size.md)). **Measured for O1 and O2** by the codec width axis; still argued for O11. ~~and O29, whose instrument is broken rather than absent~~ **O29 does not belong on this row at all**: `BytesMut::zeroed` is `alloc_zeroed`, so it is a cost the allocator may decline to pay, and it is [done](#o29-a-request-body-is-zeroed-and-then-immediately-overwritten) either way |
+| **row width raises ~~O1,~~ O2, O11, ~~O29~~** | ~~All four~~ ~~**Three**~~ **Two** are per-byte costs filed as constants. They do not get worse under load — they get worse per query as the caller's rows widen ([Row size](../tables/row-size.md)). **Measured for O1 and O2** by the codec width axis; still argued for O11. O1 is [done](#o1-queries-are-fully-deserialized-on-arrival), and this row is why it was worth doing: it was the entry on it whose cost landed on a single core. ~~and O29, whose instrument is broken rather than absent~~ **O29 does not belong on this row at all**: `BytesMut::zeroed` is `alloc_zeroed`, so it is a cost the allocator may decline to pay, and it is [done](#o29-a-request-body-is-zeroed-and-then-immediately-overwritten) either way |
 | ~~**a stage capture → O11, O29**~~ | **Discharged for O11, and never possible for O29.** `f24-routing` is the first capture taken with the repaired instrument and all four reports join completely. The breakdown at 1 KiB, 8 KiB and 512 KiB says `reply_serialize` grows **238×** on the read path and `client_serialize` **503×** on the write path, which are O11's response buffer and its client-side bundle buffer respectively. ~~and `decode` ×199 O29's `memset`~~ — O29's buffer is read *before* the bundle's clock starts, so it falls in `net_in` beside wire time and no stage isolates it ([F25](../features/read-buffers-are-filled-not-zeroed.md)) |
 | **load depth → O35** | Not a dependency so much as the reason O35 left the queue: the depth-1 ladder explains its whole observation, so nothing can rank it until something measures the relay under a bounded queue |
 
@@ -288,11 +298,46 @@ come out as a code block.
 
 ## Read path
 
-### O1. Queries are fully deserialized on arrival
+### ~~O1. Queries are fully deserialized on arrival~~
+
+**Done**, by [F26](../features/archive-routed-requests.md). The coordinator no longer deserializes
+anything: it validates the bundle once, reads the partition keys and limit straight out of the
+archive, and hands each destination shard the buffer itself as a shared `Bytes`. The shard that
+answers a query is the shard that turns it back into one.
+
+**The entry understated it, and the way it did is the useful part.** O1 counted one copy per
+query — the deserialize. There were two on every write, because `split_by_shard`'s write arms end
+in `self.clone()` and `SortedQuery::Insert { key, row }` carries the row. So an insert's row was
+deserialized out of the archive and then deep-copied again, both times on core 0. An entry filed
+by reading one function found the cost that function pays and missed the one the function it calls
+pays, which is an argument for walking the callees when filing rather than for filing less.
+
+**Two things it got right that were worth the wait.** The obstacle it named was the real one —
+`ServerMsg::Query` had to give up its owned `QueryKinds`, and that is exactly what the fix does.
+And the machinery it pointed at, `ShoalDatabase::unarchive_queries`, was indeed what this needed;
+it had been sitting callerless since it was written. It became `unsafe fn` on the way, because as
+a *safe* fn wrapping `rkyv::access_unchecked` it let any caller hand it any bytes — which is a
+defect the entry did not notice while quoting it as ready to use.
+
+**Not closed: the table layer still executes against owned queries.** The remaining copy is one per
+query rather than two, and it is paid on the shard that reads the row rather than on the
+coordinator, but it is still paid. Executing against `&ArchivedQueryKinds` reaches every table
+method and the derive's filter and update codegen, and it is filed in
+[TODOs](todos.md) rather than kept here, because it is a different entry: `XL` rather than `L`, and
+with a lower ceiling than it looks, since an insert needs an owned row for its partition map
+whatever the query layer does.
+
+**Sequencing note, now moot.** The entry asked for this to be taken together with
+[D2](../direction/framing.md) to avoid two visits to the same code. D2 landed as
+[F10](../features/framing-and-protocol-evolution.md) before this was picked up, so the two visits
+happened anyway — and the second one was cheaper for it, since F10 is what built the `wire_codec`
+benchmark this was blocked on.
+
+The original entry follows.
 
 | | |
 | --- | --- |
-| **Rank** | **C1** — blocked on a design pass |
+| **Rank** | ~~**C1** — blocked on a design pass~~ — **done**, [F26](../features/archive-routed-requests.md) |
 | **Impact** | **Measured per byte**, argued per call — `request/decode/deserialize` grows ×61.5 and `request/decode/access` ×171.5 over 64 B → 64 KiB, against a header-decode control flat to a quarter of a percent. The request half is the smaller one: the response's decode grows ×432.8 |
 | **Difficulty** | L — the `BytesMut` has to survive as far as the shard that executes the query |
 | **Depends on** | ~~A `wire_codec` bench~~ (built, [F10](../features/framing-and-protocol-evolution.md)); `ServerMsg::Query` giving up its owned `QueryKinds` |

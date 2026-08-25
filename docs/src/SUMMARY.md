@@ -87,6 +87,7 @@
   - [F23. The intent log's staging buffer sizes itself](features/self-sizing-staging-buffer.md)
   - [F24. Routing benchmarks](features/routing-benchmarks.md)
   - [F25. Read buffers are filled, not zeroed](features/read-buffers-are-filled-not-zeroed.md)
+  - [F26. Requests are routed from the archive](features/archive-routed-requests.md)
 
 # Direction
 

@@ -220,6 +220,23 @@ pub struct StageStamps {
     pub routed: Offset,
     /// When that shard dequeued it
     pub exec_dequeued: Offset,
+    /// When that shard finished turning its bytes into a query it can execute
+    ///
+    /// The coordinator hands on the bundle's buffer rather than a deserialized query
+    /// ([F26](../../../docs/src/features/archive-routed-requests.md)), so this is where a
+    /// query's own rows and filters are copied out of it. It is the per query half of what
+    /// `decoded` used to hold whole, and unlike `decoded` it is not shared with the rest of
+    /// the bundle.
+    pub query_decoded: Offset,
+    /// When the shard picked this query back up after a partition it named was read
+    ///
+    /// A get whose partition has to come off disk parks and is replayed once that read
+    /// lands, so it is dequeued twice and only the second dequeue precedes the work that
+    /// answers it. `exec_dequeued` stays on the first, because that is what `query_decode`
+    /// is measured from and a query is only ever decoded once
+    /// ([F26](../../../docs/src/features/archive-routed-requests.md)). This is unset for
+    /// every query that finished in a single pass, which is nearly all of them.
+    pub exec_resumed: Offset,
     /// When its synchronous work finished
     ///
     /// For a get that is where the response was built. For a write that is where `commit`
@@ -292,6 +309,8 @@ impl StageStamps {
             decoded: Offset::UNSET,
             routed: Offset::UNSET,
             exec_dequeued: Offset::UNSET,
+            query_decoded: Offset::UNSET,
+            exec_resumed: Offset::UNSET,
             exec_done: Offset::UNSET,
             write_submitted: Offset::UNSET,
             write_completed: Offset::UNSET,
@@ -334,6 +353,17 @@ impl StageStamps {
     stage_marker!(
         /// Record that the executing shard dequeued this query
         mark_exec_dequeued => exec_dequeued
+    );
+    stage_marker!(
+        /// Record that this query finished being deserialized on the shard executing it
+        mark_query_decoded => query_decoded
+    );
+    stage_marker!(
+        /// Record that the shard picked this query back up after a partition read landed
+        ///
+        /// Kept apart from [`Self::mark_exec_dequeued`] so that replaying a parked query
+        /// does not overwrite the moment its decode was measured from.
+        mark_exec_resumed => exec_resumed
     );
     stage_marker!(
         /// Record that this query's synchronous work finished

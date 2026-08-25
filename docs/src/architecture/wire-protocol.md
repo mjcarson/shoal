@@ -393,8 +393,25 @@ deserializes anyway, so it gains nothing from alignment today.
 | Connection open | Protocol version and schema fingerprint, in the handshake |
 
 There is one deliberately unchecked path: `ShoalDatabase::unarchive_queries` uses
-`rkyv::access_unchecked` (`shared/traits.rs`). It is not called on the live request path, which
-goes through the validated `Queries::access`.
+`rkyv::access_unchecked` (`server/database.rs`). ~~It is not called on the live request path,
+which goes through the validated `Queries::access`.~~ **It is now the live request path**, and
+what changed is not the validation but where it happens
+([F26](../features/archive-routed-requests.md)).
+
+A bundle is validated **once**, on the coordinator, by `Queries::access` — exactly as the table
+above says. The coordinator then hands the same buffer to every shard that owns one of the
+partitions the bundle names, and each of those shards reads its own query out of it with
+`unarchive_queries` rather than walking the whole bundle again with `bytecheck` to reach one query
+in it.
+
+Two things make that sound, and both are invariants rather than conventions:
+
+- the coordinator validates **before** it shares, in `handle_client`, and
+- what it shares is a `bytes::Bytes`, which cannot be written to.
+
+`unarchive_queries` is an `unsafe fn` carrying that precondition in a `# Safety` block. It used to
+be a safe fn wrapping `access_unchecked`, which meant any caller could hand it any bytes — a hole
+that existed for as long as the function had no callers at all.
 
 ## Design notes
 

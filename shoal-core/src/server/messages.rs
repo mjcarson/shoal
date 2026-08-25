@@ -1,5 +1,6 @@
 //! The different messages that can be sent in shoal
 
+use bytes::Bytes;
 use glommio::io::ReadResult;
 use kanal::AsyncSender;
 use rkyv::util::AlignedVec;
@@ -159,11 +160,46 @@ where
         /// this is the first moment the server knows the bundle exists.
         base: Stamp,
     },
-    /// A query to execute
+    /// A query to execute, still in the buffer it arrived in
+    ///
+    /// This carries bytes rather than a query because the coordinator never builds one: it
+    /// validates the bundle, routes every query in it by the scalars in its archive, and hands
+    /// each shard the buffer plus enough to find its own query inside it
+    /// ([F26](../../../docs/src/features/archive-routed-requests.md)). The shard that executes
+    /// the query is the shard that pays for deserializing it, which is what keeps a bundle of
+    /// wide rows from being copied twice on the one core every request passes through.
     Query {
         /// The metadata about a query
         meta: QueryMetadata,
-        /// The query to execute
+        /// The bundle this query arrived in, shared with every shard it was routed to
+        ///
+        /// A [`Bytes`] rather than a [`crate::server::request_body::RequestBody`] because a
+        /// bundle naming partitions on several shards is held by all of them at once, and
+        /// cloning one of these is a refcount rather than a copy of the bundle.
+        body: Bytes,
+        /// Which query in that bundle this is
+        offset: usize,
+        /// The partition keys this shard owns, when the query was narrowed to a subset
+        ///
+        /// `None` means answer the query as it stands, which is what every write needs - a
+        /// write names its partition in a field the narrowing does not reach, so narrowing one
+        /// would be both wrong and unnecessary.
+        keys: Option<Vec<u64>>,
+    },
+    /// A query being run again, after the partition it was parked on was read
+    ///
+    /// This is the other way a query reaches [`crate::server::shard::Shard::handle_query`], and
+    /// it carries a query rather than bytes because there is no longer a bundle to read one out
+    /// of: the query was decoded when it first arrived, narrowed to the partition it blocked
+    /// on, and parked there. Decoding it a second time is neither possible nor wanted, which is
+    /// why this is a variant of its own rather than an arm of [`ServerMsg::Query`] - the
+    /// difference between the two is exactly which costs have already been paid.
+    ///
+    /// A released query never leaves the shard that parked it.
+    Released {
+        /// The metadata about the query being run again
+        meta: QueryMetadata,
+        /// The query, as it was when it was parked
         query: <D::ClientType as QuerySupport>::QueryKinds,
     },
     /// One shards share of a query that was split across several shards
@@ -233,10 +269,23 @@ impl<D: ShoalDatabase> Clone for ServerMsg<D> {
                 client: client.clone(),
                 client_tx: client_tx.clone(),
             },
-            ServerMsg::Query { meta, query } => ServerMsg::Query {
+            ServerMsg::Query {
+                meta,
+                body,
+                offset,
+                keys,
+            } => ServerMsg::Query {
                 meta: meta.clone(),
-                query: query.clone(),
+                // a refcount on the bundle rather than a copy of it
+                body: body.clone(),
+                offset: *offset,
+                keys: keys.clone(),
             },
+            // a released query is replayed on the shard that parked it and is never
+            // broadcast, so there is nothing that would ever ask us to duplicate one
+            ServerMsg::Released { .. } => {
+                panic!("A released query is only ever replayed on the shard that parked it")
+            }
             // a gathered response travels to exactly one shard and is never broadcast,
             // so there is nothing that would ever ask us to duplicate one
             ServerMsg::Gathered { .. } => {

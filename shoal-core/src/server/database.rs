@@ -24,7 +24,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::server::messages::{LoadedPartitionKinds, QueryMetadata, ServerMsg};
-use crate::server::routing::ShardRouting;
+use crate::server::routing::{ArchivedShardRouting, ShardRouting};
 use crate::server::{Conf, ServerError};
 use crate::shared::queries::{ArchivedQueries, Queries};
 use crate::shared::responses::ResponseError;
@@ -35,10 +35,13 @@ use crate::storage::{FullArchiveMap, LoaderMsg, Loaders, RecoveryStats};
 pub trait ShoalDatabase: 'static + Sized {
     /// This databases external client type
     ///
-    /// Its queries have to be routable, because only something that owns a ring implements
-    /// this trait at all. A `#[shoal::db(client)]` schema implements neither, which is what
-    /// keeps [`ShardRouting`] - and therefore the ring and the shard - out of a client build.
-    type ClientType: QuerySupport<QueryKinds: ShardRouting> + Sized;
+    /// Its queries have to be routable both ways, because only something that owns a ring
+    /// implements this trait at all: [`ArchivedShardRouting`] is what the coordinator routes a
+    /// bundle by without deserializing it, and [`ShardRouting`] is the same decision over a
+    /// deserialized query, kept as the reference the tests check that against. A
+    /// `#[shoal::db(client)]` schema implements neither, which is what keeps them - and
+    /// therefore the ring and the shard - out of a client build.
+    type ClientType: QuerySupport<QueryKinds: ShardRouting + ArchivedShardRouting> + Sized;
 
     /// The different tables in this database
     type TableNames: TableNameSupport;
@@ -94,11 +97,51 @@ pub trait ShoalDatabase: 'static + Sized {
         Queries::default()
     }
 
-    /// Deserialize our query types
-    fn unarchive_queries(buff: &[u8]) -> &ArchivedQueries<Self::ClientType> {
+    /// Read a bundle back out of the buffer it arrived in, without validating it again
+    ///
+    /// This is how a shard reaches the query it was routed: the coordinator hands on the
+    /// bundle's buffer rather than a deserialized query, and the shard reads its own query out
+    /// of it ([F26](../../../docs/src/features/archive-routed-requests.md)). Validating here
+    /// would mean every shard walking the whole bundle to reach one query in it, which costs
+    /// more than the copy this exists to avoid.
+    ///
+    /// # Arguments
+    ///
+    /// * `buff` - The bundle's buffer, already validated
+    ///
+    /// # Safety
+    ///
+    /// `buff` must be bytes some caller has already validated as an `ArchivedQueries` of this
+    /// schema, with [`crate::shared::queries::Queries::access`], and must not have been written
+    /// to since. The coordinator validates once per bundle before sharing it and the buffer it
+    /// shares is an immutable [`bytes::Bytes`], which is what discharges both halves of that on
+    /// the only path that calls this. Bytes off a socket do not satisfy it.
+    unsafe fn unarchive_queries(buff: &[u8]) -> &ArchivedQueries<Self::ClientType> {
         // load an archived type from a slice
-        unsafe { rkyv::access_unchecked::<ArchivedQueries<Self::ClientType>>(&buff) }
+        unsafe { rkyv::access_unchecked::<ArchivedQueries<Self::ClientType>>(buff) }
     }
+
+    /// Turn one query of an already validated bundle back into a query this shard can execute
+    ///
+    /// This is the only copy a request pays for now. The coordinator routes by the scalars in
+    /// the archive and hands the buffer on, so every `String`, `Vec` and filter a query carries
+    /// is copied out here, once, on the shard that is about to read them
+    /// ([F26](../../../docs/src/features/archive-routed-requests.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `archived` - The query to deserialize, read out of the bundle it arrived in
+    ///
+    /// # Errors
+    ///
+    /// Returns whatever rkyv failed to deserialize the query with.
+    /// This has no default body on purpose. Writing one means proving
+    /// `Archived<QueryKinds>: Deserialize<QueryKinds, _>` for every schema at once, which is
+    /// not provable from the bounds this trait has - the derive knows the concrete enum and
+    /// rkyv has already written that impl for it, so the one line lives there instead.
+    fn deserialize_query(
+        archived: &<<Self::ClientType as QuerySupport>::QueryKinds as rkyv::Archive>::Archived,
+    ) -> Result<<Self::ClientType as QuerySupport>::QueryKinds, rkyv::rancor::Error>;
 
     /// Handle messages for different table types
     #[allow(async_fn_in_trait)]

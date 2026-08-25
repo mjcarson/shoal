@@ -151,7 +151,9 @@ side effect**: `add` is idempotent because ignoring a known name is the whole of
 behaviour, so exactly-once `Join` delivery is no longer something the ring's shape depends on.
 
 **The `find_shard` signature did not change**, so `group_by_shard`, `SortedQuery::split_by_shard`
-and `UnsortedQuery::split_by_shard` are untouched.
+and `UnsortedQuery::split_by_shard` are untouched. `route_archived`, added later by
+[F26](../../features/archive-routed-requests.md), calls the same `group_by_shard` and is untouched
+by it for the same reason.
 
 A separate consequence worth naming: because `Ring::new` builds `ShardInfo::new(i)` in order,
 `shards[i].mesh_id() == i` on every shard. The old ring stored an *arrival order* index, so two

@@ -76,7 +76,7 @@ const RANKS: [(&str, Option<f64>); 6] = [
 ///
 /// The order here is the order they are reported in, and it is the order the offsets are
 /// differenced in, so it has to stay the real order of the pipeline.
-const STAGE_NAMES: [&str; 19] = [
+const STAGE_NAMES: [&str; 21] = [
     "client_serialize",
     "client_pool",
     "client_write",
@@ -85,6 +85,8 @@ const STAGE_NAMES: [&str; 19] = [
     "decode",
     "route",
     "exec_queue",
+    "query_decode",
+    "partition_wait",
     "execute",
     "durable_staged",
     "durable_write",
@@ -322,6 +324,8 @@ fn journey(server: &StageRecord, client: &ClientRecord) -> Option<Journey> {
         stamps.decoded,
         stamps.routed,
         stamps.exec_dequeued,
+        stamps.query_decoded,
+        stamps.exec_resumed,
         stamps.exec_done,
         stamps.released,
         stamps.replied,
@@ -345,7 +349,12 @@ fn journey(server: &StageRecord, client: &ClientRecord) -> Option<Journey> {
     let decoded = at(stamps.decoded);
     let routed = at(stamps.routed);
     let exec_dequeued = at(stamps.exec_dequeued);
+    let query_decoded = at(stamps.query_decoded);
+    let exec_resumed = at(stamps.exec_resumed);
     let exec_done = at(stamps.exec_done);
+    // a get that parked on a partition read was dequeued twice, and it is the second dequeue
+    // that its answer was built after. Only a parked query has one of these
+    let exec_started = exec_resumed.or(query_decoded);
     let write_submitted = at(stamps.write_submitted);
     let write_completed = at(stamps.write_completed);
     let sync_issued = at(stamps.sync_issued);
@@ -375,8 +384,25 @@ fn journey(server: &StageRecord, client: &ClientRecord) -> Option<Journey> {
         span(decoded, routed),
         // exec_queue
         span(routed, exec_dequeued),
+        // query_decode - turning this query's own bytes back into a query
+        //
+        // the coordinator hands on the bundle's buffer rather than a deserialized query, so
+        // this is where a query's rows and filters are copied out of it (F26). Unlike `decode`
+        // above it is paid per query rather than per bundle, and on the shard that executes
+        span(exec_dequeued, query_decoded),
+        // partition_wait - a get parked while a partition it named was read off disk
+        //
+        // only a get that parked has this, and it is the one stage on the read path that is
+        // not work: it is the query waiting for storage to answer. It sits apart from
+        // `exec_queue` because the queue wait in front of it was already paid and measured,
+        // and apart from `execute` because nothing is executing during it
+        span(query_decoded, exec_resumed),
         // execute
-        span(exec_dequeued, exec_done),
+        //
+        // a query that parked measures only the pass that answered it, which is what this
+        // stage meant before the decode was split out of it and what keeps a capture taken
+        // across that change comparable
+        span(exec_started, exec_done),
         // durable_staged - time spent in the DMA buffer before anything submitted it
         span(exec_done, write_submitted),
         // durable_write
@@ -567,8 +593,8 @@ pub fn read_report(path: &Path) -> Result<StageReport, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_report, read_report, write_report, ClientRecord, BUCKET_FRACTION, MIN_BUCKET,
-        REPORT_VERSION, STAGE_NAMES,
+        build_report, journey, read_report, write_report, ClientRecord, BUCKET_FRACTION,
+        MIN_BUCKET, REPORT_VERSION, STAGE_NAMES,
     };
     use shoal::server::stage_profile::{Offset, StageOp, StageRecord, StageStamps, Stamp};
     use uuid::Uuid;
@@ -596,6 +622,7 @@ mod tests {
         stamps.decoded = next(&mut at);
         stamps.routed = next(&mut at);
         stamps.exec_dequeued = next(&mut at);
+        stamps.query_decoded = next(&mut at);
         stamps.exec_done = next(&mut at);
         // only a write parks on the intent log, so only a write reaches the durability
         // stages or is ever released - which is the case that proves an unset stage is not
@@ -793,6 +820,87 @@ mod tests {
                 "a stage below the clock floor was reported as a measurement"
             );
         }
+    }
+
+    #[test]
+    /// A get that parked on a partition read measures the pass that answered it
+    ///
+    /// A parked get is dequeued twice, and before it had a stamp of its own the replay
+    /// overwrote `exec_dequeued` - which is what `query_decode` is measured from. That
+    /// reported every parked get as having decoded instantly, and put the whole disk wait
+    /// inside `execute` as well as inside `exec_queue`, so one wait was counted twice and a
+    /// real decode was counted as nothing.
+    fn a_parked_get_does_not_count_its_disk_wait_as_execution() {
+        let id = Uuid::new_v4();
+        let base = Stamp::now();
+        // a get that walks its stages 100ns apart, then parks for a long time before it is
+        // replayed - the park is the whole point, so it is far larger than any stage
+        let park = 50_000;
+        let mut stamps = StageStamps::new(base);
+        stamps.set_index(0);
+        stamps.set_op(StageOp::Get);
+        let at = |nanos: u64| Offset::between(base, base.plus_nanos(nanos));
+        stamps.bundle_dequeued = at(100);
+        stamps.decoded = at(200);
+        stamps.routed = at(300);
+        stamps.exec_dequeued = at(400);
+        stamps.query_decoded = at(500);
+        // the partition this get named had to be read, so it is picked back up much later
+        stamps.exec_resumed = at(500 + park);
+        stamps.exec_done = at(600 + park);
+        stamps.replied = at(700 + park);
+        stamps.queued_to_client = at(800 + park);
+        stamps.socket_written = at(900 + park);
+        let server = StageRecord {
+            epoch: 0,
+            id,
+            stamps,
+        };
+        let client = client_record(id, 0, 100, base, 900 + park);
+        // read the stages straight off the journey, since one record is too few to bucket
+        let walked = journey(&server, &client).expect("a parked get is a usable journey");
+        let stage = |name: &str| {
+            let index = STAGE_NAMES
+                .iter()
+                .position(|stage| *stage == name)
+                .expect("every stage asserted on is declared");
+            walked.stages[index]
+        };
+        // the decode really happened, on the pass that parked, and is reported as itself
+        assert_eq!(
+            stage("query_decode"),
+            Some(100),
+            "a parked get reported its decode as something other than the decode it did"
+        );
+        // the work that answered it is the second pass alone, not the wait in front of it
+        assert_eq!(
+            stage("execute"),
+            Some(100),
+            "a parked get counted its disk wait as execution"
+        );
+        // the wait itself is named rather than folded into either neighbour
+        assert_eq!(
+            stage("partition_wait"),
+            Some(park),
+            "a parked get lost the wait for the partition it parked on"
+        );
+        // and the queue in front of it still measures the queue, not the queue plus the wait
+        assert_eq!(
+            stage("exec_queue"),
+            Some(100),
+            "a parked get counted its disk wait as time spent queued to a shard"
+        );
+        // a get that never parked reaches none of this
+        let (server, client) = run(1, StageOp::Get);
+        let unparked = journey(&server[0], &client[0]).expect("an unparked get is usable");
+        let index = STAGE_NAMES
+            .iter()
+            .position(|stage| *stage == "partition_wait")
+            .expect("partition_wait is declared");
+        assert_eq!(
+            unparked.stages[index], None,
+            "a get that never parked reported a wait for a partition read"
+        );
     }
 
     #[test]

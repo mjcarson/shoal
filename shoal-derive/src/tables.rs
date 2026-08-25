@@ -188,4 +188,17 @@ impl TableKinds {
         }
         panic!("Invalid type checked when detect table kind: {ty:?}")
     }
+
+    /// Get the name of the query enum a table of this kind is queried with
+    ///
+    /// The two enums are the same shape and differ only in whether a partition holds one row
+    /// or many, so anything generated once per table kind names the type through this rather
+    /// than repeating the match.
+    pub fn query_type(&self) -> Ident {
+        // each kind has exactly one query enum
+        match self {
+            TableKinds::Unsorted => format_ident!("UnsortedQuery"),
+            TableKinds::Sorted => format_ident!("SortedQuery"),
+        }
+    }
 }

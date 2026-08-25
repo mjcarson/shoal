@@ -14,17 +14,21 @@ single get from the client's socket to the response, naming every hop.
    write_vectored           │
      [len][archive]  ═══════╪══════▶ client_rx_relay
                             │          read_exact(8) → len
-                            │          read_exact(len) → BytesMut
+                            │          read_exact(len) → RequestBody
                             │          ServerMsg::Client ──┐
                             │                              ▼
                             │                        shard loop
                             │                          handle_client
-                            │                            Queries::access
-                            │                            deserialize
+                            │                            RequestBody::freeze → Bytes
+                            │                            Queries::access   (validates once)
                             │                          send_to_shard
-                            │                            ring.find_shard(pkey)
+                            │                            route_archived
+                            │                              ring.find_shard(pkey)
                             │                            ServerMsg::Query ═════▶ shard loop
-                            │                                                     handle_query
+                            │                              {body, offset, keys}     handle_query
+                            │                                                       unarchive_queries
+                            │                                                       deserialize_query
+                            │                                                       narrow_to(keys)
                             │                                                       tables.handle
                             │                                                         ↓
                             │                                              ┌──────────┴──────────┐
@@ -115,45 +119,58 @@ the split stream and closes the socket.
 ## 3. Coordinating: fan-out
 
 ```rust
-let archived = Queries::access(&data)?;
-let queries = <Queries<D::ClientType> as RkyvSupport>::deserialize(archived)?;
-self.send_to_shard(peer, queries).await
+let body = data.freeze();
+let archived = Queries::access(&body)?;
+self.send_to_shard(peer, &body, archived, stamps).await
 ```
 
-`shoal-core/src/server/shard.rs:466-470`
+`shoal-core/src/server/shard.rs`, `Shard::handle_client`
 
-`Queries::access` validates the archive with `bytecheck` (`shared/queries.rs:89-102`), then
-`deserialize` **fully materialises the bundle**. On a branch named `ZeroCopyResponses` this is
-worth noticing: the request path is not zero-copy. Every query is deserialized here and then
-narrowed into one owned query per target shard.
+`Queries::access` validates the archive with `bytecheck`, and **that is all the coordinator does
+to the bundle** ([F26](../features/archive-routed-requests.md)). It does not deserialize it. The
+body is frozen into a `Bytes` first so that the archive and every shard the bundle routes to
+borrow the same buffer, and a clone of it is a refcount rather than a copy.
 
-Fan-out splits each query by shard and attaches metadata:
+This is the one validation the bundle gets, and everything downstream depends on it having
+happened — see [Executing](#4-executing).
+
+Fan-out routes each query by shard and attaches metadata:
 
 ```rust
-let end_index = queries.base_index + query_count;
-for (index, kind) in queries.queries.into_iter().enumerate() {
-    let index = index + queries.base_index;
+let end_index = base_index + last_offset;
+for (offset, kind) in queries.queries.iter().enumerate() {
+    let index = offset + base_index;
     let end = index == end_index;
-    kind.split_by_shard(&self.ring, &mut found);
+    QueryKinds::route_archived(kind, &self.ring, &mut found);
     let gather = if found.len() > 1 { /* register, reply here */ } else { None };
-    for (shard_info, query) in found.drain(..) {
-        let meta = QueryMetadata::new(client, queries.id, index, end, gather.clone());
-        self.comms.send(&shard_info.contact, ServerMsg::Query { meta, query }).await?;
+    for (shard_info, keys) in found.drain(..) {
+        let meta = QueryMetadata::new(client, bundle_id, index, end, gather.clone(), stamps);
+        let msg = ServerMsg::Query { meta, body: body.clone(), offset, keys };
+        self.comms.send(&shard_info.contact, msg).await?;
     }
 }
 ```
 
-`shoal-core/src/server/shard.rs`
+`shoal-core/src/server/shard.rs`, `Shard::send_to_shard`
 
-`split_by_shard` groups a query's partition keys by the shard that owns them and emits **one
-query per shard, naming only that shard's keys**. Shards are deduplicated, so a shard owning two
-of the keys gets one query naming both rather than the same query twice, and no shard is asked
-about partitions it does not own.
+`route_archived` groups a query's partition keys by the shard that owns them and emits **one
+message per shard, naming only that shard's keys**. Shards are deduplicated, so a shard owning
+two of the keys gets one message naming both rather than the same query twice, and no shard is
+asked about partitions it does not own.
 
-It is also where a sorted query's `sort_select` is normalized — a set of sort keys put in sort
-order and deduplicated — once, for the same reason: this is the one place every query passes
-through no matter who built it, and a query arriving over the wire is deserialized straight into
-its struct without meeting a constructor
+Every field it reads is a `u64` or an `Option<usize>` sitting inline in the archive. It never
+touches a row, a filter or a sort key, which is what lets a bundle of megabyte rows be routed for
+the cost of its keys.
+
+A shard is handed either `Some(keys)` or `None`, and the difference matters: `None` is not "every
+key", it means **do not narrow**. Every write takes it, because a write names its partition in a
+field the narrowing does not reach.
+
+~~It is also where a sorted query's `sort_select` is normalized.~~ **That moved.** The coordinator
+never deserializes a selection now, so normalization — a set of sort keys put in sort order and
+deduplicated — happens in `narrow_to`, on the shard that executes the query. The reason it exists
+at all is unchanged: a query arriving over the wire is deserialized straight into its struct
+without meeting a constructor
 ([Sort keys were accepted and ignored](../appendix/resolved/sort-keys.md)). A range needs no
 normalizing, since it is already an ordered pair ([F1](../features/sort-key-ranges.md)).
 
@@ -183,9 +200,10 @@ if let Some(limit) = gather.limit {
 }
 ```
 
-`Gather` carries `partition_order` because the narrowed queries do not: `split_by_shard` hands
-each shard only its own keys, so the order the client asked for exists nowhere else by the time
-the shares come back. `order_by_partitions` is a **stable** sort by where each row's partition was
+`Gather` carries `partition_order` because the narrowed queries do not: routing hands each shard
+only its own keys, so the order the client asked for exists nowhere else by the time the shares
+come back. The coordinator reads that order out of the archive with `archived_partition_keys`,
+which is one of the two things it still looks at per query. `order_by_partitions` is a **stable** sort by where each row's partition was
 named, which leaves the sort-key order each shard produced within a partition untouched.
 
 The two lines cannot be swapped. Truncating first keeps the rows that arrived first, which is
@@ -201,7 +219,35 @@ leaks it and the client waits forever, since there are no timeouts anywhere
 
 ## 4. Executing
 
-The owning shard receives `ServerMsg::Query` and calls into the generated dispatch layer:
+The owning shard receives `ServerMsg::Query`, and the first thing it does is turn its share of
+the bundle back into a query ([F26](../features/archive-routed-requests.md)):
+
+```rust
+// SAFETY: the coordinator validated these exact bytes with `Queries::access` before
+// sharing them, and a `Bytes` cannot be written to, so nothing has changed them since.
+let archived = unsafe { D::unarchive_queries(body) };
+let query = D::deserialize_query(&archived.queries[offset])?;
+let query = match keys {
+    Some(keys) => query.narrow_to(keys),
+    None => query,
+};
+```
+
+**This is the only copy a request pays for**, and it is paid here rather than on the coordinator.
+Every `String`, `Vec` and filter the query carries is materialized on the shard that is about to
+read them. It is stamped as its own stage, `query_decode`, which is why the stage report has
+twenty spans rather than nineteen.
+
+The read is unchecked, and the safety argument is the whole of why routing from the archive is
+sound: the coordinator validated this buffer once and `Bytes` is immutable, so revalidating here
+would mean each shard walking the *whole bundle* to reach one query in it. `unarchive_queries` is
+an `unsafe fn` so that precondition cannot be dropped silently.
+
+A query that was parked on a partition read comes back as `ServerMsg::Released` instead, carrying
+the query itself — it was decoded and narrowed when it first arrived, and there is no bundle left
+to read it out of.
+
+Then it calls into the generated dispatch layer:
 
 ```rust
 if let Some((addr, query_id, response)) = self.tables.handle(meta, query).await {
@@ -383,13 +429,21 @@ whole lifecycle including the asynchronous flush.
 
 ## Limitations
 
-- The request path deserializes and then clones per shard; it is not zero-copy.
+- ~~The request path deserializes and then clones per shard; it is not zero-copy.~~ **The clone is
+  gone and the deserialize moved** ([F26](../features/archive-routed-requests.md)). The coordinator
+  routes from the archive without deserializing anything, and each shard deserializes only its own
+  query — so the bundle is walked once rather than once plus a clone per destination, and that walk
+  happens on the shard that will read the row rather than on the single coordinator every request
+  passes through. The request path is still not *zero*-copy: a query is materialized once, and
+  [TODOs](../appendix/todos.md) has what executing against the archive would take.
   **Every copy on this path is O(bytes), and there are about six of them per round trip** — ~~the
-  zeroed request buffer,~~ the bundle deserialization, the row copied into a partition and out of
-  one, the intent log's serialize/checksum/copy, and the response serialization. The request
-  buffer's zeroing came off this list with
+  zeroed request buffer,~~ ~~the bundle deserialization,~~ the per-query deserialization, the row
+  copied into a partition and out of one, the intent log's serialize/checksum/copy, and the
+  response serialization. The request buffer's zeroing came off this list with
   [F25](../features/read-buffers-are-filled-not-zeroed.md), along with the client's matching one;
-  the kernel copy that fills it is still here and always will be. None of that is
+  the kernel copy that fills it is still here and always will be. F26 did not remove an item from
+  the list so much as shrink one and move it off core 0 — except on the write path, where it
+  removed the second copy of every inserted row outright. None of that is
   visible at a 64 byte row and it is most of the cost at 4 MiB; see
   [Row size and what it costs](../tables/row-size.md#the-payload-is-walked-about-six-times-per-round-trip).
   **That list is a read/write mixture**, and three of its items are inside `FileSystem::commit`,

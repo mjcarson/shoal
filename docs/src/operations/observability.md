@@ -60,6 +60,7 @@ following a query:
 | `Coordinator::handle_client` | `shard.rs:452-457` |
 | `Coordinator::send_to_shard` | `shard.rs:413` |
 | `Shard::handle_query` | `shard.rs:505-511` |
+| `Shard::handle_released` | a query run again after the partition it parked on was read ([F26](../features/archive-routed-requests.md)) |
 | `PersistentTable::handle` | `.../persistent/sorted.rs:301` |
 | `PersistentTable::{insert,get,exists,delete,update}` | `.../persistent/sorted.rs:328`, `:386`, `:533`, `:666`, `:825` |
 | `Shard::reply` | `shard.rs:479` |
@@ -239,7 +240,7 @@ macro layer [could not adjudicate F4](../features/validated-archives.md#performa
 | Scope | Location |
 | --- | --- |
 | `ShoalPool::start`, `shard::start` | `server.rs:65`, `shard.rs:861` |
-| `Shard::{handle_client, reply, handle_query, handle_flushed, evict_data}` | `shard.rs:558`, `:581`, `:612`, `:720`, `:733` |
+| `Shard::{handle_client, reply, handle_query, handle_released, handle_flushed, evict_data}` | `shard.rs:558`, `:581`, `:612`, `:720`, `:733` — `handle_released` is **new** with [F26](../features/archive-routed-requests.md), and is measured separately from `handle_query` for the reason the two are separate messages: it has no decode to pay |
 | `Shard::shutdown_tasks` | `shard.rs:208` |
 | `FileSystem` (all methods) | `.../fs.rs:108`, `:248` |
 | `PersistentUnsortedTable` (all methods) | `.../persistent/unsorted.rs:123` |

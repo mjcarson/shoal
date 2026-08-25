@@ -1,5 +1,6 @@
 //! A single shard in Shoal
 
+use bytes::Bytes;
 use futures::{
     io::{ReadHalf, WriteHalf},
     AsyncReadExt, AsyncWriteExt,
@@ -36,7 +37,7 @@ use super::messages::{QueryMetadata, ServerMsg};
 use super::request_body::RequestBody;
 use super::database::ShoalDatabase;
 use super::ring::Ring;
-use super::routing::ShardRouting;
+use super::routing::ArchivedShardRouting;
 use super::stage_profile::{self, StageStamps, Stamp};
 use super::tls;
 use super::{Comms, Conf, ServerError};
@@ -52,8 +53,8 @@ use crate::{
             error::{self as proto_error, ErrorCode},
             handshake, ProtocolError,
         },
-        queries::Queries,
-        traits::{QuerySupport, RkyvSupport, ShoalQuerySupport, ShoalResponseSupport},
+        queries::{ArchivedQueries, Queries},
+        traits::{QuerySupport, ShoalResponseSupport},
     },
     storage::{FullArchiveMap, LoaderMsg, Loaders},
 };
@@ -1062,11 +1063,25 @@ where
     }
 
     /// Forward our queries to the correct shards
+    ///
+    /// Nothing here deserializes a query. Every field this reads - the partition keys, the
+    /// limit, the bundles id and base index - is a scalar sitting inline in the archive, so a
+    /// bundle of megabyte rows is routed for the cost of its keys
+    /// ([F26](../../../docs/src/features/archive-routed-requests.md)). The shard that answers a
+    /// query is the shard that pays for turning it back into one.
+    ///
+    /// # Arguments
+    ///
+    /// * `client` - The client that sent this bundle
+    /// * `body` - The buffer the bundle arrived in, shared with every shard it routes to
+    /// * `queries` - The bundle, read out of that buffer
+    /// * `stamps` - When this bundle reached each stage so far
     #[instrument(name = "Coordinator::send_to_shard", skip_all)]
     async fn send_to_shard(
         &mut self,
         client: Uuid,
-        queries: Queries<D::ClientType>,
+        body: &Bytes,
+        queries: &ArchivedQueries<D::ClientType>,
         stamps: StageStamps,
     ) -> Result<(), ServerError> {
         // an empty bundle has no last query, and nothing to send either way
@@ -1079,31 +1094,42 @@ where
         // position four means something very different in a batch of five than in one of five
         // hundred
         let batch_len = queries.queries.len();
-        // initialize a vec to store the per shard queries we find
+        // read the bundles own scalars out of the archive
+        //
+        // a uuid archives to itself - rkyv's `Archived` for it is `Uuid`, since it is sixteen
+        // bytes with no endianness to have - while a usize is stored little endian and has to
+        // be read back into whatever this host uses
+        let bundle_id = queries.id;
+        let base_index = queries.base_index.to_native() as usize;
+        // initialize a vec to store the per shard shares we find
         let mut found = Vec::with_capacity(3);
         // get the absolute index for the last query in this bundle
         //
         // every index below is absolute, so this has to carry the base index too or a
         // streamed bundle would compare an absolute index against a relative one
-        let end_index = queries.base_index + last_offset;
+        let end_index = base_index + last_offset;
         // crawl over our queries
-        for (index, kind) in queries.queries.into_iter().enumerate() {
+        for (offset, kind) in queries.queries.iter().enumerate() {
             // get this queries absolute index in its stream
             //
             // this is per query and not per shard, so that every shard answering one
             // query answers it under the same index
-            let index = index + queries.base_index;
+            let index = offset + base_index;
             // check if this is the last query or not
             let end = index == end_index;
             // give this query its own copy of the bundles stamps to carry from here on
             let mut stamps = stamps;
             // note where in its batch this query sat, since a query near the tail of a
             // bundle waits on every query ahead of it and that is not a server side cost
-            stamps.set_batch(index - queries.base_index, batch_len);
+            stamps.set_batch(offset, batch_len);
             // remember the index this query answers under, which is half of a records key
             stamps.set_index(index);
-            // split this query into the per shard queries that answer it
-            kind.split_by_shard(&self.ring, &mut found);
+            // find the shards that answer this query, and the keys each of them owns
+            <<D::ClientType as QuerySupport>::QueryKinds as ArchivedShardRouting>::route_archived(
+                kind,
+                &self.ring,
+                &mut found,
+            );
             // record that this query is leaving us for the shards that own its partitions
             stamps.mark_routed();
             // a query answered by one shard alone is replied to directly, so only a
@@ -1116,38 +1142,44 @@ where
                     span: Span::current(),
                     stamps,
                     outstanding: found.len(),
-                    limit: kind.limit(),
+                    limit: <<D::ClientType as QuerySupport>::QueryKinds as ArchivedShardRouting>::archived_limit(kind),
                     // remember the order this query named its partitions in, since the
                     // narrowed queries only carry each shards own share of them
-                    partition_order: kind.partition_keys().to_vec(),
+                    partition_order: <<D::ClientType as QuerySupport>::QueryKinds as ArchivedShardRouting>::archived_partition_keys(kind),
                     merged: None,
                 };
-                self.gathering.insert((queries.id, index), gather);
+                self.gathering.insert((bundle_id, index), gather);
                 // tell every shard we split this to answer back to us
                 Some(self.info.contact.clone())
             } else {
                 None
             };
-            // note whether the copy each shard carries is a share of a query we split
+            // note whether the share each shard carries is a share of a query we split
             //
             // a split query produces one of these per shard plus the one client visible
             // record the gather emits, so a report that counted them all would multiply
             // count it. The copy we kept in the gather above is deliberately not flagged.
             let mut share_stamps = stamps;
             share_stamps.set_share_of_gathered(gather.is_some());
-            // send each narrowed query to the shard that owns its partitions
-            for (shard_info, query) in found.drain(..) {
+            // send each shard the bundle and the keys of its own share of this query
+            for (shard_info, keys) in found.drain(..) {
                 // build the metadata for this query
                 let meta = QueryMetadata::new(
                     client,
-                    queries.id,
+                    bundle_id,
                     index,
                     end,
                     gather.clone(),
                     share_stamps,
                 );
-                // build the mssage to send
-                let msg = ServerMsg::Query { meta, query };
+                // build the message to send, which is a refcount on the bundle rather than
+                // a copy of the query in it
+                let msg = ServerMsg::Query {
+                    meta,
+                    body: body.clone(),
+                    offset,
+                    keys,
+                };
                 // send this to correct shard
                 self.comms.send(&shard_info.contact, msg).await?;
             }
@@ -1183,17 +1215,27 @@ where
         let mut stamps = StageStamps::new(base);
         // record that we have dequeued this bundle, which closes the ingress queue stage
         stamps.mark_bundle_dequeued();
-        // load our arhived query from buffer
-        let archived = Queries::access(&data)?;
-        // deserialize our queries
-        let queries = <Queries<D::ClientType> as RkyvSupport>::deserialize(archived)?;
-        // record that this bundle is now a set of queries rather than a buffer
+        // hand this body over as a buffer every shard that answers part of it can hold at once
         //
-        // this stage is paid once per bundle and charged to every query in it, so the
-        // report has to label it as a batch level cost rather than a per query one
+        // this happens before the archive is read rather than after, so that the archive and
+        // the clones handed to each shard all borrow the same buffer
+        let body = data.freeze();
+        // check that these bytes really are a bundle of this schemas queries
+        //
+        // this is the only validation the bundle gets. every shard it routes to reads its own
+        // query straight out of these same bytes without walking them again, which is only
+        // sound because this ran first - see `ShoalDatabase::unarchive_queries`
+        let archived = Queries::access(&body)?;
+        // record that this bundle is readable, which is now all this stage covers
+        //
+        // it used to cover deserializing every query in the bundle as well. that moved to the
+        // shards that execute them, where it is stamped as `query_decoded`
+        // ([F26](../../../docs/src/features/archive-routed-requests.md)). this stage is still
+        // paid once per bundle and charged to every query in it, so the report still has to
+        // label it as a batch level cost rather than a per query one
         stamps.mark_decoded();
-        // send each query to the correct shard
-        self.send_to_shard(peer, queries, stamps).await
+        // route every query in the bundle to the shards that answer it
+        self.send_to_shard(peer, &body, archived, stamps).await
     }
 
     /// Send a respones back to the client
@@ -1234,22 +1276,32 @@ where
 
     /// Handle a query on this shard
     ///
+    /// This is where a query is turned back into one. The coordinator routed it by the scalars
+    /// in its archive and handed on the buffer it arrived in, so every `String`, `Vec` and
+    /// filter it carries is copied out here, on the shard that is about to read them, rather
+    /// than on the one core every request passes through
+    /// ([F26](../../../docs/src/features/archive-routed-requests.md)).
+    ///
     /// # Arguments
     ///
-    /// `meta` - The metadata about the query to handle
-    /// `query` - The query to handle
+    /// * `meta` - The metadata about the query to handle
+    /// * `body` - The bundle this query arrived in
+    /// * `offset` - Which query in that bundle this is
+    /// * `keys` - The partition keys this shard owns, if the query was narrowed to a subset
     #[allow(clippy::future_not_send)]
     #[instrument(
         name = "Shard::handle_query",
         parent = &meta.span,
-        skip(self, query),
+        skip(self, body, keys),
         fields(index = meta.index, id = meta.id.to_string())
     )]
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     async fn handle_query(
         &mut self,
         mut meta: QueryMetadata,
-        query: <D::ClientType as QuerySupport>::QueryKinds,
+        body: &Bytes,
+        offset: usize,
+        keys: Option<Vec<u64>>,
     ) -> Result<(), ServerError>
     where
         for<'a> <<<D as ShoalDatabase>::ClientType as QuerySupport>::QueryKinds as Archive>::Archived:
@@ -1267,6 +1319,91 @@ where
         let gathered_meta = meta.gather.is_some().then(|| meta.clone());
         // record that this shard now has this query in hand, closing the routing queue stage
         meta.stamps.mark_exec_dequeued();
+        // read the bundle back out of the buffer it arrived in
+        //
+        // SAFETY: the coordinator validated these exact bytes with `Queries::access` before
+        // sharing them, and a `Bytes` cannot be written to, so nothing has changed them since.
+        // Revalidating here would mean walking the whole bundle to reach one query in it.
+        let archived = unsafe { D::unarchive_queries(body) };
+        // turn our own query in it back into one we can execute
+        //
+        // the index cannot be out of range: `send_to_shard` takes it from `enumerate` over this
+        // same bundle and puts the two in one message, so an offset only ever travels with the
+        // buffer it was read from
+        let query = D::deserialize_query(&archived.queries[offset])?;
+        // narrow it to the partitions this shard owns, if the coordinator split it
+        let query = match keys {
+            Some(keys) => query.narrow_to(keys),
+            // a write named one partition and was routed by it, so there is nothing to narrow
+            None => query,
+        };
+        // record what turning our share of this bundle back into a query cost
+        //
+        // this is the per query half of what `decoded` used to hold whole, and unlike
+        // `decoded` it is paid on the shard that reads the row rather than on the coordinator
+        meta.stamps.mark_query_decoded();
+        // execute it now that it is a query rather than bytes
+        self.execute_query(meta, query, span, gathered_meta).await
+    }
+
+    /// Run a query again after the partition it was parked on was read
+    ///
+    /// A released query was decoded and narrowed when it first arrived and has been sitting in
+    /// a tables `blocked` map ever since, so there is no bundle to read it out of and no
+    /// decode to charge it for a second time. That is the whole difference between this and
+    /// [`Shard::handle_query`], and it is why the two are separate messages.
+    ///
+    /// # Arguments
+    ///
+    /// * `meta` - The metadata about the query being run again
+    /// * `query` - The query, as it was when it was parked
+    #[allow(clippy::future_not_send)]
+    #[instrument(
+        name = "Shard::handle_released",
+        parent = &meta.span,
+        skip(self, query),
+        fields(index = meta.index, id = meta.id.to_string())
+    )]
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    async fn handle_released(
+        &mut self,
+        mut meta: QueryMetadata,
+        query: <D::ClientType as QuerySupport>::QueryKinds,
+    ) -> Result<(), ServerError> {
+        // copy our span for it we reply
+        let span = meta.span.clone();
+        // keep a copy of our metadata only if this query was actually split
+        let gathered_meta = meta.gather.is_some().then(|| meta.clone());
+        // record that this shard has this query in hand again
+        //
+        // this is deliberately not `mark_exec_dequeued`: that stamp is what `query_decode` is
+        // measured from, and this query was decoded on the pass that parked it. Overwriting it
+        // here would report every parked query as having decoded in no time at all, and would
+        // put the whole disk wait inside `execute` as well as inside `exec_queue`
+        meta.stamps.mark_exec_resumed();
+        // execute it, with nothing to decode
+        self.execute_query(meta, query, span, gathered_meta).await
+    }
+
+    /// Execute a query and answer whoever is owed the answer
+    ///
+    /// This is everything both ways into a shard have in common: a query, and whether its
+    /// answer belongs to a client or to the shard collecting the shares of a split query.
+    ///
+    /// # Arguments
+    ///
+    /// * `meta` - The metadata for this query
+    /// * `query` - The query to execute
+    /// * `span` - The span to reply under
+    /// * `gathered_meta` - The metadata to answer with, if this is a share of a split query
+    #[allow(clippy::future_not_send)]
+    async fn execute_query(
+        &mut self,
+        meta: QueryMetadata,
+        query: <D::ClientType as QuerySupport>::QueryKinds,
+        span: Span,
+        gathered_meta: Option<QueryMetadata>,
+    ) -> Result<(), ServerError> {
         // try to handle this query
         if let Some((addr, query_id, mut stamps, response)) = self.tables.handle(meta, query).await
         {
@@ -1474,8 +1611,17 @@ where
                 ServerMsg::Client { peer, data, base } => {
                     self.handle_client(peer, data, base).await?
                 }
-                // handle this query from the user
-                ServerMsg::Query { meta, query } => self.handle_query(meta, query).await?,
+                // handle this query from the user, reading it out of the bundle it arrived in
+                ServerMsg::Query {
+                    meta,
+                    body,
+                    offset,
+                    keys,
+                } => self.handle_query(meta, &body, offset, keys).await?,
+                // run this query again now that the partition it waited on has been read
+                ServerMsg::Released { meta, query } => {
+                    self.handle_released(meta, query).await?
+                }
                 // collect this shards share of a query we split across shards
                 ServerMsg::Gathered { meta, response } => {
                     self.handle_gathered(meta, response).await?

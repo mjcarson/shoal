@@ -228,7 +228,7 @@ pub fn add(
                             // wrap our query
                             let query = #query_ident::#variant_ident(unwrapped);
                             // build our shard message
-                            let query_msg = ::shoal::server::messages::ServerMsg::Query { meta, query};
+                            let query_msg = ::shoal::server::messages::ServerMsg::Released { meta, query };
                             // send this message
                             shard_local_tx.send(query_msg).await?;
                         }
@@ -246,7 +246,7 @@ pub fn add(
                             // wrap our query
                             let query = #query_ident::#variant_ident(unwrapped);
                             // build our shard message
-                            let query_msg = ::shoal::server::messages::ServerMsg::Query { meta, query };
+                            let query_msg = ::shoal::server::messages::ServerMsg::Released { meta, query };
                             // send this message
                             shard_local_tx.send(query_msg).await?;
                         }
@@ -277,7 +277,7 @@ pub fn add(
                         // wrap our query
                         let query = #query_ident::#variant_ident(unwrapped);
                         // build our shard message
-                        let query_msg = ::shoal::server::messages::ServerMsg::Query { meta, query };
+                        let query_msg = ::shoal::server::messages::ServerMsg::Released { meta, query };
                         // send this message
                         shard_local_tx.send(query_msg).await?;
                     }
@@ -353,6 +353,21 @@ pub fn add(
                 // add in what each of our tables recovery discarded
                 #(#recovery_stats_arms)*
                 stats
+            }
+
+            /// Turn one query of an already validated bundle back into one we can execute
+            ///
+            /// # Arguments
+            ///
+            /// * `archived` - The query to deserialize, read out of the bundle it arrived in
+            fn deserialize_query(
+                archived: &<<Self::ClientType as ::shoal::shared::traits::QuerySupport>::QueryKinds as ::shoal::rkyv::Archive>::Archived,
+            ) -> Result<
+                <Self::ClientType as ::shoal::shared::traits::QuerySupport>::QueryKinds,
+                ::shoal::rkyv::rancor::Error,
+            > {
+                // copy this querys own bytes out of the bundle they arrived in
+                ::shoal::rkyv::deserialize::<_, ::shoal::rkyv::rancor::Error>(archived)
             }
 
             /// Handle messages for different table types

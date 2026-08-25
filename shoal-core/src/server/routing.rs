@@ -10,10 +10,30 @@
 //! The queries themselves are wire types and live in the protocol crate. Only the routing does,
 //! which is why the impls here are on foreign types.
 
+use rkyv::vec::ArchivedVec;
+
 use crate::server::ring::Ring;
 use crate::server::shard::ShardInfo;
-use crate::shared::queries::{SortedQuery, UnsortedQuery};
+use crate::shared::queries::{
+    ArchivedSortedQuery, ArchivedUnsortedQuery, SortedQuery, UnsortedQuery,
+};
 use crate::shared::traits::{ShoalSortedTable, ShoalUnsortedTable};
+
+/// Read a queries partition keys out of the archive they arrived in
+///
+/// A `u64` is stored little endian in an archive whatever the host is, so there is no slice of
+/// native keys in there to borrow and each one has to be read out. They are scalars sitting
+/// inline in the buffer, so this walks bytes the coordinator has already touched and allocates
+/// once for the whole set - which is what makes routing a bundle of megabyte rows cost the
+/// keys rather than the rows.
+///
+/// # Arguments
+///
+/// * `keys` - The archived partition keys to read
+fn native_keys(keys: &ArchivedVec<rkyv::rend::u64_le>) -> Vec<u64> {
+    // read each key back into the endianness this host works in
+    keys.iter().map(|key| key.to_native()).collect()
+}
 
 /// Group a queries partition keys by the shard that owns each of them
 ///
@@ -142,5 +162,237 @@ impl<T: ShoalUnsortedTable + std::fmt::Debug> ShardRouting for UnsortedQuery<T> 
             UnsortedQuery::Exists(exists) => ring.find_shard(exists.partition_key),
         };
         found.push((shard, self.clone()));
+    }
+}
+
+/// Routing a query that is still in the buffer it arrived in
+///
+/// This is the live routing path. [`ShardRouting`] describes the same decision over a
+/// deserialized query and is kept as the reference implementation the tests check this
+/// against, but the coordinator no longer builds one: it validates the bundle, reads the
+/// partition keys straight out of the archive, and hands each shard the shared buffer plus
+/// the keys it owns ([F26](../../../docs/src/features/archive-routed-requests.md)).
+///
+/// Nothing here touches a row, a filter or a sort key. Every field it reads is a `u64` or an
+/// `Option<usize>` sitting inline in the archive, which is the whole reason the coordinator
+/// can route a bundle of megabyte rows without allocating.
+pub trait ArchivedShardRouting: rkyv::Archive + Sized {
+    /// Find the shards that answer this query, and the keys each of them owns
+    ///
+    /// A shard is pushed with `Some(keys)` when the query was narrowed to a subset of the
+    /// partitions it named, and with `None` when the shard answers the query as it stands.
+    /// `None` is not the same as "every key": it means the executing shard must not narrow,
+    /// which is what every write needs, since a write names its partition in a field the
+    /// narrowing does not touch.
+    ///
+    /// # Arguments
+    ///
+    /// * `archived` - The query, still in the buffer it arrived in
+    /// * `ring` - The shard ring to check against
+    /// * `found` - The per shard shares we found for this query
+    fn route_archived<'a>(
+        archived: &<Self as rkyv::Archive>::Archived,
+        ring: &'a Ring,
+        found: &mut Vec<(&'a ShardInfo, Option<Vec<u64>>)>,
+    );
+
+    /// Get the partitions this query named, in the order it named them
+    ///
+    /// The owned form hands back a borrowed slice, but there is no slice of `u64` in an
+    /// archive to borrow - the keys are stored little endian and have to be read out one at a
+    /// time - so this allocates. It is only called for a query that really was split, which is
+    /// the only case whose shares have to be put back into the order the query named.
+    ///
+    /// # Arguments
+    ///
+    /// * `archived` - The query, still in the buffer it arrived in
+    fn archived_partition_keys(archived: &<Self as rkyv::Archive>::Archived) -> Vec<u64>;
+
+    /// Get the most rows this query asked for, if it set a limit
+    ///
+    /// # Arguments
+    ///
+    /// * `archived` - The query, still in the buffer it arrived in
+    fn archived_limit(archived: &<Self as rkyv::Archive>::Archived) -> Option<usize>;
+
+    /// Narrow this query to the partitions the shard executing it owns
+    ///
+    /// This is the other half of [`ArchivedShardRouting::route_archived`], run on the shard
+    /// that will answer rather than on the coordinator. Splitting the decision from the
+    /// narrowing is what lets the query be deserialized once, on the shard that needs it,
+    /// instead of once on the coordinator and again per shard it was split to.
+    ///
+    /// # Arguments
+    ///
+    /// * `keys` - The partition keys this shard owns
+    fn narrow_to(self, keys: Vec<u64>) -> Self;
+}
+
+impl<T: ShoalSortedTable + std::fmt::Debug> ArchivedShardRouting for SortedQuery<T> {
+    /// Find the shards that answer this sorted query, and the keys each of them owns
+    ///
+    /// # Arguments
+    ///
+    /// * `archived` - The query, still in the buffer it arrived in
+    /// * `ring` - The shard ring to check against
+    /// * `found` - The per shard shares we found for this query
+    fn route_archived<'a>(
+        archived: &<Self as rkyv::Archive>::Archived,
+        ring: &'a Ring,
+        found: &mut Vec<(&'a ShardInfo, Option<Vec<u64>>)>,
+    ) {
+        // get the correct shards for this query
+        match archived {
+            ArchivedSortedQuery::Insert { key, .. } | ArchivedSortedQuery::Delete { key, .. } => {
+                // a write names a single partition so it goes to a single shard, unnarrowed
+                found.push((ring.find_shard(key.to_native()), None));
+            }
+            ArchivedSortedQuery::Get(get) => {
+                // narrow this get to each shards own partition keys
+                for (shard, keys) in group_by_shard(ring, &native_keys(&get.partition_keys)) {
+                    found.push((shard, Some(keys)));
+                }
+            }
+            ArchivedSortedQuery::Exists(exists) => {
+                // narrow this exists to each shards own partition keys
+                for (shard, keys) in group_by_shard(ring, &native_keys(&exists.partition_keys)) {
+                    found.push((shard, Some(keys)));
+                }
+            }
+            ArchivedSortedQuery::Update(update) => {
+                // an update names a single partition so it goes to a single shard
+                found.push((ring.find_shard(update.partition_key.to_native()), None));
+            }
+        }
+    }
+
+    /// Get the partitions this sorted query named, in the order it named them
+    ///
+    /// # Arguments
+    ///
+    /// * `archived` - The query, still in the buffer it arrived in
+    fn archived_partition_keys(archived: &<Self as rkyv::Archive>::Archived) -> Vec<u64> {
+        // only a get returns rows whose order this could describe
+        match archived {
+            ArchivedSortedQuery::Get(get) => native_keys(&get.partition_keys),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Get the most rows this sorted query asked for, if it set a limit
+    ///
+    /// # Arguments
+    ///
+    /// * `archived` - The query, still in the buffer it arrived in
+    fn archived_limit(archived: &<Self as rkyv::Archive>::Archived) -> Option<usize> {
+        // only a get returns rows that a limit could apply to
+        match archived {
+            ArchivedSortedQuery::Get(get) => get.limit.as_ref().map(|limit| limit.to_native() as usize),
+            _ => None,
+        }
+    }
+
+    /// Narrow this sorted query to the partitions the shard executing it owns
+    ///
+    /// The sort key selection is normalized here rather than on the coordinator, since the
+    /// coordinator never deserializes one. That is once per shard a get was split to instead
+    /// of once per get, and it is the one thing this design pays for rather than saves.
+    ///
+    /// # Arguments
+    ///
+    /// * `keys` - The partition keys this shard owns
+    fn narrow_to(self, keys: Vec<u64>) -> Self {
+        // only the two multi partition queries have anything to narrow
+        match self {
+            SortedQuery::Get(get) => {
+                // put this gets sort keys in the order the rows they name come back in
+                let sort_select = get.sort_select.normalized();
+                SortedQuery::Get(get.for_partitions(keys, sort_select))
+            }
+            SortedQuery::Exists(exists) => {
+                // drop any sort key this exists named more than once
+                let sort_select = exists.sort_select.normalized();
+                SortedQuery::Exists(exists.for_partitions(keys, sort_select))
+            }
+            // a write named one partition and was routed by it, so there is nothing to narrow
+            other => other,
+        }
+    }
+}
+
+impl<T: ShoalUnsortedTable + std::fmt::Debug> ArchivedShardRouting for UnsortedQuery<T> {
+    /// Find the shards that answer this unsorted query, and the keys each of them owns
+    ///
+    /// # Arguments
+    ///
+    /// * `archived` - The query, still in the buffer it arrived in
+    /// * `ring` - The shard ring to check against
+    /// * `found` - The per shard shares we found for this query
+    fn route_archived<'a>(
+        archived: &<Self as rkyv::Archive>::Archived,
+        ring: &'a Ring,
+        found: &mut Vec<(&'a ShardInfo, Option<Vec<u64>>)>,
+    ) {
+        // get the correct shard for this query, or push every shard a get was split to
+        let shard = match archived {
+            ArchivedUnsortedQuery::Insert { key, .. }
+            | ArchivedUnsortedQuery::Delete { key, .. } => ring.find_shard(key.to_native()),
+            ArchivedUnsortedQuery::Get(get) => {
+                // narrow this get to each shards own partition keys
+                for (shard, keys) in group_by_shard(ring, &native_keys(&get.partition_keys)) {
+                    found.push((shard, Some(keys)));
+                }
+                return;
+            }
+            ArchivedUnsortedQuery::Update(update) => {
+                ring.find_shard(update.partition_key.to_native())
+            }
+            ArchivedUnsortedQuery::Exists(exists) => {
+                ring.find_shard(exists.partition_key.to_native())
+            }
+        };
+        found.push((shard, None));
+    }
+
+    /// Get the partitions this unsorted query named, in the order it named them
+    ///
+    /// # Arguments
+    ///
+    /// * `archived` - The query, still in the buffer it arrived in
+    fn archived_partition_keys(archived: &<Self as rkyv::Archive>::Archived) -> Vec<u64> {
+        // only a get returns rows whose order this could describe
+        match archived {
+            ArchivedUnsortedQuery::Get(get) => native_keys(&get.partition_keys),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Get the most rows this unsorted query asked for, if it set a limit
+    ///
+    /// # Arguments
+    ///
+    /// * `archived` - The query, still in the buffer it arrived in
+    fn archived_limit(archived: &<Self as rkyv::Archive>::Archived) -> Option<usize> {
+        // only a get returns rows that a limit could apply to
+        match archived {
+            ArchivedUnsortedQuery::Get(get) => {
+                get.limit.as_ref().map(|limit| limit.to_native() as usize)
+            }
+            _ => None,
+        }
+    }
+
+    /// Narrow this unsorted query to the partitions the shard executing it owns
+    ///
+    /// # Arguments
+    ///
+    /// * `keys` - The partition keys this shard owns
+    fn narrow_to(self, keys: Vec<u64>) -> Self {
+        // only a get names more than one partition, so only a get has anything to narrow
+        match self {
+            UnsortedQuery::Get(get) => UnsortedQuery::Get(get.for_partitions(keys)),
+            // every other unsorted query named one partition and was routed by it
+            other => other,
+        }
     }
 }

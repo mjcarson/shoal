@@ -25,15 +25,19 @@ entry in [Optimizations](../appendix/optimizations.md) is worth taking.
 
 ## What it does
 
-A `stage-profile` build records, for every query, when it reached each of nineteen points
-between the client handing it to `send` and the response coming back. ~~`scripts/bench.sh`~~
+A `stage-profile` build records, for every query, when it reached each of ~~nineteen~~ ~~twenty~~
+**twenty-one** points between the client handing it to `send` and the response coming back.
+[F26](archive-routed-requests.md) added the twentieth, `query_decode`, and **changed what `decode`
+means** at the same time — see the note under the table. The twenty-first is `partition_wait`, the
+one stage on the read path that is not work: a get whose partition has to come off disk parks, and
+that wait belonged to no stage until it had a name. ~~`scripts/bench.sh`~~
 `shoal-bench run` captures one as a fifth phase and archives it to
 `docs/perf/runs/<label>.stages.json`, where [Benchmark
 Results](../performance/overview.md) draws it as a stacked bar per latency rank.
 
 ~~One workload, `macro/insert_unsorted`, at 256 byte rows.~~ Since
 [F22](row-size-benchmarks.md) the layer profiles **four** workloads — that one plus the grid's width
-axis at 1 KiB, 8 KiB and 512 KiB — because a breakdown at one width cannot say which of the nineteen
+axis at 1 KiB, 8 KiB and 512 KiB — because a breakdown at one width cannot say which of the
 stages grows with the bytes, which is the question [Row size and what it costs](../tables/row-size.md)
 most wanted answered. The artifact is a `StageReports` keyed by workload rather than a single
 report; the old single-report shape is still accepted on read, which is what keeps the nine captures
@@ -48,9 +52,11 @@ reason: the hotpath layer wants one workload and this one wants a curve. See
 | `client_write` | → after the write loop | batch |
 | `net_in` | → last byte read off the server's socket | query |
 | `shard_queue_in` | → the shard dequeues the bundle | query |
-| `decode` | → `Queries::access` and deserialize done | batch |
+| `decode` | → `Queries::access` done — the bundle is *readable*, not deserialized | batch |
 | `route` | → handed to the shard owning its partitions | query |
 | `exec_queue` | → that shard dequeues it | query |
+| `query_decode` | → this query deserialized out of the bundle and narrowed | query |
+| `partition_wait` | → the partition this get parked on has been read | query |
 | `execute` | → synchronous work done (`commit` returned, or the response was built) | query |
 | `durable_staged` | → the write carrying it is submitted to io_uring | query |
 | `durable_write` | → that write lands | query |
@@ -172,6 +178,19 @@ halves keep everything there, which is agreement rather than sampling
   They are comparable across threads, which is what makes the shard and client halves joinable in
   a workload, where `ShoalPool::start` runs in the same process. Against a remote server `net_in` and
   `net_out` are meaningless and the two halves cannot be joined at all.
+- **`decode` does not mean what it used to, and captures do not compare across the change.**
+  Until [F26](archive-routed-requests.md) it covered validating the bundle *and* deserializing
+  every query in it. It now covers only the validate; the deserialize is `query_decode`, one stage
+  later, on the shard that executes the query rather than on the coordinator. To compare a capture
+  taken before F26 with one taken after, add the two together. They are still not quite the same
+  quantity — the deserialize now happens on *N* shards rather than on core 0 — which is the point
+  of the change and the reason the two stages are kept apart.
+- **`execute` measures the pass that answered a query, not the wait in front of it.** A get whose
+  partition has to be read parks and is replayed, so it is dequeued twice; `exec_queue` measures
+  the first dequeue, `partition_wait` the read it parked on, and `execute` only the pass that
+  built its answer. A parked get therefore reports its decode as the decode it really did rather
+  than as nothing, which is what it did for as long as the replay overwrote the stamp
+  `query_decode` is measured from.
 - **Four stages are batch level.** `client_serialize`, `client_pool`, `client_write` and `decode`
   are paid once per bundle and charged to every query in it. They are labelled `per_batch` in the
   JSON; a reader who ignores that will read a large `decode` as one query's cost.

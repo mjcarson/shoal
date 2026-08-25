@@ -40,7 +40,11 @@ pub use shoal_client::client::{self, Shoal, ShoalResponse, ShoalUnorderedResultS
 #[cfg(feature = "server")]
 pub use shoal_core::ShoalPool;
 #[cfg(feature = "server")]
-pub use shoal_core::server::{self, Conf, database::ShoalDatabase, routing::ShardRouting};
+pub use shoal_core::server::{
+    self, Conf,
+    database::ShoalDatabase,
+    routing::{ArchivedShardRouting, ShardRouting},
+};
 #[cfg(feature = "server")]
 pub use shoal_core::storage::{self, FileSystem, NoStorage};
 #[cfg(feature = "server")]

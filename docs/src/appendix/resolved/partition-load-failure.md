@@ -113,7 +113,8 @@ what the shard needs is only which partition to release.
 **The shard releases the parked queries.** `ShoalDatabase::fail_partition` mirrors
 `load_partition`: the derive dispatches on the table name, `PersistentTable::fail_partition`
 drains `blocked.remove(&partition_id)`, and each released query is replayed as a
-`ServerMsg::Query`. No `MarkEvictable` follows it, unlike a successful load — nothing was read,
+`ServerMsg::Released` ([F26](../../features/archive-routed-requests.md) — it was a
+`ServerMsg::Query` until that variant started carrying a bundle rather than a query). No `MarkEvictable` follows it, unlike a successful load — nothing was read,
 so nothing entered `partitions` and nothing came out of the LRU that has to be put back.
 
 **A released query is marked to skip the read that just failed.** This is the part without which

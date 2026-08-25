@@ -11,8 +11,13 @@
 //! [`RequestBody::read_from`] is its only constructor, so a `RequestBody` that exists is a
 //! buffer some read filled to its full length. A read that fails drops the buffer without ever
 //! handing it out.
+//!
+//! There are two ways out of the type and both preserve that: [`Deref`] borrows the bytes, and
+//! [`RequestBody::freeze`] consumes the body for a [`Bytes`] several shards can hold at once.
+//! Neither can be reached without having built one, so neither can hand out memory a read did
+//! not fill.
 
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use futures::{AsyncRead, AsyncReadExt};
 use std::io;
 use std::ops::Deref;
@@ -66,6 +71,24 @@ impl RequestBody {
         // fill every byte of it from the connection
         reader.read_exact(&mut data).await?;
         Ok(RequestBody { data })
+    }
+
+    /// Turn this body into a buffer several shards can hold at once
+    ///
+    /// A bundle is routed to every shard that owns one of the partitions its queries name, and
+    /// each of those shards reads its own query straight out of these bytes rather than being
+    /// handed a copy of it ([F26](../../../docs/src/features/archive-routed-requests.md)). So the
+    /// body has to outlive the routing loop and be cheap to hand out, which is what [`Bytes`] is
+    /// and [`BytesMut`] is not - cloning a `BytesMut` copies it.
+    ///
+    /// This consumes the body rather than borrowing it, so it is the second and last exit from
+    /// the type. It preserves the guarantee the type exists for: the only way to reach a `Bytes`
+    /// through here is to have built a `RequestBody` first, and the only way to do that is a read
+    /// that filled every byte.
+    #[must_use]
+    pub fn freeze(self) -> Bytes {
+        // the same allocation, handed over as a shared read only buffer
+        self.data.freeze()
     }
 
     /// Get how many bytes this body is

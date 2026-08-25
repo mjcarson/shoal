@@ -36,8 +36,11 @@ produces, and what **every** macro percentile recorded before
 artifact records which one a number is. Contrast **Service time**.
 
 **Blocked query** — A query parked in `blocked: HashMap<u64, Vec<...>>` waiting for a
-partition to be read from disk. Re-injected as a fresh `ServerMsg::Query` when the read
-completes, rather than being resumed as a suspended future. See
+partition to be read from disk. Re-injected as a `ServerMsg::Released` when the read
+completes, rather than being resumed as a suspended future. It carries the query itself, unlike
+`ServerMsg::Query` which carries the bundle a query arrived in — a blocked query was decoded and
+narrowed when it first arrived and is never decoded again
+([F26](../features/archive-routed-requests.md)). See
 [Query Execution](../tables/query-execution.md).
 
 **check_disk** — A flag on `SortedPartition` meaning "there may be more of this partition in

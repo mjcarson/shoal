@@ -42,8 +42,12 @@ in the other direction — it had one row left open, that row was fixed, and the
 [moved](resolved/claude-md-drift.md).
 
 **Baseline as of writing:** `cargo check --workspace --all-targets` passes with warnings;
-`cargo test --workspace` passes — 1,045 tests, two ignored, plus 12 more behind
+`cargo test --workspace` passes — **1,060 tests**, two ignored, plus 12 more behind
 `--features stage-profile` that a default run does not reach ([Test Coverage](test-coverage.md)).
+~~1,045~~ — this figure had gone stale by two features while the sentences below it kept naming
+what each added, which is what a running total is supposed to prevent. It is re-derived from a run
+rather than incremented, and [Test Coverage](test-coverage.md) is the page that carries the
+per-binary breakdown.
 [Resolved #76](resolved/stage-join.md) added 6, and moved the count in both directions at once: 2
 in a default run and 4 behind the feature, including the first test anywhere that starts a server
 under `stage-profile` and reads what it wrote. That is the test the stage layer never had, and its
@@ -54,7 +58,8 @@ reproduces [O34](optimizations.md) and fails against the tree before its fix —
 the optimizations page ever reproduced by a test rather than argued from source and sized by a
 capture. [F25](../features/read-buffers-are-filled-not-zeroed.md) and
 [Resolved #79](resolved/micro-only-capture-current.md) added 8, two of which fail against the tree
-before the fix.
+before the fix. [F26](../features/archive-routed-requests.md) added 5, four of which were confirmed
+by breaking the code under them rather than by being written after it.
 **Unchanged by the `f22-row-size` capture**, which added no tests and moved no count, and which is
 where item [75](#75-a-control-that-was-measured-at-every-width-is-not-drawn-and-the-caption-says-it-is)
 and [item 76](resolved/stage-join.md) came from — both read out of the committed artifact rather

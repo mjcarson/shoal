@@ -3,8 +3,22 @@
 What the test suite reaches, what it does not, and the one place where it is unsound.
 
 **Established by running it.** `cargo check --workspace --all-targets` passes with warnings and
-`cargo test --workspace` passes: **1,055 tests**, two ignored, plus **12** behind
+`cargo test --workspace` passes: **1,060 tests**, two ignored, plus **13** behind
 `--features stage-profile` that a default run does not reach.
+
+**[F26](../features/archive-routed-requests.md) added 5**, and the total went 1,055 → 1,060. It
+added a sixth that a default run does not reach, taking the `stage-profile` extras from 12 to 13:
+`a_parked_get_does_not_count_its_disk_wait_as_execution`, over the stamp a replayed query used to
+overwrite. That one was found by reading the change rather than by a failure, which makes it the
+only test here written for a defect that had never been captured — the layer it is about only runs
+under a feature flag, so nothing would have reported it. They
+are all in one new binary, `archive_routing.rs`, and they are all the same kind of test: the
+coordinator now routes a bundle without deserializing it, which splits one function into three,
+so each of them checks the three against the one they replaced rather than against a hardcoded
+answer. `split_by_shard` is kept in the tree for exactly that reason — it is no longer on the live
+path and it is the only definition of correct the new path has. Four of the five were confirmed by
+breaking the code under them: dropping the `normalized()` call fails two, and routing a write with
+keys to narrow to fails a third.
 
 **[F25](../features/read-buffers-are-filled-not-zeroed.md) and
 [Resolved #79](resolved/micro-only-capture-current.md) added 8**, and the total went 1,047 → 1,055.
@@ -164,8 +178,8 @@ should read this table rather than assume it was.
 | `shoal-proto` unit | 171 | the protocol, the SHQL parser, SCRAM, the TLS config — moved out of `shoal-core` |
 | `shoal-core` unit | 154 | the engine: partitions, storage, the shard. Was 323 before the split. Up 5 with [F23](../features/self-sizing-staging-buffer.md), all of them over the staging buffer's sizing rule, and 3 with [F25](../features/read-buffers-are-filled-not-zeroed.md) over `RequestBody` — a body delivered in pieces, a stream that ends early, and an empty one |
 | `shoal-client` unit | 20 | the client read loop and its error routing, and — new with [F16](../features/client-builder.md) — the builder, the pool defaults and the endpoint order; and — new with [F25](../features/read-buffers-are-filled-not-zeroed.md) — a response payload arriving in pieces and a connection that closes halfway through one |
-| `shoal-bench` unit | 404 | the harness, the workloads, the charts, and — new with [F17](../features/workload-grid.md) and [F18](../features/results-pages.md) — the grid, the row-width and key generators, the family and page registries, and the two new chart kinds; and — new with [F19](../features/chart-legends.md) — the shared legend, the data-derived axis ticks, and the encryption charts in nanoseconds; and — new with [F20](../features/configuration-sweeps.md) and [F21](../features/benchmark-groups.md) — the configuration sweep, the group table, and `--group` in the registry; and — new with [F22](../features/row-size-benchmarks.md) — the three width passes, the configuration sweep's width repeats, both runner-side lists of profiled workloads, and the per-workload stage artifact; and — new with [Resolved #76](resolved/stage-join.md) — that the stage layer's collector judges each report rather than their sum; and — new with [Resolved #79](resolved/micro-only-capture-current.md) — that each page resolves the current capture of the layer it draws. **415 with `--features stage-profile`**, which adds the 8 over the report builder and 3 over the `StageLog` |
-| `shoal` integration | 199 | 15 binaries against a live server, one ignored. `pool.rs` is **new** with [F16](../features/client-builder.md) and `intent_log_batching.rs` with [F23](../features/self-sizing-staging-buffer.md) |
+| `shoal-bench` unit | 404 | the harness, the workloads, the charts, and — new with [F17](../features/workload-grid.md) and [F18](../features/results-pages.md) — the grid, the row-width and key generators, the family and page registries, and the two new chart kinds; and — new with [F19](../features/chart-legends.md) — the shared legend, the data-derived axis ticks, and the encryption charts in nanoseconds; and — new with [F20](../features/configuration-sweeps.md) and [F21](../features/benchmark-groups.md) — the configuration sweep, the group table, and `--group` in the registry; and — new with [F22](../features/row-size-benchmarks.md) — the three width passes, the configuration sweep's width repeats, both runner-side lists of profiled workloads, and the per-workload stage artifact; and — new with [Resolved #76](resolved/stage-join.md) — that the stage layer's collector judges each report rather than their sum; and — new with [Resolved #79](resolved/micro-only-capture-current.md) — that each page resolves the current capture of the layer it draws. **416 with `--features stage-profile`**, which adds the 9 over the report builder — one of them new with [F26](../features/archive-routed-requests.md), over a parked get's stages — and 3 over the `StageLog` |
+| `shoal` integration | 204 | 16 binaries, one ignored. `pool.rs` is **new** with [F16](../features/client-builder.md), `intent_log_batching.rs` with [F23](../features/self-sizing-staging-buffer.md), and `archive_routing.rs` with [F26](../features/archive-routed-requests.md). All but the last run against a live server; `archive_routing.rs` starts nothing, because `Ring`, the routing traits and rkyv are pure CPU over plain data — the same property `shoal/benches/routing.rs` relies on |
 | `shoalctl` integration | 34 | the completion menu, driven the way the key handler does |
 | `shoal-client-check` integration | 7 | **new.** A schema compiling and running against the client alone |
 | `shoal-bench` integration | 21 | committed artifacts, chart geometry, CSS sync. Up 2 with [F17](../features/workload-grid.md), both guarding the committed corpus against the four fields it added, and 2 more with [F19](../features/chart-legends.md) over the legend's layout. **22 with `--features stage-profile`**, which adds `stage_join.rs` — the only test here that starts a server ([Resolved #76](resolved/stage-join.md)) |
@@ -193,7 +207,7 @@ config section, and 4 new doctests (`TlsClientOptions::new`, `Networking::tls`,
 `ClientOptions::tls`, and `Shoal::with_options`, the last `no_run` because it needs a server).
 5 more workload unit tests landed in `shoal-bench` over the encrypted transport arms.
 
-**Nine of these need the `tls` kernel module and skip loudly without it**, the same way the twelve
+**Nine of these need the `tls` kernel module and skip loudly without it**, the same way the thirteen
 `stage-profile` tests sit outside a default run: the 8 in `tls.rs` and
 `a_socket_reports_the_tls_ulp_once_it_is_attached`. That last one is the only assertion anywhere
 that can tell a kTLS socket from a plaintext one, which makes it the one that would catch the

@@ -178,6 +178,13 @@ about. Left alone deliberately, and named here so the next reader knows it was s
 - **`RequestBody`'s field stays private, and `read_from` stays its only constructor.** No
   `From<BytesMut>`, no `pub fn new`, no public field. This is the entire safety argument for the
   `set_len` inside it.
+- **`RequestBody` keeps exactly two exits, and both start from a completed read.** `Deref` borrows
+  the bytes, and `freeze` — added by [F26](archive-routed-requests.md), which needed the body to
+  outlive the routing loop and be cheap to hand to several shards at once — consumes the body for
+  a `Bytes`. Neither is reachable without having built a `RequestBody` first, which is what keeps
+  the guarantee above intact as the type grows callers. A third exit that does not go through
+  `read_from` hands a shard memory nothing wrote, and F26 made that a wider blast radius than it
+  was: those bytes are now read by every shard the bundle routes to, with `access_unchecked`.
 - **The client's `set_len` stays behind the `filled().len()` check.** It is sound because
   `ReadBuf` counts what a reader initialized; a version that assumed the read filled the buffer
   would be the server's argument without the server's protection.

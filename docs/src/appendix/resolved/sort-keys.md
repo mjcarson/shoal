@@ -126,11 +126,18 @@ impl block, because the archived form of a partition was already being iterated 
 What is left in the table is the part that is actually its own: deciding which partitions to read,
 in the same `(resident, check_disk)` shape `get` uses. The six `println!`s went with the scans.
 
-**Sort keys are normalized once, where a query enters the server.**
-`normalize_sort_keys` (`shared/queries.rs`) sorts and deduplicates, and
-`SortedQuery::split_by_shard` calls it in the `Get` and `Exists` arms — beside `group_by_shard`,
-which deduplicates partition keys for the same reason. Sorting there is what makes a seek-in-order
-produce sort order; deduplicating is what stops a key named twice from returning its row twice.
+~~**Sort keys are normalized once, where a query enters the server.**~~ **Where they are
+normalized moved; that they are has not.** `normalize_sort_keys` (`shared/queries.rs`) sorts and
+deduplicates, and `SortedQuery::split_by_shard` called it in the `Get` and `Exists` arms — beside
+`group_by_shard`, which deduplicates partition keys for the same reason. Sorting there is what
+makes a seek-in-order produce sort order; deduplicating is what stops a key named twice from
+returning its row twice.
+
+[F26](../../features/archive-routed-requests.md) moved it to
+`ArchivedShardRouting::narrow_to`, on the shard that executes the query, because the coordinator
+no longer deserializes a query and so has no selection to normalize. It is therefore **once per
+shard a get was split to** rather than once per get. The obligation is unchanged and so is the
+reason for it — see the invariant below, which is the part a new call path has to respect.
 
 **A get naming sort keys still reads disk.** No part of this touches the `check_disk` block in
 `PersistentSortedTable::get` or its counterpart in `exists`. That is deliberate and is the
@@ -162,7 +169,9 @@ before it is answered about is worth more than the read it saves. It is recorded
 built, saving the server the work. Rejected because a query arriving over the wire is deserialized
 straight into its struct and never passes through a constructor, so the server would have been
 trusting a client to have done something it has no way to check. `split_by_shard` is the one place
-every query passes through, whoever built it.
+every query passes through, whoever built it — and after
+[F26](../../features/archive-routed-requests.md), `narrow_to` is. The argument is unaffected by
+which of them it is: both are server side, and neither trusts the client.
 
 **Range predicates in the same change.** `title >= 'M' AND title < 'N'` is what would make paging
 inside a partition possible, and it was the larger half of what TODOs asked for. It was kept out
@@ -183,8 +192,11 @@ to do.
   produce `All`**, and both the generated builders and the SHQL binding arm do.
 - **Sort keys reaching a table are sorted and deduplicated.** The scans seek in the order they are
   given and do not check for repeats, because `normalize_sort_keys` has already run. A new path
-  that hands a get to a table without going through `split_by_shard` has to normalize for itself —
-  the same obligation `group_by_shard` already imposes for partition keys.
+  that hands a get to a table without going through `narrow_to` — ~~`split_by_shard`~~, until
+  [F26](../../features/archive-routed-requests.md) moved it — has to normalize for itself, the
+  same obligation `group_by_shard` already imposes for partition keys. **The move is exactly the
+  hazard this invariant is about**: normalization used to sit in the same function as the routing,
+  and now it does not, so a future path that routes without narrowing skips it silently.
 - **`check_disk` stays the only thing that decides whether a partition is read.** A named key
   missing from the copy in memory says nothing about the copy in an archive, and a named key
   *found* in memory says nothing about the other keys the same query named. Sort keys may not

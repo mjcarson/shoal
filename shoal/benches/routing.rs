@@ -33,8 +33,10 @@ use rkyv::{Archive, Deserialize, Serialize};
 use std::hint::black_box;
 
 use shoal::server::ring::Ring;
-use shoal::shared::queries::{UnsortedGet, UnsortedQuery};
-use shoal::{FileSystem, PersistentUnsortedTable, ShardRouting, ShoalUnsortedTable};
+use shoal::shared::queries::{ArchivedUnsortedQuery, UnsortedGet, UnsortedQuery};
+use shoal::{
+    ArchivedShardRouting, FileSystem, PersistentUnsortedTable, ShardRouting, ShoalUnsortedTable,
+};
 
 /// The shard counts every ring benchmark is run at
 ///
@@ -212,11 +214,103 @@ fn bench_split_write(c: &mut Criterion) {
     group.finish();
 }
 
+/// Measure routing a get without deserializing it
+///
+/// **This is the live path**, and `routing/split_by_shard/get` above is the same decision over a
+/// query that has already been deserialized. The coordinator no longer builds one
+/// ([F26](../../docs/src/features/archive-routed-requests.md)): it reads the partition keys
+/// straight out of the archive and hands each shard the buffer plus the keys it owns. So the
+/// difference between the two groups at a given key count is what routing from the archive is
+/// worth per query, before the deserialize this moved off the coordinator is counted at all.
+///
+/// The same O(n²) `group_by_shard` sits under both, so [O39] bends this curve exactly as it bends
+/// the one above. That is deliberate — a change to the dedup scan has to show in both.
+///
+/// [O39]: ../../docs/src/appendix/optimizations.md
+///
+/// # Arguments
+///
+/// * `c` - The criterion harness to add this benchmark to
+fn bench_route_archived_get(c: &mut Criterion) {
+    // build the group every key count is measured under
+    let mut group = c.benchmark_group("routing/route_archived/get");
+    // the same twelve shard ring the split arms measure against
+    let ring = Ring::new(12).expect("a twelve shard ring is placeable");
+    // measure routing at each key count
+    for keys in KEYS {
+        // build the query this routing is measured over, and archive it the way the wire does
+        let query = UnsortedQuery::<RoutedRow>::Get(get(keys));
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&query).expect("a query archives");
+        // read it back the way a shard does, which is the form this benchmark is about
+        let archived =
+            rkyv::access::<ArchivedUnsortedQuery<RoutedRow>, rkyv::rancor::Error>(&bytes)
+                .expect("an archived query is readable");
+        // the work is per key, so this is what makes the per element cost readable
+        group.throughput(Throughput::Elements(keys as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(keys), &keys, |b, _| {
+            // reuse one buffer across iterations, the way the routing loop does
+            let mut found = Vec::with_capacity(12);
+            b.iter(|| {
+                // the caller clears the buffer rather than allocating a new one
+                found.clear();
+                UnsortedQuery::<RoutedRow>::route_archived(archived, &ring, &mut found);
+                black_box(found.len())
+            });
+        });
+    }
+    group.finish();
+}
+
+/// Measure routing a write without deserializing it
+///
+/// **The control**, for the same reason `routing/split_by_shard/write` is one: a write names a
+/// single partition and never enters `group_by_shard`, so it is flat in everything the get arm
+/// varies. Against that write arm it is also the cleanest reading of what this change is worth —
+/// both route one key to one shard, and the difference is that this one never touched the row.
+///
+/// # Arguments
+///
+/// * `c` - The criterion harness to add this benchmark to
+fn bench_route_archived_write(c: &mut Criterion) {
+    // build the group this control is measured under
+    let mut group = c.benchmark_group("routing/route_archived/write");
+    // the same twelve shard ring every other arm here measures against
+    let ring = Ring::new(12).expect("a twelve shard ring is placeable");
+    // the same key counts, none of which a write can actually name more than one of
+    for keys in KEYS {
+        // a write names one partition however many the get beside it named
+        let query = UnsortedQuery::<RoutedRow>::Insert {
+            key: 0,
+            row: RoutedRow { key: 0, value: 0 },
+        };
+        // archive it and read it back, the way the wire and then the coordinator do
+        let bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&query).expect("a query archives");
+        let archived =
+            rkyv::access::<ArchivedUnsortedQuery<RoutedRow>, rkyv::rancor::Error>(&bytes)
+                .expect("an archived query is readable");
+        // one partition is one element, which is the point of the control
+        group.throughput(Throughput::Elements(1));
+        group.bench_with_input(BenchmarkId::from_parameter(keys), &keys, |b, _| {
+            // the same reused buffer every other arm uses
+            let mut found = Vec::with_capacity(12);
+            b.iter(|| {
+                // the caller clears the buffer rather than allocating a new one
+                found.clear();
+                UnsortedQuery::<RoutedRow>::route_archived(archived, &ring, &mut found);
+                black_box(found.len())
+            });
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     routing,
     bench_find_shard,
     bench_ring_new,
     bench_split_get,
     bench_split_write,
+    bench_route_archived_get,
+    bench_route_archived_write,
 );
 criterion_main!(routing);

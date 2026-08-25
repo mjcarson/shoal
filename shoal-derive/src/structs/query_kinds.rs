@@ -75,6 +75,7 @@ pub fn add(
     let query_ident = format_ident!("{}QueryKinds", struct_ident);
     let response_ident = format_ident!("{}ResponseKinds", struct_ident);
     let archived_response_ident = format_ident!("Archived{}ResponseKinds", struct_ident);
+    let archived_query_ident = format_ident!("Archived{}QueryKinds", struct_ident);
     // Generate QueryKinds enum variants
     let query_variants = tables.iter().map(|table| {
         // get the ident and type for this table
@@ -139,6 +140,61 @@ pub fn add(
                 for (shard, narrowed) in split {
                     found.push((shard, #query_ident::#variant(narrowed)));
                 }
+            }
+        }
+    });
+    // Generate route_archived match arms
+    //
+    // each table routes its own query, and hands back the keys each shard owns rather than a
+    // narrowed query - the narrowing happens on the shard that executes it, which is the whole
+    // point of routing from the archive
+    let route_archived_arms = tables.iter().map(|table| {
+        let variant = &table.variant_ident;
+        let inner = &table.inner_type;
+        let query_ty = table.kind.query_type();
+        quote! {
+            #archived_query_ident::#variant(query) => {
+                // named through the trait so a schema does not have to have it in scope
+                <::shoal::shared::queries::#query_ty<#inner> as ::shoal::server::routing::ArchivedShardRouting>::route_archived(
+                    query,
+                    ring,
+                    found,
+                )
+            }
+        }
+    });
+    // Generate archived_partition_keys match arms
+    let archived_partition_keys_arms = tables.iter().map(|table| {
+        let variant = &table.variant_ident;
+        let inner = &table.inner_type;
+        let query_ty = table.kind.query_type();
+        quote! {
+            #archived_query_ident::#variant(query) => {
+                <::shoal::shared::queries::#query_ty<#inner> as ::shoal::server::routing::ArchivedShardRouting>::archived_partition_keys(query)
+            }
+        }
+    });
+    // Generate archived_limit match arms
+    let archived_limit_arms = tables.iter().map(|table| {
+        let variant = &table.variant_ident;
+        let inner = &table.inner_type;
+        let query_ty = table.kind.query_type();
+        quote! {
+            #archived_query_ident::#variant(query) => {
+                <::shoal::shared::queries::#query_ty<#inner> as ::shoal::server::routing::ArchivedShardRouting>::archived_limit(query)
+            }
+        }
+    });
+    // Generate narrow_to match arms
+    //
+    // the narrowed query goes back into the variant it came out of, the same way a split one did
+    let narrow_to_arms = tables.iter().map(|table| {
+        let variant = &table.variant_ident;
+        quote! {
+            #query_ident::#variant(query) => {
+                #query_ident::#variant(
+                    ::shoal::server::routing::ArchivedShardRouting::narrow_to(query, keys),
+                )
             }
         }
     });
@@ -251,6 +307,63 @@ pub fn add(
                 ) {
                     match &self {
                         #(#split_by_shard_arms),*
+                    }
+                }
+            }
+
+            #[automatically_derived]
+            impl ::shoal::server::routing::ArchivedShardRouting for #query_ident {
+                /// Find the shards that answer this query, and the keys each of them owns
+                ///
+                /// # Arguments
+                ///
+                /// * `archived` - The query, still in the buffer it arrived in
+                /// * `ring` - The shard ring to check against
+                /// * `found` - The per shard shares we found for this query
+                fn route_archived<'a>(
+                    archived: &<Self as ::shoal::rkyv::Archive>::Archived,
+                    ring: &'a ::shoal::server::ring::Ring,
+                    found: &mut Vec<(&'a ::shoal::server::shard::ShardInfo, Option<Vec<u64>>)>,
+                ) {
+                    match archived {
+                        #(#route_archived_arms),*
+                    }
+                }
+
+                /// Get the partitions this query named, in the order it named them
+                ///
+                /// # Arguments
+                ///
+                /// * `archived` - The query, still in the buffer it arrived in
+                fn archived_partition_keys(
+                    archived: &<Self as ::shoal::rkyv::Archive>::Archived,
+                ) -> Vec<u64> {
+                    match archived {
+                        #(#archived_partition_keys_arms),*
+                    }
+                }
+
+                /// Get the most rows this query asked for, if it set a limit
+                ///
+                /// # Arguments
+                ///
+                /// * `archived` - The query, still in the buffer it arrived in
+                fn archived_limit(
+                    archived: &<Self as ::shoal::rkyv::Archive>::Archived,
+                ) -> Option<usize> {
+                    match archived {
+                        #(#archived_limit_arms),*
+                    }
+                }
+
+                /// Narrow this query to the partitions the shard executing it owns
+                ///
+                /// # Arguments
+                ///
+                /// * `keys` - The partition keys this shard owns
+                fn narrow_to(self, keys: Vec<u64>) -> Self {
+                    match self {
+                        #(#narrow_to_arms),*
                     }
                 }
             }

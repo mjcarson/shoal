@@ -109,7 +109,7 @@ pair, and therefore the one that explains why the ephemeral arms fall too.
 | Where | What it costs | Filed as |
 | --- | --- | --- |
 | ~~`shard.rs:105` — `BytesMut::zeroed(header.body_len())`~~ **gone** ([F25](../features/read-buffers-are-filled-not-zeroed.md)) | ~~a `memset` of the whole request body, overwritten by the `read_exact` on the next line~~ — and it was `alloc_zeroed` rather than a `memset`, so it was a cost the allocator sometimes declined to pay | ~~[O29](../appendix/optimizations.md#o29-a-request-body-is-zeroed-and-then-immediately-overwritten)~~ **done** |
-| `shard.rs:1184` — `Queries::deserialize` | every `String` and `Vec` in the bundle allocated and copied out of a buffer that already holds them in a readable layout | [O1](../appendix/optimizations.md#o1-queries-are-fully-deserialized-on-arrival) |
+| ~~`shard.rs:1184` — `Queries::deserialize`~~ **narrowed** ([F26](../features/archive-routed-requests.md)) | ~~every `String` and `Vec` in the **bundle** allocated and copied out of a buffer that already holds them in a readable layout~~ — the coordinator no longer deserializes anything, and the shard that answers a query deserializes only **that query**. It is one walk of one query rather than one walk of the bundle plus, on every write, a second deep copy of the row that `split_by_shard`'s `self.clone()` made — and it happens on the shard that reads the row rather than on core 0 | ~~[O1](../appendix/optimizations.md#o1-queries-are-fully-deserialized-on-arrival)~~ **done**; the remaining walk is [filed in TODOs](../appendix/todos.md) |
 | `partitions.rs:585`, `:293` — `P::from_row` | the row copied into the partition, and copied again on the way out of a get | [O2](../appendix/optimizations.md#o2-every-returned-row-is-copied-at-least-twice) |
 | `fs.rs:368` — `RkyvSupport::serialize` | the row serialized back into a fresh `AlignedVec` for the intent log | [O11](../appendix/optimizations.md#o11-a-fresh-alignedvec-per-write-and-per-response) |
 | `fs.rs:373` — `hasher.write(archived.as_slice())` | a second full pass over the record, for its checksum | [O11](../appendix/optimizations.md#o11-a-fresh-alignedvec-per-write-and-per-response) |
@@ -121,7 +121,11 @@ A read served from an archived partition is worse still: `P::from_archived`
 rows → bytes** rather than **rows → copied rows → bytes**.
 
 **The table above is a *mixture*, and a read never pays most of it.** Three of its seven rows are
-inside `FileSystem::commit`, which only a write enters, and the first two are the request half. That
+inside `FileSystem::commit`, which only a write enters, and the first two are the request half —
+both of which have since been struck: the zeroing by [F25](../features/read-buffers-are-filled-not-zeroed.md)
+and the bundle deserialize by [F26](../features/archive-routed-requests.md). **The write path is
+where F26 took a whole hop out**, since an inserted row was copied twice before it left the
+coordinator and is now copied once, on the shard that stores it. That
 was the right accounting for the `r50` arms this page is built on, and it is the wrong one for
 anybody reading the section to find out what a *get* costs. Traced in code against the tree — which
 nobody had done, the table having been derived from reading the source — a single-shard get of a
@@ -158,8 +162,12 @@ A fan-out get adds three more: the cross-shard `ServerMsg::Gathered` move, `Resp
 **What the row-size axis adds to those entries.** Each of them was filed as a small constant cost on
 a hot path, and ranked accordingly. They are not constant. Their cost grows in the row width, which
 is a quantity **the caller controls**, and this axis is where that becomes the whole story. The
-ranking of O1, O2, O11 ~~and O29~~ against each other does not change; what changes is that ~~all
-four~~ **all three** are much larger for a caller with wide rows than their scorecards suggest.
+ranking of ~~O1,~~ O2, O11 ~~and O29~~ against each other does not change; what changes is that
+~~all four~~ ~~**all three**~~ **both** are much larger for a caller with wide rows than their
+scorecards suggest. **O1 has since been [done](../appendix/optimizations.md)** — and this paragraph
+is the reason it was worth doing rather than the reason it was filed: what made the request half
+urgent was not its size but that it was paid on the coordinator, which is one core for the whole
+system, and that its size was chosen by the caller.
 
 **One of the four turned out not to belong in that sentence**, and finding out why is the reason
 this paragraph is worth reading twice. O29's `BytesMut::zeroed(len)` is `vec![0; len]`, which is
