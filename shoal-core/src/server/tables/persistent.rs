@@ -269,9 +269,23 @@ enum Found<'a, P> {
 #[derive(Debug)]
 pub struct RowSink<'a, P> {
     /// Where each row this get found currently lives, in the order it was found
+    ///
+    /// **Empty until this get finds a row it can point at.** A get every one of whose rows had to
+    /// be built — which is every get against an archive — keeps its rows in `scratch` alone and
+    /// this stays empty, because an index that says "the *i*th row is the *i*th built row" for
+    /// every row carries nothing. See [`Self::mixed`].
     found: Vec<Found<'a, P>>,
     /// The rows this get had to build, in the order it built them
     scratch: Vec<P>,
+    /// Whether this get has found rows in both places, and so needs `found` to tell them apart
+    ///
+    /// This exists because of a measurement. `push_built` writing to both vectors cost the
+    /// archived scans **5–14%** against the shape they had before
+    /// ([F27](../../../docs/src/features/grouped-responses.md)) — a second push per row, on the
+    /// one path that gains nothing from being able to point at rows, since an archive holds no
+    /// row to point at. While this is false the second push does not happen, and `found` is
+    /// backfilled if a row that can be pointed at ever arrives.
+    mixed: bool,
     /// Which partition each run of those rows came from, in the order they were scanned
     groups: Vec<RowGroup>,
     /// How many rows had been found when the run being scanned started
@@ -283,6 +297,7 @@ impl<P> Default for RowSink<'_, P> {
         RowSink {
             found: Vec::new(),
             scratch: Vec::new(),
+            mixed: false,
             groups: Vec::new(),
             run_started_at: 0,
         }
@@ -296,6 +311,13 @@ impl<'a, P> RowSink<'a, P> {
     ///
     /// * `row` - The row to answer with, where it lies
     pub fn push_resident(&mut self, row: &'a P) {
+        // the moment a row can be pointed at, where each row lives stops being implied by its
+        // position and has to be recorded - so catch `found` up with what `scratch` already holds
+        if !self.mixed {
+            self.found
+                .extend((0..self.scratch.len()).map(Found::Built));
+            self.mixed = true;
+        }
         self.found.push(Found::Resident(row));
     }
 
@@ -305,20 +327,29 @@ impl<'a, P> RowSink<'a, P> {
     ///
     /// * `row` - The row this get built
     pub fn push_built(&mut self, row: P) {
-        self.found.push(Found::Built(self.scratch.len()));
+        // while every row is a built one, its position in `scratch` is its position in the
+        // answer, and saying so per row is a second write for nothing
+        if self.mixed {
+            self.found.push(Found::Built(self.scratch.len()));
+        }
         self.scratch.push(row);
     }
 
     /// How many rows this get has found so far
     #[must_use]
     pub fn len(&self) -> usize {
-        self.found.len()
+        // until a row is pointed at, every row this get found is a built one
+        if self.mixed {
+            self.found.len()
+        } else {
+            self.scratch.len()
+        }
     }
 
     /// Whether this get has found no rows at all
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.found.is_empty()
+        self.len() == 0
     }
 
     /// Record that everything found since the last call came from this partition
@@ -332,14 +363,14 @@ impl<'a, P> RowSink<'a, P> {
     /// * `partition` - The partition the rows found since the last close came from
     pub fn close_group(&mut self, partition: u64) {
         // a partition that gave nothing is an absence rather than an empty group
-        let len = self.found.len() - self.run_started_at;
+        let len = self.len() - self.run_started_at;
         if len > 0 {
             self.groups.push(RowGroup {
                 partition,
                 len: len as u64,
             });
         }
-        self.run_started_at = self.found.len();
+        self.run_started_at = self.len();
     }
 
     /// How many of the rows this get found it had to build rather than point at
@@ -359,10 +390,15 @@ impl<'a, P> RowSink<'a, P> {
     ///
     /// * `self` - The sink to walk
     pub fn iter(&self) -> impl Iterator<Item = &P> {
-        self.found.iter().map(|found| match found {
-            Found::Resident(row) => *row,
-            Found::Built(at) => &self.scratch[*at],
-        })
+        // a get that pointed at nothing is its scratch space, in order
+        let built = (!self.mixed).then(|| self.scratch.iter());
+        let placed = self.mixed.then(|| {
+            self.found.iter().map(|found| match found {
+                Found::Resident(row) => *row,
+                Found::Built(at) => &self.scratch[*at],
+            })
+        });
+        built.into_iter().flatten().chain(placed.into_iter().flatten())
     }
 
     /// Take every row this get found as an owned row, cloning the ones it borrowed
@@ -376,6 +412,10 @@ impl<'a, P> RowSink<'a, P> {
     where
         P: Clone,
     {
+        // a get that pointed at nothing already owns every row it found, in order
+        if !self.mixed {
+            return self.scratch;
+        }
         // the built rows come out in the order they went in, which is the order they are named in
         let mut built = self.scratch.into_iter();
         self.found
@@ -396,14 +436,7 @@ impl<'a, P> RowSink<'a, P> {
     /// is the reason a get that has to park cannot take this path at all.
     #[must_use]
     pub fn rows(&self) -> GetRows<RowRef<'_, P>> {
-        let rows = self
-            .found
-            .iter()
-            .map(|found| match found {
-                Found::Resident(row) => RowRef::new(*row),
-                Found::Built(at) => RowRef::new(&self.scratch[*at]),
-            })
-            .collect();
+        let rows = self.iter().map(RowRef::new).collect();
         GetRows {
             rows,
             groups: self.groups.clone(),
