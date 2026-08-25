@@ -1290,3 +1290,33 @@ Multi-shard routing is no longer on that list; it gained coverage with
 | `shoalctl/src/components/tab.rs:548`, `:558` | `next`/`prev`, never called — the compiler warns about them on every build. |
 | ~~`EphemeralTable`~~ | ~~Cannot be used in a `#[db]` database.~~ Deleted by [F9](../features/ephemeral-tables.md), which replaced it with aliases over the persistent tables. |
 | `shoal/examples/basic.rs.bak` | A `.bak` file in the source tree. |
+
+## A single-key archived get sits above a control that should be flat
+
+`partition_sorted/maybe_loaded/get_key/*` is 11% over the trailing capture in
+`f27-grouped-responses` and still 11% over it in `f27-row-sink`, which was taken to remove the one
+structural reason it could have been — see [F27](../features/grouped-responses.md#performance). At
+1024 rows it went *further* out between the two, 124.89 ns to 139.79 ns, across a change that
+touches its path only by removing a write.
+
+**What makes it worth a look rather than a shrug** is that `partition_sorted/archived/walk_all/16`
+reports +9.3% and +9.4% in the same two captures while using a plain `Vec` and calling nothing F27
+changed. So there is a floor of roughly nine points here that belongs to the machine or the
+binary's layout rather than to any commit, and `get_key` sits a couple of points above even that,
+inconsistently.
+
+Three things would separate them, in increasing order of effort:
+
+- **Repeat a capture at one commit.** Two micro captures of the same tree bound how much of this
+  band is run-to-run. Nothing in the corpus does this — every capture is of a different commit —
+  so the noise band on the results pages is a *declared* constant (±9% under a microsecond) that
+  has never been checked against a repeat. That is a gap worth closing on its own account, and it
+  is cheap: one label, one layer, twenty minutes.
+- **Bisect it.** The path is `MaybeLoaded::get` → `seek_archived` → `collect_archived`, and F27
+  touched all three signatures without changing what any of them does per row beyond a branch.
+- **Look at the sink's size.** `RowSink` carries `groups` and `run_started_at`, which only the
+  sealed path uses, so every per-partition scan on the owned path constructs and drops a `Vec` it
+  will never write to. Moving those into the caller is a simplification whether or not it is this.
+
+Filed rather than chased, because the absolute figure is fifteen nanoseconds on a benchmark that
+returns one row, and the resident scans it sits beside moved by 96%.

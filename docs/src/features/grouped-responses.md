@@ -275,13 +275,41 @@ rows. The floor it is approaching is the filter and the walk, which is all that 
 copy is gone — which is also why the single-key gets move by 18% rather than by 96%: one row's
 clone against the seek that found it is a much smaller share.
 
-**The same capture found a regression, on the path that gains nothing.** The archived scans rose
-5–14% — `maybe_loaded/get_range_64/16` +14.0%, `get_key/256` +11.3%, `archived/walk_all/16` +9.3%
-— because `RowSink::push_built` wrote to two vectors where the old code wrote to one. An archive
-holds no row to point at, so every row there is built, and the index recording that carries
-nothing. It is now not written until a row is actually pointed at. Measured again as
-`f27-row-sink`; `f27-grouped-responses` is kept as the capture that shows the regression, because
-a fix with no before is an assertion.
+**The same capture showed the archived scans rising 5–14%**, and chasing that is where the more
+useful lesson is.
+
+The first reading was structural and plausible: `RowSink::push_built` wrote to two vectors where
+the old code wrote to one, on the one path that gains nothing, since an archive holds no row to
+point at and every row there is built. That was fixed — the index is not written until a row is
+actually pointed at — and re-measured as `f27-row-sink`. It cleared `get_all/16` and
+`get_range_64/*`, which fell back inside the noise band.
+
+**It did not clear `archived/walk_all/16` or `maybe_loaded/get_key/*`, and `walk_all` is why that
+matters.** That benchmark builds a plain `Vec` and calls `access`, `live_row_values` and
+`from_archived` — **it touches nothing this feature changed.** It reports +9.3% in the first
+capture and +9.4% in the second. So roughly nine points of that band is not this change at all; it
+is the distance between today's machine and whenever the trailing capture was taken, on
+benchmarks of a few hundred nanoseconds where the declared band is already ±9%.
+
+Read against that control, the archived arms are:
+
+| Benchmark | uses the sink? | f27-grouped-responses | f27-row-sink |
+| --- | --- | ---: | ---: |
+| `archived/walk_all/16` | **no** | +9.3% | +9.4% |
+| `maybe_loaded/get_all/16` | yes | +10.0% | within noise |
+| `maybe_loaded/get_range_64/16` | yes | +14.0% | within noise |
+| `maybe_loaded/get_key/256` | yes | +11.3% | +11.4% |
+| `maybe_loaded/get_key/1024` | yes | +9.8% | **+22.9%** |
+
+The two that moved are the two the fix was aimed at. `get_key` did not move, sits about two points
+above a control that should be flat, and at 1024 rows went *further* out between two captures of
+almost identical code — 124.89 ns to 139.79 ns. A 15 ns swing on a 115 ns benchmark is not
+something this pair of captures can attribute, and saying which of code, layout and machine owns it
+would need a repeat capture at one commit. **Filed rather than explained**, in
+[TODOs](../appendix/todos.md).
+
+Both captures are kept. `f27-grouped-responses` is the one that shows the regression the fix was
+for, and a fix with no *before* is an assertion.
 
 The predictions written down before the capture, which stand:
 
