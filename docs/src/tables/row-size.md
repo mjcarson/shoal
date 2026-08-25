@@ -110,7 +110,7 @@ pair, and therefore the one that explains why the ephemeral arms fall too.
 | --- | --- | --- |
 | ~~`shard.rs:105` — `BytesMut::zeroed(header.body_len())`~~ **gone** ([F25](../features/read-buffers-are-filled-not-zeroed.md)) | ~~a `memset` of the whole request body, overwritten by the `read_exact` on the next line~~ — and it was `alloc_zeroed` rather than a `memset`, so it was a cost the allocator sometimes declined to pay | ~~[O29](../appendix/optimizations.md#o29-a-request-body-is-zeroed-and-then-immediately-overwritten)~~ **done** |
 | ~~`shard.rs:1184` — `Queries::deserialize`~~ **narrowed** ([F26](../features/archive-routed-requests.md)) | ~~every `String` and `Vec` in the **bundle** allocated and copied out of a buffer that already holds them in a readable layout~~ — the coordinator no longer deserializes anything, and the shard that answers a query deserializes only **that query**. It is one walk of one query rather than one walk of the bundle plus, on every write, a second deep copy of the row that `split_by_shard`'s `self.clone()` made — and it happens on the shard that reads the row rather than on core 0 | ~~[O1](../appendix/optimizations.md#o1-queries-are-fully-deserialized-on-arrival)~~ **done**; the remaining walk is [filed in TODOs](../appendix/todos.md) |
-| `partitions.rs:585`, `:293` — `P::from_row` | the row copied into the partition, and copied again on the way out of a get | [O2](../appendix/optimizations.md#o2-every-returned-row-is-copied-at-least-twice) |
+| ~~`partitions.rs:585`, `:293` — `P::from_row`~~ **gone for a resident get** ([F27](../features/grouped-responses.md)) | ~~the row copied into the partition, and copied again on the way out of a get~~ — the copy *out* is gone: a get that named no projection and read only resident partitions is serialized from the rows the partition is holding. A row read out of an archive is still materialized, which is [O40](../appendix/optimizations.md) | ~~[O2](../appendix/optimizations.md#o2-every-returned-row-is-copied-at-least-twice)~~ **half done** |
 | `fs.rs:368` — `RkyvSupport::serialize` | the row serialized back into a fresh `AlignedVec` for the intent log | [O11](../appendix/optimizations.md#o11-a-fresh-alignedvec-per-write-and-per-response) |
 | `fs.rs:373` — `hasher.write(archived.as_slice())` | a second full pass over the record, for its checksum | [O11](../appendix/optimizations.md#o11-a-fresh-alignedvec-per-write-and-per-response) |
 | `fs.rs:387` — `buff.write_all(archived.as_slice())` | a third pass, copying it into the DMA buffer | [O11](../appendix/optimizations.md#o11-a-fresh-alignedvec-per-write-and-per-response) |
@@ -133,8 +133,8 @@ resident partition walks the payload like this:
 
 | # | Hop | Kind | Filed as |
 | ---: | --- | --- | --- |
-| 1 | `P::from_row` deep clone out of the `BTreeMap` (`partitions.rs:585`, `:293`) | copy + alloc | [O2](../appendix/optimizations.md#o2-every-returned-row-is-copied-at-least-twice) |
-| 2 | `PendingGet::finish` re-collects the slots (`persistent.rs:196`) | alloc + walk | **[O36](../appendix/optimizations.md#o36-every-get-re-collects-its-rows-into-a-fresh-vec-even-when-it-read-one-partition)** — was unfiled |
+| ~~1~~ | ~~`P::from_row` deep clone out of the `BTreeMap` (`partitions.rs:585`, `:293`)~~ **gone for a resident get** ([F27](../features/grouped-responses.md)); an archived one still pays it, as [O40](../appendix/optimizations.md) | copy + alloc | ~~[O2](../appendix/optimizations.md#o2-every-returned-row-is-copied-at-least-twice)~~ **half done** |
+| ~~2~~ | ~~`PendingGet::finish` re-collects the slots (`persistent.rs:196`)~~ **gone** — the first run is handed over rather than copied ([F27](../features/grouped-responses.md)) | alloc + walk | ~~**[O36](../appendix/optimizations.md#o36-every-get-re-collects-its-rows-into-a-fresh-vec-even-when-it-read-one-partition)**~~ **done** |
 | 3 | `rkyv::to_bytes` of the response (`shard.rs:1212`) | serialize + alloc | [O2](../appendix/optimizations.md#o2-every-returned-row-is-copied-at-least-twice), [O11](../appendix/optimizations.md#o11-a-fresh-alignedvec-per-write-and-per-response) |
 | 4 | `write_vectored` of `[preamble][archive]` | kernel copy | **unavoidable** |
 | 5 | `read_exact` on the client | kernel copy | **unavoidable** |
@@ -155,9 +155,12 @@ own buffer, so there is no staging copy to remove. **This branch is named for wo
 done and nowhere recorded as done** — which is how a reader ends up looking for a copy that was
 removed before they arrived.
 
-A fan-out get adds three more: the cross-shard `ServerMsg::Gathered` move, `ResponseAction::merge`'s
-`extend`, and the `sort_by_cached_key` rehash that is
-[O18](../appendix/optimizations.md#o18-the-gathered-reorder-rehashes-every-rows-partition-key).
+A fan-out get adds ~~three~~ **two** more: the cross-shard `ServerMsg::Gathered` move and
+`ResponseAction::merge`'s `extend`. ~~and the `sort_by_cached_key` rehash that is
+[O18](../appendix/optimizations.md#o18-the-gathered-reorder-rehashes-every-rows-partition-key)~~ —
+**the rehash is gone** ([F27](../features/grouped-responses.md)): a share carries the index of the
+partitions its rows came from, so the reorder ranks groups and hashes nothing. What replaces it is
+one shallow move per row, which the `extend` above was already paying.
 
 **What the row-size axis adds to those entries.** Each of them was filed as a small constant cost on
 a hot path, and ranked accordingly. They are not constant. Their cost grows in the row width, which

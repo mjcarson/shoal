@@ -7,7 +7,8 @@ projection is a named subset of a table's fields that a get can ask to be answer
 
 ## Context
 
-`ResponseAction::Get(Option<Vec<T>>)` is parameterised by the table's row type, and both halves of
+`ResponseAction::Get(Option<Vec<T>>)` — since [F27](grouped-responses.md), `Option<GetRows<T>>` —
+is parameterised by the table's row type, and both halves of
 the scan produced that type and nothing else. `SortedPartition::collect_rows` pushed `row.clone()`;
 its archived twin `collect_archived` called `R::deserialize(row)`. For a row that is mostly
 `String`s, that deserialize is the dominant cost of a read: every string is allocated and copied out
@@ -102,6 +103,13 @@ table and its own fields; only `#[db]` sees every projection of every table at o
 enum and the response kinds need the whole set. That is also why the projections are declared on the
 database's field rather than on the table.
 
+~~**A projection carries its table's partition key.**~~ **No longer required**, and this is the
+constraint [F27](grouped-responses.md) lifted — a get's answer carries the index of the partitions
+its rows came from, so nothing asks a row where it belongs and `order_by_partitions` has dropped
+its `T: PartitionKeySupport` bound. The derive's requirement and its compile-time assertion are
+both gone, and *a projection of a title alone is now expressible*. The reasoning it rested on,
+kept because a reader who learned the old rule needs to find out it moved:
+
 **A projection carries its table's partition key.** The shard collecting the shares of a split get
 puts the rows back in the order the query named their partitions in, and it does that by asking each
 row which partition it came from. A projection that dropped the partition key would come back
@@ -139,7 +147,10 @@ gives up the monomorphised inner loop, and produces bytes rather than a `Vec<P>`
 `access` — three things traded for one declaration site.
 
 **Carrying per-partition row counts on the wire** so the gather interleaves shares by rank instead of
-hashing each row's partition key. This would lift the requirement that a projection carry its
+hashing each row's partition key. **This is what was eventually built**, by
+[F27](grouped-responses.md), and it was found by reading this section rather than rederived — which
+is the argument for writing rejected alternatives down at all. Counts rather than nested vectors is
+also exactly why it was `M` and not the `XL` O18 graded itself. This would lift the requirement that a projection carry its
 partition key, and would also drop `sort_by_cached_key` from every multi-partition get. It changes
 the response shape and `FromShoal::retrieve`'s signature, so it is filed as
 [O18](../appendix/optimizations.md#o18-the-gathered-reorder-rehashes-every-rows-partition-key)
@@ -157,6 +168,8 @@ and it belongs with O18.
   field of a `#[db]` struct, so there is nowhere to declare one.~~ No longer true.
   [F9](ephemeral-tables.md) made ephemeral tables aliases for the persistent ones, so a projection
   is declared on an ephemeral field exactly as it is on any other.
+- ~~**A projection has to name its table's partition key**, and to name it in the same field order.~~
+  **Lifted** by [F27](grouped-responses.md). The original text follows.
 - **A projection has to name its table's partition key**, and to name it in the same field order.
   The type check catches a mismatched key *type*; it cannot catch two `u64` fields swapped.
 - **There is no column list in SHQL.** `SELECT a, b FROM T` is a parse error, not a query.
@@ -183,6 +196,9 @@ and it belongs with O18.
   downcasts, and panics rather than silently starting fresh, because starting fresh would discard
   the rows already found. This holds because the query parked on a partition is a copy of the one
   that parked it, and dispatch reads the projection off that copy.
+- ~~**A projection hashes its partition key the way its row does.**~~ **No longer load bearing** —
+  [F27](grouped-responses.md) ranks groups rather than rows, so nothing hashes a returned row's
+  partition key at all. The invariant as it stood:
 - **A projection hashes its partition key the way its row does.** `order_by_partitions` looks each
   returned row's partition key up in a rank map built from the keys the query named. A projection
   that hashes to something else sorts last, silently.

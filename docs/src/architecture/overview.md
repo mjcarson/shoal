@@ -100,10 +100,13 @@ Types that must agree across the wire.
 | `tables/` | Table implementations, partitions, and storage engines. |
 | `trace.rs` | `tracing` + OpenTelemetry setup. |
 
-Two files in this directory — `cursor.rs` and `response.rs` — are **not part of the build**.
+~~Two files in this directory — `cursor.rs` and `response.rs` — are **not part of the build**.
 They are absent from the `mod` declarations in `shoal-core/src/server.rs:14-22` and reference
-APIs that no longer exist (`crate::ShoalRow`, `rkyv::AlignedVec`). They are dead. See
-[Known Issues](../appendix/known-issues.md#20-orphaned-source-files).
+APIs that no longer exist (`crate::ShoalRow`, `rkyv::AlignedVec`). They are dead.~~ **Both are
+gone**, deleted by [F27](../features/grouped-responses.md) — see
+[Resolved #20](../appendix/resolved/orphaned-sources.md), which also records what opening
+`response.rs` found: the borrowed-response design it was kept as prior art for was twenty-eight
+lines of struct and `PhantomData`.
 
 ### `client/`
 

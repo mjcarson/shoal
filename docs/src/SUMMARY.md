@@ -88,6 +88,7 @@
   - [F24. Routing benchmarks](features/routing-benchmarks.md)
   - [F25. Read buffers are filled, not zeroed](features/read-buffers-are-filled-not-zeroed.md)
   - [F26. Requests are routed from the archive](features/archive-routed-requests.md)
+  - [F27. A get's answer carries its partitions, and its rows where they lie](features/grouped-responses.md)
 
 # Direction
 
@@ -121,6 +122,7 @@
   - [16, 51. A partition read that failed panicked its shard and stranded its queries](appendix/resolved/partition-load-failure.md)
   - [18, 50. Core exclusion was ignored and shard placement was random](appendix/resolved/excluded-cores-typo.md)
   - [20. The storage tests were entirely commented out](appendix/resolved/storage-tests.md)
+  - [20. Orphaned source files](appendix/resolved/orphaned-sources.md)
   - [24. A bad query could leave the terminal in raw mode](appendix/resolved/shoalctl-panic.md)
   - [25. `CLAUDE.md` described a Shoal that no longer existed](appendix/resolved/claude-md-drift.md)
   - [26, 39. A multi-partition get answered in an arbitrary order](appendix/resolved/partition-order.md)

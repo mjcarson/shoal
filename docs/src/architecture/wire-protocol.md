@@ -291,7 +291,8 @@ pub struct Response<T> {
 
 pub enum ResponseAction<T> {
     Insert(bool),
-    Get(Option<Vec<T>>),
+    /// since F27: the rows, plus an index of the partitions they came from
+    Get(Option<GetRows<T>>),
     Delete(bool),
     Update(bool),
     Exists(bool),

@@ -175,15 +175,20 @@ pub struct MovieSummary {
 
 `shoal-derive/src/projections.rs`
 
-It generates `ShoalProjection` — a `from_row` that clones the named fields and a `from_archived`
-that reads them straight out of an archived row — plus `RkyvSupport`, `PartitionKeySupport` and
+It generates `ShoalProjection` — a `from_row` that clones the named fields, a `from_archived`
+that reads them straight out of an archived row, and an `IDENTITY` that is `None` for every
+projection and `Some` only on the row's own impl, which is what lets an unprojected get be answered
+with the rows a partition already holds ([F27](../features/grouped-responses.md)) — plus `RkyvSupport`, `PartitionKeySupport` and
 `TableRowFormat`, all from the same generators the table derive uses. A field the row does not have
 fails to compile inside `from_row`, which is the check, so there is no separate validation for it.
 
-`#[shoal(partition)]` is the only field attribute a projection takes, and at least one field must
+`#[shoal(partition)]` is the only field attribute a projection takes, and ~~at least one field must
 carry it. A projection has to be able to say which partition its row came from, because the shard
 collecting the shares of a split get puts the rows back in the order the query named their
-partitions in ([F2](../features/projections.md#invariants-to-uphold)). The derive also emits a
+partitions in ([F2](../features/projections.md#invariants-to-uphold))~~ **that requirement is
+gone** ([F27](../features/grouped-responses.md)): a get's answer carries the index of the
+partitions its rows came from, so nothing asks a row where it belongs and a projection may leave
+the partition key out. A projection of a title alone now compiles. The derive also emits a
 compile-time assertion that the projection's `PartitionKey` type is the same type the row's is.
 
 Which projections a table has is declared on the database, not on the table:

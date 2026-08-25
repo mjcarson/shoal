@@ -25,9 +25,8 @@ use tracing::{event, instrument, Level};
 use uuid::Uuid;
 
 use crate::server::messages::{Answer, LoadedPartition, QueryMetadata, SealReply, ServerMsg};
-use crate::server::tables::persistent::{open, PendingGet, RowSink};
+use crate::server::tables::persistent::{open, RowSink};
 use crate::shared::protocol::error::ErrorCode;
-use crate::shared::row_ref::RowRef;
 use crate::server::stage_profile::{StageOp, StageStamps};
 use crate::server::tables::partitions::UnsortedPartition;
 use crate::server::tables::persistent::{
@@ -592,7 +591,7 @@ where
     #[instrument(name = "PersistentTable::get", skip_all)]
     async fn get<P: ShoalProjection<Row = R>>(
         &mut self,
-        mut meta: QueryMetadata,
+        meta: QueryMetadata,
         get: UnsortedGet<R>,
         seal: SealReply<P>,
     ) -> Option<(Uuid, Uuid, StageStamps, Answer<Response<P>>)> {

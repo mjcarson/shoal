@@ -111,18 +111,29 @@ the limit check, and the push exist once rather than once per arm:
 
 ```rust
 for row in rows {
-    if params.limit_reached(found) { break; }
+    if params.limit_reached(found.len()) { break; }
     if let Some(filter) = &params.filters {
         if !T::is_filtered(filter, row) { continue; }
     }
-    found.push(P::from_row(row));
+    match identity {
+        Some(identity) => found.push_resident(identity(row)),
+        None => found.push_built(P::from_row(row)),
+    }
 }
 ```
 
 `P` is what this get asked to be answered with. A get that named no projection asks for the whole
-row, whose `from_row` is a clone, so this is exactly what the loop did before
-[F2](../features/projections.md) — the scan is monomorphised per projection, so an unprojected get
-has no branch here at all.
+row, whose `from_row` is a clone — ~~so this is exactly what the loop did before
+[F2](../features/projections.md)~~ **and since [F27](../features/grouped-responses.md) it does not
+clone it at all**: a row *is* its own identity projection, so a resident one is pointed at rather
+than copied, and the reply is serialized from those pointers. A projection is a strict subset of
+its row and is still built. The `identity` above is `P::IDENTITY`, read once before the loop rather
+than per row, and it is `Some` only on the impl the table derive writes for the row itself — which
+is the one place `Self::Row` and `Self` are the same type, so no projection can claim it.
+
+`found` is a `RowSink`, which records each row as either resident or built and can hold both at
+once — that is what lets a get naming one resident partition and one archived one borrow the half
+it can.
 
 `found` here is this partition's own slot, so `limit_reached` caps each partition at `limit` rows
 of its own. A partition can never contribute more than that to the first `limit` rows of the

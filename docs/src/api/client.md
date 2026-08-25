@@ -278,7 +278,7 @@ is local to the code that depends on them.
 **One query index yields exactly one response.** `pending` is a `BTreeMap<usize, ClientMsg>` keyed
 by the response's index, and `insert` on a `BTreeMap` overwrites. That would silently drop a
 response if two ever shared an index. They cannot: `ResponseAction` has no variant that a query
-answers more than once — a get answers `Get(Option<Vec<T>>)` with every row it found, not a row at a
+answers more than once — a get answers `Get(Option<GetRows<T>>)` with every row it found, not a row at a
 time, and the `Error` variant [F11](../features/error-channel.md) added is applied *in place of*
 whatever a query answered rather than alongside it, at one site per table — and the shard replies
 once per query it handles

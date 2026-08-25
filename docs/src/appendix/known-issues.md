@@ -42,7 +42,7 @@ in the other direction — it had one row left open, that row was fixed, and the
 [moved](resolved/claude-md-drift.md).
 
 **Baseline as of writing:** `cargo check --workspace --all-targets` passes with warnings;
-`cargo test --workspace` passes — **1,060 tests**, two ignored, plus 12 more behind
+`cargo test --workspace` passes — **1,073 tests**, two ignored, plus 13 more behind
 `--features stage-profile` that a default run does not reach ([Test Coverage](test-coverage.md)).
 ~~1,045~~ — this figure had gone stale by two features while the sentences below it kept naming
 what each added, which is what a running total is supposed to prevent. It is re-derived from a run
@@ -428,39 +428,6 @@ debug leftover in the way the six removed ones were, which is why what remains o
 `shoal-core/src/server/conf.rs:30-32` — the only field in `Resources` without a default. A
 `resources:` block omitting `memory` fails to deserialize. Omitting the whole block yields
 `memory: 0`, so eviction runs continuously.
-
-### 20. Orphaned source files
-
-`shoal-core/src/server/cursor.rs` and `shoal-core/src/server/response.rs` are not declared in
-`shoal-core/src/server.rs:14-27` and are not compiled. They reference APIs that no longer
-exist (`crate::ShoalRow`, `rkyv::AlignedVec`). Dead.
-
-**`response.rs` is not merely dead, and that changes what should be done with it.** It defines
-
-```rust
-pub struct Responses<'a, R> {
-    data: Vec<Option<Vec<&'a AlignedVec>>>,
-    ...
-}
-```
-
-— a response that **borrows** its rows instead of owning them, which is precisely the shape
-[O2](optimizations.md#o2-every-returned-row-is-copied-at-least-twice) is blocked on.
-`ResponseAction::Get(Option<Vec<T>>)` can only hold owned rows, and that is the whole of why the
-largest open entry on the optimizations page is an XL wire-format change. Somebody starting O2 will
-either rediscover this file by accident or reimplement it, and either way will not be able to tell
-whether it is a design that was tried and abandoned or one that was never finished — because nothing
-compiles it, so it cannot even be said whether it still type-checks.
-
-So the two files want different treatment. `cursor.rs` is leftover and should go. `response.rs`
-should be *decided*: folded into O2's entry as prior art and deleted, or declared behind
-`#[allow(dead_code)]` so the compiler keeps it honest. The third state it is in now — present,
-unreferenced, unchecked — is the only one that helps nobody. Found while tracing the response path
-for the copy accounting on
-[Row size and what it costs](../tables/row-size.md#the-payload-is-walked-about-six-times-per-round-trip).
-
-The other half of this item — `.../fs/tests.rs` being 429 lines of commented-out tests — is
-[fixed](resolved/storage-tests.md).
 
 ### 21. Constant and comment mismatches
 

@@ -382,7 +382,36 @@ a buffer that already holds them. Its *Impact* grade should be read as **Asympto
 a quantity the caller chooses — rather than as the *Argued* constant above. See
 [Row size and what it costs](../tables/row-size.md#the-payload-is-walked-about-six-times-per-round-trip).
 
-### O2. Every returned row is copied at least twice
+### O2. Every returned row is copied at least twice — *the resident half is done*
+
+**Half done**, by [F27](../features/grouped-responses.md), and the open remainder is filed as
+[O40](#o40-a-row-read-out-of-an-archive-is-materialized-before-it-is-re-serialized) rather than
+left to be rediscovered inside this entry.
+
+**What is closed.** A get that named no projection and read only resident partitions no longer
+copies its rows at all on the way out. The reply is serialized from the rows the partition is
+holding, through a `RowRef<'a, T>` whose archived type *is* the row's archived type, so the bytes
+are identical to what the copying path wrote and no wire version had to move for it. The claim is
+a count and is tested as one: a resident unprojected scan of three rows copies **zero** of them,
+against a projected control that builds all three.
+
+**What is not.** A partition read from disk stays an archive, and what it holds is
+`Archived<T>` — rkyv has no `Serialize` for an archived value back into its own layout, and
+`shoal-derive` cannot write one for a field type whose definition it never sees. Those rows are
+still materialized. That is [O40](#o40-a-row-read-out-of-an-archive-is-materialized-before-it-is-re-serialized).
+
+**And one thing neither half reached, which is the finding that matters.** The sorted table never
+takes the new path at all, because `check_disk` is set when a partition is created and nothing
+clears it when storage reports there was never anything on disk to read. So a sorted partition that
+has only ever been written to is judged non-resident for ever, and refused the borrowing path
+correctly but permanently. Found by probing the path rather than by reasoning about it — both
+paths answer identically, so nothing failed. Filed as
+[item 80](known-issues.md#80-a-sorted-partition-that-was-never-on-disk-asks-storage-about-it-on-every-get).
+**The unsorted table does take it**, throughout its integration suite.
+
+The rest of this entry stands as written, and describes the archived path and the split-get path
+that still pay it:
+
 
 | | |
 | --- | --- |
@@ -651,7 +680,29 @@ than more attractive — see [F1](../features/sort-key-ranges.md#invariants-to-u
 
 ---
 
-### O18. The gathered reorder rehashes every row's partition key
+### ~~O18. The gathered reorder rehashes every row's partition key~~
+
+**Done**, by [F27](../features/grouped-responses.md), together with the resident half of
+[O2](#o2-every-returned-row-is-copied-at-least-twice) as this page said it had to be. A get's
+answer carries an index of the partitions its rows came from, so the shard collecting the shares
+of a split get ranks the **groups** — as many lookups as the query named partitions — instead of
+hashing every row's partition key. Nothing is hashed there at all now.
+
+The shape the entry proposed is not quite the shape that was built, and the difference is the
+whole reason it was cheap. It suggested a share carry `Vec<(u64, Vec<T>)>`; what landed is a flat
+`Vec<T>` beside a `Vec<RowGroup>` index. Both carry the same information. The nested one would have
+changed the payload a client walks from an `ArchivedVec<Archived<T>>` into a vec of vecs, rewriting
+all sixty-eight `access::<T>()` call sites in the tree; the flat one leaves every one of them
+untouched, because `ShoalResponse::access` reaches into `.rows` and keeps its signature. The entry
+graded itself **XL** on the strength of that rewrite. It was **M**.
+
+**What it unblocked is worth more than what it saved.** `order_by_partitions` no longer needs
+`T: PartitionKeySupport`, and that bound was the only reason a projection had to carry its table's
+partition key — a constraint [F2](../features/projections.md) recorded as a limitation and could
+not lift on its own. A projection of a title alone is now expressible.
+
+The original entry read:
+
 
 | | |
 | --- | --- |
@@ -1872,7 +1923,17 @@ whose absolute latencies are not comparable to a shipping one, so folding a ship
 optimization into that capture would produce a number that means nothing. It needs its own
 before-and-after macro capture against the frozen baseline, which has not been taken.
 
-### O36. Every get re-collects its rows into a fresh `Vec`, even when it read one partition
+### ~~O36. Every get re-collects its rows into a fresh `Vec`, even when it read one partition~~
+
+**Done**, by [F27](../features/grouped-responses.md), and it took the fix this entry proposed:
+`GetRows::from_slots` hands over the first run rather than copying it, so a get that read one
+partition answers with the `Vec` the scan already filled. It was `S`, as filed, and it was done
+because [O18](#o18-the-gathered-reorder-rehashes-every-rows-partition-key) rewrote `finish` anyway
+— which is the argument for taking near-free entries with whatever reaches their code rather than
+on their own.
+
+The original entry read:
+
 
 | | |
 | --- | --- |
@@ -2084,3 +2145,61 @@ it**, and anybody about to read that curve as evidence for O13 has to subtract t
 the tablet ring answering in constant time exactly as
 [Resolved #11/#12/#37](resolved/tablet-ring.md) said it would. The lookup this entry calls once per
 key is not what makes the function quadratic; the dedup scan around it is.
+
+---
+
+### O40. A row read out of an archive is materialized before it is re-serialized
+
+| | |
+| --- | --- |
+| **Rank** | **C1a**, inheriting [O2](#o2-every-returned-row-is-copied-at-least-twice)'s place — the open half of the largest established win |
+| **Impact** | **Measured per byte** as part of O2: the response codec grows ×432.8 on decode and ×72.2 on encode over 64 B → 64 KiB, and the `f24-routing` stage breakdown puts `execute` at ×65 over 1 KiB → 512 KiB. What is *not* separated is how much of that belongs to the archived path rather than the resident one, because no capture distinguishes them |
+| **Difficulty** | **XL** — a per-row-type re-serializer emitted by `shoal-derive`, recursing into field types it cannot see |
+| **Depends on** | nothing that is missing; the design question is the whole of it |
+| **Blocks** | nothing |
+| **Tradeoff** | Contained — no wire format change. The bytes are the same either way, which is the property [F27](../features/grouped-responses.md) already relies on |
+| **Benchmark** | `partition_sorted/maybe_loaded/get_all` against `partition_sorted/get_all` — the archived scan against the resident one — is the pair that would price it, and both already exist. What is missing is an arm that runs the same rows both ways in one build, the way [F25](../features/read-buffers-are-filled-not-zeroed.md) ran `body/{zeroed,uninit}` |
+
+`MaybeLoaded::collect_archived` builds an owned row per row returned:
+
+```rust
+found.push_built(P::from_archived(row));
+```
+
+`partitions.rs`, and the unsorted twin beside it. [F27](../features/grouped-responses.md) removed
+the same copy from the resident path by pointing at the row instead
+(`found.push_resident(identity(row))`), and cannot do it here, for a reason worth stating precisely
+because it is not a matter of effort.
+
+**rkyv has no way to serialize an archived value back into its own layout.** There is no
+`impl Archive for ArchivedString`, none for `ArchivedVec`, and none for any type the derive
+generates. The only archived types that are re-serializable are the ones whose archived form is
+themselves — rkyv's own `rend` scalars, `u8`, `i8`, `bool`, `()`. Verified against
+`rkyv-0.8.12/src/impls/`.
+
+The pieces to build one exist, one level deep. `ArchivedString::serialize_from_str`
+(`string/mod.rs:81`) writes exactly what `impl Archive for String` writes;
+`ArchivedVec::serialize_from_slice` (`vec.rs:90`) does the same for a slice whose element archives
+to itself. So a mirror is writable field by field for a row of scalars, `String`s and
+`Vec<u8>`-shaped collections.
+
+**Where it stops is `Vec<Tag>` for any `Tag` the schema declares elsewhere.** `ArchivedVec<ArchivedTag>`
+cannot be borrowed back into anything serializable, and `shoal-derive` sees only the *syntax* of a
+field's type — it cannot look inside `Tag`, which may live in another crate. So the derive would
+have to emit a re-serializer that recurses through types it cannot enumerate, or the feature would
+have to be refused for any row with a nested user type, which is a rule a schema author would hit
+without warning.
+
+**Two things make this smaller than it looks.** The first is that only the *first* copy is at
+stake: the archived path loses `PendingGet::finish`'s re-collect and the gather's rehash the same
+way the resident path did, since those are [O36](#o36-every-get-re-collects-its-rows-into-a-fresh-vec-even-when-it-read-one-partition)
+and [O18](#o18-the-gathered-reorder-rehashes-every-rows-partition-key) and both are done. The
+second is that a projection is not covered by this or by O2 either way — a projection is a strict
+subset of its row and has to be built whatever the row is held as.
+
+**And it is not reachable on the sorted table today for an unrelated reason.**
+[Item 80](known-issues.md#80-a-sorted-partition-that-was-never-on-disk-asks-storage-about-it-on-every-get)
+keeps `check_disk` set on any sorted partition that was never written to disk, which refuses that
+table the resident path as well. Fixing that is `S` and would be worth doing before anyone prices
+this one, because until it is fixed the sorted table's archived path is the *only* path it has and
+the comparison has no control.

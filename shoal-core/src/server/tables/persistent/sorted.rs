@@ -24,9 +24,8 @@ use tracing::{event, instrument, Level, Span};
 use uuid::Uuid;
 
 use crate::server::messages::{Answer, LoadedPartition, QueryMetadata, SealReply, ServerMsg};
-use crate::server::tables::persistent::{open, PendingGet, RowSink};
+use crate::server::tables::persistent::{open, RowSink};
 use crate::shared::protocol::error::ErrorCode;
-use crate::shared::row_ref::RowRef;
 use crate::server::stage_profile::{StageOp, StageStamps};
 use crate::server::tables::partitions::SortedPartition;
 use crate::server::tables::persistent::{
