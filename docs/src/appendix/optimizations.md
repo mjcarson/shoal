@@ -712,7 +712,7 @@ The original entry read:
 | **Depends on** | O2; ~~a `wire_codec` bench~~ — built ([F10](../features/framing-and-protocol-evolution.md)), and it does not reach this entry. See the Benchmark row |
 | **Blocks** | [F2](../features/projections.md#limitations) — a projection must carry its partition key only because of this |
 | **Tradeoff** | **Major** — wire format, shared with O2 |
-| **Benchmark** | ~~none — `wire_codec` is unbuilt~~ ~~**Uncovered, not unbuilt.**~~ **Built**, by [F27](../features/grouped-responses.md): `wire_codec/response/gather/{hash,groups}` runs both shapes in one build over 1024 rows swept across 1 → 256 partitions. It says the entry had the axis right and the direction wrong — the win is ×15.5 at four partitions and ×1.15 at 256, because ranking groups only beats ranking rows while there are many fewer groups than rows. Captured as `f27-grouped-responses` |
+| **Benchmark** | ~~none — `wire_codec` is unbuilt~~ ~~**Uncovered, not unbuilt.**~~ **Built**, by [F27](../features/grouped-responses.md): `wire_codec/response/gather/{hash,groups}` runs both shapes in one build over 1024 rows swept across 1 → 256 partitions. It says the entry had the axis right and the direction wrong — the win is ×15.8 at four partitions and ×1.16 at 256, because ranking groups only beats ranking rows while there are many fewer groups than rows. Captured as `f27-grouped-responses` and again as `f27-row-sink`, which agree to within a percent on these arms |
 
 `ResponseAction::order_by_partitions` (`shared/responses.rs:109`) sorts the merged rows of a split
 query by where their partition was named. A `Response` carries rows and nothing else, so the only
@@ -2211,7 +2211,7 @@ the comparison has no control.
 | | |
 | --- | --- |
 | **Rank** | **A5**, beside the other near-free entries on paths every split get takes |
-| **Impact** | **Measured** — it is what is left of `order_by` at high group counts, and it is why [O18](#o18-the-gathered-reorder-rehashes-every-rows-partition-key)'s win falls from ×16 at four partitions to ×1.15 at 256 |
+| **Impact** | **Measured** — it is what is left of `order_by` at high group counts, and it is why [O18](#o18-the-gathered-reorder-rehashes-every-rows-partition-key)'s win falls from ×15.8 at four partitions to ×1.16 at 256 |
 | **Difficulty** | **S** — a different way of moving the runs, in one function |
 | **Depends on** | nothing |
 | **Blocks** | nothing |
@@ -2239,8 +2239,8 @@ O(n) in the rows and unavoidable — the rows genuinely have to be permuted — 
 O(*groups*) and are not.
 
 **This is the whole of what is left at the wide end.** The captured numbers on
-[F27](../features/grouped-responses.md#performance) put the grouped reorder at 1.03 µs against the
-hashing one's 15.95 µs over four partitions, and at 15.70 µs against 18.01 µs over 256 — same rows,
+[F27](../features/grouped-responses.md#performance) put the grouped reorder at 1.02 µs against the
+hashing one's 16.08 µs over four partitions, and at 15.79 µs against 18.29 µs over 256 — same rows,
 same total moves, 256 allocations instead of four.
 
 **Two ways out, and the obvious one is worse than it looks.** Collecting into a `Vec<Option<T>>`

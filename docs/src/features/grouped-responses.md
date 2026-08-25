@@ -212,12 +212,16 @@ what keeps a stage capture comparable across this change, and it is the thing th
 
 ## Performance
 
-**Captured as `f27-grouped-responses`** — micro layer only, 218 benchmarks, on a clean tree with
-the `performance` governor. The macro half is a separate step and has not been taken; see the last
-prediction below for why it may say nothing.
+**Captured twice, micro layer only, 218 benchmarks each, on a clean tree with the `performance`
+governor.** `f27-grouped-responses` measured the feature as first written; `f27-row-sink` measured
+it after the regression that capture found was fixed, and **is the one that describes the tree as
+it stands** — every figure below is from it unless it is explicitly a before-and-after of the two.
+The macro half is a separate step and has not been taken; see the last prediction below for why it
+may say nothing.
 
 One of these numbers contradicts the entry it was built for, which is the more useful half of the
-capture.
+capture. The two runs agree to within a percent or so on the codec arms, which is worth knowing
+before reading anything into the scan arms, where they do not.
 
 **The reorder: the win shrinks as the partition count rises, which is the opposite of what O18
 expected.** `wire_codec/response/gather/{hash,groups}`, 1024 rows spread over a sweeping number of
@@ -225,11 +229,11 @@ partitions:
 
 | Partitions | rows each | `hash` | `groups` | |
 | ---: | ---: | ---: | ---: | ---: |
-| 1 | 1024 | 15.97 µs | 18.3 ns | early return — a single run has no order to fix |
-| 4 | 256 | 15.95 µs | 1.03 µs | **×15.5** |
-| 16 | 64 | 15.96 µs | 1.65 µs | ×9.7 |
-| 64 | 16 | 16.38 µs | 2.70 µs | ×6.1 |
-| 256 | 4 | 18.01 µs | 15.70 µs | **×1.15** |
+| 1 | 1024 | 16.14 µs | 18.4 ns | early return — a single run has no order to fix |
+| 4 | 256 | 16.08 µs | 1.02 µs | **×15.8** |
+| 16 | 64 | 16.20 µs | 1.54 µs | ×10.5 |
+| 64 | 16 | 16.66 µs | 2.65 µs | ×6.3 |
+| 256 | 4 | 18.29 µs | 15.79 µs | **×1.16** |
 
 O18's entry said what would show it was "a response of many rows drawn from many partitions against
 one drawn from a few", which reads as a prediction that the win grows with the partition count. It
@@ -243,16 +247,16 @@ Filed as [O41](../appendix/optimizations.md#o41-reordering-a-gathered-get-alloca
 get over many single-row partitions — which is what `macro/fanout/n` drives — gains almost nothing
 here. A get over a few partitions holding many rows each gains an order of magnitude.
 
-**Building the reply: ×8.6 at a thousand rows.** `wire_codec/response/build/{owned,borrowed}`, where
+**Building the reply: ×8.7 at a thousand rows.** `wire_codec/response/build/{owned,borrowed}`, where
 each arm includes the step in front of the serialize, because timing the serialize alone would
 compare the two shapes at the one thing they do identically:
 
 | Rows | `owned` (clone, then serialize) | `borrowed` (point, then serialize) | |
 | ---: | ---: | ---: | ---: |
-| 16 | 751 ns | 202 ns | ×3.7 |
-| 256 | 14.49 µs | 1.83 µs | ×7.9 |
-| 1024 | 57.54 µs | 6.73 µs | **×8.6** |
-| 4096 | 230.9 µs | 25.74 µs | ×9.0 |
+| 16 | 746 ns | 202 ns | ×3.7 |
+| 256 | 14.36 µs | 1.81 µs | ×7.9 |
+| 1024 | 57.62 µs | 6.61 µs | **×8.7** |
+| 4096 | 230.5 µs | 25.44 µs | ×9.1 |
 
 **The ratio grows with the row count and then stops**, which is what says the win is the clone
 rather than anything about the serialize: the clone is O(rows) and so is the serialize, so past a
@@ -263,16 +267,17 @@ capture, the resident partition scans:
 
 | Benchmark | before | after | |
 | --- | ---: | ---: | ---: |
-| `partition_sorted/get_all/4096` | 210.66 µs | 7.55 µs | **−96.4%** |
-| `partition_sorted/get_all/1024` | 52.17 µs | 1.89 µs | −96.4% |
+| `partition_sorted/get_all/4096` | 210.66 µs | 7.30 µs | **−96.5%** |
+| `partition_sorted/get_all/1024` | 52.17 µs | 2.10 µs | −96.0% |
 | `partition_sorted/get_all/256` | 12.87 µs | 0.57 µs | −95.6% |
-| `partition_sorted/get_range_64/1024` | 3.05 µs | 0.19 µs | −93.9% |
-| `partition_sorted/get_all/16` | 536.07 ns | 74.99 ns | −86.0% |
-| `partition_sorted/get_key/1024` | 35.22 ns | 28.79 ns | −18.3% |
+| `partition_sorted/get_range_64/256` | 3.02 µs | 0.19 µs | −93.7% |
+| `partition_sorted/get_range_64/1024` | 3.05 µs | 0.22 µs | −92.9% |
+| `partition_sorted/get_all/16` | 536.07 ns | 74.31 ns | −86.1% |
+| `partition_sorted/get_key/16` | 23.72 ns | 20.32 ns | −14.4% |
 
 A scan that no longer clones the rows it returns costs a twenty-eighth of what it did at 4096
 rows. The floor it is approaching is the filter and the walk, which is all that is left once the
-copy is gone — which is also why the single-key gets move by 18% rather than by 96%: one row's
+copy is gone — which is also why the single-key gets move by 14% rather than by 96%: one row's
 clone against the seek that found it is a much smaller share.
 
 **The same capture showed the archived scans rising 5–14%**, and chasing that is where the more
