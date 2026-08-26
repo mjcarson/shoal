@@ -149,9 +149,19 @@ field holding its table. A projection reads only the fields it names out of an a
 answers in a response variant of its own so the client can name its type. It must carry its
 table's partition key. See [F2](../features/projections.md).
 
-**Identity projection** — The projection of a row into itself: a clone from a resident row, a
-deserialize from an archived one. It is what a get that named no projection is answered with, which
-is what makes a projected get and an unprojected one the same code path.
+**Identity projection** — The projection of a row into itself. It is what a get that named no
+projection is answered with, which is what makes a projected get and an unprojected one the same
+code path — and it is the only projection that copies **nothing**: `IDENTITY` lets a resident row be
+pointed at where its partition holds it ([F27](../features/grouped-responses.md)) and
+`ARCHIVED_IDENTITY` lets an archived one be written straight out of its archive
+([F28](../features/rearchived-rows.md)). Neither constant can be set by a projection that is not
+its own row.
+
+**Mirror** — The serializer `shoal-derive` emits to write an archived value back into its own
+layout, which rkyv has no way to do: `Rearchive`, one impl per row and per projection, resolved
+field by field against rkyv's own archived struct. A field whose type the derive cannot see inside
+falls back to being materialized on its own, and `#[shoal(rearchive)]` opts a nested type that
+implements the trait back in. See [F28](../features/rearchived-rows.md).
 
 **Pending response** — A response held in `PendingResponse` against the intent log offset one
 past its record, released once the durability watermark passes it. See

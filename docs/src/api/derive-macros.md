@@ -43,6 +43,7 @@ pub struct TestRecord {
 | `#[shoal(sort)]` | Part of the sort key. Required for sorted tables, forbidden on unsorted. |
 | `#[shoal(filter)]` | Usable in a filter predicate and in a SHQL `WHERE`. |
 | `#[shoal(update)]` | Usable in an update query. |
+| `#[shoal(rearchive)]` | This field's type implements `Rearchive` itself, so write it out of an archive rather than materializing it. Opt-in, because the derive sees only the *syntax* of a field's type and cannot tell whether a name it has never seen implements anything ([F28](../features/rearchived-rows.md)). |
 
 Parsed by `darling` into `ShoalField` (`shoal-derive/src/tables.rs:11-30`). Attributes
 combine: a field can be both `filter` and `update`.
@@ -178,8 +179,19 @@ pub struct MovieSummary {
 It generates `ShoalProjection` — a `from_row` that clones the named fields, a `from_archived`
 that reads them straight out of an archived row, and an `IDENTITY` that is `None` for every
 projection and `Some` only on the row's own impl, which is what lets an unprojected get be answered
-with the rows a partition already holds ([F27](../features/grouped-responses.md)) — plus `RkyvSupport`, `PartitionKeySupport` and
-`TableRowFormat`, all from the same generators the table derive uses. A field the row does not have
+with the rows a partition already holds ([F27](../features/grouped-responses.md)) — plus
+`RkyvSupport`, `PartitionKeySupport` and `TableRowFormat`, all from the same generators the table
+derive uses.
+
+Both table derives and this one also emit a **mirror**: a `Rearchive` impl that writes an archived
+value back into its own layout, which rkyv cannot do for any type its own derive generates. That is
+what lets an unprojected get whose partition is still an archive be answered out of that archive
+rather than materialized first ([F28](../features/rearchived-rows.md)). It is emitted field by
+field, from the syntax of each field's type: scalars, `String`, and `Vec`/`Option` of those are
+written straight out of the archive, and anything else — a `HashMap`, a type from another crate —
+is materialized on its own while every field around it takes the fast path. The table derive also
+sets `ARCHIVED_IDENTITY`, the archived twin of `IDENTITY`, on a row's impl of itself and nowhere
+else. A field the row does not have
 fails to compile inside `from_row`, which is the check, so there is no separate validation for it.
 
 `#[shoal(partition)]` is the only field attribute a projection takes, and ~~at least one field must

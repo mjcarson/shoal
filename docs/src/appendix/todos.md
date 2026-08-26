@@ -1318,9 +1318,39 @@ Three things would separate them, in increasing order of effort:
   is cheap: one label, one layer, twenty minutes.
 - **Bisect it.** The path is `MaybeLoaded::get` → `seek_archived` → `collect_archived`, and F27
   touched all three signatures without changing what any of them does per row beyond a branch.
+  [F28](../features/rearchived-rows.md) then touched the last of the three again, so `f28-rearchive`
+  is the third capture over this band and the control is `archived/walk_all` in every one of them.
 - **Look at the sink's size.** `RowSink` carries `groups` and `run_started_at`, which only the
   sealed path uses, so every per-partition scan on the owned path constructs and drops a `Vec` it
   will never write to. Moving those into the caller is a simplification whether or not it is this.
 
 Filed rather than chased, because the absolute figure is fifteen nanoseconds on a benchmark that
 returns one row, and the resident scans it sits beside moved by 96%.
+
+## The field shapes the mirror does not cover
+
+[F28](../features/rearchived-rows.md) writes an archived row back out field by field, and the
+classifier that decides how each field is written has three outcomes: copied as a block, written
+out of the archive through that type's own mirror, or materialized on its own. What it recognizes
+is scalars, `String`, and `Vec`/`Option` of something it recognizes. Everything else falls back,
+correctly and silently.
+
+Three of those fallbacks are worth closing, and none of them was in scope:
+
+- **`HashMap` and `BTreeMap`.** rkyv archives both, and both expose enough to be resolved from
+  outside — `ArchivedHashMap` has `serialize_from_iter`. A map field is a plausible thing for a
+  schema to hold and it currently materializes whole.
+- **`Option<Tag>` and `Vec<Tag>` for an opaque `Tag`.** The classifier looks one level in and gives
+  up if the inner type is unknown, so the whole field falls back. If `Tag` is `#[shoal(rearchive)]`
+  it should compose, and the machinery already does — `ArchivedRef` substitutes into rkyv's generic
+  impls. It is the classifier that stops, not the runtime.
+- **`#[shoal(rearchive)]` cannot be applied to a type the schema does not own.** The opt-in emits
+  `<Ty as Rearchive>::…`, so `Ty` needs an impl, so the schema has to be able to write one. A
+  blanket impl for anything that is `Archive + Serialize + Deserialize` would collide with the
+  specific ones; a derive macro exported for the purpose would not, and is the shape to reach for.
+
+The reason none of these was taken is that each one costs a field shape's worth of code and testing
+for a schema nobody has yet written, while the fallback is already correct. What makes them cheap
+now is that the hard part — the trait, `ArchivedRef`, and the resolver that keeps a materialized
+value alive — is built and tested.
+

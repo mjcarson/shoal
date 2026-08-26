@@ -27,6 +27,14 @@ pub(super) struct ShoalField {
     /// Whether this field can be updated
     #[darling(default)]
     pub update: bool,
+    /// Whether this fields type implements `Rearchive` itself
+    ///
+    /// The derive sees only the syntax of a field's type, so a nested type declared elsewhere is
+    /// materialized on its own when a row is written back out of an archive. This says that the
+    /// type does implement the mirror after all, and asks for it to be used
+    /// ([O40](../../../docs/src/appendix/optimizations.md)).
+    #[darling(default)]
+    pub rearchive: bool,
 }
 
 /// The arguments for a FromShoal derive
@@ -144,6 +152,16 @@ pub(super) fn add(
             /// answers with the rows the partition already holds rather than with clones of them
             /// ([O2](../../../docs/src/appendix/optimizations.md)).
             const IDENTITY: Option<fn(&#name) -> &Self> = Some(|row| row);
+
+            /// And an archived one is written back out of the archive it was read from
+            ///
+            /// The archived twin of the constant above, set by the same impl for the same reason:
+            /// this is the one place where `Self::Row` and `Self` are the same type, so it is the
+            /// one place where a row's archived form and this projection's archived form are the
+            /// same bytes ([O40](../../../docs/src/appendix/optimizations.md)).
+            const ARCHIVED_IDENTITY: Option<
+                fn(&<#name as ::shoal::rkyv::Archive>::Archived) -> &<Self as ::shoal::rkyv::Archive>::Archived,
+            > = Some(|row| row);
 
             /// Build a whole row from a resident one, which is a clone
             ///

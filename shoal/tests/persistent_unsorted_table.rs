@@ -143,6 +143,106 @@ async fn insert() -> Result<(), TestError> {
     Ok(())
 }
 
+/// A get answered off disk returns exactly what the same get returns in memory
+///
+/// The unsorted twin of the sorted tables test of the same name. An unsorted partition read from
+/// disk stays the archive it was read from, and the row it answers with is written straight out
+/// of that archive rather than materialized first
+/// ([F28](../../docs/src/features/rearchived-rows.md)). Which of the two a get takes depends on
+/// where the partition happens to be, so the two have to be indistinguishable to a caller.
+#[tokio::test]
+async fn a_get_off_disk_answers_the_same_row_as_one_in_memory() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = utils::test_dir();
+    // a row whose payload is big enough that copying it would be worth avoiding
+    let test_data = TestRecord::new("partition_key", "a payload worth copying");
+    // read it once while it is still resident, which is the answer to match
+    let (client, pool) = utils::start::<TestDb>(&temp_dir).await?;
+    client.send_one(test_data.clone()).await?;
+    let resident = client
+        .send_one(TestRecordGet::new(vec![test_data.partition_key.clone()]))
+        .await?;
+    let resident_row = TestRecord::deserialize(
+        resident.access::<TestRecord>()?.unwrap().first().unwrap(),
+    )
+    .unwrap();
+    pool.exit()?;
+    // wait for threads to fully clean up and the port to be released
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    // cycle once more so this insert has been compacted into an archive on disk
+    cycle_server(&temp_dir).await?;
+    // now ask for the same row against a server that has to read it off disk
+    let (client, pool) = utils::start::<TestDb>(&temp_dir).await?;
+    let first = client
+        .send_one(TestRecordGet::new(vec![test_data.partition_key.clone()]))
+        .await?;
+    let first_row =
+        TestRecord::deserialize(first.access::<TestRecord>()?.unwrap().first().unwrap()).unwrap();
+    // and again, which is the get that is actually answered out of the archive
+    //
+    // the first get finds nothing resident, parks on the disk read and is replayed once the
+    // partition has been loaded — and a replayed get takes the copying path, because the rows
+    // its earlier executions found have to outlive the execution that found them. By the second
+    // get the partition is accessible and nothing parks, so the reply is written straight out of
+    // the archive. Both are checked here, since a caller cannot tell which it got
+    let archived = client
+        .send_one(TestRecordGet::new(vec![test_data.partition_key.clone()]))
+        .await?;
+    let archived_row = TestRecord::deserialize(
+        archived.access::<TestRecord>()?.unwrap().first().unwrap(),
+    )
+    .unwrap();
+    // the row came back whole both times, and the two answers agree
+    assert_eq!(resident_row, test_data);
+    assert_eq!(
+        first_row, resident_row,
+        "a get replayed after a disk read returned a different row than the same get in memory"
+    );
+    assert_eq!(
+        archived_row, resident_row,
+        "a get answered out of an archive returned a different row than the same get in memory"
+    );
+    // Shutdown server
+    pool.exit()?;
+    Ok(())
+}
+
+/// A projected get answered off disk returns exactly what the same projection returns in memory
+///
+/// A projection is a strict subset of its rows fields, so there is no archived value of it to
+/// point at and it is built however the partition is being held. This is the guard on the
+/// constant that decides between the two.
+#[tokio::test]
+async fn a_projected_get_off_disk_answers_what_a_resident_one_does() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = utils::test_dir();
+    // a row whose payload is what the projection leaves behind
+    let test_data = TestRecord::new("partition_key", "a payload worth skipping");
+    // leave it on disk with nothing resident in memory
+    insert_then_evict_to_disk(&temp_dir, &test_data).await?;
+    // ask for the projection against a server that has to read it off disk
+    let (client, pool) = utils::start::<TestDb>(&temp_dir).await?;
+    let response = client
+        .send_one(
+            TestRecordGet::new(vec![test_data.partition_key.clone()])
+                .projection::<TestRecordKey>(),
+        )
+        .await?;
+    let projected =
+        TestRecordKey::deserialize(response.access::<TestRecordKey>()?.unwrap().first().unwrap())
+            .unwrap();
+    // the projection came back carrying only the field it named
+    assert_eq!(
+        projected,
+        TestRecordKey {
+            partition_key: test_data.partition_key.clone(),
+        }
+    );
+    // Shutdown server
+    pool.exit()?;
+    Ok(())
+}
+
 /// Test deleting rows from shoal
 #[tokio::test]
 async fn delete() -> Result<(), TestError> {

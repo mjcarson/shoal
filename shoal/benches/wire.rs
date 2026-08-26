@@ -851,6 +851,31 @@ fn bench_response_build(c: &mut Criterion) {
                 black_box(rkyv::to_bytes::<rkyv::rancor::Error>(&found).unwrap())
             });
         });
+        // and the shape a get off disk answers with: written back out of the archive it read
+        //
+        // the rows here are archived once, out here, the way a partition read from disk is
+        // archived once by the compaction that wrote it. What the arm measures is the mirror
+        // [F28](../../docs/src/features/rearchived-rows.md) generates — the same reply, written
+        // out of `Archived<T>` instead of out of `T`, without the deserialize the owned arm's
+        // clone stands in for
+        let row_bytes = rkyv::to_bytes::<rkyv::rancor::Error>(&owned).expect("failed to archive");
+        let archived_rows = rkyv::access::<
+            rkyv::vec::ArchivedVec<<TitleByKeyword as Archive>::Archived>,
+            rkyv::rancor::Error,
+        >(&row_bytes)
+        .expect("failed to access the archived rows");
+        group.bench_with_input(BenchmarkId::new("archived", rows), &rows, |b, _| {
+            b.iter(|| {
+                let found = GetRows::single(
+                    0,
+                    black_box(archived_rows)
+                        .iter()
+                        .map(RowRef::<TitleByKeyword>::archived)
+                        .collect(),
+                );
+                black_box(rkyv::to_bytes::<rkyv::rancor::Error>(&found).unwrap())
+            });
+        });
     }
     group.finish();
 }

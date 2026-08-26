@@ -8,6 +8,7 @@ use rkyv::ser::sharing::Share;
 use rkyv::ser::Serializer;
 use rkyv::util::AlignedVec;
 use rkyv::{Archive, Serialize};
+use super::rearchive::Rearchive;
 use tracing::instrument;
 use uuid::Uuid;
 
@@ -410,7 +411,7 @@ pub trait ShoalTableSupport:
 /// ([F27](../../../docs/src/features/grouped-responses.md)), so nothing asks a row where it came
 /// from and a projection is free to leave its table's partition key out.
 pub trait ShoalProjection:
-    std::fmt::Debug + Clone + RkyvSupport + PartitionKeySupport + Sized + Send + 'static
+    std::fmt::Debug + Clone + RkyvSupport + PartitionKeySupport + Rearchive + Sized + Send + 'static
 {
     /// The table whose rows this projects
     type Row: ShoalTableSupport;
@@ -441,6 +442,22 @@ pub trait ShoalProjection:
     /// type-check at all. A projection that tried would not compile, so this is a claim the
     /// compiler checks rather than one a reviewer has to.
     const IDENTITY: Option<fn(&Self::Row) -> &Self> = None;
+
+    /// How to borrow this projection out of a row that is still in an archive, when it *is* that row
+    ///
+    /// The archived twin of [`ShoalProjection::IDENTITY`], and it exists for the same reason: a
+    /// get that named no projection can be answered out of the archive a partition was read from
+    /// instead of out of rows materialized from it, which is
+    /// [O40](../../../docs/src/appendix/optimizations.md) and the open half of O2. Every other
+    /// projection is a strict subset of its row — its archived form is a *different* type with
+    /// different fields — so this is `None`, and such a get builds its rows as it always did.
+    ///
+    /// **A projection cannot lie about this either.** Only the impl the table derive writes on the
+    /// row itself can set it, where `Self::Row = Self` is what makes the identity function
+    /// type-check. The two constants are set and cleared together.
+    const ARCHIVED_IDENTITY: Option<
+        fn(&<Self::Row as Archive>::Archived) -> &<Self as Archive>::Archived,
+    > = None;
 
     /// Build this projection from a resident row
     ///

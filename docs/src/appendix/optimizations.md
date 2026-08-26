@@ -123,7 +123,7 @@ this page opens with. Ordered inside each tier.
 | ~~**A2**~~ | ~~[**O17**](#o17-handle_flushed-runs-on-every-message)~~ — **done**, by [F5](../features/flushed-sweep-gate.md) | Profiled — 711,638 calls became 21,279 | S | — | Contained | it was, on the profile alone |
 | ~~**A3**~~ | ~~[**O34**](#o34-a-record-wider-than-the-staging-buffer-defeats-intent-log-batching)~~ — **done**, by [F23](../features/self-sizing-staging-buffer.md) | Measured, before and after — 1.22× at 64 KiB rows became **+22.0%** at the shipped setting, on disjoint intervals, and the sweep's spread collapsed 1.225× → 1.010× | S–M | ~~a `latency_buffer` sweep above the buffer~~ — discharged | Contained | it was, and it was, twice |
 | **A4** | [**O13**](#o13-a-multi-partition-get-is-quadratic-in-the-partitions-it-names) (+ [**O12**](#o12-to_blocked-clones-the-whole-filter-set-per-blocked-partition) and [**O39**](#o39-routing-a-multi-partition-get-is-quadratic-before-the-query-reaches-a-table) beside it) — the quadratic multi-partition get, **twice**: once in the table and once in the router | Asymptotic — O(n²) in a caller-set n. **O39 measured** — 4.13 ns·n + 0.0109 ns·n² | S | — | None | O39 **yes**, by `routing/split_by_shard/get` ([F24](../features/routing-benchmarks.md)); O13 and O12 still need a bench over `PersistentSortedTable::get` |
-| **A5** | [**O5**](#o5-the-hottest-maps-use-siphash), [**O14**](#o14-fixed-thousand-element-preallocations-on-per-call-paths), [**O28**](#o28-the-client-takes-two-guards-on-its-response-map-for-every-query-it-sends), [**O36**](#o36-every-get-re-collects-its-rows-into-a-fresh-vec-even-when-it-read-one-partition), [**O38**](#o38-a-response-that-arrives-out-of-order-is-validated-twice) — hasher, allocation sizes, a doubled map guard, a re-collect per get, and a second validation per reordered response | Argued, except O38 which is **asymptotic** in the row width | S | — | None | no — needs a table-layer bench, and O28 needs the client measured at all. **O38 is the exception**: `macro/transport/stream` against `stream_unordered` is a ready-made control |
+| **A5** | [**O5**](#o5-the-hottest-maps-use-siphash), [**O14**](#o14-fixed-thousand-element-preallocations-on-per-call-paths), [**O28**](#o28-the-client-takes-two-guards-on-its-response-map-for-every-query-it-sends), [**O36**](#o36-every-get-re-collects-its-rows-into-a-fresh-vec-even-when-it-read-one-partition), [**O38**](#o38-a-response-that-arrives-out-of-order-is-validated-twice), [**O42**](#o42-a-get-replayed-after-a-disk-read-copies-rows-its-partition-is-now-holding) — hasher, allocation sizes, a doubled map guard, a re-collect per get, a second validation per reordered response, and the one get per partition read that still copies | Argued, except O38 which is **asymptotic** in the row width | S | — | None | no — needs a table-layer bench, and O28 needs the client measured at all. **O38 is the exception**: `macro/transport/stream` against `stream_unordered` is a ready-made control |
 | **A6** | [**O25**](#o25-two-instrument-spans-remain-on-per-query-paths) — two `#[instrument]` spans on per-query paths | Argued — but the cost is in the *uninstrumented* binary | S | — | Contained | no — needs a with/without capture |
 
 ~~**Do O34 first.**~~ **Done**, by [F23](../features/self-sizing-staging-buffer.md). It moved from
@@ -195,18 +195,27 @@ would have, because what made it worth doing was not in the entry.
 | # | Entry | Impact | Diff | Depends on | Tradeoff | Adjudicable today |
 | --- | --- | --- | --- | --- | --- | --- |
 | ~~**C1**~~ | ~~[**O1**](#o1-queries-are-fully-deserialized-on-arrival) — zero-copy the request half~~ — **done**, by [F26](../features/archive-routed-requests.md) | Argued — and **understated**: there were two copies per write, not one | L | ~~a `wire_codec` bench~~ (built, [F10](../features/framing-and-protocol-evolution.md)); ~~the `BytesMut` reaching the shard~~ — it reaches it as a `Bytes` | Contained | it was not, and it was taken anyway — the design pass is what found the second copy |
-| **C1a** | [**O2**](#o2-every-returned-row-is-copied-at-least-twice) + [**O18**](#o18-the-gathered-reorder-rehashes-every-rows-partition-key), together — **now the largest established win** | **Measured per byte** — the response codec grows ×432.8 on decode, and `r100` says the read path owns the wide end | **XL** | each other; ~~a `wire_codec` bench~~ — discharged | **Major** — wire format and the client | **yes, on the per-byte half** |
+| ~~**C1a**~~ | ~~[**O2**](#o2-every-returned-row-is-copied-at-least-twice) + [**O18**](#o18-the-gathered-reorder-rehashes-every-rows-partition-key), together~~ — **done**, by [F27](../features/grouped-responses.md) and [F28](../features/rearchived-rows.md) | **Measured per byte** — the response codec grows ×432.8 on decode, and `r100` says the read path owns the wide end | ~~**XL**~~ **M**, twice | each other; ~~a `wire_codec` bench~~ — discharged | ~~**Major** — wire format and the client~~ **none** — the bytes are identical either way | it was, on the per-byte half — and the change turned out not to need the format break it was ranked on |
 | **C3** | [**O30**](#o30-nothing-can-see-what-a-connection-costs-to-open) — the connect path is unmeasured | **Unknown, and that is the entry** | S for the workload, unknown for whatever it finds | a `connect` workload | — | **no, and that is the point** |
 | **C4** | [**O31**](#o31-the-disjointness-rule-cannot-tell-a-result-from-a-saturated-workload) — a saturated workload passes the rule that decides what is real | **Measured** — four points report encryption making queries faster | S to detect, M to decide | nothing | Contained | **yes, it already has been** |
 | ~~**C5**~~ | ~~[**O35**](#o35-the-per-connection-response-relay-writes-one-response-at-a-time) — one response written at a time, per connection~~ — **moved to Tier D**, its evidence reattributed to load depth | ~~Argued, indicated — a 45× p50-to-p99 spread at 512 KiB~~ | M to reorder, **XL** to interleave | [D2](../direction/framing.md), for the interleaving form only | Contained, or **Major** | it was, and it came back negative |
 
-**C1a is where the largest win now sits, and it is still not actionable.** `f22-row-size` gave O2 a
-measurement on exactly the half that grows in what a caller controls, and the mixture sweep put the
-wide end of the axis on the read path — so for anyone storing rows of hundreds of kilobytes, the
-response copies are the thing. It stays in Tier C because nothing about the difficulty changed: it
-reaches the wire format and the client, it has to land with O18 or the format break is paid twice,
-and that is a design pass rather than a patch. **What changed is that the design pass is now worth
-scheduling**, which it was not while the entry was argued.
+~~**C1a is where the largest win now sits, and it is still not actionable.**~~ **Done**, by
+[F27](../features/grouped-responses.md) and [F28](../features/rearchived-rows.md), and the way it
+came out is worth more than the entry was. `f22-row-size` gave O2 a measurement on exactly the half
+that grows in what a caller controls, and the mixture sweep put the wide end of the axis on the read
+path — so for anyone storing rows of hundreds of kilobytes, the response copies are the thing. It
+sat in Tier C on a difficulty estimate that named the wire format and the client, and **the wire
+format never moved**: `RowRef` and `ArchivedRef` archive as the row's own archived type, so a reply
+written out of rows the server is holding is byte for byte the reply the copying path wrote. The
+**Major** tradeoff this row carried for four features was an artifact of assuming the response type
+had to change to stop copying, and it did not. What was actually hard was the thing the entry did
+not mention: rkyv has no serializer for an archived value, and one had to be generated.
+
+**The lesson is about the estimate, not the win.** An XL that reaches the wire format is scheduled
+differently from an M that does not, and this one was mis-tiered for as long as it was filed. The
+design pass is what corrected it — the same thing that happened to [O1](#o1-queries-are-fully-deserialized-on-arrival),
+where the pass found a second copy nobody had filed.
 
 **Tier D — declined, kept with the reason.** A rejected optimization is recorded, not dropped.
 
@@ -382,23 +391,33 @@ a buffer that already holds them. Its *Impact* grade should be read as **Asympto
 a quantity the caller chooses — rather than as the *Argued* constant above. See
 [Row size and what it costs](../tables/row-size.md#the-payload-is-walked-about-six-times-per-round-trip).
 
-### O2. Every returned row is copied at least twice — *the resident half is done*
+### O2. Every returned row is copied at least twice — ~~*the resident half is done*~~ **done**
 
-**Half done**, by [F27](../features/grouped-responses.md), and the open remainder is filed as
-[O40](#o40-a-row-read-out-of-an-archive-is-materialized-before-it-is-re-serialized) rather than
-left to be rediscovered inside this entry.
+**Done**, in two halves: the resident one by [F27](../features/grouped-responses.md), and the
+archived one by [F28](../features/rearchived-rows.md), which was filed as
+[O40](#o40-a-row-read-out-of-an-archive-is-materialized-before-it-is-re-serialized) in between so
+that the open remainder could not be rediscovered inside this entry.
 
-**What is closed.** A get that named no projection and read only resident partitions no longer
+**The resident half.** A get that named no projection and read only resident partitions no longer
 copies its rows at all on the way out. The reply is serialized from the rows the partition is
 holding, through a `RowRef<'a, T>` whose archived type *is* the row's archived type, so the bytes
 are identical to what the copying path wrote and no wire version had to move for it. The claim is
 a count and is tested as one: a resident unprojected scan of three rows copies **zero** of them,
 against a projected control that builds all three.
 
-**What is not.** A partition read from disk stays an archive, and what it holds is
-`Archived<T>` — rkyv has no `Serialize` for an archived value back into its own layout, and
-`shoal-derive` cannot write one for a field type whose definition it never sees. Those rows are
-still materialized. That is [O40](#o40-a-row-read-out-of-an-archive-is-materialized-before-it-is-re-serialized).
+**The archived half.** A partition read from disk stays an archive, and what it holds is
+`Archived<T>`. rkyv has no `Serialize` for an archived value back into its own layout, so
+[F28](../features/rearchived-rows.md) generates one — a mirror per row type, emitted field by field
+against rkyv's own archived struct, with a **per-field** fallback for a type the derive cannot see
+inside so that no schema is refused and no row loses more than that one field costs. The same count
+test says so: an archived unprojected scan of three rows now builds **zero** of them, against a
+projected control that builds all three, on both tables.
+
+**What is still copied, and it is no longer this entry.** A projection is a strict subset of its
+row and has to be built whatever its partition is held as. A share of a split get is owed to
+another shard, which has to merge it. And a get that *parked* on a disk read copies on its replay —
+filed as [O42](#o42-a-get-replayed-after-a-disk-read-copies-rows-its-partition-is-now-holding),
+because it is a property of parking rather than of archives.
 
 ~~**And one thing neither half reached, which is the finding that matters.**~~ **Reached now**, by
 [Resolved #80](resolved/never-flushed-partitions.md). The sorted table did not take the new path
@@ -409,24 +428,26 @@ but permanently. Found by probing the path rather than by reasoning about it —
 identically, so nothing failed. **The unsorted table always took it**, throughout its integration
 suite.
 
-**So the resident half of this entry is now closed for both tables, and neither is measured.** The
-count test is over `RowSink` rather than over a running server, and no capture has been taken since
-the sorted table became eligible — which is precisely the capture
+**So both halves of this entry are now closed for both tables, and neither is measured.** The count
+tests are over `RowSink` rather than over a running server, and no capture has been taken since the
+sorted table became eligible — which is precisely the capture
 [F27](../features/grouped-responses.md) said would show the feature working, and predicted would
-show nothing while item 80 stood.
+show nothing while item 80 stood. `f28-rearchive` is the micro capture for the archived half, and
+its predictions are written down on [F28](../features/rearchived-rows.md#performance) rather than
+here.
 
-The rest of this entry stands as written, and describes the archived path and the split-get path
-that still pay it:
+The rest of this entry stands as written, and describes what the copies *were* — the difficulty and
+tradeoff rows in particular, which are what the change proved wrong:
 
 
 | | |
 | --- | --- |
 | **Rank** | **C1a**, with O18 — the largest read-path win, and the largest change |
 | **Impact** | **Measured per byte**, argued per row — the response codec grows ×432.8 on decode and ×72.2 on encode over 64 B → 64 KiB. And the `r100` sweep says the read path owns the wide end of the axis: at 4 MiB a pure-read mixture runs at 0.3% of its own 64 B rate against a pure write's 0.9% |
-| **Difficulty** | **XL** — `ResponseAction::Get` reaches the wire format and the client |
+| **Difficulty** | ~~**XL** — `ResponseAction::Get` reaches the wire format and the client~~ **M, twice.** `ResponseAction::Get` never had to change: a reply written out of borrowed or archived rows archives as the same bytes as one written out of owned rows |
 | **Depends on** | O18, which changes the same shape; ~~a `wire_codec` bench~~ (built, [F10](../features/framing-and-protocol-evolution.md)) |
 | **Blocks** | O18 |
-| **Tradeoff** | **Major** — a wire-format break, and `FromShoal::retrieve`'s signature with it. **Cheaper than it was**: [F10](../features/framing-and-protocol-evolution.md) put a version byte and a schema fingerprint on the wire, so a format change is now a refused connection naming both sides rather than undefined behaviour |
+| **Tradeoff** | ~~**Major** — a wire-format break, and `FromShoal::retrieve`'s signature with it~~ **None.** There was no format break: the bytes are identical either way, `PROTOCOL_VERSION` did not move, and `FromShoal::retrieve` kept its signature. F10's version byte and schema fingerprint went unused by this after all |
 | **Benchmark** | `partition_sorted/archived/walk_all` and `get_all` bound the copies; `wire_codec/response/encode` and `/decode` at 16, 256, 1024 and 4096 rows are the wire half. **Plus `wire_codec/width/response/*`** at five row widths ([F22](../features/row-size-benchmarks.md)), which is the per-byte half and the steepest curve in the micro layer. Captured in `f22-row-size` |
 
 `SortedPartition::get` copies out of the `BTreeMap`:
@@ -448,8 +469,13 @@ Then `Shard::reply` serializes the whole `Vec<T>` back into bytes (`shard.rs:121
 from an `Accessible` partition therefore goes **bytes → owned rows → bytes**, and a read served
 from memory goes **rows → cloned rows → bytes**.
 
-The response type is what forces it: `ResponseAction::Get(Option<Vec<T>>)`
-(`shoal-proto/src/shared/responses.rs:89`) can only hold owned rows.
+~~The response type is what forces it: `ResponseAction::Get(Option<Vec<T>>)`
+(`shoal-proto/src/shared/responses.rs:89`) can only hold owned rows.~~ **This was the mistake in
+the entry, and it is what mis-tiered it.** `Vec<T>` is generic, and `T` does not have to be an
+owned row: [F27](../features/grouped-responses.md) instantiates it at `RowRef<'a, R>` and
+[F28](../features/rearchived-rows.md) at the archived variant of the same enum, both of which
+archive as `<R as Archive>::Archived`. Nothing about the response type had to change, and so
+nothing about the wire format did.
 
 **Narrowed, not closed, by [F2](../features/projections.md).** The two lines above used to read
 `found.push(row.clone())` and `let loaded = R::deserialize(row).unwrap(); found.push(loaded)`;
@@ -459,9 +485,13 @@ path materializes a smaller owned value and the wire carries less. A get that na
 copies the whole row twice — the identity projection is exactly the two lines above — so the shape
 of this entry is unchanged and only its magnitude moved.
 
-**A third entry now wants the same flag day.** This and O18 already had to land together to avoid
-paying the wire break twice ([dependency edges](#dependency-edges)); [D2](../direction/framing.md)
-is a third break, and the argument is identical. **The expensive part of a wire-format change is
+~~**A third entry now wants the same flag day.**~~ **There was no flag day.** This and O18 were
+believed to have to land together to avoid paying the wire break twice
+([dependency edges](#dependency-edges)); they did land together, in
+[F27](../features/grouped-responses.md), and broke nothing, so
+[D2](../direction/framing.md) is now the *first* break rather than a third. The paragraph is kept
+because the reasoning is right about breaks that are real — it was simply applied to one that was
+not. As written: **The expensive part of a wire-format change is
 the flag day, and it is paid per break rather than per field** — so if D2 is taken first and these
 two later, the cost is two. Whether they can realistically be designed together is the open
 question, since D2 is a header change and these are a payload change; but the sequencing decision
@@ -2154,7 +2184,30 @@ key is not what makes the function quadratic; the dedup scan around it is.
 
 ---
 
-### O40. A row read out of an archive is materialized before it is re-serialized
+### ~~O40. A row read out of an archive is materialized before it is re-serialized~~
+
+**Done**, by [F28](../features/rearchived-rows.md), and with it
+[O2](#o2-every-returned-row-is-copied-at-least-twice). An unprojected get whose partition is still
+an archive now points at each archived row where it lies and serializes the reply straight from
+those pointers. The missing direction — a serializer from an archived value back into its own
+layout — is generated per row type by `shoal-derive`, field by field, against rkyv's own archived
+struct.
+
+**Two things this entry got wrong, both worth keeping.** The **XL** grade rested on the derive
+having to recurse through field types it cannot see; the answer was to stop trying, and fall back
+**per field** rather than per row — a type the derive cannot see inside materializes that one
+field, and every field around it is still written out of the archive. Nothing is refused, no schema
+stops compiling, and the change came out **M**. And the entry did not mention `Option`, which is
+the one shape that could not be written by hand at all, because `ArchivedOption`'s tag type is
+private to rkyv; it is served by substituting `ArchivedRef<'_, T>` into rkyv's *own* generic impl,
+which is the trick that makes the whole thing compose.
+
+**The last paragraph of the entry — that item 80 left the sorted table with no control — was
+overtaken** by [Resolved #80](resolved/never-flushed-partitions.md), which landed first. Both
+tables reach both paths now, and both are tested for it as counts.
+
+The entry as filed:
+
 
 | | |
 | --- | --- |
@@ -2262,3 +2315,47 @@ rows each — that the fan-out workload drives and the grid does not.
 [O36](#o36-every-get-re-collects-its-rows-into-a-fresh-vec-even-when-it-read-one-partition) was
 eventually closed under: it was `S` for four features and was done in an afternoon by the change
 that rewrote the code around it.
+
+---
+
+### O42. A get replayed after a disk read copies rows its partition is now holding
+
+| | |
+| --- | --- |
+| **Rank** | **A5**, with the other near-free entries — one flag on one branch, on a path every cold read takes |
+| **Impact** | **Argued, and bounded to one get per partition read.** It is the full cost [O2](#o2-every-returned-row-is-copied-at-least-twice) used to be — a deserialize and a serialize per row — paid once, on the first get after a partition comes off disk. Every get after it is answered out of the archive |
+| **Difficulty** | **S–M** — the flag is one line; what it needs is for a replayed get to be able to answer in place, which is a question about `PendingGets` rather than about rows |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | Contained — no wire format change, the same as F27 and F28 |
+| **Benchmark** | None, and the micro layer cannot reach this: it is about *which* path a running server takes, not what either path costs. `macro/get_sorted` against a cold table is the shape that would show it |
+
+A get naming a partition that is on disk and not resident parks on the read and is replayed once
+the load lands. `can_answer_in_place` refuses the sealed path to any get that has parked:
+
+```rust
+// a get that has already parked holds rows from an execution that has ended
+if self.pending_data.is_parked(&(meta.id, meta.index)) {
+    return false;
+}
+```
+
+`persistent/sorted.rs`, and the unsorted twin beside it
+
+That is correct as written — a parked get's earlier executions found rows that have to outlive the
+execution that found them, so they are owned by definition. But by the time of the replay the
+partition it was waiting for is `Accessible`, and its rows are exactly the rows
+[F28](../features/rearchived-rows.md) can now write straight out of the archive. So the get that
+paid for the disk read also pays the old copy, and the getters behind it do not.
+
+**Found by probing rather than by reading.** With a probe on `RowSink::push_archived` and another
+on `RowSink::into_owned`, the first get off disk reaches both and the second reaches only the first.
+Nothing failed and no test could have caught it, because both paths answer identically — the same
+trap that hid [item 80](resolved/never-flushed-partitions.md) inside F27, which is why the probe
+was run at all.
+
+**The shape of a fix.** A replay whose *only* outstanding partition is the one that just loaded
+holds no rows from an earlier execution — `PendingGets` is empty for it — so it could take the
+sealed path unchanged. That is a narrower condition than `is_parked` and is cheap to test for. A
+get that parked on several partitions genuinely cannot, and should keep copying.
+

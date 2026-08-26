@@ -42,7 +42,10 @@ MaybeLoaded::Accessible(read) => {
         if let Some(filter) = &params.filters {
             if !R::is_filtered_archived(filter, row) { continue; }
         }
-        found.push(P::from_archived(row));
+        match P::ARCHIVED_IDENTITY {
+            Some(_) => found.push_archived(row),
+            None => found.push_built(P::from_archived(row)),
+        }
     }
 }
 ```
@@ -54,12 +57,16 @@ Note `is_filtered_archived` — the derive macro generates a filter that operate
 query over a large partition deserializes only what it returns. This is the payoff for
 choosing rkyv as the on-disk format.
 
-`P::from_archived` is where that payoff is taken further. `P` is what this get asked to be answered
-with: for a get that named no projection it is the row itself, whose `from_archived` is the
-`R::deserialize` this line used to be. For a get that named a projection it reads only the fields
-that projection declared straight out of the archive, so the rest of the row stays where it is
-([F2](../features/projections.md)). The scan is monomorphised over `P`, so neither case pays for
-the other.
+`P` is what this get asked to be answered with, and the match above is where the payoff is taken
+further. For a get that named **no projection**, `P` is the row itself and there is nothing to
+build: the row is already sitting in the layout the wire wants, so the scan points at it and the
+reply is serialized straight out of the archive ([F28](../features/rearchived-rows.md)). For a get
+that named a **projection**, `P` is a strict subset of the row's fields with no archived value of
+its own anywhere, so `from_archived` reads only the fields that projection declared out of the
+archive and leaves the rest where they are ([F2](../features/projections.md)). The scan is
+monomorphised over `P`, so neither case pays for the other, and `ARCHIVED_IDENTITY` — a constant
+the table derive sets on a row's impl of itself and a projection cannot set at all — is what tells
+the two apart.
 
 **`read.archived()` used to be `SortedPartition::<R>::access(read).unwrap()`**, and the difference
 is the whole of [F4](../features/validated-archives.md). `access` is rkyv's *checked* entry point:

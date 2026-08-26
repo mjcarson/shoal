@@ -362,13 +362,17 @@ where
                         return false;
                     }
                 }
-                // read the fields this get asked for straight out of the archive
+                // answer with the fields this get asked for, straight out of the archive
                 //
-                // a projection of a wide row is the whole point of this path, since it copies
-                // the fields it named instead of every field the row has. An archived row is
-                // always built rather than borrowed, whatever the projection: what the partition
-                // holds is `Archived<R>`, and there is no `R` here to point at
-                found.push_built(P::from_archived(archived));
+                // an unprojected get asks for the whole row, and the whole row is already
+                // sitting here in the layout the wire wants, so point at it and let the
+                // response serialize it where it lies. A projection names a strict subset of
+                // the rows fields, so it has no archive of its own to point at and is built
+                // the way it always was
+                match P::ARCHIVED_IDENTITY {
+                    Some(_) => found.push_archived(archived),
+                    None => found.push_built(P::from_archived(archived)),
+                }
                 true
             }
         }
@@ -1084,16 +1088,15 @@ where
     /// * `params` - The parameters of the get these rows were visited for
     /// * `rows` - The archived rows this gets selection visited, in sort order
     /// * `found` - Where to record the rows this partition answers with
-    fn collect_archived<'a, 'sink, P, I>(
-        params: &SortedGet<R>,
-        rows: I,
-        found: &mut RowSink<'sink, P>,
-    ) where
+    fn collect_archived<'a, P, I>(params: &SortedGet<R>, rows: I, found: &mut RowSink<'a, P>)
+    where
         P: ShoalProjection<Row = R>,
         I: Iterator<Item = &'a <R as Archive>::Archived>,
         <R as Archive>::Archived: 'a,
     {
         hotpath::measure_block!("MaybeLoaded::collect_archived", {
+            // ask once whether this projection is the row itself, instead of once per row
+            let identity = P::ARCHIVED_IDENTITY;
             // visit the rows this get selected until we hold as many as it asked for
             for row in rows {
                 // stop scanning once we hold every row this get asked for
@@ -1108,14 +1111,16 @@ where
                         continue;
                     }
                 }
-                // read the fields this get asked for straight out of the archive
+                // answer with the fields this get asked for, straight out of the archive
                 //
-                // an unprojected get asks for the whole row, whose projection is the deserialize
-                // this has always done, and a projected one copies only the fields it named.
-                // Either way the row is built rather than borrowed - what this partition holds is
-                // `Archived<R>`, and there is no `R` anywhere to point at, which is the half of
-                // [O2](../../../docs/src/appendix/optimizations.md) this change does not close
-                found.push_built(P::from_archived(row));
+                // an unprojected get asks for the whole row, which is already in the layout the
+                // wire wants, so point at it rather than materializing a copy to serialize back
+                // into the same bytes. A projection is a strict subset of the rows fields, so
+                // there is no archive of it to point at and it is built the way it always was
+                match identity {
+                    Some(_) => found.push_archived(row),
+                    None => found.push_built(P::from_archived(row)),
+                }
             }
         })
     }
@@ -1308,6 +1313,8 @@ mod tests {
     use crate::server::tables::persistent::RowSink;
     use crate::server::tables::persistent::unsorted::UnsortedIntents;
     use crate::shared::queries::parser::{FieldRole, TypeValidator};
+    use crate::shared::rearchive::Rearchive;
+    use crate::shared::row_ref::RowRef;
     use crate::shared::queries::{SortRange, SortSelect, SortedExists, SortedGet, SortedUpdate};
     use crate::shared::queries::{UnsortedGet, UnsortedUpdate};
     use crate::shared::traits::{
@@ -1419,6 +1426,120 @@ mod tests {
 
     impl RkyvSupport for TestProjectionKind {}
 
+
+    /// What each field of a [`TestRow`] produced on its way back out of an archive
+    ///
+    /// This is written by hand here because the table derives cannot run inside `shoal-core` —
+    /// they emit `::shoal::` paths, and this crate is underneath that facade. It is field for
+    /// field what `shoal-derive` emits for a row of three `String` fields, so a mirror that
+    /// stopped matching rkyv would fail these tests the same way it would fail a schema's.
+    struct TestRowArchivedResolver {
+        /// What `TestRow::partition_key` produced on its way out of the archive
+        partition_key: <String as Rearchive>::ArchivedResolver,
+        /// What `TestRow::sort_key` produced on its way out of the archive
+        sort_key: <String as Rearchive>::ArchivedResolver,
+        /// What `TestRow::data` produced on its way out of the archive
+        data: <String as Rearchive>::ArchivedResolver,
+    }
+
+    /// A test row can be written back out of the archive it was read from
+    impl Rearchive for TestRow {
+        /// What this row's fields produced, which is not rkyv's resolver for this row
+        type ArchivedResolver = TestRowArchivedResolver;
+
+        /// Write every field's out of line data, straight out of the archive holding it
+        ///
+        /// # Arguments
+        ///
+        /// * `archived` - The archived row to write back out
+        /// * `serializer` - The serializer to write the out of line data into
+        fn serialize_archived<S>(
+            archived: &<Self as Archive>::Archived,
+            serializer: &mut S,
+        ) -> Result<Self::ArchivedResolver, <S as rkyv::rancor::Fallible>::Error>
+        where
+            S: rkyv::rancor::Fallible + rkyv::ser::Writer + rkyv::ser::Allocator + ?Sized,
+            <S as rkyv::rancor::Fallible>::Error: rkyv::rancor::Source,
+        {
+            Ok(TestRowArchivedResolver {
+                partition_key: <String as Rearchive>::serialize_archived(&archived.partition_key, serializer)?,
+                sort_key: <String as Rearchive>::serialize_archived(&archived.sort_key, serializer)?,
+                data: <String as Rearchive>::serialize_archived(&archived.data, serializer)?,
+            })
+        }
+
+        /// Write the fixed size row on top of what was serialized for its fields
+        ///
+        /// # Arguments
+        ///
+        /// * `archived` - The archived row being written back out
+        /// * `resolver` - What each of its fields produced
+        /// * `out` - Where the archived row belongs
+        fn resolve_archived(
+            archived: &<Self as Archive>::Archived,
+            resolver: Self::ArchivedResolver,
+            out: rkyv::Place<<Self as Archive>::Archived>,
+        ) {
+            // split the place the row belongs in into one place per field
+            rkyv::munge::munge!(let ArchivedTestRow { partition_key, sort_key, data } = out);
+            <String as Rearchive>::resolve_archived(&archived.partition_key, resolver.partition_key, partition_key);
+            <String as Rearchive>::resolve_archived(&archived.sort_key, resolver.sort_key, sort_key);
+            <String as Rearchive>::resolve_archived(&archived.data, resolver.data, data);
+        }
+    }
+
+
+    /// Read the keys naming a row out of whichever form a sink pointed at
+    ///
+    /// A sink answers with a [`RowRef`] rather than a row, because a row still in the archive its
+    /// partition was read from is not a row — it is `Archived<Row>`, and the two only become
+    /// interchangeable once they are being written to the wire. A test that wants to name the
+    /// rows a scan returned has to read them from either form, so it asks for the key rather
+    /// than reaching for the field.
+    trait Keys<'a> {
+        /// The partition this row belongs to
+        fn partition_key(self) -> &'a str;
+
+        /// The key this row is sorted by within its partition
+        fn sort_key(self) -> &'a str;
+    }
+
+    impl<'a> Keys<'a> for RowRef<'a, TestRow> {
+        /// The partition this row belongs to, wherever the row is living
+        fn partition_key(self) -> &'a str {
+            match self {
+                RowRef::Resident(row) => row.partition_key.as_str(),
+                RowRef::InArchive(archived) => archived.partition_key.as_str(),
+            }
+        }
+
+        /// The key this row is sorted by, wherever the row is living
+        fn sort_key(self) -> &'a str {
+            match self {
+                RowRef::Resident(row) => row.sort_key.as_str(),
+                RowRef::InArchive(archived) => archived.sort_key.as_str(),
+            }
+        }
+    }
+
+    impl<'a> Keys<'a> for RowRef<'a, SortKeyOnly> {
+        /// The partition the row this was projected from belonged to
+        fn partition_key(self) -> &'a str {
+            match self {
+                RowRef::Resident(row) => row.partition_key.as_str(),
+                RowRef::InArchive(archived) => archived.partition_key.as_str(),
+            }
+        }
+
+        /// The key the row this was projected from was sorted by
+        fn sort_key(self) -> &'a str {
+            match self {
+                RowRef::Resident(row) => row.sort_key.as_str(),
+                RowRef::InArchive(archived) => archived.sort_key.as_str(),
+            }
+        }
+    }
+
     /// A whole row is the identity projection of itself
     impl ShoalProjection for TestRow {
         type Row = TestRow;
@@ -1432,6 +1553,12 @@ mod tests {
         // this the default takes over and every row is copied, which is safe and is exactly what
         // this constant exists to avoid
         const IDENTITY: Option<fn(&TestRow) -> &Self> = Some(|row| row);
+
+        // and an archived row is its own identity projection too, which is what lets a get off
+        // disk answer out of the archive it read rather than materializing a row per row
+        const ARCHIVED_IDENTITY: Option<
+            fn(&<TestRow as Archive>::Archived) -> &<Self as Archive>::Archived,
+        > = Some(|row| row);
 
         fn from_row(row: &TestRow) -> Self {
             row.clone()
@@ -1474,6 +1601,64 @@ mod tests {
 
         fn get_partition_key_from_archived_insert(_intent: &<Self as Archive>::Archived) -> u64 {
             0
+        }
+    }
+
+
+    /// What each field of a [`SortKeyOnly`] produced on its way back out of an archive
+    ///
+    /// This is written by hand here because the table derives cannot run inside `shoal-core` —
+    /// they emit `::shoal::` paths, and this crate is underneath that facade. It is field for
+    /// field what `shoal-derive` emits for a row of two `String` fields, so a mirror that
+    /// stopped matching rkyv would fail these tests the same way it would fail a schema's.
+    struct SortKeyOnlyArchivedResolver {
+        /// What `SortKeyOnly::partition_key` produced on its way out of the archive
+        partition_key: <String as Rearchive>::ArchivedResolver,
+        /// What `SortKeyOnly::sort_key` produced on its way out of the archive
+        sort_key: <String as Rearchive>::ArchivedResolver,
+    }
+
+    /// A test row can be written back out of the archive it was read from
+    impl Rearchive for SortKeyOnly {
+        /// What this row's fields produced, which is not rkyv's resolver for this row
+        type ArchivedResolver = SortKeyOnlyArchivedResolver;
+
+        /// Write every field's out of line data, straight out of the archive holding it
+        ///
+        /// # Arguments
+        ///
+        /// * `archived` - The archived row to write back out
+        /// * `serializer` - The serializer to write the out of line data into
+        fn serialize_archived<S>(
+            archived: &<Self as Archive>::Archived,
+            serializer: &mut S,
+        ) -> Result<Self::ArchivedResolver, <S as rkyv::rancor::Fallible>::Error>
+        where
+            S: rkyv::rancor::Fallible + rkyv::ser::Writer + rkyv::ser::Allocator + ?Sized,
+            <S as rkyv::rancor::Fallible>::Error: rkyv::rancor::Source,
+        {
+            Ok(SortKeyOnlyArchivedResolver {
+                partition_key: <String as Rearchive>::serialize_archived(&archived.partition_key, serializer)?,
+                sort_key: <String as Rearchive>::serialize_archived(&archived.sort_key, serializer)?,
+            })
+        }
+
+        /// Write the fixed size row on top of what was serialized for its fields
+        ///
+        /// # Arguments
+        ///
+        /// * `archived` - The archived row being written back out
+        /// * `resolver` - What each of its fields produced
+        /// * `out` - Where the archived row belongs
+        fn resolve_archived(
+            archived: &<Self as Archive>::Archived,
+            resolver: Self::ArchivedResolver,
+            out: rkyv::Place<<Self as Archive>::Archived>,
+        ) {
+            // split the place the row belongs in into one place per field
+            rkyv::munge::munge!(let ArchivedSortKeyOnly { partition_key, sort_key } = out);
+            <String as Rearchive>::resolve_archived(&archived.partition_key, resolver.partition_key, partition_key);
+            <String as Rearchive>::resolve_archived(&archived.sort_key, resolver.sort_key, sort_key);
         }
     }
 
@@ -1736,7 +1921,7 @@ mod tests {
         let params = get_with_limit(Some(2));
         partition.get(&params, &mut found);
         // a limit takes the first rows in sort order, not an arbitrary two
-        let sort_keys = found.iter().map(|row| row.sort_key.as_str()).collect::<Vec<_>>();
+        let sort_keys = found.iter().map(|row| row.sort_key()).collect::<Vec<_>>();
         assert_eq!(sort_keys, vec!["a", "b"]);
     }
 
@@ -1777,7 +1962,7 @@ mod tests {
         partition.get(&params, &mut found);
         // our already full response is untouched
         assert_eq!(found.len(), 2);
-        let sort_keys = found.iter().map(|row| row.sort_key.as_str()).collect::<Vec<_>>();
+        let sort_keys = found.iter().map(|row| row.sort_key()).collect::<Vec<_>>();
         assert_eq!(sort_keys, vec!["x", "y"]);
     }
 
@@ -1916,7 +2101,7 @@ mod tests {
         // only the row we named comes back
         let sort_keys = found
             .iter()
-            .map(|row| row.sort_key.as_str())
+            .map(|row| row.sort_key())
             .collect::<Vec<_>>();
         assert_eq!(sort_keys, vec!["c"]);
     }
@@ -1933,7 +2118,7 @@ mod tests {
         // both of the rows we named come back and nothing else does
         let sort_keys = found
             .iter()
-            .map(|row| row.sort_key.as_str())
+            .map(|row| row.sort_key())
             .collect::<Vec<_>>();
         assert_eq!(sort_keys, vec!["b", "d"]);
     }
@@ -2015,7 +2200,7 @@ mod tests {
         // the limit takes the first rows we named
         let sort_keys = found
             .iter()
-            .map(|row| row.sort_key.as_str())
+            .map(|row| row.sort_key())
             .collect::<Vec<_>>();
         assert_eq!(sort_keys, vec!["a", "b"]);
     }
@@ -2087,7 +2272,7 @@ mod tests {
         let params = get_with_range(range, None);
         partition.get(&params, &mut found);
         // the rows inside the range come back, in sort order, and nothing else
-        let keys: Vec<&str> = found.iter().map(|row| row.sort_key.as_str()).collect();
+        let keys: Vec<&str> = found.iter().map(|row| row.sort_key()).collect();
         assert_eq!(keys, vec!["b", "c", "d"]);
     }
 
@@ -2105,7 +2290,7 @@ mod tests {
         let params = get_with_range(range, None);
         partition.get(&params, &mut found);
         // the row the bound named is left out and the rest come back
-        let keys: Vec<&str> = found.iter().map(|row| row.sort_key.as_str()).collect();
+        let keys: Vec<&str> = found.iter().map(|row| row.sort_key()).collect();
         assert_eq!(keys, vec!["b", "c"]);
     }
 
@@ -2119,14 +2304,14 @@ mod tests {
         let range = range_of(Bound::Unbounded, Bound::Excluded("c"));
         let params = get_with_range(range, None);
         partition.get(&params, &mut found);
-        let keys: Vec<&str> = found.iter().map(|row| row.sort_key.as_str()).collect();
+        let keys: Vec<&str> = found.iter().map(|row| row.sort_key()).collect();
         assert_eq!(keys, vec!["a", "b"]);
         // asking for everything up to and including it keeps it
         let mut found: RowSink<'_, TestRow> = RowSink::default();
         let range = range_of(Bound::Unbounded, Bound::Included("c"));
         let params = get_with_range(range, None);
         partition.get(&params, &mut found);
-        let keys: Vec<&str> = found.iter().map(|row| row.sort_key.as_str()).collect();
+        let keys: Vec<&str> = found.iter().map(|row| row.sort_key()).collect();
         assert_eq!(keys, vec!["a", "b", "c"]);
     }
 
@@ -2191,7 +2376,7 @@ mod tests {
         let params = get_with_range(SortRange::default(), None);
         partition.get(&params, &mut found);
         // the deleted row is not in the answer
-        let keys: Vec<&str> = found.iter().map(|row| row.sort_key.as_str()).collect();
+        let keys: Vec<&str> = found.iter().map(|row| row.sort_key()).collect();
         assert_eq!(keys, vec!["a", "c"]);
     }
 
@@ -2208,7 +2393,7 @@ mod tests {
         let params = get_with_range(SortRange::default(), Some(2));
         partition.get(&params, &mut found);
         // the walk stopped at the limit rather than at the end of the range
-        let keys: Vec<&str> = found.iter().map(|row| row.sort_key.as_str()).collect();
+        let keys: Vec<&str> = found.iter().map(|row| row.sort_key()).collect();
         assert_eq!(keys, vec!["a", "b"]);
     }
 
@@ -2391,7 +2576,7 @@ mod tests {
         // every row comes back, projected, in sort order
         let sort_keys = found
             .iter()
-            .map(|row| row.sort_key.as_str())
+            .map(|row| row.sort_key())
             .collect::<Vec<_>>();
         assert_eq!(sort_keys, vec!["a", "b", "c"]);
     }
@@ -2437,13 +2622,14 @@ mod tests {
     }
 
     #[test]
-    /// An archived scan builds every row, which is the half of O2 this does not close
+    /// An archived scan points at every row it returns, which is the other half of O2
     ///
-    /// What an accessible partition holds is `Archived<T>`, and rkyv has no way to serialize an
-    /// archived value back into its own layout - so there is no `T` anywhere to point at and the
-    /// row has to be materialized. Recorded as a test rather than only as prose, so that the day
-    /// somebody finds a way to borrow these it fails and says where to look.
-    fn an_archived_scan_builds_every_row_it_returns() {
+    /// What an accessible partition holds is `Archived<T>` rather than `T`, so these rows cannot
+    /// be pointed at the way resident ones are — they are written back out of the archive by the
+    /// mirror [F28](../../../docs/src/features/rearchived-rows.md) generates. This is the count
+    /// that says the mirror is actually *reached*: both paths answer with the same rows, so
+    /// nothing else in this file would notice if a get quietly went back to materializing them.
+    fn an_archived_scan_points_at_every_row_it_returns() {
         // hold a partition as the archive an evicted one is
         let partition = accessible(&["a", "b", "c"]);
         // ask for all of it, as whole rows, with no projection to blame
@@ -2451,13 +2637,60 @@ mod tests {
         let mut found: RowSink<'_, TestRow> = RowSink::default();
         let params = get_with_limit(None);
         partition.get(&params, &mut seek, &mut found);
+        // every row came back, and not one of them was materialized to do it
+        assert_eq!(found.len(), 3);
+        assert_eq!(
+            found.built(),
+            0,
+            "an archived get materialized rows it could have written out of the archive"
+        );
+        // and the rows it points at are the rows the archive holds, in sort order
+        let sort_keys = found.iter().map(Keys::sort_key).collect::<Vec<_>>();
+        assert_eq!(sort_keys, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    /// A projected archived scan still builds every row it returns
+    ///
+    /// A projection is a strict subset of its row's fields, so the archive holds no value of it
+    /// to point at however the partition is being held. This is the guard on the constant that
+    /// decides which of the two an archived scan does.
+    fn a_projected_archived_scan_builds_every_row() {
+        // hold a partition as the archive an evicted one is
+        let partition = accessible(&["a", "b", "c"]);
+        // ask for it as the projection instead of as whole rows
+        let mut seek = None;
+        let mut found: RowSink<'_, SortKeyOnly> = RowSink::default();
+        let params = projected(get_with_limit(None));
+        partition.get(&params, &mut seek, &mut found);
         // every row came back, and every one of them was built to do it
         assert_eq!(found.len(), 3);
         assert_eq!(
             found.built(),
             3,
-            "an archived row was answered in place, which rkyv has no way to do"
+            "a projection was answered out of an archive that holds no value of it"
         );
+    }
+
+    #[test]
+    /// An unsorted archived get points at the row it answers with
+    ///
+    /// The unsorted twin of [`an_archived_scan_points_at_every_row_it_returns`]. An unsorted
+    /// partition holds a single row, so the same claim is one row rather than a scan of them.
+    fn an_unsorted_archived_get_points_at_its_row() {
+        // hold a one row partition as the archive an evicted one is
+        let partition = unsorted_accessible(&UnsortedPartition::new(0, TestRow::new("a")));
+        // ask for it as a whole row, with no projection to blame
+        let mut found: RowSink<'_, TestRow> = RowSink::default();
+        assert!(partition.get(&unsorted_get(None), &mut found));
+        // the row came back, and it was not materialized to do it
+        assert_eq!(found.len(), 1);
+        assert_eq!(
+            found.built(),
+            0,
+            "an archived unsorted get materialized the row it could have pointed at"
+        );
+        assert_eq!(found.iter().next().unwrap().sort_key(), "a");
     }
 
     #[test]
@@ -2473,7 +2706,7 @@ mod tests {
         let params = projected(get_with_limit(None));
         partition.get(&params, &mut found);
         // the projected row names the partition its row was in
-        assert_eq!(found.iter().next().unwrap().partition_key, "partition");
+        assert_eq!(found.iter().next().unwrap().partition_key(), "partition");
     }
 
     #[test]
@@ -2488,7 +2721,7 @@ mod tests {
         // the rows we named come back and no others
         let sort_keys = found
             .iter()
-            .map(|row| row.sort_key.as_str())
+            .map(|row| row.sort_key())
             .collect::<Vec<_>>();
         assert_eq!(sort_keys, vec!["b", "d"]);
     }
@@ -2509,7 +2742,7 @@ mod tests {
         // only the rows inside the range come back
         let sort_keys = found
             .iter()
-            .map(|row| row.sort_key.as_str())
+            .map(|row| row.sort_key())
             .collect::<Vec<_>>();
         assert_eq!(sort_keys, vec!["c", "d"]);
     }
@@ -2529,7 +2762,7 @@ mod tests {
         // the limit takes the first rows in sort order
         let sort_keys = found
             .iter()
-            .map(|row| row.sort_key.as_str())
+            .map(|row| row.sort_key())
             .collect::<Vec<_>>();
         assert_eq!(sort_keys, vec!["a", "b"]);
     }
@@ -2547,7 +2780,7 @@ mod tests {
         // the deleted row is not projected into the answer
         let sort_keys = found
             .iter()
-            .map(|row| row.sort_key.as_str())
+            .map(|row| row.sort_key())
             .collect::<Vec<_>>();
         assert_eq!(sort_keys, vec!["a", "c"]);
     }
@@ -2821,10 +3054,10 @@ mod tests {
         // every row was projected, and the projection kept its keys
         let sort_keys = found
             .iter()
-            .map(|row| row.sort_key.as_str())
+            .map(|row| row.sort_key())
             .collect::<Vec<_>>();
         assert_eq!(sort_keys, vec!["a", "b", "c"]);
-        assert_eq!(found.iter().next().unwrap().partition_key, "partition");
+        assert_eq!(found.iter().next().unwrap().partition_key(), "partition");
     }
 
     #[test]

@@ -3,8 +3,19 @@
 What the test suite reaches, what it does not, and the one place where it is unsound.
 
 **Established by running it.** `cargo check --workspace --all-targets` passes with warnings and
-`cargo test --workspace` passes: **1,074 tests**, two ignored, plus **13** behind
+`cargo test --workspace` passes: **1,084 tests**, two ignored, plus **13** behind
 `--features stage-profile` that a default run does not reach.
+
+**[F28](../features/rearchived-rows.md) added 10**, and the total went 1,074 → 1,084. Four are in
+`shoal-proto`: two over the generated mirror, which serialize a row out of its own archive and
+compare the bytes with what rkyv writes for the owned row, and two over `RowRef`'s archived variant
+— including a reply mixing resident and archived rows, which is what an ordinary get across several
+partitions is. Two are counts in `shoal-core` asserting that an archived scan **points at** every
+row it returns and that a projected one still builds every row; one more is the unsorted twin. The
+last four are integration tests over a partition that is genuinely on disk, sorted and unsorted, in
+both cases reading the same rows back resident and archived and requiring the two answers to be
+identical. The count tests are the ones that matter: both paths answer the same rows, so nothing
+else in the suite would notice a get that quietly went back to materializing them.
 
 **[Resolved #80](resolved/never-flushed-partitions.md) added 1**, and the total went 1,073 → 1,074.
 It is one test in a new binary, `disk_lookups.rs`, and it is the first test in the suite that
@@ -209,11 +220,11 @@ should read this table rather than assume it was.
 
 | Where | Tests | |
 | --- | --- | --- |
-| `shoal-proto` unit | 178 | the protocol, the SHQL parser, SCRAM, the TLS config — moved out of `shoal-core` |
-| `shoal-core` unit | 156 | the engine: partitions, storage, the shard. Was 323 before the split. Up 5 with [F23](../features/self-sizing-staging-buffer.md), all of them over the staging buffer's sizing rule, and 3 with [F25](../features/read-buffers-are-filled-not-zeroed.md) over `RequestBody` — a body delivered in pieces, a stream that ends early, and an empty one |
+| `shoal-proto` unit | 182 | the protocol, the SHQL parser, SCRAM, the TLS config — moved out of `shoal-core`. Up 4 with [F28](../features/rearchived-rows.md), over the mirror that writes an archived value back into its own layout and over `RowRef`'s archived variant |
+| `shoal-core` unit | 158 | the engine: partitions, storage, the shard. Was 323 before the split. Up 5 with [F23](../features/self-sizing-staging-buffer.md), all of them over the staging buffer's sizing rule, and 3 with [F25](../features/read-buffers-are-filled-not-zeroed.md) over `RequestBody` — a body delivered in pieces, a stream that ends early, and an empty one; and 2 with [F28](../features/rearchived-rows.md), which are copy counts over an archived scan and its projected control — one of them replacing the F27 test that asserted the opposite |
 | `shoal-client` unit | 20 | the client read loop and its error routing, and — new with [F16](../features/client-builder.md) — the builder, the pool defaults and the endpoint order; and — new with [F25](../features/read-buffers-are-filled-not-zeroed.md) — a response payload arriving in pieces and a connection that closes halfway through one |
 | `shoal-bench` unit | 404 | the harness, the workloads, the charts, and — new with [F17](../features/workload-grid.md) and [F18](../features/results-pages.md) — the grid, the row-width and key generators, the family and page registries, and the two new chart kinds; and — new with [F19](../features/chart-legends.md) — the shared legend, the data-derived axis ticks, and the encryption charts in nanoseconds; and — new with [F20](../features/configuration-sweeps.md) and [F21](../features/benchmark-groups.md) — the configuration sweep, the group table, and `--group` in the registry; and — new with [F22](../features/row-size-benchmarks.md) — the three width passes, the configuration sweep's width repeats, both runner-side lists of profiled workloads, and the per-workload stage artifact; and — new with [Resolved #76](resolved/stage-join.md) — that the stage layer's collector judges each report rather than their sum; and — new with [Resolved #79](resolved/micro-only-capture-current.md) — that each page resolves the current capture of the layer it draws. **416 with `--features stage-profile`**, which adds the 9 over the report builder — one of them new with [F26](../features/archive-routed-requests.md), over a parked get's stages — and 3 over the `StageLog` |
-| `shoal` integration | 209 | 18 binaries, one ignored. `disk_lookups.rs` is **new** with [Resolved #80](resolved/never-flushed-partitions.md) and holds exactly one test, because what it asserts is a process-wide count. `grouped_responses.rs` is **new** with [F27](../features/grouped-responses.md) and starts no server, for the same reason `archive_routing.rs` does not: it asserts what the derive generates and what rkyv does with it. `pool.rs` is **new** with [F16](../features/client-builder.md), `intent_log_batching.rs` with [F23](../features/self-sizing-staging-buffer.md), and `archive_routing.rs` with [F26](../features/archive-routed-requests.md). All but the last run against a live server; `archive_routing.rs` starts nothing, because `Ring`, the routing traits and rkyv are pure CPU over plain data — the same property `shoal/benches/routing.rs` relies on |
+| `shoal` integration | 213 | 18 binaries, one ignored. `disk_lookups.rs` is **new** with [Resolved #80](resolved/never-flushed-partitions.md) and holds exactly one test, because what it asserts is a process-wide count. Up 4 with [F28](../features/rearchived-rows.md), which reads a partition that is genuinely on disk back both ways in both table suites. `grouped_responses.rs` is **new** with [F27](../features/grouped-responses.md) and starts no server, for the same reason `archive_routing.rs` does not: it asserts what the derive generates and what rkyv does with it. `pool.rs` is **new** with [F16](../features/client-builder.md), `intent_log_batching.rs` with [F23](../features/self-sizing-staging-buffer.md), and `archive_routing.rs` with [F26](../features/archive-routed-requests.md). All but the last run against a live server; `archive_routing.rs` starts nothing, because `Ring`, the routing traits and rkyv are pure CPU over plain data — the same property `shoal/benches/routing.rs` relies on |
 | `shoalctl` integration | 34 | the completion menu, driven the way the key handler does |
 | `shoal-client-check` integration | 7 | **new.** A schema compiling and running against the client alone |
 | `shoal-bench` integration | 21 | committed artifacts, chart geometry, CSS sync. Up 2 with [F17](../features/workload-grid.md), both guarding the committed corpus against the four fields it added, and 2 more with [F19](../features/chart-legends.md) over the legend's layout. **22 with `--features stage-profile`**, which adds `stage_join.rs` — the only test here that starts a server ([Resolved #76](resolved/stage-join.md)) |

@@ -131,9 +131,10 @@ its row and is still built. The `identity` above is `P::IDENTITY`, read once bef
 than per row, and it is `Some` only on the impl the table derive writes for the row itself — which
 is the one place `Self::Row` and `Self` are the same type, so no projection can claim it.
 
-`found` is a `RowSink`, which records each row as either resident or built and can hold both at
-once — that is what lets a get naming one resident partition and one archived one borrow the half
-it can.
+`found` is a `RowSink`, which records each row as resident, still in an archive, or built, and can
+hold all three at once — that is what lets a get naming one resident partition and one archived one
+point at the rows of both ([F28](../features/rearchived-rows.md)) while building any projection
+beside them.
 
 `found` here is this partition's own slot, so `limit_reached` caps each partition at `limit` rows
 of its own. A partition can never contribute more than that to the first `limit` rows of the
@@ -176,8 +177,11 @@ whose start is past its end.
 is a change from the bare `sort_keys: Vec<Sort>` this replaced. See
 [item 8](../appendix/resolved/sort-keys.md) and [F1](../features/sort-key-ranges.md).
 
-Rows are `clone()`d into the response. For an `Accessible` partition they are deserialized
-instead, but only after passing the filter
+~~Rows are `clone()`d into the response. For an `Accessible` partition they are deserialized
+instead, but only after passing the filter~~ **Neither, for a get that named no projection**: a
+resident row is pointed at where the partition holds it ([F27](../features/grouped-responses.md))
+and an archived one is written straight out of the archive it was read from
+([F28](../features/rearchived-rows.md)), in both cases only after passing the filter
 ([Partitions](partitions.md#maybeloaded)). Both of those are the *identity* projection; a get that
 named a projection copies only the fields that projection declared, which for an archived partition
 means the rest of each row is never deserialized at all

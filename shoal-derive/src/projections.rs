@@ -110,6 +110,7 @@ pub(super) fn derive(ast: &syn::DeriveInput) -> proc_macro2::TokenStream {
     };
     // instance vecs for the fields this projection names and for the ones keying its partition
     let mut all_fields = Vec::default();
+    let mut mirror_fields = Vec::default();
     let mut partition_fields = Vec::default();
     // step over our fields and pick out the ones that key this projections partition
     for field in fields {
@@ -118,6 +119,12 @@ pub(super) fn derive(ast: &syn::DeriveInput) -> proc_macro2::TokenStream {
         if let Some(ident) = field_attrs.ident.clone() {
             // every field a projection names is copied out of the row it projects
             all_fields.push((ident.clone(), field_attrs.ty.clone()));
+            // and again with whether the field asserted a mirror of its own, for the rearchiver
+            mirror_fields.push((
+                ident.clone(),
+                field_attrs.ty.clone(),
+                field_attrs.rearchive,
+            ));
             // a sort or filter role belongs to the table, not to the subset of it we return
             if field_attrs.sort || field_attrs.filter || field_attrs.update {
                 panic!(
@@ -168,6 +175,7 @@ pub(super) fn derive(ast: &syn::DeriveInput) -> proc_macro2::TokenStream {
     traits::rkyv::add(&mut output, name);
     traits::partition_key::add(&mut output, name, &partition_fields);
     traits::table_row_format::add(&mut output, name, &all_fields);
+    traits::rearchive::add(&mut output, name, &mirror_fields);
     // build the field copies that turn a resident row into this projection
     let from_row_fields: Vec<_> = all_fields
         .iter()

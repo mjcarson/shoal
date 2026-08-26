@@ -80,7 +80,11 @@ and disk loads all behave exactly as they did.
 
 **A whole row is the identity projection of itself.** This is the choice the rest of the design
 rests on. The table derive emits `impl ShoalProjection for Movie` whose `from_row` is a clone and
-whose `from_archived` is the `R::deserialize` a get has always done. Every get path is then generic
+whose `from_archived` is the `R::deserialize` a get has always done — and, since
+[F27](grouped-responses.md) and [F28](rearchived-rows.md), an unprojected get calls neither: the
+two constants on that impl, `IDENTITY` and `ARCHIVED_IDENTITY`, are what let a resident row be
+pointed at and an archived one be written out of its archive. They are `Some` only here, on the one
+impl where `Self::Row` and `Self` are the same type. Every get path is then generic
 over `P: ShoalProjection<Row = R>` and monomorphised, so an unprojected get compiles to what it
 compiled to before and a projected one has no branch in its inner loop. There is exactly one scan,
 not one per shape.
@@ -191,7 +195,9 @@ and it belongs with O18.
   makes a projected get answer in the wrong variant, which the client reads as the wrong type.
 - **The identity projection must stay inlineable.** `from_row` is a clone and `from_archived` is a
   deserialize, both `#[inline]`. If either grows a branch or an indirection, every existing
-  unprojected read pays for a feature it does not use.
+  unprojected read pays for a feature it does not use. Both are now off the hot path for an
+  unprojected get entirely ([F28](rearchived-rows.md)) and remain the fallback every other path
+  uses — a parked get, a share of a split get, and every projection.
 - **A parked get resumes with the projection it started with.** `PendingGets::resume::<P>`
   downcasts, and panics rather than silently starting fresh, because starting fresh would discard
   the rows already found. This holds because the query parked on a partition is a copy of the one

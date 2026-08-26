@@ -19,6 +19,7 @@ use deepsize2::DeepSizeOf;
 use rkyv::{Archive, Deserialize, Serialize};
 use shoal::shared::responses::{GetRows, Response, ResponseAction, ResponseError};
 use shoal::shared::protocol::error::ErrorCode;
+use shoal::shared::rearchive::Rearchive;
 use shoal::shared::row_ref::RowRef;
 use shoal::tables::{EphemeralSortedTable, EphemeralUnsortedTable};
 use shoal_derive::{db, ShoalSortedTable, ShoalUnsortedTable};
@@ -89,7 +90,7 @@ fn response<T>(data: ResponseAction<T>) -> Response<T> {
 /// * `rows` - The rows to answer with
 fn both_shapes<T>(rows: &[T]) -> (GetRows<T>, GetRows<RowRef<'_, T>>)
 where
-    T: Clone,
+    T: Clone + Rearchive,
 {
     // the same two runs either way, so only the ownership differs
     let split = rows.len() / 2;

@@ -49,10 +49,29 @@ pub struct TitleByKeyword {
     pub title: String,
 }
 
+/// A projection that names every field its row has
+///
+/// This is not a projection anybody would write. It exists to measure what an archived get cost
+/// **before** [F28](../../docs/src/features/rearchived-rows.md): a projection has no archived
+/// value of its own to point at, so it is materialized per row however its partition is held,
+/// which is what every archived get used to do. Naming every field makes the row it builds the
+/// same row `get_all` now points at, so the two arms differ in the copy and in nothing else.
+#[derive(Debug, Archive, Serialize, Deserialize, Clone, shoal::ShoalProjection, PartialEq)]
+#[rkyv(derive(Debug))]
+#[shoal_projection(table = "TitleByKeyword")]
+pub struct WholeRow {
+    /// The keyword this title is filed under, which is its partition
+    #[shoal(partition)]
+    pub keyword: String,
+    /// The title itself, which is what the partition is sorted by
+    pub title: String,
+}
+
 /// The schema these benchmarks build their queries against
 #[shoal::db]
 pub struct BenchDb {
     /// The one sorted table these benchmarks use
+    #[shoal(projections(WholeRow))]
     pub title_by_keyword: PersistentSortedTable<TitleByKeyword, FileSystem>,
 }
 
@@ -380,6 +399,27 @@ fn bench_maybe_loaded(c: &mut Criterion) {
                 let mut seek = None;
                 let mut found: RowSink<'_, TitleByKeyword> = RowSink::default();
                 archived.get(black_box(&all), &mut seek, &mut found);
+                black_box(found)
+            });
+        });
+        // the same walk, materializing every row, which is what this cost before F28
+        //
+        // it reaches the archive through the same `MaybeLoaded` dispatch and the same scan as
+        // `get_all` above, and differs from it only in that a projection has no archived value
+        // to point at and has to be built. The before and the after therefore come out of one
+        // build on one machine, rather than out of two captures taken weeks apart
+        let all_projected = SortedGet::<TitleByKeyword> {
+            partition_keys: vec![0],
+            sort_select: SortSelect::All,
+            filters: None,
+            limit: None,
+            projection: <WholeRow as ShoalProjection>::PROJECTION,
+        };
+        group.bench_with_input(BenchmarkId::new("build_all", size), &size, |b, _| {
+            b.iter(|| {
+                let mut seek = None;
+                let mut found: RowSink<'_, WholeRow> = RowSink::default();
+                archived.get(black_box(&all_projected), &mut seek, &mut found);
                 black_box(found)
             });
         });

@@ -185,6 +185,147 @@ async fn a_repeated_get_answers_the_same_rows_and_names_their_partition() -> Res
     Ok(())
 }
 
+/// A get answered off disk returns exactly what the same get returns in memory
+///
+/// A partition read from disk stays the archive it was read from, so the rows of the reply are
+/// written straight out of that archive rather than materialized first
+/// ([F28](../../docs/src/features/rearchived-rows.md)). The two paths have to be
+/// indistinguishable from the outside — same rows, same order, same payloads, same grouping —
+/// because which one a get takes depends on where a partition happens to be at the time, and a
+/// caller is never told.
+#[tokio::test]
+async fn a_get_off_disk_answers_the_same_rows_as_one_in_memory() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = utils::test_dir();
+    // several rows in one partition, so the answer has an order and a grouping to get wrong
+    let rows: Vec<TestRecord> = ["a", "b", "c", "d"]
+        .into_iter()
+        .map(|sort_key| TestRecord::new("partition_key", sort_key, "a payload worth copying"))
+        .collect();
+    // read them once while they are still resident, which is the answer to match
+    let (client, pool) =
+        utils::start_with_conf::<TestDb>(utils::build_single_shard_config(&temp_dir)).await?;
+    for row in &rows {
+        client.send_one(row.clone()).await?;
+    }
+    let resident = client
+        .send_one(TestRecordGet::new(vec!["partition_key".to_owned()]))
+        .await?;
+    let resident_rows: Vec<TestRecord> = resident
+        .access::<TestRecord>()?
+        .unwrap()
+        .iter()
+        .map(|row| TestRecord::deserialize(row).unwrap())
+        .collect();
+    let resident_groups: Vec<u64> = resident
+        .groups::<TestRecord>()?
+        .unwrap()
+        .iter()
+        .map(|group| group.len.to_native())
+        .collect();
+    pool.exit()?;
+    // wait for threads to fully clean up and the port to be released
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    // cycle once more so these inserts have been compacted into an archive on disk
+    let (_client, pool) =
+        utils::start_with_conf::<TestDb>(utils::build_single_shard_config(&temp_dir)).await?;
+    pool.exit()?;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    // now ask for the same rows against a server that has to read them off disk
+    let (client, pool) =
+        utils::start_with_conf::<TestDb>(utils::build_single_shard_config(&temp_dir)).await?;
+    let first = client
+        .send_one(TestRecordGet::new(vec!["partition_key".to_owned()]))
+        .await?;
+    // and again, which is the get that is actually answered out of the archive
+    //
+    // the first get finds nothing resident, parks on the disk read and is replayed once the
+    // partition has been loaded — and a replayed get takes the copying path, because the rows
+    // its earlier executions found have to outlive the execution that found them. By the second
+    // get the partition is accessible and nothing parks, so the reply is written straight out of
+    // the archive. Both are checked here, since a caller cannot tell which it got
+    let archived = client
+        .send_one(TestRecordGet::new(vec!["partition_key".to_owned()]))
+        .await?;
+    let first_rows: Vec<TestRecord> = first
+        .access::<TestRecord>()?
+        .unwrap()
+        .iter()
+        .map(|row| TestRecord::deserialize(row).unwrap())
+        .collect();
+    let archived_rows: Vec<TestRecord> = archived
+        .access::<TestRecord>()?
+        .unwrap()
+        .iter()
+        .map(|row| TestRecord::deserialize(row).unwrap())
+        .collect();
+    let archived_groups: Vec<u64> = archived
+        .groups::<TestRecord>()?
+        .unwrap()
+        .iter()
+        .map(|group| group.len.to_native())
+        .collect();
+    // every row came back, in sort order, both times
+    assert_eq!(resident_rows, rows);
+    assert_eq!(
+        first_rows, resident_rows,
+        "a get replayed after a disk read returned different rows than the same get in memory"
+    );
+    assert_eq!(
+        archived_rows, resident_rows,
+        "a get answered out of an archive returned different rows than the same get in memory"
+    );
+    // and both answers say the same thing about which partition those rows came from
+    assert_eq!(resident_groups, vec![4]);
+    assert_eq!(archived_groups, resident_groups);
+    // Shutdown server
+    pool.exit()?;
+    Ok(())
+}
+
+/// A projected get answered off disk returns exactly what the same projection returns in memory
+///
+/// A projection is a strict subset of its rows fields, so there is no archived value of it to
+/// write out and it is built either way. This is here because the constant that decides between
+/// the two is the one thing a projection could get wrong, and getting it wrong would show up as
+/// a reply of whole rows where the caller asked for two fields.
+#[tokio::test]
+async fn a_projected_get_off_disk_answers_what_a_resident_one_does() -> Result<(), TestError> {
+    // get a new temp dir for this test
+    let temp_dir = utils::test_dir();
+    // several rows in one partition, whose payload is what the projection leaves behind
+    let rows: Vec<TestRecord> = ["a", "b", "c"]
+        .into_iter()
+        .map(|sort_key| TestRecord::new("partition_key", sort_key, "a payload worth skipping"))
+        .collect();
+    // leave them on disk with nothing resident in memory
+    insert_rows_then_evict_to_disk(&temp_dir, &rows).await?;
+    // ask for the projection against a server that has to read them off disk
+    let (client, pool) =
+        utils::start_with_conf::<TestDb>(utils::build_single_shard_config(&temp_dir)).await?;
+    let response = client
+        .send_one(TestRecordGet::new(vec!["partition_key".to_owned()]).projection::<TestRecordKeys>())
+        .await?;
+    let projected: Vec<TestRecordKeys> = response
+        .access::<TestRecordKeys>()?
+        .unwrap()
+        .iter()
+        .map(|row| TestRecordKeys::deserialize(row).unwrap())
+        .collect();
+    // the projection came back, in sort order, carrying only the fields it named
+    let expected: Vec<TestRecordKeys> = rows
+        .iter()
+        .map(|row| TestRecordKeys {
+            partition_key: row.partition_key.clone(),
+            sort_key: row.sort_key.clone(),
+        })
+        .collect();
+    assert_eq!(projected, expected);
+    // Shutdown server
+    pool.exit()?;
+    Ok(())
+}
+
 /// Test inserting and exists queries work in shoal
 #[tokio::test]
 async fn exists_true() -> Result<(), TestError> {

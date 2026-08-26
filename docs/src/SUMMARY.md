@@ -89,6 +89,7 @@
   - [F25. Read buffers are filled, not zeroed](features/read-buffers-are-filled-not-zeroed.md)
   - [F26. Requests are routed from the archive](features/archive-routed-requests.md)
   - [F27. A get's answer carries its partitions, and its rows where they lie](features/grouped-responses.md)
+  - [F28. A get answered off disk is written out of the archive it read](features/rearchived-rows.md)
 
 # Direction
 

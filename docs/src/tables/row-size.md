@@ -110,15 +110,19 @@ pair, and therefore the one that explains why the ephemeral arms fall too.
 | --- | --- | --- |
 | ~~`shard.rs:105` — `BytesMut::zeroed(header.body_len())`~~ **gone** ([F25](../features/read-buffers-are-filled-not-zeroed.md)) | ~~a `memset` of the whole request body, overwritten by the `read_exact` on the next line~~ — and it was `alloc_zeroed` rather than a `memset`, so it was a cost the allocator sometimes declined to pay | ~~[O29](../appendix/optimizations.md#o29-a-request-body-is-zeroed-and-then-immediately-overwritten)~~ **done** |
 | ~~`shard.rs:1184` — `Queries::deserialize`~~ **narrowed** ([F26](../features/archive-routed-requests.md)) | ~~every `String` and `Vec` in the **bundle** allocated and copied out of a buffer that already holds them in a readable layout~~ — the coordinator no longer deserializes anything, and the shard that answers a query deserializes only **that query**. It is one walk of one query rather than one walk of the bundle plus, on every write, a second deep copy of the row that `split_by_shard`'s `self.clone()` made — and it happens on the shard that reads the row rather than on core 0 | ~~[O1](../appendix/optimizations.md#o1-queries-are-fully-deserialized-on-arrival)~~ **done**; the remaining walk is [filed in TODOs](../appendix/todos.md) |
-| ~~`partitions.rs:585`, `:293` — `P::from_row`~~ **gone for a resident get** ([F27](../features/grouped-responses.md)) | ~~the row copied into the partition, and copied again on the way out of a get~~ — the copy *out* is gone: a get that named no projection and read only resident partitions is serialized from the rows the partition is holding. A row read out of an archive is still materialized, which is [O40](../appendix/optimizations.md) | ~~[O2](../appendix/optimizations.md#o2-every-returned-row-is-copied-at-least-twice)~~ **half done** |
+| ~~`partitions.rs:585`, `:293` — `P::from_row`~~ **gone** ([F27](../features/grouped-responses.md), [F28](../features/rearchived-rows.md)) | ~~the row copied into the partition, and copied again on the way out of a get~~ — the copy *out* is gone for a get that named no projection, however its partition is held: a resident one is serialized from the rows the partition is holding, and an archived one straight out of the archive it was read from | ~~[O2](../appendix/optimizations.md#o2-every-returned-row-is-copied-at-least-twice)~~ **done** |
 | `fs.rs:368` — `RkyvSupport::serialize` | the row serialized back into a fresh `AlignedVec` for the intent log | [O11](../appendix/optimizations.md#o11-a-fresh-alignedvec-per-write-and-per-response) |
 | `fs.rs:373` — `hasher.write(archived.as_slice())` | a second full pass over the record, for its checksum | [O11](../appendix/optimizations.md#o11-a-fresh-alignedvec-per-write-and-per-response) |
 | `fs.rs:387` — `buff.write_all(archived.as_slice())` | a third pass, copying it into the DMA buffer | [O11](../appendix/optimizations.md#o11-a-fresh-alignedvec-per-write-and-per-response) |
 | `shard.rs:1212` — `rkyv::to_bytes(&response)` | the response serialized into another fresh `AlignedVec` | [O2](../appendix/optimizations.md#o2-every-returned-row-is-copied-at-least-twice), [O11](../appendix/optimizations.md#o11-a-fresh-alignedvec-per-write-and-per-response) |
 
-A read served from an archived partition is worse still: `P::from_archived`
+~~A read served from an archived partition is worse still: `P::from_archived`
 (`partitions.rs:1092`, `:363`) materializes an owned row from bytes, so the path is **bytes → owned
-rows → bytes** rather than **rows → copied rows → bytes**.
+rows → bytes** rather than **rows → copied rows → bytes**.~~ **No longer true**, by
+[F28](../features/rearchived-rows.md): an unprojected get whose partition is still an archive is
+written straight out of it, so that path is **bytes → bytes**. A projection still materializes,
+and so does the one get that parked on the disk read
+([O42](../appendix/optimizations.md#o42-a-get-replayed-after-a-disk-read-copies-rows-its-partition-is-now-holding)).
 
 **The table above is a *mixture*, and a read never pays most of it.** Three of its seven rows are
 inside `FileSystem::commit`, which only a write enters, and the first two are the request half —
@@ -133,7 +137,7 @@ resident partition walks the payload like this:
 
 | # | Hop | Kind | Filed as |
 | ---: | --- | --- | --- |
-| ~~1~~ | ~~`P::from_row` deep clone out of the `BTreeMap` (`partitions.rs:585`, `:293`)~~ **gone for a resident get** ([F27](../features/grouped-responses.md)); an archived one still pays it, as [O40](../appendix/optimizations.md) | copy + alloc | ~~[O2](../appendix/optimizations.md#o2-every-returned-row-is-copied-at-least-twice)~~ **half done** |
+| ~~1~~ | ~~`P::from_row` deep clone out of the `BTreeMap` (`partitions.rs:585`, `:293`)~~ **gone** ([F27](../features/grouped-responses.md)); ~~an archived one still pays it~~ **nor does an archived one** ([F28](../features/rearchived-rows.md)) | copy + alloc | ~~[O2](../appendix/optimizations.md#o2-every-returned-row-is-copied-at-least-twice)~~ **done** |
 | ~~2~~ | ~~`PendingGet::finish` re-collects the slots (`persistent.rs:196`)~~ **gone** — the first run is handed over rather than copied ([F27](../features/grouped-responses.md)) | alloc + walk | ~~**[O36](../appendix/optimizations.md#o36-every-get-re-collects-its-rows-into-a-fresh-vec-even-when-it-read-one-partition)**~~ **done** |
 | 3 | `rkyv::to_bytes` of the response (`shard.rs:1212`) | serialize + alloc | [O2](../appendix/optimizations.md#o2-every-returned-row-is-copied-at-least-twice), [O11](../appendix/optimizations.md#o11-a-fresh-alignedvec-per-write-and-per-response) |
 | 4 | `write_vectored` of `[preamble][archive]` | kernel copy | **unavoidable** |

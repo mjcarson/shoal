@@ -18,6 +18,8 @@ use crate::server::stage_profile::StageStamps;
 use crate::shared::protocol::error::ErrorCode;
 use crate::shared::responses::{GetRows, Response, ResponseAction, ResponseError, RowGroup};
 use crate::shared::row_ref::RowRef;
+use crate::shared::traits::ShoalProjection;
+use rkyv::Archive;
 
 /// Replace what a query answered with the failure it was released with, if it was released by one
 ///
@@ -244,19 +246,43 @@ impl<R> PendingGet<R> {
 
 /// Where a row a get found currently lives
 ///
-/// A get that named no projection and landed on a resident partition can answer with the row the
-/// partition is holding. Anything else — a projection, or a partition that is still the archive
-/// it was read from — has to build the row it answers with, and that built row lives in the
-/// sink's own scratch space until the reply is serialized.
-#[derive(Debug)]
-enum Found<'a, P> {
+/// A get that named no projection can answer with the row wherever the table is keeping it: with
+/// the row itself if its partition is resident, and with the archived row if its partition is
+/// still the archive it was read from. Only a projection has to build what it answers with, and
+/// that built row lives in the sink's own scratch space until the reply is serialized.
+enum Found<'a, P: ShoalProjection> {
     /// Still in the partition that holds it
     Resident(&'a P),
+    /// Still in the archive its partition was read from
+    ///
+    /// Held as the *row's* archived type rather than the projection's, because that is the type
+    /// the archive holds and the type [`ShoalProjection::from_archived`] takes if this row ever
+    /// has to be materialized after all. Only the identity projection can put a row here, and
+    /// [`ShoalProjection::ARCHIVED_IDENTITY`] is what says so.
+    InArchive(&'a <<P as ShoalProjection>::Row as Archive>::Archived),
     /// Built by this get, and held at this index of the scratch space
     ///
     /// An index rather than a reference, because the scratch space is a `Vec` that grows as the
     /// scan runs and a reference into it would dangle the moment it reallocated.
     Built(usize),
+}
+
+impl<P: ShoalProjection> std::fmt::Debug for Found<'_, P> {
+    /// Say where a row lives, without requiring an archived row to be printable
+    ///
+    /// Deriving this would put a `Debug` bound on the *archived* row type, which a schema is not
+    /// otherwise required to ask rkyv for, so a table whose rows did not would stop compiling.
+    ///
+    /// # Arguments
+    ///
+    /// * `formatter` - The formatter to write where this row lives into
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Found::Resident(_) => formatter.write_str("Found::Resident(..)"),
+            Found::InArchive(_) => formatter.write_str("Found::InArchive(..)"),
+            Found::Built(at) => write!(formatter, "Found::Built({at})"),
+        }
+    }
 }
 
 /// The rows one execution of a get found, borrowed wherever they could be
@@ -267,13 +293,13 @@ enum Found<'a, P> {
 /// gives up the common case, because a partition read from disk stays an archive and a long lived
 /// table is a mixture.
 #[derive(Debug)]
-pub struct RowSink<'a, P> {
+pub struct RowSink<'a, P: ShoalProjection> {
     /// Where each row this get found currently lives, in the order it was found
     ///
     /// **Empty until this get finds a row it can point at.** A get every one of whose rows had to
-    /// be built — which is every get against an archive — keeps its rows in `scratch` alone and
-    /// this stays empty, because an index that says "the *i*th row is the *i*th built row" for
-    /// every row carries nothing. See [`Self::mixed`].
+    /// be built — which is every projected get — keeps its rows in `scratch` alone and this stays
+    /// empty, because an index that says "the *i*th row is the *i*th built row" for every row
+    /// carries nothing. See [`Self::mixed`].
     found: Vec<Found<'a, P>>,
     /// The rows this get had to build, in the order it built them
     scratch: Vec<P>,
@@ -281,10 +307,13 @@ pub struct RowSink<'a, P> {
     ///
     /// This exists because of a measurement. `push_built` writing to both vectors cost the
     /// archived scans **5–14%** against the shape they had before
-    /// ([F27](../../../docs/src/features/grouped-responses.md)) — a second push per row, on the
-    /// one path that gains nothing from being able to point at rows, since an archive holds no
-    /// row to point at. While this is false the second push does not happen, and `found` is
-    /// backfilled if a row that can be pointed at ever arrives.
+    /// ([F27](../../../docs/src/features/grouped-responses.md)) — a second push per row, on what
+    /// was then the one path that gained nothing from being able to point at rows. An archived
+    /// row is pointed at now ([F28](../../../docs/src/features/rearchived-rows.md)) and the
+    /// remaining path that builds every row is a projection, but the shape is kept because the
+    /// measurement that produced it applies to that path unchanged. While this is false the
+    /// second push does not happen, and `found` is backfilled if a row that can be pointed at
+    /// ever arrives.
     mixed: bool,
     /// Which partition each run of those rows came from, in the order they were scanned
     groups: Vec<RowGroup>,
@@ -292,7 +321,7 @@ pub struct RowSink<'a, P> {
     run_started_at: usize,
 }
 
-impl<P> Default for RowSink<'_, P> {
+impl<P: ShoalProjection> Default for RowSink<'_, P> {
     fn default() -> Self {
         RowSink {
             found: Vec::new(),
@@ -304,7 +333,7 @@ impl<P> Default for RowSink<'_, P> {
     }
 }
 
-impl<'a, P> RowSink<'a, P> {
+impl<'a, P: ShoalProjection> RowSink<'a, P> {
     /// Answer with a row the partition is already holding
     ///
     /// # Arguments
@@ -319,6 +348,26 @@ impl<'a, P> RowSink<'a, P> {
             self.mixed = true;
         }
         self.found.push(Found::Resident(row));
+    }
+
+    /// Answer with a row that is still in the archive its partition was read from
+    ///
+    /// The archived twin of [`RowSink::push_resident`], and it keeps the same bookkeeping: a row
+    /// pointed at here is a row that was not built, so `found` has to start saying where each row
+    /// lives from this point on.
+    ///
+    /// # Arguments
+    ///
+    /// * `archived` - The archived row to answer with, where it lies
+    pub fn push_archived(&mut self, archived: &'a <<P as ShoalProjection>::Row as Archive>::Archived) {
+        // the moment a row can be pointed at, where each row lives stops being implied by its
+        // position and has to be recorded - so catch `found` up with what `scratch` already holds
+        if !self.mixed {
+            self.found
+                .extend((0..self.scratch.len()).map(Found::Built));
+            self.mixed = true;
+        }
+        self.found.push(Found::InArchive(archived));
     }
 
     /// Answer with a row this get had to build
@@ -384,18 +433,30 @@ impl<'a, P> RowSink<'a, P> {
         self.scratch.len()
     }
 
-    /// Visit every row this get found, wherever it lives
+    /// Point at every row this get found, wherever it lives
+    ///
+    /// This yields a [`RowRef`] rather than a `&P` because a row still in an archive is not a
+    /// row: what the partition holds is `Archived<P::Row>`, and the two are only interchangeable
+    /// once they are being written to the wire, which is what `RowRef` is for.
     ///
     /// # Arguments
     ///
     /// * `self` - The sink to walk
-    pub fn iter(&self) -> impl Iterator<Item = &P> {
+    pub fn iter(&self) -> impl Iterator<Item = RowRef<'_, P>> {
+        // only the identity projection can have pointed at an archived row, so it set this
+        let identity = P::ARCHIVED_IDENTITY;
         // a get that pointed at nothing is its scratch space, in order
-        let built = (!self.mixed).then(|| self.scratch.iter());
-        let placed = self.mixed.then(|| {
-            self.found.iter().map(|found| match found {
-                Found::Resident(row) => *row,
-                Found::Built(at) => &self.scratch[*at],
+        let built = (!self.mixed).then(|| self.scratch.iter().map(RowRef::new));
+        let placed = self.mixed.then(move || {
+            self.found.iter().map(move |found| match found {
+                Found::Resident(row) => RowRef::new(*row),
+                Found::InArchive(archived) => {
+                    // an archived row reached the sink, so the constant that let it in is set
+                    let identity = identity
+                        .expect("only the identity projection can point at an archived row");
+                    RowRef::archived(identity(*archived))
+                }
+                Found::Built(at) => RowRef::new(&self.scratch[*at]),
             })
         });
         built.into_iter().flatten().chain(placed.into_iter().flatten())
@@ -422,6 +483,7 @@ impl<'a, P> RowSink<'a, P> {
             .into_iter()
             .map(|found| match found {
                 Found::Resident(row) => row.clone(),
+                Found::InArchive(archived) => P::from_archived(archived),
                 Found::Built(_) => built
                     .next()
                     .expect("every built row was pushed to the scratch space it is indexed into"),
@@ -433,10 +495,12 @@ impl<'a, P> RowSink<'a, P> {
     ///
     /// The borrow is the sink's rather than the partition's, because a built row lives in the
     /// sink. That is what obliges the reply to be serialized while the sink is still alive, and
-    /// is the reason a get that has to park cannot take this path at all.
+    /// is the reason a get that has to park cannot take this path at all. A row pointed at in a
+    /// partition or in an archive outlives the sink, but the sink cannot say so without splitting
+    /// its lifetime in two, and the caller that needs it to is the one that cannot park anyway.
     #[must_use]
     pub fn rows(&self) -> GetRows<RowRef<'_, P>> {
-        let rows = self.iter().map(RowRef::new).collect();
+        let rows = self.iter().collect();
         GetRows {
             rows,
             groups: self.groups.clone(),

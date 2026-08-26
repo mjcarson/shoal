@@ -46,7 +46,7 @@ in the other direction — it had one row left open, that row was fixed, and the
 [moved](resolved/claude-md-drift.md).
 
 **Baseline as of writing:** `cargo check --workspace --all-targets` passes with warnings;
-`cargo test --workspace` passes — **1,074 tests**, two ignored, plus 13 more behind
+`cargo test --workspace` passes — **1,084 tests**, two ignored, plus 13 more behind
 `--features stage-profile` that a default run does not reach ([Test Coverage](test-coverage.md)).
 ~~1,045~~ — this figure had gone stale by two features while the sentences below it kept naming
 what each added, which is what a running total is supposed to prevent. It is re-derived from a run

@@ -90,6 +90,7 @@ pub fn derive_shoal_sorted_table(stream: TokenStream) -> TokenStream {
     };
     // instance vecs to store our partition, filter, and update keys
     let mut all_fields = Vec::default();
+    let mut mirror_fields = Vec::default();
     let mut partition_fields = Vec::default();
     let mut sort_fields = Vec::default();
     let mut filter_fields = Vec::default();
@@ -101,6 +102,12 @@ pub fn derive_shoal_sorted_table(stream: TokenStream) -> TokenStream {
         if let Some(ident) = field_attrs.ident.clone() {
             // collect all fields for schema support
             all_fields.push((ident.clone(), field_attrs.ty.clone()));
+            // and again with whether the field asserted a mirror of its own, for the rearchiver
+            mirror_fields.push((
+                ident.clone(),
+                field_attrs.ty.clone(),
+                field_attrs.rearchive,
+            ));
             // check if this is a partition or a sort key
             match (field_attrs.partition, field_attrs.sort) {
                 (true, false) => partition_fields.push((ident.clone(), field_attrs.ty.clone())),
@@ -154,6 +161,7 @@ pub fn derive_shoal_sorted_table(stream: TokenStream) -> TokenStream {
         &update_fields,
     );
     traits::table_row_format::add(&mut output, name, &all_fields);
+    traits::rearchive::add(&mut output, name, &mirror_fields);
     //traits::from_query::add_sorted(&mut output, name, &query_name);
     // generate the Filter and Update structs
     structs::filter::add(&mut output, name, &filter_fields);
@@ -193,6 +201,7 @@ pub fn derive_shoal_unsorted_table(stream: TokenStream) -> TokenStream {
     };
     // instance vecs to store our partition, filter, and update keys
     let mut all_fields = Vec::default();
+    let mut mirror_fields = Vec::default();
     let mut partition_fields = Vec::default();
     let mut filter_fields = Vec::default();
     let mut update_fields = Vec::default();
@@ -203,6 +212,12 @@ pub fn derive_shoal_unsorted_table(stream: TokenStream) -> TokenStream {
         if let Some(ident) = field_attrs.ident.clone() {
             // collect all fields for schema support
             all_fields.push((ident.clone(), field_attrs.ty.clone()));
+            // and again with whether the field asserted a mirror of its own, for the rearchiver
+            mirror_fields.push((
+                ident.clone(),
+                field_attrs.ty.clone(),
+                field_attrs.rearchive,
+            ));
             // check if this is a partition or a sort key
             match (field_attrs.partition, field_attrs.sort) {
                 (true, false) => partition_fields.push((ident.clone(), field_attrs.ty.clone())),
@@ -250,6 +265,7 @@ pub fn derive_shoal_unsorted_table(stream: TokenStream) -> TokenStream {
         &update_fields,
     );
     traits::table_row_format::add(&mut output, name, &all_fields);
+    traits::rearchive::add(&mut output, name, &mirror_fields);
     // generate the Filter and Update structs
     structs::filter::add(&mut output, name, &filter_fields);
     structs::get::add_unsorted(&mut output, name, &partition_fields);

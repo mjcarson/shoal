@@ -136,6 +136,12 @@ write a mirror exist one level deep (`ArchivedString::serialize_from_str`,
 cannot look inside a `Vec<Tag>` whose `Tag` lives in another crate. Filed as
 [O40](../appendix/optimizations.md#o40-a-row-read-out-of-an-archive-is-materialized-before-it-is-re-serialized).
 
+~~Rejected~~ **taken, one feature later**, by [F28](rearchived-rows.md), and the sentence above is
+where it was wrong: what the field the derive cannot see inside forces is a **fallback**, not a
+refusal. That field is materialized on its own and every field around it is written straight out of
+the archive, so a row with one `HashMap` in it keeps the fast path for its other twenty. The
+decision this page could not see was that the choice was never all-or-nothing per row.
+
 **Making a share travel as bytes.** Would extend the borrowing path to split gets. A share has to
 be *merged* on the shard collecting it, and bytes cannot be merged without being read back, which
 is the copy the change exists to remove.
@@ -167,7 +173,13 @@ records the answer, and a sorted partition asks once rather than once per query.
 defect was found by putting a probe on the path and watching it never fire, not by reasoning —
 both paths answer identically, so nothing failed and no test would have caught it.
 
-**A row read out of an archive is still materialized.** [O40](../appendix/optimizations.md), above.
+~~**A row read out of an archive is still materialized.**~~ **No longer true**, by
+[F28](rearchived-rows.md), which wrote the mirror this page called rkyv's problem rather than an
+effort problem. It is still rkyv's problem — there is no `Serialize` for an archived value — and
+what changed is that the missing direction is now generated per row type, with a **per-field**
+fallback for the `Vec<Tag>` case below rather than a refusal. An unprojected get answered off disk
+copies no rows. [O40](../appendix/optimizations.md) is closed, and with it
+[O2](../appendix/optimizations.md).
 
 **A share of a split get is still copied once per share.**
 
@@ -360,7 +372,7 @@ the paths named there resolve.
 | `an_answer_with_no_rows_is_byte_identical_through_either_enum` | the same, for the five answers that carry no rows |
 | `a_borrowed_reply_reads_back_through_the_owned_enum` | a client can no longer read what a borrowing shard wrote |
 | `a_resident_unprojected_scan_copies_no_rows` | a resident get copies a row it could have pointed at — O2's claim, stated as a count |
-| `an_archived_scan_builds_every_row_it_returns` | an archived row is answered in place, which rkyv has no way to do |
+| ~~`an_archived_scan_builds_every_row_it_returns`~~ | replaced by `an_archived_scan_points_at_every_row_it_returns` ([F28](rearchived-rows.md)) — an archived get now materializes nothing, and the count test asserts the opposite of what it did here |
 | `groups_cover_every_row_exactly_once` | a merge, a limit or a reorder leaves a gap or an overlap in the index |
 | `the_groups_a_get_returns_name_its_partitions_in_the_order_it_asked_for` | the index is built in arrival order rather than named order |
 | `a_gathered_get_orders_its_rows_without_hashing_any_of_them` | the grouped reorder disagrees with the hashing one, over six arrival orders of four shares |
@@ -384,7 +396,8 @@ suites — pass **unchanged**, which is what says the reorder still does what it
   [O36](../appendix/optimizations.md#o36-every-get-re-collects-its-rows-into-a-fresh-vec-even-when-it-read-one-partition)
   — closed
 - [O40](../appendix/optimizations.md#o40-a-row-read-out-of-an-archive-is-materialized-before-it-is-re-serialized)
-  — the archived half, and why it is not effort but rkyv
+  — the archived half, and why it is not effort but rkyv. **Closed** by
+  [F28](rearchived-rows.md), which wrote the missing direction rather than working around it
 - [Resolved #80](../appendix/resolved/never-flushed-partitions.md) — why the sorted table did not
   reach any of this, and what it took to establish that clearing one flag was safe
 - [Resolved #20](../appendix/resolved/orphaned-sources.md) — `response.rs`, kept for years as this

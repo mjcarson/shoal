@@ -52,6 +52,123 @@ pub(super) fn is_u32_type(ty: &syn::Type) -> bool {
     false
 }
 
+/// The scalars whose archived form writes itself
+///
+/// rkyv archives each of these to a `rend` type it already implements `Archive<Archived = Self>`
+/// and `Serialize` for, which is what makes the mirror for one of them rkyv's own code.
+const PORTABLE_SCALARS: [&str; 17] = [
+    "bool", "char", "f32", "f64", "i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16", "u32",
+    "u64", "u128", "usize", "()",
+];
+
+/// How a field is written back out of the archive it was read from
+///
+/// `shoal-derive` sees the *syntax* of a field's type and never its definition, so this is what
+/// it can decide from a name. A shape it does not recognize is not an error — it is a field that
+/// is materialized on its own while the rest of the row is not
+/// ([O40](../../../docs/src/appendix/optimizations.md)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum FieldShape {
+    /// A `Vec` of elements that archive to themselves, which rkyv can copy in one go
+    ///
+    /// Kept apart from `Mirrored` because the generic mirror walks a vector element by element,
+    /// and doing that to a payload would turn a copy of it into a loop over it.
+    PortableVec,
+    /// A type this crate's mirror knows how to write out of an archive
+    Mirrored,
+    /// A type it does not, which is materialized on its own and written the way it always was
+    Opaque,
+}
+
+impl FieldShape {
+    /// Work out how a field has to be written back out, from the syntax of its type
+    ///
+    /// # Arguments
+    ///
+    /// * `ty` - The field's type
+    /// * `opted_in` - Whether the field declared `#[shoal(rearchive)]`, which asserts an impl
+    pub(super) fn of(ty: &syn::Type, opted_in: bool) -> FieldShape {
+        // an author who named a type implementing the trait has told us more than syntax can
+        if opted_in {
+            return FieldShape::Mirrored;
+        }
+        // a vector of scalars is the one shape that must not go through the generic mirror
+        if let Some(inner) = generic_argument(ty, "Vec") {
+            if is_portable_scalar(inner) {
+                return FieldShape::PortableVec;
+            }
+        }
+        // everything else is either a shape shoal-proto implements the mirror for, or it is not
+        if is_mirrored(ty) {
+            FieldShape::Mirrored
+        } else {
+            FieldShape::Opaque
+        }
+    }
+}
+
+/// Determine whether a type archives to itself, which is every scalar rkyv handles
+///
+/// # Arguments
+///
+/// * `ty` - The type to check
+fn is_portable_scalar(ty: &syn::Type) -> bool {
+    // a unit type is written `()` rather than as a path, so it is checked on its own
+    if matches!(ty, syn::Type::Tuple(tuple) if tuple.elems.is_empty()) {
+        return true;
+    }
+    if let syn::Type::Path(type_path) = ty {
+        if let Some(segment) = type_path.path.segments.last() {
+            return PORTABLE_SCALARS.contains(&segment.ident.to_string().as_str());
+        }
+    }
+    false
+}
+
+/// Determine whether shoal-proto implements the mirror for a type
+///
+/// Recursive, because `Vec` and `Option` are mirrored only when what they hold is.
+///
+/// # Arguments
+///
+/// * `ty` - The type to check
+fn is_mirrored(ty: &syn::Type) -> bool {
+    // scalars and strings are the leaves
+    if is_portable_scalar(ty) || is_string_type(ty) {
+        return true;
+    }
+    // and the two containers are mirrored exactly as far as what they hold is
+    for wrapper in ["Vec", "Option"] {
+        if let Some(inner) = generic_argument(ty, wrapper) {
+            return is_mirrored(inner);
+        }
+    }
+    false
+}
+
+/// Take the type a named container holds, if a type is that container
+///
+/// # Arguments
+///
+/// * `ty` - The type to look inside
+/// * `wrapper` - The container to look for, by name
+fn generic_argument<'a>(ty: &'a syn::Type, wrapper: &str) -> Option<&'a syn::Type> {
+    if let syn::Type::Path(type_path) = ty {
+        if let Some(segment) = type_path.path.segments.last() {
+            // the name has to match, or this is some other container entirely
+            if segment.ident != wrapper {
+                return None;
+            }
+            if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
+                if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
+                    return Some(inner);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Convert snake case strings to pascal case
 ///
 /// # Arguments
