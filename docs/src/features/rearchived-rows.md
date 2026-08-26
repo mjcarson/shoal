@@ -214,26 +214,78 @@ sealed path takes `&self`, and that is exactly why it may not park, block, or ta
 
 ## Performance
 
-**Predictions, written down before the capture** (`f28-rearchive`, micro layer):
+**Captured** as `f28-rearchive`, micro layer, on a clean tree under the `performance` governor.
+Read against `f27-row-sink` rather than against `compare`'s trailing baseline, which is from
+2026-08-09 and predates F27 — every resident arm shows −95% against it, which is F27's win being
+re-reported, not this one.
 
-- `wire_codec/response/build/archived` beats `owned` at every row count, by a margin that grows
-  with the count, and does **not** beat `borrowed` — pointing at a row that is already in the
-  target layout cannot be slower than writing one out of an archive field by field.
-- `partition_sorted/maybe_loaded/get_all` improves against its own `f27-row-sink` number, most at
-  4096 rows.
-- `partition_sorted/maybe_loaded/build_all` — the same scan through a projection naming every
-  field, which is what `get_all` did before this change — sits where `get_all` used to.
-- `partition_sorted/maybe_loaded/get_key` barely moves. One row of two short strings is dominated
-  by the seek and the validation, not by the copy.
-- **The control most likely to fail is `partition_sorted/archived/walk_all`.** It touches nothing
-  this change touches and should be flat. It was +9.4% in `f27-row-sink` against a trailing
-  capture, which is the machine and not the code, so every archived arm here has to be read against
-  it. If it moves, the run is contaminated and the numbers beside it are noise.
-- The macro layer is **not** captured for this, and would be the wrong instrument if it were: the
-  grid's arms read partitions that are resident far more often than not.
+**The archived scan, which is what this change is:**
 
-`shoal-proto/src/shared/rearchive.rs` was added to the micro layer in `docs/perf/sources.json` in
-the same change — F27's lesson, which was a measured file that the manifest never named.
+| Arm (1024 rows / 4096 rows) | Before | After | Change |
+| --- | ---: | ---: | ---: |
+| `maybe_loaded/get_all/1024` | 55.94 µs | 2.51 µs | **−95.5%** |
+| `maybe_loaded/get_all/4096` | 224.6 µs | 9.38 µs | **−95.8%** |
+| `maybe_loaded/get_range_64/1024` | 3.62 µs | 0.43 µs | −88.1% |
+| `maybe_loaded/get_key/1024` | 139.8 ns | 106.0 ns | −24.2% |
+
+`maybe_loaded/build_all` — the same scan through a projection naming every field, which is what
+`get_all` did before this change — measures **53.55 µs** at 1024 and **215.1 µs** at 4096 *in this
+build*, within 4% of what `get_all` measured in `f27-row-sink`. That is the arm doing its job: the
+before and the after are one machine and one binary apart, not two captures apart.
+
+`get_key` was predicted to barely move and moved 24%. One row of two short strings is a seek and
+then a deserialize of two strings, and it turns out the deserialize was most of it.
+
+**Writing the reply, which is the other half of the answer path:**
+
+| Arm, 4096 rows | Time |
+| --- | ---: |
+| `wire_codec/response/build/owned` | 224.2 µs |
+| `wire_codec/response/build/borrowed` | 35.5 µs |
+| `wire_codec/response/build/archived` | 38.9 µs |
+
+Both predictions held: writing out of an archive beats copying the rows first by **5.8×**, and does
+not beat pointing at rows that are already in the target layout — it costs 10% more, which is the
+mirror walking a row field by field where `borrowed` hands rkyv a row it can serialize directly.
+
+So a 4096-row get answered off disk goes from *scan 224.6 µs + serialize 224.2 µs* to *scan 9.4 µs
++ serialize 38.9 µs* — **about 9× on the whole answer path**, for the rows it returns.
+
+### What it cost, which is not zero
+
+**`RowRef` became an enum, and F27's resident path pays for it.** Measured in isolation, back to
+back on the same machine, at `a1b0cff` against this change:
+
+| `wire_codec/response/build/borrowed` | Before | After | Change |
+| --- | ---: | ---: | ---: |
+| 16 rows | 198.0 ns | 265.5 ns | +34.1% |
+| 256 rows | 1.799 µs | 2.407 µs | +33.8% |
+| 1024 rows | 6.543 µs | 9.061 µs | +38.5% |
+| 4096 rows | 25.27 µs | 35.47 µs | +40.4% |
+
+A borrowed row was a pointer and is now a pointer and a discriminant — 16 bytes per row in the
+`Vec` instead of 8 — and `resolve` gained a match with an unreachable arm, per row. **This is a
+regression on the path most gets take**, imposed by the change that made the archived path 24×
+faster, and it is filed as
+[O43](../appendix/optimizations.md#o43-a-borrowed-row-costs-a-discriminant-it-usually-does-not-need)
+rather than left inside this page. It is not a reason to revert: the resident path is still **6.3×**
+faster than copying, which is what F27 bought and what this keeps.
+
+### One number in the capture is not about the code
+
+`wire_codec/width/request/encode/serialize/65536` reports **+71.5%** in this capture and
+`width/response/encode/serialize/65536` **+42.6%**. Neither arm touches anything this change
+touches — they serialize an owned request bundle. Run in isolation, the arm measures **7.50 µs at
+this commit against 7.80 µs at the parent**, which is *faster*, against the **17.7 µs** the capture
+recorded for it. So the arm costs more than twice as much when it runs two hundred benchmarks into a
+capture than when it runs alone, and the capture number is about that rather than about the commit.
+
+The designated control held — `partition_sorted/archived/walk_all` is +1.4% to +2.7% across all four
+sizes, against the +9.4% it moved in `f27-row-sink` — so this is not a hot machine. It is
+position-in-capture drift on the widest arms, and it is the third capture in a row to show a band
+this page cannot explain. Added to the standing
+[todos entry](../appendix/todos.md) that asks for a repeat capture at one commit, which would bound
+it; that entry is now the cheapest unbuilt thing in the measurement corpus.
 
 ## Tests
 

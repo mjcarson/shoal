@@ -123,7 +123,7 @@ this page opens with. Ordered inside each tier.
 | ~~**A2**~~ | ~~[**O17**](#o17-handle_flushed-runs-on-every-message)~~ — **done**, by [F5](../features/flushed-sweep-gate.md) | Profiled — 711,638 calls became 21,279 | S | — | Contained | it was, on the profile alone |
 | ~~**A3**~~ | ~~[**O34**](#o34-a-record-wider-than-the-staging-buffer-defeats-intent-log-batching)~~ — **done**, by [F23](../features/self-sizing-staging-buffer.md) | Measured, before and after — 1.22× at 64 KiB rows became **+22.0%** at the shipped setting, on disjoint intervals, and the sweep's spread collapsed 1.225× → 1.010× | S–M | ~~a `latency_buffer` sweep above the buffer~~ — discharged | Contained | it was, and it was, twice |
 | **A4** | [**O13**](#o13-a-multi-partition-get-is-quadratic-in-the-partitions-it-names) (+ [**O12**](#o12-to_blocked-clones-the-whole-filter-set-per-blocked-partition) and [**O39**](#o39-routing-a-multi-partition-get-is-quadratic-before-the-query-reaches-a-table) beside it) — the quadratic multi-partition get, **twice**: once in the table and once in the router | Asymptotic — O(n²) in a caller-set n. **O39 measured** — 4.13 ns·n + 0.0109 ns·n² | S | — | None | O39 **yes**, by `routing/split_by_shard/get` ([F24](../features/routing-benchmarks.md)); O13 and O12 still need a bench over `PersistentSortedTable::get` |
-| **A5** | [**O5**](#o5-the-hottest-maps-use-siphash), [**O14**](#o14-fixed-thousand-element-preallocations-on-per-call-paths), [**O28**](#o28-the-client-takes-two-guards-on-its-response-map-for-every-query-it-sends), [**O36**](#o36-every-get-re-collects-its-rows-into-a-fresh-vec-even-when-it-read-one-partition), [**O38**](#o38-a-response-that-arrives-out-of-order-is-validated-twice), [**O42**](#o42-a-get-replayed-after-a-disk-read-copies-rows-its-partition-is-now-holding) — hasher, allocation sizes, a doubled map guard, a re-collect per get, a second validation per reordered response, and the one get per partition read that still copies | Argued, except O38 which is **asymptotic** in the row width | S | — | None | no — needs a table-layer bench, and O28 needs the client measured at all. **O38 is the exception**: `macro/transport/stream` against `stream_unordered` is a ready-made control |
+| **A5** | [**O5**](#o5-the-hottest-maps-use-siphash), [**O14**](#o14-fixed-thousand-element-preallocations-on-per-call-paths), [**O28**](#o28-the-client-takes-two-guards-on-its-response-map-for-every-query-it-sends), [**O36**](#o36-every-get-re-collects-its-rows-into-a-fresh-vec-even-when-it-read-one-partition), [**O38**](#o38-a-response-that-arrives-out-of-order-is-validated-twice), [**O42**](#o42-a-get-replayed-after-a-disk-read-copies-rows-its-partition-is-now-holding), [**O43**](#o43-a-borrowed-row-costs-a-discriminant-it-usually-does-not-need) — hasher, allocation sizes, a doubled map guard, a re-collect per get, a second validation per reordered response, the one get per partition read that still copies, and the discriminant every borrowed row now carries | Argued, except O38 which is **asymptotic** in the row width | S | — | None | no — needs a table-layer bench, and O28 needs the client measured at all. **O38 is the exception**: `macro/transport/stream` against `stream_unordered` is a ready-made control |
 | **A6** | [**O25**](#o25-two-instrument-spans-remain-on-per-query-paths) — two `#[instrument]` spans on per-query paths | Argued — but the cost is in the *uninstrumented* binary | S | — | Contained | no — needs a with/without capture |
 
 ~~**Do O34 first.**~~ **Done**, by [F23](../features/self-sizing-staging-buffer.md). It moved from
@@ -428,13 +428,19 @@ but permanently. Found by probing the path rather than by reasoning about it —
 identically, so nothing failed. **The unsorted table always took it**, throughout its integration
 suite.
 
-**So both halves of this entry are now closed for both tables, and neither is measured.** The count
-tests are over `RowSink` rather than over a running server, and no capture has been taken since the
-sorted table became eligible — which is precisely the capture
-[F27](../features/grouped-responses.md) said would show the feature working, and predicted would
-show nothing while item 80 stood. `f28-rearchive` is the micro capture for the archived half, and
-its predictions are written down on [F28](../features/rearchived-rows.md#performance) rather than
+**The archived half is now measured**, by `f28-rearchive`: `partition_sorted/maybe_loaded/get_all`
+fell **95.5%** at 1024 rows and **95.8%** at 4096, against a `build_all` arm in the same build that
+holds the old behaviour at 53.55 µs and 215.1 µs. Writing the reply out of an archive rather than
+copying the rows first is **5.8×** (38.9 µs against 224.2 µs at 4096 rows). Together that is about
+**9× on the whole answer path** of a wide archived get. It cost something, and that is filed as
+[O43](#o43-a-borrowed-row-costs-a-discriminant-it-usually-does-not-need) rather than netted off
 here.
+
+**The resident half is still not measured end to end.** The count
+tests are over `RowSink` rather than over a running server, and no *macro* capture has been taken
+since the sorted table became eligible — which is precisely the capture
+[F27](../features/grouped-responses.md) said would show the feature working, and predicted would
+show nothing while item 80 stood.
 
 The rest of this entry stands as written, and describes what the copies *were* — the difficulty and
 tradeoff rows in particular, which are what the change proved wrong:
@@ -2193,6 +2199,9 @@ those pointers. The missing direction — a serializer from an archived value ba
 layout — is generated per row type by `shoal-derive`, field by field, against rkyv's own archived
 struct.
 
+**Measured at −95.5% and −95.8%** on `partition_sorted/maybe_loaded/get_all` at 1024 and 4096 rows
+(`f28-rearchive`), against a `build_all` arm carrying the old behaviour in the same build.
+
 **Two things this entry got wrong, both worth keeping.** The **XL** grade rested on the derive
 having to recurse through field types it cannot see; the answer was to stop trying, and fall back
 **per field** rather than per row — a type the derive cannot see inside materializes that one
@@ -2358,4 +2367,44 @@ was run at all.
 holds no rows from an earlier execution — `PendingGets` is empty for it — so it could take the
 sealed path unchanged. That is a narrower condition than `is_parked` and is cheap to test for. A
 get that parked on several partitions genuinely cannot, and should keep copying.
+
+---
+
+### O43. A borrowed row costs a discriminant it usually does not need
+
+| | |
+| --- | --- |
+| **Rank** | **A5**, with the near-free entries — but it is a **regression this repository introduced**, not a cost that was always there |
+| **Impact** | **Measured, in isolation, back to back on one machine**: `wire_codec/response/build/borrowed` is **+34.1%** at 16 rows, **+33.8%** at 256, **+38.5%** at 1024 and **+40.4%** at 4096, comparing `a1b0cff` against [F28](../features/rearchived-rows.md) |
+| **Difficulty** | **M**, and possibly not worth taking — see below |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | Any fix has to keep one `Vec` holding rows of both kinds, which is what the enum is for |
+| **Benchmark** | **Built**: `wire_codec/response/build/{owned,borrowed,archived}` at 16, 256, 1024 and 4096 rows |
+
+[F28](../features/rearchived-rows.md) made `RowRef<'a, T>` a two-variant enum so that one reply can
+carry rows pointed at in a resident partition beside rows pointed at in an archive. A get across
+several partitions is routinely a mixture of the two, so the reply cannot be homogeneous.
+
+The cost is paid per row on **every** borrowed reply, including the ones with no archived row in
+them at all:
+
+- the `Vec` element is **16 bytes instead of 8** — a pointer and a discriminant, padded — so a
+  4096-row reply writes 32 KiB more than it needs to;
+- `resolve` and `serialize` each gained a match, with an arm that is `unreachable!()` because the
+  value and its resolver must be the same variant. That arm is per row.
+
+**It is not a reason to revert anything.** The resident path is still **6.3×** faster than copying
+the rows first (35.5 µs against 224.2 µs at 4096 rows), which is the whole of what
+[F27](../features/grouped-responses.md) bought; this gives back a third of the margin on top of that
+win, in exchange for making the archived path 24× faster. But it is a real cost on the path most
+gets take, and it went in without being noticed until the arm that prices it was read.
+
+**Two things to try, in order.** First, check whether it is the discriminant or the panic: the
+unreachable arm may be blocking inlining or dragging panic machinery into a per-row loop, and
+restructuring so the match is on the resolver alone would settle that without changing the layout.
+Second, if it is the layout, there is no obvious safe fix — `&T` and `&Archived<T>` are both
+non-null so no niche is available for a two-pointer-kind enum, and pointer tagging would depend on
+an alignment a `#[repr(C)]` row of bytes does not have to give. Measure the first before designing
+for the second.
 

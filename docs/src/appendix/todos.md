@@ -1316,6 +1316,18 @@ Three things would separate them, in increasing order of effort:
   so the noise band on the results pages is a *declared* constant (±9% under a microsecond) that
   has never been checked against a repeat. That is a gap worth closing on its own account, and it
   is cheap: one label, one layer, twenty minutes.
+
+  **`f28-rearchive` raised the price of not having done it.** That capture reports
+  `wire_codec/width/request/encode/serialize/65536` at **+71.5%** and its response twin at
+  **+42.6%**, on arms that serialize an owned request bundle and touch nothing
+  [F28](../features/rearchived-rows.md) changed. Run on their own, back to back against the parent
+  commit, the same arm measures **7.50 µs at F28 against 7.80 µs before it** — *faster* — against
+  the **17.7 µs** the capture recorded. So that arm costs more than twice as much two hundred
+  benchmarks into a capture than it does alone, and no amount of reading the diff would have found
+  that. Only the widest arms show it; the neighbouring `body/*`, `decode/*` and `access/*` arms at
+  the same width are flat to within 3%. **A repeat capture is now the only way to tell which of the
+  numbers on the micro page are about the code**, and the fact that a committed capture contains a
+  +71.5% that is not real is the argument for taking it.
 - **Bisect it.** The path is `MaybeLoaded::get` → `seek_archived` → `collect_archived`, and F27
   touched all three signatures without changing what any of them does per row beyond a branch.
   [F28](../features/rearchived-rows.md) then touched the last of the three again, so `f28-rearchive`
