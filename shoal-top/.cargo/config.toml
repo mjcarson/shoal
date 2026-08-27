@@ -1,0 +1,28 @@
+# Cargo settings for the wasm build of the explorer.
+#
+# The workspace's own .cargo/config.toml carries `[build] rustflags = ["-Ctarget-cpu=native"]`,
+# and a `[build]` table applies to every target - wasm32 included, where rustc substitutes the
+# host CPU name and LLVM rejects it along with every x86 feature flag that came with it. That is
+# not fatal, it is about two hundred warning lines per crate, which across an eframe build buries
+# every real diagnostic under roughly fifty thousand lines of noise.
+#
+# A `[target.<triple>]` entry *replaces* `build.rustflags` for that triple rather than merging with
+# it, so this leaves the native benchmark builds - which depend on that flag, and whose provenance
+# records it - reading exactly as they did.
+#
+# It says `generic` rather than being empty, and that is not a stylistic choice. Cargo picks the
+# first of three mutually exclusive sources: `RUSTFLAGS`, then every matching `target.<triple>`
+# entry joined together, then `build.rustflags`. An **empty** join does not count as a match, so
+# `rustflags = ["-Ctarget-cpu=generic"]` here falls straight through to `-Ctarget-cpu=native` and changes nothing - which
+# is exactly what it did on the first attempt, for about eight thousand lines of warnings.
+#
+# It lives here rather than in the workspace config because `shoal-bench/src/fingerprint.rs` hashes
+# that file into `EnvFacts::cargo_config_sha`. Appending to it would in fact be survivable, since
+# `env_digest` hashes the scanned rustflags string rather than the file, but this file relies on
+# neither of those facts staying true.
+#
+# Cargo discovers this by walking up from the *current directory*, not from `--manifest-path`, so
+# `shoal-bench explore --serve` has to spawn cargo with its working directory inside this crate.
+# `shoal-bench/src/explore/build.rs` does, and says why.
+[target.wasm32-unknown-unknown]
+rustflags = ["-Ctarget-cpu=generic"]

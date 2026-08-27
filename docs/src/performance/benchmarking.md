@@ -390,6 +390,49 @@ page says which kind it is. `--check` reports every page that is out of date rat
 and it fails after any commit, because each page states which commit it was rendered against and
 every staleness verdict on it is relative to that commit.
 
+Every chart on those pages draws **one** capture. To see a metric across several — which is what
+says whether it is improving or regressing — use the explorer instead:
+
+```bash
+shoal-bench explore --serve   # then open http://127.0.0.1:8321
+```
+
+[F29](../features/benchmark-explorer.md) draws any number of captures together, against either a
+swept fact (the read share, the row width, the load depth) or the capture timeline. On a machine
+reached over SSH `--serve` is the form that works, because a native window needs a display; forward
+the port and open it in a browser. It reads the same artifacts these pages are generated from, and
+draws the macro layer only.
+
+It opens dark, on a One Dark palette; the sun/moon switch at the left of the toolbar changes that,
+and the `☰` beside it folds the picker away once you have finished selecting and want the chart to
+have the width. The four blocks that say how to read what is on screen are the bar along the bottom
+— shut on first sight, and the same four the results pages open with.
+
+It opens on the chart at the top of [the grid page](grid.md), and a button beside it redraws the one
+at the top of [the row width page](row-size.md) — those two are declared as presets because selecting
+the width sweep by hand is fifty-two checkboxes. **Which workloads may share a chart is decided by
+their axis units** ([F30](../features/plot-axis-units.md)): a workload measured at the smoke scale, a
+percentile stamped per batch rather than per query, or a row width that is a *mean* over a declared
+distribution rather than a measurement, is not offered. Nor is one that carries no value for the
+metric on screen at all ([F31](../features/metric-availability.md)) — half the corpus counts no
+queries, so *queries answered per second* is not a chart every arm has. The first
+workload ticked sets the units and `clear selection` is how they change. Everything that is admitted
+is still drawn as **one curve per set of held facts**, so four tables at one width are four lines
+and not one line through all four.
+
+The metric control is three lists rather than one: a kind, and — under `latency` alone — an
+operation and a rank. Each holds only what **every** ticked workload can answer, so the list shrinks
+as the selection narrows and never offers a choice that would draw nothing. With nothing ticked it
+is the whole corpus. The picker shrinks the same way, families included; each header says how many
+of its members it is not showing, and a line under the tree gives the total. The capture list
+underneath does **not** shrink: a capture carrying no value for the metric is **greyed**, with the
+reason on hover, and stays tickable ([F33](../features/chart-readout.md)) — a capture is an identity
+you know by name out of twenty-seven, where a workload is one row of three hundred and seventy-four.
+
+**Hovering the chart reads out the column**, not the point: every drawn line's value at that position
+on the key axis, largest first, with `absent` for the ones that measured nothing there and never a
+zero. The numbers are the measurements, so the log toggles do not reach them.
+
 Which page a workload lands on is decided by its **family**, in
 `shoal-bench/src/render/family.rs`. A workload belonging to no family fails a test rather than
 landing on no page, which is [F18](../features/results-pages.md)'s whole mechanism: before it, a

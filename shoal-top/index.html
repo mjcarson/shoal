@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>shoal-top</title>
+    <style>
+      /* the canvas is the whole page; egui paints its own background and theme into it. the ground
+         here is One Dark's, the same one the app installs, so there is no flash before it paints */
+      html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; }
+      body { background: #282c34; }
+      canvas { display: block; width: 100%; height: 100%; }
+      /* shown until the wasm has loaded, and replaced by whatever went wrong if it does not */
+      #status {
+        position: absolute; inset: 0; display: flex; align-items: center;
+        justify-content: center; color: #abb2bf; font: 14px system-ui, sans-serif;
+        white-space: pre-wrap; text-align: center; padding: 2rem;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="shoal_top_canvas"></canvas>
+    <div id="status">loading the explorer…</div>
+    <script type="module">
+      // the glue wasm-bindgen generated, served from the same directory by `explore --serve`
+      import init, { start } from "./shoal_top.js";
+      const status = document.getElementById("status");
+      try {
+        await init();
+        await start("shoal_top_canvas");
+        status.remove();
+      } catch (why) {
+        // a failure here is otherwise a blank page and one line in the console
+        status.textContent = "the explorer failed to start:\n\n" + why;
+      }
+    </script>
+  </body>
+</html>

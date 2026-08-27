@@ -92,6 +92,7 @@ and `cargo test --workspace` passes with 71 integration tests and 94 unit tests.
 | `shoal` | The user-facing façade over the four. **Everything outside those four names this and nothing else.** `default-features = false` drops the engine and leaves a client. |
 | `shoalctl` | A terminal UI, generic over a compiled-in schema. A client: no glommio, no io_uring. |
 | `shoal-client-check` | Not a library. A schema that compiles against the client alone, which fails to build if a server path creeps back into it. |
+| `shoal-top` | The benchmark explorer's index types and its `egui` interface ([F29](features/benchmark-explorer.md), [F30](features/plot-axis-units.md), [F33](features/chart-readout.md)). `shoal-bench` enters it with `default-features = false` and gets the `serde` structs alone, so the benchmark runner never grows a graphics dependency. Named for what it is meant to become: a live view of a running server. |
 
 That shape is [F15](features/client-server-split.md), and the reason for it is worth one line:
 before it, opening a connection meant compiling a storage engine. `shoal-core` was one crate

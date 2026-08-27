@@ -90,6 +90,11 @@
   - [F26. Requests are routed from the archive](features/archive-routed-requests.md)
   - [F27. A get's answer carries its partitions, and its rows where they lie](features/grouped-responses.md)
   - [F28. A get answered off disk is written out of the archive it read](features/rearchived-rows.md)
+  - [F29. An explorer that draws more than one capture](features/benchmark-explorer.md)
+  - [F30. Only comparable axes share a chart](features/plot-axis-units.md)
+  - [F31. A metric a workload can actually answer](features/metric-availability.md)
+  - [F32. A colour per table, and a chart that frames itself](features/chart-line-identity.md)
+  - [F33. The chart answers where you point, and the capture list says whether it can](features/chart-readout.md)
 
 # Direction
 
@@ -142,6 +147,11 @@
   - [78. Sources manifest drift](appendix/resolved/sources-manifest-drift.md)
   - [79. A capture of one layer decided what every page drew](appendix/resolved/micro-only-capture-current.md)
   - [80. A sorted partition that was never on disk asked storage about it on every get](appendix/resolved/never-flushed-partitions.md)
+  - [82. Every selected workload was folded into one line per capture](appendix/resolved/one-line-per-capture.md)
+  - [83. The explorer opened on a metric that half its corpus could not answer](appendix/resolved/default-metric-half-the-corpus-cannot-answer.md)
+  - [84. Two workloads the recorded facts cannot tell apart drew as one line](appendix/resolved/identical-facts-one-line.md)
+  - [85. The chart stayed framed for the last thing it drew](appendix/resolved/chart-framed-for-the-last-selection.md)
+  - [86. The hover label read a logarithmic chart in decades](appendix/resolved/hover-label-reads-in-decades.md)
 - [TODOs and Unbuilt Work](appendix/todos.md)
 - [Review, August 2026](appendix/review-2026-08.md)
 - [Glossary](appendix/glossary.md)

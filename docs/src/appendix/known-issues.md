@@ -31,12 +31,17 @@ test suite does and does not reach is in [Test Coverage](test-coverage.md).
 Defects that have been fixed move to [Resolved Issues](resolved-issues.md), one page each,
 carrying the reasoning and the invariants the fix depends on. Item numbers are shared between
 the two pages and never reused, so a number appears on exactly one of them — which is why this
-list starts at 15 and skips 25, 26, 31, 34, 39, 44, 45, 48, 51, 56, 57, 61, 67, 68, 74, 76, 78, 79
-and 80, and
-why item 81 is both the newest number and the newest entry here, and why 78, 79 and 80 are on the
-resolved page. **79 never appeared here at all**: it was found and fixed in the same change
-([Resolved #79](resolved/micro-only-capture-current.md)), which is allowed and is worth noting
-because it makes the numbering look like an entry went missing. Item 80 is the other way round —
+list starts at 15 and skips 25, 26, 31, 34, 39, 44, 45, 48, 51, 56, 57, 61, 67, 68, 74, 76, 78, 79,
+80, 82, 83, 84, 85 and 86, and
+why item 81 is the newest entry here while 86 is the newest number, and why 78, 79, 80, 82, 83, 84,
+85 and 86 are on the resolved page. **79, 82, 83, 84, 85 and 86 never appeared here at all**: each was
+found and fixed in the same change ([Resolved #79](resolved/micro-only-capture-current.md),
+[Resolved #82](resolved/one-line-per-capture.md),
+[Resolved #83](resolved/default-metric-half-the-corpus-cannot-answer.md),
+[Resolved #84](resolved/identical-facts-one-line.md),
+[Resolved #85](resolved/chart-framed-for-the-last-selection.md),
+[Resolved #86](resolved/hover-label-reads-in-decades.md)), which is allowed and is
+worth noting because it makes the numbering look like six entries went missing. Item 80 is the other way round —
 it was filed here rather than fixed, because the fix turned on a question about the storage layer
 that reading `block_on_load` alone could not answer, and stayed here until somebody answered it
 ([Resolved #80](resolved/never-flushed-partitions.md)). The exceptions are items 16, 17, 20, 24, 54 and 73, which were only
@@ -46,10 +51,11 @@ in the other direction — it had one row left open, that row was fixed, and the
 [moved](resolved/claude-md-drift.md).
 
 **Baseline as of writing:** `cargo check --workspace --all-targets` passes with warnings;
-`cargo test --workspace` passes — **1,084 tests**, two ignored, plus 13 more behind
+`cargo test --workspace` passes — **1,155 tests**, two ignored, plus 13 more behind
 `--features stage-profile` that a default run does not reach ([Test Coverage](test-coverage.md)).
-~~1,045~~ — this figure had gone stale by two features while the sentences below it kept naming
-what each added, which is what a running total is supposed to prevent. It is re-derived from a run
+~~1,045~~ ~~1,084~~ — this figure had gone stale by two features while the sentences below it kept
+naming what each added, which is what a running total is supposed to prevent, and it then went stale
+by four more in exactly the same way. It is re-derived from a run
 rather than incremented, and [Test Coverage](test-coverage.md) is the page that carries the
 per-binary breakdown.
 [Resolved #76](resolved/stage-join.md) added 6, and moved the count in both directions at once: 2

@@ -48,6 +48,129 @@ all eight had drifted.
 
 Implied by the code's shape but not present.
 
+### Retiring `render` in favour of the explorer
+
+[F29](../features/benchmark-explorer.md) is meant to become how the numbers are read, and the eleven
+generated pages are meant to go. It does not replace them yet, and the gap is worth stating rather
+than discovering.
+
+What the committed pages are that a WebAssembly application is not:
+
+- **Diffable.** A capture's effect currently shows up as a reviewable diff under
+  `docs/src/performance/`. An app shows nothing in a pull request.
+- **Checkable.** `render --check` is the mechanism that says the committed pages describe this tree.
+  Something rendered at view time is always current and therefore never verified.
+- **Deterministic, as a tested property.** The four rules in `render/page.rs` exist because the
+  output is compared byte for byte. `tests/chart_geometry.rs` and `tests/css_sync.rs` are both
+  SVG-shaped and neither transfers.
+- **Readable with no toolchain.** The pages are legible in an editor, on a forge, in `grep` and to a
+  screen reader, and the book builds from a clean checkout with no `wasm32` target and no
+  `wasm-bindgen`. Every chart also carries an `aria` description, which a canvas does not.
+- **Archival.** A page states the commit it was rendered against. An app renders whatever the corpus
+  holds now.
+
+So `render` does not get deleted; it gets **reimplemented on top of `explore::project`**, which is
+why that function takes a `&Page` and touches no filesystem. Before that is worth doing the explorer
+needs the two index sections below, the `configuration.md` *Real?* gate — a tuning table without it
+is a table of noise with nine confident recommendations in it — and a static export path so that
+something `--check`-able still exists.
+
+### The index's two missing sections
+
+[F29](../features/benchmark-explorer.md) draws the macro layer only, so
+[`micro.md`](../performance/micro.md) and [`attribution.md`](../performance/attribution.md) have no
+counterpart in it. Both are additive and the index is shaped for them: a new
+`#[serde(default)]` section, `INDEX_VERSION` to 2, and two more arms in the projection — `gather`
+already reads the hotpath and stages artifacts that a version 1 index discards, which is what makes
+this cheap.
+
+- **Attribution** needs `HotpathProfile::output` (scope, calls, percentiles, total — never
+  `percent_total`, [item 53](known-issues.md)) and `StageReports`' buckets. Both are **attribution
+  only**: the explorer must refuse to put a scope total on the same axis as a macro measurement, the
+  same way `attribution.md` is a page of its own rather than a section beside numbers that measure.
+  [F30](../features/plot-axis-units.md) is the mechanism for that refusal and the place to add it —
+  a scope total gets a `Unit` and a `KeyUnit` of its own and the picker ~~disables~~ **hides** the
+  rest, rather than a second rule being invented for a second layer. There is a second half of that
+  mechanism now: [F31](../features/metric-availability.md) made `Index::units` read the measurement
+  before calling it comparable, so a scope total also needs a `Metric` arm whose `value` returns
+  `None` for a macro point and vice versa. Get that pair right and the picker, the metric list and
+  `Source::series` all refuse the mixture without another rule being written.
+- **Micro** needs criterion's four estimates plus `Page::repeats`, which is what the noise band is
+  drawn from.
+
+### The configuration sweep has no useful sweep view
+
+[F20](../features/configuration-sweeps.md)'s fifty-eight arms are one grid cell —
+`macro/grid/unsorted/r50/1024` — with exactly one field of the server configuration moved. So on
+every one of the explorer's five sweep axes they all sit at the *same* position, and
+[F30](../features/plot-axis-units.md)'s curve key separates them into fifty-eight curves of one
+point each rather than one vertical stack of fifty-eight. That is honest and it is not useful.
+
+[F32](../features/chart-line-identity.md) made it slightly less useful again, deliberately: hue now
+carries the **table**, and all fifty-eight of these run against `persistent_unsorted`, so they are
+fifty-eight curves in one colour separated only by a marker that wraps every six. The old rule gave
+them eight rotating hues before it wrapped, which was more distinguishable and meant nothing. Neither
+is a chart worth reading, and the sixth axis below is still the fix.
+
+The timeline is the right view for them and already works. What would make the sweep view work is a
+sixth axis reading the **conf knob** the sweep moves — `arms::conf_knob` and `conf_value` already
+exist on the `shoal-bench` side and neither is projected into the index. It was not built because
+the axis is not numeric: a durability barrier and a buffer size are a nominal and an ordinal scale,
+and `SweepAxis::format` assumes a quantity. That is the real work, and it is not large; it was left
+out of F30 because F30's job was to stop wrong charts being drawn, not to add a right one.
+
+### A readout row names the line, not the workload
+
+[F33](../features/chart-readout.md)'s readout lists every drawn line's value in the column the
+pointer is over, and names each row the way the legend names it: `f28-rearchive ·
+persistent_unsorted`. That is the **curve**, and a curve is several workloads wherever the sweep axis
+is what separates them — which is the normal case, since a sweep is one line walking a recorded fact
+across its arms. So a reader looking at a point cannot ask which arm produced it.
+
+It was left out rather than guessed at, because `Series` carries no per-point provenance: a point is
+`(f64, Option<f64>)` and the series knows its name, its capture, its hue and its mark. The two ways
+to fix it are a third element on the point — the workload index, which widens every point in the
+chart's hot path — or a lookup back through `Index` from `(capture, key)`, which re-derives what
+`Source::series` already knew and would have to agree with `split_curves` about which arm sits where.
+The second is the right one and is not small; the first is small and puts drawing state on a
+structure that a live server will also have to fill.
+
+Where the curve was already split per workload by [F32](../features/chart-line-identity.md)'s
+`split_curves`, the name **is** the identifier and the question does not arise. That is what makes
+this a gap rather than a defect: the case where it matters most is already covered.
+
+### The four mandatory blocks are written in markdown and drawn as literal text
+
+`Family`'s four blocks ([F18](../features/results-pages.md)) were written for mdbook and are full of
+`**bold**` and `*italic*` runs. They are projected into the explorer's index verbatim — which is the
+point, and `the_four_blocks_are_carried_whole` asserts it byte for byte — and then handed to
+`ui.label` on a plain `&str`, which renders the asterisks. So the panel along the bottom of the
+explorer shows `The **latency** is a service time` with the markers in it.
+
+Found while moving that panel and folding it. Not fixed there because the honest fixes are both
+larger than they look: rendering markdown means `egui_commonmark` and a dependency in a crate whose
+manifest is explicit about not growing one, and stripping the markers means either mutating text
+that a test asserts is carried unchanged, or teaching `render/family.rs` to hold structured spans
+that both surfaces render — which is the right answer and is a day's work for a cosmetic problem.
+
+### `theme::faded` and `INTERVAL_ALPHA` are dead
+
+Both were written for an interval band between a workload's fastest and slowest run, and the plot
+draws no such band. Nothing outside `theme.rs` names either. They are kept rather than deleted
+because the band is a real thing to want — the corpus records the spread and `Metric::Spread` puts
+it on the value axis, but nothing draws it *around* a line — and the reasoning in `faded`'s comment,
+that a band is its line's hue rather than a neutral grey so two overlapping bands still say which
+line each belongs to, is the part worth keeping. If the band is not built, delete them.
+
+### A live view of a running server
+
+`shoal-top` is named for what it is meant to become rather than for what it does. Every chart is
+written against `index::Source` rather than against `Index` for this reason: a live trace feed is
+another implementor of one trait, not a rewrite of the drawing code. Nothing has been built for it,
+and the shape of the feed — whether the server pushes, whether it is the stage instrumentation
+already in the tree, and what a window over an unbounded stream means for an axis that currently
+holds a fixed set of captures — is undecided.
+
 **Where the client half of this now lives.** Six of the entries below are about the client or the
 wire it speaks, and they have grown a design rather than staying sketches. That design is the
 [Direction](../direction/overview.md) chapter, which says how each would be built, what it would

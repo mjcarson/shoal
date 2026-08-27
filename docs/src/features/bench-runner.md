@@ -28,7 +28,7 @@ be skipped."
 
 ## What it does
 
-`shoal-bench` is a workspace crate with six commands.
+`shoal-bench` is a workspace crate with seven commands.
 
 | Command | What it does |
 | --- | --- |
@@ -38,6 +38,7 @@ be skipped."
 | `status` | says what has been captured and whether each layer still describes the current code |
 | `render` | regenerates every page under [Performance](../performance/overview.md); `--check` verifies them |
 | `promote <label>` | advances a baseline to a capture |
+| `explore` | opens the interactive explorer ([F29](benchmark-explorer.md)), which draws any number of captures on one chart rather than the one a page draws, and only workloads whose axes are in the same units ([F30](plot-axis-units.md)); hovering it reads out every line's value in the column under the pointer ([F33](chart-readout.md)); `--serve` builds it to WebAssembly and serves it over loopback |
 
 **Filtering works the way `cargo test` does.** A positional argument is a substring of a
 benchmark's identifier, any of them matching selects it, `--exact` switches to equality, and

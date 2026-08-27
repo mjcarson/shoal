@@ -62,7 +62,19 @@ stage-profile = ["workloads", "shoal/stage-profile"]
 # downloads nothing. Keep it that way: `cargo tree -p shoal-bench --no-default-features` should
 # never introduce a package that some other member did not already pull in, and should never
 # mention glommio.
+#
+# `shoal-top` is the one entry that needed this paragraph amended rather than obeyed. The explorer
+# it holds is an egui application, and the workspace lockfile grew by about two hundred and fifty
+# packages to resolve it - almost all of them eframe's *native* backend, since the browser half was
+# already there behind plotters. What is preserved is the test the paragraph actually names: it is
+# entered below with `default-features = false`, which takes the index types and leaves the graphics
+# behind, so `cargo tree -p shoal-bench --no-default-features` still mentions no egui and no
+# glommio, and the half of this crate that judges a change is still the cheapest build in the tree.
 [dependencies]
+# The explorer's index types. `default-features = false` is mandatory and is the whole reason the
+# types live in that crate rather than this one: with them, this dependency is `serde` structs, and
+# without them it would drag egui, winit and wgpu into the runner.
+shoal-top = { version = "0.1.0", path = "../shoal-top", default-features = false }
 # the established CLI style in this workspace, see shoal/examples/tmdb.rs
 clap = { version = "4.2", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }

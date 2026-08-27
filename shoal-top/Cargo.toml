@@ -1,0 +1,68 @@
+[package]
+name = "shoal-top"
+version = "0.1.0"
+edition = "2024"
+description = "Plots Shoal's benchmark corpus interactively, and is meant to grow into a live view of a running server"
+
+# `cdylib` is what the browser needs and `rlib` is what `shoal-bench` links, so the crate is both.
+# Cargo builds both artifacts on a native build, which costs one throwaway shared object and is
+# what lets `shoal-bench explore` and `shoal-bench explore --serve` be the same program.
+[lib]
+name = "shoal_top"
+path = "src/lib.rs"
+crate-type = ["rlib", "cdylib"]
+
+# The standalone window. `shoal-bench explore` is the entry point this was built for, and this
+# binary is the one the live view will grow into once it has a server to talk to rather than a
+# corpus to read.
+[[bin]]
+name = "shoal-top"
+path = "src/main.rs"
+required-features = ["native"]
+
+# `index` - the whole of `src/index.rs` and `src/fmt.rs` - is always compiled and depends on
+# nothing but serde. That is deliberate and load bearing in two directions.
+#
+# `shoal-bench` enters this crate with `default-features = false`, so it gets the index types and
+# no graphics at all. Without that, `cargo tree -p shoal-bench --no-default-features` would grow
+# an egui tree, and the half of that crate which judges a change has to stay the cheapest build in
+# the workspace.
+#
+# The browser build enters it with `web`, and every module behind `ui` has to compile for
+# `wasm32-unknown-unknown`. Nothing in `index.rs` reads a clock, a file or a process for that
+# reason: `SystemTime::now` panics on that target.
+[features]
+default = ["ui"]
+ui = ["dep:egui", "dep:egui_plot"]
+native = ["ui", "dep:eframe", "dep:serde_json"]
+web = ["ui", "dep:eframe", "dep:serde_json"]
+
+[dependencies]
+# the index is serde structs and nothing else, which is what keeps this crate linkable from both
+# a headless benchmark runner and a browser
+serde = { version = "1", features = ["derive"] }
+
+# The chart. `egui_plot` 0.37 is built against `egui` 0.36, and `eframe` 0.36 carries that same
+# `egui` - the three move together and pinning one without the others stops them unifying.
+# reading an index off disk, and parsing the one the server hands the browser. optional because
+# `shoal-bench` builds its own index in process and never parses one
+serde_json = { version = "1", optional = true }
+
+egui = { version = "0.36", optional = true }
+egui_plot = { version = "0.37", optional = true }
+eframe = { version = "0.36", optional = true }
+
+# The browser half. None of these are optional, because the target table already gates them: they
+# are pulled for a wasm build and for nothing else.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+console_error_panic_hook = "0.1"
+web-sys = { version = "0.3", features = [
+    "Window",
+    "Request",
+    "RequestInit",
+    "Response",
+    "Document",
+    "HtmlCanvasElement",
+] }

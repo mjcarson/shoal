@@ -25,6 +25,15 @@ cargo test <test_name>
 # fails to resolve `glommio` if a server path creeps back into the client half of #[shoal::db]
 cargo check -p shoal-client-check --no-default-features
 
+# the explorer's native window is behind a non-default feature, so `--workspace --all-targets`
+# does not compile it. this is the same idiom as the line above, for the same reason
+cargo check -p shoal-top --features native
+
+# and the browser half, which is the target that actually gets used. RUSTFLAGS is set explicitly
+# because the shell exports `-C target-cpu=native`, which reaches wasm32 and beats every config file
+cd shoal-top && RUSTFLAGS="-C target-cpu=generic" \
+    cargo check --target wasm32-unknown-unknown --lib --features web
+
 # and the same property on a program somebody runs
 cargo build -p shoalctl
 
@@ -71,7 +80,20 @@ cargo run -p shoal-bench --release -- status
 # regenerate the results pages, or check that the committed ones are current
 cargo run -p shoal-bench --release -- render
 cargo run -p shoal-bench --release -- render --check
+
+# the interactive explorer (F29). unlike `render`, this draws any number of captures on one chart,
+# against either a swept fact or the capture timeline. a native window needs a display, so on a
+# machine reached over ssh the second form is the one that works
+cargo run -p shoal-bench --release -- explore
+cargo run -p shoal-bench --release -- explore --serve      # http://127.0.0.1:8321
+cargo run -p shoal-bench --release -- explore --index-only  # target/explore/index.json
 ```
+
+`--serve` needs `wasm-bindgen` at **exactly** the version the lockfile resolved; it refuses to build
+with the `cargo install` line to run rather than producing a bundle that fails in the browser. The
+index is written to `target/explore/` and must never be committed - `gather` computes `Page::dirty`
+from every uncommitted path outside `docs/src/performance/`, so a committed index would break
+`render --check` permanently.
 
 `docs/perf/baselines/B1-performance.json` is frozen and never overwritten — `promote` refuses it
 with no override. `shoal.yml` is the benchmark config and is committed — changing it invalidates
@@ -263,7 +285,7 @@ Shoal is a high-performance, distributed database with persistence, built on thr
 
 ### Crate Structure
 
-Five implementation crates plus a facade. The split is
+Six implementation crates plus a facade. The split is
 [F15](docs/src/features/client-server-split.md) and the rule it enforces is simple: **nothing
 outside `shoal-proto`, `shoal-client`, `shoal-core` and `shoal-derive` names any of them — callers
 go through `shoal`.**
@@ -286,6 +308,12 @@ go through `shoal`.**
 - **shoal** - The facade. `default-features = false` drops `shoal-core` and leaves a client
 - **shoal-client-check** - A schema that compiles against the client alone. Not a library: it
   exists to fail if a server path creeps back into the client half of `#[shoal::db]`
+- **shoal-top** - The benchmark explorer ([F29](docs/src/features/benchmark-explorer.md)):
+  `index.rs` holds the portable index types and depends on `serde` alone, and everything behind the
+  `ui` feature draws them with `egui`/`egui_plot`. **`shoal-bench` enters it with
+  `default-features = false`**, which is what keeps egui out of `cargo tree -p shoal-bench
+  --no-default-features`. It must never depend on `shoal-bench`: that crate pulls `walkdir`, which
+  does not build for `wasm32-unknown-unknown`, and the explorer's primary target is a browser
 
 ### Key Abstractions
 

@@ -155,11 +155,20 @@ fn check_one(target: &std::path::Path, rendered: &str) -> std::result::Result<()
 
 /// Reads every artifact the page is built from
 ///
+/// `pub(crate)` rather than private because [`crate::explore::index`] projects the explorer's index
+/// out of the same [`Page`]. One reader of the corpus, so the committed pages and the explorer can
+/// never disagree about what was captured - which is the property that matters if the explorer is
+/// ever to replace the pages.
+///
+/// It reads the hotpath and stages layers that a v1 index then discards, which costs about a second
+/// over thirteen megabytes. That is paid deliberately: it is what makes an attribution section a
+/// new arm here rather than a new pass over the corpus.
+///
 /// # Arguments
 ///
 /// * `store` - The artifact tree to work in
 /// * `args` - What the caller asked for
-fn gather(store: &Store, args: &RenderArgs) -> Result<Page> {
+pub(crate) fn gather(store: &Store, args: &RenderArgs) -> Result<Page> {
     let facts = RealFacts::new(store.root());
     // what the tree is now, which is what every verdict on the page is relative to
     let now = fingerprint::current(store, &facts, false)?;

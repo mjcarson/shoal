@@ -9,6 +9,7 @@ members = [
     "shoal-core",
     "shoal-derive",
     "shoal-proto",
+    "shoal-top",
     "shoalctl",
 ]
 

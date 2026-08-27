@@ -32,6 +32,7 @@ pub mod cli;
 pub mod clock;
 pub mod collect;
 pub mod compare;
+pub mod explore;
 pub mod fingerprint;
 pub mod fmt;
 pub mod groups;

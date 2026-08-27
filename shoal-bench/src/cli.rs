@@ -38,6 +38,8 @@ pub enum Command {
     Render(RenderArgs),
     /// Advance a baseline to a captured run
     Promote(PromoteArgs),
+    /// Open the benchmark explorer over every capture in the tree
+    Explore(ExploreArgs),
 }
 
 /// How many times a capture runs each workload before taking its median
@@ -259,6 +261,68 @@ pub struct RenderArgs {
     #[clap(long)]
     pub current: Option<String>,
 }
+
+impl RenderArgs {
+    /// The arguments [`crate::render::gather`] needs when nothing is being rendered
+    ///
+    /// `gather` reads three of these five fields - `current`, `baseline` and `trailing` - and the
+    /// explorer has an opinion about none of them. Built here rather than in `explore` because
+    /// clap's `default_value` exists only on a parsed value, and a hand written `RenderArgs` naming
+    /// a different frozen baseline would quietly give the explorer a different corpus from the one
+    /// the book shows.
+    pub fn for_index() -> Self {
+        RenderArgs {
+            // nothing is written, so there is nowhere to write it to
+            out: None,
+            check: false,
+            baseline: crate::store::FROZEN_BASELINE.to_string(),
+            trailing: crate::store::TRAILING_BASELINE.to_string(),
+            // the explorer draws every capture rather than one of them, so it names none
+            current: None,
+        }
+    }
+}
+
+/// Arguments to `shoal-bench explore`
+#[derive(clap::Args, Debug)]
+pub struct ExploreArgs {
+    /// Build the explorer to WebAssembly and serve it over loopback instead of opening a window
+    ///
+    /// This is the path that works on a machine reached over SSH. A native window needs a display,
+    /// and a benchmark machine generally has none.
+    #[clap(long)]
+    pub serve: bool,
+    /// The address to serve on
+    ///
+    /// Loopback by default and deliberately: the explorer carries no authentication, and a port
+    /// forward reaches loopback perfectly well.
+    #[clap(long, default_value = "127.0.0.1")]
+    pub addr: String,
+    /// The port to serve on
+    #[clap(long, default_value_t = DEFAULT_PORT)]
+    pub port: u16,
+    /// Rebuild the WebAssembly bundle even when one is already present and current
+    #[clap(long)]
+    pub build: bool,
+    /// Write the projected index and exit, without opening or serving anything
+    ///
+    /// The index is what the explorer draws. Writing it on its own is how to see what a capture
+    /// contributes without starting a browser, and is what the tests read.
+    #[clap(long)]
+    pub index_only: bool,
+    /// Where to write the index and the bundle, defaulting to `target/explore`
+    ///
+    /// Never inside `docs/`. A committed index would flip every rendered page's dirty flag on each
+    /// rebuild and break `render --check` permanently.
+    #[clap(long)]
+    pub out: Option<PathBuf>,
+}
+
+/// The port the explorer serves on unless told otherwise
+///
+/// Named rather than written twice, because the message telling somebody how to forward the port
+/// has to name the same one the server bound.
+pub const DEFAULT_PORT: u16 = 8321;
 
 /// Arguments to `shoal-bench promote`
 #[derive(clap::Args, Debug)]

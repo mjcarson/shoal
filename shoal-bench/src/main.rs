@@ -51,6 +51,7 @@ fn dispatch(cli: Cli) -> Result<i32> {
         Command::Status(args) => shoal_bench::stale::run_status(&store, &args),
         Command::Render(args) => shoal_bench::render::run_render(&store, &args),
         Command::Promote(args) => shoal_bench::promote::run_promote(&store, &args),
+        Command::Explore(args) => shoal_bench::explore::run_explore(&store, &args),
     }
 }
 
