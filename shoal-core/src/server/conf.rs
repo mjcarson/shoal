@@ -513,11 +513,239 @@ impl TraceLevel {
     }
 }
 
+/// The path an OTLP over HTTP collector accepts spans on
+///
+/// Named so that [`Tracing::metrics_sink`] can recognize a trace endpoint and rewrite it, rather
+/// than asking a config to repeat the same host and port twice.
+const TRACES_PATH: &str = "/v1/traces";
+
+/// The path an OTLP over HTTP collector accepts metrics on
+const METRICS_PATH: &str = "/v1/metrics";
+
+/// The settings for an OTLP trace sink
+///
+/// Spans are exported as protobuf over HTTP, which is what port 4318 on a collector speaks.
+/// There is no gRPC exporter, and never has been, despite what [`RemoteTracing::Grpc`] is called.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(deny_unknown_fields)]
+pub struct OtlpTracing {
+    /// The full URL to POST spans to, including the `/v1/traces` path
+    pub endpoint: String,
+    /// Any extra headers to send with every export
+    ///
+    /// A multi tenant collector reads the tenant out of a header rather than out of the payload,
+    /// so this is where `X-Scope-OrgID` belongs. A tenant compiled into the binary is how spans
+    /// end up somewhere nobody queries.
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
+    /// How long a single export may take before it is abandoned, in seconds
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+    /// How often the batch processor ships whatever it has, in milliseconds
+    ///
+    /// The SDK default is five seconds, which is longer than a short run lives. Anything not
+    /// shipped by then leaves only on shutdown.
+    #[serde(default)]
+    pub batch_delay_ms: Option<u64>,
+    /// How many spans may be queued before new ones are dropped
+    #[serde(default)]
+    pub max_queue_size: Option<usize>,
+    /// What fraction of traces to export, between 0.0 and 1.0
+    ///
+    /// `None` exports every trace, which is what a short run wants. A workload driving millions of
+    /// queries wants a small fraction of them instead, because the queue above is finite and a
+    /// sink that cannot keep up drops spans rather than choosing which ones to keep.
+    ///
+    /// **This is the collector's knob, not the cost knob.** A sampler decides after `tracing` has
+    /// already built the span, so it bounds what is exported and not what is spent building it.
+    /// [`Tracing::level`] is what bounds the latter.
+    #[serde(default)]
+    pub sample_ratio: Option<f64>,
+}
+
+impl OtlpTracing {
+    /// Creates a new OTLP trace sink pointed at an endpoint
+    ///
+    /// # Arguments
+    ///
+    /// * `endpoint` - The full URL to POST spans to, including the `/v1/traces` path
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use shoal_core::server::conf::OtlpTracing;
+    ///
+    /// OtlpTracing::new("http://127.0.0.1:4318/v1/traces")
+    ///     .header("X-Scope-OrgID", "Shoal");
+    /// ```
+    pub fn new<E: Into<String>>(endpoint: E) -> Self {
+        OtlpTracing {
+            endpoint: endpoint.into(),
+            headers: HashMap::default(),
+            timeout_secs: None,
+            batch_delay_ms: None,
+            max_queue_size: None,
+            sample_ratio: None,
+        }
+    }
+
+    /// Add a header to send with every export
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The header name to set
+    /// * `value` - The value to set it to
+    pub fn header<K: Into<String>, V: Into<String>>(mut self, key: K, value: V) -> Self {
+        // add this header to the ones we already have
+        self.headers.insert(key.into(), value.into());
+        self
+    }
+
+    /// Set how long a single export may take before it is abandoned
+    ///
+    /// # Arguments
+    ///
+    /// * `secs` - The timeout in seconds
+    pub fn timeout_secs(mut self, secs: u64) -> Self {
+        self.timeout_secs = Some(secs);
+        self
+    }
+
+    /// Set how often the batch processor ships whatever it has
+    ///
+    /// # Arguments
+    ///
+    /// * `millis` - The delay between exports in milliseconds
+    pub fn batch_delay_ms(mut self, millis: u64) -> Self {
+        self.batch_delay_ms = Some(millis);
+        self
+    }
+
+    /// Set how many spans may be queued before new ones are dropped
+    ///
+    /// # Arguments
+    ///
+    /// * `size` - The maximum number of queued spans
+    pub fn max_queue_size(mut self, size: usize) -> Self {
+        self.max_queue_size = Some(size);
+        self
+    }
+
+    /// Set what fraction of traces to export
+    ///
+    /// # Arguments
+    ///
+    /// * `ratio` - The fraction to export, between 0.0 and 1.0
+    pub fn sample_ratio(mut self, ratio: f64) -> Self {
+        self.sample_ratio = Some(ratio);
+        self
+    }
+}
+
+/// The settings for an OTLP metrics sink
+///
+/// Metrics are exported as protobuf over HTTP, to the same collector port spans go to and a
+/// different path. Nothing in `shoal-core` builds this pipeline — the type lives here because the
+/// configuration does, and the process that has metrics worth shipping owns the exporter.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(deny_unknown_fields)]
+pub struct OtlpMetrics {
+    /// The full URL to POST metrics to, including the `/v1/metrics` path
+    pub endpoint: String,
+    /// Any extra headers to send with every export
+    ///
+    /// The same tenancy rule [`OtlpTracing::headers`] describes applies here.
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
+    /// How often to ship whatever has been recorded, in seconds
+    #[serde(default)]
+    pub interval_secs: Option<u64>,
+    /// How long a single export may take before it is abandoned, in seconds
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+}
+
+impl OtlpMetrics {
+    /// Creates a new OTLP metrics sink pointed at an endpoint
+    ///
+    /// # Arguments
+    ///
+    /// * `endpoint` - The full URL to POST metrics to, including the `/v1/metrics` path
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use shoal_core::server::conf::OtlpMetrics;
+    ///
+    /// OtlpMetrics::new("http://127.0.0.1:4318/v1/metrics").interval_secs(10);
+    /// ```
+    pub fn new<E: Into<String>>(endpoint: E) -> Self {
+        OtlpMetrics {
+            endpoint: endpoint.into(),
+            headers: HashMap::default(),
+            interval_secs: None,
+            timeout_secs: None,
+        }
+    }
+
+    /// Add a header to send with every export
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The header name to set
+    /// * `value` - The value to set it to
+    pub fn header<K: Into<String>, V: Into<String>>(mut self, key: K, value: V) -> Self {
+        // add this header to the ones we already have
+        self.headers.insert(key.into(), value.into());
+        self
+    }
+
+    /// Set how often to ship whatever has been recorded
+    ///
+    /// # Arguments
+    ///
+    /// * `secs` - The interval between exports in seconds
+    pub fn interval_secs(mut self, secs: u64) -> Self {
+        self.interval_secs = Some(secs);
+        self
+    }
+
+    /// Set how long a single export may take before it is abandoned
+    ///
+    /// # Arguments
+    ///
+    /// * `secs` - The timeout in seconds
+    pub fn timeout_secs(mut self, secs: u64) -> Self {
+        self.timeout_secs = Some(secs);
+        self
+    }
+}
+
 /// The settings for different remote tracing sinks (not stdout)
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum RemoteTracing {
-    /// The settings for a GRPC based tracing sink
+    /// The settings for an OTLP over HTTP tracing sink
+    Otlp(OtlpTracing),
+    /// The old name for an OTLP over HTTP sink, carrying just an endpoint
+    ///
+    /// This never spoke gRPC. It is kept so a config written against the old name still parses,
+    /// and it resolves to the same exporter [`RemoteTracing::Otlp`] does.
     Grpc(String),
+}
+
+impl RemoteTracing {
+    /// Get the OTLP settings this sink resolves to
+    ///
+    /// The deprecated `Grpc` spelling carries an endpoint and nothing else, so it widens into a
+    /// default [`OtlpTracing`] rather than being handled separately everywhere.
+    pub fn otlp(&self) -> OtlpTracing {
+        match self {
+            // already the right shape
+            RemoteTracing::Otlp(otlp) => otlp.clone(),
+            // widen the endpoint only spelling into the full settings
+            RemoteTracing::Grpc(endpoint) => OtlpTracing::new(endpoint),
+        }
+    }
 }
 
 /// The tracing settings for Shoal
@@ -526,8 +754,14 @@ pub struct Tracing {
     /// The level to log traces at
     #[serde(default)]
     pub level: TraceLevel,
-    /// The settings for sending traces to a grpc sink
+    /// The settings for sending traces to a remote sink
     pub remote: Option<RemoteTracing>,
+    /// The settings for sending metrics to a remote sink
+    ///
+    /// Left unset when [`Tracing::remote`] names a sink, [`Tracing::metrics_sink`] derives one
+    /// from it, because a collector almost always takes both on the same host and port.
+    #[serde(default)]
+    pub metrics: Option<OtlpMetrics>,
 }
 
 impl Tracing {
@@ -543,10 +777,74 @@ impl Tracing {
         self
     }
 
-    /// Set a GRPC remote tracing sink
-    pub fn grpc(mut self, endpoint: impl Into<String>) -> Self {
-        self.remote = Some(RemoteTracing::Grpc(endpoint.into()));
+    /// Set an OTLP over HTTP remote tracing sink
+    ///
+    /// # Arguments
+    ///
+    /// * `otlp` - The OTLP settings to export with
+    pub fn otlp(mut self, otlp: OtlpTracing) -> Self {
+        self.remote = Some(RemoteTracing::Otlp(otlp));
         self
+    }
+
+    /// Set an OTLP over HTTP remote tracing sink from an endpoint alone
+    ///
+    /// This is the old spelling and is kept for callers that already use it. It exports over
+    /// HTTP, not gRPC.
+    pub fn grpc(mut self, endpoint: impl Into<String>) -> Self {
+        self.remote = Some(RemoteTracing::Otlp(OtlpTracing::new(endpoint)));
+        self
+    }
+
+    /// Set an OTLP over HTTP metrics sink
+    ///
+    /// # Arguments
+    ///
+    /// * `metrics` - The OTLP metrics settings to export with
+    pub fn metrics(mut self, metrics: OtlpMetrics) -> Self {
+        self.metrics = Some(metrics);
+        self
+    }
+
+    /// Get the metrics sink these settings resolve to
+    ///
+    /// An explicit [`Tracing::metrics`] wins. Failing that, a trace sink implies one on the same
+    /// collector: the two paths differ only in their last segment, and a config naming one endpoint
+    /// twice is a config with two places to forget to change. Returns `None` when neither is set,
+    /// which is what leaves the pipeline uninstalled.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use shoal_core::server::conf::Tracing;
+    ///
+    /// let derived = Tracing::default().grpc("http://127.0.0.1:4318/v1/traces");
+    /// assert_eq!(
+    ///     derived.metrics_sink().unwrap().endpoint,
+    ///     "http://127.0.0.1:4318/v1/metrics",
+    /// );
+    /// // and nothing configured stays nothing configured
+    /// assert!(Tracing::default().metrics_sink().is_none());
+    /// ```
+    pub fn metrics_sink(&self) -> Option<OtlpMetrics> {
+        // an explicit sink is the one that was asked for
+        if let Some(metrics) = &self.metrics {
+            return Some(metrics.clone());
+        }
+        // otherwise derive one from the trace sink, keeping its headers so a tenant carries over
+        let otlp = self.remote.as_ref()?.otlp();
+        let endpoint = match otlp.endpoint.strip_suffix(TRACES_PATH) {
+            // the usual shape, so swap the path a collector serves spans on for the metrics one
+            Some(base) => format!("{base}{METRICS_PATH}"),
+            // an endpoint that does not end in the path we expect is not one to rewrite blindly
+            None => return None,
+        };
+        Some(OtlpMetrics {
+            endpoint,
+            headers: otlp.headers.clone(),
+            interval_secs: None,
+            timeout_secs: otlp.timeout_secs,
+        })
     }
 }
 
@@ -629,7 +927,8 @@ impl Conf {
 #[cfg(test)]
 mod tests {
     use super::{
-        AuthMechanism, Conf, PathBuf, Resources, DEFAULT_ITERATIONS, DEFAULT_MAX_FRAME_BYTES,
+        AuthMechanism, Conf, OtlpTracing, PathBuf, RemoteTracing, Resources, TraceLevel,
+        DEFAULT_ITERATIONS, DEFAULT_MAX_FRAME_BYTES,
     };
 
     /// Write a config file into a temp dir and load it
@@ -947,6 +1246,187 @@ mod tests {
         assert!(
             error.to_string().contains("SCRAM-SHA-1"),
             "the error did not name the offending mechanism: {error}"
+        );
+    }
+
+    #[test]
+    /// The old `Grpc` spelling still loads, and still means an OTLP over HTTP sink
+    ///
+    /// Every config written before the variant was renamed uses this spelling, including the one
+    /// checked into this repository. Dropping it would turn a working deployment's config into a
+    /// parse error on upgrade.
+    fn the_deprecated_grpc_spelling_still_loads() {
+        // load a config written the old way
+        let (_dir, conf) = load(
+            "resources:\n  memory: \"4Gi\"\ntracing:\n  level: Info\n  remote:\n    Grpc: \"http://127.0.0.1:4318/v1/traces\"\n",
+        );
+        let conf = conf.expect("a config using the old Grpc spelling failed to load");
+        // it has to still be a remote sink
+        let remote = conf.tracing.remote.expect("the remote sink was dropped");
+        assert!(matches!(remote, RemoteTracing::Grpc(_)));
+        // and it has to widen into the same OTLP settings the new spelling produces
+        let otlp = remote.otlp();
+        assert_eq!(otlp.endpoint, "http://127.0.0.1:4318/v1/traces");
+        assert!(otlp.headers.is_empty());
+    }
+
+    #[test]
+    /// The `Otlp` spelling carries the headers a multi tenant collector needs
+    ///
+    /// The tenant used to be compiled into `trace.rs` as `X-Scope-OrgID: Shoal`, which is how
+    /// spans reach a tenant nobody queries. It belongs in the config.
+    fn an_otlp_sink_carries_its_headers() {
+        // load a config naming a tenant
+        let (_dir, conf) = load(
+            "resources:\n  memory: \"4Gi\"\ntracing:\n  level: Info\n  remote:\n    Otlp:\n      endpoint: \"http://127.0.0.1:4318/v1/traces\"\n      headers:\n        X-Scope-OrgID: Shoal\n      batch_delay_ms: 500\n",
+        );
+        let conf = conf.expect("a config naming an OTLP sink failed to load");
+        // the tenant has to survive the round trip
+        let otlp = conf
+            .tracing
+            .remote
+            .expect("the remote sink was dropped")
+            .otlp();
+        assert_eq!(otlp.headers.get("X-Scope-OrgID").map(String::as_str), Some("Shoal"));
+        assert_eq!(otlp.batch_delay_ms, Some(500));
+    }
+
+    #[test]
+    /// A misspelled OTLP key is rejected rather than silently dropped
+    ///
+    /// The same reasoning as `misspelled_resource_key_is_rejected`: a typo in a tenant header or
+    /// a batch delay would otherwise export to the wrong place and say nothing about it.
+    fn a_misspelled_otlp_key_is_rejected() {
+        // `endpoints` is not a field
+        let (_dir, conf) = load(
+            "resources:\n  memory: \"4Gi\"\ntracing:\n  remote:\n    Otlp:\n      endpoint: \"http://127.0.0.1:4318/v1/traces\"\n      endpoints: 3\n",
+        );
+        let error = conf.expect_err("a misspelled OTLP key was accepted");
+        assert!(
+            error.to_string().contains("endpoints"),
+            "the error did not name the offending key: {error}"
+        );
+    }
+
+    #[test]
+    /// `Tracing::grpc` builds an OTLP sink, because it never spoke gRPC
+    ///
+    /// The builder kept its old name so callers do not break, but it must not keep the old
+    /// variant, or the config a program builds in memory would disagree with the one it writes.
+    fn the_grpc_builder_builds_an_otlp_sink() {
+        // build a config the way a program embedding shoal does
+        let tracing = super::Tracing::default()
+            .level(TraceLevel::Debug)
+            .grpc("http://127.0.0.1:4318/v1/traces");
+        // it has to be the OTLP variant
+        let remote = tracing.remote.expect("the builder set no remote sink");
+        assert!(matches!(remote, RemoteTracing::Otlp(_)));
+        assert_eq!(remote.otlp().endpoint, "http://127.0.0.1:4318/v1/traces");
+    }
+
+    #[test]
+    /// An OTLP sink built in memory carries what it was given
+    fn an_otlp_sink_builds_from_its_setters() {
+        // build one with every knob set
+        let otlp = OtlpTracing::new("http://127.0.0.1:4318/v1/traces")
+            .header("X-Scope-OrgID", "Shoal")
+            .timeout_secs(3)
+            .batch_delay_ms(250)
+            .max_queue_size(64);
+        assert_eq!(otlp.headers.get("X-Scope-OrgID").map(String::as_str), Some("Shoal"));
+        assert_eq!(otlp.timeout_secs, Some(3));
+        assert_eq!(otlp.batch_delay_ms, Some(250));
+        assert_eq!(otlp.max_queue_size, Some(64));
+    }
+
+    #[test]
+    /// A sample ratio parses, and its absence means every trace
+    ///
+    /// `OtlpTracing` denies unknown fields, so this name is part of the config contract: a
+    /// deployment that writes `sample_ratio` and gets a parse error would be told its whole
+    /// tracing section is wrong rather than that one key is.
+    fn a_sample_ratio_parses_and_defaults_to_none() {
+        // a config that names one
+        let (_dir, conf) = load(
+            "resources:\n  memory: \"4Gi\"\ntracing:\n  remote:\n    Otlp:\n      endpoint: \"http://127.0.0.1:4318/v1/traces\"\n      sample_ratio: 0.001\n",
+        );
+        let conf = conf.expect("a config naming a sample ratio failed to load");
+        let otlp = conf
+            .tracing
+            .remote
+            .expect("the remote sink was dropped")
+            .otlp();
+        assert_eq!(otlp.sample_ratio, Some(0.001));
+        // and one that does not, which has to mean every trace rather than none of them
+        let (_dir, bare) = load(
+            "resources:\n  memory: \"4Gi\"\ntracing:\n  remote:\n    Otlp:\n      endpoint: \"http://127.0.0.1:4318/v1/traces\"\n",
+        );
+        let bare = bare.expect("a config without a sample ratio failed to load");
+        assert_eq!(
+            bare.tracing
+                .remote
+                .expect("the remote sink was dropped")
+                .otlp()
+                .sample_ratio,
+            None
+        );
+    }
+
+    #[test]
+    /// A metrics sink parses, with its own endpoint and interval
+    fn a_metrics_sink_parses() {
+        // a config naming both sinks explicitly
+        let (_dir, conf) = load(
+            "resources:\n  memory: \"4Gi\"\ntracing:\n  remote:\n    Otlp:\n      endpoint: \"http://127.0.0.1:4318/v1/traces\"\n  metrics:\n    endpoint: \"http://collector:4318/v1/metrics\"\n    interval_secs: 5\n",
+        );
+        let conf = conf.expect("a config naming a metrics sink failed to load");
+        // the explicit sink is the one that wins, on a different host to prove it was not derived
+        let metrics = conf.tracing.metrics_sink().expect("the metrics sink was dropped");
+        assert_eq!(metrics.endpoint, "http://collector:4318/v1/metrics");
+        assert_eq!(metrics.interval_secs, Some(5));
+    }
+
+    #[test]
+    /// A metrics endpoint is derived from the trace one when the config names only that
+    ///
+    /// A collector takes both on the same host and port, so requiring the endpoint twice is
+    /// requiring two places to forget to change. The tenant header carries over with it, because
+    /// metrics landing in a tenant nobody queries is the same failure spans used to have.
+    fn a_metrics_endpoint_defaults_from_the_trace_one() {
+        // a config naming a trace sink and nothing else
+        let (_dir, conf) = load(
+            "resources:\n  memory: \"4Gi\"\ntracing:\n  remote:\n    Otlp:\n      endpoint: \"http://127.0.0.1:4318/v1/traces\"\n      headers:\n        X-Scope-OrgID: Shoal\n",
+        );
+        let conf = conf.expect("a config naming only a trace sink failed to load");
+        let metrics = conf.tracing.metrics_sink().expect("no metrics sink was derived");
+        assert_eq!(metrics.endpoint, "http://127.0.0.1:4318/v1/metrics");
+        assert_eq!(metrics.headers.get("X-Scope-OrgID").map(String::as_str), Some("Shoal"));
+        // and a config naming no sink at all derives nothing, which is what leaves it uninstalled
+        assert!(super::Tracing::default().metrics_sink().is_none());
+    }
+
+    #[test]
+    /// An endpoint that is not a trace path is not rewritten into a metrics one
+    ///
+    /// Guessing at a URL whose shape we do not recognize would export to a path the collector
+    /// does not serve, and the exporter reports that as a failure per batch rather than once.
+    fn an_unrecognized_endpoint_derives_no_metrics_sink() {
+        // a sink whose path is not the one a rewrite knows how to move
+        let tracing = super::Tracing::default().grpc("http://127.0.0.1:4318/ingest");
+        assert!(tracing.metrics_sink().is_none());
+    }
+
+    #[test]
+    /// A misspelled metrics key is rejected rather than silently dropped
+    fn a_misspelled_metrics_key_is_rejected() {
+        // `interval` is not a field, `interval_secs` is
+        let (_dir, conf) = load(
+            "resources:\n  memory: \"4Gi\"\ntracing:\n  metrics:\n    endpoint: \"http://127.0.0.1:4318/v1/metrics\"\n    interval: 5\n",
+        );
+        let error = conf.expect_err("a misspelled metrics key was accepted");
+        assert!(
+            error.to_string().contains("interval"),
+            "the error did not name the offending key: {error}"
         );
     }
 }

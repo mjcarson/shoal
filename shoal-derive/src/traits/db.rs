@@ -314,7 +314,7 @@ pub fn add(
         quote! {
             #table_names_ident::#variant_ident => {
                 // take the queries that were parked on this partition, if there were any
-                if let Some(released) = self.#field_ident.fail_partition(partition_id, error.as_ref()) {
+                if let Some(released) = self.#field_ident.fail_partition(partition_id, span, error.as_ref()) {
                     // replay each of them, marked to answer without the read that failed
                     //
                     // no mark evictable message follows this one, unlike a load that
@@ -516,6 +516,7 @@ pub fn add(
                 &mut self,
                 table: Self::TableNames,
                 partition_id: u64,
+                span: &::shoal::tracing::Span,
                 error: Option<::shoal::shared::responses::ResponseError>,
                 shard_local_tx: &::shoal::kanal::AsyncSender<::shoal::server::messages::ServerMsg<Self>>,
             ) -> Result<(), ::shoal::server::ServerError> {

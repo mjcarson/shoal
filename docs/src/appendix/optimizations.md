@@ -125,6 +125,8 @@ this page opens with. Ordered inside each tier.
 | **A4** | [**O13**](#o13-a-multi-partition-get-is-quadratic-in-the-partitions-it-names) (+ [**O12**](#o12-to_blocked-clones-the-whole-filter-set-per-blocked-partition) and [**O39**](#o39-routing-a-multi-partition-get-is-quadratic-before-the-query-reaches-a-table) beside it) — the quadratic multi-partition get, **twice**: once in the table and once in the router | Asymptotic — O(n²) in a caller-set n. **O39 measured** — 4.13 ns·n + 0.0109 ns·n² | S | — | None | O39 **yes**, by `routing/split_by_shard/get` ([F24](../features/routing-benchmarks.md)); O13 and O12 still need a bench over `PersistentSortedTable::get` |
 | **A5** | [**O5**](#o5-the-hottest-maps-use-siphash), [**O14**](#o14-fixed-thousand-element-preallocations-on-per-call-paths), [**O28**](#o28-the-client-takes-two-guards-on-its-response-map-for-every-query-it-sends), [**O36**](#o36-every-get-re-collects-its-rows-into-a-fresh-vec-even-when-it-read-one-partition), [**O38**](#o38-a-response-that-arrives-out-of-order-is-validated-twice), [**O42**](#o42-a-get-replayed-after-a-disk-read-copies-rows-its-partition-is-now-holding), [**O43**](#o43-a-borrowed-row-costs-a-discriminant-it-usually-does-not-need) — hasher, allocation sizes, a doubled map guard, a re-collect per get, a second validation per reordered response, the one get per partition read that still copies, and the discriminant every borrowed row now carries | Argued, except O38 which is **asymptotic** in the row width | S | — | None | no — needs a table-layer bench, and O28 needs the client measured at all. **O38 is the exception**: `macro/transport/stream` against `stream_unordered` is a ready-made control |
 | **A6** | [**O25**](#o25-two-instrument-spans-remain-on-per-query-paths) — two `#[instrument]` spans on per-query paths | Argued — but the cost is in the *uninstrumented* binary | S | — | Contained | no — needs a with/without capture |
+| **A7** | [**O44**](#o44-one-trace-per-request-costs-a-span-per-query-and-one-per-frame) — one trace per request costs a span per query and one per frame | Argued — one more registry slab insert per query at `level: Info` | S | — | **Not contained** — every span on the query path re-parents off it | no, and the run that would settle it is the same one A6 wants: one capture at `level: Off` against one at `level: Info` |
+| **A8** | [**O45**](#o45-the-clients-return-half-costs-two-spans-per-response) — the client's return half costs two spans per response | Argued — two more registry slab inserts per **response** at `level: Info`, and in the client rather than the server | S | — | **Not contained** — `Shoal::response` is what carries an answer back into the trace its send opened | no, and it is the *third* entry the one capture at `level: Off` against `level: Info` would settle |
 
 ~~**Do O34 first.**~~ **Done**, by [F23](../features/self-sizing-staging-buffer.md). It moved from
 the bottom of this tier to the top on the strength of one capture, was for one release **the only
@@ -164,7 +166,10 @@ had been; A3 described a step and was a slope. See
 
 **A6 is ranked last despite being the smallest diff**, because unlike everything else here its
 impact is argued rather than profiled — a span's cost is invisible to the profile that would
-normally rank it, which is precisely what makes it worth filing.
+normally rank it, which is precisely what makes it worth filing. **A7 and A8 are behind it for the
+same reason**, and the three of them now share one experiment: a capture at `level: Off` against
+one at `level: Info` on the same commit settles all three at once, which is an argument for taking
+it rather than for taking it three times.
 
 **Tier B — argued, contained, waiting on its benchmark.** The profile is what orders this tier:
 `write_helper` is 30.5 ms per call against roughly 350 ns for the insert it persists, so a write-path
@@ -1344,7 +1349,7 @@ the DMA case rather than to pin them arbitrarily. Until then, treat a movement i
 | | |
 | --- | --- |
 | **Rank** | **A6** — last in Tier A, because it is the only entry there a profile cannot rank |
-| **Impact** | Argued — 617,175 INFO spans each, per run, in the **uninstrumented** binary |
+| **Impact** | Argued — 617,175 INFO spans each, per run, in the **uninstrumented** binary; see [O44](#o44-one-trace-per-request-costs-a-span-per-query-and-one-per-frame) for what tracing the whole request added |
 | **Difficulty** | S — delete an attribute, or set `level = "trace"` |
 | **Depends on** | nothing |
 | **Blocks** | nothing |
@@ -1353,11 +1358,20 @@ the DMA case rather than to pin them arbitrarily. Until then, treat a movement i
 
 Filed while taking [F5](../features/flushed-sweep-gate.md), which removed a third one.
 
-`Shard::handle_query` (`shard.rs:688-693`) and `Shard::reply` (`:652`) both carry `#[instrument]`, both default to
+`Shard::handle_query` and `Shard::reply` both carry `#[instrument]`, both default to
 `INFO`, and the subscriber is a `Registry` with a `fmt` layer filtered at `Info` (`server/trace.rs`)
 against a `shoal.yml` that sets `level: Info`. So both callsites are enabled: each call allocates a
 span in the registry's slab, enters, exits and closes it. At 617,175 calls apiece that is 1.2 million
 span lifecycles per run.
+
+**There is a third one now, and it is not a candidate for removal.**
+[Resolved #89](resolved/fragmented-query-traces.md) moved `Coordinator::send_to_shard`'s
+function-level span into its routing loop as `Coordinator::route`, one per query rather than one
+per bundle, and that span is the parent every other span on the query path re-parents off. Deleting
+it does not flatten one edge of the trace the way deleting `reply`'s would; it fragments the whole
+of it, because an empty parent starts a new trace rather than an orphan. The same now applies to
+`reply`'s more strongly than when this entry was written. **`handle_query`'s is still the one to go
+if only one goes** — nothing takes it as a parent.
 
 **This is the entry the profile is structurally unable to rank**, which is why it is filed rather
 than taken. `hotpath` attributes time to *its own* scopes; a span inside a scope is counted as part
@@ -2408,3 +2422,98 @@ non-null so no niche is available for a two-pointer-kind enum, and pointer taggi
 an alignment a `#[repr(C)]` row of bytes does not have to give. Measure the first before designing
 for the second.
 
+### O44. One trace per request costs a span per query and one per frame
+
+| | |
+| --- | --- |
+| **Rank** | **A7** — beside [O25](#o25-two-instrument-spans-remain-on-per-query-paths), and unrankable for the same reason |
+| **Impact** | Argued — one extra registry slab insert per query and one per frame, at `level: Info` |
+| **Difficulty** | S — the cost is one `info_span!` call, and lowering it means losing what it bought |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | **Not contained** — every span on the query path re-parents off `Coordinator::route`, so removing it fragments the trace rather than shortening it |
+| **Benchmark** | none, and the honest reason is [O25](#o25-two-instrument-spans-remain-on-per-query-paths)'s: the cost is in the baseline binary and absent from nothing in `docs/perf/` |
+
+Filed by [Resolved #89](resolved/fragmented-query-traces.md) against itself, because a fix that
+adds work to the per-query path should say so on this page rather than in its own *Performance*
+section alone.
+
+What that change did to the per-query cost, at `level: Info`, which is what the committed
+`shoal.yml` names:
+
+| Span | Per | Net |
+| --- | --- | --- |
+| `Coordinator::route` | query | **replaces** `Coordinator::send_to_shard`'s, which was per bundle |
+| `Shoal::request` | frame | one more |
+| the loader's two | partition read | none — they existed, and only gained parents |
+| the response write | response | none — covered by entering the query's own span, which is what the relay already did |
+
+So for a bundle of one, which is the common case and every arm of the isolating set, the query path
+is **one span heavier** — the request root. For a bundle of *n* it is *n* heavier, because the span
+that used to be shared is now per query. [F5](../features/flushed-sweep-gate.md) counted 711,638
+slab inserts per run for a single per-message span, which is the order of magnitude to hold this
+against.
+
+**The cheap fix is the wrong one.** Dropping `Coordinator::route` to `DEBUG` would cost nothing at
+`Info` and would silently re-root every span beneath it into its own trace, because `tracing` turns
+an empty parent into a new root rather than an orphan — the exact defect item 89 fixed, reintroduced
+by a level. Every span on this path has to sit at one level, because every one of them is a parent
+to something. A *leaf* could safely sit lower, and item 89 built one — a span around the socket
+write — then removed it, because the query's own span already covers those instants.
+
+**What would actually settle it** is the pair of runs [O25](#o25-two-instrument-spans-remain-on-per-query-paths)
+asks for and nobody has taken: one capture at `level: Off` and one at `level: Info`, on the same
+commit. That measures both entries at once, which is a reason to take it once rather than twice.
+Until then this is argued, and the number to argue against is F5's.
+
+**The trace this prices now spans two processes.** [F35](../features/wire-trace-context.md) joined
+the client's half to the server's, which changed nothing in the table above — every span here is on
+the server and none of them moved — and added two more on the *client's* per-query path. Those are
+[O45](#o45-the-clients-return-half-costs-two-spans-per-response) rather than more rows here,
+because they are in a different process and a different crate, and because the run that would
+settle them is the same one this entry has been waiting for.
+
+### O45. The client's return half costs two spans per response
+
+| | |
+| --- | --- |
+| **Rank** | **A7** — beside [O44](#o44-one-trace-per-request-costs-a-span-per-query-and-one-per-frame) and [O25](#o25-two-instrument-spans-remain-on-per-query-paths), and unrankable for the same reason |
+| **Impact** | Argued — two extra registry slab inserts per **response** at `level: Info`, in the client |
+| **Difficulty** | S — the cost is two callsites, and removing either loses what it bought |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | **Not contained** — `Shoal::response` is what carries a query's answers back into the trace its send opened, so removing it does not shorten a trace, it truncates one |
+| **Benchmark** | none, and for the same reason as O44: the cost is in the baseline binary and absent from nothing in `docs/perf/` |
+
+Filed by [F35](../features/wire-trace-context.md) against itself, the way O44 was filed by
+[Resolved #89](resolved/fragmented-query-traces.md). A feature that adds work to a per-query path
+says so here rather than in its own *Performance* section alone.
+
+What it added, per **response** rather than per query — which for a bundle of *n* is *n* times, and
+for a stream is once per row group:
+
+| Span | Per | Net |
+| --- | --- | --- |
+| `Shoal::response` | frame read back | one more, in `TcpProxy::relay` |
+| `ShoalResultStream::next` | response handed to the caller | one more |
+| `Shoal::send_stamped` | bundle | none — it existed, and only started being parked in the `Waiter` |
+| the trace context itself | traced frame | not a span: 26 bytes and one `read_exact`, and only when the client is tracing |
+
+**This is on the client, which is the half that is meant to be cheap.** `shoal-client` links no
+engine, and the 374 workloads drive it as hard as they drive the server — so two spans per response
+is the same order of magnitude as O44's, arriving in the process that has the least other work to
+hide it. F5's 711,638 slab inserts per run for one per-message span is the number to hold it
+against, as it is for O44.
+
+**The cheap fix is the wrong one, in the same way.** Dropping `Shoal::response` to `DEBUG` would
+cost nothing at `Info` and would re-root every response into a trace of its own, since `tracing`
+turns an empty parent into a new root — the defect item 89 fixed and
+[item 90](resolved/divergent-layer-filters.md) fixed from the other side, reintroduced by a level.
+`ShoalResultStream::next` is the one of the two that *is* a leaf and could safely sit lower; it is
+at `INFO` because a query whose answer took a long time to be collected is exactly what somebody
+reading a trace is looking for, and a leaf nobody can see is not worth a callsite either.
+
+**What is genuinely contained here** is that `tracing.level` still decides all of it. The committed
+`shoal.yml` names `Warn`, at which neither callsite is enabled and both cost a filter check. This
+entry is about what a deployment at `Info` pays, which is the level
+[F34](../features/benchmark-tracing.md) made a capture honor.

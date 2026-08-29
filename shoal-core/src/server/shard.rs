@@ -30,7 +30,7 @@ use std::rc::Rc;
 use std::time::Duration;
 use std::{cell::RefCell, hash::BuildHasherDefault};
 use std::{collections::HashMap, io::IoSlice};
-use tracing::{event, instrument, Level, Span};
+use tracing::{event, info_span, instrument, Instrument, Level, Span};
 use uuid::Uuid;
 
 use super::messages::{Answer, QueryMetadata, ServerMsg};
@@ -40,6 +40,7 @@ use super::ring::Ring;
 use super::routing::ArchivedShardRouting;
 use super::stage_profile::{self, StageStamps, Stamp};
 use super::tls;
+use super::trace;
 use super::{Comms, Conf, ServerError};
 use crate::{
     shared::{
@@ -51,13 +52,58 @@ use crate::{
             self,
             auth::{self as proto_auth, AuthMechanism, AuthStatus},
             error::{self as proto_error, ErrorCode},
-            handshake, ProtocolError,
+            handshake,
+            trace::{TraceContext, TRACE_CONTEXT_LEN},
+            ProtocolError,
         },
         queries::{ArchivedQueries, Queries},
         traits::{QuerySupport, ShoalResponseSupport},
     },
     storage::{FullArchiveMap, LoaderMsg, Loaders},
 };
+
+/// Read the trace context a request frame carries, if its header says it carries one
+///
+/// Split out of the relay so that the flag check, the read and the decode are one step there. A
+/// frame with the flag clear reads nothing at all, which is every frame a client that is not
+/// tracing sends.
+///
+/// # Arguments
+///
+/// * `tcp_rx` - The read half of the connection this frame is arriving on
+/// * `header` - The already checked header of the frame being read
+async fn read_trace_context(
+    tcp_rx: &mut ReadHalf<TcpStream>,
+    header: &protocol::Header,
+) -> Result<Option<TraceContext>, ServerError> {
+    // a frame with the flag clear carries no context, and reading one would eat its payload
+    if header.trace_len() == 0 {
+        return Ok(None);
+    }
+    // take exactly the bytes a context is, onto the stack
+    let mut raw = [0u8; TRACE_CONTEXT_LEN];
+    tcp_rx.read_exact(&mut raw).await?;
+    // and turn them into the context the client sent
+    Ok(Some(TraceContext::decode(&raw)?))
+}
+
+/// Write a trace id out the way a collector shows it
+///
+/// `TraceContext` holds bytes rather than an OpenTelemetry id, so that `shoal-proto` links no
+/// tracing stack. This is the one place the server wants them as the 32 hex digits somebody would
+/// paste into a collector's search box.
+///
+/// # Arguments
+///
+/// * `wire_trace` - The trace context to write the trace id of
+fn hex_trace_id(wire_trace: &TraceContext) -> String {
+    // two hex digits per byte, in the order they went on the wire
+    wire_trace
+        .trace_id()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
 
 /// Relay bundles of queries from one client into this node
 ///
@@ -102,12 +148,71 @@ async fn client_rx_relay<S: ShoalDatabase>(
                 break;
             }
         };
+        // read the trace context this frame carries, if its flags say it carries one
+        //
+        // this is a read of its own rather than the front of the body buffer below, because that
+        // buffer is an rkyv archive accessed in place: an archive starting 26 bytes into its own
+        // allocation has every pointer in it misaligned
+        let wire_trace = match read_trace_context(&mut tcp_rx, &header).await {
+            Ok(wire_trace) => wire_trace,
+            Err(error) => {
+                // a peer that said a context follows and wrote something else is a peer we cannot
+                // stay in step with, so this ends the connection the way a bad header does. so
+                // does a read that failed, since the socket is then part way through a frame
+                event!(Level::ERROR, msg = "failed to read a trace context", %peer, ?error);
+                break;
+            }
+        };
+        // work out how much of this frame is the bundle rather than what sits ahead of it
+        let payload_len = match header.request_payload_len() {
+            Ok(payload_len) => payload_len,
+            Err(error) => {
+                event!(Level::ERROR, msg = "refused a frame", %peer, %error);
+                break;
+            }
+        };
+        // open the root span every span this bundle produces hangs off
+        //
+        // here rather than after the body read, because this is the first instant the frame is
+        // known to exist and the read of its body is part of serving it. the wait on the
+        // preamble above is deliberately outside: that is idle time between requests, not time
+        // this request spent anywhere
+        //
+        // `parent: None` is explicit rather than incidental. this task inherits nothing today,
+        // but a span opened contextually would silently join whatever the connection task
+        // happened to be in the day somebody instruments it
+        //
+        // it stays `parent: None` even when the client sent a trace context. that context is an
+        // *OpenTelemetry* parent, set below and resolved by the OTLP layer, and the two parenting
+        // mechanisms are independent - this one decides what the registry hangs this span off,
+        // and the registry has never heard of the other process
+        let span = info_span!(
+            parent: None,
+            "Shoal::request",
+            peer = %peer,
+            bytes = payload_len,
+            trace = tracing::field::Empty,
+        );
+        // join this request to the trace the client opened, if it sent one
+        if let Some(wire_trace) = &wire_trace {
+            // say on the span itself which trace it was joined to, so a run with no collector
+            // attached can still be followed in the console
+            span.record("trace", tracing::field::display(hex_trace_id(wire_trace)));
+            trace::adopt_remote_parent(&span, wire_trace);
+        }
         // read this frame's body into a buffer that is exactly the right size
         //
         // the buffer is not zeroed first, because every byte of it is about to be overwritten.
         // that is what `RequestBody` is for: the read is its only constructor, so a body that
         // exists is a body a read filled
-        let data = match RequestBody::read_from(&mut tcp_rx, header.body_len()).await {
+        //
+        // instrumented rather than entered around: a guard held across an await would leave this
+        // span current while another connection's task runs on this executor. `Instrumented`
+        // enters on each poll and exits on each return, which is also what gives this span an end
+        let data = match RequestBody::read_from(&mut tcp_rx, payload_len)
+            .instrument(span.clone())
+            .await
+        {
             Ok(data) => data,
             Err(error) => {
                 event!(Level::ERROR, msg = "failed to read a frame body", %peer, ?error);
@@ -120,7 +225,15 @@ async fn client_rx_relay<S: ShoalDatabase>(
         // this is the first moment we know the bundle exists
         let base = Stamp::now();
         // forward our clients message
-        if let Err(error) = kanal_tx.send(ServerMsg::Client { peer, data, base }).await {
+        if let Err(error) = kanal_tx
+            .send(ServerMsg::Client {
+                peer,
+                span,
+                data,
+                base,
+            })
+            .await
+        {
             // this shards channel is gone, so there is nowhere left to put this bundle
             event!(Level::ERROR, msg = "failed to forward a bundle", %peer, ?error);
             break;
@@ -217,7 +330,12 @@ async fn client_tx_relay<S: ShoalDatabase>(
             // this should only happen exit/shutdown or when our client shutsdown
             Err(_) => break,
         };
-        // enter our span
+        // enter this query's own span for the framing and the write
+        //
+        // this is what puts the end of the trace on the socket rather than at the reply that
+        // queued the bytes: `tracing-opentelemetry` timestamps a span when it is *exited*, so
+        // a span that is only ever held and never entered exports with no duration at all.
+        // entering it here is what makes `Coordinator::route` cover the whole query
         let span_guard = span.enter();
         // build the header and query id that go ahead of this response
         //
@@ -1073,13 +1191,20 @@ where
     /// # Arguments
     ///
     /// * `client` - The client that sent this bundle
+    /// * `request` - The root span the relay opened for the bundle being routed
     /// * `body` - The buffer the bundle arrived in, shared with every shard it routes to
     /// * `queries` - The bundle, read out of that buffer
     /// * `stamps` - When this bundle reached each stage so far
-    #[instrument(name = "Coordinator::send_to_shard", skip_all)]
+    ///
+    /// This is deliberately **not** instrumented as a whole. The span it used to open was one
+    /// per bundle and was what every query in that bundle took as its parent, so a batch of a
+    /// hundred queries produced one flat list of a hundred siblings. The span opened per query
+    /// below replaces it - the routing work itself is attributed to `Coordinator::handle_client`,
+    /// which is the caller and covers exactly the same instants.
     async fn send_to_shard(
         &mut self,
         client: Uuid,
+        request: &Span,
         body: &Bytes,
         queries: &ArchivedQueries<D::ClientType>,
         stamps: StageStamps,
@@ -1117,6 +1242,19 @@ where
             let index = offset + base_index;
             // check if this is the last query or not
             let end = index == end_index;
+            // open the span this query and everything it causes hangs off
+            //
+            // per query rather than per bundle, so a batch is one trace with one subtree per
+            // query in it. it is the parent every hop from here rejoins through - the shard
+            // that executes the query, the loader that reads its partition, the flush that
+            // makes its write durable, and the write of its response - so it lives until the
+            // last of those has finished with the metadata carrying it
+            let query_span = info_span!(
+                parent: request,
+                "Coordinator::route",
+                id = %bundle_id,
+                index,
+            );
             // give this query its own copy of the bundles stamps to carry from here on
             let mut stamps = stamps;
             // note where in its batch this query sat, since a query near the tail of a
@@ -1139,7 +1277,7 @@ where
                 // comes straight back to us still finds somewhere to land
                 let gather = Gather {
                     client,
-                    span: Span::current(),
+                    span: query_span.clone(),
                     stamps,
                     outstanding: found.len(),
                     limit: <<D::ClientType as QuerySupport>::QueryKinds as ArchivedShardRouting>::archived_limit(kind),
@@ -1170,6 +1308,7 @@ where
                     index,
                     end,
                     gather.clone(),
+                    query_span.clone(),
                     share_stamps,
                 );
                 // build the message to send, which is a refcount on the bundle rather than
@@ -1191,17 +1330,22 @@ where
     ///
     /// # Arguments
     ///
-    /// * `addr` - The address
+    /// * `peer` - The client this bundle came from
+    /// * `span` - The root span the relay opened when this bundle came off the socket
+    /// * `data` - The bundle to route
+    /// * `base` - When the last byte of this bundle came off the socket
     #[allow(clippy::future_not_send)]
     #[instrument(
         name = "Coordinator::handle_client",
-        skip(self, peer, data),
+        parent = &span,
+        skip(self, peer, span, data),
         err(Debug)
     )]
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     async fn handle_client<'a>(
         &mut self,
         peer: Uuid,
+        span: Span,
         data: RequestBody,
         base: Stamp,
     ) -> Result<(), ServerError>
@@ -1235,7 +1379,8 @@ where
         // label it as a batch level cost rather than a per query one
         stamps.mark_decoded();
         // route every query in the bundle to the shards that answer it
-        self.send_to_shard(peer, &body, archived, stamps).await
+        self.send_to_shard(peer, &span, &body, archived, stamps)
+            .await
     }
 
     /// Send a respones back to the client
@@ -1245,7 +1390,13 @@ where
     /// * `addr` - The address to send this reply too
     /// * `response` - The response to send
     /// * `stamps` - When this query reached each stage so far, and its index
-    #[instrument(name = "Shard::reply", parent = &span, skip_all, err(Debug))]
+    #[instrument(
+        name = "Shard::reply",
+        parent = &span,
+        skip_all,
+        fields(id = %query_id),
+        err(Debug)
+    )]
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     async fn reply(
         &mut self,
@@ -1649,9 +1800,12 @@ where
                     }
                 }
                 // Handle this client query
-                ServerMsg::Client { peer, data, base } => {
-                    self.handle_client(peer, data, base).await?
-                }
+                ServerMsg::Client {
+                    peer,
+                    span,
+                    data,
+                    base,
+                } => self.handle_client(peer, span, data, base).await?,
                 // handle this query from the user, reading it out of the bundle it arrived in
                 ServerMsg::Query {
                     meta,
@@ -1675,12 +1829,20 @@ where
                 }
                 // this partition could not be read, so release the queries waiting on it
                 ServerMsg::PartitionLoadFailed {
+                    span,
                     table,
                     partition_id,
                     error,
                 } => {
                     self.tables
-                        .fail_partition(table, partition_id, error, &self.shard_local_tx)
+                        .fail_partition(
+                            table,
+                            partition_id,
+                            // the read that gave up, which every query it releases is linked to
+                            &span,
+                            error,
+                            &self.shard_local_tx,
+                        )
                         .await?
                 }
                 // Inform a table that some of its data has been flushed to storage

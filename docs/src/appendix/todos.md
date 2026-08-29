@@ -660,14 +660,95 @@ the actual work here, and it would be useful well beyond recovery: a readiness e
 exactly the same thing.
 
 A third piece is smaller but blocks testing either of the above: `trace::setup` is never called
-by the library, ~~only by the example binary~~ **or by anything else** — the example does not call
-it either, and neither does `shoal-workload`, `shoalctl` or any test. So no test can observe any
-event the server emits ([Test Coverage](test-coverage.md)), the `tracing` section of `shoal.yml`
-configures nothing, and every `#[instrument]` and `event!` in the workspace — including the client's
-since [F16](../features/client-builder.md) — dispatches to nobody. Filed as
-[item 69](known-issues.md), where the two decisions it needs are written down: whether a library
-should install a *global* subscriber at all, and how a benchmark capture keeps getting the same
-one it has always had.
+by the library, ~~only by the example binary~~ ~~**or by anything else** — the example does not call
+it either~~ — **the example calls it again**, and holds the `TraceGuard` that flushes on drop, so
+its spans do reach a collector. ~~`shoal-workload`, `shoalctl` and every test still install
+nothing[…] a benchmark capture's `tracing` section configures nothing~~ — **`shoal-workload`
+installs one now** and a capture honors its config, since
+[F34](../features/benchmark-tracing.md), which also answered the second of the two decisions the
+item named: a capture keeps getting the subscriber the file asks for, and the level it ran at is
+recorded on the artifact so a comparison across a change to it is named rather than silent.
+`shoalctl` and every test still install nothing, so no test can observe any event the server emits
+([Test Coverage](test-coverage.md)), and the *first* decision — whether a library should install a
+**global** subscriber at all — is still unmade. Filed as [item 69](known-issues.md).
+
+Note that a test cannot simply call `setup` to get around this: it installs a **global**
+subscriber, so the first test to call it would decide what every other test in that binary sees.
+F34 did not change this — it moved the install onto a binary, which is the right home for a global
+one and is no help to a test. What closes the coverage gap is a **non-global** path out of
+`trace.rs`, something like `trace::subscriber(conf, &TraceOptions) -> impl Subscriber` with
+`setup_with` built on top of it, so a test can scope one with
+`tracing::subscriber::with_default` for its own duration.
+
+**What F34 gave is the benchmark's metrics, not the engine's.** `shoal-bench` reports throughput,
+wall clock and latency percentiles per workload run over OTLP, which is enough to chart a capture
+as it happens and nothing at all about a server running on its own. Everything the paragraphs above
+ask for — resident bytes, LRU depth, compaction backlog, blocked-query count, and `RecoveryStats`
+as a number rather than an event — is still missing, and the pipeline F34 built in
+`shoal-bench/src/workloads/harness/metrics.rs` is the wrong side of the crate boundary to supply
+it. What it does supply is the config: `Tracing::metrics` and `Tracing::metrics_sink()` live in
+`shoal-core`, so a server-side exporter has somewhere to read its endpoint from already.
+
+**A per-query latency histogram over OTLP.** Deliberately not built by F34, and the reason is worth
+keeping: `Measurement::record` is on the measured path, so an instrument there would make a traced
+capture slower than an untraced one by an amount that is a property of the metrics module rather
+than of the database. The shape it would give — latency *within* one run rather than one point per
+run — is real and is currently only available from a sampled trace. Anything that builds it has to
+either pay for it outside the measured window or accept that the arm carrying it is not comparable
+to one that is not.
+
+~~**A trace context on the wire, so a client's spans and a server's are one trace.**~~ **Done**, by
+[F35](../features/wire-trace-context.md), which built the first of the two shapes below exactly as
+this entry called it: the `Flags` bit, the widened request preamble, `PROTOCOL_VERSION` to 3,
+extraction in `client_rx_relay` and injection where the client frames a bundle. The note about the
+client's sampler was right too, and is now a documented limitation rather than a prediction.
+
+Two things this entry did not see. The context has to be **a read of its own** rather than the
+front of the body buffer, because that buffer is an rkyv archive accessed in place — which is what
+makes the preamble variable length rather than the body variable shape, and is the real argument
+against the rejected alternative as much as the fingerprint is. And joining the *send* to the
+server was only half the work: a query's answers arrive in a detached reader shared by every query
+on the connection, so the return half needed `Waiter` to park a span the same way
+`QueryMetadata.span` does on the server.
+
+What it built, kept for the reasoning:
+
+- **A `Flags` bit plus a widened request preamble.** The request preamble is eight bytes and
+  carries no query id at all (`shoal-proto/src/shared/protocol.rs`), while the *response* preamble
+  is twenty-four; twelve of the sixteen `Flags` bits are free. A bit saying *a W3C `traceparent`
+  follows* lets a peer that sets it and one that does not both be understood, at the cost of a
+  variable-length preamble and a `PROTOCOL_VERSION` bump to 3. ~~This is the one to build.~~ Built.
+- **A field on `Queries<S>`.** Much less code, and it moves `SCHEMA_FINGERPRINT`
+  (`shoal-proto/src/shared/traits.rs`), which both peers exchange and refuse each other on
+  mismatch — so every client and every server has to be replaced at the same instant, for a field
+  that is empty whenever nobody is tracing. Not built, and the fingerprint turned out to be the
+  weaker half of the argument: bumping the version byte moves it too, so **both** shapes cost one
+  flag day. What actually separates them is that a flag bit makes the *next* optional block a call
+  site rather than another bump, and that the rkyv field would sit inside the archive every shard
+  reads on the hot path.
+
+**Still open beside it: `shoalctl` installs no subscriber**, so an operator running it gets no
+output from the seven client spans that now exist. Three lines, unblocked, and named again below.
+
+**Link a flush to the writes it made durable.** `StreamWriter`'s `fdatasync` tasks, `ArchiveMap`'s
+writers and `FileSystemCompactor` are each their own trace, deliberately: one flush covers every
+write it happened to catch, so it is the child of none of them. The same argument that made a
+partition read a *link* rather than a parent for all but its requester applies here, and the
+machinery is the same — `follows_from` off the parked `QueryMetadata` in `PendingResponse`. What is
+missing is a span to link *to*: the detached IO tasks in `stream.rs` do not carry one to the
+`DataFlushed` that wakes the shard. Worth it because "what made my write durable" is the one
+question the flush pipeline cannot currently be asked.
+
+**A span per shard-share of a split query.** A get naming partitions on three shards fans out to
+three `Shard::handle_query` spans, all siblings under one `Coordinator::route`. That is correct and
+slightly lossy: the shares are distinguishable only by which shard recorded them, and the gather
+that merges them is a fourth sibling rather than their parent. A span per share, with the gather as
+its parent, would say which shard was slow without reading timestamps. Not built because it is one
+more span per shard per split query on a path that is already the expensive one.
+
+**Install a subscriber in `shoalctl`.** Three lines, unblocked, and nothing has needed it yet.
+Without it an operator gets no output from the client's spans or from the `event!(Level::ERROR, …)`
+calls that report a dead connection or a refused frame.
 
 **Promote eviction drift to a `WARN`.** The eviction event now carries a `drift` field — the gap
 between what a pass actually dropped and what the shard counter moved by, which is non zero only

@@ -42,6 +42,10 @@ its per-batch timestamp cannot answer that.
 - `shoal.yml` at the repo root. It is committed and it *is* the benchmark configuration —
   changing it invalidates the recorded baseline.
 - A writable storage directory at whatever `shoal.yml` points at, `/opt/shoal` by default.
+- **A collector, only if `shoal.yml` names one.** The `tracing:` section is honored by a capture
+  ([F34](../features/benchmark-tracing.md)). A sink that is unreachable is logged and never fatal,
+  so a capture still runs — but the level it was taken at changes what was measured, and that is
+  under *Getting a number you can trust* below.
 - **The `tls` kernel module, for the eight encrypted transport arms only.** `modprobe tls` — a
   machine that has never used kTLS answers `ENOENT`, `setsockopt` does not autoload it, and a
   workload configured for TLS refuses to start rather than quietly capturing a plaintext number
@@ -446,6 +450,13 @@ new sweep appeared on the one big page as an unexplained chart and nobody notice
 2. **Hold the config fixed:** same `cores`, `memory`, `buffer_size`, `write_behind`, and the same
    `--seed` and `--scale`. All five are recorded per workload in the artifact, so a capture taken
    under a different one is visibly rather than silently incomparable.
+2b. **Trace at `Warn`, or know that you are not measuring the same program.** A capture honors the
+   `tracing:` section of `shoal.yml` ([F34](../features/benchmark-tracing.md)), and `#[instrument]`
+   defaults to `INFO` — so `level: Info` or finer puts a span per query through `tracing`'s registry
+   on three per-query callsites in the server. `sample_ratio` does not take that back: a sampler
+   decides after the span has been built. The committed file names `Warn` for this reason, the level
+   and whether spans were being exported are both recorded in the artifact, and `compare` names a
+   pair that disagrees rather than comparing them silently.
 3. **Warm up.** Every workload discards its first few percent of samples, for the same reason:
    connection setup, an empty pool and cold partition faults belong to starting up rather than to
    the steady state. The warmup is a property of the workload rather than a flag, so it cannot be

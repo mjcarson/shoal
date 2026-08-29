@@ -8,7 +8,7 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use glommio::io::{DmaFile, ReadResult};
 use glommio::{GlommioError, Task, TaskQueueHandle};
 use kanal::{AsyncReceiver, AsyncSender};
-use tracing::{event, instrument, Level};
+use tracing::{event, instrument, Level, Span};
 
 use crate::server::messages::{LoadedPartition, LoadedPartitionKinds, ServerMsg};
 use crate::server::{ServerError, ShoalError};
@@ -219,13 +219,15 @@ async fn read_partition_once(
 /// * `table` - The table this partition belongs to
 /// * `partition_id` - The partition to read
 /// * `table_map` - The archive map for that table
+/// * `span` - The span of the query that asked for this read
 /// * `shard_local_tx` - The channel to send this reads outcome on
-#[instrument(name = "loader::read_partition", skip_all)]
+#[instrument(name = "loader::read_partition", parent = &span, skip_all)]
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 async fn read_partition<D: ShoalDatabase>(
     table: D::TableNames,
     partition_id: u64,
     table_map: Arc<ArchiveMap>,
+    span: Span,
     shard_local_tx: AsyncSender<ServerMsg<D>>,
 ) -> AsyncSender<ServerMsg<D>> {
     // try to read this partition from disk, and build the message that says how it went
@@ -233,7 +235,13 @@ async fn read_partition<D: ShoalDatabase>(
         // wrap our loaded partition so we can keep track of the table this is for
         Ok(data) => ServerMsg::Partition(LoadedPartitionKinds {
             table,
-            loaded: LoadedPartition { partition_id, data },
+            loaded: LoadedPartition {
+                partition_id,
+                data,
+                // the shard side of this read links the queries it releases to it, so the
+                // read has to travel with its own span rather than only be covered by one
+                span: Span::current(),
+            },
         }),
         // this read failed, so tell our shard to release the queries waiting on it
         Err(error) => {
@@ -255,6 +263,8 @@ async fn read_partition<D: ShoalDatabase>(
                 ),
             }
             ServerMsg::PartitionLoadFailed {
+                // the read that gave up, so the queries it releases can be linked to it
+                span: Span::current(),
                 // say what the queries parked on this read should answer with, which is
                 // nothing at all for a partition that was simply pruned
                 error: client_error(&error, &table, partition_id),
@@ -323,11 +333,13 @@ impl<D: ShoalDatabase> FsLoader<D> {
     ///
     /// * `table_name` - The table the partition to read belongs to
     /// * `partition_id` - The partition to read
-    #[instrument(name = "Fsloader::spawn_task", skip_all, err(Debug))]
+    /// * `span` - The span of the query that asked for this read
+    #[instrument(name = "Fsloader::spawn_task", parent = &span, skip_all, err(Debug))]
     async fn spawn_task(
         &mut self,
         table_name: D::TableNames,
         partition_id: u64,
+        span: Span,
     ) -> Result<(), ServerError> {
         // get the archive map for this table, cloned so the task can own it and this
         // borrow can be dropped before anything is awaited
@@ -343,10 +355,16 @@ impl<D: ShoalDatabase> FsLoader<D> {
         // costs the reuse pool one entry. That is left alone because the only thing that
         // fails this call is a task queue that is gone, and a loader with no queue to run
         // tasks on has no further use for the pool
+        // the span the spawned task hangs off, since a spawn carries no ambient context
+        //
+        // this is `spawn_task`'s own span rather than the one it was handed, so a reader sees
+        // the read under the request that asked for it rather than beside it
+        let read_span = Span::current();
         let task = glommio::spawn_local_into(
             async move {
                 // try to load this partition from disk
-                read_partition(table_name, partition_id, table_map, shard_local_tx).await
+                read_partition(table_name, partition_id, table_map, read_span, shard_local_tx)
+                    .await
             },
             self.medium_priority,
         )?;
@@ -364,15 +382,18 @@ impl<D: ShoalDatabase> FsLoader<D> {
     ///
     /// * `table` - The table the partition that could not be read belongs to
     /// * `partition_id` - The partition that could not be read
+    /// * `span` - The span of the query that asked for the read that never started
     /// * `error` - What the queries parked on that partition should answer with
     async fn report_failure(
         &self,
         table: D::TableNames,
         partition_id: u64,
+        span: Span,
         error: Option<ResponseError>,
     ) {
         // build the failure message for this partition
         let msg = ServerMsg::PartitionLoadFailed {
+            span,
             table,
             partition_id,
             error,
@@ -400,9 +421,12 @@ impl<D: ShoalDatabase> FsLoader<D> {
                 LoaderMsg::Request {
                     table_name,
                     partition_id,
+                    span,
                 } => {
-                    // try to spawn this task
-                    if let Err(error) = self.spawn_task(table_name, partition_id).await {
+                    // try to spawn this task, under the span of the query that asked for it
+                    if let Err(error) =
+                        self.spawn_task(table_name, partition_id, span.clone()).await
+                    {
                         // this read never started, so nothing else is going to tell our shard
                         // about it and the queries parked on it would wait forever
                         event!(
@@ -416,7 +440,7 @@ impl<D: ShoalDatabase> FsLoader<D> {
                         // a read that never started is not a partition that is missing, so
                         // this is always a failure the client hears about
                         let failure = client_error(&error, &table_name, partition_id);
-                        self.report_failure(table_name, partition_id, failure)
+                        self.report_failure(table_name, partition_id, span, failure)
                             .await;
                     }
                 }

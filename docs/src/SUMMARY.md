@@ -95,6 +95,8 @@
   - [F31. A metric a workload can actually answer](features/metric-availability.md)
   - [F32. A colour per table, and a chart that frames itself](features/chart-line-identity.md)
   - [F33. The chart answers where you point, and the capture list says whether it can](features/chart-readout.md)
+  - [F34. A capture that honors its tracing config](features/benchmark-tracing.md)
+  - [F35. A trace context on the wire](features/wire-trace-context.md)
 
 # Direction
 
@@ -141,6 +143,7 @@
   - [56, 61. A response cannot say that a read failed](appendix/resolved/response-error-channel.md)
   - [54. `#[shoal::db]` needed crates the caller had never heard of](appendix/resolved/macro-emits-three-crates.md)
   - [67, 68. Chart labels collided, and the scope prefix strip never matched](appendix/resolved/chart-labels.md)
+  - [69. Nothing in the workspace ever installed a tracing subscriber](appendix/resolved/benchmark-tracing.md)
   - [73. Two instrumented runs wrote to one artifact, and the last one won](appendix/resolved/stage-artifact-overwrite.md)
   - [74. A configuration knob the page did not name disappeared from it](appendix/resolved/conf-knob-dropped.md)
   - [76. The stage layer joined nothing for any grid arm](appendix/resolved/stage-join.md)
@@ -152,6 +155,8 @@
   - [84. Two workloads the recorded facts cannot tell apart drew as one line](appendix/resolved/identical-facts-one-line.md)
   - [85. The chart stayed framed for the last thing it drew](appendix/resolved/chart-framed-for-the-last-selection.md)
   - [86. The hover label read a logarithmic chart in decades](appendix/resolved/hover-label-reads-in-decades.md)
+  - [89. One query produced several disjoint traces](appendix/resolved/fragmented-query-traces.md)
+  - [90. Setting `RUST_LOG` could fragment every exported trace](appendix/resolved/divergent-layer-filters.md)
 - [TODOs and Unbuilt Work](appendix/todos.md)
 - [Review, August 2026](appendix/review-2026-08.md)
 - [Glossary](appendix/glossary.md)

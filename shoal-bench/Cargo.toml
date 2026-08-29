@@ -51,6 +51,14 @@ workloads = [
     "dep:uuid",
     "dep:mimalloc",
     "dep:rcgen",
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-otlp",
+    # a workload's client puts a trace context on the wire, so a captured query is one trace
+    # rather than two. this sits in `workloads` rather than in a feature of its own because the
+    # three crates above are already unconditional here, and a capture that traced only half of
+    # each query would be the one shape nobody wants (F35)
+    "shoal/otel",
 ]
 # attribute time to scopes. must forward to `shoal`, which forwards to `shoal-core`, since every
 # instrumentation attribute lives there
@@ -122,6 +130,15 @@ uuid = { workspace = true, optional = true }
 # the server half of a workload runs on glommio, and the client half needs an allocator that
 # matches the one the server was measured with
 mimalloc = { workspace = true, optional = true }
+# Shipping a run's measurements to a collector while the capture is still going (F34). Every one
+# of these is already resolved through `shoal-core`, which pulls the same three at the same
+# versions for the trace half - the metrics half of them is in each crate's *default* feature set,
+# so this adds instruments to build and no packages to the lockfile. They sit in the measured half
+# because the workload process is what has a measurement worth shipping; the runner never links
+# them, and `cargo tree -p shoal-bench --no-default-features` is unchanged.
+opentelemetry = { version = "0.28", optional = true }
+opentelemetry_sdk = { version = "0.28", optional = true }
+opentelemetry-otlp = { version = "0.28", optional = true }
 # the tls transport arms generate a certificate per workload per run rather than committing one,
 # so that nothing in the repository expires and invalidates a capture
 rcgen = { version = "0.13", default-features = false, features = ["crypto", "aws_lc_rs", "pem"], optional = true }

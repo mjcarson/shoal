@@ -22,6 +22,7 @@ use std::collections::HashMap;
 use std::hash::BuildHasherDefault;
 use std::sync::Arc;
 use uuid::Uuid;
+use tracing::Span;
 
 use crate::server::messages::{Answer, LoadedPartitionKinds, QueryMetadata, ServerMsg};
 use crate::server::routing::{ArchivedShardRouting, ShardRouting};
@@ -228,6 +229,7 @@ pub trait ShoalDatabase: 'static + Sized {
     /// # Arguments
     ///
     /// * `table` - The table the partition that could not be read belongs to
+    /// * `span` - The span of the read that gave up, which the queries it releases are linked to
     /// * `partition_id` - The partition that could not be read
     /// * `error` - What the released queries should answer with, if this was a failure at all
     /// * `shard_local_tx` - The channel to replay the released queries on
@@ -236,6 +238,7 @@ pub trait ShoalDatabase: 'static + Sized {
         &mut self,
         table: Self::TableNames,
         partition_id: u64,
+        span: &Span,
         error: Option<ResponseError>,
         shard_local_tx: &AsyncSender<ServerMsg<Self>>,
     ) -> Result<(), ServerError>;

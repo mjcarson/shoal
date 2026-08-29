@@ -25,7 +25,11 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, ReadBuf};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpStream, ToSocketAddrs};
 use tokio::task::JoinHandle;
-use tracing::{event, instrument, Level};
+use tracing::{event, info_span, instrument, Instrument, Level, Span};
+// the extension trait that resolves what trace the caller is in, which only exists with a layer
+// that can answer the question
+#[cfg(feature = "otel")]
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 use uuid::Uuid;
 
 pub mod builder;
@@ -43,6 +47,7 @@ use shoal_proto::shared::auth::scram::{ClientStep, ScramClient};
 use shoal_proto::shared::auth::{AuthError, Credentials};
 use shoal_proto::shared::protocol::auth::{self as proto_auth, AuthMechanism, AuthStatus};
 use shoal_proto::shared::protocol::error::{self, ErrorCode};
+use shoal_proto::shared::protocol::trace::TraceContext;
 use shoal_proto::shared::protocol::{self, handshake, MessageType, ProtocolError};
 use shoal_proto::shared::responses::{ArchivedResponseError, ArchivedRowGroup, ResponseActionNames};
 use shoal_proto::shared::tls::{self as shared_tls, TlsClientOptions};
@@ -100,6 +105,41 @@ fn endpoint_order(start: usize, count: usize) -> impl Iterator<Item = usize> {
     (0..count).map(move |offset| (start.wrapping_add(offset)) % count.max(1))
 }
 
+/// The trace context to put on the wire, if this caller is in a trace at all
+///
+/// The context names the caller's current span, which is what the server's `Shoal::request` span
+/// hangs off - so a query's spans and the shard's answering it are one trace
+/// ([F35](../../../docs/src/features/wire-trace-context.md)).
+///
+/// Returns `None` when there is nothing to carry, which is every caller with no OpenTelemetry
+/// layer installed: the context such a caller resolves to is all zeroes, and `TraceContext::new`
+/// refuses to build one from ids that name no parent. **So a build with this feature on and no
+/// collector configured writes exactly the bytes it wrote before the feature existed.**
+#[cfg(feature = "otel")]
+fn current_trace_context() -> Option<TraceContext> {
+    // resolve what trace the caller is in, which the OTLP layer answers and nothing else does
+    let context = tracing::Span::current().context();
+    // bound rather than chained, since the span reference this resolves to is a temporary
+    let span = opentelemetry::trace::TraceContextExt::span(&context);
+    let span_context = span.span_context();
+    // and hand its ids to the codec, which refuses the invalid pair an untraced caller resolves to
+    TraceContext::new(
+        span_context.trace_id().to_bytes(),
+        span_context.span_id().to_bytes(),
+        span_context.trace_flags().to_u8(),
+    )
+}
+
+/// The trace context to put on the wire, which is never one in a build without `otel`
+///
+/// A client that cannot resolve a trace context sets no flag bit and writes no extra bytes, which
+/// is why this feature can be off without either peer being confused: the *reading* half is
+/// unconditional, so a server understands the bit whether or not anything it serves ever sets it.
+#[cfg(not(feature = "otel"))]
+fn current_trace_context() -> Option<TraceContext> {
+    None
+}
+
 /// The channel a query's responses are routed through, and where they are owed from
 ///
 /// The connection is here rather than in a map of its own so that there is exactly one place a
@@ -114,6 +154,18 @@ struct Waiter {
     conn: Option<u64>,
     /// The channel to hand this query's responses to
     tx: AsyncSender<ClientMsg>,
+    /// The span this query's answers hang off
+    ///
+    /// The response half of a query runs in a detached reader task shared by every query on one
+    /// connection, so it inherits nothing from the caller that sent the query. This is how it
+    /// finds its way back: the span is parked here when the query is registered and read out
+    /// again when a frame for it arrives.
+    ///
+    /// **This must never be an empty span.** `tracing` turns a parent it cannot resolve into
+    /// `Attributes::new_root`, so an empty one here does not produce an orphan that something
+    /// would notice - every response span silently starts a **new trace**. This is the client's
+    /// half of the trap `QueryMetadata.span` documents on the server's side.
+    span: Span,
 }
 
 /// The write half of a pooled connection, and which connection it is
@@ -974,6 +1026,9 @@ impl<S: QuerySupport> Shoal<S> {
                     Waiter {
                         conn: None,
                         tx: tx.clone(),
+                        // the caller's own span, since this runs inside the send that is
+                        // registering the query rather than in a task of its own
+                        span: Span::current(),
                     },
                 );
                 // we found a unique query id so stop trying to find a new id
@@ -1030,7 +1085,13 @@ impl<S: QuerySupport> Shoal<S> {
         // this is done before we take a connection from the pool, so a bundle too large to frame
         // fails without ever consuming a pool slot. it is attributed to serialization rather than
         // to the pool wait, the same way the streaming path attributes it
-        let preamble = protocol::request_preamble(archived.len(), self.peer_max_frame_bytes())?;
+        // the context names this send's own span, so the server's root hangs off it. resolving it
+        // here rather than at the socket keeps it inside the span it is naming
+        let preamble = protocol::request_preamble_traced(
+            current_trace_context().as_ref(),
+            archived.len(),
+            self.peer_max_frame_bytes(),
+        )?;
         // start tracking this response
         let (response_tx, response_rx) = self.track_response(&mut queries.id)?;
         // get a connection from our connection pool and send our query
@@ -1042,7 +1103,7 @@ impl<S: QuerySupport> Shoal<S> {
         // this is where client side backpressure shows up once enough queries are in flight
         stamps.mark_pooled();
         // build our vectored byte slices to send
-        let mut bufs = &mut [IoSlice::new(&preamble), IoSlice::new(&archived)][..];
+        let mut bufs = &mut [IoSlice::new(preamble.as_bytes()), IoSlice::new(&archived)][..];
         // keep sending our data until all of this archive has been sent
         while !bufs.is_empty() {
             // send this data back to our client
@@ -1069,6 +1130,7 @@ impl<S: QuerySupport> Shoal<S> {
             Waiter {
                 conn: Some(conn.id),
                 tx: response_tx.clone(),
+                span: Span::current(),
             },
         );
         // check that this connection did not die between being handed to us and being written to
@@ -1098,6 +1160,7 @@ impl<S: QuerySupport> Shoal<S> {
             unbounded_queries: false,
             pending: BTreeMap::default(),
             phantom: PhantomData,
+            span: Span::current(),
         };
         Ok((result_stream, stamps))
     }
@@ -1329,6 +1392,7 @@ impl<S: QuerySupport> Shoal<S> {
             unbounded_queries: true,
             pending: BTreeMap::default(),
             phantom: PhantomData,
+            span: Span::current(),
         };
         // wraap our result in a stream that supports queries and results
         let query_stream = ShoalQueryStream {
@@ -1364,6 +1428,7 @@ impl<S: QuerySupport> Shoal<S> {
             pending: BTreeSet::default(),
             phantom: PhantomData,
             end: None,
+            span: Span::current(),
         };
         // wraap our result in a stream that supports queries and results
         let query_stream = ShoalQueryStream {
@@ -1703,7 +1768,28 @@ impl TcpProxy {
             // get the channel for this query
             match self.channel_map.pin_owned().get(&query_id) {
                 // send our message to the right shoal stream
-                Some(waiter) => waiter.tx.send(wrapped).await.map_err(send_failed)?,
+                Some(waiter) => {
+                    // rejoin the trace the query was sent in
+                    //
+                    // this reader is shared by every query on one connection and inherits nothing
+                    // from any of them, so the parent comes out of the waiter rather than out of
+                    // the ambient context - which belongs to whatever the last frame was for
+                    //
+                    // opened here rather than around the frame read above because until the query
+                    // id is decoded there is no way to know whose span this frame belongs to
+                    let span = info_span!(parent: &waiter.span, "Shoal::response", %query_id);
+                    // instrumented rather than entered around: a guard held across the await below
+                    // would leave this span current while another connection's task runs on this
+                    // worker. `Instrumented` enters on each poll and exits on each return, which is
+                    // also what gives this span an end - `tracing-opentelemetry` timestamps a span
+                    // when it is *exited*, so one that is never entered exports with no duration
+                    waiter
+                        .tx
+                        .send(wrapped)
+                        .instrument(span)
+                        .await
+                        .map_err(send_failed)?;
+                }
                 // a frame for a query nobody is waiting on is dropped, and this loop goes on
                 //
                 // that happens when a result stream was dropped before it was drained, which
@@ -2026,6 +2112,13 @@ pub struct ShoalResultStream<S: QuerySupport> {
     pending: BTreeMap<usize, ClientMsg>,
     /// The database kind we are streaming response for
     phantom: PhantomData<S>,
+    /// The span this stream's own work hangs off
+    ///
+    /// Taken where the stream is built rather than read from the ambient context in `next`,
+    /// because a caller polls a stream from wherever it likes - often a `select!` in a task that
+    /// never sent anything. This is the same span the query's `Waiter` parked, so a response and
+    /// the delivery of it are siblings under the send that asked for them.
+    span: Span,
 }
 
 impl<S: QuerySupport> ShoalResultStream<S>
@@ -2205,6 +2298,10 @@ where
     }
 
     /// Get the next response to our query
+    ///
+    /// Parented off the span this stream was built in rather than off the ambient one, since a
+    /// caller can poll a stream from a task that never sent anything.
+    #[instrument(name = "ShoalResultStream::next", parent = &self.span, skip_all, err(Debug))]
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub async fn next(&mut self) -> Result<Option<ShoalResponse<S>>, Errors>
     where
@@ -2331,6 +2428,13 @@ pub struct ShoalUnorderedResultStream<S: QuerySupport> {
     end: Option<usize>,
     /// The database kind we are streaming response for
     phantom: PhantomData<S>,
+    /// The span this stream's own work hangs off
+    ///
+    /// Taken where the stream is built rather than read from the ambient context in `next`,
+    /// because a caller polls a stream from wherever it likes - often a `select!` in a task that
+    /// never sent anything. This is the same span the query's `Waiter` parked, so a response and
+    /// the delivery of it are siblings under the send that asked for them.
+    span: Span,
 }
 
 impl<S: QuerySupport> ShoalUnorderedResultStream<S>
@@ -2433,6 +2537,9 @@ where
     }
 
     /// Get the next available response to our query
+    ///
+    /// Parented off the span this stream was built in, the same way the ordered stream's is.
+    #[instrument(name = "ShoalUnorderedResultStream::next", parent = &self.span, skip_all, err(Debug))]
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     pub async fn next(&mut self) -> Result<Option<ShoalResponse<S>>, Errors>
     where
@@ -2538,7 +2645,8 @@ impl<Q: QuerySupport> ShoalQueryStream<Q> {
         //
         // this is attributed to serialization rather than to the pool wait, since it is the last
         // thing done to the bytes before a connection is asked for
-        let preamble = protocol::request_preamble(
+        let preamble = protocol::request_preamble_traced(
+            current_trace_context().as_ref(),
             archived.len(),
             self.peer_max_frame_bytes.load(Ordering::Relaxed),
         )?;
@@ -2551,7 +2659,7 @@ impl<Q: QuerySupport> ShoalQueryStream<Q> {
         // this is where client side backpressure shows up once enough queries are in flight
         stamps.mark_pooled();
         // build our vectored byte slices to send
-        let mut bufs = &mut [IoSlice::new(&preamble), IoSlice::new(&archived)][..];
+        let mut bufs = &mut [IoSlice::new(preamble.as_bytes()), IoSlice::new(&archived)][..];
         // keep sending our data until all of this archive has been sent
         while !bufs.is_empty() {
             // send this data back to our client
@@ -2579,6 +2687,7 @@ impl<Q: QuerySupport> ShoalQueryStream<Q> {
             Waiter {
                 conn: Some(conn.id),
                 tx: self.response_tx.clone(),
+                span: Span::current(),
             },
         );
         // increment the number of queries sent and our base index
@@ -2599,7 +2708,7 @@ impl<Q: QuerySupport> ShoalQueryStream<Q> {
 
 #[cfg(test)]
 mod tests {
-    use super::{endpoint_order, error, protocol, ClientMsg, ErrorCode, Frame, TcpProxy, Waiter};
+    use super::{endpoint_order, error, protocol, ClientMsg, ErrorCode, Frame, Span, TcpProxy, Waiter};
     use papaya::HashMap;
     use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
@@ -2944,7 +3053,14 @@ mod tests {
         let (tx, rx) = kanal::unbounded_async();
         channel_map
             .pin()
-            .insert(query_id, Waiter { conn: Some(1), tx });
+            .insert(
+                query_id,
+                Waiter {
+                    conn: Some(1),
+                    tx,
+                    span: Span::current(),
+                },
+            );
         let dead_conns = Arc::new(HashMap::with_capacity(1));
         let is_shutting_down = Arc::new(AtomicBool::new(false));
         let proxy = TcpProxy::new(reader, 1, &channel_map, &dead_conns, &is_shutting_down);
@@ -2995,7 +3111,14 @@ mod tests {
         let (tx, rx) = kanal::unbounded_async();
         channel_map
             .pin()
-            .insert(known_id, Waiter { conn: Some(1), tx });
+            .insert(
+                known_id,
+                Waiter {
+                    conn: Some(1),
+                    tx,
+                    span: Span::current(),
+                },
+            );
         let dead_conns = Arc::new(HashMap::with_capacity(1));
         let is_shutting_down = Arc::new(AtomicBool::new(false));
         let proxy = TcpProxy::new(reader, 1, &channel_map, &dead_conns, &is_shutting_down);
@@ -3044,6 +3167,7 @@ mod tests {
             Waiter {
                 conn: Some(1),
                 tx: doomed_tx,
+                span: Span::current(),
             },
         );
         channel_map.pin().insert(
@@ -3051,6 +3175,7 @@ mod tests {
             Waiter {
                 conn: Some(2),
                 tx: other_tx,
+                span: Span::current(),
             },
         );
         // read that connection until it ends

@@ -112,7 +112,7 @@ impl<S: QuerySupport> Queries<S> {
     }
 
     /// Load our queries
-    #[instrument(name = "Queries<S>::access", skip_all, err(Debug))]
+    #[instrument(level = "trace", name = "Queries<S>::access", skip_all, err(Debug))]
     pub fn access(raw: &[u8]) -> Result<&ArchivedQueries<S>, rkyv::rancor::Error>
     where
         for<'a> <Self as Archive>::Archived: rkyv::bytecheck::CheckBytes<
@@ -209,7 +209,9 @@ mod tests {
         // normalize the selection holding it
         let normalized = SortSelect::Range(range).normalized();
         // both bounds came through untouched
-        let normalized = normalized.range().expect("a range normalized into something else");
+        let normalized = normalized
+            .range()
+            .expect("a range normalized into something else");
         assert!(matches!(normalized.start, Bound::Excluded("b")));
         assert!(matches!(normalized.end, Bound::Included("d")));
     }

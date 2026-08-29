@@ -29,11 +29,16 @@ number of body bytes before it replies — which is what a version refusal is ma
 version may add meaning to the flag bits or change what follows the header; it may not move these
 two fields.
 
-**`length` counts every byte after the header**, including a response frame's query id. It is not
-the payload length. That is what lets a peer skip a frame whose type it does not know, and it is
-what makes `decode_response`'s "shorter than its own query id" check possible.
+**`length` counts every byte after the header**, including a response frame's query id and a
+request frame's trace context. It is not the payload length. That is what lets a peer skip a frame
+whose type it does not know, and it is what makes `decode_response`'s "shorter than its own query
+id" check possible — and `Header::request_payload_len`'s "shorter than the trace context it claims"
+check beside it.
 
-`version` is `PROTOCOL_VERSION`, currently 1. A frame naming any other version is refused.
+`version` is `PROTOCOL_VERSION`, ~~currently 1~~ **currently 3**. A frame naming any other version
+is refused. It went to 2 when a get's answer started carrying the index of the partitions its rows
+came from ([F27](../features/grouped-responses.md)), and to 3 when a request frame started being
+able to carry a trace context ([F35](../features/wire-trace-context.md)).
 
 `type` is one of twelve, with discriminants that are explicit, start at 1, and are never reused:
 
@@ -56,28 +61,42 @@ Starting at 1 rather than 0 is what stops a zeroed buffer decoding as a valid ty
 reserved entries exist so that the features that need them are a call site rather than a second
 flag day — which is what `Auth`, `AuthResponse` and `Error` turned out to be.
 
-`flags` is sixteen bits, four of which are claimed: `IS_ERROR` (1), `STALE_TOPOLOGY` (2), `LAST`
-(4), `REFUSED` (8). Two are set today: `REFUSED`, on a `HelloAck` that turns a client away, and
-`IS_ERROR`, on every `Error` frame. `IS_ERROR` is redundant against the type byte on that frame and
+`flags` is sixteen bits, five of which are claimed: `IS_ERROR` (1), `STALE_TOPOLOGY` (2), `LAST`
+(4), `REFUSED` (8), `TRACE_CONTEXT` (16). Three are set today: `REFUSED`, on a `HelloAck` that
+turns a client away; `IS_ERROR`, on every `Error` frame; and `TRACE_CONTEXT`, on a request frame
+from a client that is tracing ([F35](../features/wire-trace-context.md)) — the first of the free
+bits to be spent, and the demonstration that the mechanism below actually works. `IS_ERROR` is redundant against the type byte on that frame and
 is set anyway, so that "is this a failure" stays one uniform bit test when a `Response` frame
 carrying an error payload starts setting it too — **the type byte remains authoritative, and the
 flag is never the sole test**. **Unknown bits are preserved, never rejected** — that is the whole
-mechanism by which the other twelve can be spent one at a time without a version bump.
+mechanism by which the other eleven can be spent one at a time without a version bump.
 
 ## Framing
 
 ### Client → Server
 
 ```
- ┌─────────────────┬─────────────────────────────────────┐
- │ header (8 B)    │ rkyv-archived Queries<S>            │
- └─────────────────┴─────────────────────────────────────┘
-  ◀── preamble ───▶◀────────── length bytes ───────────▶
+ ┌─────────────────┬──────────────────────┬───────────────────────────┐
+ │ header (8 B)    │ trace context (26 B) │ rkyv-archived Queries<S>  │
+ └─────────────────┴──────────────────────┴───────────────────────────┘
+  ◀── preamble ───▶◀────────only if TRACE_CONTEXT is set ───────────▶
+                   ◀───────────── length bytes ──────────────────────▶
 ```
 
-Written vectored from two slices (`Shoal::send` and `ShoalQueryStream::send` in
-`shoal-core/src/client.rs`), read as an 8-byte header then an exact-size body (`client_rx_relay`
-in `shoal-core/src/server/shard.rs`).
+**This is the one preamble here that is not a fixed size.** Without the flag it is the eight byte
+header and nothing else, which is every frame a client that is not tracing sends. With it, a 26
+byte W3C trace context follows: a version byte, a 16 byte trace id, an 8 byte span id and the trace
+flags ([F35](../features/wire-trace-context.md)).
+
+Written vectored from two slices (`Shoal::send_stamped` and `ShoalQueryStream::send` in
+`shoal-client/src/client.rs`) — the preamble is one buffer whichever shape it is, so the payload
+stays a slice of its own. Read as an 8-byte header, then the context if the flags say there is one,
+then an exact-size body (`client_rx_relay` in `shoal-core/src/server/shard.rs`).
+
+**The context is read separately from the body, and has to be.** The body is an rkyv archive
+accessed in place, and the read that fills it allocates exactly its length, so the archive starts at
+offset 0. Folding the context into the front of that buffer would put every archived pointer 26
+bytes out of alignment.
 
 ### Server → Client
 
@@ -93,7 +112,9 @@ Written vectored from two slices (`client_tx_relay`), read as a 24-byte preamble
 exact-size payload (`TcpProxy::read_frame` in `shoal-core/src/client.rs`).
 
 The query id stays where it is, after the header: it is a routing field, not a framing field, and
-only response frames have one.
+only response frames have one. Nothing goes back the other way for tracing — a client keeps its own
+span and needs nothing from the server to stay in its own trace, so the response preamble is
+untouched by F35.
 
 **The header costs zero bytes.** The old request frame was an 8-byte `u64` length and the new one
 is an 8-byte header; the old response preamble was 16 bytes of query id plus an 8-byte `u64`

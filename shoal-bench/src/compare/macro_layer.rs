@@ -118,6 +118,18 @@ pub struct MacroComparison {
     /// purpose built workloads existed. Reported explicitly, because an empty table of rows is
     /// otherwise indistinguishable from a comparison in which nothing moved.
     pub disjoint: bool,
+    /// Workloads whose two sides did not trace the same way, and how they differed
+    ///
+    /// A run with a subscriber installed and a run without are measurements of two different
+    /// programs: `#[instrument]` defaults to `INFO`, so anything at that level or finer puts a
+    /// span per query through `tracing`'s registry. The rows above still compare, because a
+    /// deliberate before-and-after across that change is a thing somebody may want; what must not
+    /// happen is the difference being attributed to the code.
+    ///
+    /// Empty when both sides agree, and empty when neither side recorded the facts — every capture
+    /// taken before [F34](../../../docs/src/features/benchmark-tracing.md) is in that state, and
+    /// calling those uncomparable would condemn the whole committed corpus.
+    pub traced: Vec<String>,
 }
 
 impl MacroComparison {
@@ -225,12 +237,18 @@ pub fn compare(run: &MacroCaptureV2, baseline: &MacroCaptureV2) -> MacroComparis
         .map(|id| (*id).to_string())
         .collect();
     let mut rows = Vec::new();
+    let mut traced = Vec::new();
     // one block of rows per shared workload, in identifier order so the report is deterministic
     for id in &shared {
         let (Some(before), Some(after)) = (baseline.workloads.get(*id), run.workloads.get(*id))
         else {
             continue;
         };
+        // say so before comparing anything, since a difference in what was instrumented is not a
+        // difference in the code and must not be read as one
+        if let Some(difference) = trace_difference(after, before) {
+            traced.push(format!("{id} ({difference})"));
+        }
         rows.extend(compare_one(id, after, before));
     }
     // then a row per workload that only one side has, so it is named rather than dropped
@@ -253,7 +271,39 @@ pub fn compare(run: &MacroCaptureV2, baseline: &MacroCaptureV2) -> MacroComparis
         only_in_baseline,
         // sharing nothing is different from sharing something and finding no movement
         disjoint: shared.is_empty(),
+        traced,
     }
+}
+
+/// How two sides of one workload disagreed about tracing, if they did
+///
+/// Returns `None` when they agree, and when neither recorded the facts — a capture taken before
+/// [F34](../../../docs/src/features/benchmark-tracing.md) has no tracing facts at all, and reading
+/// its silence as "untraced" would be inventing a measurement about it. That is the same rule the
+/// `Option` fields on [`crate::model::macro_layer::ConfFacts`] already follow.
+///
+/// # Arguments
+///
+/// * `run` - The workload as this run measured it
+/// * `baseline` - The same workload as the baseline measured it
+fn trace_difference(run: &WorkloadCapture, baseline: &WorkloadCapture) -> Option<String> {
+    // a workload with no server on one side has nothing to compare here
+    let (run_conf, baseline_conf) = (run.conf.as_ref()?, baseline.conf.as_ref()?);
+    // the level is the field that costs, so it is reported first and on its own
+    if let (Some(after), Some(before)) = (&run_conf.trace_level, &baseline_conf.trace_level)
+        && after != before
+    {
+        return Some(format!("level {before} -> {after}"));
+    }
+    // then whether spans were leaving the box while the run was in flight
+    if let (Some(after), Some(before)) = (run_conf.trace_remote, baseline_conf.trace_remote)
+        && after != before
+    {
+        // named as what changed rather than as two booleans, which read backwards half the time
+        let described = if after { "started" } else { "stopped" };
+        return Some(format!("export {described}"));
+    }
+    None
 }
 
 /// Compares one workload against the same workload from another capture
@@ -623,5 +673,74 @@ mod tests {
         let comparison = compare(&after, &frozen);
         assert!(!comparison.disjoint, "two version 1 captures must still join");
         assert!(comparison.missing().is_empty());
+        // and neither of them recorded a tracing fact, which is not the same as disagreeing
+        assert!(
+            comparison.traced.is_empty(),
+            "the committed corpus was declared uncomparable with itself"
+        );
+    }
+
+    /// Builds a capture whose workload traced a given way
+    ///
+    /// # Arguments
+    ///
+    /// * `walls` - Every run's wall clock in nanoseconds
+    /// * `level` - The level its subscriber was filtered at
+    /// * `remote` - Whether it was exporting spans while it ran
+    fn traced_capture(walls: &[u64], level: &str, remote: bool) -> MacroCaptureV2 {
+        use crate::model::macro_layer::ConfFacts;
+        let mut capture = capture(walls);
+        let workload = capture
+            .workloads
+            .get_mut(ID)
+            .expect("the fixture holds its own workload");
+        workload.conf = Some(ConfFacts {
+            shards: 12,
+            memory: "4Gi".to_string(),
+            durability: "async".to_string(),
+            trace_level: Some(level.to_string()),
+            trace_remote: Some(remote),
+            ..ConfFacts::default()
+        });
+        capture
+    }
+
+    #[test]
+    /// A run traced differently from its baseline is called out rather than compared silently
+    ///
+    /// `#[instrument]` defaults to `INFO`, so a run at that level pays a span per query through
+    /// `tracing`'s registry and a run at `Warn` does not. Comparing the two without saying so
+    /// attributes the instrumentation to the code, which is exactly the failure recording the
+    /// facts exists to stop.
+    fn a_traced_capture_does_not_compare_to_an_untraced_one() {
+        // the level moved, which is the half that costs
+        let quiet = traced_capture(&[1_000, 1_100], "warn", false);
+        let loud = traced_capture(&[1_400, 1_500], "info", false);
+        let comparison = compare(&loud, &quiet);
+        assert_eq!(comparison.traced.len(), 1, "a level change went unreported");
+        assert!(
+            comparison.traced[0].contains("warn -> info"),
+            "the report did not name the change: {}",
+            comparison.traced[0]
+        );
+        // the rows are still built, because a deliberate before and after across that change is a
+        // thing somebody may want to look at - it just may not be read as a code difference
+        assert!(!comparison.rows.is_empty());
+        // and the export starting on its own is reported too
+        let exporting = traced_capture(&[1_400, 1_500], "warn", true);
+        let comparison = compare(&exporting, &quiet);
+        assert_eq!(comparison.traced.len(), 1);
+        assert!(comparison.traced[0].contains("export started"));
+    }
+
+    #[test]
+    /// Two captures that traced the same way compare with nothing said about it
+    ///
+    /// The noisy half of this guard: a warning that fires on every ordinary comparison is a
+    /// warning nobody reads by the third one.
+    fn matching_trace_facts_are_not_reported() {
+        let before = traced_capture(&[1_000, 1_100], "warn", false);
+        let after = traced_capture(&[1_010, 1_120], "warn", false);
+        assert!(compare(&after, &before).traced.is_empty());
     }
 }

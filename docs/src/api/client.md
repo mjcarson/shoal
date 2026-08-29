@@ -521,6 +521,17 @@ a PBKDF2 derivation on both ends. Nothing measures it
   workloads that bound the total are built ([F13](../features/transport-workloads.md)). So step 0
   of the [Direction](../direction/overview.md) chapter is done and
   [O28](../appendix/optimizations.md) and O30 are adjudicable. **What the spans still do not do is
-  reach anything**: nothing in the workspace calls `trace::setup`, so no subscriber is ever
-  installed, the server's spans have never been switched on either, and `shoal.yml`'s `tracing`
-  section configures nothing ([item 69](../appendix/known-issues.md)).
+  reach anything**~~: nothing in the workspace calls `trace::setup`~~ ~~— the bundled example calls
+  it now […] `shoal-workload` and `shoalctl` still install no subscriber, so a benchmark capture's
+  `tracing` section still configures nothing~~ — **the example and `shoal-workload` both call it**,
+  so the client's spans reach a collector on every benchmark run and a capture honors its
+  `tracing:` section ([F34](../features/benchmark-tracing.md)). `shoalctl` and the tests still
+  install nothing ([item 69](../appendix/known-issues.md)). What F16 measured is still a statement
+  about spans nobody was listening to: it was taken before any of this, under no subscriber.
+  **And they are no longer a trace of their own**: [F35](../features/wire-trace-context.md) put a
+  W3C trace context on the request frame, so a client built with `otel` is the *parent* of every
+  span the server opens answering it — and the return half rejoins it too, since `Waiter` now parks
+  the span a query was sent in and `Shoal::response` and both `next()`s hang off it. Those last
+  three are spans this page and
+  [Observability](../operations/observability.md) each claimed for two features before either
+  had them.

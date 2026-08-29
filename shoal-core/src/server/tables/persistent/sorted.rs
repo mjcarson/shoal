@@ -40,8 +40,8 @@ use crate::shared::responses::{Response, ResponseAction, ResponseError};
 use crate::server::database::ShoalDatabase;
 use crate::shared::traits::{RkyvSupport, ShoalProjection, ShoalSortedTable, ShoalTableSupport, TableNameSupport};
 use crate::storage::{
-    FullArchiveMap, IntentReadSupport, LoaderMsg, Loaders, PendingResponse, RecoveryStats,
-    ShouldPrune, StorageSupport,
+    link_released, FullArchiveMap, IntentReadSupport, LoaderMsg, Loaders, PendingResponse,
+    RecoveryStats, ShouldPrune, StorageSupport,
 };
 use crate::tables::partitions::{MaybeLoaded, MaybeRow, PartitionSupport, ValidatedArchive};
 
@@ -320,6 +320,8 @@ where
     ) -> Result<PartitionLoad<SortedQuery<R>>, ServerError> {
         // remember which partition this is, since the load is consumed below
         let partition_id = loaded.partition_id;
+        // and the span of the read that produced it, for the same reason
+        let read_span = loaded.span.clone();
         // overlay any existing loaded partition data on this newly loaded partition
         match self.partitions.entry(loaded.partition_id) {
             hash_map::Entry::Occupied(mut entry) => {
@@ -349,6 +351,7 @@ where
                             return Ok(PartitionLoad::Failed(
                                 self.fail_partition(
                                     partition_id,
+                                    &read_span,
                                     Some(&corrupt_archive(self.table_name, partition_id)),
                                 )
                                 .unwrap_or_default(),
@@ -393,6 +396,7 @@ where
                         return Ok(PartitionLoad::Failed(
                             self.fail_partition(
                                 partition_id,
+                                &read_span,
                                 Some(&corrupt_archive(self.table_name, partition_id)),
                             )
                             .unwrap_or_default(),
@@ -415,7 +419,11 @@ where
         }
         // get the queries that were blocked on this partition
         Ok(match self.blocked.remove(&partition_id) {
-            Some(unblocked) => PartitionLoad::Loaded(unblocked, self.flushed_generation),
+            Some(unblocked) => {
+                // put every query this read released in the same trace as the read
+                link_released(&unblocked, &read_span);
+                PartitionLoad::Loaded(unblocked, self.flushed_generation)
+            }
             None => PartitionLoad::Idle,
         })
     }
@@ -433,11 +441,13 @@ where
     /// # Arguments
     ///
     /// * `partition_id` - The partition that could not be read
+    /// * `read` - The span of the read that gave up, which the queries it releases are linked to
     /// * `error` - What the released queries should answer with, if this was a failure at all
-    #[instrument(name = "PersistentTable::fail_partition", skip(self, error))]
+    #[instrument(name = "PersistentTable::fail_partition", skip(self, read, error))]
     pub fn fail_partition(
         &mut self,
         partition_id: u64,
+        read: &Span,
         error: Option<&ResponseError>,
     ) -> Option<Vec<(QueryMetadata, SortedQuery<R>)>> {
         // take the queries that were parked on this partition
@@ -459,6 +469,8 @@ where
             // against one really has found everything there is to find
             meta.failed = error.cloned();
         }
+        // put every query this failure released in the same trace as the read that failed
+        link_released(&blocked, read);
         Some(blocked)
     }
 
@@ -494,7 +506,13 @@ where
         // try to load this partition from disk if it exists
         let will_load = self
             .storage
-            .load_partition(self.table_name, partition_key, &self.loader_tx)
+            .load_partition(
+                self.table_name,
+                partition_key,
+                // the read this asks for belongs in the trace of the query that parks on it
+                &meta.span,
+                &self.loader_tx,
+            )
             .await
             .unwrap();
         // if this partition has no data on disk then there is nothing to wait for

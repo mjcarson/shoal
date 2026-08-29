@@ -100,11 +100,21 @@ per-connection task, before the stream is split, under one deadline.
 let mut preamble = [0u8; protocol::REQUEST_PREAMBLE_LEN];
 tcp_rx.read_exact(&mut preamble).await // EOF ⇒ client died, break
 let header = protocol::decode_request(&preamble, max_frame_bytes)?; // else log and break
-let data = RequestBody::read_from(&mut tcp_rx, header.body_len()).await // else log and break
-kanal_tx.send(ServerMsg::Client { peer, data, base }).await // else log and break
+let wire_trace = read_trace_context(&mut tcp_rx, &header).await?; // None unless the flag is set
+let payload_len = header.request_payload_len()?; // the body minus whatever the context took
+let span = info_span!(parent: None, "Shoal::request", ..); // adopts wire_trace if there is one
+let data = RequestBody::read_from(&mut tcp_rx, payload_len).await // else log and break
+kanal_tx.send(ServerMsg::Client { peer, span, data, base }).await // else log and break
 ```
 
 `client_rx_relay`, `shoal-core/src/server/shard.rs`
+
+**The trace context is its own read, and the body length is not the frame length.** A client that
+is tracing puts 26 bytes between the header and the payload
+([F35](../features/wire-trace-context.md)), and they cannot go into the front of `RequestBody`'s
+buffer: that buffer is sized to hold the archive exactly, so the archive starts at offset 0 and is
+accessed in place. `header.body_len()` counts the context; `header.request_payload_len()` is what
+the body actually is.
 
 Clean EOF ends the loop, and so does everything else — a version this build does not speak, a
 message type it does not know, a length past `max_frame_bytes`, a truncated body, or a shard
@@ -121,7 +131,7 @@ the split stream and closes the socket.
 ```rust
 let body = data.freeze();
 let archived = Queries::access(&body)?;
-self.send_to_shard(peer, &body, archived, stamps).await
+self.send_to_shard(peer, &span, &body, archived, stamps).await
 ```
 
 `shoal-core/src/server/shard.rs`, `Shard::handle_client`
@@ -175,7 +185,11 @@ without meeting a constructor
 normalizing, since it is already an ordered pair ([F1](../features/sort-key-ranges.md)).
 
 `QueryMetadata` carries the client id, the bundle id, the query's index within the bundle, an
-`end` flag, `Span::current()` for tracing, and `gather` (`server/messages.rs`). Index and `end`
+`end` flag, ~~`Span::current()`~~ **the query's own `Coordinator::route` span**, and `gather`
+(`server/messages.rs`). The span is passed in rather than read from the ambient context, and it is
+opened once per **query** rather than once per bundle — reading `Span::current()` there took
+`send_to_shard`'s function-level span, so every query in a batch shared one parent
+([Resolved #89](../appendix/resolved/fragmented-query-traces.md)). Index and `end`
 are how the client reassembles an ordered stream from responses that arrive out of order, which
 is why the index is computed **once per query** rather than once per target shard — every shard
 answering one query must answer it under the same index.
@@ -390,7 +404,10 @@ while !bufs.is_empty() {
 
 The client runs one `TcpProxy` per pooled connection. Each reads a 24-byte preamble — eight bytes
 of header and then the query id — looks that id up in a shared concurrent map, and forwards the
-payload:
+payload. The response preamble is fixed size in a way the *request* preamble no longer is, because
+nothing about tracing travels back this way: the entry it looks up carries the span the query was
+sent in, which is how the answer rejoins the trace that asked for it
+([F35](../features/wire-trace-context.md)).
 
 ```rust
 let mut preamble = [0u8; protocol::RESPONSE_PREAMBLE_LEN];
@@ -423,9 +440,15 @@ why the shard loop stays a flat `match`.
 **Responses bypass the coordinator.** Because `NewClient` is broadcast, the owning shard
 writes to the client's socket channel directly. The coordinator is on the request path only.
 
-**Tracing spans are threaded through by hand.** `QueryMetadata` carries a `Span`, `reply`
-takes one, and `client_tx_relay` enters it around the socket write — so a trace spans the
-whole lifecycle including the asynchronous flush.
+**Tracing spans are threaded through by hand.** `QueryMetadata` carries a `Span`, `reply` takes
+one, and `client_tx_relay` opens a child of it around the socket write — so a trace spans the whole
+lifecycle including the asynchronous flush. ~~`client_tx_relay` enters it~~ — entering it put the
+write *under* the span for anything reading `Span::current()` and produced no span at all for
+anything reading the trace, which is one of four gaps in
+[Resolved #89](../appendix/resolved/fragmented-query-traces.md). The root of that trace is opened
+in `client_rx_relay` when the frame lands, so the lifecycle this page describes and the trace of it
+now start in the same place; see
+[Observability](../operations/observability.md#how-one-query-stays-one-trace) for the whole shape.
 
 ## Limitations
 

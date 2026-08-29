@@ -20,7 +20,7 @@ use std::hash::Hasher;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tracing::{event, instrument, Level};
+use tracing::{event, instrument, Level, Span};
 
 mod compactor;
 pub mod conf;
@@ -608,6 +608,7 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
         &self,
         table_name: N,
         partition_id: u64,
+        span: &Span,
         loader_tx: &AsyncSender<LoaderMsg<N>>,
     ) -> Result<bool, ServerError> {
         // check if this partition is in our archive map
@@ -621,6 +622,8 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
                     .send(LoaderMsg::Request {
                         table_name,
                         partition_id,
+                        // the read this asks for belongs in the trace of the query asking
+                        span: span.clone(),
                     })
                     .await?;
                 // return true to let our caller know we are loading this

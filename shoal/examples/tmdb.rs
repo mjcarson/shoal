@@ -30,14 +30,14 @@
 
 use deepsize2::DeepSizeOf;
 use rkyv::{Archive, Deserialize, Serialize};
+use shoal::server::conf::{DefaultStorageSettings, Networking, Resources, Storage, TraceLevel, Tracing, OtlpTracing};
+use shoal::server::tables::storage::fs::conf::{
+    FileSystemLatencyWriterConf, FileSystemTableConf, FileSystemThroughputWriterConf,
+};
 use shoal::shared::queries::Queries;
 use shoal::{
     Conf, Errors, FileSystem, PersistentSortedTable, PersistentUnsortedTable, Shoal, ShoalPool,
     ShoalProjection, ShoalSortedTable, ShoalUnsortedTable,
-};
-use shoal::server::conf::{DefaultStorageSettings, Networking, Resources, Storage, TraceLevel};
-use shoal::server::tables::storage::fs::conf::{
-    FileSystemLatencyWriterConf, FileSystemTableConf, FileSystemThroughputWriterConf,
 };
 
 /// A movie, stored one per partition
@@ -72,7 +72,9 @@ pub struct Movie {
 /// A sorted table adds `#[shoal(sort)]`, which orders the rows *within* a partition. That is what
 /// makes "every movie tagged `alien`, in title order" a range of a single partition rather than a
 /// scan of the whole table.
-#[derive(Debug, Clone, PartialEq, Archive, Serialize, Deserialize, ShoalSortedTable, DeepSizeOf)]
+#[derive(
+    Debug, Clone, PartialEq, Archive, Serialize, Deserialize, ShoalSortedTable, DeepSizeOf,
+)]
 #[rkyv(derive(Debug))]
 #[shoal_table(db = "Tmdb")]
 pub struct MovieByKeyword {
@@ -117,18 +119,102 @@ pub struct Tmdb {
 
 /// The movies this example writes, with the keywords each is listed under
 const MOVIES: [(u64, &str, u64, &str, f64, &[&str]); 12] = [
-    (78, "Blade Runner", 1982, "Man has made his match... now it's his problem.", 8.1, &["android", "dystopia", "noir"]),
-    (348, "Alien", 1979, "In space no one can hear you scream.", 8.2, &["alien", "space", "horror"]),
-    (679, "Aliens", 1986, "This time it's war.", 7.9, &["alien", "space", "war"]),
-    (218, "The Terminator", 1984, "Your future is in his hands.", 7.7, &["android", "time-travel"]),
-    (280, "Terminator 2", 1991, "It's nothing personal.", 8.1, &["android", "time-travel"]),
-    (62, "2001: A Space Odyssey", 1968, "An epic drama of adventure and exploration.", 8.1, &["space", "ai"]),
-    (1892, "Return of the Jedi", 1983, "The Empire falls.", 7.9, &["space", "war"]),
-    (11, "Star Wars", 1977, "A long time ago in a galaxy far, far away...", 8.2, &["space", "war"]),
-    (601, "E.T.", 1982, "He is afraid. He is alone. He is three million light years from home.", 7.5, &["alien", "family"]),
-    (813, "Close Encounters", 1977, "We are not alone.", 7.4, &["alien", "ufo"]),
-    (152, "Star Trek: The Motion Picture", 1979, "The human adventure is just beginning.", 6.4, &["space", "alien"]),
-    (105, "Back to the Future", 1985, "He was never in time for his classes...", 8.3, &["time-travel", "comedy"]),
+    (
+        78,
+        "Blade Runner",
+        1982,
+        "Man has made his match... now it's his problem.",
+        8.1,
+        &["android", "dystopia", "noir"],
+    ),
+    (
+        348,
+        "Alien",
+        1979,
+        "In space no one can hear you scream.",
+        8.2,
+        &["alien", "space", "horror"],
+    ),
+    (
+        679,
+        "Aliens",
+        1986,
+        "This time it's war.",
+        7.9,
+        &["alien", "space", "war"],
+    ),
+    (
+        218,
+        "The Terminator",
+        1984,
+        "Your future is in his hands.",
+        7.7,
+        &["android", "time-travel"],
+    ),
+    (
+        280,
+        "Terminator 2",
+        1991,
+        "It's nothing personal.",
+        8.1,
+        &["android", "time-travel"],
+    ),
+    (
+        62,
+        "2001: A Space Odyssey",
+        1968,
+        "An epic drama of adventure and exploration.",
+        8.1,
+        &["space", "ai"],
+    ),
+    (
+        1892,
+        "Return of the Jedi",
+        1983,
+        "The Empire falls.",
+        7.9,
+        &["space", "war"],
+    ),
+    (
+        11,
+        "Star Wars",
+        1977,
+        "A long time ago in a galaxy far, far away...",
+        8.2,
+        &["space", "war"],
+    ),
+    (
+        601,
+        "E.T.",
+        1982,
+        "He is afraid. He is alone. He is three million light years from home.",
+        7.5,
+        &["alien", "family"],
+    ),
+    (
+        813,
+        "Close Encounters",
+        1977,
+        "We are not alone.",
+        7.4,
+        &["alien", "ufo"],
+    ),
+    (
+        152,
+        "Star Trek: The Motion Picture",
+        1979,
+        "The human adventure is just beginning.",
+        6.4,
+        &["space", "alien"],
+    ),
+    (
+        105,
+        "Back to the Future",
+        1985,
+        "He was never in time for his classes...",
+        8.3,
+        &["time-travel", "comedy"],
+    ),
 ];
 
 /// Builds a config that stores its data in a temporary directory
@@ -149,7 +235,11 @@ fn config(dir: &std::path::Path) -> Conf {
                 .expect("256MiB is a valid memory size"),
         )
         .networking(Networking::default().port(12345))
-        .tracing(shoal::server::conf::Tracing::default().level(TraceLevel::Warn))
+        // a remote sink only if one was named, so the example still runs against nothing
+        //
+        // `SHOAL_OTLP_ENDPOINT` is the full URL including `/v1/traces`, and `SHOAL_OTLP_TENANT`
+        // is the `X-Scope-OrgID` a multi tenant collector reads its tenant out of
+        .tracing(tracing_conf())
         .storage(
             Storage::default().default_settings(
                 DefaultStorageSettings::default().filesystem(
@@ -159,6 +249,32 @@ fn config(dir: &std::path::Path) -> Conf {
                 ),
             ),
         )
+}
+
+/// Builds the tracing settings this run uses
+///
+/// The example writes to stdout with no configuration at all. It exports to a collector only when
+/// `SHOAL_OTLP_ENDPOINT` names one, so that pointing the example at a Tempo or an OTel collector
+/// is a shell variable rather than an edit:
+///
+/// ```bash
+/// SHOAL_OTLP_ENDPOINT=http://127.0.0.1:4318/v1/traces \
+///     SHOAL_OTLP_TENANT=Shoal cargo run --example tmdb
+/// ```
+fn tracing_conf() -> Tracing {
+    // everything gets a stdout layer at Info
+    let tracing = Tracing::default().level(TraceLevel::Info);
+    // and a remote sink only when one was named
+    let Ok(endpoint) = std::env::var("SHOAL_OTLP_ENDPOINT") else {
+        return tracing;
+    };
+    // point an OTLP over HTTP exporter at it
+    let mut otlp = OtlpTracing::new(endpoint);
+    // a multi tenant collector rejects an export that names no tenant, so pass one if we have it
+    if let Ok(tenant) = std::env::var("SHOAL_OTLP_TENANT") {
+        otlp = otlp.header("X-Scope-OrgID", tenant);
+    }
+    tracing.otlp(otlp)
 }
 
 /// Writes every movie, and a row per keyword for each of them
@@ -295,10 +411,13 @@ async fn main() -> Result<(), Errors> {
     //
     // glommio silently disables O_DIRECT on tmpfs, and `/tmp` usually is one, so a server rooted
     // there quietly runs a buffered write path instead of the one it was built for
-    let dir = tempfile::TempDir::new_in(target_dir())
-        .expect("failed to create a temporary directory");
+    let dir =
+        tempfile::TempDir::new_in(target_dir()).expect("failed to create a temporary directory");
     let conf = config(dir.path());
     let addr = format!("127.0.0.1:{}", conf.networking.port);
+    // setup tracing/telemetry. the guard has to outlive every span below it, because dropping
+    // it is what flushes whatever the exporter has queued
+    let traces = shoal_core::server::trace::setup(&conf);
     // start one shard per configured core. this returns as soon as the shard threads are spawned,
     // which is why the client below retries rather than assuming the server is up.
     let pool = ShoalPool::<Tmdb>::start(conf).expect("failed to start shoal");
@@ -312,6 +431,8 @@ async fn main() -> Result<(), Errors> {
     read_with_shql(&client).await?;
     // stop the shards, which flushes everything still buffered
     pool.exit().expect("failed to stop shoal");
+    // shutdown our tracer, which ships whatever the exporter still has queued
+    shoal_core::server::trace::shutdown(traces);
     Ok(())
 }
 

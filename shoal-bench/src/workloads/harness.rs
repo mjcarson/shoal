@@ -16,6 +16,7 @@
 pub mod conf;
 pub mod driver;
 pub mod keys;
+pub mod metrics;
 pub mod ready;
 pub mod rows;
 pub mod seed;

@@ -188,6 +188,26 @@ pub struct ConfFacts {
     /// The largest frame the server would accept, in bytes
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_frame_bytes: Option<u64>,
+    /// The level the subscriber this run installed was filtered at
+    ///
+    /// **This is the field that decides whether a capture is comparable**, more than
+    /// [`ConfFacts::trace_remote`] below it. `#[instrument]` defaults to `INFO`, so anything at
+    /// that level or finer switches on a span per query in `tracing`'s registry — the same class
+    /// of cost [F5](../../../docs/src/features/flushed-sweep-gate.md) measured at 711,638 slab
+    /// inserts per run for a single span it then removed. A run at `Warn` and a run at `Info` are
+    /// two different measurements of two different programs.
+    ///
+    /// `None` on every capture taken before
+    /// [F34](../../../docs/src/features/benchmark-tracing.md), which is correct: nothing installed
+    /// a subscriber at all then, so there was no level for one to run at.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_level: Option<String>,
+    /// Whether spans were being exported to a collector while this was measured
+    ///
+    /// Recorded separately from the level because it costs separately: the level decides what is
+    /// built, this decides what is serialized and POSTed off the box while the run is in flight.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_remote: Option<bool>,
     /// A digest over the whole resolved configuration
     ///
     /// The named fields above are the ones worth reading. This covers everything else, so a

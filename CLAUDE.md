@@ -6,8 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 # You can't build just shoal on its own you can either build an example or the tests
-# To build the example you can use
+# To build the examples you can use
 cargo build --example tmdb
+cargo build --release --example tmdb_dataset
 
 # the benchmark workloads are the other thing that instantiates a schema
 cargo build --release --bin shoal-workload
@@ -34,6 +35,11 @@ cargo check -p shoal-top --features native
 cd shoal-top && RUSTFLAGS="-C target-cpu=generic" \
     cargo check --target wasm32-unknown-unknown --lib --features web
 
+# the client half of the trace context is behind a feature, so `cargo test -p shoal` compiles
+# `trace_propagation.rs` away. a `--workspace` run does build it, because `shoal-bench` enables
+# `shoal/otel` and cargo unifies features - this is the form that runs it on its own (F35)
+cargo test -p shoal --features otel --test trace_propagation
+
 # and the same property on a program somebody runs
 cargo build -p shoalctl
 
@@ -43,6 +49,12 @@ cargo build --release --bin shoal-workload --features hotpath
 # Run the TMDB example. Needs no config, no dataset and no flags - it starts its own
 # server against a temp dir under target/ and reads the rows back four ways.
 cargo run --example tmdb
+
+# The same two tables against the real dataset, which is the one example that needs
+# something off disk: TMDB_movie_dataset_v11.csv (538MB, from kaggle, not in this repo)
+# at ~/datasets/ or --dataset, and a shoal.yml in the cwd or the defaults' /opt/shoal.
+# --limit loads a slice. The rows/sec it prints is not a measurement - see shoal-bench.
+cargo run --release --example tmdb_dataset -- --limit 10000
 ```
 
 ## Benchmarking

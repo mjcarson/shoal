@@ -78,8 +78,10 @@ pointing at
 which is the same problem seen from the macro's side.
 
 So the true dependency surface of "a Shoal client" today is tokio with `full`, glommio, bb8, kanal,
-papaya, rkyv, lru, intmap, bytes, deepsize2, winnow, and the whole OpenTelemetry and tonic stack —
-none of it optional.
+papaya, rkyv, lru, intmap, bytes, deepsize2, winnow, and the whole OpenTelemetry stack — none of
+it optional. ~~and tonic~~ `tonic` left with the three unused OpenTelemetry dependencies it came in
+with, which is 512 lines off `Cargo.lock` and one fewer major of `rustls` in the graph, and changes
+nothing about the argument below: the surface is still everything a server needs.
 
 There is a second, subtler coupling in the same direction. `ShoalQuerySupport` is a *shared* trait
 implemented by the generated `QueryKinds`, and one of its methods takes server types:

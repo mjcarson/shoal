@@ -1,5 +1,6 @@
 //! The root traits that shoal is built upon that are shared between the client and server
 
+use super::rearchive::Rearchive;
 use deepsize2::DeepSizeOf;
 use rkyv::de::Pool;
 use rkyv::rancor::{Error, Strategy};
@@ -8,7 +9,6 @@ use rkyv::ser::sharing::Share;
 use rkyv::ser::Serializer;
 use rkyv::util::AlignedVec;
 use rkyv::{Archive, Serialize};
-use super::rearchive::Rearchive;
 use tracing::instrument;
 use uuid::Uuid;
 
@@ -45,7 +45,7 @@ pub trait RkyvSupport: Archive
     /// # Arguments
     ///
     /// * `raw` - The raw bytes to load an archive from
-    #[instrument(name = "RkyvSupport::access", skip_all, err(Debug))]
+    #[instrument(level = "trace", name = "RkyvSupport::access", skip_all, err(Debug))]
     fn access(raw: &[u8]) -> Result<&<Self as Archive>::Archived, rkyv::rancor::Error>
     where
         for<'a> <Self as Archive>::Archived: rkyv::bytecheck::CheckBytes<

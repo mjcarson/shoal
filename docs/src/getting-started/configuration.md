@@ -57,8 +57,21 @@ auth:                                # optional; omitting it requires nothing
 
 tracing:
   level: Info                        # Trace | Debug | Info | Warn | Error | Off
-  remote:
-    Grpc: "http://127.0.0.1:4318/v1/traces"   # optional
+                                     # RUST_LOG overrides this, per target
+  remote:                            # optional; omit for stdout only
+    Otlp:
+      endpoint: "http://127.0.0.1:4318/v1/traces"   # the full URL, path included
+      headers:                                      # optional
+        X-Scope-OrgID: Shoal                        # the tenant, on a multi tenant collector
+      timeout_secs: 10               # optional, how long one export may take
+      batch_delay_ms: 1000           # optional, how often spans are shipped
+      max_queue_size: 8192           # optional, spans queued before new ones are dropped
+      sample_ratio: 0.001            # optional, fraction of traces exported; default all of them
+  metrics:                           # optional; derived from `remote` when omitted
+    endpoint: "http://127.0.0.1:4318/v1/metrics"    # the full URL, path included
+    headers: {}                      # optional
+    interval_secs: 10                # optional, how often recorded metrics are shipped
+    timeout_secs: 10                 # optional, how long one export may take
 
 storage:
   default:
@@ -187,6 +200,38 @@ A user that names neither is a config error and refuses to start, naming the use
 `iterations` is the PBKDF2 cost, paid by the server once per connection. Raising it raises time to
 first query — the pool opens ten connections before it is idle — rather than the cost of an offline
 guess against a file an attacker has to have stolen first.
+
+### tracing
+
+The section is only as live as the binary reading it: `trace::setup` installs a **global**
+subscriber and the application has to call it. The bundled example does, and so does
+`shoal-workload` since [F34](../features/benchmark-tracing.md), which is what makes this section
+configure a benchmark capture. `shoalctl` and the tests still install nothing, so this section is
+inert for them ([item 69](../appendix/known-issues.md)).
+
+`RUST_LOG` overrides `level` **entirely**, per target, and is what makes an export problem
+diagnosable — the OTLP exporter reports every step of a POST at `DEBUG` on its own targets:
+
+```bash
+RUST_LOG=info,opentelemetry-otlp=debug,opentelemetry-sdk=debug,opentelemetry-http=debug
+```
+
+Two settings are easy to get backwards. **`level` is what costs and `sample_ratio` is what the
+collector sees.** A sampler decides after `tracing` has built the span, so it bounds the export and
+not the work; `#[instrument]` defaults to `INFO`, so `level: Info` puts a registry slab insert per
+query on three per-query callsites in the server. Turn `sample_ratio` down to protect the collector,
+and `level` down to protect throughput.
+
+`metrics` may be omitted. With `remote` set, the metrics endpoint is derived from it by swapping
+`/v1/traces` for `/v1/metrics`, carrying the tenant header across, because a collector serves both
+on one host and port. An endpoint whose path is not the one that rewrite recognizes derives nothing
+rather than guessing at a URL. Set the block explicitly when the two sinks are not on one host.
+
+`Grpc: "<endpoint>"` is still accepted where `Otlp:` goes. It never spoke gRPC — it is the old name
+for the same OTLP over HTTP exporter — and it widens into an `Otlp` sink with every other field
+defaulted.
+
+See [Observability](../operations/observability.md) for what is instrumented and how to read it.
 
 ### storage
 

@@ -262,11 +262,14 @@ above cost anything. **Step 0 is done.**
 metrics over sixteen transport workloads, before and after, and not one disjoint pair —
 `macro/transport/send_one/small`, the arm this page names below, moved −4.98% and overlapped.
 `hotpath::measure` compiles away without its feature, so a default build carries none of it. The
-spans *are* in the build, and cost nothing because **no subscriber is installed** — `trace::setup`
-has no callers anywhere in the workspace, which also means the server's own spans have never been
-switched on and `shoal.yml`'s `tracing` section configures nothing
-([item 69](../appendix/known-issues.md)). The spans are now written down; making them reach
-anything is a separate piece of work.
+spans *are* in the build, and cost nothing **in the configuration this was measured under, which
+installs no subscriber** — `trace::setup` had no callers anywhere in the workspace when this figure
+was taken. ~~The example calls it now, so a subscriber can be switched on, but `shoal-workload`
+still installs none~~ — `shoal-workload` installs one now, and a capture honors its `tracing:`
+section ([F34](../features/benchmark-tracing.md)). **Every number on this page was still measured
+without one**, so the measurement remains a statement about spans nobody was listening to; what has
+changed is that the other configuration now exists and can be measured, not that this figure covers
+it ([item 69](../appendix/known-issues.md)).
 
 ## Recommendation
 

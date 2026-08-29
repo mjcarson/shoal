@@ -18,10 +18,11 @@ use super::error::{
 };
 use super::fingerprint::{self, ROLE_FILTER, ROLE_PARTITION, ROLE_SORT, ROLE_UPDATE};
 use super::handshake::{Hello, HelloAck, RefusalReason, HANDSHAKE_BODY_LEN, HANDSHAKE_FRAME_LEN};
+use super::trace::{TraceContext, TRACE_CONTEXT_LEN, TRACE_CONTEXT_VERSION};
 use super::{
-    decode_request, decode_response, request_preamble, response_preamble, Flags, Header,
-    MessageType, ProtocolError, RawHeader, HEADER_LEN, PROTOCOL_VERSION, QUERY_ID_LEN,
-    REQUEST_PREAMBLE_LEN, RESPONSE_PREAMBLE_LEN,
+    decode_request, decode_response, request_preamble, request_preamble_traced, response_preamble,
+    Flags, Header, MessageType, ProtocolError, RawHeader, HEADER_LEN, MAX_REQUEST_PREAMBLE_LEN,
+    PROTOCOL_VERSION, QUERY_ID_LEN, REQUEST_PREAMBLE_LEN, RESPONSE_PREAMBLE_LEN,
 };
 
 /// Every message type this build knows, so a test can walk all of them
@@ -108,6 +109,10 @@ fn a_response_preamble_round_trips() {
 fn the_preamble_sizes_are_unchanged() {
     assert_eq!(REQUEST_PREAMBLE_LEN, 8);
     assert_eq!(RESPONSE_PREAMBLE_LEN, 24);
+    // and a request frame carrying a trace context is those eight bytes plus a fixed block, which
+    // is the one preamble here that is not the same size every time
+    assert_eq!(TRACE_CONTEXT_LEN, 26);
+    assert_eq!(MAX_REQUEST_PREAMBLE_LEN, 34);
 }
 
 /// Every message type is written as the byte it has always been written as
@@ -802,4 +807,167 @@ fn an_unknown_mechanism_in_an_ack_reads_as_none() {
     // and a zero, which is what every server wrote before there was authentication
     body[13] = 0;
     assert_eq!(HelloAck::decode(&body).mechanism, None);
+}
+
+/// A trace context that names a parent survives the wire
+///
+/// Both ids and the flags byte come back exactly as they went out, because the receiver builds a
+/// `SpanContext` straight out of them - an id that shifted by a byte is a parent that resolves to
+/// nothing, which is a new trace rather than an error.
+#[test]
+fn a_trace_context_round_trips() {
+    // a context with every byte of both ids distinguishable from its neighbours
+    let trace_id = [
+        0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee,
+        0xff,
+    ];
+    let span_id = [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08];
+    let context = TraceContext::new(trace_id, span_id, 1).expect("a valid context was refused");
+    // it goes out as the version byte, both ids in order, and the flags
+    let raw = context.encode();
+    assert_eq!(raw.len(), TRACE_CONTEXT_LEN);
+    assert_eq!(raw[0], TRACE_CONTEXT_VERSION);
+    assert_eq!(&raw[1..17], &trace_id);
+    assert_eq!(&raw[17..25], &span_id);
+    assert_eq!(raw[25], 1);
+    // and comes back as what went in
+    let decoded = TraceContext::decode(&raw).expect("a context we wrote was refused");
+    assert_eq!(decoded, context);
+    assert_eq!(decoded.trace_id(), trace_id);
+    assert_eq!(decoded.span_id(), span_id);
+    assert!(decoded.is_sampled());
+}
+
+/// A trace context whose ids name no parent is never built, and never accepted
+///
+/// This is the load bearing refusal of the whole feature. `tracing` turns a parent it cannot
+/// resolve into `Attributes::new_root`, so a zero id does not produce an orphan somebody would
+/// notice - it silently starts a new trace, which is exactly what the context exists to stop.
+#[test]
+fn a_trace_context_that_names_no_parent_is_refused() {
+    // neither id may be all zeroes, on the way in
+    assert!(TraceContext::new([0; 16], [1; 8], 1).is_none());
+    assert!(TraceContext::new([1; 16], [0; 8], 1).is_none());
+    assert!(TraceContext::new([1; 16], [1; 8], 1).is_some());
+    // or on the way out, for a peer that set the flag and then wrote one anyway
+    let mut raw = TraceContext::new([1; 16], [1; 8], 1)
+        .expect("a valid context was refused")
+        .encode();
+    raw[1..17].fill(0);
+    assert_eq!(
+        TraceContext::decode(&raw).unwrap_err(),
+        ProtocolError::InvalidTraceContext
+    );
+}
+
+/// A trace context in a version this build does not write is refused rather than guessed at
+///
+/// The flag bit says a context follows and nothing more, so this is the only thing that can tell a
+/// decoder these 26 bytes are not the ones it knows how to read.
+#[test]
+fn an_unknown_trace_context_version_is_refused() {
+    let mut raw = TraceContext::new([7; 16], [3; 8], 0)
+        .expect("a valid context was refused")
+        .encode();
+    raw[0] = TRACE_CONTEXT_VERSION.wrapping_add(1);
+    assert_eq!(
+        TraceContext::decode(&raw).unwrap_err(),
+        ProtocolError::UnknownTraceContextVersion(TRACE_CONTEXT_VERSION.wrapping_add(1))
+    );
+}
+
+/// A traced request preamble says a context follows, and counts it in its own length
+///
+/// The length counting the context rather than just the payload is what lets a peer that does not
+/// want the context drain the frame anyway, which is the standing rule for every fixed field here.
+#[test]
+fn a_traced_request_preamble_round_trips() {
+    let context = TraceContext::new([9; 16], [4; 8], 1).expect("a valid context was refused");
+    // frame a bundle of 4096 payload bytes, carrying the context
+    let preamble = request_preamble_traced(Some(&context), 4096, ROOMY).unwrap();
+    assert_eq!(preamble.len(), MAX_REQUEST_PREAMBLE_LEN);
+    assert!(!preamble.is_empty());
+    // the header says a context follows, and counts it
+    let mut header_bytes = [0u8; REQUEST_PREAMBLE_LEN];
+    header_bytes.copy_from_slice(&preamble.as_bytes()[..REQUEST_PREAMBLE_LEN]);
+    let header = decode_request(&header_bytes, ROOMY).unwrap();
+    assert!(header.flags.contains(Flags::TRACE_CONTEXT));
+    assert_eq!(header.body_len(), 4096 + TRACE_CONTEXT_LEN);
+    assert_eq!(header.trace_len(), TRACE_CONTEXT_LEN);
+    // and the payload after the context is the length the caller asked to frame
+    assert_eq!(header.request_payload_len().unwrap(), 4096);
+    // the context itself sits between the two, and is what went in
+    let mut context_bytes = [0u8; TRACE_CONTEXT_LEN];
+    context_bytes.copy_from_slice(&preamble.as_bytes()[REQUEST_PREAMBLE_LEN..]);
+    assert_eq!(TraceContext::decode(&context_bytes).unwrap(), context);
+}
+
+/// A bundle with no context to carry is framed exactly as it was before contexts existed
+///
+/// Most callers are in this arm: a client with no OpenTelemetry layer installed has no context to
+/// put on the wire, and must not pay 26 bytes a frame to say so.
+#[test]
+fn an_untraced_preamble_is_byte_identical() {
+    // both routes to a preamble, given the same bundle
+    let plain = request_preamble(4096, ROOMY).unwrap();
+    let traced = request_preamble_traced(None, 4096, ROOMY).unwrap();
+    // the same eight bytes, and no more of them
+    assert_eq!(traced.len(), REQUEST_PREAMBLE_LEN);
+    assert_eq!(traced.as_bytes(), &plain);
+    // which means no flag bit, and a length that is the payload alone
+    let header = decode_request(&plain, ROOMY).unwrap();
+    assert!(!header.flags.contains(Flags::TRACE_CONTEXT));
+    assert_eq!(header.trace_len(), 0);
+    assert_eq!(header.request_payload_len().unwrap(), 4096);
+}
+
+/// A frame claiming a trace context it is too short to hold is refused before anything reads it
+///
+/// The subtraction that finds the payload length would otherwise underflow, and a peer would go on
+/// to read a body of nearly `usize::MAX` bytes.
+#[test]
+fn a_traced_frame_too_short_for_its_context_is_refused() {
+    // a header that says a context follows and then claims fewer bytes than one takes
+    let header = Header::new(
+        MessageType::Queries,
+        Flags::TRACE_CONTEXT,
+        TRACE_CONTEXT_LEN - 1,
+        ROOMY,
+    )
+    .unwrap();
+    assert_eq!(
+        header.request_payload_len().unwrap_err(),
+        ProtocolError::BodyTooShort {
+            need: TRACE_CONTEXT_LEN,
+            got: (TRACE_CONTEXT_LEN - 1) as u32,
+        }
+    );
+    // a frame carrying nothing but a context is legal, since an empty bundle is a legal bundle
+    let empty = Header::new(
+        MessageType::Queries,
+        Flags::TRACE_CONTEXT,
+        TRACE_CONTEXT_LEN,
+        ROOMY,
+    )
+    .unwrap();
+    assert_eq!(empty.request_payload_len().unwrap(), 0);
+}
+
+/// The trace context flag is bit 4, and does not collide with the four bits that came before it
+///
+/// A flag bit that moved would be read as a different flag by every peer built from an older
+/// commit, which is the same class of break as a renumbered message type.
+#[test]
+fn the_trace_context_flag_is_its_own_bit() {
+    assert_eq!(Flags::TRACE_CONTEXT.bits(), 1 << 4);
+    // and none of the bits already spent are set by it
+    for other in [
+        Flags::IS_ERROR,
+        Flags::STALE_TOPOLOGY,
+        Flags::LAST,
+        Flags::REFUSED,
+    ] {
+        assert!(!Flags::TRACE_CONTEXT.contains(other));
+        assert!(!other.contains(Flags::TRACE_CONTEXT));
+    }
 }

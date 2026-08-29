@@ -13,42 +13,143 @@ Configured under `tracing:` in the config
 tracing:
   level: Info                                        # Trace|Debug|Info|Warn|Error|Off
   remote:
-    Grpc: "http://127.0.0.1:4318/v1/traces"
+    Otlp:
+      endpoint: "http://127.0.0.1:4318/v1/traces"    # the full URL, path included
+      headers:                                       # optional
+        X-Scope-OrgID: Shoal                         # the tenant, on a multi tenant collector
+      timeout_secs: 10                               # optional, default 10
+      batch_delay_ms: 1000                           # optional, default 1000
+      max_queue_size: 8192                           # optional, default 8192
+      sample_ratio: 0.001                            # optional, default every trace
+  metrics:                                           # optional, derived from remote when absent
+    endpoint: "http://127.0.0.1:4318/v1/metrics"
+    headers: {}                                      # optional
+    interval_secs: 10                                # optional, default 10
+    timeout_secs: 10                                 # optional, default 10
 ```
 
-Setup is in `shoal-core/src/server/trace.rs`. A stdout `fmt` layer is always installed; if a
-remote is configured, an OTLP layer is added on top:
+**`level` is the cost knob; `sample_ratio` is the collector's.** This is easy to get backwards. A
+sampler decides *after* `tracing` has built the span, so it bounds what is serialized and POSTed and
+not what is spent building it. `#[instrument]` defaults to `INFO`, so `level: Info` switches on a
+registry slab insert per query on `Shard::handle_query`, `Shard::reply` and ~~`Coordinator::send_to_shard`~~
+**`Coordinator::route`** — the class of cost [F5](../features/flushed-sweep-gate.md) counted at
+711,638 slab inserts per run for one span it then removed. Turn `sample_ratio` down to protect the
+collector; turn `level` down to protect the measurement.
+
+That third callsite **moved** rather than multiplied.
+[Resolved #89](../appendix/resolved/fragmented-query-traces.md) took `send_to_shard`'s
+function-level span, which was one per bundle, and reopened it inside the routing loop as
+`Coordinator::route`, which is one per query. For a bundle of one — the common case — that is the
+same cost; for a bundle of *n* it is *n* − 1 more. `Shoal::request` adds one more per bundle, and
+that is the whole of the change: the response write is covered by entering the query's own span
+rather than by a span of its own.
+
+`metrics` may be left out. With `remote` set, [`Tracing::metrics_sink`] derives the metrics endpoint
+by swapping `/v1/traces` for `/v1/metrics` on the same collector, carrying the tenant header across —
+a collector serves both on one host and port, and requiring the URL twice is requiring two places to
+forget to change it. An endpoint whose path is not the one a rewrite recognizes derives nothing
+rather than guessing. Nothing in `shoal-core` builds a metrics pipeline; the type is there because
+the configuration is, and `shoal-bench` owns the exporter.
+
+[`Tracing::metrics_sink`]: ../features/benchmark-tracing.md
+
+`RUST_LOG` overrides `level`, per target, and this is the setting that makes an export problem
+diagnosable — the OTLP exporter reports every step of a POST on its own targets at `DEBUG`:
+
+```bash
+RUST_LOG=info,opentelemetry-otlp=debug,opentelemetry-sdk=debug,opentelemetry-http=debug
+# HttpTracesClient.CallingExport / ReqwestBlockingClient.Send on success
+# BatchSpanProcessor.ExportError                            on failure
+```
+
+Setup is in `shoal-core/src/server/trace.rs`. A console `fmt` layer is always installed; if a
+remote is configured, an OTLP layer is added on top, and `setup` hands back a guard:
 
 ```rust
-pub fn setup(conf: &Conf) -> Option<SdkTracerProvider> {
-    let local = setup_local(&conf.tracing);
-    let registry = tracing_subscriber::registry().with(local);
-    match &conf.tracing.remote {
-        Some(RemoteTracing::Grpc(endpoint)) => setup_remote("Shoal", endpoint, registry),
-        None => { registry.try_init().unwrap(); None }
-    }
-}
+pub fn setup(conf: &Conf) -> TraceGuard;                              // the defaults
+pub fn setup_with(conf: &Conf, options: &TraceOptions) -> TraceGuard; // F34
 ```
 
-`shoal-core/src/server/trace.rs:74-90`
+`TraceOptions` carries the three things a process that is not a server needs to choose — the
+service name it reports as, the resource attributes every span carries, and whether the console
+layer writes to **stderr** rather than stdout. That last one is not cosmetic for anything whose
+stdout is an artifact; see [F34](../features/benchmark-tracing.md).
 
-`setup` is **not called by `ShoalPool::start`** — the application must call it. Neither the
-bundled example nor the benchmark workloads do, so `cargo run --example tmdb` and a
-`shoal-workload` run both produce no structured logs at all. Nothing warns about this.
+**Hold the guard for as long as spans are being emitted.** `SdkTracerProvider` has no `Drop` of
+its own, so dropping the guard is the only thing that flushes what the batch processor is holding.
+`shutdown(guard)` does the same at a point you name; it is idempotent with the drop that follows.
 
-Two details worth knowing:
+`setup` is **not called by `ShoalPool::start`** — the application must call it. The bundled example
+does, and ~~the benchmark workloads and `shoalctl` still do not, so a `shoal-workload` run produces
+no structured logs at all~~ — **`shoal-workload` does now**, since
+[F34](../features/benchmark-tracing.md), which is what makes the section above configure anything
+for a capture. `shoalctl` and the tests still install nothing, and a *library* installing a global
+subscriber is still an open question; that remainder is
+[item 69](../appendix/known-issues.md).
 
-- The `RemoteTracing::Grpc` variant is exported over **HTTP**, not gRPC:
-  `SpanExporter::builder().with_http()` (`trace.rs:36-40`). The default port in the checked-in
-  config, 4318, is the OTLP/HTTP port, so the config is right and the variant name is wrong.
-- The remote layer is hardcoded to `LevelFilter::INFO`
-  (`trace.rs:54-56`), independent of `tracing.level`. Setting `level: Debug` gives you more on
-  stdout and exactly the same spans remotely.
-- Batch queue size is 2048 × 100 spans (`trace.rs:41-44`), which is large. Under load,
-  dropped spans are more likely than backpressure.
+Three details worth knowing:
 
-`shutdown(provider)` (`trace.rs:100-110`) must be called to flush the batch processor; skipping
-it loses whatever is queued.
+- ~~The `RemoteTracing::Grpc` variant is exported over **HTTP**, not gRPC~~ — **fixed.** The
+  variant is now `RemoteTracing::Otlp`, which is what the exporter has always spoken. `Grpc:`
+  still parses and means the same thing, so a config written against the old name keeps working;
+  `the_deprecated_grpc_spelling_still_loads` pins that.
+- ~~The remote layer is hardcoded to `LevelFilter::INFO`, independent of `tracing.level`~~ —
+  **fixed.** Both layers are filtered at the configured level, so `level: Debug` now means more
+  spans remotely as well as on stdout.
+- ~~Batch queue size is 2048 × 100 spans, which is large~~ — **fixed.** The default is 8,192 and
+  `max_queue_size` sets it. The scheduled delay is 1 s rather than the SDK's 5 s, so a run shorter
+  than five seconds no longer exports only at shutdown.
+
+A trace sink that is unreachable, or that rejects an export, is logged and never panics. It must
+not be able to take the database down with it.
+
+**A collector can accept an export and still drop the spans.** `opentelemetry-otlp` 0.28 checks
+the HTTP status and ignores the `partial_success` field of the response body, so a collector that
+answers `200` while rejecting every span looks exactly like success from inside Shoal. Confirming
+delivery means asking the collector, not reading Shoal's logs — filed as
+[item 87](../appendix/known-issues.md).
+
+### Reading it in Grafana
+
+A benchmark capture and a running server both report over OTLP to whatever collector the config
+names, and they are told apart by `service.name`: a server is `Shoal`, a workload is
+`shoal-workload`. Filter on that first, or a capture's three hundred and seventy-four runs and a
+deployment's traffic are one series.
+
+A workload's spans carry the run that produced them:
+
+| Attribute | Example |
+| --- | --- |
+| `shoal.workload` | `macro/grid/unsorted/r50/1024` |
+| `shoal.label` | the capture, `f28-rearchive` |
+| `shoal.scale` | `full` or `smoke` |
+| `shoal.seed`, `shoal.port` | what the run was given |
+
+and the metrics it reports carry the same identity as labels, plus `op`, `percentile`, `counter`,
+`shards` and `durability` where those apply:
+
+| Instrument | Kind | Unit |
+| --- | --- | --- |
+| `shoal_bench.rows_per_sec` | gauge | rows/s |
+| `shoal_bench.ops_per_sec` | gauge | queries/s |
+| `shoal_bench.wall_clock` | gauge | s |
+| `shoal_bench.latency` | gauge, by `op` and `percentile` | ms |
+| `shoal_bench.rows` | counter, by `counter` | rows |
+| `shoal_bench.run.completed` | counter | 1 |
+
+`shoal_bench.run.completed` is capture progress: count it against the three hundred and seventy-four
+identifiers in `workload_ids::IDS` and a panel says how far through a two hour capture the run is.
+
+Three things to know before trusting a dashboard built on these:
+
+- **The metrics are one point per workload run**, recorded from the finished artifact after the
+  server has stopped. They are not a live series *within* a run — that is what the spans are for,
+  and [F34](../features/benchmark-tracing.md) says why the histogram that would have given it is
+  deliberately not there.
+- **A traced capture is not comparable to an untraced one.** `shoal-bench compare` says so, reading
+  `trace_level` and `trace_remote` off the artifact. A Grafana panel says nothing, so the label is
+  what you have to check yourself.
+- **A collector can accept an export and drop every span** — see below.
 
 ## What is instrumented
 
@@ -57,18 +158,38 @@ following a query:
 
 | Span | Location |
 | --- | --- |
-| `Coordinator::handle_client` | `shard.rs:452-457` |
-| `Coordinator::send_to_shard` | `shard.rs:413` |
-| `Shard::handle_query` | `shard.rs:505-511` |
+| `Shoal::request` | `shard.rs`, in `client_rx_relay` — one per frame, and the root of its trace |
+| `Coordinator::handle_client` | `shard.rs` |
+| `Coordinator::route` | `shard.rs`, in `send_to_shard` — **one per query**, not one per bundle |
+| `Shard::handle_query` | `shard.rs` |
 | `Shard::handle_released` | a query run again after the partition it parked on was read ([F26](../features/archive-routed-requests.md)) |
-| `PersistentTable::handle` | `.../persistent/sorted.rs:301` |
-| `PersistentTable::{insert,get,exists,delete,update}` | `.../persistent/sorted.rs:328`, `:386`, `:533`, `:666`, `:825` |
-| `Shard::reply` | `shard.rs:479` |
-| `FileSystemCompactor::*` | `.../fs/compactor.rs:98`, `:129`, `:153`, `:193`, `:209`, `:278`, `:314` |
-| `FileSystem::read_intents` | `.../fs.rs:428-431` |
+| `PersistentTable::handle` | `.../persistent/sorted.rs` |
+| `PersistentTable::{insert,get,exists,delete,update}` | `.../persistent/sorted.rs`, one each |
+| `Shard::handle_gathered` | `shard.rs`, one per share of a query that was split across shards |
+| `Shard::reply` | `shard.rs` |
+| `Fsloader::spawn_task` | `.../fs/loader.rs`, one per partition read requested |
+| `FileSystemCompactor::*` | `.../fs/compactor.rs`, seven of them |
+| `FileSystem::read_intents` | `.../fs.rs` |
 | `loader::read_partition` | `.../fs/loader.rs`, one per partition read, whether it succeeds or fails |
 | `PersistentTable::block_on_load` | `.../persistent/sorted.rs`, `.../persistent/unsorted.rs` — one per query parked on a read |
 | `PersistentTable::fail_partition` | `.../persistent/sorted.rs`, `.../persistent/unsorted.rs` — one per read that gave up |
+
+And the client's, which are in another process and are joined to the ones above by a trace context
+on the wire ([F35](../features/wire-trace-context.md)):
+
+| Span | Location |
+| --- | --- |
+| `Shoal::send` | `client.rs` — only on the bundle path; `send_one` reaches `send_stamped` directly |
+| `Shoal::send_stamped` | `client.rs` — the span whose context goes on the wire, and the one a query's answers hang off |
+| `ShoalQueryStream::send` | `client.rs`, one per bundle on a stream |
+| `Shoal::response` | `client.rs`, in `TcpProxy::relay` — one per frame read back, parented off the `Waiter` |
+| `ShoalResultStream::next` | `client.rs`, one per response handed to the caller |
+| `ShoalUnorderedResultStream::next` | `client.rs`, the unordered stream's half of the same |
+| `ShoalConnectionManager::connect_to` | `client.rs`, one per pooled connection opened |
+
+The line numbers that used to be in this table were removed rather than corrected. Every one of
+them had drifted, and a wrong line number reads exactly like a right one — the symbol name is what
+to grep for.
 
 **`Shard::handle_flushed` used to be on this list and deliberately is not any more.** It ran once
 per message the shard handled and was a parent to nothing — `Shard::reply` attaches itself to the
@@ -78,35 +199,111 @@ paths are filed as [O25](../appendix/optimizations.md#o25-two-instrument-spans-r
 for the same reason, and are **not** removed: `reply`'s is real trace structure, and neither is on a
 path that usually does nothing.
 
-Spans are propagated **manually across channel hops**, which is the part worth understanding.
-An asynchronous message queue breaks tracing's implicit parenting, so `QueryMetadata` carries
-a `Span`:
+### How one query stays one trace
 
-```rust
-pub struct QueryMetadata {
-    pub client: Uuid,
-    pub id: Uuid,
-    pub index: usize,
-    pub end: bool,
-    pub span: Span,
-}
+Spans are propagated **manually across channel hops**, which is the part worth understanding. An
+asynchronous message queue breaks tracing's implicit parenting, so the parent travels in the
+message.
+
+The shape is: **one trace per request frame, one subtree per query in it.** A frame is a bundle —
+`Queries<S>` carries one UUID and a `Vec` of queries — so the read, the validation and the framing
+are shared and belong to the frame rather than to any one query. For a bundle of one, which is the
+common case, that is one trace per query.
+
+```
+Shoal::send_stamped                      the caller's process: frames the bundle and writes it
+├── Shoal::request                       the server: opened in client_rx_relay when the frame lands
+│   ├── Coordinator::handle_client       validates the bundle and routes it
+│   └── Coordinator::route               one per query in the bundle
+│       ├── Shard::handle_query          on the shard that owns the partition
+│       │   └── PersistentTable::{handle,get,block_on_load}
+│       ├── Fsloader::spawn_task         only if the partition is not resident
+│       │   └── loader::read_partition   in a task of its own, on the loader's queue
+│       ├── Shard::handle_released       the query replayed once the read landed
+│       └── Shard::reply
+├── Shoal::response                      the caller again: one per frame the reader task routes
+└── ShoalResultStream::next              one per response handed back to the caller
 ```
 
-`shoal-core/src/server/messages.rs:14-26`
+**The two processes are one trace only when the client was built with `otel`** and is itself in a
+trace. Without it the client sets no flag bit, `Shoal::request` is the root it has always been, and
+everything under it is exactly as it was — which is the arm every deployment that has never
+configured a collector is in.
 
-captured at fan-out with `Span::current()` (`messages.rs:37-45`) and re-entered on the far
-side:
+`Coordinator::route` is what `QueryMetadata.span` holds, and it is opened per query rather than per
+bundle. It used to be `Coordinator::send_to_shard`'s function-level span, which is one per bundle —
+so a batch of a hundred queries produced one flat list of a hundred siblings
+([Resolved #89](../appendix/resolved/fragmented-query-traces.md)).
+
+**Neither of those two is opened by an `#[instrument]`, and that decides how each is timed.** A
+span wrapping a function is entered and exited by the attribute; a span held across a channel hop
+is not entered by anything unless something is made to enter it — and
+`tracing-opentelemetry` timestamps a span when it is **exited**, resolving a missing end as
+`end_time.unwrap_or(start_time)`. So a span that is only ever passed around as a parent exports
+with **zero duration**: the trace is joined correctly and the root draws as a tick with its
+children extending past it, which reads as a broken trace rather than as a timing bug.
+
+Both are therefore entered where the interval they name actually is. `Shoal::request` is
+`.instrument()`ed over the body read, so it covers the frame arriving — instrumented rather than
+entered around, because a guard held across an `await` would leave it current while another
+connection's task ran on the same executor. `Coordinator::route` is entered in `client_tx_relay`
+around the framing and the socket write, so it covers **routing to response written**, which is the
+server-side latency of that one query. There is no separate span for the write: the query's own
+span already covers it, and `StageStamps` measures it far more precisely than a span would.
+
+Every hop re-parents off it explicitly:
 
 ```rust
 #[instrument(name = "Shard::handle_query", parent = &meta.span, ...)]
 ```
 
-`shard.rs:505-506`
+The same span travels through `PendingResponse` and back out in `reply`, so a trace covers the
+write, the wait for durability, and the response — even though they happen in different iterations
+of the shard loop. It travels through the tables' `blocked` map too, so a get that parked on a disk
+read is answered inside the trace it arrived in.
 
-The same span travels through `PendingResponse` and back out in `reply`
-(`shard.rs:479`), so a trace covers the write, the wait for durability, and the response — even
-though they happen in different iterations of the shard loop. That is genuinely useful, and it
-is the main reason the flush pipeline is debuggable at all.
+**A load is linked rather than parented, for every query but one.** A partition read serves every
+query parked on that partition, so it cannot be the child of more than one of them. It is the child
+of the query `block_on_load` requested it for — the first to park — and `link_released`
+(`tables/storage.rs`) gives the rest a `follows_from`, which `tracing-opentelemetry` exports as a
+span link.
+
+### The trap under all of this
+
+**An empty parent is not an orphan. It is a new trace.**
+
+```rust
+let new_span = match parent.into() {
+    Some(parent) => Attributes::child_of(parent, meta, values),
+    None => Attributes::new_root(meta, values),
+};
+```
+
+`tracing-0.1.41/src/span.rs:497-508`. So `#[instrument(parent = &meta.span, ...)]` where
+`meta.span` is `Span::none()`, or is a span the layer's filter rejected, silently starts a fresh
+trace id — no warning, no orphan marker, and console output that looks entirely correct.
+`tracing-opentelemetry` has the same fall-through one level down, in `parent_context`, for a parent
+its own per-layer filter cannot see.
+
+Two rules follow, and both are load-bearing:
+
+- **Every span on the query path sits at one level** — `INFO`, which is `#[instrument]`'s
+  default. A parent a filter can drop independently of its children re-roots all of them. A leaf
+  could safely sit lower, since nothing hangs off one, but there is no leaf here that is worth a
+  span at all.
+- **Every layer of the subscriber is filtered from one source.** `filter_directives`
+  (`trace.rs`) decides the directives once and both layers build an `EnvFilter` from that string.
+  They used to read different sources, which meant setting `RUST_LOG` — the thing a person does
+  when their traces look wrong — could fragment every exported trace
+  ([Resolved #90](../appendix/resolved/divergent-layer-filters.md)).
+
+**A span crossing a spawn has to be passed, never inherited.** `glommio::spawn_local` and
+`spawn_local_into` carry no ambient context, so every future spawned on the request path takes its
+parent as a value.
+
+**A span held across a hop has to be entered somewhere, or it has no duration.** This is the
+zero-duration trap above, and `tracing_topology.rs` asserts against it by name for both spans that
+are opened by hand rather than by an attribute.
 
 ### Events
 
@@ -283,38 +480,81 @@ For running Shoal anywhere real, the gaps are:
 - **No slow-query log.**
 - **No structured error reporting to clients** — server-side failures are panics
   ([Wire Protocol](../architecture/wire-protocol.md#limitations)).
-- **`trace::setup` is opt-in and undocumented**, so the default experience is no logs.
+- **`trace::setup` is opt-in**, so a binary that does not call it gets no logs. The example and
+  `shoal-workload` call it ([F34](../features/benchmark-tracing.md)); `shoalctl` and the tests do
+  not.
 
 ## Design notes
 
-**Spans over metrics.** Shoal instruments causally — follow one query across shards, across
-the flush boundary, and back — rather than aggregating. For a database being actively
-developed, tracing a single slow query is more valuable than a request-rate graph, and the
-manual span propagation through `QueryMetadata` is the deliberate investment that makes it
-work.
+**Spans over metrics.** Shoal instruments causally — follow one query across shards, across the
+flush boundary, across a disk read, and back — rather than aggregating. For a database being
+actively developed, tracing a single slow query is more valuable than a request-rate graph, and the
+manual span propagation through `QueryMetadata` is the deliberate investment that makes it work.
+
+**The trace is the request, not the handler.** The root is opened when the last byte of a frame
+comes off the socket and closes when the last response for that frame is written, so the ingress
+queue and the framing are inside it. Rooting at the first instrumented *handler* is the easy thing
+and it hides exactly the intervals a slow query is usually slow in.
 
 **Zero-cost when off.** Both `tracing`'s level filter and `hotpath`'s feature gate compile the
 instrumentation away, so the hot path pays nothing in a default release build.
 
 ## Limitations
 
-- The remote exporter ignores the configured level.
-- `RemoteTracing::Grpc` uses HTTP.
-- `trace::setup` is never called by the library **or by anything else** — not the example, not
-  `shoal-workload`, not `shoalctl`. So no subscriber is ever installed and **every span and event
-  on this page dispatches to nobody**, which makes the `tracing` section of `shoal.yml` inert.
-  Filed as [item 69](../appendix/known-issues.md).
+- ~~The remote exporter ignores the configured level.~~ It is filtered at `tracing.level` now,
+  like the stdout layer — and from the *same* `filter_directives` call, which is what stops the two
+  disagreeing ([Resolved #90](../appendix/resolved/divergent-layer-filters.md)).
+- ~~`RemoteTracing::Grpc` uses HTTP.~~ The variant is `RemoteTracing::Otlp`, which says so.
+  `Grpc:` still parses and still means OTLP over HTTP.
+- **A collector that answers `200` can still have dropped every span.** `opentelemetry-otlp` 0.28
+  ignores `partial_success` in the response, so from inside Shoal a total rejection is
+  indistinguishable from success. Filed as [item 87](../appendix/known-issues.md).
+- ~~`trace::setup` is never called by the library **or by anything else** — not the example, not
+  `shoal-workload`, not `shoalctl`~~ ~~— **partly.** The bundled example calls it […]
+  `shoal-workload`, `shoalctl` and the tests still install no subscriber~~ — **the example and
+  `shoal-workload` both call it**, so the `tracing` section of a config now configures a benchmark
+  capture as well as the example ([F34](../features/benchmark-tracing.md)). `shoalctl` and the
+  tests still install nothing, and the decision the remainder waits on — whether a *library* should
+  install a global subscriber at all — is still unmade. Filed as
+  [item 69](../appendix/known-issues.md).
 - ~~`PersistentSortedTable` is not `hotpath`-instrumented.~~ It is now, along with the partition
   layer, the stream writer, the compactor and the loader — see the table above.
 - ~~`partitions.rs` and `client.rs` still have **no `tracing` spans at all**~~ — `client.rs` has
   spans and `hotpath` scopes since [F16](../features/client-builder.md), on `Shoal::send`,
-  `ShoalQueryStream::send`, `ShoalConnectionManager::connect_to`, `track_response`,
-  `TcpProxy::read_frame` and both `next()`s. `partitions.rs` still has none, so the hottest CPU code
-  is invisible to a trace even though `hotpath` covers it.
+  `Shoal::send_stamped`, `ShoalQueryStream::send` and `ShoalConnectionManager::connect_to`. ~~and
+  on `track_response`, `TcpProxy::read_frame` and both `next()`s~~ — **those three were never
+  there**, and this list named them for two features. There are four client spans, not seven.
+  ~~There are four client spans, not seven.~~ There are **seven** now, and three of them are the
+  ones this list twice claimed and never had: `Shoal::response` and both `next()`s arrived with
+  [F35](../features/wire-trace-context.md), which needed the return half of a query to be in the
+  trace the send opened. `partitions.rs` still has none, so the hottest CPU code is invisible to a
+  trace even though `hotpath` covers it.
+- ~~**The client's spans and the server's are still two traces.** Nothing on the wire carries a
+  trace context: the request preamble is eight bytes with no query id and `Queries<S>` is rkyv, so
+  joining them is a protocol change.~~ **They are one trace now**, by
+  [F35](../features/wire-trace-context.md): the request preamble grew an optional 26 byte W3C trace
+  context behind `Flags::TRACE_CONTEXT`, and `PROTOCOL_VERSION` went to 3 with it. Two things a
+  reader of this page has to know about the result. The client's half is behind the **`otel`
+  feature**, off by default, so a client built without it is joined to nothing and says so by
+  setting no flag bit. And **the sampling decision moved to the client**: the context is adopted as
+  a *remote* parent, which a parent based sampler defers to, so `sample_ratio` on a server now
+  governs only traces that arrived without one.
+- **A flush is its own trace, and that is deliberate.** `StreamWriter`'s `fdatasync` tasks,
+  `ArchiveMap`'s writers and `FileSystemCompactor` each cover every write they happened to catch,
+  so they belong to no single query. A write's *response* rejoins its query's trace when the
+  watermark moves, because `Shard::reply` is parented off the query's span — but what made it
+  durable is not in that trace.
 - ~~Corruption and truncation are warnings with no counters.~~ Counted and summarized per shard
   now, but only as an event — nothing scrapes it, and nothing aggregates across shards.
-- Because `trace::setup` is never called by the library, none of these events reach a test. The
-  recovery summary has no automated coverage for that reason
-  ([Test Coverage](../appendix/test-coverage.md)).
+- Because `trace::setup` installs a **global** subscriber, none of these events reach a test — a
+  test that installed one would decide what every other test in the binary sees. The recovery
+  summary has no automated coverage for that reason
+  ([Test Coverage](../appendix/test-coverage.md)). [F34](../features/benchmark-tracing.md) did not
+  change this: it moved the install onto a binary, which is the right place for a *global* one and
+  is no help to a test. What that needs is a non-global path out of `trace.rs`, and there is not
+  one.
+- **A traced benchmark capture measures a different program.** The level is what costs, and it is
+  recorded on the artifact so a comparison across it is named rather than silent — but the cost
+  itself has never been measured, only inferred from [F5](../features/flushed-sweep-gate.md).
 - Three `println!` sites bypass the log level.
 - No health checks or runtime introspection of any kind, and no metrics beyond recovery.

@@ -30,9 +30,13 @@ designing before it is needed rather than after.
 > page was written.
 
 ~~Nothing.~~ A search for authentication-related terms across `shoal-core`, `shoalctl`, and `shoal`
-returned no hits outside the SHQL tokenizer and two comments using the phrase "token ring". The
+returned no hits outside the SHQL tokenizer and two comments using the phrase "token ring". ~~The
 only `tls` in the workspace is still `tonic`'s `tls-roots` feature, pulled in by the OTLP trace
-exporter (`shoal-core/src/server/trace.rs`) and unrelated to client connections.
+exporter (`shoal-core/src/server/trace.rs`) and unrelated to client connections.~~ That `tonic`
+dependency was declared but never used by any source file, and has been removed along with
+`opentelemetry-proto 0.1` and `opentelemetry-semantic-conventions 0.10`; the OTLP exporter speaks
+HTTP and never needed it. `tls` in the workspace now means
+[F14](../features/encryption-in-transit.md) and nothing else.
 
 The network configuration had two fields:
 

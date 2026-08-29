@@ -143,10 +143,14 @@ number in [Benchmark Results](../performance/overview.md) includes the client an
 them can attribute anything to it** — the total this chapter proposes to change ~~has never been~~
 **is now** bounded, and ~~the attribution is not. The spans are what remain, they are the cheapest
 thing on the list, and nothing below can be *attributed* until they are done.~~ so is the
-attribution. What F16 also found is that **the spans reach nobody**: `trace::setup` has no callers
-anywhere in this workspace, so no subscriber is ever installed, the server's spans have never been
-switched on either, and `shoal.yml`'s `tracing` section configures nothing
-([item 69](../appendix/known-issues.md)). The scopes work regardless — `hotpath` does not go through
+attribution. What F16 also found is that ~~**the spans reach nobody**: `trace::setup` has no callers
+anywhere in this workspace~~ ~~— the bundled example calls it now […] `shoal-workload` and
+`shoalctl` still install no subscriber, so a benchmark capture's `tracing` section still configures
+nothing~~ — **`shoal-workload` installs one too**, since
+[F34](../features/benchmark-tracing.md), so a capture honors its `tracing:` section and the spans
+reach a collector on every run of one. `shoalctl` and the tests still install nothing
+([item 69](../appendix/known-issues.md)). F16's *measurement* is unaffected either way: it was
+taken under no subscriber and says what these spans cost in that configuration. The scopes work regardless — `hotpath` does not go through
 `tracing` — so the attribution this step was for is available, and making the *spans* reach a
 collector is a separate piece of work that step 0 turned up rather than one it was.
 

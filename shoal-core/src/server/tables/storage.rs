@@ -337,11 +337,47 @@ impl std::fmt::Display for Loaders {
     }
 }
 
+/// Link every query a partition read released to that read, except the one that asked for it
+///
+/// A load serves every query parked on its partition, so it cannot be the child of more than one
+/// of them. The query that asked for the read is already its parent - `block_on_load` requests the
+/// load and then parks, so it is the first entry in the parked list - and the rest get a
+/// `follows_from`, which is an OpenTelemetry span link. That is the honest shape for a fan in: a
+/// reader following any of those queries can reach the read that unblocked it, and the read is
+/// still counted once, under the query that caused it.
+///
+/// # Arguments
+///
+/// * `released` - The queries this read released, in the order they parked
+/// * `read` - The span of the read that released them
+pub fn link_released<Q>(released: &[(QueryMetadata, Q)], read: &Span) {
+    // the first entry asked for this read and is already its parent, and a span that follows
+    // its own child is a cycle rather than a link
+    for (meta, _) in released.iter().skip(1) {
+        meta.span.follows_from(read);
+    }
+}
+
 /// The different messages to and from loaders
-#[derive(Debug, Clone, Copy)]
+///
+/// This is `Clone` but no longer `Copy`: a request carries the span of the query that asked for
+/// it, so the read a loader performs lands in that query's trace rather than in one of its own
+/// ([Resolved #89](../../../docs/src/appendix/resolved/fragmented-query-traces.md)).
+#[derive(Debug, Clone)]
 pub enum LoaderMsg<N: TableNameSupport> {
     /// A request to read a partition from disk
-    Request { table_name: N, partition_id: u64 },
+    Request {
+        /// The table the partition to read belongs to
+        table_name: N,
+        /// The partition to read
+        partition_id: u64,
+        /// The span of the query that asked for this read
+        ///
+        /// A load serves every query parked on its partition, and this is the one that asked
+        /// for it - so the read is a child of this span, and the others the load releases are
+        /// linked to it instead. See `PersistentTable::load_partition`.
+        span: Span,
+    },
     /// Shutdown this loader
     Shutdown,
 }
@@ -505,11 +541,19 @@ pub trait StorageSupport: Sized {
     ///
     /// Returns true if a partition exists and will be loaded from disk and
     /// false if it does not and wont.
+    ///
+    /// # Arguments
+    ///
+    /// * `table_name` - The table the partition to read belongs to
+    /// * `partition_id` - The partition to read
+    /// * `span` - The span of the query asking for this read, which the read hangs off
+    /// * `loader_tx` - The channel to send load requests on
     #[allow(async_fn_in_trait)]
     async fn load_partition<N: TableNameSupport>(
         &self,
         table_name: N,
         partition_id: u64,
+        span: &Span,
         loader_tx: &AsyncSender<LoaderMsg<N>>,
     ) -> Result<bool, ServerError>;
 
@@ -530,6 +574,9 @@ pub trait StorageSupport: Sized {
 #[cfg(test)]
 mod tests {
     use super::{PendingResponse, QueryMetadata, RecoveryStats};
+    use std::sync::{Arc, Mutex};
+    use tracing::span::{Attributes, Id};
+    use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
     use crate::server::stage_profile::{StageStamps, Stamp};
     use crate::shared::responses::ResponseAction;
     use tracing::Span;
@@ -566,6 +613,113 @@ mod tests {
             pending.add(meta, *pos, ResponseAction::Insert(true));
         }
         pending
+    }
+
+    /// A layer that records the `follows_from` edges a test produces
+    ///
+    /// A link is not a field or a parent, so nothing about a span's own record says it has one.
+    /// `on_follows_from` is the only place the edge is visible.
+    #[derive(Default, Clone)]
+    struct RecordLinks {
+        /// Every (span, followed span) pair this layer has been shown
+        edges: Arc<Mutex<Vec<(u64, u64)>>>,
+        /// The id every span was opened under, so an edge can be named
+        names: Arc<Mutex<Vec<(u64, String)>>>,
+    }
+
+    impl<S: tracing::Subscriber> Layer<S> for RecordLinks {
+        /// Remember what this span was called
+        ///
+        /// # Arguments
+        ///
+        /// * `attrs` - The attributes of the span being opened
+        /// * `id` - The id assigned to the span
+        /// * `_ctx` - The context of the subscriber this layer is part of
+        fn on_new_span(&self, attrs: &Attributes<'_>, id: &Id, _ctx: Context<'_, S>) {
+            self.names
+                .lock()
+                .expect("the link recorder was poisoned")
+                .push((id.into_u64(), attrs.metadata().name().to_owned()));
+        }
+
+        /// Record a link between two spans
+        ///
+        /// # Arguments
+        ///
+        /// * `span` - The span the link is on
+        /// * `follows` - The span it follows
+        /// * `_ctx` - The context of the subscriber this layer is part of
+        fn on_follows_from(&self, span: &Id, follows: &Id, _ctx: Context<'_, S>) {
+            self.edges
+                .lock()
+                .expect("the link recorder was poisoned")
+                .push((span.into_u64(), follows.into_u64()));
+        }
+    }
+
+    #[test]
+    /// A read links every query it releases except the one that asked for it
+    ///
+    /// A load serves every query parked on its partition, so it can be the child of only one of
+    /// them - the one `block_on_load` requested it for, which is the first to park. The rest have
+    /// to reach it some other way or a reader following them sees a gap where the disk read was.
+    /// The requester is deliberately *not* linked: it is already the read's parent, and an edge
+    /// from a parent to its own child is a cycle rather than a link.
+    fn a_read_links_every_query_but_the_one_that_asked() {
+        // record the links this makes
+        let recorder = RecordLinks::default();
+        let subscriber = tracing_subscriber::registry().with(recorder.clone());
+        // scope the subscriber to this test, since another test in this binary may want its own
+        tracing::subscriber::with_default(subscriber, || {
+            // the read three queries parked on
+            let read = tracing::info_span!("read");
+            // three queries, in the order they parked - the first is the one that asked
+            let parked: Vec<(QueryMetadata, ())> = (0..3)
+                .map(|index| {
+                    let span = tracing::info_span!("query", index);
+                    (
+                        QueryMetadata::untimed(
+                            Uuid::new_v4(),
+                            Uuid::new_v4(),
+                            index,
+                            false,
+                            None,
+                            span,
+                        ),
+                        (),
+                    )
+                })
+                .collect();
+            // link what this read released
+            super::link_released(&parked, &read);
+            // the two that did not ask are linked, and the one that did is not
+            let edges = recorder
+                .edges
+                .lock()
+                .expect("the link recorder was poisoned")
+                .clone();
+            assert_eq!(
+                edges.len(),
+                2,
+                "a read linked {} of the three queries it released",
+                edges.len()
+            );
+            // every edge points at the read, and none of them starts at the requester
+            let requester = parked[0]
+                .0
+                .span
+                .id()
+                .expect("the requester's span was not enabled")
+                .into_u64();
+            let read_id = read.id().expect("the read's span was not enabled").into_u64();
+            for (span, follows) in edges {
+                assert_eq!(follows, read_id, "a link pointed somewhere other than the read");
+                assert_ne!(
+                    span, requester,
+                    "the query that asked for the read was linked to its own child"
+                );
+            }
+        });
     }
 
     #[test]

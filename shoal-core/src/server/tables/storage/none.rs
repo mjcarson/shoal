@@ -28,6 +28,7 @@
 use glommio::io::ReadResult;
 use glommio::TaskQueueHandle;
 use kanal::{AsyncReceiver, AsyncSender};
+use tracing::Span;
 use rkyv::bytecheck::CheckBytes;
 use rkyv::de::Pool;
 use rkyv::rancor::Strategy;
@@ -309,11 +310,13 @@ impl<D: ShoalDatabase> StorageSupport for NoStorage<D> {
     ///
     /// * `table_name` - The name of the table to load a partition for
     /// * `partition_id` - The partition to load
+    /// * `span` - The span of the query asking for this read
     /// * `loader_tx` - The channel to send load requests on
     async fn load_partition<N: TableNameSupport>(
         &self,
         _table_name: N,
         _partition_id: u64,
+        _span: &Span,
         _loader_tx: &AsyncSender<LoaderMsg<N>>,
     ) -> Result<bool, ServerError> {
         // no partition is ever on disk, so a get that misses in memory has genuinely missed

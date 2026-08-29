@@ -20,6 +20,13 @@ stage-profile = []
 # separately from `shoal-core/hotpath` because the whole point of measuring the client is to be
 # able to do it in a build that has no engine in it at all
 hotpath = ["hotpath/hotpath"]
+# put a trace context on the wire, so a caller's spans and the server's are one trace
+#
+# a feature rather than a hard dependency because the *reading* side is unconditional: a server
+# always understands the flag bit, so a client that never sets it can never desynchronize the two.
+# that is what makes this safe to gate, and it is the difference between this and `stage-profile`,
+# where both halves have to agree about whether a type exists at all
+otel = ["dep:opentelemetry", "dep:tracing-opentelemetry"]
 
 # tokio and a connection pool, and nothing that could start a database
 [dependencies]
@@ -32,6 +39,11 @@ bb8 = "0.8"
 papaya = "0.2"
 async-trait = "0.1"
 tracing = "0.1"
+# pinned to the versions `shoal-core` resolves, deliberately. two `opentelemetry` majors in one
+# process are two incompatible `SpanContext` types, so a client and a server that disagreed would
+# put a context on the wire that the other could not turn back into a parent
+opentelemetry = { version = "0.28", optional = true }
+tracing-opentelemetry = { version = "0.29", optional = true }
 # optional so that a client built without the feature does not link a profiler it never calls
 hotpath = { workspace = true, optional = true }
 futures = "0.3"

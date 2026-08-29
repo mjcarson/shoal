@@ -25,7 +25,25 @@ storage:
         buffer_size: 4096
       throughput_sensitive:
         path: "/opt/shoal"
+# A capture honors this section (F34). Two things about it are worth knowing before changing it:
+#
+#   `level` is the cost knob, not `sample_ratio`. `#[instrument]` defaults to INFO, so anything at
+#   that level or finer puts a span per query through tracing's registry - which is a cost the
+#   sampler cannot take back, because a sampler decides after the span has been built. `Warn` is
+#   what a capture whose numbers are going to be quoted should run at. `Info` and finer are for an
+#   exploratory traced run, and the level is recorded on every artifact so the two never compare
+#   silently.
+#
+#   `sample_ratio` is the collector's knob. A full scale grid arm drives millions of queries, and
+#   an unsampled export of them overflows the queue and measures the exporter.
+#
+# `metrics` is omitted deliberately: with a `remote` sink set and no `metrics` block, the metrics
+# endpoint is derived by swapping `/v1/traces` for `/v1/metrics` on the same collector. Set it
+# explicitly only when the two are not on the same host.
 tracing:
   level: Info
-  #remote:
-  #  Grpc: "http://172.16.0.193:4318/v1/traces"
+  remote:
+    Otlp:
+      endpoint: http://172.16.0.193:4318/v1/traces
+      headers:
+        X-Scope-OrgID: Shoal

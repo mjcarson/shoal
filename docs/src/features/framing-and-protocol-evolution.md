@@ -45,7 +45,9 @@ not know, which is the only reason a type byte is worth carrying.
 
 ## What it does
 
-Every frame in both directions now starts with the same eight bytes:
+Every frame in both directions now starts with the same eight bytes — and, since
+[F35](wire-trace-context.md), a request frame may carry 26 more between them and its payload when
+`Flags::TRACE_CONTEXT` is set, which makes it the one variable length preamble here:
 
 ```
  ┌─────────┬─────────┬──────────┬────────────────────┐

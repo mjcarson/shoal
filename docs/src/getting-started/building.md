@@ -103,16 +103,28 @@ machine's core count and to ports already in use.
 | `shoal-core` | `bench` | Re-exports crate private internals as `tables::bench_exports` so the criterion benches can reach them. Not a supported API. |
 | `shoal` | `bench` | Same, forwarded. Required to build `shoal/benches`. |
 | `shoal-core` | `shql-complete` | SHQL autocompletion support for clients. |
+| `shoal-client` | `stage-profile` | Records when a response came off the socket. Has to be enabled with the server's half, or the two disagree about whether stamps exist at all. |
+| `shoal-client` | `otel` | Puts a W3C trace context on every request frame, so a caller's spans and the server's are one trace ([F35](../features/wire-trace-context.md)). Off by default, and safe to leave off: the client sets no flag bit and writes no extra bytes, and a server understands the bit either way. |
+| `shoal` | `otel` | Same, forwarded to `shoal-client/otel`. There is no server half to forward — `shoal-core` reads the context unconditionally. |
 
 ```bash
 cargo build --release --bin shoal-workload --features hotpath   # a profiling build
 cargo bench -p shoal --features bench                     # the micro benchmarks
+cargo test -p shoal --features otel                       # including the two-process trace test
 ```
+
+**`otel` is off by default and a `cargo test --workspace` still builds it**, because `shoal-bench`
+enables `shoal/otel` and cargo unifies features across a workspace build. That is the one feature
+here whose reach is decided by a crate other than the one you are building.
 
 See [Observability](../operations/observability.md) for what `hotpath` reports and
 [Benchmarking](../performance/benchmarking.md) for how to run either.
 
-## Running the example
+## Running the examples
+
+There are two, and the difference between them is what they need off disk.
+
+### `tmdb` — nothing set up
 
 ~~The `tmdb` example is both a demo and the benchmark harness.~~ Since
 [F8](../features/purpose-built-workloads.md) it is only a demo, and it needs **nothing set up**:
@@ -128,6 +140,31 @@ filter, and the same query written in SHQL.
 The benchmark harness it used to be is now twenty-three purpose-built workloads in `shoal-bench`.
 See
 [Benchmarking](../performance/benchmarking.md) for how to run them and what the numbers mean.
+
+### `tmdb_dataset` — the same tour, on a real dataset
+
+```bash
+cargo run --release --example tmdb_dataset
+```
+
+Same two tables, but the row is the full 24 column TMDB record read out of a csv rather than a
+literal in the source, and there are 1.19 million of them instead of twelve. It needs two things
+the other one does not:
+
+- **The dataset.** `TMDB_movie_dataset_v11.csv`, about 538 MB, from
+  [Kaggle](https://www.kaggle.com/datasets/asaniczka/tmdb-movies-dataset-2023-930k-movies).
+  Nothing in this repository fetches it. It is looked for at
+  `~/datasets/TMDB_movie_dataset_v11.csv`, and `--dataset` points at it anywhere else.
+- **Somewhere to write.** `./shoal.yml` if there is one and the built-in defaults if there is not,
+  which put storage at `/opt/shoal`. A full load writes several gigabytes into it.
+
+`--limit` loads a slice of the file instead of all of it, which is what a first run wants;
+`--workers`, `--batch` and `--in-flight` size the client pipeline. A row that will not deserialize
+is skipped and counted rather than ending the load.
+
+**It is not a benchmark**, despite printing a rows-per-second figure — there is no warmup, no
+repetition, no percentile and no baseline behind that number. Measuring Shoal is `shoal-bench`'s
+job; see [Benchmarking](../performance/benchmarking.md).
 
 Note that the checked-in `shoal.yml` points storage at `/opt/shoal`, which must exist and be
 writable. It is also the benchmark configuration, so changing it invalidates the recorded

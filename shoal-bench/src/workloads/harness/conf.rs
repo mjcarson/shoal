@@ -80,9 +80,15 @@ pub fn resolve(base: &Path, id: &str, overrides: &ConfOverrides, port: u16) -> R
     conf.storage.default.filesystem.throughput_sensitive.path = throughput;
     // bind somewhere nothing else is, since several workloads run in one capture
     conf.networking.port = port;
-    // a workload's own server is not the thing being observed, and an Info level log per query
-    // would be
-    conf.tracing.level = TraceLevel::Warn;
+    // the tracing section is deliberately left exactly as the file wrote it
+    //
+    // this used to be forced to `Warn` here, back when nothing installed a subscriber and the
+    // override was inert. A capture now honors it ([F34](../../../../docs/src/features/benchmark-tracing.md)),
+    // so overriding it would be this file deciding what the config file is allowed to say. What
+    // the level costs is recorded on the artifact by `facts` instead, so a capture taken at a
+    // level that instruments the query path is visibly a different measurement rather than a
+    // silently slower one.
+    //
     // then whatever this workload actually depends on
     if let Some(shards) = overrides.shards {
         conf.resources.cores = Some(shards);
@@ -210,7 +216,31 @@ pub fn facts(conf: &Conf) -> ConfFacts {
         throughput_buffer_size: Some(filesystem.throughput_sensitive.buffer_size as u64),
         throughput_write_behind: Some(filesystem.throughput_sensitive.write_behind as u64),
         max_frame_bytes: Some(u64::from(conf.networking.max_frame_bytes)),
+        // what the subscriber this run installed was doing, which is what decides whether this
+        // capture is a measurement of the same program another one measured
+        trace_level: Some(trace_level(&conf.tracing.level).to_string()),
+        trace_remote: Some(conf.tracing.remote.is_some()),
         digest: digest(conf),
+    }
+}
+
+/// Renders a trace level the way the artifact records it
+///
+/// `TraceLevel` has no `Display`, and its `Debug` is a name this crate would then be pinned to.
+/// Lowercase names match how `durability` is already written beside it.
+///
+/// # Arguments
+///
+/// * `level` - The level to render
+fn trace_level(level: &TraceLevel) -> &'static str {
+    // exhaustive rather than a fallback, so a level added to the enum is a compile error here
+    match level {
+        TraceLevel::Trace => "trace",
+        TraceLevel::Debug => "debug",
+        TraceLevel::Info => "info",
+        TraceLevel::Warn => "warn",
+        TraceLevel::Error => "error",
+        TraceLevel::Off => "off",
     }
 }
 
@@ -290,7 +320,10 @@ pub fn storage_dirs(conf: &Conf) -> Vec<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    use shoal::server::conf::TraceLevel;
+
     use super::{binary_size, slug};
+    use crate::workloads::workload::ConfOverrides;
 
     /// A byte count comes back in the units it was written in
     #[test]
@@ -330,5 +363,60 @@ mod tests {
         let before = slugs.len();
         slugs.dedup();
         assert_eq!(before, slugs.len(), "two workloads share a storage subdir");
+    }
+
+    /// Resolving a configuration leaves its tracing section exactly as the file wrote it
+    ///
+    /// `resolve` used to force the level to `Warn`, which was harmless while nothing installed a
+    /// subscriber and is a silent override now that something does. A capture is meant to be
+    /// configurable by the file it is pointed at; this is what says so.
+    #[test]
+    fn the_harness_no_longer_forces_a_level() {
+        // a config file asking for a level and a sink the old override would have thrown away
+        let dir = tempfile::tempdir().expect("failed to make a temp dir");
+        let path = dir.path().join("shoal.yml");
+        std::fs::write(
+            &path,
+            "resources:\n  memory: \"4Gi\"\ntracing:\n  level: Debug\n  remote:\n    Otlp:\n      endpoint: \"http://127.0.0.1:4318/v1/traces\"\n",
+        )
+        .expect("failed to write a config");
+        // resolve it the way a workload does
+        let conf = super::resolve(&path, "macro/insert_unsorted", &ConfOverrides::default(), 12000)
+            .expect("failed to resolve a configuration");
+        // both halves of the tracing section have to survive
+        assert!(matches!(conf.tracing.level, TraceLevel::Debug));
+        assert!(conf.tracing.remote.is_some());
+    }
+
+    /// The artifact records the level a run traced at and whether it was exporting
+    ///
+    /// Without these two a capture taken with a subscriber installed is indistinguishable from one
+    /// taken without, and the two are measurements of different programs.
+    #[test]
+    fn facts_record_the_trace_level_and_sink() {
+        // a config with tracing turned all the way down and no sink, which is the quiet case
+        let dir = tempfile::tempdir().expect("failed to make a temp dir");
+        let quiet = dir.path().join("quiet.yml");
+        std::fs::write(&quiet, "resources:\n  memory: \"4Gi\"\ntracing:\n  level: Warn\n")
+            .expect("failed to write a config");
+        let conf = super::resolve(&quiet, "macro/insert_unsorted", &ConfOverrides::default(), 12000)
+            .expect("failed to resolve a configuration");
+        let facts = super::facts(&conf);
+        assert_eq!(facts.trace_level.as_deref(), Some("warn"));
+        assert_eq!(facts.trace_remote, Some(false));
+        // and one exporting per query spans, which is the case that must never look like the above
+        let loud = dir.path().join("loud.yml");
+        std::fs::write(
+            &loud,
+            "resources:\n  memory: \"4Gi\"\ntracing:\n  level: Info\n  remote:\n    Otlp:\n      endpoint: \"http://127.0.0.1:4318/v1/traces\"\n",
+        )
+        .expect("failed to write a config");
+        let conf = super::resolve(&loud, "macro/insert_unsorted", &ConfOverrides::default(), 12000)
+            .expect("failed to resolve a configuration");
+        let loud_facts = super::facts(&conf);
+        assert_eq!(loud_facts.trace_level.as_deref(), Some("info"));
+        assert_eq!(loud_facts.trace_remote, Some(true));
+        // and the digest has to move with them, since it is what catches everything unnamed
+        assert_ne!(facts.digest, loud_facts.digest);
     }
 }

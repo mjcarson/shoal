@@ -103,11 +103,7 @@ pub fn derive_shoal_sorted_table(stream: TokenStream) -> TokenStream {
             // collect all fields for schema support
             all_fields.push((ident.clone(), field_attrs.ty.clone()));
             // and again with whether the field asserted a mirror of its own, for the rearchiver
-            mirror_fields.push((
-                ident.clone(),
-                field_attrs.ty.clone(),
-                field_attrs.rearchive,
-            ));
+            mirror_fields.push((ident.clone(), field_attrs.ty.clone(), field_attrs.rearchive));
             // check if this is a partition or a sort key
             match (field_attrs.partition, field_attrs.sort) {
                 (true, false) => partition_fields.push((ident.clone(), field_attrs.ty.clone())),
@@ -213,11 +209,7 @@ pub fn derive_shoal_unsorted_table(stream: TokenStream) -> TokenStream {
             // collect all fields for schema support
             all_fields.push((ident.clone(), field_attrs.ty.clone()));
             // and again with whether the field asserted a mirror of its own, for the rearchiver
-            mirror_fields.push((
-                ident.clone(),
-                field_attrs.ty.clone(),
-                field_attrs.rearchive,
-            ));
+            mirror_fields.push((ident.clone(), field_attrs.ty.clone(), field_attrs.rearchive));
             // check if this is a partition or a sort key
             match (field_attrs.partition, field_attrs.sort) {
                 (true, false) => partition_fields.push((ident.clone(), field_attrs.ty.clone())),
@@ -314,7 +306,6 @@ pub fn db(attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut item_struct = syn::parse_macro_input!(item as syn::ItemStruct);
     let struct_ident = item_struct.ident.clone();
     let enum_ident = format_ident!("{struct_ident}TableNames");
-
     // validate we have named fields
     let Fields::Named(_) = &item_struct.fields else {
         return syn::Error::new_spanned(
@@ -324,10 +315,8 @@ pub fn db(attr: TokenStream, item: TokenStream) -> TokenStream {
         .to_compile_error()
         .into();
     };
-
     // the projections each of this databases tables declared, in field order
     let mut projections = Vec::default();
-
     // rewrite field types: add <StructName> to storage and append TableNames
     if let Fields::Named(fields) = &mut item_struct.fields {
         if fields.named.is_empty() {
@@ -342,7 +331,6 @@ pub fn db(attr: TokenStream, item: TokenStream) -> TokenStream {
         projections = utils::take_projections(fields);
         utils::rewrite_table_fields(fields, &struct_ident);
     }
-
     // emit the rewritten struct definition, which only a server has any use for
     //
     // the rewrite above still runs for a client, because everything below reads the fields and
@@ -352,13 +340,11 @@ pub fn db(attr: TokenStream, item: TokenStream) -> TokenStream {
         DbHalf::Both => quote! { #item_struct },
         DbHalf::Client => quote! {},
     };
-
     // now borrow the rewritten fields immutably for codegen
     let fields = match &item_struct.fields {
         Fields::Named(fields) => fields,
         _ => unreachable!(),
     };
-
     // get our field names converted to pascal case
     let variants = utils::get_variant_names(fields);
     // build the table names for this db and add the TableNameSupport trait

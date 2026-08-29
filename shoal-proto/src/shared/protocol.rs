@@ -7,9 +7,13 @@
 //!  │ version │  type   │  flags   │   length (u32 LE)  │
 //!  │  (1 B)  │  (1 B)  │  (2 B)   │       (4 B)        │
 //!  └─────────┴─────────┴──────────┴────────────────────┘
-//!  request  : [header][rkyv Queries]
+//!  request  : [header][trace context 26 B]?[rkyv Queries]
 //!  response : [header][query id 16 B][rkyv ResponseKinds]
 //! ```
+//!
+//! A request frame's trace context is present only when [`Flags::TRACE_CONTEXT`] is set, which is
+//! what makes the request preamble the one variable length preamble here
+//! ([F35](../../../docs/src/features/wire-trace-context.md)).
 //!
 //! # Invariants
 //!
@@ -19,9 +23,16 @@
 //! exactly the right number of body bytes before replying. Without it the version byte is
 //! decorative, because a peer that cannot parse the rest of the header cannot resynchronize.
 //!
-//! **`length` counts every byte after the header**, including a response frame's 16 byte query id.
-//! It is not the payload length. That is what lets a peer skip a frame whose type it does not
-//! know, which is the only reason a type byte is worth carrying.
+//! **`length` counts every byte after the header**, including a response frame's 16 byte query id
+//! and a request frame's trace context. It is not the payload length. That is what lets a peer
+//! skip a frame whose type it does not know, which is the only reason a type byte is worth
+//! carrying.
+//!
+//! **Anything ahead of a payload is read separately from it.** A request frame's trace context and
+//! a response frame's query id are read into their own buffers rather than into the front of the
+//! payload's, because the payload is an rkyv archive accessed in place: a reader whose archive
+//! starts 26 bytes into its allocation has every pointer in it misaligned. That is why
+//! [`decode_request`] hands back a header and stops, and the trace context is a second read.
 //!
 //! **This module knows nothing about any async runtime.** The server reads with glommio and the
 //! client reads with tokio, and the two share every decision here and none of the I/O, because
@@ -35,11 +46,13 @@ pub mod auth;
 pub mod error;
 pub mod fingerprint;
 pub mod handshake;
+pub mod trace;
 
 #[cfg(test)]
 mod tests;
 
 use handshake::RefusalReason;
+use trace::{TraceContext, TRACE_CONTEXT_LEN};
 
 /// The version of the wire protocol this build speaks
 ///
@@ -51,7 +64,14 @@ use handshake::RefusalReason;
 /// byte is refused in [`RawHeader::validate`] before a frame is read, and this constant is also
 /// mixed into every schema fingerprint, so a mismatch is a refused connection naming both sides
 /// twice over.
-pub const PROTOCOL_VERSION: u8 = 2;
+///
+/// Went to 3 when a request frame started being able to carry a W3C trace context between its
+/// header and its payload ([F35](../../../docs/src/features/wire-trace-context.md)). Unlike the
+/// 1 → 2 bump this *is* a framing change: a peer built before it reads the 26 context bytes as
+/// the first 26 bytes of an rkyv archive. The flag bit is what makes every change **after** this
+/// one cheaper - a peer that does not know a bit still round trips it - but the bit itself had to
+/// be introduced to a peer that would understand a frame carrying it.
+pub const PROTOCOL_VERSION: u8 = 3;
 
 /// The size of the frame header in bytes
 pub const HEADER_LEN: usize = 8;
@@ -59,8 +79,15 @@ pub const HEADER_LEN: usize = 8;
 /// The size of the query id a response frame carries after its header
 pub const QUERY_ID_LEN: usize = 16;
 
-/// The number of bytes a client reads before the body of a request frame
+/// The number of bytes a server reads before it knows what else a request frame carries
+///
+/// This is the header alone, and it is deliberately *not* the whole preamble any more: a frame
+/// with [`Flags::TRACE_CONTEXT`] set carries [`TRACE_CONTEXT_LEN`] more bytes after it, which are
+/// read once the flags say they are there.
 pub const REQUEST_PREAMBLE_LEN: usize = HEADER_LEN;
+
+/// The largest a request preamble can be, with a trace context on it
+pub const MAX_REQUEST_PREAMBLE_LEN: usize = HEADER_LEN + TRACE_CONTEXT_LEN;
 
 /// The number of bytes a client reads before the payload of a response frame
 pub const RESPONSE_PREAMBLE_LEN: usize = HEADER_LEN + QUERY_ID_LEN;
@@ -201,6 +228,13 @@ impl Flags {
     /// This frame refuses what the peer asked for, and the body says why
     pub const REFUSED: Flags = Flags(1 << 3);
 
+    /// A W3C trace context sits between this request frame's header and its payload
+    ///
+    /// The first of the twelve free bits to be spent, and the reason the other eleven are worth
+    /// having: a peer that does not know a bit round trips it rather than refusing it, so the
+    /// *next* optional block costs no version byte.
+    pub const TRACE_CONTEXT: Flags = Flags(1 << 4);
+
     /// Build a flag set from its raw bits
     ///
     /// Unknown bits are kept as they are, since a bit this build does not know about is a bit a
@@ -257,6 +291,10 @@ pub enum ProtocolError {
     UnknownAuthMechanism(u8),
     /// The peer named an authentication status this build does not know
     UnknownAuthStatus(u8),
+    /// The peer wrote a trace context in a version this build does not read
+    UnknownTraceContextVersion(u8),
+    /// The peer said a trace context followed and then wrote one that names no parent
+    InvalidTraceContext,
     /// The peer sent a valid message type, but not the one this frame had to be
     UnexpectedMessageType {
         /// The message type that had to be here
@@ -319,6 +357,12 @@ impl std::fmt::Display for ProtocolError {
             }
             ProtocolError::UnknownAuthStatus(raw) => {
                 write!(f, "the peer named an unknown authentication status: {raw}")
+            }
+            ProtocolError::UnknownTraceContextVersion(raw) => {
+                write!(f, "the peer wrote an unknown trace context version: {raw}")
+            }
+            ProtocolError::InvalidTraceContext => {
+                write!(f, "the peer sent a trace context that names no parent")
             }
             ProtocolError::UnexpectedMessageType { expected, got } => {
                 write!(f, "expected a {expected} frame but got a {got} frame")
@@ -520,6 +564,43 @@ impl Header {
     pub const fn body_len(&self) -> usize {
         self.len as usize
     }
+
+    /// Get the number of bytes of this request frame's body that are a trace context
+    ///
+    /// Zero unless [`Flags::TRACE_CONTEXT`] is set, which is the only thing that puts anything
+    /// between a request frame's header and its payload.
+    #[inline]
+    pub const fn trace_len(&self) -> usize {
+        // the flag is the only thing that says a context is there
+        if self.flags.contains(Flags::TRACE_CONTEXT) {
+            TRACE_CONTEXT_LEN
+        } else {
+            0
+        }
+    }
+
+    /// Get the number of payload bytes this request frame carries after its trace context
+    ///
+    /// This is only meaningful for a request frame, since it is the one frame kind whose preamble
+    /// is variable length. A response frame's fixed fields are subtracted by
+    /// [`decode_server_frame`] instead.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError::BodyTooShort`] when the peer set the trace flag and then claimed a
+    /// body that cannot hold a trace context. This check is only possible because the length
+    /// counts everything after the header rather than just the payload.
+    #[inline]
+    pub const fn request_payload_len(&self) -> Result<usize, ProtocolError> {
+        // take off whatever sits between the header and the payload
+        match self.body_len().checked_sub(self.trace_len()) {
+            Some(payload_len) => Ok(payload_len),
+            None => Err(ProtocolError::BodyTooShort {
+                need: TRACE_CONTEXT_LEN,
+                got: self.len,
+            }),
+        }
+    }
 }
 
 /// The routing fields every frame a server sends a client carries, whatever its type
@@ -603,7 +684,133 @@ pub fn response_preamble(
     Ok(preamble)
 }
 
+/// The bytes that go ahead of a bundle of queries, however many of them there are
+///
+/// A request preamble is either eight bytes or thirty four, and this is one buffer rather than two
+/// so that a caller's write stays two `IoSlice`s: the preamble, and the payload in an allocation
+/// of its own. Building it as a stack array with a length rather than a `Vec` keeps the framing of
+/// a bundle allocation free, which is what it has always been.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RequestPreamble {
+    /// The preamble bytes, of which only the first `len` are written
+    bytes: [u8; MAX_REQUEST_PREAMBLE_LEN],
+    /// How many of those bytes this preamble actually is
+    len: usize,
+}
+
+impl RequestPreamble {
+    /// Get the bytes to write ahead of this bundle's payload
+    #[inline]
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8] {
+        // only the front of the buffer was filled, and the rest is never written
+        self.bytes.split_at(self.len).0
+    }
+
+    /// Get the number of bytes this preamble is
+    #[inline]
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Returns true if this preamble carries no bytes, which it never does
+    ///
+    /// Here because clippy asks for it beside a `len`. A preamble always carries at least a
+    /// header, so this is always false.
+    #[inline]
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
+/// Build the bytes that go ahead of a bundle of queries, with a trace context on them
+///
+/// The context is what joins the caller's spans to the ones the server opens answering this
+/// bundle. Passing `None` writes exactly the eight bytes [`request_preamble`] writes, which is the
+/// case for every caller that is not tracing - so a build that could set the flag and has nothing
+/// to put in it costs nothing on the wire.
+///
+/// # Arguments
+///
+/// * `trace` - The trace context to carry, if this caller is in a trace
+/// * `payload_len` - The number of archived bytes that will follow this preamble
+/// * `max_frame_bytes` - The largest frame the server will accept
+#[inline]
+pub const fn request_preamble_traced(
+    trace: Option<&TraceContext>,
+    payload_len: usize,
+    max_frame_bytes: u32,
+) -> Result<RequestPreamble, ProtocolError> {
+    // a bundle with no context to carry is framed exactly as it was before this existed
+    let Some(trace) = trace else {
+        return match request_preamble(payload_len, max_frame_bytes) {
+            Ok(header) => Ok(RequestPreamble {
+                bytes: pad_preamble(header),
+                len: HEADER_LEN,
+            }),
+            Err(error) => Err(error),
+        };
+    };
+    // the context is part of the frame body, so it counts towards the length
+    let Some(body_len) = payload_len.checked_add(TRACE_CONTEXT_LEN) else {
+        return Err(ProtocolError::PayloadTooLarge {
+            len: payload_len,
+            max: max_frame_bytes,
+        });
+    };
+    // build the header, saying that a context follows it
+    let header = match Header::new(
+        MessageType::Queries,
+        Flags::TRACE_CONTEXT,
+        body_len,
+        max_frame_bytes,
+    ) {
+        Ok(header) => header,
+        Err(error) => return Err(error),
+    };
+    // lay the header down first and the context after it
+    let mut bytes = pad_preamble(header.encode());
+    let context = trace.encode();
+    let mut index = 0;
+    while index < TRACE_CONTEXT_LEN {
+        bytes[HEADER_LEN + index] = context[index];
+        index += 1;
+    }
+    Ok(RequestPreamble {
+        bytes,
+        len: MAX_REQUEST_PREAMBLE_LEN,
+    })
+}
+
+/// Widen an encoded header into the buffer a request preamble is held in
+///
+/// `RequestPreamble` is one fixed size array whichever shape it holds, so an untraced preamble is
+/// a header followed by bytes that are never written. This exists because neither `copy_from_slice`
+/// nor array concatenation is const.
+///
+/// # Arguments
+///
+/// * `header` - The encoded header to widen
+#[inline]
+const fn pad_preamble(header: [u8; HEADER_LEN]) -> [u8; MAX_REQUEST_PREAMBLE_LEN] {
+    // copy the header into the front and leave the rest alone
+    let mut bytes = [0u8; MAX_REQUEST_PREAMBLE_LEN];
+    let mut index = 0;
+    while index < HEADER_LEN {
+        bytes[index] = header[index];
+        index += 1;
+    }
+    bytes
+}
+
 /// Read the preamble of a bundle of queries
+///
+/// This stops at the header rather than going on to decode a trace context, because the two are
+/// separate reads: the header is what says whether a context is there at all, and the payload
+/// after it has to land at the start of its own allocation to be accessed in place. A caller reads
+/// this, checks [`Header::trace_len`], and reads a [`TraceContext`] if there is one.
 ///
 /// # Arguments
 ///

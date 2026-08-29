@@ -51,13 +51,24 @@ in the other direction — it had one row left open, that row was fixed, and the
 [moved](resolved/claude-md-drift.md).
 
 **Baseline as of writing:** `cargo check --workspace --all-targets` passes with warnings;
-`cargo test --workspace` passes — **1,155 tests**, two ignored, plus 13 more behind
+`cargo test --workspace` passes — **1,198 tests**, two ignored, plus 13 more behind
 `--features stage-profile` that a default run does not reach ([Test Coverage](test-coverage.md)).
-~~1,045~~ ~~1,084~~ — this figure had gone stale by two features while the sentences below it kept
-naming what each added, which is what a running total is supposed to prevent, and it then went stale
-by four more in exactly the same way. It is re-derived from a run
+~~1,045~~ ~~1,084~~ ~~1,164~~ ~~1,187~~ — this figure had gone stale by two features while the sentences below
+it kept naming what each added, which is what a running total is supposed to prevent, and it then
+went stale by four more in exactly the same way. It is re-derived from a run
 rather than incremented, and [Test Coverage](test-coverage.md) is the page that carries the
-per-binary breakdown.
+per-binary breakdown. It had gone stale by a **whole feature** again this time:
+[F34](../features/benchmark-tracing.md) added 20 and moved the figure on the coverage page and not
+on this one, so 1,164 was two changes behind rather than one.
+[Resolved #89](resolved/fragmented-query-traces.md) and
+[Resolved #90](resolved/divergent-layer-filters.md) added the other 3 — a new
+`tracing_topology.rs` integration binary carrying 1, which fails against the tree before the fix
+and reports the three separate traces one query produced, and 2 `shoal-core` unit tests.
+[F35](../features/wire-trace-context.md) added 11, and one of them is the first test here whose
+existence depends on a feature **another crate** turns on: `trace_propagation.rs` is gated on
+`otel`, which `cargo test -p shoal` does not enable and a `--workspace` run does, through
+`shoal-bench`. So this figure counts it and a per-package run would not
+([Test Coverage](test-coverage.md) says which is which).
 [Resolved #76](resolved/stage-join.md) added 6, and moved the count in both directions at once: 2
 in a default run and 4 behind the feature, including the first test anywhere that starts a server
 under `stage-profile` and reads what it wrote. That is the test the stage layer never had, and its
@@ -1377,42 +1388,38 @@ it needs its own before-and-after and a note on
 [Performance Baseline](../performance/baseline.md). Whether `lto = "thin"` would let
 the thirty `#[inline]` attributes be dropped again is the interesting half of the question.
 
-### 69. Nothing in the workspace ever installs a tracing subscriber
+### 69. `shoalctl` and the tests still install no tracing subscriber
 
-`shoal-core/src/server/trace.rs:75`, `trace::setup`, and the absence of any caller
+**Mostly resolved.** [F34](../features/benchmark-tracing.md) put a subscriber on `shoal-workload`,
+so a benchmark capture honors the `tracing:` section of its config and the engine's spans can be
+seen — [the resolved page](resolved/benchmark-tracing.md) has the whole of it. What is written
+there and not here is closed. Three things are not.
 
-`trace.rs` builds a `tracing_subscriber` registry, reads `Tracing` out of the config, and wires an
-OpenTelemetry exporter when `tracing.remote` names a gRPC endpoint. `pub fn setup(conf: &Conf)` is
-its entry point and **nothing calls it** — not `ShoalPool::start`, not `shard::start`, not
-`shoal-workload`, not `shoalctl`, not a test. `grep -rn "trace::setup"` over the workspace returns
-its own definition and nothing else.
+`shoalctl/src/main.rs`, and every test in the workspace
 
-Three things follow, and the third is the one worth noticing:
+**`shoalctl` installs nothing**, so an operator using it to talk to a server gets no structured
+output from the client half — including the `event!(Level::ERROR, ...)` calls that report a dead
+connection or a refused frame. The fix is the one `shoal-workload` took: call `trace::setup_with`
+in `main` and hold the guard. It has not been done because nothing has needed it yet, which is a
+reason to file it rather than a reason it is fine.
 
-- **The `tracing` section of `shoal.yml` configures nothing.** A deployment setting
-  `tracing.level: Debug`, or pointing `tracing.remote` at a collector, gets the same behaviour as
-  one that sets neither, which is silence.
-- **Every `#[instrument]` and `event!` in the workspace goes to a no-op dispatcher.** That includes
-  the server's — `Shard::reply`, `Shard::handle_query`, `Coordinator::send_to_shard` and the rest
-  have never been switched on — and the `event!(Level::ERROR, ...)` calls the error paths use to
-  report a dead connection or a refused frame. **An operator debugging a failure gets no output
-  from any of them.**
-- **It conditions what [F16](../features/client-builder.md) measured.** That feature added spans to
-  the client and found they cost nothing across 144 metrics. That is true and narrower than it
-  sounds: a span whose dispatcher finds no subscriber is close to free, so the measurement says
-  what these spans cost *in this configuration*, and this configuration is the only one that
-  currently exists. It is not a result about what the spans cost.
+**No test can observe any event the server emits**, and this one cannot be fixed the same way.
+`setup` installs a **global** subscriber, so the first test to call it decides what every other
+test in that binary sees — which is why `shoal/tests/disk_lookups.rs` installs its own local one
+rather than reaching for `setup`. The recovery summary has no automated coverage for exactly this
+reason ([Test Coverage](test-coverage.md)). Closing it needs a **non-global** path out of
+`trace.rs` — something returning a `Subscriber` for a caller to scope with
+`tracing::subscriber::with_default` — and F34 did not build one.
 
-**Established by reading the source and confirming by grep**, while writing
-[F16](../features/client-builder.md)'s *Performance* section — the question "what do these spans
-cost?" turned into "what is listening?" and the answer was nothing.
+**Whether a library should install a global subscriber at all is still unmade.** F34 sidestepped it
+by putting the install on the binary, which is right for the benchmark and says nothing about a
+program embedding `ShoalPool::start` and expecting the config it handed over to be honored. That
+program today gets silence unless it calls `setup` itself, and nothing tells it so.
 
-**Fix direction:** call `trace::setup` from `ShoalPool::start` and hold its `SdkTracerProvider` for
-the life of the pool, since `trace::shutdown` already exists and already takes one. Two things to
-decide on the way. A library that installs a **global** subscriber takes that decision away from
-the binary embedding it, so this may belong on `shoal-workload` and `shoalctl` rather than on
-`ShoalPool`. And whatever the answer, a benchmark capture must keep getting the subscriber it has
-always had — none — or every macro number moves for a reason that is not the code being measured.
+**Fix direction:** the `shoalctl` half is three lines and is unblocked. The test half wants
+`trace::subscriber(conf, &TraceOptions) -> impl Subscriber` alongside `setup_with`, with `setup_with`
+built on it — then a test scopes one for its own duration and the global install stays the binary's
+decision.
 
 ### 70. An axis writes more digits than its ticks have room for, and twice labels two at the same number
 
@@ -1743,3 +1750,87 @@ doing carefully is the report, which has to treat the two populations as two rat
 subtracting one from the other. Found while fixing
 [Resolved #80](resolved/never-flushed-partitions.md), which is about the other side of the same
 call.
+
+### 87. A collector that rejects every span is indistinguishable from one that accepts them
+
+`opentelemetry-otlp` 0.28, `OtlpHttpClient::export`
+(`~/.cargo/registry/.../opentelemetry-otlp-0.28.0/src/exporter/http/trace.rs:53-71`)
+
+The OTLP/HTTP response body is an `ExportTraceServiceResponse`, whose `partial_success` field
+carries `rejected_spans` and an `error_message`. A collector uses it to say *I took the request and
+threw the contents away* — the wrong tenant, a resource limit, a malformed attribute. The exporter
+never reads it:
+
+```rust
+let response = client.send_bytes(request).await.map_err(...)?;
+
+if !response.status().is_success() {
+    return Err(OTelSdkError::InternalFailure(error));
+}
+
+Ok(())
+```
+
+The status is checked and the body is dropped on the floor. So a collector answering `200` with
+`partial_success { rejected_spans: 412 }` produces exactly the same result inside Shoal as one that
+stored all 412 — `Ok(())`, no `BatchSpanProcessor.ExportError`, nothing at any log level.
+
+**Established by reproduction**, while diagnosing spans that were not appearing in Grafana. A proxy
+placed between the example and the collector captured the real answer:
+
+```
+sent=178434B tenant='Shoal' -> 200 body=b'\n\x00'
+```
+
+`\n\x00` is field 1, length zero: an empty `partial_success`, meaning nothing was rejected. That
+run was healthy, and the point is that **the unhealthy case would have looked identical from
+inside Shoal** — which is why the failure was chased through Shoal for as long as it was when it
+was never there. The 412 is the exact span count of one `cargo run --example tmdb`, counted by
+decoding the protobuf the exporter sent.
+
+**Fix direction:** wrapping `SpanExporter` to decode the response is not possible from outside the
+crate — `OtlpHttpClient::export` discards the body before returning, so there is nothing left for a
+wrapper to inspect. The options are upstream, or a hand-rolled exporter over `opentelemetry-proto`
+0.28 (already in the graph, as a dependency of `opentelemetry-otlp`), which would be the third
+implementation of an OTLP client in this tree's dependency closure and is hard to justify for one
+field. The cheap and honest thing, done in
+[Observability](../operations/observability.md#tracing), is to write down that confirming delivery
+means asking the collector rather than reading Shoal's logs.
+
+### 88. The readiness probe's expected refusals are reported at ERROR
+
+`shoal-bench/src/workloads/harness/ready.rs`, and the `event!(Level::ERROR, ...)` in
+`shoal-client/src/client.rs` that it provokes
+
+`ShoalPool::start` returns before its shards have bound, so `ready::wait_until_answering` connects
+in a loop until one answers. Every attempt before that lands on a closed port, and the client
+reports each one:
+
+```
+ERROR shoal_client::client: error=Io(Os { code: 111, kind: ConnectionRefused, ... })
+ERROR shoal_client::client: error=Io(Custom { kind: Other, error: "failed to send to proxy: send to a half closed channel" })
+ERROR shoal_client::client: msg="failing the queries a dead connection owed" conn=9 queries=1 code=ConnectionLost
+```
+
+The probe is working. Those lines mean the server has not finished starting, which is the state the
+probe exists to wait out — and the pool opens ten connections, so a single workload emits **at
+least a dozen** of them before it measures anything.
+
+This was invisible until [F34](../features/benchmark-tracing.md), because nothing installed a
+subscriber. It is now the first thing a person sees on a traced capture, and a capture is three
+hundred and seventy-four workloads: several thousand `ERROR` lines, none of which is an error.
+**The cost is that the ones that are get lost among them** — a genuinely dead connection during a
+measured run prints exactly the same third line as a probe attempt.
+
+**Established by reproduction**, in the smoke run that verified F34:
+`./target/release/shoal-workload run --id macro/insert_ephemeral --scale smoke` writes twelve
+`ERROR` lines to stderr and then measures the workload successfully and exits zero. The output is
+quoted above verbatim.
+
+**Fix direction:** the level is right for the client and wrong for this caller, and the client
+cannot tell the difference — a refused connect during startup and a refused connect mid-run are the
+same event. So the probe is what should say so: connect through a path that does not log, or have
+`ready` install a filter for its own duration that drops `shoal_client::client` below `WARN`, and
+lift it once the server answers. The second is cheap and needs the non-global subscriber path
+[item 69](#69-shoalctl-and-the-tests-still-install-no-tracing-subscriber) also wants, which is a
+reason to do that one first.

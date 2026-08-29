@@ -33,7 +33,14 @@ pub struct QueryMetadata {
     /// shard that split it instead of straight to the client. `None` means this query
     /// is answered by one shard alone and needs no collecting.
     pub gather: Option<ShardContact>,
-    /// The span context for this query
+    /// The span this query and everything it causes hangs off
+    ///
+    /// **This must never be an empty span.** `#[instrument(parent = &meta.span, ...)]` with an
+    /// empty parent does not produce an orphan - `tracing` turns a `None` parent into
+    /// `Attributes::new_root`, so every span downstream of it silently starts a *new trace*
+    /// ([Resolved #89](../../../docs/src/appendix/resolved/fragmented-query-traces.md)). It is
+    /// opened per query in `Coordinator::send_to_shard`, under the request span the socket read
+    /// opened, and carried unchanged across every channel hop from there.
     pub span: Span,
     /// When this query reached each stage of its journey through shoal
     ///
@@ -68,6 +75,7 @@ impl QueryMetadata {
     /// * `index` - The index for this query in a bundle of queries
     /// * `end` - Whether this is the last query in a bundle or not
     /// * `gather` - The shard collecting this queries responses if it was split
+    /// * `span` - The span this query and everything it causes hangs off
     /// * `stamps` - The stage timings for the bundle this query arrived in
     pub fn new(
         client: Uuid,
@@ -75,6 +83,7 @@ impl QueryMetadata {
         index: usize,
         end: bool,
         gather: Option<ShardContact>,
+        span: Span,
         stamps: StageStamps,
     ) -> Self {
         QueryMetadata {
@@ -83,7 +92,7 @@ impl QueryMetadata {
             index,
             end,
             gather,
-            span: Span::current(),
+            span,
             stamps,
             // a query starts out with no reason to skip a read, since only a load that has
             // already failed can give it one
@@ -107,12 +116,14 @@ impl QueryMetadata {
     /// * `index` - The index for this query in a bundle of queries
     /// * `end` - Whether this is the last query in a bundle or not
     /// * `gather` - The shard collecting this queries responses if it was split
+    /// * `span` - The span this query and everything it causes hangs off
     pub fn untimed(
         client: Uuid,
         id: Uuid,
         index: usize,
         end: bool,
         gather: Option<ShardContact>,
+        span: Span,
     ) -> Self {
         QueryMetadata::new(
             client,
@@ -120,6 +131,7 @@ impl QueryMetadata {
             index,
             end,
             gather,
+            span,
             StageStamps::new(Stamp::now()),
         )
     }
@@ -180,6 +192,13 @@ where
     Client {
         /// This peers id
         peer: Uuid,
+        /// The root span every span this bundle produces hangs off
+        ///
+        /// Opened by the relay when the last byte of the frame came off the socket, rather than
+        /// here, so the trace starts where the request does. It is carried rather than entered:
+        /// the relay task and the shard that handles this are different tasks on different
+        /// threads, and `tracing`'s ambient span does not cross either boundary.
+        span: Span,
         /// The raw data for our request
         ///
         /// This is a [`RequestBody`] rather than a bare buffer because the bytes in it are
@@ -258,6 +277,11 @@ where
     /// pruned partition carries no failure at all, because a partition that really is gone is
     /// answered correctly by finding nothing.
     PartitionLoadFailed {
+        /// The span of the read that gave up
+        ///
+        /// The queries this releases are linked to it rather than parented to it: a read serves
+        /// every query parked on its partition, so it belongs to none of them alone.
+        span: Span,
         /// The table the partition that could not be read belongs to
         table: D::TableNames,
         /// The partition that could not be read
@@ -292,8 +316,14 @@ impl<D: ShoalDatabase> Clone for ServerMsg<D> {
     fn clone(&self) -> Self {
         match self {
             ServerMsg::Join(info) => ServerMsg::Join(info.clone()),
-            ServerMsg::Client { peer, data, base } => ServerMsg::Client {
+            ServerMsg::Client {
+                peer,
+                span,
+                data,
+                base,
+            } => ServerMsg::Client {
                 peer: *peer,
+                span: span.clone(),
                 data: data.clone(),
                 base: *base,
             },
@@ -325,10 +355,12 @@ impl<D: ShoalDatabase> Clone for ServerMsg<D> {
             }
             ServerMsg::Partition(loaded) => ServerMsg::Partition(loaded.clone()),
             ServerMsg::PartitionLoadFailed {
+                span,
                 table,
                 partition_id,
                 error,
             } => ServerMsg::PartitionLoadFailed {
+                span: span.clone(),
                 error: error.clone(),
                 table: *table,
                 partition_id: *partition_id,
@@ -365,6 +397,12 @@ pub struct LoadedPartition {
     pub partition_id: u64,
     /// The result for this read
     pub data: ReadResult,
+    /// The span of the read that produced this
+    ///
+    /// A load releases every query parked on its partition, so the queries it unblocks are
+    /// *linked* to this rather than parented to it - only the query that asked for the read is
+    /// its child. See `PersistentTable::load_partition`.
+    pub span: Span,
 }
 
 pub struct LoadedPartitionKinds<D: ShoalDatabase> {

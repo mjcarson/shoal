@@ -37,6 +37,11 @@ bench = ["server", "shoal-core/bench"]
 stage-profile = ["shoal-client/stage-profile", "shoal-core?/stage-profile"]
 # SHQL autocompletion, which clients opt into
 shql-complete = ["shoal-proto/shql-complete"]
+# put a trace context on the wire, so a caller's spans and the server's are one trace
+#
+# forwards to the client half alone. the server half is unconditional, because a server always
+# understands the flag bit whether or not anything it is linked against ever sets one (F35)
+otel = ["shoal-client/otel"]
 
 
 [dependencies]
@@ -57,7 +62,8 @@ deepsize2 = { workspace = true }
 # the shql tests cover autocompletion, which clients opt into
 shoal-core = { version = "0.1.0", path = "../shoal-core", features = ["shql-complete"] }
 futures = "0.3"
-# the example builds its config in code and stores it under a temp dir, so it needs no shoal.yml
+# the `tmdb` example builds its config in code and stores it under a temp dir, so it needs no
+# shoal.yml. `tmdb_dataset` is the other half of that pair and reads one off disk instead
 tempfile = "3"
 criterion = { workspace = true }
 # the wire bench allocates a request body both of the ways the relay can, so it needs the same
@@ -72,6 +78,22 @@ rcgen = { version = "0.13", default-features = false, features = ["crypto", "aws
 # than adding a counter to the engine that only a test would ever read
 tracing = "0.1"
 tracing-subscriber = "0.3"
+# `trace_propagation` asserts about OpenTelemetry trace ids rather than about the registry's span
+# tree, because a trace context on the wire is joined at the OTLP layer and is invisible to the
+# registry - `Shoal::request` stays an explicit tracing root either way. Pinned to the versions
+# `shoal-core` resolves, since two `opentelemetry` majors in one process are two `SpanContext` types
+opentelemetry = "0.28"
+opentelemetry_sdk = "0.28"
+tracing-opentelemetry = "0.29"
+# the `tmdb_dataset` example reads the TMDB csv off disk. the sync reader rather than an async one:
+# it runs on a blocking thread and is the faster of the two on a half gigabyte file
+csv = "1"
+# and deserializes each row straight into the table struct. this facade re-exports `serde_json` but
+# not `serde`, so a schema that derives `serde::Deserialize` has to name it here
+serde = { version = "1", features = ["derive"] }
+# `tmdb_dataset` takes flags, unlike `tmdb` which takes none. pinned to the same version the other
+# two crates in this workspace that use it ask for
+clap = { version = "4.2", features = ["derive"] }
 
 # the micro benchmarks reach crate private internals of shoal-core through its `bench`
 # feature, so they cannot be built without it

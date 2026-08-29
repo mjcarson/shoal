@@ -169,12 +169,14 @@ paid until something is actually broken. Health-based preference wants the `Ping
 that accepts a query and never answers still parks its caller forever
 ([item 62](../appendix/known-issues.md)). That is F17.
 
-**The spans reach nobody.** `shoal-core/src/server/trace.rs` builds a subscriber and **nothing in
+**The spans reach nobody.** `shoal-core/src/server/trace.rs` builds a subscriber and ~~**nothing in
 the workspace calls it** — not `ShoalPool::start`, not the workload binary, not the tests. So the
-`tracing` section of `shoal.yml` configures nothing, the server's own spans have never been
-switched on either, and the measurement below says what these spans cost when no subscriber is
-installed rather than what they cost. Filed as
-[item 69](../appendix/known-issues.md).
+`tracing` section of `shoal.yml` configures nothing~~ — **the workload binary calls it now**, so
+the `tracing` section of `shoal.yml` configures a capture and both halves' spans can be switched on
+([F34](../features/benchmark-tracing.md)). `ShoalPool::start` and the tests still do not. **The
+measurement below is unchanged by that** and says exactly what it always said: what these spans cost
+when no subscriber is installed, which was the only configuration that existed when it was taken.
+The remainder is [item 69](../appendix/known-issues.md).
 
 ## Invariants to uphold
 
@@ -230,8 +232,11 @@ feature, so a default build contains none of it and the scopes are genuinely fre
 `tracing` spans are in the build — and **no subscriber is installed**, so each one is a check
 against a global dispatcher that finds nothing and returns. That is the honest scope of this
 measurement: it says the spans cost nothing in the configuration this repository actually runs, and
-it says nothing about what they would cost under a subscriber. Since `trace::setup` has no callers
-at all, that configuration is also the only one that currently exists.
+it says nothing about what they would cost under a subscriber. Since `trace::setup` had no callers
+at all when this was measured, that configuration was also the only one that existed. The example
+calls it now, and so does `shoal-workload` since [F34](../features/benchmark-tracing.md), which
+makes the other configuration reachable and measurable — and leaves this measurement saying exactly
+what it always said, about the one without a subscriber. **Nobody has taken the other measurement.**
 
 **What it unblocks is worth more than what it cost.**
 [O28](../appendix/optimizations.md) and

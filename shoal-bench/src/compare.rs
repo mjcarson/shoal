@@ -376,6 +376,15 @@ fn print_macro_text(comparison: &macro_layer::MacroComparison) {
             comparison.missing().join(", ")
         );
     }
+    // and anything whose two sides were not instrumented the same way, which is not a difference
+    // in the code and must not be read as one
+    if !comparison.traced.is_empty() {
+        println!(
+            "  NOT COMPARABLE - these were traced differently on the two sides, so any movement \
+             above is at least partly the instrumentation:\n    {}",
+            comparison.traced.join("\n    ")
+        );
+    }
 }
 
 /// Renders a list of workload identifiers, or says there are none
