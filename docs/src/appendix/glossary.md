@@ -284,7 +284,13 @@ than mistaking it for the end of the log. See
 | Intent log | — | The write-ahead log |
 | Flushed | Durable on stable storage | Handed to the kernel; no `fdatasync` on the normal path |
 | Sorted | Supports ordered scans and range queries | Rows are stored ordered, but no read predicate uses the order |
-| Distributed | Multiple nodes | Multiple shards in one process |
+| Distributed | Multiple nodes | Multiple shards in one process. What it would take to mean the other thing is [Distributed Shoal](../distributed/overview.md), whose [vocabulary](../distributed/overview.md#vocabulary) fixes the words below for that part alone |
+| Node | A machine or process in a cluster | Unbuilt. One Shoal process with a `NodeId` and a storage directory ([C1](../distributed/node-identity.md)) |
+| Replica set | The copies of a piece of data | Unbuilt. The `RF` shards on `RF` distinct nodes holding a tablet, stored per tablet in the map ([C4](../distributed/tablet-map.md)) |
+| Primary | A leader node | Unbuilt. A *role* a shard plays for some tablets: the one replica that orders that tablet's writes ([C5](../distributed/replication.md)) |
+| Epoch | A term or generation | Unbuilt. A per-tablet counter incremented on every primary change; what fences a replaced primary ([C7](../distributed/failover.md)). Not the compaction *generation* |
+| Consistency level | How many replicas a read or write waits for | Unbuilt. `One`/`Quorum`/`All` for writes, `One`/`Primary`/`Quorum` for reads ([C6](../distributed/reads.md)) |
+| Control plane | A separate service | Unbuilt. A thread on cpu 0 of every node running Raft, the failure detector and the rebalancer; never on a query path ([C1](../distributed/node-identity.md)) |
 | `sync` | Force to stable storage | On `StreamWriter`, issues a background write and returns. `sync_blocking` is the real one — but on glommio's `DmaStreamWriter`, `sync` *does* fsync |
 
 **Workload** — One purpose-built benchmark in `shoal-bench`, isolating one path through the

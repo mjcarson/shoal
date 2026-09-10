@@ -56,7 +56,11 @@ its nine entries have since been built, in whole ([F10](features/framing-and-pro
 [F11](features/error-channel.md)) and in half ([F12](features/authentication.md)).
 
 Shoal is best understood as a fast single-node partitioned key-value store with a
-persistence layer, on top of which distribution has not yet been built.
+persistence layer, on top of which distribution has not yet been built. How it would be —
+replication with a primary per tablet, membership under Raft, failover, rebalancing, and the
+tests and benchmarks that would prove each — is designed in
+[Distributed Shoal](distributed/overview.md), which is to the first five bullets above what
+Direction is to the last one: a design record with an order, and nothing in it built.
 
 ## A note on the current branch
 

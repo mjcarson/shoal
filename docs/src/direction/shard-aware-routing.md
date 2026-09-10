@@ -145,7 +145,7 @@ shape: the slow path stays correct and stays exercised.
 | **Impact** | Argued, and weakly. The hop this removes is a `kanal` send between two cores of the same machine |
 | **Difficulty** | XL — reaches the wire format, the pool, the server's listener, and the merge path |
 | **Depends on** | ~~[D2](framing.md) for `Topology`~~ — **satisfied**, message type 9 exists and is unwired since [F10](../features/framing-and-protocol-evolution.md); [D6](connection-pool.md) for a pool that can be resharded; [D5](runtimes.md) for `Ring` on the client side |
-| **Blocks** | nothing here. It is a prerequisite for multi-node routing, which is [TODOs](../appendix/todos.md#distribution)'s problem, not this chapter's |
+| **Blocks** | nothing here. It is a prerequisite for multi-node routing, which is ~~[TODOs](../appendix/todos.md#distribution)'s problem~~ [Distributed Shoal](../distributed/overview.md)'s problem — [C2](../distributed/transport.md) and [C4](../distributed/tablet-map.md) — not this chapter's. Note that C4 builds step 1 below, the `Topology` frame, ahead of this page's schedule |
 | **Tradeoff** | Major — the pool stops being uniform, and a whole class of staleness bugs becomes possible |
 | **Benchmark** | `routing`, unbuilt — and until it exists **this entry cannot be justified at all** |
 
@@ -236,3 +236,6 @@ left.
   Dragonfly's argument against one
 - [TODOs](../appendix/todos.md#distribution) — multi-node routing, which this is a prerequisite for
   and not a substitute for
+- [Distributed Shoal](../distributed/overview.md) — where multi-node routing is now designed;
+  [C4](../distributed/tablet-map.md#pushed-to-clients) is step 1 of this page, built for servers
+  and clients at once

@@ -216,6 +216,15 @@ The *client* half of this is now designed separately.
 from the client rather than from a coordinator, which is a prerequisite for multi-node routing and
 not a substitute for it — the transport and membership work above is unchanged by it.
 
+**Where the rest of this now lives.** The transport, membership, replication and failover halves
+have grown a design rather than staying this sketch. That design is the
+[Distributed Shoal](../distributed/overview.md) part — the `Remote` variant is
+[C2](../distributed/transport.md), the replica set per tablet is [C4](../distributed/tablet-map.md),
+the authority over the table is [C3](../distributed/membership.md), and the "actual work" the
+tablet-ring page deferred is [C5](../distributed/replication.md) through
+[C7](../distributed/failover.md). This entry still records *that* it is unbuilt. Nothing there is
+built either.
+
 ### Rebalancing
 
 Today the shard count is part of the on-disk format — intent logs are `Shard-N-active` and
@@ -247,6 +256,14 @@ A third piece appears once the map is editable, and it is on the client side:
 holding a copy of the map holds a stale one during a move, so the map has to carry a version and
 a query routed against a stale one has to be forwarded rather than refused. That is a constraint on
 how rebalancing is built, not a consequence of it, which is why it is worth knowing before starting.
+
+**Where this now lives.** [C8](../distributed/rebalancing.md) in the
+[Distributed Shoal](../distributed/overview.md) part designs the rebalancer, the move, and the
+answer to the second piece above — which is **not** the one this entry expected. With the
+streaming protocol in hand ([C7](../distributed/failover.md#a-returning-node)), storage stays
+keyed by shard and a per-tablet index over the archive map does what per-tablet files would have,
+for the reason [C8](../distributed/rebalancing.md#storage-stays-keyed-by-shard) gives. The first
+piece, persisting the map, is [C4](../distributed/tablet-map.md). Both are unbuilt.
 
 ### Sort-key range predicates — built
 

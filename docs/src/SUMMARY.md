@@ -111,6 +111,23 @@
   - [D8. Compile-time guarantees](direction/typed-queries.md)
   - [D9. Lessons from other databases](direction/prior-art.md)
 
+# Distributed Shoal
+
+- [Overview](distributed/overview.md)
+  - [C1. Nodes, identity, and the cluster configuration](distributed/node-identity.md)
+  - [C2. The inter-node transport](distributed/transport.md)
+  - [C3. Membership and failure detection](distributed/membership.md)
+  - [C4. The replicated tablet map](distributed/tablet-map.md)
+  - [C5. Replication and the write path](distributed/replication.md)
+  - [C6. Reads and consistency levels](distributed/reads.md)
+  - [C7. Primary failover and recovering a node](distributed/failover.md)
+  - [C8. Adding, removing and rebalancing nodes](distributed/rebalancing.md)
+  - [C9. Operating a cluster](distributed/operations.md)
+  - [C10. Performance, and the benchmarks that judge it](distributed/performance.md)
+  - [C11. Acceptance tests and the cluster harness](distributed/testing.md)
+  - [C12. Lessons from other clusters](distributed/prior-art.md)
+  - [Milestones](distributed/milestones.md)
+
 # Appendix
 
 - [Known Issues](appendix/known-issues.md)

@@ -379,6 +379,11 @@ rather than a second one.
 
 ### 38. Integration test binaries all bind the same ports
 
+> **Would be closed by [M0](../distributed/milestones.md#m0-step-0-the-harness-and-the-facts)** of
+> [Distributed Shoal](../distributed/overview.md): the cluster fixture takes ports from bind-zero
+> and deletes the counter ([C11](../distributed/testing.md#the-cluster-fixture)). Nothing there is
+> built yet.
+
 `shoal/tests/utils.rs:48-53` hands out ports from a counter:
 
 ```rust
@@ -1033,6 +1038,11 @@ directly — but it is still the ergonomic gap this item was filed for.
 
 ### 58. A shard that dies is not reported to whoever started the pool
 
+> **Would be closed by [M0](../distributed/milestones.md#m0-step-0-the-harness-and-the-facts)** of
+> [Distributed Shoal](../distributed/overview.md): `ShoalPool::start` returns a handle with
+> `ready()` and `shard_failed()` ([C9](../distributed/operations.md#readiness)). Nothing there is
+> built yet.
+
 ```rust
 pub fn exit(self) -> Result<(), ServerError> {
     self.should_shutdown.store(true, Ordering::Relaxed);
@@ -1327,6 +1337,11 @@ remainder of the appendix — and the pass is worth doing as one sweep with the 
 rather than as fifteen incidental corrections, for the reason this item already gives.
 
 ### 65. Two `gxhash` majors, and partition keys hashed by the one without `deterministic`
+
+> **Must be fixed before [M1](../distributed/milestones.md#m1-node-identity-and-the-control-plane-thread)**
+> of [Distributed Shoal](../distributed/overview.md): on one node this is a persistence hazard
+> across upgrades; across two nodes built from different lockfiles it is two nodes disagreeing
+> about which tablet a row is in ([C1](../distributed/node-identity.md#prerequisites)).
 
 `Cargo.toml:16` and `shoal-proto/Cargo.toml`, `shoal-core/Cargo.toml`; the hash itself is
 `shoal-derive/src/traits/partition_key.rs`, `PartitionKeySupport::get_partition_key`
