@@ -126,6 +126,7 @@
   - [C10. Performance, and the benchmarks that judge it](distributed/performance.md)
   - [C11. Acceptance tests and the cluster harness](distributed/testing.md)
   - [C12. Lessons from other clusters](distributed/prior-art.md)
+  - [C13. Protocol decisions and open questions](distributed/protocol.md)
   - [Milestones](distributed/milestones.md)
 
 # Appendix

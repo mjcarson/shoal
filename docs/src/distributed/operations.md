@@ -2,267 +2,193 @@
 
 ## Context
 
-Every page before this one describes something an operator would want to see and cannot: which
-nodes are in the cluster, which tablets each holds, how far a follower is behind, how suspicious
-the failure detector is, whether a rebalance is running. And two things an operator would want to
-*do* — remove a node, decommission one — have so far been described as log entries the leader
-proposes, with nothing said about who asks it to. This page is the surface: the frames, the
-`shoalctl` tab, the metrics, and the runbooks for the six things an operator will actually type.
+An operator needs to see data readiness, durability, replication debt and migration progress,
+and to recover without silently discarding evidence. All administration talks to Shoal nodes;
+there is no external membership or failover service. Basic observability and authorization land
+with the operations they expose, not only at the end of the feature.
 
 ## What exists today
 
-**No introspection of any kind.** [Observability](../operations/observability.md) says it in its
-first paragraph: "no metrics endpoint, no health check, and no introspection API". What a server
-knows about itself reaches an operator as log lines, and since
-[F34](../features/benchmark-tracing.md) as spans and metrics on an OTLP sink if `shoal.yml` names
-one ([Configuration](../getting-started/configuration.md#tracing)).
-
-**`shoalctl` is a query tool** — a ratatui TUI compiled against a schema, with query tabs, a SHQL
-bar, completion and a result table ([shoalctl](../operations/shoalctl.md)). It has no
-administrative surface because there has been nothing to administer.
-
-**`ShoalPool::start` returns before anything is ready and `exit` reports nothing**
-([item 58](../appendix/known-issues.md#58-a-shard-that-dies-is-not-reported-to-whoever-started-the-pool)).
-There is no moment at which a node can say it is up, and no way to ask.
-
-**A client learns the topology** since [C4](tablet-map.md#pushed-to-clients) and does nothing
-with it but hold it — `Shoal::topology()`.
+Shoal has authenticated client principals, TLS, a schema-specific `shoalctl` TUI and optional
+OTLP tracing/metrics. The pool lacks a reliable readiness/failure handle. It has no distributed
+repair, migration, backup/restore or cluster-admin API. Existing disk archives do not have the
+end-to-end integrity metadata required by this design.
 
 ## The design
 
-### The `Admin` frame
+### The Admin frame
 
-One message type, appended at the end of [C2](transport.md#the-message-types)'s list, carrying a
-request the control plane answers. A client sends it on an ordinary client connection; the
-accepting shard hands it to the control plane over the shard-to-control-plane channel
-([C1](node-identity.md#the-control-plane-thread)) and relays the answer back under the request's
-query id, so the client's proxy demultiplexes it like any response.
+Use the authenticated client connection and relay admin requests to the embedded control runtime.
+Read-only replies identify the node and control/data versions observed. Mutations carry an
+operation id and expected policy/topology version, are forwarded to the control leader when
+appropriate, and return an accepted operation/status handle rather than block indefinitely for
+a long migration. Repeating the same operation id is idempotent.
 
-```rust
-pub enum AdminRequest {
-    Members,                          // every member, its state, its address, its shard count
-    Topology,                         // the map at its version — the same thing the Topology frame pushes
-    Lag,                              // per tablet this node holds: primary's stamp, own stamp, the gap
-    Detector,                         // per peer: phi, last pong, the window
-    Rebalance,                        // the plan and the moves in flight
-    Decommission(NodeId),             // Up → Leaving; refused for a node that is not Up
-    Remove(NodeId),                   // Down → Removing; refused for a node that is Up (decommission it)
-    RebalancePrimaries(bool),         // toggle the third plan target
-    Repair(Option<u16>),              // run anti-entropy for one tablet or all — see below
-}
-```
+| Request family | Information/action |
+| --- | --- |
+| Members / Topology | Identities, control voters, data placement, leader hints and committed configuration ids |
+| Lag / Health | Durable, committed, applied and checkpointed positions; eligible/quarantined/installing copies |
+| Detector | Local suspicion, report freshness, incarnation and committed Down episodes |
+| Rebalance / OperationStatus | Transition phases, blockers, remaining bytes, disk reserve and resource budgets |
+| Decommission / Remove / Replace | Capacity-checked state transitions; replacement joins as a learner first |
+| Policy / Maintenance | Versioned RF/default/grace/weight policies; suspend/resume automatic removal |
+| Repair / Backup / Restore | Scoped operations with provenance, checksums and explicit recovery boundary |
 
-A request that changes state — `Decommission`, `Remove`, `RebalancePrimaries` — is **refused unless
-the connection authenticated as a principal in `cluster.admins`**, a new list in the block
-([C1](node-identity.md#the-cluster-block)). The read-only requests are open to any authenticated
-client, and to any client at all on a server with no `auth:` section, which is the same stance
-every query takes today ([Wire Protocol](../architecture/wire-protocol.md#limitations)). This is
-the first thing in Shoal that a `Principal` ([F12](../features/authentication.md)) gates, and the
-per-table authorization `todos.md` filed as blocked on having a principal gets its precedent.
+Authorize every state-changing request, including Repair, through `cluster.admins` from its first
+implementation. Log principal, request id, expected version and outcome. Read-only visibility
+follows the deployment's auth policy, with topology exposure documented. Admin authorization
+belongs in M3/M8/M9 as those requests appear, not retrofitted in M10.
 
-`Members`, `Topology`, `Lag`, `Detector` and `Rebalance` are answered by *this node's* control
-plane from *its* view; a state-changing request is forwarded to the leader, which proposes it,
-and the answer is the commit or the refusal. An operator asking three nodes for `Members` may get
-three answers during a change, and the version in each says which is newest.
+### shoalctl's cluster tab
 
-### `shoalctl`'s cluster tab
+Show desired versus active RF, learners versus voters, leader hints/terms, per-tablet readiness,
+max/histogram replication lag, Down grace remaining, migration phases and blocked reasons.
+Surface “two durable copies, desired three, awaiting replacement node” explicitly. A member count
+of three is not sufficient evidence that every tablet has three ready copies.
 
-A fourth pane kind beside the query tabs, opened with a key, drawing the five read-only replies
-on a refresh interval:
-
-```
- ┌ cluster 8f3a… ───────────────────────── version 1042 ── leader node-2c91 ─┐
- │ node        state    shards  tablets  primaries  lag(max)  phi            │
- │ 2c91a0b3    Up       12      1024     342        0         0.3   *leader* │
- │ 7e12f6d9    Up       12      1024     341        0         0.4            │
- │ b04d1e77    Down     12      1024     0          —         9.8   3m12s    │
- │ e9a3c5f1    Joining  8       0        0          —         0.2            │
- ├ rebalance ─────────────────────────────────────────────────────────────────┤
- │ 1024 → 683 per node; 341 moves planned, 3 in flight                       │
- │ tablet 0x3f2  2c91→e9a3  streaming  2.1 GiB / 3.4 GiB   lag 0             │
- └────────────────────────────────────────────────────────────────────────────┘
-```
-
-State-changing actions are keys with a confirmation line that names what will happen — `remove
-b04d1e77: re-replicate 1024 tablets from survivors, this node will not be able to rejoin` — because
-the action is the one an operator cannot take back. `shoalctl` stays a library compiled against a
-schema ([shoalctl](../operations/shoalctl.md)); the cluster tab needs nothing from the schema and
-would work in a standalone binary, which is worth knowing when `todos.md`'s "build and packaging"
-entry is picked up.
+Actions show a preview naming the affected identity, planned data movement and irreversible
+boundary, then submit the versioned operation. Long operations survive a disconnected TUI and are
+resumable by id. Record state changes so automated and manual removal are equally auditable.
 
 ### Metrics
 
-On the OTLP metrics sink the configuration already has (`tracing.metrics`,
-[Configuration](../getting-started/configuration.md#tracing)), recorded by the control plane and
-by shards:
+| Family | Essential measurements |
+| --- | --- |
+| Membership | Control quorum availability, voter count, policy/topology versions, Down/Removing age |
+| Replication | Durable/commit/apply lag in entries, bytes and age; missing quorum and under-replicated tablets |
+| Writes | End-to-end and quorum/application wait histograms; success, rejection and unknown outcomes |
+| Reads | Barrier/application wait, stale/session routing, retry/timeout and incomplete-share errors |
+| Recovery | Retained history bytes/oldest position, snapshot generation/progress, blocked recovery and time to catch up |
+| Resources | Pending bytes, lane queue bytes, memory caps, free disk reserve, transfer throughput and I/O failures |
+| Integrity | Checksum failures, quarantined copies, repair source/provenance and unresolved divergence |
+| Failover | Detection/election/recovery/reconnect intervals and client-visible outage |
 
-| Metric | Kind | Labels | What it says |
-| --- | --- | --- | --- |
-| `shoal.cluster.members` | gauge | `state` | How many members in each state |
-| `shoal.cluster.topology_version` | gauge | | Whether every node agrees |
-| `shoal.replication.lag` | gauge | `tablet`, `replica` | Seqs behind the primary. **The** metric — a follower that is falling behind is the earliest sign of everything else |
-| `shoal.replication.quorum_wait` | histogram | `level` | Time from commit to release, per write; what `Quorum` costs a caller |
-| `shoal.detector.phi` | gauge | `peer` | Suspicion, per peer |
-| `shoal.failover.count` | counter | | How many `SetPrimary`s the leader has proposed for a `Down` node |
-| `shoal.failover.window` | histogram | | Seconds a tablet had no `Up` primary |
-| `shoal.rebalance.moves` | counter | `kind` | `add`, `drop`, `primary` |
-| `shoal.rebalance.streaming_bytes` | counter | | Bytes streamed as snapshots |
-| `shoal.reads.stale` | counter | `level` | `Quorum` reads that found a lagging replica and nudged it |
-
-`shoal.replication.lag` at 4096 tablets × RF is too many series for a collector by default, so it
-is exported per node as a max and a histogram, and per tablet only when `tracing.metrics.per_tablet`
-is set — a knob that exists so the answer to "which tablet" is available when it is needed and not
-paid for when it is not.
+Aggregate by node/table/role by default; per-tablet series are opt-in to avoid unbounded collector
+cardinality. Top-k diagnostics and admin queries identify individual hot or lagging tablets.
+A zero sequence gap alone is not an integrity/readiness check. Record replication traffic and
+all participating nodes' work, not just the coordinator's profile.
 
 ### Traces
 
-A query that crosses nodes is one trace, by [C2](transport.md#the-message-types)'s rule, and its
-shape is [Observability](../operations/observability.md#how-one-query-stays-one-trace)'s with two
-new spans: `Coordinator::forward` on the coordinator, parent of the remote node's
-`Shoal::request`, and `Shard::replicate` on a primary, parent of each follower's
-`Shard::apply_replicate`. A trace of a `Quorum` write therefore shows the fan-out and, on each
-branch, which follower's fsync the ack waited for — which is the attribution
-[C10](performance.md#what-distribution-costs) needs and no throughput number gives.
+Forward and replication spans retain originating context, with links/per-record metadata for
+batches. Include term/configuration and transition ids where useful, without making every tablet
+an unbounded metric label. Traces distinguish append, durable, commit, apply and reply. Repair and
+snapshot operations carry independent operation ids and resource-wait spans.
 
 ### Readiness
 
-`ShoalPool::start` gains what it never had: the control plane knows when every shard has bound
-its listener, and `start` returns a handle whose `ready()` resolves then, and whose
-`shard_failed()` resolves if one exits. That closes
-[item 58](../appendix/known-issues.md#58-a-shard-that-dies-is-not-reported-to-whoever-started-the-pool)
-and the readiness entry in `todos.md` that [F8](../features/purpose-built-workloads.md) worked
-around with a probe. An `Admin::Members` reply from a node is also a readiness probe — a node that
-answers it has a control plane, and one whose own entry says `Up` has a map.
+`start` returns a handle with process readiness and shard-failure notification. Separate process
+live, control-plane joined, and data-ready-for-policy states. Expose per-tablet readiness and a
+summary that says whether default reads/writes can be accepted. A joining node can answer admin
+without claiming ready quorum data. An installing tablet stays ineligible even if `One` tolerates
+arbitrary lag. Client load balancers need a documented readiness probe, not a fixed sleep.
 
 ### Runbooks
 
-Six, each a numbered list of what to type and what to expect, kept short here and written in full
-when M10 lands:
-
-1. **Bootstrap.** One node, `cluster:` with empty `seeds`. It mints the cluster and is `Up`
-   alone at `replication_factor` copies of nothing. Start the second and third with the first as
-   seed; the rebalancer widens every tablet as they join. Do not send writes at `Quorum` until
-   `Members` shows `RF` nodes `Up`, or they will be refused `Unavailable`.
-2. **Add a node.** Start it with any `Up` node as seed. Watch `Rebalance` until the plan is empty.
-   Nothing else.
-3. **Replace a dead node.** `Remove` the dead one (or let `auto_remove_after`); add the new one.
-   Two runbooks, in that order, and the reason for the order is that a `Removing` node's tablets
-   are widened from survivors and the new node is then a destination for balance — doing it the
-   other way round widens onto the new node and then rebalances again.
-4. **Decommission.** `Decommission` it; watch until `Removed`; stop the process. Its directory can
-   be deleted.
-5. **Rolling upgrade.** One node at a time: stop it, upgrade, start it, wait for `Lag` to reach
-   zero and `Members` to show it `Up`, then the next. A node running a protocol version its peers
-   do not speak is refused by the peer handshake ([C2](transport.md#the-peer-handshake)) — which
-   is the *safety* of a rolling upgrade, since the version byte is what makes a mismatch a
-   refusal and not a misread ([D9](../direction/prior-art.md#cassandra)) — so a release that bumps
-   the peer protocol has to speak the old version too, for the duration of the roll. That is a
-   constraint on how `PeerHello` is versioned, and it is why the peer handshake carries the
-   version in its body as well as in the header: a node can accept `n − 1` for one release.
-6. **A partition healed and a node came back `Removed`.** It is refused. Its data is orphaned and
-   stale. Start it from an empty directory as a new node; the old directory is a backup of nothing
-   the cluster does not already hold, and can be deleted once `Members` shows every tablet at RF.
+1. **Bootstrap.** Explicitly create the first embedded control group; join the intended nodes.
+   Wait for data configuration/replica readiness, not just Members=Up, before default writes.
+2. **Add.** Join identity, inspect resource/domain capacity, follow learner transfer and safe
+   reconfiguration until the feasible target is reached. Report blocked capacity clearly.
+3. **Replace a dead node.** Start an authenticated replacement as a new identity or use Replace
+   to pair it with the old member. At RF=3 on three machines, restoring RF needs that replacement;
+   do not wait for removal to complete before supplying the missing capacity.
+4. **Decommission.** Preview feasibility, mark Leaving, follow transition ids, wait for safe data
+   and control-voter retirement, then stop. Refuse an impossible RF/domain target without override
+   through a separate explicit policy change.
+5. **Automatic removal and maintenance.** Show the proposed 30m grace, permit null or explicit
+   maintenance suspension, persist episode/progress across leader changes, and page on blockers.
+6. **Removed node returns.** Never restore its old authority. Preserve the directory for audit or
+   verified import; an explicit replacement/import path may reuse validated checkpoint data as
+   learner input. Do not delete the only remaining useful evidence on a count-only health check.
+7. **Rolling upgrade.** Validate n/n−1 structural schema and codecs; upgrade one failure domain at
+   a time, wait for data readiness/catch-up, then activate new capabilities through control state.
+   State the last safe binary/storage rollback point. Changed schema needs its own migration.
+8. **Control quorum lost.** Established data groups continue where their own quorums survive.
+   Restore original control voters from durable storage; no automatic rebootstrap. Topology/admin
+   mutations remain blocked. Permanent majority loss requires the disaster-recovery procedure.
+9. **Backup and restore.** Capture checksummed per-tablet committed checkpoints with configuration,
+   schema/format, deduplication state and boundary manifest. Store outside the failure domain being
+   protected. The initial backup need not be one cross-tablet transactional snapshot; say so.
+   Restore to an isolated new cluster identity, verify histories/data, then explicitly cut over.
+10. **Existing single-node data.** Test supported offline conversion or export/import into fresh
+    cluster storage, verification, cutover and rollback. Never require destroying the source.
 
 ### Repair
 
-`Admin::Repair` runs anti-entropy: every replica of a tablet computes a digest of its partitions
-— a hash per partition of its archived bytes, folded into one per tablet — and the primary
-compares. A replica whose digest differs is caught up by snapshot ([C7](failover.md#a-returning-node)),
-because a digest mismatch at equal stamps means corruption, not lag, and corruption is not in the
-log. This is the check every "digest-identical" acceptance test on the other pages uses, exposed
-as an operator's tool and, on a timer (`cluster.repair_interval`, default off), as a scheduled
-one. [M8](milestones.md#m8-repair) builds it, and it closes the gap
-[Storage Overview](../storage/overview.md#limitations) names — "no checksums on archive data" —
-from the other end: an archive that does not match its peers is repaired from them.
+Detect storage corruption with persistent archive/checkpoint checksums and validate manifests.
+For logical comparison, pin replicas to the same committed applied checkpoint and hash canonical
+logical content in deterministic table/partition/key order, including schema and coverage.
+Different archive layout, padding or compaction timing must not create false corruption reports.
+If replicas cannot reach a common retained boundary, establish a new checkpoint for comparison.
+
+Do not assume the primary is correct. Quarantine checksum-invalid copies, compare independent
+verified replicas/backup provenance, and select a source under an explicit accidental-corruption
+policy. If a trustworthy source cannot be established, stop destructive repair and preserve
+copies for operator recovery. A majority digest can support diagnosis under the stated fault
+model but does not prove arbitrary software-corruption immunity.
+
+Repair uses C7's atomic snapshot mechanism and C8's per-tablet transition lock and resource budgets.
+It cannot overwrite a newer committed history with an older snapshot. Repairing a corrupted
+primary includes removing its serving eligibility and reestablishing authority on a healthy
+quorum. Metrics record the evidence, source, replaced generation and verified resulting boundary.
+
+Scheduled scrub/repair intervals and their default are a Q12 decision with a cost measurement;
+manual repair is available at M8. Replication is not a backup against deletion, operator mistakes
+or corruption applied consistently everywhere.
 
 ## Alternatives rejected
 
-**An HTTP admin endpoint.** A second listener, a second protocol, a second auth path, and a
-dependency on an HTTP stack the server otherwise lacks. The `Admin` frame reuses the client
-connection, the client's auth, and the client's proxy.
-
-**Admin over the peer port.** It would have to be authenticated as a peer, which is a node
-certificate, which an operator's laptop does not have.
-
-**Metrics per tablet by default.** 12,288 series per node for lag alone. Exported as a max and
-a histogram, per tablet on request.
-
-**A standalone `shoalctl` binary for the cluster tab.** It would work, and it is filed with the
-packaging entry rather than built here, because the tab is a pane in the tool that exists.
-
-**Gating read-only admin behind `cluster.admins`.** `Members` reveals addresses and states, which
-the `Topology` frame already pushes to every client. Gating what is already public buys nothing.
+Repair-from-primary on any mismatch, raw archived-byte digest as universal logical equality,
+handshake-only rolling upgrades, and deleting orphaned data based on RF counts are superseded.
+A forced new majority after permanent quorum loss is disaster recovery with an explicit data-loss
+boundary, not normal automatic failover.
 
 ## What it costs
 
-- **A control-plane round trip per admin request**, and a Raft round trip for a state-changing
-  one.
-- **Ten metric families**, most of them one series per node, exported on the interval the
-  configuration already has.
-- **Two spans per cross-node hop**, subject to the same cost
-  [O44](../appendix/optimizations.md#o44-one-trace-per-request-costs-a-span-per-query-and-one-per-frame)
-  and O45 put on the existing ones.
-- **A digest walk per repair**, which reads every archive of every tablet repaired.
+Integrity scans, checksums, snapshot/backup storage, administrative state and telemetry. Scope and
+throttle background work. Strong operational claims require restore and mixed-version exercises,
+not just working UI controls. No performance capture is required for this plan-only revision.
 
 ## What it breaks
 
-- **`ShoalPool::start`'s signature**, gaining a handle. Every caller — tests, the bench harness,
-  the examples — changes, and every one of them gets to delete a sleep.
-- **`shoalctl`'s `PaneKind`** gains a variant, and its help overlay grows a section.
-- **A `Principal` now gates something**, so the "no authorization" limitation on
-  [Wire Protocol](../architecture/wire-protocol.md#limitations) is partly false and is annotated.
+Readiness APIs and startup callers, admin protocol and authorization, storage integrity metadata,
+release compatibility and backup tooling. Client-visible error semantics must expose unknown write
+outcomes and blocked recovery instead of flattening them into success/failure.
 
 ## Invariants to uphold
 
-- **A state-changing admin request is proposed by the leader and nowhere else.** A follower's
-  control plane forwards it; it does not act on it.
-- **A read-only admin request is answered from the local view and says which version it is.**
-  No admin read blocks on the leader.
-- **`Remove` is refused for an `Up` node.** The graceful path exists and is the one to take; an
-  operator who wants the ungraceful one on a live node has to stop it first, which is the
-  confirmation.
-- **A repair that finds a mismatch at equal stamps streams a snapshot; it never patches a
-  partition in place.**
-- **Peer protocol version `n` accepts `n − 1` for one release.** This is what makes a rolling
-  upgrade possible and it is a promise the release process has to keep.
+- Admin mutations are authorized, versioned, idempotent and auditable from first implementation.
+- Readiness reflects data eligibility and the requested policy, not just open sockets.
+- Repair never trusts a primary solely because it is primary or overwrites unresolved evidence.
+- Upgrade compatibility includes payloads, schema and storage activation boundaries.
+- Backup/restore preserves identity boundaries and makes its consistency scope explicit.
 
 ## Prerequisites
 
-[C1](node-identity.md) for the control plane and `cluster.admins`; [C3](membership.md) for
-`Members` and the states `Decommission`/`Remove` transition; [C8](rebalancing.md) for
-`Rebalance`; [C7](failover.md) for the snapshot repair streams; [F12](../features/authentication.md)
-for the `Principal`; [F34](../features/benchmark-tracing.md) for the metrics sink.
+[C1](node-identity.md), [C3](membership.md), [C7](failover.md), [C8](rebalancing.md),
+C13 Q10–Q12. Readiness M0; basic admin M3; lag M4; repair M8; operations expand through M10.
 
 ## How it would be measured
 
-The admin path is not a query path and no workload should see it. `shoal.replication.quorum_wait`
-is itself a measurement, and [C10](performance.md) reads it beside the `nodes/rf/cl` sweep to
-attribute a `Quorum` write's latency to the wait rather than to the fan-out — the first time a
-metric rather than a stage stamp does attribution in this book.
+[C10](performance.md) includes scrub/repair interference and restore time in addition to cluster
+query capacity. Track backup age and retained recovery points; define RPO/RTO objectives for the
+deployment instead of conflating replica failover with disaster recovery.
 
 ## Acceptance tests
 
 | Test | Asserts | Milestone |
 | --- | --- | --- |
-| `members_names_every_node_and_its_state` | Three nodes; kill one; `Members` from a survivor shows two `Up`, one `Down`, one version | M3 |
-| `topology_admin_matches_the_pushed_frame` | The `Admin::Topology` reply equals the client's `Shoal::topology()` | M3 |
-| `lag_reports_a_paused_follower` | Pause a follower, write; `Lag` on the primary shows the gap; resume; zero | M4 |
-| `a_state_change_needs_an_admin_principal` | `Remove` from an unlisted principal is refused; from a listed one, accepted | M10 |
-| `remove_is_refused_for_an_up_node` | The refusal names `Decommission` | M9 |
-| `decommission_from_shoalctl_drains_the_node` | The tab's key sends the frame; the node reaches `Removed` | M10 |
-| `ready_resolves_when_every_shard_listens` | `start().ready().await` returns and a client connects with no sleep | M0 |
-| `shard_failed_resolves_when_a_shard_panics` | Inject a panic in one shard (test hook); the handle reports it | M0 |
-| `a_cross_node_trace_has_the_forward_span` | `Coordinator::forward` parents the remote `Shoal::request` under one trace id | M2 |
-| `quorum_wait_is_recorded_per_write` | The histogram has one sample per `Quorum` write | M4 |
-| `repair_restores_a_deleted_archive` | Delete one replica's archive for a tablet; `Repair`; digest matches; span attributes name the snapshot path | M8 |
-| `a_peer_one_version_behind_is_accepted` | A `PeerHello` at `n − 1` shakes hands; at `n − 2` it is refused | M10 |
+| `readiness_distinguishes_process_control_and_data` | Ready process/admin cannot falsely imply ready default quorum writes | M3 |
+| `admin_mutations_require_principal_and_operation_identity` | Unauthorized, stale-version and duplicate requests cannot repeat a membership mutation | M3 |
+| `repair_detects_corrupt_primary_and_preserves_evidence` | Corrupt the primary; trusted surviving state repairs it, unresolved divergence stops | M8 |
+| `canonical_digest_ignores_archive_layout_at_same_boundary` | Equivalent data compacted differently compares equal; changed/missing data does not | M8 |
+| `repair_serializes_with_migration_and_new_commits` | Concurrent repair/move cannot install stale state or destroy current evidence | M9a |
+| `rolling_upgrade_survives_operations_and_failure` | Mixed binaries replicate, read, snapshot and elect correctly, with activation/rollback limits | M10 |
+| `backup_restore_verifies_history_in_new_cluster` | Restore isolated backups including retry state, validate data, and prohibit old identities joining | M10 |
+| `permanent_quorum_loss_requires_explicit_recovery` | No automatic empty bootstrap or destructive choice when durable majority evidence is unavailable | M10 |
 
 ## Related
 
-- [Observability](../operations/observability.md) — what exists, and the trace shape this extends
-- [shoalctl](../operations/shoalctl.md) — the tool the tab joins
-- [Configuration — tracing](../getting-started/configuration.md#tracing) — the sink the metrics use
-- [F12. Authentication](../features/authentication.md) — the principal that gates admin writes
-- [item 58](../appendix/known-issues.md#58-a-shard-that-dies-is-not-reported-to-whoever-started-the-pool) — closed by readiness
-- [TODOs — Observability](../appendix/todos.md), [Build and packaging](../appendix/todos.md) — the entries a standalone `shoalctl` would touch
-- [D9 — Cassandra](../direction/prior-art.md#cassandra) — why the version byte makes rolling upgrades safe
+[C2](transport.md) compatibility, [C7](failover.md) checkpoints, [C8](rebalancing.md) transitions,
+[C13](protocol.md) failure assumptions and gates, [Observability](../operations/observability.md),
+[Authentication](../features/authentication.md).

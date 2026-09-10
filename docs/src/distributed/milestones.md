@@ -1,341 +1,242 @@
 # Milestones
 
-This is the first page in the book to use the word. [Direction](../direction/overview.md) calls
-itself "a design record, not a roadmap" and [Introduction](../introduction.md#what-shoal-is-not)
-repeats it, and both are right about what they describe: nine independent designs ranked by
-evidence. This part is different in one way — its twelve pages are one feature with a dependency
-graph, and the graph has to be walked in some order. A milestone here is **an order with reasons,
-not a date**. Where a step could have gone elsewhere, the reason it did not is written down, and
-that reason is the part worth reading.
+Nothing in this chapter is implemented. Keep M0–M10 as stable identifiers; M9a/b/c refine M9
+without renumbering later work. Acceptance tests live in their owning C pages and are indexed
+by [C11](testing.md#the-acceptance-test-table). Each test names one gate below. This is an order
+with dependencies and measurable exit criteria, not dates.
 
-Eleven steps in four groups. Each says what it delivers, which `C` page it turns into an `F` page
-— the page stays as the design record and the `F` page describes what shipped, the rule from
-`direction/overview.md:52-59` — which acceptance tests it builds, which benchmark arm it captures
-and what number exits it, and what it deliberately leaves out. The tests are the ones on each
-`C` page, indexed on [C11](testing.md#the-acceptance-test-table); the arms and numbers are
-[C10](performance.md#the-acceptance-numbers)'s.
+**All stages use embedded Shoal coordination. No external membership or failover service is a
+prerequisite, a fallback, or an eventual deployment step.** [C13](protocol.md) is the decision
+record. Before implementation, settle its blocking questions and record the evidence, including
+exact dependency source versions and benchmark provenance.
 
-## Group 0 — Foundations
+## Group 0 — Protocol and foundations
 
-Nothing in this group changes what a single node does. Everything in it is what the later groups
-need to be judged.
+### Before M0: the protocol contract
+
+Agree C13's failure model, table-qualified stream identity, durable quorum, committed visibility,
+control/data authority split and no cross-tablet transaction promise. Prefer embedded data Raft;
+Q1's spike selects the library/runtime and tests whether group count/batching are practical.
+The model can begin with that protocol while integration alternatives remain under evaluation.
+A custom protocol cannot bypass this gate by calling primary appointment a topology edit.
 
 ### M0. Step 0: the harness and the facts
 
-**Goal.** Be able to start three nodes, kill one, and measure a cluster arm, before there is a
-cluster to do it to.
+**Delivers.** Pure deterministic protocol/adapter model with stable-storage events, reproducible
+schedules and history oracle. Process fixture with readiness/failure handles, real bound endpoints,
+cleanup, explicit core allocation and directed fault controls. Initial children are isolated
+servers/mock peers, so this stage does not require NodeId, membership or replicated digests.
+Extend those fixture operations as the relevant code lands. Preserve historical workload ids,
+port mappings and artifact decoding; add cluster environments and separate load-driver support.
 
-**Delivers.** The `Cluster` fixture in `shoal/tests/cluster/mod.rs` ([C11](testing.md#the-cluster-fixture)):
-child processes, bind-zero ports handed down, readiness by line, `kill`/`pause`/`resume`/
-`partition`, the ledger, digests. `get_unique_port` and its counter deleted from
-`shoal/tests/utils.rs`, closing [item 38](../appendix/known-issues.md#38-integration-test-binaries-all-bind-the-same-ports).
-`ShoalPool::start` returns a handle with `ready()` and `shard_failed()`
-([C9](operations.md#readiness)), closing [item 58](../appendix/known-issues.md#58-a-shard-that-dies-is-not-reported-to-whoever-started-the-pool)
-and the readiness entry in `todos.md`; every sleep in `utils.rs` and `harness.rs` deleted. In
-`shoal-bench`: `ScaleFacts` gains `nodes`, `replication_factor`, `consistency`; `ScaleFactsLite`
-and `SweepAxis` mirror them; `port_for` becomes a block; a `cluster` family, surface and group;
-`shoal-workload serve`; `harness::run` starts `N` processes with disjoint core slices and pins the
-driver ([C10](performance.md#emulating-a-cluster-on-one-machine)).
+**Acceptance.** C11's fixture/oracle/table-structure rows, C10 resource/artifact rows and C13's
+`protocol_model_preserves_acknowledged_history`. Register runnable Cargo test entry points.
 
-**Pages it makes true.** None — C11 and the harness half of C10 become an `F` page together,
-because a harness is a feature.
-
-**Acceptance tests.** C11's seven fixture tests; C9's two readiness tests; C10's six harness
-tests.
-
-**Benchmark.** A one-node "cluster" arm, `nodes/1/rf/1/cl/one`, with no `cluster:` block yet —
-which is today's reference cell run through the new harness. **Exit: it captures inside the
-reference cell's spread**, proving the harness itself moved nothing.
-
-**Leaves out.** Deterministic simulation, with the reason on C11; network namespaces for
-partitions, filed as the arm to add when the relay is not enough.
+**Evidence/exit.** Fixture self-tests and saved schedules reproduce their expected violations.
+A matched single-node arm verifies that the harness did not change what the old comparison meant.
+No storage durability claim is inferred from SIGKILL alone. Full-engine simulation is not required.
 
 ### M1. Node identity and the control-plane thread
 
-**Goal.** A node has a name, a cluster has a name, and the reserved core does something.
+**Delivers.** Stable node/cluster identity, explicit bootstrap, configurable control core and
+SMT/cpuset validation, versioned marker, basic topology observation and single-node embedded
+OpenRaft integration. Fix stable partition hashing (item 65) before cross-node routing.
+Perform Q1's embedded data-plane library/runtime spike and Q13's initial group/table scale study.
+Q2/Q3/Q4 must have concrete storage/application/checkpoint designs before M4.
 
-**Delivers.** `NodeId`, `ClusterId`, `StorageMeta` format 2, the `cluster:` block with
-`deny_unknown_fields`, the control-plane thread on cpu 0 running a **single-node** `openraft`
-group with a state machine holding one member and today's derived map, and `ServerMsg::Topology`
-broadcast on the mesh ([C1](node-identity.md)). The `Topology` frame pushed to clients and
-`Shoal::topology()` recording it — [D7](../direction/shard-aware-routing.md)'s step 1, built
-here. `shoalctl` showing the map in its new cluster tab, read-only.
-[Item 65](../appendix/known-issues.md#65-two-gxhash-majors-and-partition-keys-hashed-by-the-one-without-deterministic)
-fixed first, as a gate, because two nodes built from different lockfiles would otherwise disagree
-about which tablet a key is in.
+**Acceptance.** C1's M1 identity/config/affinity/standalone/default rows. Run the selected
+control library's storage conformance checks and crash tests for persisted metadata.
 
-**Pages it makes true.** C1 → F page. C4's push half.
-
-**Acceptance tests.** C1's seven M1 rows; C4's `a_client_receives_a_topology_frame_on_connect`.
-
-**Benchmark.** `nodes/1/rf/1/cl/one` again, now with the block present and the thread running.
-**Exit: inside the spread.** If the thread on cpu 0 or the wider map shows up here, C1 named a
-cost it does not have.
-
-**Leaves out.** Any peer. The `openraft` dependency lands here, on a group of one, so that M3's
-work is the network and not the integration; and the two source questions on
-[C3](membership.md#openraft-and-the-runtime) are answered in this milestone's first commit, before
-the crate is added, because the answers might change the plan.
+**Evidence/exit.** Pin dependency versions and source/API references in Q1. Demonstrate the
+network/storage/runtime seams and record idle/active group memory/CPU and batching feasibility.
+Compare standalone versus matched one-node cluster; investigate any material overhead. The
+control-plane choice does not force the same library or runtime onto every data shard.
 
 ### M2. The inter-node transport
 
-**Goal.** A query whose partitions are on another node is answered, and the trace says so.
+**Delivers.** Remote contacts, validated forwarding/gathering, separate control/data/bulk lanes,
+bounded byte queues, identity/authentication handshake and trace propagation. Use static test
+placement before distributed membership. Define compatibility and certificate bootstrap contracts
+(Q10/Q11), common replication command framing, deadlines and operation identity fields early.
+No opaque widened rkyv struct is called compatible merely because n−1 handshakes.
 
-**Delivers.** `ShardContact::Remote`, the second arm in `Comms::send`, per-shard outbound peer
-connections, the peer listener on `cluster.port` with accept-anywhere-and-relay, the peer
-handshake with mTLS, `Forward` and `Forwarded`, revalidation on arrival, bounded peer channels
-with `Shedding`, and the trace context on every peer frame ([C2](transport.md)). Membership is
-**static** — a `cluster.static_split` test-only setting assigns tablets to two nodes from config,
-so the transport is exercised before Raft exists.
+**Acceptance.** C2's M2 forwarding, malformed peer, bounded lanes and tracing rows. Add fault hooks
+before encryption where tests need individual frame manipulation, retaining real TLS tests.
 
-**Pages it makes true.** C2 → F page.
+**Evidence/exit.** Local/local-shard/remote hop capture with actual affinity/queue facts. Initial
+loopback p50 added-hop budget 100 µs; report tails too. A slow snapshot stream cannot exhaust all
+memory or block progress traffic. Source links and chosen encodings are reviewable.
 
-**Acceptance tests.** C2's ten rows; C9's `a_cross_node_trace_has_the_forward_span`.
-
-**Benchmark.** `macro/cluster/hop/{local,remote}` — the first cluster capture, over the ephemeral
-controls. **Exit: `remote` adds ≤ 100 µs at p50 over `local` on loopback**, and `local` (another
-shard, same node) is the number D7 said nobody had measured, captured for the first time.
-
-**Leaves out.** Per-shard peer ports (D7's option 1) — measured against by `hop`, not built; the
-`Replicate` family of frames, whose payloads are C5's.
-
-## Group A — Distribute a live system with no failures
-
-Three nodes, nothing dies. The cluster has to work before it has to survive.
+## Group A — Replicate a live system
 
 ### M3. Membership
 
-**Goal.** Three processes become a cluster from one seed, agree on a map, and notice when one of
-them stops answering — and do nothing about it.
+**Delivers.** Embedded control membership, explicit three/five-voter policy, learners, durable
+placement intent, stable table identity and replica readiness distinctions. Direct control traffic,
+freshness-aware status reports, shard health, duplicate-node fencing and authorized/versioned admin
+operations. Node joins with no tablet authority. Initial data bootstrap is explicit, not RF
+reduction inferred from available members. Control and data configuration ids are separate.
 
-**Delivers.** The Raft group of nodes with join, learner promotion, the member states, the
-phi-accrual detector on the control-plane connection, `Unreachable` local and `Down` by majority
-([C3](membership.md)). The map as Raft state with bootstrap assignment and `ReplicaSet` as the
-value, `Ring` deleted, `find_replicas` at every routing site ([C4](tablet-map.md)) — at RF=1, so a
-replica set has one entry. `Admin::Members` and `Admin::Topology`. A joiner does not serve until
-its first `Topology`.
+**Acceptance.** C3's M3 membership/report rows; C4's M3 map/table/client topology rows; C1 duplicate
+identity; C2 independent-control-networking; C9 readiness/admin rows; C13 no-external-coordinator.
 
-**Pages it makes true.** C3 → F page; C4 → F page (the map half; the push half was M1).
-
-**Acceptance tests.** C3's nine M3 rows; C1's `a_joining_node_does_not_serve_before_its_first_topology`;
-C4's four M3 rows; C9's two M3 rows.
-
-**Benchmark.** `nodes/3/rf/1/cl/one`: three nodes, one copy, reads at `One`. **Exit: a local
-partition's read is inside the single-node spread, a remote one is `hop/remote` away**, and the
-detector's pings do not appear — if they do, they are on the wrong connection.
-
-**Leaves out.** Failover, rebalancing, RF > 1. `SetPrimary` and `MoveTablet` exist as log entries
-and nothing proposes them. A per-table `replication_factor` is accepted and refused by name.
+**Evidence/exit.** Healthy metadata agreement plus minority isolation and restart tests; topology
+fanout/group-scale budgets measured. Joining a fourth node leaves a three-voter policy at three.
+Membership evidence is not used as a substitute for safe data election.
 
 ### M4. Replication and quorum writes
 
-**Goal.** Every tablet has three copies, a write is acknowledged at a quorum, and every replica
-converges. **R5**, and the default half of **R4**.
+**Delivers.** Selected embedded data protocol, table-qualified logical histories over a specified
+WAL adapter, persisted term/vote and configuration, distinct durable/commit/apply/checkpoint
+positions, common command serialization, committed-order mutation/results, bounded pending state,
+duplicate-safe acknowledgements and rotation. Default fsynced quorum, optional All, explicit refusal
+of unimplemented accepted-only/volatile policies. `One` reads see committed state.
 
-**Delivers.** Intent record format 2 with the `(tablet, epoch, seq)` header, the replication
-sender beside `commit`, `Replicate`/`ReplicateAck`, the quorum gate in `PendingResponse`,
-`Unavailable` before commit, followers applying in order with `CatchUp` for gaps, rotation that
-counts an ack rather than draining ([C5](replication.md)). RF=3 bootstrap assignment with distinct
-nodes and even primaries ([C4](tablet-map.md)). Reads at `One` from the nearest `Up` replica, and
-`limit` across replicas ([C6](reads.md)). `Admin::Lag`, `shoal.replication.lag` and
-`shoal.replication.quorum_wait` ([C9](operations.md)).
+Define and start replicated retry identity/result storage here; complete its leader-change behavior
+in M6. Design checkpoint/retention boundaries now even though full transfer lands in M7. Admission,
+unknown outcomes, write deadlines and resource bounds ship with the first network write path.
 
-**Pages it makes true.** C5 → F page. C6's `One` half.
+**Acceptance.** C5's M4 durability/rotation/bootstrap/stream/conditional/encoding rows, C4 feasible
+placement, C6 committed One reads, C10 policy/lag capture rows. Run library adapter conformance and
+injected storage-order tests. Force compaction before commitment as a named regression.
 
-**Acceptance tests.** C5's thirteen rows; C4's four M4 rows; C6's three M4 rows; C9's two M4 rows.
-
-**Benchmark.** The `nodes/{1,2,3}/rf/{1,3}/cl/{one,quorum}` sweep, persistent and ephemeral.
-**Exit, in order of importance:** `nodes/1/rf/1/cl/one` inside the reference cell's spread — the
-"no drastic slowdown" criterion, and the milestone does not close until it holds; `rf/3/cl/quorum`
-≤ 1.5× `rf/1/cl/one` on the ephemeral arm; the persistent excess over that attributed to the shared
-device by reading the two beside each other.
-
-**Leaves out.** `Primary` and `Quorum` reads; the per-bundle override; anything that happens when
-a node dies. A `Down` follower is not waited for, which is testable without failover by killing a
-follower and asserting the ack still comes, and that test is here.
+**Evidence/exit.** Healthy convergence across several tables and restarts, exact durable evidence
+before success, and bounded lag/queues under slow followers. Compare standalone, RF=1 and feasible
+RF=3 with matching semantics and resource budgets. No universal replication-latency multiplier;
+record curves and explain overhead. Default durability never changes to meet a target.
 
 ### M5. Read consistency levels
 
-**Goal.** A caller can read their own write, and the wire can say how strongly to read.
+**Delivers.** Data-quorum read barriers, application waits, session-token design/path, complete
+negative-result coverage, ordered gather/limit semantics, deadlines/late-reply handling and mixed
+bundle policy resolution. Resolve whether Primary and Quorum need distinct API names (Q5).
+Wire compatibility uses C2's selected-version contract rather than a new unexplained flag day.
 
-**Delivers.** `Primary` reads under the lease, `Quorum` reads with per-partition stamp reconcile
-and `CatchUp` read repair, gather deadlines with `Error(Timeout)`, and `Queries.consistency` with
-`PROTOCOL_VERSION` 4 — the flag day, taken once ([C6](reads.md)). The builder's `.consistency(..)`.
+**Acceptance.** C6's M5 barrier, coverage, limits, timeout and mixed-policy rows. Validate empty,
+filtered and deleted partitions. Strong reads during leader changes remain an M6 release gate.
 
-**Pages it makes true.** C6 → F page.
+**Evidence/exit.** One/barrier/session and fanout read captures with barrier/application wait and
+tails visible. No cross-tablet snapshot claim; session lower bounds are scoped and bounded.
+Leases remain deferred until Q6 has both a timing proof and worthwhile measured benefit.
 
-**Acceptance tests.** C6's seven remaining rows.
-
-**Benchmark.** `macro/cluster/reads/{one,primary,quorum}` and `fanout/*/nodes/3`. **Exit:
-`primary` ≤ `hop/remote` over `one`; `quorum` ≤ 2× `one` at p50 on the read-only arm.**
-
-**Leaves out.** A linearizable level beyond `Primary`'s lease; the idempotency key, which is a
-write concern and is C7's problem to name.
-
-## Group B — Survive failures
-
-A node dies, comes back, and is found to have been wrong. The ledger test lives here.
+## Group B — Survive failures and return safely
 
 ### M6. Primary failover
 
-**Goal.** A tablet whose primary died gets a new one within the window, and no acknowledged
-`Quorum` write is lost. **The single most valuable test in the part.**
+**Delivers.** Data-group elections, matching-history recovery, current-term activation/read barriers,
+old-primary fencing and complete stable retry/result handling. Default operations distinguish
+rejected from unknown outcomes. Established data groups survive control-quorum loss where their
+own majority remains; metadata mutations stop. Down detection is not an election prerequisite.
 
-**Delivers.** Per-tablet stamps in heartbeat replies, the leader's `primary_failover_after` timer,
-`SetPrimary` to the highest `Up` replica, follower truncation on a new epoch, fencing by epoch on
-every `Replicate` and `Primary` read, `Unavailable` during the window ([C7](failover.md)).
-`shoal.failover.count` and `shoal.failover.window`.
+**Acceptance.** C7's M6 stale-report/delayed-map/shard-stall/history/read/quorum tests; C5 lost-response
+retry; C6 session/leader-change tests; C2 forwarding identity; C3 grace placement; C10 outage series;
+C13 separation of control/data quorums. Include updates/deletes/no-ops and conditional results.
 
-**Pages it makes true.** C7's first half → F page.
-
-**Acceptance tests.** C7's seven M6 rows, the ledger test among them, twenty times under `soak`;
-C3's `down_moves_no_tablet`; C6's `a_primary_read_is_refused_when_the_lease_has_lapsed`; C10's
-`failover_reports_a_window_not_a_rate`.
-
-**Benchmark.** `macro/cluster/failover`. **Exit: the refusal window ≤ `primary_failover_after` +
-2 s at the defaults, reported as a duration**, and throughput after equals throughput before
-within the spread.
-
-**Leaves out.** A returning node — the killed node stays dead in this milestone's tests. The
-idempotency key, filed on `todos.md` with C7's argument for why the window is visible until it
-exists.
+**Evidence/exit.** No acknowledged operation/result lost across deterministic and real fault
+schedules. Initial client outage objective is election-base + 2s only under the named bounded-delay,
+healthy-survivor/backlog conditions. Record actual resource-reduced throughput after failure;
+do not require it to equal three healthy nodes. Without safe retries and reads this is not HA-ready.
 
 ### M7. Recover a node brought back online
 
-**Goal.** A node that was down comes back, catches up, serves, and has moved nothing. **R3**,
-proved.
+**Delivers.** Retained-log catch-up, stable checkpoints, chunked resumable snapshots and atomic durable
+installation. Include configuration/history, retry state and absence coverage. Per-tablet eligibility,
+retention/recovery space budgets and backpressure. Q3/Q9 completed, including behavior when a hot
+stream cannot catch up before its pinned-history budget expires.
 
-**Delivers.** `CatchUp` by log; the snapshot stream — `StreamBegin`, `StreamPartition`,
-`StreamEnd` — from the primary's partitions and archive map at a `seq`, installed through the
-receiver's archive writer; the primary choosing log or snapshot by what it has compacted; a
-returning primary becoming a follower; per-tablet routing around a replica still catching up
-([C7](failover.md#a-returning-node)). `Admin::Lag` reporting catch-up progress.
+**Acceptance.** C7's M7 catch-up/snapshot/crash/retention/readiness/full-restart rows. Kill at every
+installation boundary and source failover point while writes and compaction continue.
 
-**Pages it makes true.** C7 → F page, complete.
-
-**Acceptance tests.** C7's six M7 rows, `down_for_less_than_auto_remove_after_moves_nothing`
-among them.
-
-**Benchmark.** `macro/cluster/catchup/{log,snapshot}`. **Exit: seconds to lag zero for a fixed
-backlog, recorded**; there is no prior number to beat, so the exit is that both paths complete
-and the snapshot path is the one taken when the log cannot be.
-
-**Leaves out.** Primaries moving back — the rebalancer's job, off by default, M9. Repair — a
-returning node is caught up by stamp, and corruption at equal stamps is M8.
+**Evidence/exit.** Exact state and history after every crash, old or new complete installed generation,
+bounded resources and convergence within a stated foreground-load envelope. Capture log/snapshot
+catch-up rates and foreground tails; preserving a Down node's placement during grace is proved.
 
 ### M8. Repair
 
-**Goal.** Two replicas at the same stamp that disagree are found, and the wrong one is fixed
-from the right one.
+**Delivers.** Persistent integrity metadata, canonical digests at a common committed boundary,
+quarantine and verified source selection, atomic snapshot repair, authorization and progress metrics.
+Unresolved divergence preserves evidence instead of overwriting every copy from the primary.
+Decide scheduled repair policy/cost in Q12.
 
-**Delivers.** Per-tablet digests, `Admin::Repair` on one tablet or all, snapshot-from-the-primary
-on a mismatch, `cluster.repair_interval` for a scheduled run ([C9](operations.md#repair)).
-`Cluster::digest` in the fixture becomes the operator's digest rather than a test-only one.
+**Acceptance.** C9's M8 corruption and canonical digest rows, with independent oracle comparison.
+Corrupt primary and followers separately; vary archive layout, deletes and checkpoint boundaries.
 
-**Pages it makes true.** C9's repair section; the digest half of C11.
-
-**Acceptance tests.** `repair_restores_a_deleted_archive`; a digest test per table kind.
-
-**Benchmark.** None captured. A repair reads every archive of the tablet, which is a known cost
-with no number to beat; the arm is filed for when a scheduled repair is on by default, which it
-is not.
-
-**Leaves out.** Merkle trees. A digest per tablet is 4096 hashes per replica, and a mismatch
-streams the tablet; Cassandra's per-range Merkle trees exist to make the *diff* cheap on ranges
-far larger than a Shoal tablet. Filed with the reason.
+**Evidence/exit.** Corruption detected and repaired from justified evidence, or stopped with an
+actionable unresolved state. Measure scrub/repair resource and foreground-latency interference.
+Migration interaction is tested when its implementation arrives in M9a.
 
 ## Group C — Elastic membership
 
-Nodes are added, removed, and replaced. **R1** and **R2**.
-
 ### M9. Migration and the rebalancer
 
-**Goal.** Adding a node evens the cluster with no client error; decommissioning one drains it;
-removing a dead one re-replicates from survivors; and a node down past `auto_remove_after` is
-removed.
+M9 is complete only after M9a/b/c. Each substage is independently reviewable; inter-node migration
+and safe node replacement can be delivered before retiring the local shard-count refusal.
 
-**Delivers.** The rebalancer on the leader's control plane with its three targets and one move
-per pair; `AddReplica`, `DropReplica` and `MoveTablet`; the per-tablet index in the archive map;
-`drop_grace`; orphan reporting and reuse; `Decommission`, `Remove`, `Leaving`/`Removing`/`Removed`;
-`auto_remove_after`; `rebalance_primaries`; `ShardCountMismatch` retired and `cores` changeable
-([C8](rebalancing.md)). The `Topology` frame pushed to clients on change, and the server-side
-stale-route forward ([C4](tablet-map.md#staleness-on-servers-too)).
+### M9a. Safe replica migration
 
-**Pages it makes true.** C8 → F page. C4's staleness half. [TODOs — Rebalancing](../appendix/todos.md#rebalancing)
-is closed, with the note that its second half was answered differently.
+**Delivers.** Durable transition records; nonvoting learner catch-up; library configuration transition
+with required old/new quorums; activation barrier; leadership transfer; metadata reconciliation;
+bounded stale routing and delayed safe cleanup. Per-tablet serialization with repair and RF changes.
 
-**Acceptance tests.** C8's thirteen rows — R1, R2 and R3 each named in one; C4's two M9 rows;
-C9's `remove_is_refused_for_an_up_node`.
+**Acceptance.** All C8 M9a rows; C4 stale-routing/configuration rows; C5 migrated retry history;
+C9 repair/migration interaction. Failure matrix includes control leader, source and destination
+at every phase and an acknowledged write after a zero-lag report.
 
-**Benchmark.** `macro/cluster/rebalance/{add,decommission,remove}`. **Exit: zero client errors on
-`add` and `decommission`; p99 ≤ 2× during the move; seconds to even, recorded.**
+**Evidence/exit.** Every phase resumes safely; old-config in-flight operations survive publication
+and retirement. Verify foreground correctness first; record transfer bytes/duration and pauses.
 
-**Leaves out.** Rack and zone awareness in the plan — the map has room for it (a `Member` gains a
-`zone` and the plan's first target gains "distinct zones"), and it is filed rather than built
-because the three test machines are in one room. Tablet splitting, which the high-bit derivation
-was kept for and which needs a per-table map first. `max_concurrent_moves_per_pair`.
+### M9b. Capacity-aware rebalancing and removal
+
+**Delivers.** Feasible weighted placement, disk reserves, per-node/device transfer budgets,
+Decommission/Remove/Replace workflows, automatic grace expiry and maintenance suspension. Persist
+progress across control leader restart. No silent RF reduction when only two RF=3 nodes remain.
+Resolve Q7/Q8 policy defaults and supported recovery-load envelope with evidence.
+
+**Acceptance.** C8 M9b budgets/weights/capacity/removal/drain rows; C3 persisted grace and maintenance.
+Add a fourth node, replace a dead member and exercise impossible drain targets explicitly.
+
+**Evidence/exit.** Healthy add/drain meets zero final errors and an initial p99 inflation budget of
+2× within its documented load/deadline envelope. Targets are feasible by bytes/load/capacity, not
+exact tablet count. Capacity-blocked cases stay observable and retain surviving evidence.
+
+### M9c. Change local shard count
+
+**Delivers.** Startup executor for vanished-shard files, full log/checkpoint/consensus/dedup recovery,
+atomic rehome manifest, resumable local transfer and correct data configuration/address updates.
+Only then retire `ShardCountMismatch` and update storage/partitioning documentation.
+
+**Acceptance.** C8 local-rehome crash matrix across several tables, changed core counts and restart.
+
+**Evidence/exit.** No abandoned, duplicated or double-owned data/history; resource and startup costs
+recorded. An archive index alone does not pass this gate.
 
 ### M10. Operations and the real cluster
 
-**Goal.** An operator can run it, and the numbers exist on hardware that is not one machine.
+**Delivers.** Full runbooks/TUI, rolling wire/schema/storage compatibility and activation rules,
+certificate/address rotation, backup/restore and permanent-quorum-loss recovery, supported
+single-node data import/cutover. Real heterogeneous three-node capture with per-node facts and
+all earlier open production gates resolved or explicitly unsupported. Admin auth already exists.
 
-**Delivers.** `cluster.admins` gating state-changing admin requests on a `Principal`; `shoalctl`'s
-cluster tab with actions and confirmations; the remaining metrics; the peer handshake accepting
-`n − 1`; the six runbooks written in full ([C9](operations.md)). The three-node capture on real
-hardware with per-node `EnvFacts` and the `different machines` verdict ([C10](performance.md#the-real-three-node-capture)).
-The docs sweep: [Introduction](../introduction.md#what-shoal-is-not)'s five bullets struck
-through with what replaced each; [Partitioning](../architecture/partitioning.md#limitations)'s
-four; the glossary's `Distributed` row; `CLAUDE.md`'s "distributed database" finally true;
-[Storage Overview](../storage/overview.md#durability-model)'s durability model gaining its quorum
-qualifier; every `C` page annotated with its `F` page and a *Still open* list.
+**Acceptance.** C9 M10 upgrade/backup/disaster rows, C2 actual mixed-version operations, C1 existing-data
+migration and C10 physical environments. Fail a node during a mixed-version run. Perform a real
+restore to a new cluster identity, not just create backup files. Q10–Q12 receive decision records.
 
-**Pages it makes true.** C9 → F page; C10 → F page; C12 gets a "what was copied" annotation per
-system.
-
-**Acceptance tests.** C9's three M10 rows; C10's `a_real_cluster_capture_records_every_nodes_env`.
-
-**Benchmark.** The full `cluster` group on the three real nodes. **Exit: `render --check` clean
-with the generated cluster page, and the ratios recorded** — `rf/3` vs `rf/1`, `quorum` vs `one`,
-on that cluster, compared to nothing else.
-
-**Leaves out.** A standalone `shoalctl` binary for the cluster tab, filed with the packaging
-entry. Rolling *protocol* upgrades beyond `n − 1`.
+**Evidence/exit.** Operable three-node RF=3 redundancy with measured tails, lag and failover on unequal
+hardware; no claim of physical N>RF scale-out without that experiment. Render generated results
+from committed captures and run render --check. Update delivered F pages and current docs only
+for behavior actually implemented; keep unsupported limits visible.
 
 ## The order is a claim
 
-Three orderings here could have gone the other way, and each is a claim rather than a
-convenience.
-
-**M0 is first because nothing below it can be judged.** Direction made the same argument for
-instrumenting the client (`direction/overview.md:134-155`): every number in the book included the
-client and none could attribute anything to it, so the first step was the one that made the
-others measurable. A cluster that cannot be started three at a time and killed one at a time
-cannot be shown to do anything on C3 through C9, and a harness that changed the reference cell's
-number would poison every comparison after it. M0's exit criterion — the same cell, inside the
-spread, through the new harness — is what makes M4's exit criterion mean something.
-
-**M4 is before M5 because eventual consistency is the default and the strong reads are the
-option.** A cluster with `Quorum` writes and `One` reads is a complete, useful, eventually
-consistent store — R4 and R5 both met — and a cluster with `Quorum` reads and no replication is
-nothing. The flag day M5 carries is also better paid once the write path has settled what a stamp
-is.
-
-**M6 is before M9 because a cluster that cannot survive a dead node must not be allowed to
-grow.** Rebalancing adds nodes; every node added is another node that will die; and a rebalance
-under a failover is the interaction most likely to lose data. Failover is built, tested with the
-ledger twenty times, and captured, before the first tablet moves.
-
-One ordering that is *not* a claim: **M8 could go anywhere after M4.** It sits between M7 and M9
-because the digest it builds is what M9's tests assert convergence with, and because a repair tool
-is the thing an operator wants immediately after the first failover teaches them to worry.
+Protocol decisions precede irreversible format/API choices. Compaction safety, unknown outcomes
+and resource bounds ship with replication. Read barriers, retry identity and failover form one
+application-correctness gate. Atomic recovery precedes migration; safe migration precedes automatic
+placement policy; local shard rehome is separate. Compatibility is designed with the first transport,
+admin authorization with its first mutation, and real upgrade/restore exercises gate operational
+readiness. Performance evidence can change an implementation choice, not weaken its safety contract.
 
 ## Related
 
-- [Overview](overview.md) — the requirements each milestone is checked against, and the
-  dependency graph this order walks
-- [C11. Acceptance tests](testing.md#the-acceptance-test-table) — every test, by milestone
-- [C10. Performance](performance.md#the-acceptance-numbers) — every exit number, as a hypothesis
-- [Direction — The recommended order](../direction/overview.md#the-recommended-order) — the
-  step-0 argument this page reuses
-- [Delivered Features](../features/delivered-features.md) — where each milestone's `F` page will
-  be listed
+[Overview](overview.md), [C13 decisions](protocol.md#questions-to-answer),
+[C11 tests](testing.md#the-acceptance-test-table), [C10 performance](performance.md),
+[C12 implementation references](prior-art.md#implementation-reading-list).

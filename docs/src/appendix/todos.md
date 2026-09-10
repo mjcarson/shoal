@@ -220,10 +220,11 @@ not a substitute for it — the transport and membership work above is unchanged
 have grown a design rather than staying this sketch. That design is the
 [Distributed Shoal](../distributed/overview.md) part — the `Remote` variant is
 [C2](../distributed/transport.md), the replica set per tablet is [C4](../distributed/tablet-map.md),
-the authority over the table is [C3](../distributed/membership.md), and the "actual work" the
+the placement authority is [C3](../distributed/membership.md), and the "actual work" the
 tablet-ring page deferred is [C5](../distributed/replication.md) through
 [C7](../distributed/failover.md). This entry still records *that* it is unbuilt. Nothing there is
-built either.
+built either. [C13](../distributed/protocol.md) adds the embedded control/data protocol contract
+and the questions that gate implementation; no external membership or failover service is required.
 
 ### Rebalancing
 
@@ -254,16 +255,20 @@ and a rebalancer that decides *when* to move a tablet rather than merely how.
 A third piece appears once the map is editable, and it is on the client side:
 [D7](../direction/shard-aware-routing.md#5-staleness-which-is-what-makes-it-safe) — any client
 holding a copy of the map holds a stale one during a move, so the map has to carry a version and
-a query routed against a stale one has to be forwarded rather than refused. That is a constraint on
-how rebalancing is built, not a consequence of it, which is why it is worth knowing before starting.
+a query routed against a stale one needs a forwarding/refresh path. The original requirement to
+forward rather than ever refuse is superseded by [C4](../distributed/tablet-map.md#staleness-on-servers-too):
+bounded forwarding may return a structured routing error, and write retries preserve operation
+identity. Dead sources and stale routing loops must not become indefinite waits.
 
 **Where this now lives.** [C8](../distributed/rebalancing.md) in the
 [Distributed Shoal](../distributed/overview.md) part designs the rebalancer, the move, and the
-answer to the second piece above — which is **not** the one this entry expected. With the
-streaming protocol in hand ([C7](../distributed/failover.md#a-returning-node)), storage stays
-keyed by shard and a per-tablet index over the archive map does what per-tablet files would have,
-for the reason [C8](../distributed/rebalancing.md#storage-stays-keyed-by-shard) gives. The first
-piece, persisting the map, is [C4](../distributed/tablet-map.md). Both are unbuilt.
+storage questions the second piece left open. The initial design keeps shared physical WALs
+per shard/table for batching, while logical tablet histories, checkpoints and migration manifests
+remain independent. Tablet-organized immutable files are an explicit option; an archive index
+alone does not solve recovery of vanished shards. [C7](../distributed/failover.md) defines atomic
+snapshots and retained history; [C4](../distributed/tablet-map.md) separates placement intent from
+data-protocol authority. [M9a/b/c](../distributed/milestones.md#m9-migration-and-the-rebalancer)
+split safe migration, capacity-aware policy and local shard-count changes. All remain unbuilt.
 
 ### Sort-key range predicates — built
 
@@ -1586,4 +1591,3 @@ The reason none of these was taken is that each one costs a field shape's worth 
 for a schema nobody has yet written, while the fallback is already correct. What makes them cheap
 now is that the hard part — the trait, `ArchivedRef`, and the resolver that keeps a materialized
 value alive — is built and tested.
-

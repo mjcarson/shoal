@@ -2,286 +2,201 @@
 
 ## Context
 
-A primary per tablet buys replicas that cannot diverge ([C5](replication.md#why-a-primary)) and
-costs a window during which a tablet whose primary is gone accepts no writes. This page is about
-that window — how it is detected, how it is closed, what it cannot lose — and about the other
-side of the same event: a node that comes back and has to be brought forward to where the cluster
-went without it.
-
-It is also the page whose tests matter most. [D9](../direction/prior-art.md#foundationdb) said
-that of everything in the prior art "a harness that can kill a connection underneath an in-flight
-query is the single most valuable thing to copy". Every acceptance test here kills a *node*
-underneath in-flight writes and asks what survived.
+A tablet primary can die, pause, or lose only some connections. Success means both preserving
+acknowledged operations and recovering service once a viable majority can communicate. Membership
+and elections stay inside Shoal; no external coordinator participates. [C13](protocol.md) defines
+the failure assumptions.
 
 ## What exists today
 
-**Recovery is replay** ([Recovery](../storage/recovery.md)): sealed logs oldest first, then the
-active log, every partition an update needs loaded before anything is replayed, then a forced
-compaction. A shard recovers itself from its own files and asks nobody. "For a database with no
-replication to fall back on, [fail-forward on corruption] is defensible" (`recovery.md`,
-*Design notes*) — and once there is replication to fall back on, a truncated log is a shortfall to
-be filled from a peer, not a loss to be logged.
-
-**Compaction discards the log.** An intent log is sealed at `intent_log_size`, compacted into
-archives, and deleted ([Compaction](../storage/compaction.md#5-delete-the-log)). The primary's log
-is therefore a window onto recent writes, not a history, and a replica that fell behind by more
-than the window cannot be caught up from the log alone.
-
-**Nothing detects a dead shard** ([C3](membership.md#what-exists-today)) and nothing can retry a
-write, because a write is not idempotent and the server has no key to recognise a repeat by
-([TODOs](../appendix/todos.md), "An idempotency key, so a write can be retried";
-[D6](../direction/connection-pool.md#retries)).
+Local [recovery](../storage/recovery.md) replays per-shard/table logs and compacts them. Archives
+hold current state, not historical versions. Once compaction merged an intent and deleted its
+log, rereading the archive cannot roll that mutation back. Recovery must change with replication,
+not simply acquire a peer request after today's replay finishes.
 
 ## The design
 
-### When a primary is `Down`
+### When a primary is Down
 
-`Down` is the cluster's verdict, committed by the leader on a majority's evidence
-([C3](membership.md#the-state-machine-of-a-member)). From the moment it commits, a timer runs on
-the leader's control plane; when `primary_failover_after` elapses and the node is still `Down`,
-the leader proposes, for every tablet the node is primary for:
+A tablet's embedded consensus group elects a primary using its own persisted votes, durable
+history and voter configuration. Node-level `Down` is useful to routing and the removal grace;
+it is not a prerequisite for a tablet election or a proof of tablet safety. This also permits
+failover when the control-plane thread is alive but a data shard is stalled.
 
-```rust
-SetPrimary { tablet, new: ShardAddr, epoch: old_epoch + 1 }
-```
+The original rule, “choose the highest heartbeat stamp,” is unsafe. B can report index 100,
+C report 101, then A and B durably acknowledge 102 before A dies. Those cached reports would
+choose C and incorrectly discard B's acknowledged write. Reports remain observability hints.
+Do not select an authoritative history from them.
 
-**The new primary is the `Up` replica with the highest `(epoch, seq)` applied for that tablet.**
-The leader knows each replica's stamp because every node reports, in its Raft heartbeat reply, the
-highest applied stamp per tablet it holds — the same channel the detector's verdicts ride
-([C3](membership.md#failure-detection)), and the second thing the `openraft` source has to be read
-for. Between two replicas at the same stamp, the one on the node with fewer primaries wins.
-
-**Why the highest replica holds every acknowledged write.** A write acknowledged at `Quorum` was
-durable on `RF/2 + 1` replicas. Any `RF/2 + 1` of the `RF` replicas include at least one of them.
-So among any quorum of `Up` replicas, the one with the highest stamp has every write any client
-was told succeeded — the same argument Raft makes for its leader election, applied to a log the
-primary already ordered. A write acknowledged at `One` was durable on the old primary alone and
-may be on no `Up` replica; it is lost, and `One` was the caller's choice.
-
-**What about the writes nobody acknowledged?** The old primary may have staged writes that
-reached some followers and not a quorum. A follower that holds a suffix beyond the new primary's
-stamp **truncates it** on receiving the `Topology` that names the new primary at the new epoch:
-it rolls its partitions back by re-reading them from its archives and replaying its log only to
-the new primary's stamp. Those writes were never acknowledged, so no client was told they
-happened, and losing them is the protocol working. The truncation is expensive and rare — it only
-happens to a follower that was *ahead* of the quorum, which under normal replication is a few
-buffers' worth.
+Use the selected protocol's election restriction and log matching. Before strong reads or
+successful new commands, the elected leader establishes current-term authority and the required
+committed prefix, applies it, and synchronizes followers through the protocol. For the Raft
+baseline, the current-term commitment/read-barrier requirements are part of that library's
+integration contract. A metadata majority never substitutes for a data quorum.
 
 ### Fencing
 
-The old primary may be alive and partitioned rather than dead, and may still believe it leads.
-Three things stop it from doing harm:
+Persist terms/votes before responding as required by consensus. Replication messages name the
+tablet, term and matching history; receivers reject obsolete authority and notify the sender.
+The safety guarantee is that incompatible histories cannot both commit, not that an isolated
+old primary cannot receive a client request. Such requests can time out with an unknown outcome.
 
-- **Followers refuse an old epoch.** A `Replicate` carrying `epoch < current` is answered with a
-  `ReplicateAck` naming the current epoch and is not applied ([C5](replication.md#followers-apply-in-order)).
-  The old primary cannot reach a quorum, so it cannot acknowledge, so its clients see
-  `Unavailable` and retry elsewhere.
-- **The lease lapses.** A primary answers `Primary` reads only while it has heard from the control
-  plane within `primary_failover_after` ([C6](reads.md#three-read-levels)); a partitioned one has
-  not, and refuses.
-- **The old primary's own log is reconciled when it returns.** It rejoins as a follower of the
-  new primary and truncates whatever it staged past the new primary's stamp, exactly as any
-  follower would.
+Do not assume a committed topology update has instantly reached all shards. A leader hint in
+the map is routing information; it cannot override the data group's term or configuration.
+Removed nodes retain identities in control-plane tombstones, and old copies cannot recreate a
+voting group on restart. Only reconciliation with the established cluster can make them eligible.
 
-`epoch` is what makes all three cheap: a `u32` comparison at the top of every replicate and every
-`Primary` read.
+Strong reads initially use a data-quorum read barrier, not a timer reset by any control-plane
+message. A future lease needs the protocol, expiry and clock evidence in C13 Q6. `One` reads
+may remain stale during a partition, but only from an installed committed prefix.
 
 ### The window, and what a client sees
 
-Between the primary's death and `SetPrimary` committing — `primary_failover_after` plus the
-detector's latency plus a Raft round trip — a write to one of its tablets is refused with
-`Unavailable`, from the coordinator, because the map names a primary that is `Down`. The client
-sees an error it may retry. **It may not retry a write on its own**, because a write is not
-idempotent and the refused write may have committed on the old primary before it died
-([D6](../direction/connection-pool.md#retries)). What would make the retry safe is the idempotency
-key `todos.md` already describes — a per-write key the primary remembers long enough to answer a
-repeat with the first answer — and this page records that as the reason the window is *visible*
-to a caller and not merely a latency: until the key exists, the caller has to decide whether to
-resend, and the honest error tells them so.
+The proposed `primary_failover_after` is a base for the randomized tablet election timeout,
+not an extra sleep after `Down` commits and not a read lease. The exact mapping to the selected
+library is settled in Q1. Timeout tuning affects detection and contention, never safety.
 
-Reads at `One` continue throughout, from any `Up` replica. Reads at `Quorum` continue if a quorum
-is `Up`. Reads at `Primary` fail with the writes. Writes to every other tablet — the ones this node
-was a follower for — continue at `Quorum` on the remaining replicas, one short.
+Record outage from the client's first failed/uncompleted operation until a sustained run of
+successful operations. Include reconnect, election, log recovery and application time. A target
+such as base timeout plus two seconds is tested only with healthy survivors and bounded injected
+delay; a large backlog or unavailable majority can take longer. Do not promise identical
+throughput before and after losing one third of the hardware.
 
-With the defaults, `primary_failover_after: "5s"` and a half-second detector interval, the window
-is a little over five seconds. The knob is the whole trade-off, and [C12](prior-art.md#kafka) has
-the cautionary tale: set it short and a slow disk elects a new leader, set it long and every
-primary death is a long outage. Five seconds is Kafka's default session timeout and MongoDB's
-default election timeout, chosen by people who have watched a lot of failovers.
+Requests definitely refused before admission and requests with unknown outcomes are distinct.
+The client retries the latter using C5's stable identity. Bounded read retries may select another
+eligible replica within the original deadline. `One` availability through every instant of a
+kill is not guaranteed: an in-flight socket request can fail before detection.
 
 ### A returning node
 
-A node that restarts — after a crash, after a partition, after `SIGSTOP` — recovers its shards from
-its own files as today, rejoins the group, receives the current map, and then, **per tablet it
-holds**, compares its own applied stamp with the tablet's current primary:
+Recover local storage without advertising readiness for its tablets. Restore term/vote,
+configuration, checkpoint term/index, log history and deduplication state. Reconcile with the
+current group before enabling replication acknowledgements or reads.
 
-| Its stamp is | Then |
+| Local condition | Recovery |
 | --- | --- |
-| Equal to the primary's | Nothing. It is a current follower |
-| Behind, and the primary's log still holds `from_seq` | **Catch up by log**: `CatchUp { tablet, from_seq }`; the primary streams the missing records as ordinary `Replicate` frames, and the follower applies them in order |
-| Behind, and the primary has compacted past `from_seq` | **Catch up by snapshot**: the primary streams the tablet's partitions — `StreamBegin { tablet, at_seq }`, one `StreamPartition` per partition it holds, `StreamEnd` — and then the log tail from `at_seq`. The follower drops its own copy of the tablet, installs the snapshot, and applies the tail |
-| Ahead (it was the old primary, or a follower that was ahead of the quorum) | Truncate, as above, then it is equal |
-| Its epoch is behind | It was primary and was replaced. Truncate to the new primary's stamp at the new epoch, then follow |
+| Matching retained history, behind | Fetch missing entries and commit/application progress |
+| Conflicting uncommitted suffix | Locate common history with the protocol and durably truncate WAL only; never roll authoritative archives backward |
+| Required history no longer retained | Install a complete checkpoint, then its subsequent log tail |
+| Same index, mismatched checksums/state | Quarantine and use verified repair, not a claim that equal stamps imply equal data |
+| Obsolete configuration or removed identity | No autonomous voting/serving; follow C8/C9 replacement and orphan rules |
 
-Where the row boundary between "by log" and "by snapshot" falls is decided by the primary, which
-knows what it has compacted: a `CatchUp` for a seq that is in a sealed-and-compacted log is
-answered with a `StreamBegin` instead of records. The follower asked one question and gets
-whichever answer is possible.
+Do not automatically move leadership back to a returning node. A later load-aware leadership
+transfer is separately scheduled. A node can serve its healthy tablets while another tablet
+installs a snapshot; per-tablet eligibility, not a node-wide `Up`, decides that.
 
-**The snapshot is the tablet's partitions, from memory and from the archive map.** The primary
-walks its partition map for the tablet — every key whose top twelve bits name it — sending
-resident partitions as they are and faulting in the rest from its archives through the ordinary
-loader, one `StreamPartition` per partition, each a size-prefixed rkyv partition exactly as an
-archive stores one ([Storage Overview](../storage/overview.md#archives)). The receiver writes each
-straight into its active archive and its archive map, which is what the compactor does with a
-merged partition today ([Compaction](../storage/compaction.md#4-write-out)). A snapshot at a `seq`
-is consistent because the primary serializes writes: it records `at_seq` when it starts, and any
-write after that is in the tail the follower applies afterwards.
+### Snapshots and atomic installation
 
-This stream is the same protocol [C8](rebalancing.md#a-move) uses to add a replica that has never
-held the tablet — a returning node whose data is too old is, for the primary's purposes, a new
-replica — and it is built once.
+A snapshot is a stable committed applied state at `(tablet, last_term, last_index)` plus its
+configuration, schema/storage version and deduplication state. Recording an index before walking
+mutable partitions does not freeze those partitions. Select immutable checkpoint generations,
+copy-on-write views, or a bounded tablet pause to establish the cut (Q3).
 
-**It serves while it catches up.** A returning node's shards bind their client listener as soon
-as they have a map, and answer `One` reads for tablets they are current on; a tablet still
-catching up is routed around, because the coordinator's preference order skips a replica whose
-reported stamp is behind by more than a configurable `read_lag_tolerance` (default: never skip —
-a `One` read is allowed to be stale, that is what `One` means; the knob exists for an operator
-who wants freshness at `One` without paying for `Quorum`).
+Transfer protocol:
 
-**Primaries do not move back.** When the old primary returns it is a follower for every tablet it
-led. Its node now leads nothing and the others lead more than before. The rebalancer can even
-that out ([C8](rebalancing.md#the-rebalancer)) by proposing `SetPrimary` toward balance, and whether it
-does so automatically is a rebalancer setting that defaults to off — a primary change is a
-short pause for that tablet's writers, and an operator who has just recovered a node may prefer
-to choose when.
+1. Establish checkpoint S and pin its manifest/files. Retain the log strictly after S for the
+   transfer or explicitly abort/restart if the retention budget is exceeded.
+2. Send a manifest with snapshot/transition id, tablet identity, history boundary, file/chunk
+   lengths and checksums, schema/format identity, and all required metadata.
+3. Transfer bounded chunks with offset acknowledgements and resumable identity. Validate chunks;
+   duplicates are harmless, and a receiver never combines chunks from different snapshots.
+4. Write into a temporary checkpoint generation. The receiver remains ineligible for serving or
+   voting acknowledgements from this copy. Fsync required data and metadata, then atomically
+   switch the installed manifest and durably record the switch, including directory metadata.
+5. Replay entries with index strictly greater than S, using matching history. Announce readiness
+   only after the protocol's required configuration and committed prefix are installed/applied.
+6. Reclaim replaced files only after durable installation and references permit it. Recovery at
+   every intermediate crash sees the old complete checkpoint or the new complete checkpoint.
+
+The snapshot enumerates deletions/absence through a complete manifest: old partitions absent
+from the new generation must not survive installation. Reads see a stable pinned generation;
+compaction must not delete files while a snapshot or query still owns them. Bounds apply to
+memory, disk space, transfer duration and concurrent installs. This is also C8's bootstrap path.
+
+The filesystem adapter must distinguish atomic name replacement from persistence after a crash.
+Consult [Linux rename](https://man7.org/linux/man-pages/man2/rename.2.html) for replacement semantics
+and [fsync/fdatasync](https://man7.org/linux/man-pages/man2/fsync.2.html) for completion and directory
+durability requirements. Test on the supported filesystem; a successful rename alone is not the
+durable installation barrier.
+
+### Retention and convergence
+
+Separate checkpoint compaction from replication log retention. Configure byte/time budgets and
+expose the oldest retained index per stream. A single lagging follower cannot pin shared WALs
+without bound. When incremental catch-up is no longer possible, select a snapshot and account
+for the space required to retain both generations plus a tail. If incoming mutation rate exceeds
+catch-up throughput, throttle or reserve recovery capacity; never report a permanently growing
+backlog as healthy convergence.
 
 ### No hinted handoff
 
-Cassandra stores, on the coordinator, a hint for every write a down replica missed, and replays
-it when the replica returns. Shoal does not need one: **the primary's log is the hint.** Every
-write the down replica missed is in the primary's intent log in order, and `CatchUp` replays it.
-What Cassandra's hints also cover — a coordinator that is not a replica holding writes for one
-that is — does not arise, because writes go to the primary and the primary is a replica. The
-only case a hint would help is one the log has compacted away, and that is the snapshot path.
+The retained log and checkpoint paths supply catch-up. A second coordinator hint store is not
+required. This is only true because the retention and snapshot contracts above replace history
+that ordinary compaction would otherwise discard.
 
 ## Alternatives rejected
 
-**Electing the new primary by a vote among replicas.** That is multi-Raft, declined on
-[C5](replication.md#alternatives-rejected). The control plane already has a leader with a
-majority's evidence; it appoints.
-
-**Choosing the new primary by node load rather than by stamp.** A replica behind the highest
-stamp is missing acknowledged writes. The highest stamp wins; load breaks ties.
-
-**Failing over on `Unreachable` rather than `Down`.** One node's opinion would move the primary
-role for every tablet that node cannot reach, including during a partition of that node alone.
-`Down` needs a majority, and failover needs `Down` ([C3](membership.md#the-state-machine-of-a-member)).
-
-**No timer — fail over as soon as `Down` commits.** `primary_failover_after` is the operator's
-say in how much flapping they will tolerate. A node that dies and returns in two seconds would
-otherwise have every one of its primaries moved and, if the rebalancer moves them back, moved
-again. Zero is a legal value.
-
-**Retrying writes automatically inside the window.** Unsafe without the idempotency key, and the
-page says why rather than pretending the window is invisible.
-
-**Hinted handoff.** Above.
-
-**Keeping the primary's whole history so catch-up is always by log.** Unbounded disk, and the
-snapshot path is needed anyway for a brand-new replica.
-
-**A returning node that does not serve until fully caught up.** Simpler, and it takes a node's
-`One`-read capacity offline for the whole catch-up when most of its tablets are current within
-seconds. Route around the stale tablets instead.
+Heartbeat-max promotion, topology-only fencing, rollback from already advanced archives, and a
+snapshot assembled from a mutable walk are superseded. They fail under ordinary message delay
+or compaction, independent of timer choice. External failover services are outside the design.
 
 ## What it costs
 
-- **A write outage per tablet per primary death**, of `primary_failover_after` plus detection plus
-  one Raft round trip. Bounded, configured, and visible as `Unavailable`.
-- **Truncation on a follower that was ahead**: a re-read of the affected partitions from archives.
-  Rare and small.
-- **Per-tablet stamps in every heartbeat reply**: 4096 × 12 bytes at most, once per interval, off
-  the query path.
-- **Catch-up traffic on return**: the missed log, or the tablet's partitions plus the tail. This
-  is the cost of R3 — a node that was down for an hour has an hour's writes to receive, and
-  receiving them is cheaper than having moved its tablets.
+Elections and recovery pause affected tablets. Snapshot creation can consume memory or briefly
+pause writes depending on Q3; transfer consumes disk and network resources. Admission and recovery
+budgets must preserve capacity for unrelated tablets. Avoid attributing recovery time solely to
+one configured timer.
 
 ## What it breaks
 
-- **"A write that is acknowledged is durable" gains a qualifier**: at `Quorum`, it is durable
-  across the loss of a minority; at `One`, it is durable on one node and a failover may lose it.
-  [Storage Overview](../storage/overview.md#durability-model) has to say so when M6 lands.
-- **A client can now see `Unavailable` on a write**, and has to decide about it. The idempotency
-  key is what would make that decision automatic, and it is filed, not built.
-- **Recovery is no longer self-contained.** A shard still recovers itself from its own files
-  first, and then asks. [Recovery](../storage/recovery.md)'s "recovery is just replay" stays true
-  of the first step and gains a second.
-- **`RecoveryStats::truncated_logs` changes meaning on a replica.** A torn tail on a follower is
-  a shortfall the primary fills, not data loss; [item 47](../appendix/known-issues.md#47-a-torn-tail-on-the-active-log-is-counted-as-data-loss)
-  gets a second reason to be fixed.
+Recovery is no longer self-contained, but its local phase must not erase consensus evidence.
+The compactor gains committed checkpoint boundaries and retention ownership. Startup readiness
+becomes per tablet as well as per process. Retry outcomes and snapshot installation introduce
+persistent metadata beyond the existing storage marker.
 
 ## Invariants to uphold
 
-- **The new primary is the `Up` replica with the highest stamp.** Any other choice can lose an
-  acknowledged write. Load is a tiebreak, never a criterion.
-- **Failover requires `Down`, and `Down` requires a majority.** No node fails over on its own
-  verdict.
-- **An old epoch is refused by every follower, always.** Fencing is a comparison at the top of
-  every replicate; a fast path that skips it is the bug.
-- **A snapshot is taken at a `seq` and the tail starts at that `seq`.** A gap between them is a
-  lost write on the new replica; an overlap is applied twice, which for an insert is idempotent
-  and for a delete-then-insert is not.
-- **Truncation replays from archives, never from memory.** A follower that was ahead has the
-  extra writes applied in memory; the only clean state is what the archives plus the log-to-stamp
-  reconstruct.
-- **A write is never retried by the client or the coordinator without an idempotency key.** Until
-  the key exists, `Unavailable` is the caller's problem, and saying so is the design.
+- Every acknowledged quorum operation and its original result survive every permitted election.
+- Obsolete metadata cannot make an old primary authoritative or a learner a voter.
+- Recovery truncates only history the consensus protocol permits; committed checkpoints never roll back.
+- Snapshot and tail meet exactly at one recorded boundary with no gap or duplicate application.
+- Incomplete or corrupt copies never serve, vote from fabricated state, or count toward durability.
+- Recovery retains enough evidence to resume after another failure.
 
 ## Prerequisites
 
-[C3](membership.md) for `Down` and the heartbeat channel that carries stamps;
-[C5](replication.md) for the stamps, the fencing and the `CatchUp` gap path;
-[C4](tablet-map.md) for `SetPrimary` and `epoch`; [C2](transport.md) for `CatchUp` and
-`Stream*`. The snapshot stream is shared with [C8](rebalancing.md) and built in M7 for both.
+[C13](protocol.md), [C5](replication.md), [C2](transport.md), [C4](tablet-map.md).
+Design checkpoint/retention boundaries before M4; implement transfer at M7. C6 strong reads and
+M6 failover share an authority proof and must be validated together.
 
 ## How it would be measured
 
-Failover is measured by an outage, not a throughput: `macro/cluster/failover` runs the reference
-mixture at `Quorum`, kills the node holding the most primaries at a known instant, and reports
-**the interval during which writes to its tablets were refused** and the throughput before and
-after. It is reported as a duration and never folded into an ops-per-second figure, because a
-number that averaged the outage away would be the number someone quoted
-([C10](performance.md#the-workloads)). Catch-up is measured by `macro/cluster/catchup/{log,snapshot}`:
-seconds to lag zero for a node that missed a fixed number of writes, on each path.
+[C10](performance.md) measures client-visible outage, recovery debt, before/during/after tails,
+and seconds to catch up by log and checkpoint at specified write rates. Report the failed node's
+role, pending data and surviving hardware with each result.
 
 ## Acceptance tests
 
 | Test | Asserts | Milestone |
 | --- | --- | --- |
-| `no_acknowledged_quorum_write_is_lost_across_a_primary_kill` | **The ledger test.** A client records every `Quorum` write it was acked for while a node holding primaries is `SIGKILL`ed mid-stream; after failover, a `Quorum` read returns every ledgered row. Run 20 times per suite | M6 |
-| `writes_resume_within_the_failover_window` | Writes to the dead node's tablets are `Unavailable` and then succeed within `primary_failover_after + 2 × interval + 1s` | M6 |
-| `the_new_primary_has_the_highest_stamp` | Pause one follower before the kill so the two survivors differ; the one that was ahead is chosen (asserted via `Topology` and span attributes) | M6 |
-| `a_follower_ahead_of_the_quorum_truncates` | Partition the primary so a write reaches one follower and no quorum; kill the primary; that follower's digest matches the new primary's after the `Topology` | M6 |
-| `a_stale_primary_cannot_acknowledge` | Partition the primary from everything but one client; its writes are `Unavailable` and its `Primary` reads refused after the lease | M6 |
-| `a_one_write_may_be_lost_and_the_page_says_so` | Write at `One` to a primary, kill it before replication, fail over: the row is absent. The test exists to pin the promise | M6 |
-| `reads_at_one_continue_through_a_failover` | 100% read arm at `One` sees no errors across the kill | M6 |
-| `a_killed_node_catches_up_by_log` | Kill, write 10k rows (under `intent_log_size`), restart: lag reaches 0 and the digest matches; span attributes name the log path | M7 |
-| `a_killed_node_catches_up_by_snapshot` | Kill, write past several rotations, restart: the snapshot path is taken; digest matches | M7 |
-| `a_returning_primary_becomes_a_follower` | After the kill and restart, the map names it primary for nothing and follower for what it held | M7 |
-| `a_returning_node_serves_current_tablets_while_others_catch_up` | With a large backlog on one tablet, `One` reads for the others are answered locally during catch-up | M7 |
-| `down_for_less_than_auto_remove_after_moves_no_tablet` | Every replica set names the same nodes before and after; only `primary` and `epoch` changed | M7 |
-| `a_torn_tail_on_a_follower_is_filled_not_lost` | Corrupt a follower's active log tail, restart: `CatchUp` refills it, digest matches | M7 |
+| `stale_heartbeat_reports_cannot_lose_acked_write` | Force the B=100/C=101/A+B=102 schedule before election; 102 survives | M6 |
+| `delayed_topology_cannot_authorize_old_primary` | Delay map and term messages independently; conflicting leaders cannot both commit | M6 |
+| `shard_stall_with_live_control_plane_can_fail_over` | Stop only the owning data shard; surviving tablet majority recovers | M6 |
+| `quorum_history_survives_repeated_elections` | Updates/deletes/no-ops and original results survive multiple leaders and response loss | M6 |
+| `strong_read_refuses_isolated_old_primary` | Old primary cannot pass a fresh read barrier after replacement | M6 |
+| `quorum_loss_is_unavailable_without_data_loss` | RF=3 minority never commits; healing restores progress with acknowledged history intact | M6 |
+| `returning_node_catches_up_by_log_or_snapshot` | Exercise both retention cases and verify state and request-result history | M7 |
+| `snapshot_has_one_stable_boundary_under_writes` | Concurrent insert/delete/reinsert/update and compaction produce the exact checkpoint plus tail state | M7 |
+| `snapshot_install_is_atomic_at_every_crash_point` | Kill after each file/manifest/fsync transition; restart has one complete generation | M7 |
+| `snapshot_duplicates_and_resume_are_safe` | Reordered/repeated chunks and source failover never mix generations or apply twice | M7 |
+| `installing_tablet_never_serves_partial_state` | Stale-read tolerance does not expose an incomplete copy | M7 |
+| `retention_and_recovery_memory_are_bounded` | Slow follower and high write rate trigger bounded fallback/backpressure | M7 |
+| `down_within_grace_moves_no_replicas` | Election may change leadership; replica placement remains unchanged | M7 |
+| `whole_cluster_restart_preserves_durable_history` | Restart all nodes after pending writes and compaction; acknowledged operations remain | M7 |
 
 ## Related
 
-- [C5. Replication](replication.md) — the stamps and the fencing this page relies on
-- [C3. Membership](membership.md) — `Down`, and the heartbeat reply that carries stamps
-- [C6. Reads](reads.md) — the lease, and what each level sees during the window
-- [C8. Rebalancing](rebalancing.md) — the same stream, used to add a replica
-- [Recovery](../storage/recovery.md) — the first step of recovering, unchanged
-- [Compaction](../storage/compaction.md) — why the log is a window and not a history
-- [TODOs — An idempotency key](../appendix/todos.md) — what would make the window invisible
-- [D6 — Retries](../direction/connection-pool.md#retries) — why a write is not retried
-- [C12 — Kafka](prior-art.md#kafka), [MongoDB](prior-art.md#mongodb), [Cassandra](prior-art.md#cassandra) — session timeouts, election timeouts, and the hints Shoal does not need
-- [item 47](../appendix/known-issues.md#47-a-torn-tail-on-the-active-log-is-counted-as-data-loss) — gains a second reason
+[C6](reads.md), [C8](rebalancing.md), [C9](operations.md), [C11](testing.md).
+For adapter lifecycle requirements consult
+[OpenRaft state-machine and snapshot APIs](https://docs.rs/openraft/latest/openraft/storage/trait.RaftStateMachine.html).
+The full protocol reference and implementation decision gates are in [C13](protocol.md).
