@@ -79,6 +79,10 @@ pub struct NodeSpec {
     pub kind: NodeKind,
     /// The cores it should own
     pub cores: CoreClaim,
+    /// The cpus it may run on at all, if the test narrows them below the process's own
+    pub affinity: Option<Vec<usize>>,
+    /// A storage marker to stage in its directory before it starts
+    pub staged_marker: Option<String>,
 }
 
 /// How long a cluster waits for every child to report ready
@@ -98,7 +102,7 @@ pub struct ClusterBuilder {
 }
 
 impl ClusterBuilder {
-    /// Add a real server
+    /// Add a real server, bootstrapped as a cluster of one
     ///
     /// # Arguments
     ///
@@ -107,7 +111,46 @@ impl ClusterBuilder {
         self.nodes.push(NodeSpec {
             kind: NodeKind::Server,
             cores,
+            affinity: None,
+            staged_marker: None,
         });
+        self
+    }
+
+    /// Add a real server with no `cluster:` block
+    ///
+    /// # Arguments
+    ///
+    /// * `cores` - The cores it should own
+    pub fn standalone(mut self, cores: CoreClaim) -> Self {
+        self.nodes.push(NodeSpec {
+            kind: NodeKind::Standalone,
+            cores,
+            affinity: None,
+            staged_marker: None,
+        });
+        self
+    }
+
+    /// Narrow the cpus the last node added may run on
+    ///
+    /// # Arguments
+    ///
+    /// * `cpus` - The cpus
+    pub fn affinity(mut self, cpus: Vec<usize>) -> Self {
+        let node = self.nodes.last_mut().expect("a node to narrow");
+        node.affinity = Some(cpus);
+        self
+    }
+
+    /// Stage a storage marker for the last node added to find when it starts
+    ///
+    /// # Arguments
+    ///
+    /// * `marker` - The marker's bytes, verbatim
+    pub fn staged_marker(mut self, marker: impl Into<String>) -> Self {
+        let node = self.nodes.last_mut().expect("a node to stage for");
+        node.staged_marker = Some(marker.into());
         self
     }
 
@@ -120,6 +163,8 @@ impl ClusterBuilder {
         self.nodes.push(NodeSpec {
             kind: NodeKind::MockPeer,
             cores,
+            affinity: None,
+            staged_marker: None,
         });
         self
     }
@@ -174,7 +219,14 @@ impl ClusterBuilder {
         let mut nodes = Vec::with_capacity(self.nodes.len());
         for (id, (spec, dir)) in self.nodes.iter().zip(&dirs).enumerate() {
             let allocation = plan.nodes[id].1.clone();
-            nodes.push(Node::spawn(id, spec.kind, allocation, dir.path())?);
+            nodes.push(Node::spawn_with(
+                id,
+                spec.kind,
+                allocation,
+                dir.path(),
+                spec.affinity.clone(),
+                spec.staged_marker.clone(),
+            )?);
         }
         for node in &mut nodes {
             // a node that never comes up takes the whole cluster down with it, and the
@@ -281,6 +333,34 @@ impl Cluster {
     /// Every child's pid, for a test to check they are gone afterwards
     pub fn pids(&self) -> Vec<u32> {
         self.nodes.iter().map(|node| node.pid).collect()
+    }
+
+    /// A node's storage directory
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Its id
+    pub fn dir(&self, id: usize) -> &std::path::Path {
+        self._dirs[id].path()
+    }
+
+    /// Kill a node and start it again on the same directory, with the same allocation
+    ///
+    /// The kill is `SIGKILL`, so nothing the node had not made durable survives; what does is
+    /// what the restart reports. The new child is waited for the way the first was.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Its id
+    /// * `kind` - What to restart it as, which may differ from what it was
+    pub fn restart(&mut self, id: usize, kind: NodeKind) -> Result<(), FixtureError> {
+        self.nodes[id].kill()?;
+        let allocation = self.nodes[id].allocation.clone();
+        let mut node = Node::spawn(id, kind, allocation, self._dirs[id].path())?;
+        node.wait_ready(DEFAULT_READY_TIMEOUT)?;
+        self.plan.endpoints[id] = node.endpoints.clone();
+        self.nodes[id] = node;
+        Ok(())
     }
 
     /// The client endpoint of every node

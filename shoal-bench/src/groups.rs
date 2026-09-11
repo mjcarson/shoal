@@ -213,7 +213,7 @@ pub const GROUPS: &[Group] = &[
             prefixes: &[],
             // the grid and the configuration sweeps drive mixtures, so a difference in one of them
             // is never attributable to a path. that is exactly what this group excludes.
-            excluding: &["macro/grid/", "macro/skew/", "macro/conf/"],
+            excluding: &["macro/grid/", "macro/skew/", "macro/conf/", "macro/cluster/"],
             exactly: &[],
         },
     },
@@ -245,6 +245,16 @@ pub const GROUPS: &[Group] = &[
             prefixes: &["macro/conf/"],
             excluding: &[],
             exactly: &[],
+        },
+    },
+    Group {
+        name: "cluster",
+        summary: "what being a cluster node costs, against the standalone reference cell",
+        members: Members {
+            layers: &[Layer::Macro],
+            prefixes: &["macro/cluster/"],
+            excluding: &[],
+            exactly: &["macro/grid/unsorted/r50/1024"],
         },
     },
     Group {

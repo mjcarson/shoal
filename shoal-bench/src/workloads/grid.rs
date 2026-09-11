@@ -374,6 +374,15 @@ pub enum Sweep {
         /// Which setting this arm moved
         knob: &'static str,
     },
+    /// The reference cell served by a cluster of this many nodes
+    ///
+    /// Minted by [`cluster_overhead`](super::cluster_overhead) for the same reason a
+    /// configuration arm is minted elsewhere: it is the reference cell with one thing moved, and
+    /// the thing moved is that the server is a cluster node.
+    Cluster {
+        /// How many nodes served it
+        nodes: u32,
+    },
 }
 
 /// One arm of the grid
@@ -990,6 +999,9 @@ mod tests {
                 // tests them there. `Grid::all` producing one would mean a sweep had moved house.
                 Sweep::Conf { knob } => {
                     unreachable!("Grid::all minted a configuration arm for {knob}")
+                }
+                Sweep::Cluster { nodes } => {
+                    unreachable!("Grid::all minted a cluster arm for {nodes} nodes")
                 }
             };
             assert_eq!(arm.id(), expected);

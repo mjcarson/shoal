@@ -17,6 +17,7 @@ use tracing::{event, instrument, Level};
 mod args;
 mod comms;
 pub mod conf;
+pub mod control;
 pub mod database;
 pub mod errors;
 pub mod messages;
@@ -32,8 +33,9 @@ pub mod trace;
 
 use comms::Comms;
 pub use conf::Conf;
+pub use control::{ControlHandle, ControlPlacement, TopologyView};
 pub use errors::ServerError;
-pub use meta::StorageMeta;
+pub use meta::{ClusterIntent, DirectoryLock, Identity, StorageMeta};
 pub use shard::ShardEvent;
 
 use crate::server::errors::ShoalError;
@@ -56,6 +58,13 @@ use crate::shared::{queries::Queries, traits::QuerySupport};
 /// listening, so no connection can land on it - until every shard has bound the same port.
 /// That is what lets a test fixture start any number of servers without a port race
 /// ([C11](../../docs/src/distributed/testing.md)).
+///
+/// A config with a `cluster:` block gets a control plane beside its shards
+/// ([F37](../../docs/src/features/node-identity-control-plane.md)): the control core is resolved
+/// and kept away from the shards first, the storage directory is locked and its marker claimed
+/// with the node's identity, the control thread is started before the shards and stopped after
+/// them, and `ready` waits for it too. Without the block none of that exists, and the shard path
+/// is what it always was.
 pub struct ShoalPool<S: ShoalDatabase> {
     /// A handle to the Shoal shard threads
     shard_handles: PoolThreadHandles<Result<(), ServerError>>,
@@ -73,6 +82,14 @@ pub struct ShoalPool<S: ShoalDatabase> {
     ///
     /// `None` when the config named a port itself, or once readiness has been established.
     reservation: Option<socket2::Socket>,
+    /// Who this node is, read from the storage marker at the claim
+    identity: Identity,
+    /// The lock on the storage directory, held for as long as the pool exists
+    _lock: DirectoryLock,
+    /// The control plane, if this is a cluster node
+    control: Option<ControlHandle>,
+    /// The cpus the shards run on, in ascending order
+    shard_cpus: Vec<usize>,
     /// The database this shoal pool is handling
     phantom: PhantomData<S>,
 }
@@ -123,8 +140,23 @@ where
             .to_socket_addrs()?
             .next()
             .ok_or_else(|| std::io::Error::other("the configured interface names no address"))?;
-        // get the total number of cpus that we have
-        let cpus = conf.resources.cpus()?;
+        // a cluster node resolves its control core first, since the shards have to keep off it
+        //
+        // the block is validated here too, so a setting this build cannot act on refuses the
+        // start by name rather than being read by nothing
+        let placement = match &conf.cluster {
+            Some(cluster) => {
+                cluster.validate(&conf.networking.interface)?;
+                Some(ControlPlacement::resolve(&conf)?)
+            }
+            None => None,
+        };
+        // get the total number of cpus that we have, off the control core where there is one
+        let reserved = placement
+            .as_ref()
+            .map(ControlPlacement::reserved_cores)
+            .unwrap_or_default();
+        let cpus = conf.resources.cpus_reserving(&reserved)?;
         // a node with no cores has no shards, and so nothing that could own any data
         //
         // this is caught here rather than in a shard so that a misconfigured `cores` or
@@ -132,16 +164,40 @@ where
         if cpus.is_empty() {
             return Err(ServerError::Shoal(ShoalError::NoShards));
         }
-        // check this storage directory was written by the shard count we are starting with
+        // a control core a shard also landed on is a claim of isolation that would be false
+        if let Some(placement) = &placement {
+            placement.check_isolation(&cpus)?;
+        }
+        // hold the storage directory, so a second process on the same path is refused rather
+        // than claiming the same identity
+        let root = conf.storage.default.filesystem.latency_sensitive.path.clone();
+        let lock = DirectoryLock::acquire(&root)?;
+        // check this storage directory was written by the shard count and in the mode we are
+        // starting with, claiming it with a fresh identity if nothing has
         //
         // this happens before any shard is spawned, so a mismatch is refused before a
         // single write can land in the wrong place
-        StorageMeta::claim(
-            &conf.storage.default.filesystem.latency_sensitive.path,
-            cpus.len(),
-        )?;
-        // remember how many shards readiness has to hear from
+        let intent = match &conf.cluster {
+            Some(_) => ClusterIntent::Bootstrap,
+            None => ClusterIntent::Standalone,
+        };
+        let identity = StorageMeta::claim(&root, cpus.len(), intent)?;
+        // remember how many shards readiness has to hear from, and where they run
         let shards = cpus.len();
+        let mut shard_cpus: Vec<usize> = cpus.iter().map(|location| location.cpu).collect();
+        shard_cpus.sort_unstable();
+        // the control plane starts before the shards, so a group that cannot start refuses the
+        // node before any shard has bound
+        let control = match placement {
+            Some(placement) => Some(control::ControlPlane::start(
+                placement,
+                identity.clone(),
+                &conf,
+                bound.to_string(),
+                shards,
+            )?),
+            None => None,
+        };
         // spawn our shards
         let (shard_handles, should_shutdown, events) = shard::start::<S>(conf, cpus)?;
         // build the shoal pool object
@@ -153,6 +209,10 @@ where
             bound,
             ready: false,
             reservation,
+            identity,
+            _lock: lock,
+            control,
+            shard_cpus,
             phantom: PhantomData,
         };
         Ok(pool)
@@ -164,6 +224,43 @@ where
     /// were spawned. Whether anything is answering on it is what [`ShoalPool::ready`] says.
     pub fn bound_addr(&self) -> SocketAddr {
         self.bound
+    }
+
+    /// Who this node is
+    ///
+    /// Read from the storage marker when it was claimed, so it is the same across every restart
+    /// of the same directory. A standalone node has a node id and no cluster.
+    pub fn identity(&self) -> &Identity {
+        &self.identity
+    }
+
+    /// Where the control thread runs, if this is a cluster node
+    pub fn control_placement(&self) -> Option<&ControlPlacement> {
+        self.control.as_ref().map(ControlHandle::placement)
+    }
+
+    /// The cpus the shards run on, in ascending order
+    ///
+    /// What a test checks against the control core's siblings: the two sets are disjoint
+    /// unless the configuration said the core was shared.
+    pub fn shard_cpus(&self) -> &[usize] {
+        &self.shard_cpus
+    }
+
+    /// The cluster as this node sees it
+    ///
+    /// Answered by the control plane from its applied state, so it is what the committed log
+    /// says. A standalone node has no control plane and no view.
+    ///
+    /// # Errors
+    ///
+    /// Refuses with [`ShoalError::NotClustered`] on a standalone node, and fails if the control
+    /// thread is gone.
+    pub fn topology(&self) -> Result<TopologyView, ServerError> {
+        match &self.control {
+            Some(control) => control.topology(),
+            None => Err(ServerError::Shoal(ShoalError::NotClustered)),
+        }
     }
 
     /// Wait until every shard is answering, or report the first one that is not
@@ -185,6 +282,11 @@ where
         }
         // the deadline is for the whole pool, not per shard
         let deadline = Instant::now() + timeout;
+        // the control plane first, since it started first and a group that failed is a node
+        // that is not the one the config described whatever its shards are doing
+        if let Some(control) = &mut self.control {
+            control.ready(deadline)?;
+        }
         let mut seen = 0;
         while seen < self.shards {
             // wait for the next report, for as long as the deadline still allows
@@ -239,6 +341,10 @@ where
     /// reported is still running. Meant for after [`ShoalPool::ready`]: before it, that method
     /// is the one that reports a failure.
     pub fn failure(&self) -> Option<(usize, String)> {
+        // a dead control plane is reported first, as a shard that is not a shard
+        if let Some(error) = self.control.as_ref().and_then(ControlHandle::failure) {
+            return Some((usize::MAX, format!("control plane: {error}")));
+        }
         loop {
             match self.events.try_recv() {
                 // a death, which is what was asked about
@@ -271,6 +377,14 @@ where
             // log this error, and keep the first for the caller
             event!(Level::ERROR, error = format!("{error:?}"));
             first.get_or_insert(error);
+        }
+        // the control plane stops last, after every shard is gone, so nothing is ever left
+        // asking a group that has already shut down
+        if let Some(control) = self.control {
+            if let Err(error) = control.shutdown() {
+                event!(Level::ERROR, error = format!("{error:?}"));
+                first.get_or_insert(error);
+            }
         }
         // a shard that died is the pool's result, not a log line nobody installed a reader for
         match first {

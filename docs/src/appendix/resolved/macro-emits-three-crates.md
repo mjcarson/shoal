@@ -120,5 +120,5 @@ escape hatches in the meantime.
 - [D5. Runtime portability](../../direction/runtimes.md) — which predicted the second fix
 - [F8. Purpose-built workloads](../../features/purpose-built-workloads.md) — where this was
   reproduced
-- [item 65](../known-issues.md) — the two `gxhash` majors, found while deciding which crate should
+- [Resolved #65](gxhash-pin.md) — the two `gxhash` majors, found while deciding which crate should
   re-export it

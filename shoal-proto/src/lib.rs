@@ -18,10 +18,10 @@ pub use client::FromShoal;
 // The crates the generated code names by path, re-exported so a schema resolves the exact
 // versions these trait signatures were compiled against rather than whatever its own manifest
 // happened to pick. See known issue 54.
-// gxhash is pinned here to the same major `shoal-core` uses rather than to the workspace one,
-// which is a different major again - see known issue 65. It has to come from this crate because
-// `PartitionKeySupport` lives here and a client hashes its own partition keys, and there has to
-// be exactly one of it, because two would mean the client and the ring hashing a key differently.
+// gxhash is the workspace pin, which since resolved item 65 is the only gxhash there is. It has
+// to come from this crate because `PartitionKeySupport` lives here and a client hashes its own
+// partition keys, and there has to be exactly one of it, because two would mean the client and
+// the ring hashing a key differently. `shoal/tests/partition_keys.rs` freezes what it produces.
 pub use deepsize2;
 pub use gxhash;
 pub use rkyv;

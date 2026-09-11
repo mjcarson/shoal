@@ -150,6 +150,12 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
             None
         }
     };
+    // a cluster node this process started records what its control plane committed; a server
+    // somebody else started carries whatever record they handed over, and a standalone one none
+    let cluster_facts = match (&pool, &conf) {
+        (Some(pool), Some(conf)) => conf::cluster_facts(conf, pool)?,
+        _ => None,
+    };
     // put whatever this workload reads into the server. deliberately outside the timing below:
     // a read workload's numbers must describe reading, not the writing that had to happen first.
     let ctx = Context {
@@ -238,8 +244,9 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
         wall_clock_ns: Some(vec![wall_clock.as_nanos() as u64]),
         spread_pct: None,
         runs_detail: None,
-        // the cluster record is the caller's, carried whole; a single-node run has none
-        cluster: request.cluster.clone(),
+        // the cluster record is the caller's, carried whole, or the one this process's own
+        // cluster node reported; a standalone run has none
+        cluster: request.cluster.clone().or(cluster_facts),
     };
     let mut out = MacroCaptureV2::new(request.label.clone());
     out.workloads.insert(workload.id().to_string(), capture);

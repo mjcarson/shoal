@@ -3,11 +3,16 @@
 ~~**Nothing in this part is built.**~~ **Nothing distributed in this part is built.** These pages
 plan a highly available cluster of Shoal nodes. The `C` pages are design records;
 [milestones](milestones.md) name implementation gates, acceptance tests and benchmark evidence.
-Two gates are met: the protocol contract that precedes M0 was agreed on 2026-09-11 and is
-numbered P1–P6 in [C13](protocol.md#the-contract), and
+Three gates are met: the protocol contract that precedes M0 was agreed on 2026-09-11 and is
+numbered P1–P6 in [C13](protocol.md#the-contract);
 [M0](milestones.md#m0-step-0-the-harness-and-the-facts) — the executable model of that contract,
 the process fixture, and the benchmark's cluster record — was delivered the same day as
-[F36](../features/cluster-harness.md). No node speaks to a node yet. They extend the unbuilt
+[F36](../features/cluster-harness.md); and
+[M1](milestones.md#m1-node-identity-and-the-control-plane-thread) — node and cluster identity in
+a format 2 marker, the `cluster:` block, a control thread on its own core running an embedded
+`openraft` group of one on a glommio runtime, and the Q1/Q13 spike that chose the library and
+found that heartbeats do not coalesce across groups — as
+[F37](../features/node-identity-control-plane.md). No node speaks to a node yet. They extend the unbuilt
 [Distribution](../appendix/todos.md#distribution) and
 [Rebalancing](../appendix/todos.md#rebalancing) entries.
 

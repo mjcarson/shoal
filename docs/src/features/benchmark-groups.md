@@ -35,7 +35,9 @@ alone, and "a filter excluding it" runs everything else, which is not a thing th
 
 ## What it does
 
-**Twelve named groups**, declared in `shoal-bench/src/groups.rs`, each answering one question:
+**Twelve named groups** — thirteen since [F37](node-identity-control-plane.md) added `cluster`,
+the overhead arm and the standalone reference cell it is read against — declared in
+`shoal-bench/src/groups.rs`, each answering one question:
 
 ```
 $ shoal-bench list --groups

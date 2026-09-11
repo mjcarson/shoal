@@ -10,14 +10,20 @@ members = [
     "shoal-derive",
     "shoal-model",
     "shoal-proto",
+    "shoal-spike",
     "shoal-top",
     "shoalctl",
 ]
 
 [workspace.dependencies]
 rkyv = { version = "0.8.10", features = ["uuid-1"] }
-gxhash = { version = "3", features = ["deterministic"] }
-uuid = { version = "1", features = ["v4"] }
+# the one gxhash in the workspace, and it is a persistence format: `GxHasher::default()` is what
+# hashes every partition key, its zero-seeded state is stable within a major, and a row's hash
+# decides which partition and tablet it is in. `shoal/tests/partition_keys.rs` freezes eight keys
+# to the values 2.3.1 gives them. moving this major re-homes every row ever written, so it is a
+# migration and not a version bump - see resolved item 65
+gxhash = "2.3"
+uuid = { version = "1", features = ["v4", "serde"] }
 glommio = { path = "../glommio/glommio", version = "0.10"}
 tokio = { version = "1", features = ["full"] }
 kanal = "0.1.0-pre8"

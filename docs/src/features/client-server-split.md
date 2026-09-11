@@ -158,12 +158,14 @@ The bad case is that they are actively misleading: a reader who sees them believ
 `shoal-core` exists, which is the exact false belief this feature was built to correct. They are
 gone, `glommio` is no longer optional there, and the name survives on the facade meaning one thing.
 
-**`gxhash` re-exported from `shoal-proto` at the workspace pin.** The workspace pins gxhash 3 with
-`deterministic`; `shoal-core` pins 2.2. Re-exporting the workspace one would have put two majors in
+**`gxhash` re-exported from `shoal-proto` at the workspace pin.** ~~The workspace pins gxhash 3 with
+`deterministic`; `shoal-core` pins 2.2.~~ At the time, the workspace pinned gxhash 3 with
+`deterministic` and `shoal-core` pinned 2.2. Re-exporting the workspace one would have put two majors in
 the graph with the facade's choice deciding how every partition key is hashed — and changing that
-silently rehashes every persisted dataset. `shoal-proto` pins the same major the engine does, so
-there is exactly one. The disagreement itself is filed as
-[item 65](../appendix/known-issues.md).
+silently rehashes every persisted dataset. `shoal-proto` pinned the same major the engine did, so
+there was exactly one. The disagreement itself was filed as item 65 and is
+[resolved](../appendix/resolved/gxhash-pin.md): the workspace now pins `2.3` once, both crates take
+it, and eight keys are frozen to their hashes.
 
 **A `Runtime` trait, or an `async-compat` shim.** Both are D5's step 2, both are ranked C there,
 and neither is built. The argument is D5's and is not restated here.
@@ -208,9 +210,9 @@ that build. The graph proof is a build command, not a test — see *Tests*.
 - **There is exactly one `rkyv`, one `uuid`, one `gxhash` and one `deepsize2` in the graph, and the
   facade declares none of them** — each is re-exported from the crate whose trait signatures it
   appears in. Two of any of them and `Archive` impls stop unifying, and the diagnostics are a wall.
-- **`gxhash` comes from `shoal-proto`, pinned to the major `shoal-core` uses.** A client hashes its
+- **`gxhash` comes from `shoal-proto`, at the one workspace pin `shoal-core` also takes.** A client hashes its
   own partition keys, so it cannot be gated behind the engine; and the client and the ring must
-  hash a key identically.
+  hash a key identically. `shoal/tests/partition_keys.rs` is what says they still do.
 - **The non-generic per-frame functions in `shared/protocol.rs` carry `#[inline]`.** Their callers
   are in other crates now and this workspace builds with `lto = false`, so removing one turns a
   header codec into a real call on every frame. See *Performance*.
@@ -309,5 +311,5 @@ of the crate's modules.
   written to be runtime-free so it could move here unchanged, and did
 - [item 54](../appendix/resolved/macro-emits-three-crates.md) — the same defect from the macro's
   side, closed but for `deepsize2` and `rkyv`
-- [item 65](../appendix/known-issues.md) — the two `gxhash` majors this had to navigate
+- [Resolved #65](../appendix/resolved/gxhash-pin.md) — the two `gxhash` majors this had to navigate
 - [item 66](../appendix/known-issues.md) — the release profile nothing has been reading

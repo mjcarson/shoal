@@ -71,7 +71,9 @@ cargo check --workspace --all-targets
 
 `.cargo/config.toml` in the workspace sets `-Ctarget-cpu=native`. `gxhash`, Shoal's hash
 function everywhere, depends on AES-NI intrinsics, so builds are not portable across machines
-with different instruction sets.
+with different instruction sets. Its *output* is: a given gxhash version hashes a key to the same
+value on every platform it supports, which is what lets a directory move between machines
+([Resolved #65](../appendix/resolved/gxhash-pin.md)).
 
 > This page claimed that before the file existed. The flag was in a `[build]` table in the
 > workspace `Cargo.toml`, where **cargo silently ignores it** — which is why the docs and

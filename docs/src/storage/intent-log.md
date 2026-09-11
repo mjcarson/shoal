@@ -42,10 +42,16 @@ are packed into DMA buffers and buffers are written whole, a crash can leave a b
 partially on disk. The reader treats a checksum mismatch as end of log
 ([Recovery](recovery.md)).
 
-`gxhash` is not cryptographic and is not stable across builds with different target features.
+`gxhash` is not cryptographic. ~~It is not stable across builds with different target features.
 It only has to be stable within one binary's lifetime plus the restart that reads the log
 back, which in practice means: **do not rebuild with different `target-cpu` flags and expect
-to read an existing intent log.** Nothing enforces this.
+to read an existing intent log.** Nothing enforces this.~~ It is stable: gxhash documents every
+hash of a given version as the same across every platform it supports, with one exception behind
+its `avx2` cargo feature, which this workspace does not enable and which `-Ctarget-cpu=native`
+does not turn on - a cargo feature is not a target feature. The version is pinned once, at
+`2.3`, and the checksum here is the same `gxhash64` that hashes every partition key
+([Resolved #65](../appendix/resolved/gxhash-pin.md)), so a build that could not read this
+checksum could not find the partition either.
 
 Note the field name `intent_log2` and the block of commented-out `new_writer` code above it
 (`.../fs.rs:54-98`) — the vestige of the writer migration this branch is in the middle of.

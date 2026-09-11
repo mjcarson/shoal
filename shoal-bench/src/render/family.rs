@@ -532,6 +532,36 @@ pub const FAMILIES: &[Family] = &[
              bundles rather than failing.",
     },
     Family {
+        name: "cluster-overhead",
+        title: "The cost of being a cluster node",
+        surface: Surface::AllWorkloads,
+        what_it_measures:
+            "The grid's reference cell served by a server started with a `cluster:` block - a \
+             cluster of one, bootstrapped on the default control core with a replication factor \
+             of one - against the same cell served standalone (`macro/grid/unsorted/r50/1024`). \
+             The two differ in the block and in nothing else, so the difference between them is \
+             what M1's control plane costs a node that is alone: one shard candidate fewer on a \
+             machine that has none to spare, a control thread that ticks and sends nothing, and a \
+             marker rewrite before the run.",
+        how_to_read_it:
+            "Beside its twin, and only there. A number here means nothing on its own; the question \
+             is whether this arm's range overlaps the reference cell's from the same capture, and \
+             if it does not, by how much. The `cluster` record on the artifact says what the node \
+             reported: one member, the desired factor beside the active one, which core the control \
+             thread had and whether it shared it.",
+        what_would_make_it_wrong:
+            "A control core that took a shard's core. On a machine where `resources.cores` is the \
+             whole box, a cluster node runs one shard fewer than its twin and the difference is a \
+             shard's worth of throughput rather than the control plane's cost - the `cores` record \
+             says which happened. A capture taken on a machine without the `performance` governor \
+             makes the idle tick cost whatever the frequency scaling decides.",
+        what_it_cannot_say:
+            "Anything about a cluster. One node replicates to nobody, acknowledges its own writes, \
+             and serves every read locally exactly as a standalone node does. What replication \
+             costs is the `nodes/3` arm of this series, which exists once M2 has a transport for \
+             it to run over.",
+    },
+    Family {
         name: "retired",
         title: "The retired blended workload",
         surface: Surface::AllWorkloads,
@@ -588,6 +618,8 @@ pub fn family_for(id: &str) -> Option<&'static Family> {
         "conf-storage"
     } else if id.starts_with("macro/conf/resources/") {
         "conf-resources"
+    } else if id.starts_with("macro/cluster/") {
+        "cluster-overhead"
     } else if id.starts_with("macro/fanout/") {
         "fanout"
     } else if id.starts_with("macro/transport/") {

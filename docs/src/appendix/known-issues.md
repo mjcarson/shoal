@@ -1211,39 +1211,6 @@ The scope is therefore `docs/src/direction/`, `docs/src/api/`, `docs/src/archite
 remainder of the appendix — and the pass is worth doing as one sweep with the symbol names added,
 rather than as fifteen incidental corrections, for the reason this item already gives.
 
-### 65. Two `gxhash` majors, and partition keys hashed by the one without `deterministic`
-
-> **Must be fixed before [M1](../distributed/milestones.md#m1-node-identity-and-the-control-plane-thread)**
-> of [Distributed Shoal](../distributed/overview.md): on one node this is a persistence hazard
-> across upgrades; across two nodes built from different lockfiles it is two nodes disagreeing
-> about which tablet a row is in ([C1](../distributed/node-identity.md#prerequisites)).
-
-`Cargo.toml:16` and `shoal-proto/Cargo.toml`, `shoal-core/Cargo.toml`; the hash itself is
-`shoal-derive/src/traits/partition_key.rs`, `PartitionKeySupport::get_partition_key`
-
-The workspace pins `gxhash = { version = "3", features = ["deterministic"] }`. `shoal-core` and
-`shoal-proto` both pin `"2.2"`, which resolves to 2.3.1, **and neither enables `deterministic`**.
-Every partition key in every schema is hashed by 2.3.1 without that feature; the workspace pin is
-reachable from nothing and its `deterministic` is doing no work anywhere.
-
-Two things are wrong here and they are worth separating. The smaller one is the dead pin. The
-larger one is that **a partition key's hash is a persistence format** — it decides which partition
-a row belongs to and therefore which file it is in — and nothing states which gxhash produces it,
-whether that hash is stable across gxhash versions, or what `deterministic` would change if it
-were turned on. Upgrading gxhash, or enabling that feature, would silently re-hash every key and
-make every persisted dataset unreadable, and there is no test that would notice.
-
-**Established by reading the manifests**, while deciding which crate should re-export gxhash for
-[F15](../features/client-server-split.md). The split made the question live rather than
-theoretical: `shoal-proto` had to own the re-export, because a client hashes its own partition
-keys, and re-exporting the workspace pin would have put two majors in the graph with the facade's
-choice deciding how every key is hashed. It pins the same major the engine does for that reason.
-
-**Fix direction:** pin gxhash once in `[workspace.dependencies]` at the version already in use,
-so the two crates cannot drift; then settle what `deterministic` guarantees and whether this
-system needs it, and write the answer down next to the pin. A test that asserts a known key hashes
-to a known tablet would turn the next accidental change into a failure instead of a data loss.
-
 ### 66. The release profile nothing has been reading
 
 `shoalctl/Cargo.toml:28-30`, and the absence of a `[profile.release]` in `Cargo.toml`
@@ -1742,3 +1709,51 @@ entry not yet re-pointed — which needs the same "old complete or new complete"
 [C7](../distributed/failover.md#snapshots-and-atomic-installation) sets for snapshot
 installation, and is the reason this is filed rather than fixed alongside
 [F36](../features/cluster-harness.md).
+
+### 92. A table with two `#[shoal(partition)]` fields does not compile
+
+`shoal-derive/src/traits/partition_key.rs`, `add`: the `partition_key_args` branch for several
+fields
+
+A composite partition key is a tuple: `type PartitionKey = (A, B)`. The generated
+`get_partition_key` calls `get_partition_key_from_values(&(&self.a, &self.b))`, which is a
+`&(&A, &B)` where the signature wants `&(A, B)`, so every table with more than one partition field
+fails to expand:
+
+```
+error[E0308]: mismatched types
+   |     Debug, Archive, Serialize, Deserialize, Clone, ShoalUnsortedTable, ...
+   |                                                    ^^^^^^^^^^^^^^^^^^ expected `u64`, found `&u64`
+```
+
+**Established by reproduction**, by the golden key test [F37](../features/node-identity-control-plane.md)
+wrote for [item 65](resolved/gxhash-pin.md): its third table, keyed by a `u64` and a `String`,
+was the first composite partition key in the workspace and did not build. The output above is
+what `cargo test -p shoal --test partition_keys` printed before the table was removed. Item 41
+already records that SHQL cannot express such a key; this says the derive cannot either.
+
+**Fix direction:** hash the fields directly in `get_partition_key` - one `hash_field` per field
+in declaration order, which is what `get_partition_key_from_values` does with the tuple - rather
+than building a tuple of references to pass through it. Then add the composite shape to the
+frozen key set, obtaining its literals the way the other eight were.
+
+### 93. The archived partition hash disagrees with the live one for every string key
+
+`shoal-derive/src/traits/partition_key.rs`, `add`: `hash_archived_stmts`
+
+`get_partition_key_from_values` hashes a `String` through `Hash for str`, which writes the bytes
+and then a `0xff` terminator. `get_partition_key_from_archived_insert` hashes the same field as
+`hasher.write(intent.name.as_bytes())`, with no terminator. The two produce different `u64`s for
+every string key, and would place an archived row in a different partition and tablet from the
+row that was inserted.
+
+**Latent.** `get_partition_key_from_archived_insert` has no caller in the workspace, so nothing
+routes by the wrong number today. It is filed because the function is on the trait every schema
+implements, a caller is one line away, and the first one would be a silent data loss rather than
+an error. **Established by reading the source** while writing the golden key test for
+[item 65](resolved/gxhash-pin.md); the test deliberately freezes the live path alone.
+
+**Fix direction:** either delete the archived variant until something needs it, or make it write
+what `Hash for str` writes - `write_str`, which the std hasher contract spells as the bytes then
+`0xff` - and freeze the archived hash beside the live one in `partition_keys.rs` so the two cannot
+drift again.

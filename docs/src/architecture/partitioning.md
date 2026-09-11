@@ -21,8 +21,14 @@ Three variants exist because the key must be computable in three situations: fro
 (inserts), from the caller's field values without a row (gets and deletes), and from an
 archived row without deserializing it (intent log replay).
 
-`gxhash` is configured with the `deterministic` feature in the workspace `Cargo.toml`, which
-matters: a non-deterministic hash would relocate every partition on restart.
+~~`gxhash` is configured with the `deterministic` feature in the workspace `Cargo.toml`, which
+matters: a non-deterministic hash would relocate every partition on restart.~~ That was never true
+of the binary ([Resolved #65](../appendix/resolved/gxhash-pin.md)): the feature reached nothing,
+and does not exist at the major in use. The real rule is that every key is hashed by
+`GxHasher::default()`, a zero-seeded state that gxhash documents as stable for a given version
+across every platform it supports, and the workspace pins that version once at `2.3`. The hash is
+a persistence format: `shoal/tests/partition_keys.rs` freezes eight keys to the `u64` and the
+tablet they hash to, and a build that moves them cannot read an existing directory.
 
 Note that partition keys are hashes, so **partition keys collide**. Two different logical
 keys hashing to the same `u64` share a partition and, for sorted tables, share a `BTreeMap`.

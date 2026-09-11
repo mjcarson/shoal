@@ -19,8 +19,9 @@
 // any of them.
 //
 // `gxhash` is among them because a client hashes its own partition keys, so it cannot be gated
-// behind the engine - the regression crate catches that directly. See known issue 65 for why the
-// version it resolves to is pinned in two places rather than the workspace one.
+// behind the engine - the regression crate catches that directly. It resolves to the one
+// workspace pin, and `tests/partition_keys.rs` freezes what that pin hashes eight keys to
+// (resolved item 65).
 pub use shoal_proto::{deepsize2, gxhash, rkyv, serde_json, tracing, uuid};
 #[cfg(feature = "server")]
 pub use shoal_core::{glommio, kanal, lru};

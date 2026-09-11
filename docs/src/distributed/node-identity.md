@@ -8,10 +8,17 @@ require a separately deployed service; [C13](protocol.md) states that constraint
 
 ## What exists today
 
-`StorageMeta` (`shoal-core/src/server/meta.rs`) records format and shard count. `Resources::cpus`
-(`server/conf.rs`) excludes logical CPU 0, but does not reserve its whole physical core. The
-schema fingerprint detects mismatched generated schemas and currently includes the protocol
-version. Networking has a client address/port and optional TLS, but no advertised peer identity.
+**Delivered at M1 by [F37](../features/node-identity-control-plane.md)**, which built this page's
+design up to the point where a second node would be needed. `StorageMeta`
+(`shoal-core/src/server/meta.rs`) ~~records format and shard count~~ is at format 2: shard count,
+node id, cluster id, shard layout and last observed topology version, with format 1 refused by
+name. `Resources::cpus` (`server/conf.rs`) excludes logical CPU 0 ~~, but does not reserve its
+whole physical core~~ for a standalone node, and `cpus_reserving` keeps a cluster node's shards
+off the control core's whole physical core. The `cluster:` block below is implemented, with the
+settings later milestones own refused at startup. The control thread runs an embedded openraft
+group of one on a glommio executor. The schema fingerprint detects mismatched generated schemas
+and currently includes the protocol version. Networking has a client address/port and optional
+TLS; the peer endpoints are advertised in the member record and bound by nothing until M2.
 
 ## The design
 
@@ -37,11 +44,18 @@ versions are separate concepts. Their exact encoding and upgrade compatibility a
 Refuse unknown formats with instructions identifying supported migration/export tools. Before
 operational readiness provide a tested path from existing single-node data to a cluster, including
 checksums, row counts, cutover and rollback boundaries. An initial development build may refuse
-format-1 data, but “delete the directory” is not a production upgrade procedure.
+format-1 data, but “delete the directory” is not a production upgrade procedure. **F37 took that
+choice**: a format 1 marker is refused with an error naming the format found, the formats the
+build reads, and that no migration exists yet with M10 owning one. The same refusal covers a
+standalone directory opened by a cluster configuration.
 
 ### The cluster block
 
-Proposed configuration (not implemented):
+~~Proposed configuration (not implemented):~~ Implemented by F37, with one addition to the block
+as first written - `control_core_shared`, the explicit shared core on a small machine that the
+paragraph on the control thread below asks for - and with `seeds`, `tls` and any `control_voters`
+outside {1, 3, 5} refused at startup naming the milestone that delivers them.
+[Configuration](../getting-started/configuration.md#cluster) is the reference with every default:
 
 ```yaml
 cluster:                          # absent: standalone local operation
@@ -52,6 +66,7 @@ cluster:                          # absent: standalone local operation
   control_port: 12002             # independent control listener, included in seed discovery
   client_advertise: "10.0.0.2:12000"
   control_core: 0                 # validated against allowed CPUs; reserve its physical siblings
+  control_core_shared: false      # a small machine may say so explicitly, and it is recorded
   control_voters: 3               # explicit policy; five supported where justified
   replication_factor: 3
   write_consistency: Quorum
@@ -90,8 +105,11 @@ standalone or RF=1 mode has its own weaker redundancy contract.
 
 ### The control-plane thread
 
-Default to a current-thread Tokio runtime for embedded `openraft`, detector/admin work and the
-leader's rebalancer. CPU 0 is the default, but validate it against container/cgroup affinity and
+~~Default to a current-thread Tokio runtime for embedded `openraft`, detector/admin work and the
+leader's rebalancer.~~ The thread runs a **glommio** executor pinned to the control cpu, and
+`openraft` is driven on it through the `AsyncRuntime` F37 wrote; C3's
+[runtime section](membership.md#openraft-and-the-runtime) says why Tokio lost. CPU 0 is the
+default, but validate it against container/cgroup affinity and
 allow explicit allocation. Reserve a physical core including SMT siblings where isolation is
 claimed. On small machines an explicitly shared core is allowed and recorded as shared.
 

@@ -1,0 +1,25 @@
+[package]
+name = "shoal-spike"
+version = "0.1.0"
+edition = "2021"
+description = "The Q1/Q13 spike: openraft groups on the glommio runtime, counted and timed."
+license = "MIT"
+publish = false
+
+# Not a library and not a benchmark. This is the one-off measurement M1 owes C13's Q1 and Q13
+# (`docs/src/distributed/protocol.md`): how many embedded openraft groups one control-shaped
+# thread can hold, what each costs idle, and what a durable append costs. Its output is pasted
+# into the decision record by hand, labelled with the host and governor it ran under, and it
+# is never part of a capture - `shoal-bench` is for numbers that are compared across commits.
+[[bin]]
+name = "shoal-spike"
+path = "src/main.rs"
+
+[dependencies]
+# the engine, for the glommio runtime and the durable control store the spike reuses
+shoal = { version = "0.1.0", path = "../shoal" }
+openraft = { version = "=0.10.0-alpha.34", default-features = false, features = ["single-threaded", "serde"] }
+glommio = { workspace = true }
+futures = "0.3"
+libc = "0.2"
+tempfile = "3"

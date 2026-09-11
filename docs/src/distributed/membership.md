@@ -12,9 +12,12 @@ configuration. No external membership, configuration or failover service is requ
 `Shard::join_cluster` broadcasts a local join and `Ring::add` ignores unknown shards. Reserved
 ping/pong frames have no implementation. ~~The pool lacks a dependable readiness/failure handle.~~
 `ShoalPool::ready` and `failure` are that handle since
-[F36](../features/cluster-harness.md), for the process's own shards. No consensus library is
-currently in the workspace. [C1](node-identity.md) introduces identity and the control-plane
-thread; ~~M0 first adds readiness and failure propagation~~ M0 added them.
+[F36](../features/cluster-harness.md), for the process's own shards. ~~No consensus library is
+currently in the workspace.~~ `openraft` is, since [F37](../features/node-identity-control-plane.md),
+running a group of one member per cluster node with a state machine that holds the cluster id,
+the member list and the bootstrap policy - the seed of the group of nodes this page describes,
+with no second node to admit yet. [C1](node-identity.md) ~~introduces~~ delivered identity and
+the control-plane thread; ~~M0 first adds readiness and failure propagation~~ M0 added them.
 
 ## The design
 
@@ -104,10 +107,20 @@ to restore three distinct copies after one machine is permanently lost.
 
 ### openraft and the runtime
 
-Use a current-thread Tokio runtime on the reserved control core as the initial integration.
+~~Use a current-thread Tokio runtime on the reserved control core as the initial integration.~~
+The control core runs a **glommio** executor, and openraft is driven on it through the
+`AsyncRuntime` [F37](../features/node-identity-control-plane.md) wrote
+(`shoal-core/src/server/control/runtime/`), under openraft's `single-threaded` feature. The
+Tokio runtime was rejected there: a second reactor and timer wheel in a process that already has
+one of each, for no property glommio lacks, and a `Send` bound on every store that the
+`!Send` file handles would have had to be hidden from. The library's own runtime conformance
+suite passes on it.
 Run blocking filesystem work through an appropriate asynchronous/blocking adapter; a synchronous
-fsync must not freeze all election timers on that runtime. Returning from an append or vote
-operation must follow the library's durability contract, not merely enqueue work.
+fsync must not freeze all election timers on that runtime - the marker rewrite goes through
+`spawn_blocking`, and the store's own writes are glommio's, which do not block the reactor.
+Returning from an append or vote operation must follow the library's durability contract, not
+merely enqueue work: the control store completes `IOFlushed` after its `fdatasync` and `save_vote`
+returns after the vote file is renamed and the directory synced.
 
 Implement the library's network adapter over Shoal's control traffic framing. The adapter must
 preserve request identity, deadlines and shutdown behavior. It owns no external service; local
@@ -117,10 +130,13 @@ separate control/data endpoints or a validated dispatch design; Q1/M2 settles th
 
 The original source note named 0.9.25 and an alpha 0.10 alternative; C13's
 [decision record](protocol.md#decision-record) reads both (0.9.25 and 0.10.0-alpha.34 on
-2026-09-11) as data-plane candidates and pins neither for the control plane. Before implementation, pin an
+2026-09-11) as data-plane candidates ~~and pins neither for the control plane. Before implementation, pin an
 actual version and record source/API evidence for runtime behavior, storage completions, learner
-membership changes and network driving. Do not assume an alpha API or heartbeat extension is
-available. No handwritten-Raft fallback is planned.
+membership changes and network driving~~. **M1 pinned `0.10.0-alpha.34` exactly** for the control
+plane, with the runtime, storage and network seams built and the two conformance suites
+passing ([decision record](protocol.md#q1-and-q13-decided-at-m1)); learner membership changes
+and network driving are M2/M3's and still unevidenced. Do not assume an alpha API or heartbeat
+extension is available. No handwritten-Raft fallback is planned.
 
 ## Alternatives rejected
 

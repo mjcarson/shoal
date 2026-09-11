@@ -274,7 +274,7 @@ pub struct ClusterFacts {
 pub struct NodeCores {
     /// The physical cores its data shards ran on; empty when it shared cores
     pub data: Vec<usize>,
-    /// The core its control thread ran on, once nodes have one
+    /// The physical core its control thread ran on; none for a standalone node or a shared one
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control: Option<usize>,
 }

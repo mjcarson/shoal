@@ -561,12 +561,14 @@ async fn nothing_is_written_to_the_storage_directory() -> Result<(), TestError> 
         !temp_dir.path().join("TestRecord").exists(),
         "an ephemeral table opened a storage directory"
     );
-    // the only thing in this directory is the marker the pool claims it with
-    let left: Vec<String> = std::fs::read_dir(temp_dir.path())
+    // the only things in this directory are the marker the pool claims it with and the lock it
+    // holds while it runs (F37)
+    let mut left: Vec<String> = std::fs::read_dir(temp_dir.path())
         .expect("failed to read the storage directory")
         .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
         .collect();
-    assert_eq!(left, vec!["shoal-meta.json".to_string()]);
+    left.sort();
+    assert_eq!(left, vec!["shoal-meta.json".to_string(), "shoal.lock".to_string()]);
     Ok(())
 }
 

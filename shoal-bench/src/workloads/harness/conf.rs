@@ -134,7 +134,72 @@ pub fn resolve(base: &Path, id: &str, overrides: &ConfOverrides, port: u16) -> R
     if let Some(max_frame_bytes) = overrides.max_frame_bytes {
         conf.networking.max_frame_bytes = max_frame_bytes;
     }
+    // a cluster arm bootstraps a cluster of one, on the default control core, with the factor
+    // it names and nothing else moved - the block's other defaults are the documented ones
+    if let Some(cluster) = &overrides.cluster {
+        conf.cluster = Some(
+            shoal::server::conf::Cluster::default()
+                .bootstrap(true)
+                .replication_factor(cluster.replication_factor),
+        );
+    }
     Ok(conf)
+}
+
+/// The cluster record for a server this process started as a cluster node
+///
+/// Read from the pool's topology view after it is ready, so every number is what the control
+/// plane committed rather than what the configuration asked for. `None` for a standalone
+/// server, which is every arm but the cluster ones, and which keeps every single-node capture
+/// free of a `cluster` key ([F36](../../../../docs/src/features/cluster-harness.md)).
+///
+/// # Arguments
+///
+/// * `conf` - The configuration the server was started with
+/// * `pool` - The running pool
+pub fn cluster_facts(
+    conf: &Conf,
+    pool: &shoal::ShoalPool<crate::workloads::schema::Bench>,
+) -> Result<Option<crate::model::macro_layer::ClusterFacts>> {
+    // a standalone server has no cluster to record
+    let Some(cluster) = &conf.cluster else {
+        return Ok(None);
+    };
+    let view = pool.topology().map_err(|error| anyhow::anyhow!("{error}"))?;
+    let placement = pool.control_placement();
+    // the shards' physical cores, read the way the fixture reads them: from sysfs
+    let mut data: Vec<usize> = pool
+        .shard_cpus()
+        .iter()
+        .filter_map(|cpu| {
+            std::fs::read_to_string(format!("/sys/devices/system/cpu/cpu{cpu}/topology/core_id"))
+                .ok()
+                .and_then(|text| text.trim().parse::<usize>().ok())
+        })
+        .collect();
+    data.sort_unstable();
+    data.dedup();
+    Ok(Some(crate::model::macro_layer::ClusterFacts {
+        nodes: u32::try_from(view.members.len()).unwrap_or(u32::MAX),
+        desired_rf: view.desired_rf,
+        active_rf: view.active_rf,
+        write_policy: cluster.write_consistency.as_str().to_string(),
+        read_policy: cluster.read_consistency.as_str().to_string(),
+        durability: facts(conf).durability,
+        // the client runs in this process, beside the one node
+        driver: "in-process".to_string(),
+        cores: vec![crate::model::macro_layer::NodeCores {
+            data,
+            control: placement.map(|placement| placement.core),
+        }],
+        driver_cores: Vec::new(),
+        // the bench schema's tables, and the tablets the ring cuts the key space into
+        tables: crate::workloads::schema::TABLE_COUNT,
+        tablets: u32::try_from(shoal::server::ring::TABLET_COUNT).unwrap_or(u32::MAX),
+        offered_load: None,
+        // one process on one machine is the emulated case by definition
+        emulated: true,
+    }))
 }
 
 /// Write a self signed certificate for an encrypted workload beside its storage
