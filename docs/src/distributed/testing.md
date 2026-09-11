@@ -15,7 +15,10 @@ conditional-result, snapshot and reconfiguration defects.
 `ShoalPool::ready`, which reports the address the shards bound or the first shard that failed
 ([Resolved #38, 58, 88](../appendix/resolved/pool-readiness.md)). Existing crash tests re-exec
 a test binary and synchronize on a readiness line, and the cluster fixture below is that shape
-generalized. Benchmark readiness probes and tracing-based path assertions provide reusable
+generalized. Since [F37](../features/node-identity-control-plane.md) its servers are cluster
+nodes of one, each with a control core the allocator owns; it can start a standalone child, stage
+a marker, narrow a child's affinity, and restart a node on its directory, and its `Endpoints`
+carry the identities and the control core a child reported. Benchmark readiness probes and tracing-based path assertions provide reusable
 patterns. There is no whole-engine deterministic simulator; this proposal does not require
 building one before testing the new protocol state machine, and `shoal-model` is the pure model
 it asks for instead.

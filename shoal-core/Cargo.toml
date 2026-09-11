@@ -31,7 +31,8 @@ serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
 serde_json = "1"
 config = "0.13" 
-gxhash = "2.2"
+# the workspace pin - the same gxhash `shoal-proto` hashes partition keys with (resolved item 65)
+gxhash = { workspace = true }
 rkyv = { workspace = true }
 glommio = { workspace = true }
 bytes = "1.5"
@@ -70,6 +71,19 @@ rustls = { version = "0.23", default-features = false, features = ["std", "aws-l
 rustls-pki-types = "1"
 rustls-pemfile = "2"
 libc = "0.2"
+# the embedded control group (F37, M1). pinned exactly: 0.10 is an alpha and its storage and
+# network traits have moved between alphas. `single-threaded` empties openraft's `Send`/`Sync`
+# bounds, which is what lets the store hold glommio's `!Send` file handles; `serde` is what the
+# log frames and the snapshot are written with. no default features, because the defaults pull a
+# tokio runtime and clap, and the runtime this drives is glommio (`server/control/runtime`)
+openraft = { version = "=0.10.0-alpha.34", default-features = false, features = ["single-threaded", "serde"] }
+openraft-rt = { version = "=0.10.0-alpha.34", default-features = false, features = ["single-threaded"] }
+# `openraft_rt::AsyncRuntime::ThreadLocalRng` is a `rand::Rng`, at the major openraft-rt names
+rand = "0.10"
+# the oneshot the runtime hands openraft, which is the one openraft-rt itself defaults to
+futures-channel = "0.3"
+# the timeout future the runtime hands openraft is a select of a future against a timer
+pin-project-lite = "0.2"
 # the port-zero reservation `ShoalPool::start` holds while its shards bind (F36). the version
 # glommio already resolves, so the lockfile does not grow
 socket2 = "0.6"

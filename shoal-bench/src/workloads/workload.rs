@@ -151,6 +151,25 @@ pub struct ConfOverrides {
     /// A frame length is used as an allocation size before the body arrives, so this is a bound on
     /// what one client can make the server allocate as much as it is a bound on a batch.
     pub max_frame_bytes: Option<u32>,
+    /// Whether the server runs as a cluster node, and with what replication factor
+    ///
+    /// The one axis the cluster overhead arm moves
+    /// ([F37](../../../docs/src/features/node-identity-control-plane.md)): a `cluster:` block
+    /// that bootstraps a cluster of one on the default control core, against a standalone twin
+    /// that has none. Everything else about the two is the reference cell, which is what makes
+    /// the difference between them the control plane's cost.
+    pub cluster: Option<ClusterOverride>,
+}
+
+/// What a cluster arm asks of its server
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClusterOverride {
+    /// The replication factor the bootstrap records
+    ///
+    /// Recorded, not enforced, at M1: a one node cluster serves everything locally whatever
+    /// this says. It is on the artifact so a later capture with a real factor is visibly a
+    /// different measurement.
+    pub replication_factor: u32,
 }
 
 /// Everything a workload produced

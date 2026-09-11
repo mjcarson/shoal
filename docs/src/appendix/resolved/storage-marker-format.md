@@ -123,8 +123,13 @@ topology epoch — and every one of them makes the format more likely to change,
 - **`META_FORMAT` is bumped when the meaning of a field changes, not only when a field is added
   or removed.** `serde` catches the shape; only the version catches the meaning, and the meaning
   is the case that gets through.
-- **A marker is never rewritten in place.** `claim` writes a marker on exactly one path — the one
-  where no marker exists. Anything that "upgrades" a marker has to move the data it describes
+- ~~**A marker is never rewritten in place.** `claim` writes a marker on exactly one path — the one
+  where no marker exists.~~ **The identities, the shard count and the layout are never rewritten.**
+  Narrowed by [F37](../../features/node-identity-control-plane.md): the format 2 marker carries a
+  `topology` field that the control plane rewrites through `StorageMeta::observe_topology` -
+  the one field that ever moves, on the same staged-rename path the claim uses, and never
+  backwards. `claim` still writes a marker on exactly one path, the one where no marker exists.
+  Anything that "upgrades" a marker has to move the data it describes
   first, and no such migration exists ([items 11, 12](tablet-ring.md)).
 - **`StorageMeta::new` is the only constructor used outside tests**, so every marker written
   carries the current `META_FORMAT`. The test that stages a future marker builds the struct
@@ -144,9 +149,14 @@ routing every partition to the wrong shard. Filed as
 the format check does not help, because the problem is a marker that is absent rather than one
 that is wrong.
 
-**There is still exactly one format**, so this check has never refused anything in the field. It
+~~**There is still exactly one format**, so this check has never refused anything in the field. It
 is a guard against a change that has not happened yet, which is the only time it can be added
-without a migration behind it.
+without a migration behind it.~~ **Format 2 exists**, since
+[F37](../../features/node-identity-control-plane.md), and this check refuses format 1 in the
+field: every directory written before that feature. The refusal names the format found, the
+formats the build reads (`SUPPORTED_FORMATS`), and that no migration exists yet, with M10 owning
+one. The format is now read from a one-field struct before the rest of the marker is parsed,
+which is what keeps a format 1 marker failing on its format rather than on a field it never had.
 
 ## Tests
 

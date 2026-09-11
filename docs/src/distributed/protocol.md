@@ -31,7 +31,7 @@ the storage seams and [C3](membership.md) for the control-plane integration.
 | `Quorum` writes and `One` reads by default | Agreed 2026-09-11; durable quorum ([P3](#the-contract)) and committed-prefix reads ([P4](#the-contract)) are defined below |
 | A down node keeps placement during a grace period | Agreed 2026-09-11; primary elections do not copy tablets |
 | Automatic removal after a configurable timeout | Enabled in the proposed cluster defaults at 30 minutes; `null` explicitly disables it. The value stays open under Q7 |
-| Data-plane protocol | ~~Prefer embedded Raft per tablet; library/runtime integration is a gated implementation decision~~ Raft per logical tablet, agreed 2026-09-11 ([P5](#the-contract)). Which library and runtime is Q1, still open, and M1's spike decides it |
+| Data-plane protocol | ~~Prefer embedded Raft per tablet; library/runtime integration is a gated implementation decision~~ Raft per logical tablet, agreed 2026-09-11 ([P5](#the-contract)). ~~Which library and runtime is Q1, still open, and M1's spike decides it~~ M1's spike chose `openraft` on glommio for the control plane and found that per-group heartbeats do not coalesce, so the data plane's group count is a design constraint M4 inherits ([decision record](#q1-and-q13-decided-at-m1)) |
 | Control-plane `SetPrimary` alone authorizes a writer | Rejected; a tablet election and recovery establish authority ([P5](#the-contract)) |
 | Sequence numbers reset each epoch | Replaced by a logical log index across terms and term/index history ([P2](#the-contract)) |
 | External membership or failover service | Excluded ([R7](overview.md#what-is-being-asked-for)) |
@@ -160,6 +160,58 @@ line given for that release; `docs.rs` and default branches were not the source.
 dependency, and measured nothing. A version above is a pin for the spike to start from, not a
 selection, and nothing on the [milestones page](milestones.md) moved except the gate itself.
 
+#### Q1 and Q13, decided at M1
+
+Recorded 2026-09-11 by [F37](../features/node-identity-control-plane.md), on the tree that
+delivered it. The spike is `shoal-spike`, a workspace binary that is not a benchmark and is not
+a capture: `cargo run -p shoal-spike --release` prints the tables below, labelled by host and
+governor, and they were pasted here by hand. **They were taken on `europa` under the
+`powersave` governor** - the development machine, not the benchmark host - so they bound the
+shape of the answer and not its exact value.
+
+| Decision | Evidence |
+| --- | --- |
+| **`openraft` `0.10.0-alpha.34` is the control plane's library, pinned exactly** | `shoal-core/Cargo.toml`: `openraft = "=0.10.0-alpha.34"` and `openraft-rt` at the same pin, `default-features = false`, features `single-threaded` and `serde`. Exact because 0.10 is an alpha whose storage and network traits have moved between alphas (`RaftLogStorage::truncate_after` and `RaftStateMachine::apply`'s entry-responder stream are both `#[since("0.10.0")]`). `openraft-rt-tokio` is not in `cargo tree -p shoal-core`; `tokio` is, transitively, through the OTLP exporter it always was |
+| **The runtime is glommio, through an `AsyncRuntime` this repository wrote** | `shoal-core/src/server/control/runtime/`: task, timer, a bounded mpsc with weak senders, a watch with seen/unseen semantics, an async mutex, and `futures_channel`'s oneshot. Under `single-threaded` every one is `Rc`/`RefCell`. `openraft_rt::testing::Suite::<GlommioRuntime>::test_all()` - forty six runtime tests plus the deterministic-rng suite - passes as `glommio_runtime_passes_the_openraft_suite`. C1's "current-thread Tokio runtime" is struck through on its page: a second reactor and timer wheel in a process that has one of each bought no property glommio lacks |
+| **The storage seam is the control store, and it passes the conformance suite** | `shoal-core/src/server/control/store.rs`: log frames `[u32 len][u32 gxhash32][json]` appended and `fdatasync`ed before `IOFlushed` completes, a torn tail truncated at open, every other file replaced by temp-fsync-rename-dirsync. `openraft::testing::log::Suite::test_all` - forty four storage tests - passes as `control_store_passes_the_openraft_storage_suite`; `control_store_recovers_from_a_torn_append` is the crash test |
+| **The network seam is `RaftNetworkV2`, and at M1 every peer is unreachable** | `shoal-core/src/server/control/network.rs`. A group of one never sends. M2 replaces it |
+| **raft-rs was not measured, and why** | `RawNode` has no runtime abstraction to adapt: it is a state machine the caller drives with `tick`/`step`/`ready`/`advance`. A spike on the *runtime seam* axis would measure the harness written around it rather than the library, and the runtime seam is what Q1 was blocking on. The 0.7.0 pin above stays as the alternative if the data plane needs a completion-driven shape openraft's async storage cannot give (Q2/Q4) |
+| **Q13, first numbers: one control-shaped thread holds about a thousand three-member groups at openraft's default timers, and about four thousand at C1's** | The idle tables below. At 50 ms heartbeats, 1024 groups saturate the thread (99.99% of one core, 35,000 `append_entries` a second); 4096 groups never settle (129 s to elect, log growth to 4 MiB a group from re-elections). At 500 ms heartbeats and 1.5-3 s elections, 4096 groups idle at 95% of a core and 16,000 messages a second. **Heartbeats are per group and nothing coalesces across groups**: the rate is members-minus-one over the interval, times the group count, and the spike's loopback counted exactly that. So a tablet-per-group data plane at 4096 tablets on one shard needs either multi-raft heartbeat batching openraft does not have, or a group count an order of magnitude below the tablet count - which is the design constraint M4 inherits, and the grouped-tablets alternative Q1 named is no longer only an alternative |
+| **Durable append: 395 µs alone, 10.8 ms when sixty four leaders write at once** | The durable table below, on the control store, C1's timers. p50 395 µs / p99 506 µs for one group writing 200 entries in sequence; p50 10.8 ms / p99 13.1 ms for sixty four groups each writing 200 at once on one thread. The 27× is fsyncs from independent groups queueing on one executor: each append waits its own `fdatasync`, and there is no group commit across groups. Q2's shared physical WAL is the answer to that, and this is the number it has to beat |
+
+**Idle cost, memory stores, 10 s window, openraft's defaults (heartbeat 50 ms, election 150-300 ms):**
+
+| groups | RSS MiB | RSS delta/group KiB | idle CPU % of one core | append_entries/s | startup s |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 43.3 | 304.0 | 2.81 | 36 | 0.0 |
+| 64 | 76.0 | 514.5 | 36.27 | 2224 | 0.0 |
+| 1024 | 650.7 | 514.2 | 99.99 | 35319 | 0.5 |
+| 4096 | 17282.3 | 3966.9 | 99.99 | 69722 | 128.6 |
+
+**Idle cost, memory stores, 10 s window, C1's proposal (heartbeat 500 ms, election 1500-3000 ms):**
+
+| groups | RSS MiB | RSS delta/group KiB | idle CPU % of one core | append_entries/s | startup s |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 18341.6 | 0.0 | 0.58 | 4 | 0.0 |
+| 64 | 18353.4 | 188.6 | 4.74 | 256 | 0.0 |
+| 1024 | 18690.5 | 346.9 | 45.68 | 4062 | 0.6 |
+| 4096 | 20179.7 | 358.2 | 95.13 | 16245 | 2.3 |
+
+The absolute RSS in the second table is the first table's high-water mark: the allocator kept
+what the 4096-group run touched. The per-group delta is the number to read.
+
+**Durable append, control store under a temp dir, 200 writes per leader, C1's timers:**
+
+| groups | leaders writing at once | p50 µs | p99 µs | max µs |
+| --- | --- | --- | --- | --- |
+| 1 | 1 | 395.1 | 506.4 | 51099.1 |
+| 64 | 64 | 10792.5 | 13070.9 | 59351.7 |
+
+**What M1's spike did not do.** It measured no data-plane library under a *shard's* ownership -
+every group here ran on a control-shaped thread with nothing else on it - and it measured on
+the wrong host. Q13's target-scale budgets for connections, map dissemination and control-plane
+reports are M3's, and stay open.
+
 ## Alternatives rejected
 
 The earlier heartbeat-max promotion proof assumes current, durable, compatible histories and an
@@ -201,7 +253,7 @@ A preferred answer is a design hypothesis, not evidence that a library already s
 
 | ID | Question and preferred direction | Gate and evidence |
 | --- | --- | --- |
-| Q1 | Which embedded data-plane Raft library can be driven under shard ownership? Evaluate callbacks, durable term/vote handling, batching and idle-group cost; compare grouped tablets only as an explicit alternative. **Decided 2026-09-11:** the protocol is Raft and the candidates are pinned in the [decision record](#decision-record). **Open:** which library and runtime | M1 before distributed storage work; executable spike and chosen API/version recorded |
+| Q1 | Which embedded data-plane Raft library can be driven under shard ownership? Evaluate callbacks, durable term/vote handling, batching and idle-group cost; compare grouped tablets only as an explicit alternative. **Decided 2026-09-11:** the protocol is Raft and the candidates are pinned in the [decision record](#decision-record). **Decided at M1** ([F37](../features/node-identity-control-plane.md)): `openraft` `0.10.0-alpha.34` on a glommio `AsyncRuntime`, with the spike's numbers [recorded](#q1-and-q13-decided-at-m1). What stays open is whether the *data* plane uses the same library under a shard: the spike found per-group heartbeats do not coalesce, so grouped tablets are now the expected shape rather than the alternative | M1; spike run and version pinned. M4 decides the data plane's shape against it |
 | Q2 | How are logical tablet logs multiplexed into shared physical WALs without lost completion ordering? What alignment, table identity, versioning and checksums does the envelope need? | M4; format specification, restart and rotation tests |
 | Q3 | Which checkpoint mechanism provides a stable boundary without long write pauses? Prefer immutable generations or copy-on-write; a bounded pause is a documented initial fallback | M4 design, M7 implementation; crash matrix and pause/memory measurements |
 | Q4 | How are conditional mutation results, no-ops and retries derived in committed order while batching? Can `One` use a distinct accepted/pending API? How are volatile-table consensus metadata and full-cluster restart handled? | M4; operation/API matrix and state-machine tests; unsupported policies explicitly refused |
@@ -213,7 +265,7 @@ A preferred answer is a design hypothesis, not evidence that a library already s
 | Q10 | How do clients negotiate schema identity separately from wire capabilities and on-disk format? | M2 contract, M10 release gate; mixed-version operation and rollback tests |
 | Q11 | How are node certificates provisioned before first join, identities protected against cloned directories, and address changes authenticated? | M2; join, replacement, duplicate identity and certificate rotation tests |
 | Q12 | What checksummed checkpoint or backup is authoritative when replicas disagree? What operator recovery is possible after a majority is permanently lost? | M8/M10; corruption and disaster-recovery exercises, no automatic destructive choice |
-| Q13 | What scale targets bound table count, tablet count, connections, map dissemination and control-plane reports? | M1/M3; memory, idle CPU and update-fanout budgets measured at target scale |
+| Q13 | What scale targets bound table count, tablet count, connections, map dissemination and control-plane reports? **First numbers at M1** ([decision record](#q1-and-q13-decided-at-m1)): about a thousand groups a thread at openraft's timers, four thousand at C1's, 350 KiB a group idle. Connections, dissemination and reports are M3's | M1/M3; memory, idle CPU and update-fanout budgets measured at target scale |
 
 ## How it would be measured
 

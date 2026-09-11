@@ -22,13 +22,13 @@ use crate::server::errors::ShoalError;
 /// Taken from the top of the key rather than the bottom so that a tablet can later be
 /// split in two by consuming one more bit: its keys stay contiguous and no other tablet
 /// is disturbed. A tablet id taken modulo the tablet count could not be split at all.
-const TABLET_BITS: u32 = 12;
+pub const TABLET_BITS: u32 = 12;
 
 /// The number of tablets the partition key space is cut into
 ///
 /// This has to be far larger than any shard count for the split to be even, and small
 /// enough that the map stays resident — 4096 `u16`s is 8 KiB.
-const TABLET_COUNT: usize = 1 << TABLET_BITS;
+pub const TABLET_COUNT: usize = 1 << TABLET_BITS;
 
 /// The tablet map for Shoal
 #[derive(Clone)]

@@ -462,6 +462,8 @@ pub const IDS: &[&str] = &[
     "macro/conf/storage/latency_buffer/r50/w65536/16Ki",
     "macro/conf/storage/latency_buffer/r50/w65536/64Ki",
     "macro/conf/storage/latency_buffer/r50/w65536/256Ki",
+    // the cluster overhead arm (F37): the reference cell served by a one node cluster
+    "macro/cluster/overhead/nodes/1",
 ];
 
 /// Whether an id names a workload this build knows about

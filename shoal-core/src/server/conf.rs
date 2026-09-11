@@ -1,5 +1,7 @@
 //! The config for a Shoal database
 
+pub mod cluster;
+
 use byte_unit::Byte;
 use config::{Config, ConfigError};
 use glommio::CpuSet;
@@ -15,6 +17,7 @@ use crate::shared::protocol::auth::AuthMechanism;
 use crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES;
 use crate::shared::tls::TlsServerOptions;
 use crate::utils::{self, IntoStorageSize};
+pub use cluster::Cluster;
 
 /// The resource settings to use
 ///
@@ -70,12 +73,30 @@ impl Resources {
     /// problem: cpu `n` and cpu `n + physical_cores` are two threads of one core, so a plain
     /// ascending scan fills both threads of the low cores while the high cores stay idle.
     pub fn cpus(&self) -> Result<CpuSet, ServerError> {
+        // standalone reserves nothing beyond cpu 0 itself, which is what every capture ran under
+        self.cpus_reserving(&[])
+    }
+
+    /// Get the cpuset to run shoal on, keeping off whole physical cores something else owns
+    ///
+    /// [`Resources::cpus`] with a list of physical core ids removed - both SMT threads of each,
+    /// the way `exclude_cores` removes them. This is how a cluster node keeps its shards off the
+    /// control thread's core ([F37](../../../docs/src/features/node-identity-control-plane.md)):
+    /// cpu 0 alone was never enough, since its sibling thread was always a shard candidate, and
+    /// standalone mode has to keep it one because the benchmark layout depends on it.
+    ///
+    /// # Arguments
+    ///
+    /// * `reserved` - Physical cores no shard may run on, on top of `exclude_cores`
+    pub fn cpus_reserving(&self, reserved: &[usize]) -> Result<CpuSet, ServerError> {
         // get all online cpus
         let online = CpuSet::online()?
             // never run on cpu 0 as that is the coordinator cpu
             .filter(|location| location.cpu != 0)
             // don't run on any excluded cores
-            .filter(|location| !self.exclude_cores.contains(&location.core));
+            .filter(|location| !self.exclude_cores.contains(&location.core))
+            // or on a core reserved for something that is not a shard
+            .filter(|location| !reserved.contains(&location.core));
         // hand back everything we may use if no core count was set
         let Some(cores) = self.cores else {
             return Ok(online);
@@ -865,6 +886,13 @@ pub struct Conf {
     /// The storage settings to use
     #[serde(default)]
     pub storage: Storage,
+    /// The cluster this node is a member of, or none for a standalone node
+    ///
+    /// Absent is standalone, and standalone is exactly what the server was before
+    /// [F37](../../../docs/src/features/node-identity-control-plane.md): no thread, no group, no
+    /// listener, and no field of this config read by anything that did not read it before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cluster: Option<Cluster>,
 }
 
 impl Default for Conf {
@@ -875,6 +903,7 @@ impl Default for Conf {
             auth: Auth::default(),
             tracing: Tracing::default(),
             storage: Storage::default(),
+            cluster: None,
         }
     }
 }
@@ -919,6 +948,12 @@ impl Conf {
     /// Set the storage settings
     pub fn storage(mut self, storage: Storage) -> Self {
         self.storage = storage;
+        self
+    }
+
+    /// Make this node a member of a cluster
+    pub fn cluster(mut self, cluster: Cluster) -> Self {
+        self.cluster = Some(cluster);
         self
     }
 }

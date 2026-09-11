@@ -130,9 +130,10 @@ different question — whether an encrypted arm's handshake works — not for wh
 **Bind zero, close, pass the port to the child.** The race C11 warns about, and on a machine
 running twenty test binaries at once not a theoretical one.
 
-**Modelling the selected consensus library.** None is selected; that is C13's Q1 and M1's spike.
-The model is the contract the adapter around whichever library is chosen will be held to, and it
-is smaller for not being a library.
+**Modelling the selected consensus library.** ~~None is selected; that is C13's Q1 and M1's spike.~~
+M1 selected `openraft` for the control plane ([F37](node-identity-control-plane.md)), and the
+model still does not model it: the model is the contract the adapter around whichever library
+is chosen will be held to, and it is smaller for not being a library.
 
 **A linearizability checker over the whole tablet.** The oracle works one key at a time, because
 every operation reads or writes one key and its result depends on that key alone; a tablet's

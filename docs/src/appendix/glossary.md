@@ -285,7 +285,10 @@ than mistaking it for the end of the log. See
 | Flushed | Durable on stable storage | Handed to the kernel; no `fdatasync` on the normal path |
 | Sorted | Supports ordered scans and range queries | Rows are stored ordered, but no read predicate uses the order |
 | Distributed | Multiple nodes | Multiple shards in one process. What it would take to mean the other thing is [Distributed Shoal](../distributed/overview.md), whose [vocabulary](../distributed/overview.md#vocabulary) fixes the words below for that part alone |
-| Node | A machine or process in a cluster | Unbuilt. One Shoal process with a `NodeId` and a storage directory ([C1](../distributed/node-identity.md)) |
+| Node | A machine or process in a cluster | ~~Unbuilt.~~ One Shoal process with a `NodeId` and a storage directory ([C1](../distributed/node-identity.md)); since [F37](../features/node-identity-control-plane.md) every process has one, minted the first time its directory is claimed |
+| Node id | A hostname or an index | A random uuid minted once per storage directory, kept in the marker, never derived from an address ([F37](../features/node-identity-control-plane.md)) |
+| Cluster id | A cluster name | A random uuid minted once, at the one explicit bootstrap, and adopted by every joiner; a directory naming another one is refused ([F37](../features/node-identity-control-plane.md)) |
+| Marker | A lock file | `shoal-meta.json`: format, shard count, node id, cluster id, shard layout and last observed topology version, at format 2. Only the last field is ever rewritten ([Resolved #45](resolved/storage-marker-format.md), [F37](../features/node-identity-control-plane.md)) |
 | Replica set | The copies of a piece of data | Unbuilt. The `RF` shards on `RF` distinct nodes holding a tablet, stored per tablet in the map ([C4](../distributed/tablet-map.md)) |
 | Primary | A leader node | Unbuilt. A *role* a shard plays for some tablets: the one replica that orders that tablet's writes ([C5](../distributed/replication.md)) |
 | Epoch | A term or generation | Unbuilt. The per-tablet leadership term, persisted and established by the tablet's own data protocol ([C13](../distributed/protocol.md#identity-and-progress)); replication messages carry it and receivers reject an obsolete one ([C7](../distributed/failover.md#fencing)). Not the compaction *generation* |
@@ -293,7 +296,7 @@ than mistaking it for the end of the log. See
 | Fixture | A test's setup | The cluster fixture under `shoal/tests/cluster/` ([F36](../features/cluster-harness.md)): real servers and mock peers as child processes on port zero, with directed links, pause, kill and cleanup — no peer protocol yet |
 | Schedule | A timetable | An explicit list of events the protocol model in `shoal-model` applies in order: generated from a seed, written by a builder, saved as JSON, replayed and minimized. Every subsequence of one is one ([F36](../features/cluster-harness.md)) |
 | Oracle | Prophecy | The sequential state machine `shoal-model` judges a history against, one tablet and one key at a time, with successful, rejected and unknown outcomes held to three different contracts ([C11](../distributed/testing.md#the-write-ledger)) |
-| Control plane | A separate service | Unbuilt. A thread on cpu 0 of every node running Raft, the failure detector and the rebalancer; never on a query path ([C1](../distributed/node-identity.md)) |
+| Control plane | A separate service | ~~Unbuilt.~~ A thread on the control core of every cluster node - cpu 0 by default, validated against the process's affinity - running an embedded `openraft` group on a glommio executor; the failure detector and the rebalancer will hang off it; never on a query path ([C1](../distributed/node-identity.md), [F37](../features/node-identity-control-plane.md)). At M1 the group has one member and a standalone node runs none of it |
 | `sync` | Force to stable storage | On `StreamWriter`, issues a background write and returns. `sync_blocking` is the real one — but on glommio's `DmaStreamWriter`, `sync` *does* fsync |
 
 **Workload** — One purpose-built benchmark in `shoal-bench`, isolating one path through the

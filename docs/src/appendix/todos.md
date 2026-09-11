@@ -229,7 +229,40 @@ That contract was agreed on 2026-09-11 as the gate before M0 ([P1–P6](../distr
 which settled the protocol and pinned candidate libraries without selecting one or building anything.
 M0 itself was delivered the same day as [F36](../features/cluster-harness.md): the contract as an
 executable model in `shoal-model`, the cluster fixture, and the benchmark's cluster record — still
-nothing that makes one node speak to another.
+nothing that makes one node speak to another. M1 followed as
+[F37](../features/node-identity-control-plane.md): a node is now somebody — a `NodeId` and a
+`ClusterId` in a format 2 marker, the `cluster:` block, a control thread on its own core running
+an embedded `openraft` group of one on a glommio runtime — and the placement authority C3 asks
+for exists as a group with one member and a state machine that holds the cluster, its members
+and its policy. Still nothing that makes one node speak to another: the peer endpoints are
+advertised and bound by nothing, which is M2.
+
+**What F37 left undone, deliberately.** Three pieces of C1's design were not built and are
+recorded here rather than dropped:
+
+- **A `Join` intent for the marker.** `ClusterIntent` has `Standalone` and `Bootstrap`; joining is
+  refused at `Cluster::validate` naming M3. A joiner's directory before it is admitted — a node id
+  and no cluster yet — looks exactly like a standalone directory, and the marker has no field
+  that tells them apart. M3 has to add one (a `mode` the claim records, or an `adopting` state)
+  and decide what a joiner that never finished joining is refused as; deciding it now, with no
+  joiner to test against, would be guessing.
+- **Enforcing the replication policy.** `write_consistency`, `read_consistency` and
+  `replication_factor` are recorded in the control state and reported in the topology view;
+  nothing acts on them. A one node cluster serves every read and write locally. M4 and M5 own the
+  enforcement, and `active_rf` — the members that could hold a replica, capped at the desired
+  factor — becomes a count of placed replicas when C4's tablet map has something to place.
+- **A page for the cluster benchmark family.** `macro/cluster/overhead/nodes/1` lives on
+  *Every workload* with its family's four blocks. A page that draws a series needs a series, which
+  is a `nodes/3` arm, which is M2's transport. The family and the group exist so the page has
+  somewhere to attach.
+
+And two things the Q13 spike found that are design inputs rather than defects: **heartbeats do
+not coalesce across openraft groups**, so a tablet-per-group data plane at 4096 tablets on one
+shard is not viable at any heartbeat interval a failure detector would want, and the grouped
+tablets alternative Q1 named is the expected shape for M4; and **fsyncs from independent groups on
+one thread queue behind each other** (395 µs alone, 10.8 ms with sixty four leaders writing at
+once), which is the number Q2's shared physical WAL has to beat. Both are in the
+[decision record](../distributed/protocol.md#q1-and-q13-decided-at-m1).
 
 ### Rebalancing
 

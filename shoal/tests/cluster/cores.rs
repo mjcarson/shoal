@@ -6,6 +6,11 @@
 //! Cores are handed out as whole physical cores, both SMT threads of each, because
 //! `Resources::exclude_cores` excludes by physical core id and because a claim of isolation
 //! that left a sibling thread to someone else would not be one.
+//!
+//! Since M1 a server is a cluster node with a control thread, and the allocator gives each one
+//! a whole core for it, disjoint from its data cores, the reserved core and every other node's.
+//! A machine that runs out of cores for one records the control thread as shared rather than
+//! failing, which is what the server itself does with `control_core_shared`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
@@ -79,7 +84,8 @@ pub struct Allocation {
     pub data: Vec<usize>,
     /// The cpus on those cores
     pub cpus: Vec<usize>,
-    /// The core a control thread would run on; none until M1 gives a node one
+    /// The physical core the node's control thread owns; none for a mock peer, a standalone
+    /// node, or a server the machine could not give one, whose control thread is then shared
     pub control: Option<usize>,
     /// Whether this allocation shares cores with something else
     pub shared: bool,
@@ -116,7 +122,9 @@ impl ClusterPlan {
             if allocation.shared {
                 continue;
             }
-            for core in &allocation.data {
+            // the data cores and the control core alike: a control thread on a data core is
+            // sharing, and is recorded as such rather than claimed
+            for core in allocation.data.iter().chain(allocation.control.iter()) {
                 // the reserved core is never anyone's
                 if Some(*core) == self.reserved {
                     return Err(format!("{name} was given the reserved core {core}"));
@@ -134,6 +142,9 @@ impl ClusterPlan {
 ///
 /// Exact claims are taken first, since they can only be met one way; counts are taken from
 /// what is left, falling back to shared when the machine runs out; shared claims take nothing.
+/// Then every cluster server gets a control core from what remains, or none - recorded as a
+/// shared control thread - when the machine has no more to give. Control cores come last so
+/// that the data cores a claim names are exactly the ones an M0 plan gave it.
 ///
 /// # Arguments
 ///
@@ -219,6 +230,18 @@ pub fn allocate(
             },
         };
         allocations[*slot] = Some(allocation);
+    }
+    // then a control core for every cluster server, from whatever is left
+    for (slot, spec) in specs.iter().enumerate() {
+        if spec.kind != NodeKind::Server {
+            continue;
+        }
+        let allocation = allocations[slot].as_mut().expect("every slot allocated");
+        // the first free core, if there is one; a node without one shares its control thread
+        allocation.control = free.iter().next().copied();
+        if let Some(core) = allocation.control {
+            free.remove(&core);
+        }
     }
     let mut allocations = allocations.into_iter().map(|a| a.expect("every slot allocated"));
     let nodes = specs

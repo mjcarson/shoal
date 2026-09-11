@@ -109,7 +109,8 @@ Alongside them it writes `<label>.meta.json`, which is what lets a committed num
 whether it still describes the current code: the commit, whether the tree was dirty, a content
 hash of the sources each layer measures, and the machine, governor and toolchain it ran on.
 
-A full capture is now **three hundred and seventy four workloads times five runs**. At two hundred
+A full capture is now **three hundred and seventy five workloads times five runs** (the
+three hundred and seventy fifth is `macro/cluster/overhead/nodes/1`, [F37](../features/node-identity-control-plane.md)). At two hundred
 and nine it ~~budget six to seven hours~~ **took seventy-five minutes** — one minute building,
 fourteen in the micro layer, sixty in the macro layer, and under a minute in the two instrumented
 ones. That is the first capture anybody put a clock on, `F20-conf` on 2026-08-22; every figure this

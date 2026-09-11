@@ -9,6 +9,7 @@
 
 use std::io::{BufRead, BufReader};
 use std::net::SocketAddr;
+use std::os::unix::process::CommandExt as _;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
@@ -32,11 +33,13 @@ pub const FAILED_LINE: &str = "SHOAL_CLUSTER_FAILED";
 /// How many of a child's other lines are kept as evidence
 const EVIDENCE_LINES: usize = 20;
 
-/// The two things a child can be
+/// The three things a child can be
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NodeKind {
-    /// A real `ShoalPool` on the fixture's schema
+    /// A real `ShoalPool` on the fixture's schema, bootstrapped as a cluster of one
     Server,
+    /// A real `ShoalPool` with no `cluster:` block: the shape every deployment had before M1
+    Standalone,
     /// A listener that echoes what it is sent
     MockPeer,
 }
@@ -45,7 +48,7 @@ impl NodeKind {
     /// The test function that runs this kind of child
     pub fn child_fn(self) -> &'static str {
         match self {
-            NodeKind::Server => "cluster_server_child",
+            NodeKind::Server | NodeKind::Standalone => "cluster_server_child",
             NodeKind::MockPeer => "cluster_mock_peer_child",
         }
     }
@@ -62,12 +65,23 @@ pub struct ChildRequest {
     pub exclude_cores: Vec<usize>,
     /// How many cores to run; `None` lets the server decide, for a shared allocation
     pub cores: Option<usize>,
+    /// The cpu its control thread is pinned to, for a cluster node; `None` for a standalone one
+    pub control_cpu: Option<usize>,
+    /// Whether the control thread's core is shared with a shard, for a cluster node
+    pub control_shared: bool,
+    /// The cpus the child may run on at all, if the test narrowed them
+    pub affinity: Option<Vec<usize>>,
+    /// Which marker the child should find, if the test staged one: none stages nothing
+    #[serde(default)]
+    pub staged_marker: Option<String>,
 }
 
-/// The endpoints a child bound
+/// The endpoints a child bound, and the identity it reported
 ///
-/// Only the client endpoint exists at M0. The other two are what M2 and M3 add, and are here
-/// so that the record has their shape before anything fills them.
+/// Only the client endpoint is bound. The other two are what M2 and M3 add, and are here so
+/// that the record has their shape before anything fills them. The identity fields are what M1
+/// added: a node id for every server, and a cluster id, a control core and a topology version
+/// for a cluster node.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Endpoints {
     /// Where clients connect
@@ -78,6 +92,41 @@ pub struct Endpoints {
     /// Where control peers would connect; none until M3
     #[serde(default)]
     pub control: Option<SocketAddr>,
+    /// The node's identity, as a string; none for a mock peer
+    #[serde(default)]
+    pub node: Option<String>,
+    /// The cluster's identity; none for a standalone node or a mock peer
+    #[serde(default)]
+    pub cluster: Option<String>,
+    /// The cpu the control thread runs on; none without a control plane
+    #[serde(default)]
+    pub control_core: Option<usize>,
+    /// Whether that cpu's core is shared with a shard
+    #[serde(default)]
+    pub control_shared: bool,
+    /// The topology version the control plane reports; none without one
+    #[serde(default)]
+    pub topology_version: Option<u64>,
+    /// The cpus the shards run on, so a test can check them against the control core
+    #[serde(default)]
+    pub shard_cpus: Vec<usize>,
+}
+
+impl Endpoints {
+    /// An empty record, for a node that has not reported yet
+    pub fn unbound() -> Self {
+        Endpoints {
+            client: "0.0.0.0:0".parse().unwrap(),
+            data: None,
+            control: None,
+            node: None,
+            cluster: None,
+            control_core: None,
+            control_shared: false,
+            topology_version: None,
+            shard_cpus: Vec::new(),
+        }
+    }
 }
 
 /// A line the reader thread relayed
@@ -130,21 +179,82 @@ impl Node {
         allocation: Allocation,
         dir: &Path,
     ) -> Result<Self, FixtureError> {
+        Self::spawn_with(id, kind, allocation, dir, None, None)
+    }
+
+    /// Start a child, narrowing the cpus it may run on and staging a marker for it to find
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Its id
+    /// * `kind` - What it should be
+    /// * `allocation` - The cores it was given
+    /// * `dir` - Its storage directory
+    /// * `affinity` - The cpus it may run on, applied before it starts; `None` inherits
+    /// * `staged_marker` - A marker to write into its directory before it starts
+    pub fn spawn_with(
+        id: usize,
+        kind: NodeKind,
+        allocation: Allocation,
+        dir: &Path,
+        affinity: Option<Vec<usize>>,
+        staged_marker: Option<String>,
+    ) -> Result<Self, FixtureError> {
         let topology = super::Topology::detect();
+        // a cluster node's control thread runs on the first cpu of its control core, or shares
+        // cpu 0 when the machine had no core to give it
+        let (control_cpu, control_shared) = match (kind, allocation.control) {
+            (NodeKind::Server, Some(core)) => (
+                Some(topology.cores.get(&core).and_then(|cpus| cpus.first().copied()).unwrap_or(0)),
+                false,
+            ),
+            (NodeKind::Server, None) => (Some(0), true),
+            _ => (None, false),
+        };
         let request = ChildRequest {
             kind,
             dir: dir.to_path_buf(),
             exclude_cores: super::cores::excluded_for(&allocation, &topology),
             cores: if allocation.shared { None } else { Some(allocation.data.len()) },
+            control_cpu,
+            control_shared,
+            affinity: affinity.clone(),
+            staged_marker,
         };
         let request = serde_json::to_string(&request).expect("a request serializes");
         // the test binary again, running only the child function
-        let mut child = Command::new(std::env::current_exe()?)
+        let mut command = Command::new(std::env::current_exe()?);
+        command
             .args(["--exact", kind.child_fn(), "--ignored", "--nocapture"])
             .env(CHILD_ENV, request)
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()?;
+            .stderr(Stdio::inherit());
+        // the affinity is applied in the child between fork and exec, which is the one place a
+        // process's own mask can be set before anything in it runs
+        if let Some(cpus) = affinity {
+            // SAFETY: `pre_exec` runs in the forked child before exec; `sched_setaffinity` on
+            // pid 0 touches only that child, and a `cpu_set_t` is plain data with no
+            // allocation, so nothing here is unsound to run after a fork
+            unsafe {
+                command.pre_exec(move || {
+                    let mut set: libc::cpu_set_t = std::mem::zeroed();
+                    for cpu in &cpus {
+                        libc::CPU_SET(*cpu, &mut set);
+                    }
+                    let rc = libc::sched_setaffinity(
+                        0,
+                        std::mem::size_of::<libc::cpu_set_t>(),
+                        &set,
+                    );
+                    if rc == 0 {
+                        Ok(())
+                    } else {
+                        Err(std::io::Error::last_os_error())
+                    }
+                });
+            }
+        }
+        let mut child = command.spawn()?;
         let pid = child.id();
         let stdout = child.stdout.take().expect("stdout was piped");
         // relay the child's reports, and keep the rest as evidence
@@ -182,11 +292,7 @@ impl Node {
             id,
             kind,
             pid,
-            endpoints: Endpoints {
-                client: "0.0.0.0:0".parse().unwrap(),
-                data: None,
-                control: None,
-            },
+            endpoints: Endpoints::unbound(),
             allocation,
             child,
             lines,
@@ -254,6 +360,25 @@ impl Node {
             Ok(ChildLine::Closed) => Some("exited".to_string()),
             _ => None,
         }
+    }
+
+    /// The names of every thread the child is running, from procfs
+    ///
+    /// What a test reads to say whether a control thread exists: glommio names an executor's
+    /// thread after the builder, so a cluster node has one beginning `shoal-control` and a
+    /// standalone node has none.
+    pub fn thread_names(&self) -> Vec<String> {
+        let tasks = format!("/proc/{}/task", self.pid);
+        let Ok(entries) = std::fs::read_dir(&tasks) else {
+            return Vec::new();
+        };
+        let mut names: Vec<String> = entries
+            .filter_map(Result::ok)
+            .filter_map(|entry| std::fs::read_to_string(entry.path().join("comm")).ok())
+            .map(|name| name.trim().to_string())
+            .collect();
+        names.sort();
+        names
     }
 
     /// Whether the process is still there

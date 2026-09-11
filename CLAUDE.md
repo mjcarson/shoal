@@ -48,8 +48,18 @@ cargo build -p shoalctl
 cargo test -p shoal-model
 cargo run -p shoal-model --example regenerate_schedules   # after a model change; tests only load
 
-# the cluster fixture (F36) re-executes this binary as its children, so it is its own test target
+# the cluster fixture (F36) re-executes this binary as its children, so it is its own test target.
+# since F37 its servers are cluster nodes: each child runs a control thread on a core the fixture
+# allocates, and the five M1 acceptance tests live here too
 cargo test -p shoal --test cluster_fixture
+
+# the control plane's two conformance suites and its crash test (F37): the glommio runtime under
+# openraft's own suite, the control store under openraft's storage suite, and a torn append
+cargo test -p shoal-core control
+
+# the Q1/Q13 spike (F37): not a benchmark and never a capture. prints the idle and durable tables
+# the decision record in docs/src/distributed/protocol.md carries, labelled by host and governor
+cargo run -p shoal-spike --release
 
 # Run with hotpath profiling enabled (attribution only, never a baseline number)
 cargo build --release --bin shoal-workload --features hotpath
@@ -161,7 +171,7 @@ data and proves every workload still runs — which is what you want before spen
 real one. Budget twenty minutes for a macro-only smoke pass; the criterion layer is what makes a
 full smoke run take longer than you expect.
 
-The macro layer is three hundred and seventy four **workloads** living in `shoal-bench/src/workloads/`,
+The macro layer is three hundred and seventy five **workloads** living in `shoal-bench/src/workloads/`,
 each generating its own rows from `--seed` — there is no dataset to fetch
 ([F8](docs/src/features/purpose-built-workloads.md)). They come in three kinds and the differences
 matter:
@@ -180,6 +190,9 @@ matter:
   with one query outstanding.
   **A regression is never attributed to a grid arm** — the grid says a mixture got slower, the
   isolating pairs say which half.
+- **The cluster overhead arm** is one workload, `macro/cluster/overhead/nodes/1`: the grid's
+  reference cell served by a server with a `cluster:` block ([F37](docs/src/features/node-identity-control-plane.md)).
+  It is read beside `macro/grid/unsorted/r50/1024` and nowhere else; `--group cluster` selects the pair.
 - **The configuration sweep** is fifty-eight workloads under `macro/conf/`, each one the grid's
   reference cell `macro/grid/unsorted/r50/1024` with **exactly one field** of the server
   configuration moved ([F20](docs/src/features/configuration-sweeps.md)). It answers what a setting
@@ -198,7 +211,7 @@ line in `workloads::all()`, one line in `workload_ids::IDS`, and a family in
 
 A full capture is about two hours and its macro layer is most of it, so **use a group**
 rather than a prefix ([F21](docs/src/features/benchmark-groups.md)) when a question is narrower than
-the whole set. `list --groups` prints the twelve declared sets, what each answers, and what a
+the whole set. `list --groups` prints the thirteen declared sets, what each answers, and what a
 capture of it would cost — projected onto `FULL_MACRO_CAPTURE_SECS`, which is hand-maintained and
 has not been re-measured since the macro layer grew by 165 arms, so every projection it prints is
 currently low; `--group grid` is the grid alone, `--group
@@ -305,7 +318,7 @@ Shoal is a high-performance, distributed database with persistence, built on thr
 
 ### Crate Structure
 
-Six implementation crates plus a facade. The split is
+Seven implementation crates plus a facade and a spike. The split is
 [F15](docs/src/features/client-server-split.md) and the rule it enforces is simple: **nothing
 outside `shoal-proto`, `shoal-client`, `shoal-core` and `shoal-derive` names any of them — callers
 go through `shoal`.**
@@ -334,6 +347,10 @@ go through `shoal`.**
   `default-features = false`**, which is what keeps egui out of `cargo tree -p shoal-bench
   --no-default-features`. It must never depend on `shoal-bench`: that crate pulls `walkdir`, which
   does not build for `wasm32-unknown-unknown`, and the explorer's primary target is a browser
+- **shoal-spike** - The Q1/Q13 spike ([F37](docs/src/features/node-identity-control-plane.md)): a
+  binary, `publish = false`, that drives N openraft groups on one pinned glommio executor through
+  a counting loopback network and prints what they cost. Depends on `shoal` with the engine, and
+  is the one place the control store is driven with three members in a group
 - **shoal-model** - The deterministic protocol model ([F36](docs/src/features/cluster-harness.md)):
   the contract P1–P6 as executable checks over a Raft-shaped tablet group, with saved schedules
   under `shoal-model/schedules/`. Depends on `serde` and `serde_json` alone and names no shoal
@@ -364,7 +381,12 @@ go through `shoal`.**
 
 ### Server Model
 
-- One shard per CPU core (core 0 reserved for coordination)
+- One shard per CPU core (cpu 0 reserved for coordination; a cluster node also reserves the
+  control core's whole physical core for its control thread unless `cluster.control_core_shared`)
+- A `cluster:` block makes the node a cluster member ([F37](docs/src/features/node-identity-control-plane.md)):
+  `server/meta.rs` mints a `NodeId` and a `ClusterId` into a format 2 marker, `server/control/`
+  runs an embedded `openraft 0.10.0-alpha.34` group on a glommio `AsyncRuntime` written there, and
+  `ShoalPool::topology()` reports what it committed. Absent, none of that exists
 - Uses `glommio` LocalExecutor for thread-per-core async I/O
 - `kanal` channels for lock-free inter-shard communication
 - Consistent hash ring for partition routing

@@ -98,6 +98,7 @@
   - [F34. A capture that honors its tracing config](features/benchmark-tracing.md)
   - [F35. A trace context on the wire](features/wire-trace-context.md)
   - [F36. The harness and the facts](features/cluster-harness.md)
+  - [F37. Node identity and the control-plane thread](features/node-identity-control-plane.md)
 
 # Direction
 
@@ -163,6 +164,7 @@
   - [57. A missing archive was created empty rather than reported](appendix/resolved/missing-archive.md)
   - [56, 61. A response cannot say that a read failed](appendix/resolved/response-error-channel.md)
   - [54. `#[shoal::db]` needed crates the caller had never heard of](appendix/resolved/macro-emits-three-crates.md)
+  - [65. Two `gxhash` majors, and partition keys hashed by the one without `deterministic`](appendix/resolved/gxhash-pin.md)
   - [67, 68. Chart labels collided, and the scope prefix strip never matched](appendix/resolved/chart-labels.md)
   - [69. Nothing in the workspace ever installed a tracing subscriber](appendix/resolved/benchmark-tracing.md)
   - [73. Two instrumented runs wrote to one artifact, and the last one won](appendix/resolved/stage-artifact-overwrite.md)

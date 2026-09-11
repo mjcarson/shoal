@@ -1,7 +1,7 @@
 # Milestones
 
-Only the Before-M0 gate is settled ([decision record](protocol.md#decision-record), 2026-09-11);
-no numbered milestone is implemented. Keep M0–M10 as stable identifiers; M9a/b/c refine M9
+The Before-M0 gate is settled ([decision record](protocol.md#decision-record), 2026-09-11), and
+M0 and M1 are delivered. Keep M0–M10 as stable identifiers; M9a/b/c refine M9
 without renumbering later work. Acceptance tests live in their owning C pages and are indexed
 by [C11](testing.md#the-acceptance-test-table). Each test names one gate below. This is an order
 with dependencies and measurable exit criteria, not dates.
@@ -60,6 +60,15 @@ documented as proving nothing about durability, and no test infers one.
 
 ### M1. Node identity and the control-plane thread
 
+**Delivered** on 2026-09-11 as [F37](../features/node-identity-control-plane.md), which also
+closed [item 65](../appendix/resolved/gxhash-pin.md). The five tests below are runnable as
+`cargo test -p shoal --test cluster_fixture`, the two conformance suites and the crash test as
+`cargo test -p shoal-core control`, and the spike as `cargo run -p shoal-spike --release`. What
+was delivered, what was not, and the evidence are on the F page; the rest of this section is
+the gate as it was set. *Not done, on purpose:* no control listener is bound, no joiner exists,
+and the replication policy is recorded and reported rather than enforced - a one node cluster
+serves every read and write exactly as a standalone node does.
+
 **Delivers.** Stable node/cluster identity, explicit bootstrap, configurable control core and
 SMT/cpuset validation, versioned marker, basic topology observation and single-node embedded
 OpenRaft integration. Fix stable partition hashing (item 65) before cross-node routing.
@@ -73,6 +82,13 @@ control library's storage conformance checks and crash tests for persisted metad
 network/storage/runtime seams and record idle/active group memory/CPU and batching feasibility.
 Compare standalone versus matched one-node cluster; investigate any material overhead. The
 control-plane choice does not force the same library or runtime onto every data shard.
+*Met:* `openraft` `0.10.0-alpha.34` pinned exactly with the seams named by path
+([decision record](protocol.md#q1-and-q13-decided-at-m1)); the runtime and storage suites
+pass; idle memory, CPU and message rate recorded at 1, 64, 1024 and 4096 groups under two
+timer settings, and the batching finding - heartbeats do not coalesce across groups - is what
+M4 inherits; `macro/cluster/overhead/nodes/1` exists beside its standalone twin and both ran at
+smoke scale on the development host ([F37, Performance](../features/node-identity-control-plane.md#performance)),
+with the real comparison waiting on the benchmark host.
 
 ### M2. The inter-node transport
 

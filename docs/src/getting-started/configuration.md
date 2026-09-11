@@ -21,9 +21,10 @@ Two things follow from this:
   produces defaults, not an error. A typo in the filename is silent.
 - Environment variables prefixed `SHOAL_` override file values.
 
-Unknown keys are rejected inside `resources`, which is `deny_unknown_fields` — see
-[below](#the-exluded_cores-typo--fixed). Everywhere else they are still ignored rather than
-rejected, so a misspelling outside that block is still silently dropped.
+Unknown keys are rejected inside `resources`, `networking`, `auth` and `cluster`, which are
+`deny_unknown_fields` — see [below](#the-exluded_cores-typo--fixed). Everywhere else they are
+still ignored rather than rejected, so a misspelling outside those blocks is still silently
+dropped.
 
 ## The full schema
 
@@ -92,6 +93,8 @@ storage:
       FS:
         latency_sensitive:
           path: "/mnt/fast"
+cluster:                             # absent: a standalone node. see `### cluster` below
+  bootstrap: true
 ```
 
 ### resources
@@ -333,6 +336,67 @@ full round trip.
 > `write_behind: "4KiB"` is accepted and yields 4096 in-flight writes. Also
 > [item 71](../appendix/known-issues.md), so the two are fixed together.
 
+### cluster
+
+Absent, the server is a standalone node and this page above is the whole of it. Present, the
+node is a member of a cluster ([Distributed Shoal](../distributed/overview.md)): it mints a
+node identity, bootstraps or joins a cluster, runs a control thread on its own core, and records
+the replication policy the cluster was created with. Delivered by
+[F37](../features/node-identity-control-plane.md), which built the identity, the bootstrap, the
+control thread and the policy record; joining, the peer transport and enforcement of the policy
+are later milestones and the settings that belong to them are **refused at startup by name**
+rather than accepted and ignored.
+
+This is the block with every default written out. A file that says only `cluster:\n  bootstrap:
+true` gets exactly this, and `documented_cluster_defaults_match_policy_bootstrap` holds the
+two to each other.
+
+```yaml
+cluster:
+  bootstrap: true                 # create the cluster on an empty directory; keeps it on a claimed one
+  seeds: []                       # addresses to join through. refused until M3 delivers joining
+  port: 12001                     # the data peer endpoint (unbound until M2)
+  control_port: 12002             # the control listener (unbound until M2)
+  control_core: 0                 # the cpu the control thread is pinned to
+  control_core_shared: false      # whether a shard may share that cpu's physical core
+  control_voters: 3               # 1, 3 or 5
+  replication_factor: 3
+  write_consistency: Quorum       # One, Quorum or All
+  read_consistency: One
+  failure_detector:
+    interval_ms: 500
+    phi_threshold: 8.0
+  primary_failover_after: "5s"    # base data election timeout
+  auto_remove_after: "30m"        # null disables automatic removal of a Down node
+  admins: []
+```
+
+Two settings have no default and are absent above: `advertise`, the address peers reach this
+node at, which defaults to `networking.interface` and **must be given** when that is `0.0.0.0`
+or `::`; and `client_advertise`, the client address the topology reports if it differs from the
+one bound. `tls` - `cert`, `key`, `ca` - is refused until M2.
+
+**Two halves.** `advertise`, `port`, `control_port`, `client_advertise`, `control_core` and
+`control_core_shared` are this node's. `control_voters`, `replication_factor`, the two
+consistencies, `failure_detector`, `primary_failover_after`, `auto_remove_after` and `admins`
+are the cluster's: the bootstrapping node writes them into the control state as its
+`BootstrapPolicy`, and after that a change is an admin operation, not an edit to a file. A
+joiner's copy of them will be ignored ([C1](../distributed/node-identity.md)). **At M1 the policy is recorded and reported, not enforced**: a
+one node cluster serves every read and write locally, exactly as a standalone node does, and the
+topology view reports the desired replication factor beside the active one (which is 1).
+
+Durations are written with a unit - `500ms`, `5s`, `30m`, `2h` - and a bare number is refused.
+
+**The control core.** `control_core` names a *cpu*, checked against the process's affinity -
+a container's cpuset, a `taskset` - rather than against what is online, and refused by name if
+it is outside it. Unless `control_core_shared` is set, that cpu's whole physical core, both SMT
+threads, is kept away from the shards; on a machine too small for that, set it and the sharing
+is recorded in the topology view and in every benchmark artifact rather than hidden. The default
+of cpu 0 is the coordinator cpu the shards already leave alone - but standalone mode leaves
+only cpu 0 alone and lets a shard run on its sibling, because the benchmark layout depends on
+it, so a cluster node with default settings has one fewer shard candidate than a standalone one
+on the same machine.
+
 ### What to set these to
 
 This page says what each setting **is**. What each one is *worth* is measured — nine of them are
@@ -380,10 +444,31 @@ directory, and `ShoalPool::start` errors with `ShardCountMismatch` before any sh
 rather than starting and failing to find data that moved to another shard. There is no
 migration: to change the core count, start from an empty directory.
 
-The marker also carries a `format` version, and a marker written in a format this build does not
-know is refused before its shard count is read — a count read out of a layout we cannot interpret
-is a guess, and a guess that happens to match starts the server
-([item 45](../appendix/resolved/storage-marker-format.md)).
+The marker is **format 2** since [F37](../features/node-identity-control-plane.md):
+
+```json
+{
+  "format": 2,
+  "shards": 12,
+  "node": "5b1f…",          // minted the first time the directory was claimed, never changed
+  "cluster": null,          // the cluster id a bootstrap minted, or null for a standalone node
+  "layout": 1,              // the shard layout the data is under; 1 is tablet % shard_count
+  "topology": 0             // the last topology version the control plane observed
+}
+```
+
+The format is checked first and alone, and a marker in a format this build does not read is
+refused before its shard count is trusted - a count read out of a layout we cannot interpret is
+a guess, and a guess that happens to match starts the server
+([item 45](../appendix/resolved/storage-marker-format.md)). That includes **format 1**, the shape
+of every directory written before F37: the refusal names the format found, the formats this
+build reads, and that no migration between formats exists yet - M10 owns one, and "delete the
+directory" is a development answer rather than an upgrade procedure. The same marker is what
+refuses a mode change: a directory bootstrapped into a cluster is refused by a config with no
+`cluster:` block, and a standalone directory is refused by one with a block, naming M10's
+migration. `topology` is the one field ever rewritten in place; the identities, the shard count
+and the layout are written once. Beside it, `shoal.lock` is an advisory lock a running server
+holds, so a second process on the same directory is refused rather than claiming the same node.
 
 Two holes remain in the guard. It covers the default storage root only, not a per-table
 `storage.tables` override
@@ -457,8 +542,8 @@ indistinguishable from "the user wanted defaults". For a database where `memory`
 
 ## Limitations
 
-- No config validation and no schema. Unknown keys are dropped silently, except in `resources`
-  and `auth`, which are `deny_unknown_fields`.
+- No config validation and no schema. Unknown keys are dropped silently, except in `resources`,
+  `networking`, `auth` and `cluster`, which are `deny_unknown_fields`.
 - Credentials are read once, at startup. There is no way to add, remove or rotate a user without
   restarting the server.
 - No way to see the effective configuration at runtime; it is not logged at startup.

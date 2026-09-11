@@ -153,6 +153,13 @@ pub struct Bench {
     pub mem_event: EphemeralSortedTable<MemEvent>,
 }
 
+/// How many tables [`Bench`] declares
+///
+/// What a cluster record reports as the schema's size. A constant beside the schema rather than
+/// something derived from it, since nothing on `ShoalDatabase` counts tables; the test below
+/// holds it to the struct.
+pub const TABLE_COUNT: u32 = 4;
+
 /// How many characters an [`Event`] sort key is padded to
 ///
 /// Fixed, because lexicographic order only agrees with numeric order when every key is the same

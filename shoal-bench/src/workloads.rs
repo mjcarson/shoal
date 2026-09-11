@@ -24,6 +24,7 @@
 //! A test asserts those two agree, so forgetting the second is a test failure rather than a
 //! workload that is never run.
 
+pub mod cluster_overhead;
 pub mod conf_sweep;
 pub mod fanout;
 pub mod fanout_ephemeral;
@@ -118,6 +119,14 @@ pub fn all() -> Vec<Box<dyn Workload>> {
     // configuration that mixture ran under was worth
     built.extend(
         conf_sweep::all()
+            .into_iter()
+            .map(|workload| Box::new(workload) as Box<dyn Workload>),
+    );
+    // the cluster overhead arm, appended after everything for the reason everything above was:
+    // it is the reference cell served by a one node cluster, and it is the first arm of a series
+    // that grows a node at a time as the milestones land
+    built.extend(
+        cluster_overhead::all()
             .into_iter()
             .map(|workload| Box::new(workload) as Box<dyn Workload>),
     );

@@ -407,10 +407,11 @@ fn historical_artifacts_and_ports_remain_compatible() {
             .read_macro(path)
             .unwrap_or_else(|err| panic!("{}: {err:#}", path.display()));
         for (id, workload) in &capture.workloads {
-            // no single-node capture carries a cluster record, and none may grow one
+            // no single-node workload carries a cluster record, and none may grow one; the arms
+            // under `macro/cluster/` are the ones that run against a cluster node (F37)
             assert!(
-                workload.cluster.is_none(),
-                "{} records a cluster for {id}, which nothing has ever run",
+                workload.cluster.is_none() || id.starts_with("macro/cluster/"),
+                "{} records a cluster for {id}, which does not run against one",
                 path.display()
             );
         }
