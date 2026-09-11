@@ -24,11 +24,13 @@
 use std::collections::BTreeMap;
 
 use shoal_top::index::{
-    Capture, ConfFactsLite, FamilyText, Index, Layer as IndexLayer, MacroPoint, OpStats,
-    ScaleFactsLite, Timing, Verdict, Workload, INDEX_VERSION,
+    Capture, ClusterFactsLite, ConfFactsLite, FamilyText, INDEX_VERSION, Index, Layer as IndexLayer,
+    MacroPoint, NodeCoresLite, OpStats, ScaleFactsLite, Timing, Verdict, Workload,
 };
 
-use crate::model::macro_layer::{ConfFacts, ScaleFacts, Timing as CaptureTiming, WorkloadCapture};
+use crate::model::macro_layer::{
+    ClusterFacts, ConfFacts, ScaleFacts, Timing as CaptureTiming, WorkloadCapture,
+};
 use crate::model::meta::CaptureMeta;
 use crate::registry::Layer;
 use crate::render::family::{self, FAMILIES};
@@ -51,6 +53,7 @@ pub fn build(page: &Page, metas: &BTreeMap<String, CaptureMeta>) -> Index {
     // the measurements, and the two tables they reference
     let mut scales: Vec<ScaleFactsLite> = Vec::new();
     let mut confs: Vec<ConfFactsLite> = Vec::new();
+    let mut clusters: Vec<ClusterFactsLite> = Vec::new();
     let mut macro_points: Vec<MacroPoint> = Vec::new();
     for (at, snapshot) in page.timeline.iter().enumerate() {
         let Some(measured) = snapshot.macro_layer.as_ref() else {
@@ -67,6 +70,7 @@ pub fn build(page: &Page, metas: &BTreeMap<String, CaptureMeta>) -> Index {
                 capture,
                 &mut scales,
                 &mut confs,
+                &mut clusters,
             ));
         }
     }
@@ -85,6 +89,7 @@ pub fn build(page: &Page, metas: &BTreeMap<String, CaptureMeta>) -> Index {
         workloads,
         scales,
         confs,
+        clusters,
         macro_points,
     }
 }
@@ -290,12 +295,14 @@ fn env_verdict(verdict: &EnvVerdict) -> Verdict {
 /// * `measured` - The measurement itself
 /// * `scales` - The scale table to intern into
 /// * `confs` - The configuration table to intern into
+/// * `clusters` - The cluster table to intern into
 fn point(
     capture: u32,
     workload: u32,
     measured: &WorkloadCapture,
     scales: &mut Vec<ScaleFactsLite>,
     confs: &mut Vec<ConfFactsLite>,
+    clusters: &mut Vec<ClusterFactsLite>,
 ) -> MacroPoint {
     // every percentile of every operation, keyed by the name it was recorded under
     let mut ops = BTreeMap::new();
@@ -318,6 +325,11 @@ fn point(
             .as_ref()
             .map(|found| found.digest.clone())
             .unwrap_or_default(),
+        // absent stays absent: one server in its own process is not a cluster of one
+        cluster: measured
+            .cluster
+            .as_ref()
+            .map(|found| intern(clusters, cluster_facts(found))),
         timing: match measured.timing {
             CaptureTiming::PerBatch => Timing::PerBatch,
             CaptureTiming::PerQuery => Timing::PerQuery,
@@ -365,7 +377,7 @@ fn op_stats(measured: &WorkloadCapture, op: &str) -> Option<OpStats> {
 /// # Arguments
 ///
 /// * `scale` - The facts the measurement recorded
-fn scale_facts(scale: &ScaleFacts) -> ScaleFactsLite {
+pub fn scale_facts(scale: &ScaleFacts) -> ScaleFactsLite {
     ScaleFactsLite {
         scale: scale.scale.clone(),
         rows: scale.rows,
@@ -389,7 +401,7 @@ fn scale_facts(scale: &ScaleFacts) -> ScaleFactsLite {
 /// # Arguments
 ///
 /// * `conf` - The configuration the measurement recorded
-fn conf_facts(conf: &ConfFacts) -> ConfFactsLite {
+pub fn conf_facts(conf: &ConfFacts) -> ConfFactsLite {
     ConfFactsLite {
         shards: conf.shards,
         memory: conf.memory.clone(),
@@ -401,6 +413,40 @@ fn conf_facts(conf: &ConfFacts) -> ConfFactsLite {
         throughput_buffer_size: conf.throughput_buffer_size,
         throughput_write_behind: conf.throughput_write_behind,
         max_frame_bytes: conf.max_frame_bytes,
+        trace_level: conf.trace_level.clone(),
+        trace_remote: conf.trace_remote,
+    }
+}
+
+/// Trims one measurement's cluster record to the explorer's copy of it
+///
+/// Field for field: the record is already facts and nothing else.
+///
+/// # Arguments
+///
+/// * `cluster` - The record the measurement carried
+pub fn cluster_facts(cluster: &ClusterFacts) -> ClusterFactsLite {
+    ClusterFactsLite {
+        nodes: cluster.nodes,
+        desired_rf: cluster.desired_rf,
+        active_rf: cluster.active_rf,
+        write_policy: cluster.write_policy.clone(),
+        read_policy: cluster.read_policy.clone(),
+        durability: cluster.durability.clone(),
+        driver: cluster.driver.clone(),
+        cores: cluster
+            .cores
+            .iter()
+            .map(|node| NodeCoresLite {
+                data: node.data.clone(),
+                control: node.control,
+            })
+            .collect(),
+        driver_cores: cluster.driver_cores.clone(),
+        tables: cluster.tables,
+        tablets: cluster.tablets,
+        offered_load: cluster.offered_load,
+        emulated: cluster.emulated,
     }
 }
 

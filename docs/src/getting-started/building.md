@@ -87,11 +87,14 @@ cargo test insert           # a single test by name
 
 Integration tests live in `shoal/tests/`. They spin up a real `ShoalPool` against a
 `tempfile::TempDir` and talk to it over a real TCP socket — there is no in-process test
-harness. Each test grabs a unique port from a global counter starting at 13000
-(`shoal/tests/utils/utils.rs:11-16`) and configures two cores and a 100 MiB memory limit.
+harness. ~~Each test grabs a unique port from a global counter starting at 13000.~~ Each test
+starts its server on port `0` and reads the port the shards bound from `ShoalPool::ready`
+([Resolved #38, 58, 88](../appendix/resolved/pool-readiness.md)); the helpers in
+`shoal/tests/utils.rs` configure two cores and a 100 MiB memory limit.
 
-Because tests bind real ports and spawn real per-core executors, they are sensitive to the
-machine's core count and to ports already in use.
+Because tests spawn real per-core executors, they are sensitive to the machine's core count. The
+cluster fixture in `shoal/tests/cluster/` ([F36](../features/cluster-harness.md)) additionally
+allocates whole physical cores per child and records when the machine is too small to isolate them.
 
 ## Features
 

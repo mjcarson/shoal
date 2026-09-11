@@ -269,6 +269,14 @@ saying what each one isolates.
 | `--label <NAME>` | none | Name recorded inside the result |
 | `--stage-json <PATH>` | none | Write a stage breakdown. Needs `--features stage-profile`; a build without it refuses **before starting a server** rather than writing an empty file |
 | `--stage-sample <N>` | 1 | Keep one record in every `N`. Taken on the query index, so both halves keep the same queries. `4` keeps the record volume manageable on a full run |
+| `--server <ADDR>` | none | Drive a server somebody else started rather than starting one ([F36](../features/cluster-harness.md)). `--conf` is still read for the client's TLS settings and the facts recorded; `--port` is ignored; a workload that restarts its server between phases is refused |
+| `--cluster-facts <PATH>` | none | A json `ClusterFacts` record to carry on the capture verbatim; only with `--server` |
+
+The other half of `--server` is `shoal-workload serve --id <ID> [--conf] [--scale] [--port 0]`,
+which starts the named workload's server — resolved exactly as `run` would resolve it — and prints
+`SHOAL_WORKLOAD_SERVING <addr>` once every shard answers, then holds it until killed. A workload's
+port is its position in `workload_ids::IDS` counting up from 12000, frozen in `docs/perf/ports.json`
+and held there by a test; cluster arms, when they exist, take a block each from 20000.
 
 There is no `--dataset` and no `--limit`: a workload builds its own rows. There is no `--no-wait`
 either, because nothing blocks on stdin any more.

@@ -31,10 +31,13 @@ test suite does and does not reach is in [Test Coverage](test-coverage.md).
 Defects that have been fixed move to [Resolved Issues](resolved-issues.md), one page each,
 carrying the reasoning and the invariants the fix depends on. Item numbers are shared between
 the two pages and never reused, so a number appears on exactly one of them — which is why this
-list starts at 15 and skips 25, 26, 31, 34, 39, 44, 45, 48, 51, 56, 57, 61, 67, 68, 74, 76, 78, 79,
-80, 82, 83, 84, 85 and 86, and
-why item 81 is the newest entry here while 86 is the newest number, and why 78, 79, 80, 82, 83, 84,
-85 and 86 are on the resolved page. **79, 82, 83, 84, 85 and 86 never appeared here at all**: each was
+list starts at 15 and skips 17, 25, 26, 31, 34, 38, 39, 44, 45, 48, 51, 56, 57, 58, 61, 67, 68, 74,
+76, 78, 79, 80, 82, 83, 84, 85, 86, 88, 89 and 90, and
+why item 91 is the newest entry here and the newest number, and why 17, 78, 79, 80, 82, 83, 84,
+85, 86, 88, 89 and 90 are on the resolved page. **38, 58 and 88 moved together**
+([Resolved #38, 58, 88](resolved/pool-readiness.md)): three symptoms of one cause, the pool
+returning before its shards had bound. **91 was found by fixing them** — the honest `exit` that
+closed 58 surfaced a compactor that had been dying silently for as long as one test had existed. **79, 82, 83, 84, 85 and 86 never appeared here at all**: each was
 found and fixed in the same change ([Resolved #79](resolved/micro-only-capture-current.md),
 [Resolved #82](resolved/one-line-per-capture.md),
 [Resolved #83](resolved/default-metric-half-the-corpus-cannot-answer.md),
@@ -44,16 +47,21 @@ found and fixed in the same change ([Resolved #79](resolved/micro-only-capture-c
 worth noting because it makes the numbering look like six entries went missing. Item 80 is the other way round —
 it was filed here rather than fixed, because the fix turned on a question about the storage layer
 that reading `block_on_load` alone could not answer, and stayed here until somebody answered it
-([Resolved #80](resolved/never-flushed-partitions.md)). The exceptions are items 16, 17, 20, 24, 54 and 73, which were only
+([Resolved #80](resolved/never-flushed-partitions.md)). The exceptions are items 16, 20, 24, 54 and 73, which were only
 partly fixed: the open remainder is here and the rest is there. Items 9 and 51 were each one such
 exception until their second half was fixed, and are now on the resolved page alone; item 25 was one
 in the other direction — it had one row left open, that row was fixed, and the whole item
 [moved](resolved/claude-md-drift.md).
 
 **Baseline as of writing:** `cargo check --workspace --all-targets` passes with warnings;
-`cargo test --workspace` passes — **1,198 tests**, two ignored, plus 13 more behind
+`cargo test --workspace` passes — **1,238 tests**, four ignored, plus 13 more behind
 `--features stage-profile` that a default run does not reach ([Test Coverage](test-coverage.md)).
-~~1,045~~ ~~1,084~~ ~~1,164~~ ~~1,187~~ — this figure had gone stale by two features while the sentences below
+[F36](../features/cluster-harness.md) added 40 — 28 of them in the new `shoal-model` crate, 4 in
+the new `cluster_fixture.rs` binary whose two ignored functions are the children it re-executes
+the binary as, and the rest over the pool's readiness handle, the frozen ports, the cluster record
+and the distributed chapter's acceptance tables — and closed items 17, 38, 58 and 88 while
+filing 91.
+~~1,045~~ ~~1,084~~ ~~1,164~~ ~~1,187~~ ~~1,198~~ — this figure had gone stale by two features while the sentences below
 it kept naming what each added, which is what a running total is supposed to prevent, and it then
 went stale by four more in exactly the same way. It is re-derived from a run
 rather than incremented, and [Test Coverage](test-coverage.md) is the page that carries the
@@ -97,7 +105,7 @@ consumes one.
 **Unchanged by the `F20-conf` capture** before it, which added no tests and moved no count: a capture is
 evidence rather than a test, and what it produced was a reproduction for
 [item 71](#71-throughput_sensitive-is-configured-documented-and-mostly-unused), a second and worse
-reproduction for [item 58](#58-a-shard-that-dies-is-not-reported-to-whoever-started-the-pool), and
+reproduction for [item 58](resolved/pool-readiness.md), since resolved, and
 [item 72](#72-an-arm-with-no-writes-is-reported-as-an-arm-that-ran-once) filed from reading the
 renderer against the page it had just produced.
 That is up from 986 with [F20](../features/configuration-sweeps.md) and
@@ -377,80 +385,9 @@ the number of clients waiting behind it goes up with the buffer, and for a table
 goes from one to eight. Recorded here rather than as a new item, since it is this defect being worse
 rather than a second one.
 
-### 38. Integration test binaries all bind the same ports
-
-> **Would be closed by [M0](../distributed/milestones.md#m0-step-0-the-harness-and-the-facts)** of
-> [Distributed Shoal](../distributed/overview.md): the cluster fixture takes ports from bind-zero
-> and deletes the counter ([C11](../distributed/testing.md#the-cluster-fixture)). Nothing there is
-> built yet.
-
-`shoal/tests/utils.rs:48-53` hands out ports from a counter:
-
-```rust
-static PORT_COUNTER: AtomicU16 = AtomicU16::new(13000);
-fn get_unique_port() -> u16 { PORT_COUNTER.fetch_add(1, Ordering::SeqCst) }
-```
-
-The counter is per test *binary*. Cargo runs binaries in parallel, so every binary starts handing
-out 13000, 13001, 13002 at the same time. Measured by capturing the `listening on` line
-(`conf.rs:166`) from each binary in turn:
-
-| Binary | Ports bound |
-| --- | --- |
-| `persistent_sorted_table` | 13000-13102, plus 13900 and 13901 |
-| `persistent_unsorted_table` | 13000-13033 |
-| `ephemeral_sorted_table` | 13000-13015 |
-| `ephemeral_unsorted_table` | 13000-13014 |
-| `storage_meta` | 13000-13002 |
-
-**Every port bound by any of the other four is also bound by the sorted one.** The ranges grow with
-every test that restarts a server — the sorted binary was 13034 when this was filed, 13085 at the
-last measurement and is 13102 now — so re-measure rather than trusting the numbers.
-
-**It has got worse since it was filed, and not by growing.** This entry described *two* colliding
-binaries; there are now **five**, because [F9](../features/ephemeral-tables.md) added two more that
-start their own servers and `storage_meta` was never counted. Every binary someone adds that starts
-a server joins the collision by default, which is the argument for fixing the mechanism rather than
-the ranges.
-
-The bind does not fail, which is what makes this worth an entry. Glommio sets `SO_REUSEPORT` on
-listening sockets (`glommio/src/net/tcp_socket.rs:135`), so the second bind succeeds silently and
-the kernel load balances incoming connections between the two servers. A client in one test can
-therefore have its connection handed to a server owned by another test — a different schema, a
-different temp dir — with no error anywhere to say so.
-
-`persistent_sorted_table.rs:829` additionally hardcodes `let port = 13900`, so two concurrent runs
-of that one binary collide with each other regardless of the counter.
-
-**This has not been observed to fail.** `cargo test --workspace` was run four times while
-investigating, and twice more during the review that re-measured the table above; it passed every
-time. The binaries are simply never alive on the same port at the same moment. Nothing enforces
-that — it is timing, and it is the safety net every other item on this page is checked against.
-
-**Fix direction:** bind port 0 and read back the assigned port, which removes the shared namespace
-entirely. Failing that, give each binary a distinct base offset — but that only moves the
-collision to the next binary someone adds.
-
 ---
 
 ## Low — hygiene and documentation drift
-
-### 17. Leftover debug `println!`s
-
-**Mostly fixed.** The six lines in `PersistentSortedTable::exists` — one of which `{:#?}`-printed
-an entire partition — are gone. `shoal-core/src/` now has exactly two `println!`s left, and they
-are a different thing from what this item was filed about:
-
-| Location | Content | Why it is still here |
-| --- | --- |  --- |
-| `.../server/conf.rs:166` | "listening on ..." from inside `Networking::to_addr` | It is the only way a test learns which port a server bound, which is what [item 38](#38-integration-test-binaries-all-bind-the-same-ports) is measured with |
-| `.../server/trace.rs:61` | "Sending traces for … to gRPC trace sink at …" | It runs *while* the subscriber is being installed, so there is no subscriber yet to emit it through |
-
-Both still bypass the tracing level filter, and the first is still visible in any test run — see
-the sample output in
-[Observability](../operations/observability.md#debug-output-that-is-not-tracing). Neither is a
-debug leftover in the way the six removed ones were, which is why what remains of this item is
-"these two want a reason to exist or a `tracing` event" rather than "delete them".
 
 ### 19. `memory` has no serde default
 
@@ -1035,68 +972,6 @@ now different answers on the wire, and `suceeded` reports the second as `Errors:
 the options say. What is left is the first half: letting `send_one` say that an empty get is
 acceptable. It no longer has to, to tell the two apart — a caller can ask `response.error()`
 directly — but it is still the ergonomic gap this item was filed for.
-
-### 58. A shard that dies is not reported to whoever started the pool
-
-> **Would be closed by [M0](../distributed/milestones.md#m0-step-0-the-harness-and-the-facts)** of
-> [Distributed Shoal](../distributed/overview.md): `ShoalPool::start` returns a handle with
-> `ready()` and `shard_failed()` ([C9](../distributed/operations.md#readiness)). Nothing there is
-> built yet.
-
-```rust
-pub fn exit(self) -> Result<(), ServerError> {
-    self.should_shutdown.store(true, Ordering::Relaxed);
-    for handle in self.shard_handles.join_all() {
-        if let Err(error) = handle {
-            event!(Level::ERROR, error = error.to_string());
-        }
-    }
-    Ok(())
-}
-```
-
-`.../server.rs:104-117`, `ShoalPool::exit`
-
-A shard's `Result` is only ever looked at here, at shutdown, and looking at it does not change
-what this returns. So a shard that died an hour ago is indistinguishable from one that ran
-cleanly: `exit` says `Ok(())` either way, and there is nothing to ask before then — `ShoalPool`
-holds the join handles and exposes no liveness at all.
-
-The `ERROR` event is the only trace, and it is written to whatever subscriber the embedding
-process installed. A caller that installed none — which is every test — gets silence.
-
-This was found while fixing [item 57](resolved/missing-archive.md), where a shard died on a
-partition read twenty seconds before `pool.exit()` returned `Ok(())`. That defect is fixed and
-this one is why it could only be observed as a client that never got an answer.
-
-**Reproduced again on 2026-08-22, at startup rather than at runtime, and this is the worse case.**
-Taking the `F20-conf` capture on a host that had not loaded the kernel `tls` module since its last
-reboot, every `macro/transport/tls/*` and `macro/encryption/*/tls/*` arm failed. `shard.rs:948`
-checks for the TLS ULP *before* it binds and returns `TlsError::UlpUnavailable`, whose message says
-"the 'tls' kernel module is not loaded" — the one sentence that would have ended the investigation.
-Nobody saw it. `ShoalPool::start` returned `Ok`, no shard reached `to_addr`, and the only symptom
-was the readiness probe timing out after thirty seconds with
-`Handshake(Io(ConnectionRefused))` — an error that describes a closed port and names nothing about
-why it is closed. Diagnosing it took reading `shard.rs` to find the check.
-
-So the item is not only that a shard's death is unreported at `exit`: **a shard that never starts
-is unreported at `start`**, which is the same swallow one phase earlier, and `start` returning
-`Ok(())` is a stronger claim than `exit` doing so — a caller has every reason to read it as "the
-server is up". The fix direction below covers it: whatever `start` learns about a shard failing to
-bind has to reach its return value, because the readiness probe cannot distinguish a shard that
-refused to start from one that is still starting.
-
-The sharp edge is that **the test suite already knew about this dependency and the benchmark did
-not**: the 8 tests in `tls.rs` and one of the 17 TLS unit tests check for the kernel module and skip
-loudly without it, as the baseline note at the top of this page records. So the environment that
-silently produced no benchmark produces a legible skip under `cargo test`. Whatever `start` learns
-to report, `shoal-bench` should make the same check the tests already make.
-
-**Fix direction:** the smallest honest version is for `exit` to return the first shard error
-rather than swallow it, which changes a signature nothing currently relies on. The useful version
-is a liveness check that does not wait for shutdown, since the interesting question is asked while
-the server is meant to be running. Both are worth less than a shard that does not die at all,
-which is what [item 16](#16-panics-on-the-hot-path) is about.
 
 ### 59. A shard that cannot free anything keeps trying, on every message, in silence
 
@@ -1812,40 +1687,58 @@ field. The cheap and honest thing, done in
 [Observability](../operations/observability.md#tracing), is to write down that confirming delivery
 means asking the collector rather than reading Shoal's logs.
 
-### 88. The readiness probe's expected refusals are reported at ERROR
+### 91. A compaction that fails ends the compactor
 
-`shoal-bench/src/workloads/harness/ready.rs`, and the `event!(Level::ERROR, ...)` in
-`shoal-client/src/client.rs` that it provokes
+`shoal-core/src/server/tables/storage/fs/compactor.rs:688-706`, `Compactor::start`
 
-`ShoalPool::start` returns before its shards have bound, so `ready::wait_until_answering` connects
-in a loop until one answers. Every attempt before that lands on a closed port, and the client
-reports each one:
+```rust
+loop {
+    let job = self.jobs_rx.recv().await?;
+    match job.clone() {
+        CompactionJob::IntentLog { path, generation } => self.compact_intent(path, generation).await?,
+        CompactionJob::Archives => self.compact_archives().await?,
+        CompactionJob::Shutdown => { self.shutdown().await?; break; }
+    }
+}
+```
+
+Every job is `?`. A compaction that fails — an archive it cannot open, a read that comes back
+short — returns the error out of the loop, and the compactor task ends. Nothing restarts it: the
+shard keeps rotating intent logs and queueing `CompactionJob`s onto a channel whose receiver is
+gone, so every rotation after the first failure sends into `ReceiveClosed`, and the shard's
+storage stops ever being compacted. The shard itself keeps serving, from memory and from logs
+that now only grow.
+
+**Established by reproduction**, and only because [Resolved #58](resolved/pool-readiness.md)
+made `exit` return a shard's error instead of logging it to nobody. The first full run of
+`shoal/tests/persistent_sorted_table.rs` after that change failed once, in
+`a_get_whose_partition_cannot_be_read_does_not_hang`:
 
 ```
-ERROR shoal_client::client: error=Io(Os { code: 111, kind: ConnectionRefused, ... })
-ERROR shoal_client::client: error=Io(Custom { kind: Other, error: "failed to send to proxy: send to a half closed channel" })
-ERROR shoal_client::client: msg="failing the queries a dead connection owed" conn=9 queries=1 code=ConnectionLost
+---- a_get_whose_partition_cannot_be_read_does_not_hang stdout ----
+Error: Server(KanalSend(ReceiveClosed))
+test result: FAILED. 60 passed; 1 failed; 1 ignored
 ```
 
-The probe is working. Those lines mean the server has not finished starting, which is the state the
-probe exists to wait out — and the pool opens ten connections, so a single workload emits **at
-least a dozen** of them before it measures anything.
+That test takes the read permission off a table's archives to make one get fail, and puts it
+back. Whether a compaction ran *while* they were unreadable depends on when the log rotated
+under a one-byte memory limit, so the compactor dies in some runs and not others — the same
+binary passed on the next two runs. It has been dying in those runs for as long as the test has
+existed, and `exit` swallowed it every time. The test now tolerates an error at its final `exit`
+and prints it, with a comment naming this item, rather than hiding the defect again by reverting
+the honest `exit`.
 
-This was invisible until [F34](../features/benchmark-tracing.md), because nothing installed a
-subscriber. It is now the first thing a person sees on a traced capture, and a capture is three
-hundred and seventy-four workloads: several thousand `ERROR` lines, none of which is an error.
-**The cost is that the ones that are get lost among them** — a genuinely dead connection during a
-measured run prints exactly the same third line as a probe attempt.
+The `KanalSend(ReceiveClosed)` is the second-order symptom: `FileSystem::shutdown` sent
+`CompactionJob::Shutdown` to the dead compactor and reported *that* failure, not the one that
+killed it. That half is fixed — the send's failure is now a `WARN` and the join that follows
+returns the compactor's own error — so a run that hits this reports the archive it could not read
+rather than a channel nobody was listening on.
 
-**Established by reproduction**, in the smoke run that verified F34:
-`./target/release/shoal-workload run --id macro/insert_ephemeral --scale smoke` writes twelve
-`ERROR` lines to stderr and then measures the workload successfully and exits zero. The output is
-quoted above verbatim.
-
-**Fix direction:** the level is right for the client and wrong for this caller, and the client
-cannot tell the difference — a refused connect during startup and a refused connect mid-run are the
-same event. So the probe is what should say so: connect through a path that does not log, or have
-`ready` install a filter for its own duration that drops `shoal_client::client` below `WARN`, and
-lift it once the server answers. The second is cheap and needs the non-global subscriber path
-[item 69](#69-shoalctl-and-the-tests-still-install-no-tracing-subscriber) also wants, which is a
-reason to do that one first.
+**Fix direction:** a failed job should be reported and the loop continued, with the job either
+retried once its cause is gone or its intent log left for the next rotation to pick up; and a
+rotation that finds its compactor gone should say so rather than queue forever. The harder half
+is what a compaction that failed *midway* leaves behind — a partially written archive, a map
+entry not yet re-pointed — which needs the same "old complete or new complete" rule
+[C7](../distributed/failover.md#snapshots-and-atomic-installation) sets for snapshot
+installation, and is the reason this is filed rather than fixed alongside
+[F36](../features/cluster-harness.md).

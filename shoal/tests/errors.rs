@@ -147,8 +147,8 @@ async fn a_response_too_large_to_frame_is_answered_with_an_error_naming_the_quer
     // start a server, and use a real client to put a row in that no tiny frame could carry
     let temp_dir = utils::test_dir();
     let conf = utils::build_config(&temp_dir);
-    let addr = format!("127.0.0.1:{}", conf.networking.port);
     let (client, pool) = utils::start_with_conf::<TestDb>(conf).await?;
+    let addr = pool.bound_addr().to_string();
     client
         .send_one(TestRecord {
             partition_key: "big".to_owned(),
@@ -196,8 +196,8 @@ async fn a_response_too_large_to_frame_leaves_the_connection_serving() -> Result
     // start a server and write the row that will not fit
     let temp_dir = utils::test_dir();
     let conf = utils::build_config(&temp_dir);
-    let addr = format!("127.0.0.1:{}", conf.networking.port);
     let (client, pool) = utils::start_with_conf::<TestDb>(conf).await?;
+    let addr = pool.bound_addr().to_string();
     client
         .send_one(TestRecord {
             partition_key: "big".to_owned(),

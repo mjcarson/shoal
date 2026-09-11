@@ -10,9 +10,11 @@ configuration. No external membership, configuration or failover service is requ
 ## What exists today
 
 `Shard::join_cluster` broadcasts a local join and `Ring::add` ignores unknown shards. Reserved
-ping/pong frames have no implementation. The pool lacks a dependable readiness/failure handle.
-No consensus library is currently in the workspace. [C1](node-identity.md) introduces identity
-and the control-plane thread; M0 first adds readiness and failure propagation.
+ping/pong frames have no implementation. ~~The pool lacks a dependable readiness/failure handle.~~
+`ShoalPool::ready` and `failure` are that handle since
+[F36](../features/cluster-harness.md), for the process's own shards. No consensus library is
+currently in the workspace. [C1](node-identity.md) introduces identity and the control-plane
+thread; ~~M0 first adds readiness and failure propagation~~ M0 added them.
 
 ## The design
 

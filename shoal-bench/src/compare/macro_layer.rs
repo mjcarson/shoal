@@ -249,6 +249,10 @@ pub fn compare(run: &MacroCaptureV2, baseline: &MacroCaptureV2) -> MacroComparis
         if let Some(difference) = trace_difference(after, before) {
             traced.push(format!("{id} ({difference})"));
         }
+        // and a difference in what served the workload is not a difference in the code either
+        if let Some(difference) = cluster_difference(after, before) {
+            traced.push(format!("{id} ({difference})"));
+        }
         rows.extend(compare_one(id, after, before));
     }
     // then a row per workload that only one side has, so it is named rather than dropped
@@ -304,6 +308,44 @@ fn trace_difference(run: &WorkloadCapture, baseline: &WorkloadCapture) -> Option
         return Some(format!("export {described}"));
     }
     None
+}
+
+/// Names how two measurements of one workload differ in what served them, if they do
+///
+/// A cluster record on one side and none on the other is the largest difference there is: one
+/// server in its own process against a cluster. Between two records, the fields that change what
+/// an acknowledgement means - node count, active replication factor, the two consistency policies
+/// and where the driver ran - are named, one at a time, in that order. Absent on both sides is
+/// every single-node capture and says nothing.
+///
+/// # Arguments
+///
+/// * `run` - The workload as this run measured it
+/// * `baseline` - The same workload as the baseline measured it
+fn cluster_difference(run: &WorkloadCapture, baseline: &WorkloadCapture) -> Option<String> {
+    match (&run.cluster, &baseline.cluster) {
+        (None, None) => None,
+        (Some(after), None) => Some(format!("single node -> {} nodes", after.nodes)),
+        (None, Some(before)) => Some(format!("{} nodes -> single node", before.nodes)),
+        (Some(after), Some(before)) => {
+            if after.nodes != before.nodes {
+                return Some(format!("nodes {} -> {}", before.nodes, after.nodes));
+            }
+            if after.active_rf != before.active_rf {
+                return Some(format!("rf {} -> {}", before.active_rf, after.active_rf));
+            }
+            if after.write_policy != before.write_policy {
+                return Some(format!("writes {} -> {}", before.write_policy, after.write_policy));
+            }
+            if after.read_policy != before.read_policy {
+                return Some(format!("reads {} -> {}", before.read_policy, after.read_policy));
+            }
+            if after.driver != before.driver {
+                return Some(format!("driver {} -> {}", before.driver, after.driver));
+            }
+            None
+        }
+    }
 }
 
 /// Compares one workload against the same workload from another capture
@@ -463,6 +505,7 @@ mod tests {
                 ..ScaleFacts::default()
             },
             conf: None,
+            cluster: None,
             counters,
             ops,
             runs: Some(walls.len() as u32),
@@ -742,5 +785,48 @@ mod tests {
         let before = traced_capture(&[1_000, 1_100], "warn", false);
         let after = traced_capture(&[1_010, 1_120], "warn", false);
         assert!(compare(&after, &before).traced.is_empty());
+    }
+
+    /// A capture with a cluster record
+    fn clustered_capture(walls: &[u64], nodes: u32, driver: &str) -> MacroCaptureV2 {
+        let mut capture = capture(walls);
+        for workload in capture.workloads.values_mut() {
+            workload.cluster = Some(crate::model::macro_layer::ClusterFacts {
+                nodes,
+                desired_rf: 3,
+                active_rf: 3,
+                write_policy: "Quorum".to_string(),
+                read_policy: "One".to_string(),
+                durability: "fsync".to_string(),
+                driver: driver.to_string(),
+                cores: Vec::new(),
+                driver_cores: Vec::new(),
+                tables: 1,
+                tablets: 4096,
+                offered_load: None,
+                emulated: true,
+            });
+        }
+        capture
+    }
+
+    #[test]
+    /// A single-node capture is not compared against a cluster's silently
+    ///
+    /// The whole reason the cluster record is separate from the scale facts: a historical
+    /// capture has no record, and the difference between none and one is the largest there is.
+    fn a_clustered_capture_does_not_compare_to_a_single_node_one() {
+        let before = capture(&[1_000, 1_100]);
+        let after = clustered_capture(&[1_010, 1_120], 3, "separate");
+        let traced = compare(&after, &before).traced;
+        assert_eq!(traced.len(), 1, "{traced:?}");
+        assert!(traced[0].contains("single node -> 3 nodes"), "{traced:?}");
+        // and two clusters that differ in what an acknowledgement means are named
+        let other = clustered_capture(&[1_000, 1_100], 3, "in-process");
+        let traced = compare(&after, &other).traced;
+        assert!(traced[0].contains("driver in-process -> separate"), "{traced:?}");
+        // while two alike, or two single-node captures, say nothing
+        assert!(compare(&after, &clustered_capture(&[1_000, 1_100], 3, "separate")).traced.is_empty());
+        assert!(compare(&before, &capture(&[1_000, 1_100])).traced.is_empty());
     }
 }

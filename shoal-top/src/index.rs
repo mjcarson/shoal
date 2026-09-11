@@ -232,6 +232,59 @@ pub struct ConfFactsLite {
     /// The largest frame the server would accept, in bytes
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_frame_bytes: Option<u64>,
+    /// The tracing level the server ran at, absent for a capture that predates recording it
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_level: Option<String>,
+    /// Whether spans were being exported while the workload ran
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_remote: Option<bool>,
+}
+
+/// The cluster a workload ran against, when it ran against one
+///
+/// A trimmed `ClusterFacts`, field for field. Absent from a measurement means the workload ran
+/// against one server in its own process, which is every measurement in the corpus at the time
+/// this was added; the explorer must never draw that absence as a cluster of one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClusterFactsLite {
+    /// How many server processes served the workload
+    pub nodes: u32,
+    /// The replication factor the cluster was asked for
+    pub desired_rf: u32,
+    /// The replication factor the tablets actually had
+    pub active_rf: u32,
+    /// The write consistency the workload used
+    pub write_policy: String,
+    /// The read consistency the workload used
+    pub read_policy: String,
+    /// The durability the acknowledgement waited on
+    pub durability: String,
+    /// Where the load driver ran, `in-process` or `separate`
+    pub driver: String,
+    /// The cores each node was given, in node order
+    pub cores: Vec<NodeCoresLite>,
+    /// The cores the driver was given
+    #[serde(default)]
+    pub driver_cores: Vec<usize>,
+    /// How many tables the schema had
+    pub tables: u32,
+    /// How many tablets those tables were split into
+    pub tablets: u32,
+    /// The offered load, in queries per second, for an open-loop arm
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offered_load: Option<u64>,
+    /// Whether the nodes shared one machine
+    pub emulated: bool,
+}
+
+/// The cores one node was given
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeCoresLite {
+    /// The physical cores its data shards ran on
+    pub data: Vec<usize>,
+    /// The core its control thread ran on, once nodes have one
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control: Option<usize>,
 }
 
 /// How a workload's latency samples were taken
@@ -316,6 +369,9 @@ pub struct MacroPoint {
     /// The digest over the whole resolved configuration, for an exact comparability check
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub conf_digest: String,
+    /// Which cluster it ran against, as an index into [`Index::clusters`]; absent for one server
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cluster: Option<u32>,
     /// How this workload's samples were taken
     pub timing: Timing,
     /// Queries answered per second, absent when nothing counted queries
@@ -375,6 +431,9 @@ pub struct Index {
     pub scales: Vec<ScaleFactsLite>,
     /// Every distinct server configuration, referenced by index from a measurement
     pub confs: Vec<ConfFactsLite>,
+    /// Every distinct cluster, referenced by index from a measurement; empty until one is captured
+    #[serde(default)]
+    pub clusters: Vec<ClusterFactsLite>,
     /// Every macro measurement, sorted by capture then workload
     pub macro_points: Vec<MacroPoint>,
 }
@@ -1930,6 +1989,7 @@ mod tests {
             scale: workload,
             conf: None,
             conf_digest: String::new(),
+            cluster: None,
             timing,
             // workload 10 counted no queries, so it has no rate and no byte rate. that is not a
             // rate of zero, and it is what half the real corpus looks like
@@ -1978,6 +2038,7 @@ mod tests {
             workloads,
             scales,
             confs: Vec::new(),
+            clusters: Vec::new(),
             macro_points,
         }
     }

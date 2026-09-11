@@ -25,7 +25,6 @@ use shoal::storage::fs::conf::{
     FileSystemLatencyWriterConf, FileSystemTableConf, FileSystemThroughputWriterConf,
 };
 use shoal::ShoalPool;
-use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 use tempfile::TempDir;
 
@@ -59,14 +58,6 @@ impl From<Errors> for TestError {
     }
 }
 
-/// Global port counter to ensure each test gets a unique port
-static PORT_COUNTER: AtomicU16 = AtomicU16::new(13000);
-
-/// Helper to get a unique port for each test
-fn get_unique_port() -> u16 {
-    PORT_COUNTER.fetch_add(1, Ordering::SeqCst)
-}
-
 /// Create a temp dir for a test on a filesystem that supports direct IO
 ///
 /// `TempDir::new` uses `/tmp`, which is usually tmpfs. Glommio silently disables
@@ -81,7 +72,9 @@ pub fn test_dir() -> TempDir {
 /// Create a default config for tests
 pub fn build_config(temp_dir: &TempDir) -> Conf {
     // get a random port to bind to
-    let port = get_unique_port();
+    // any port: `ShoalPool::start` resolves zero to a real one before its shards bind, and
+    // `ready` reports it, so two test binaries can never be handed the same number (item 38)
+    let port = 0;
     // build a default test conf
     Conf::default()
         .resources(
@@ -324,23 +317,24 @@ where
     for<'a> <<T::ClientType as QuerySupport>::ResponseKinds as Archive>::Archived:
         CheckBytes<Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>>,
 {
-    // build the address our client should connect too
-    let addr = format!("127.0.0.1:{}", conf.networking.port);
-    println!("TALK TO {addr}");
     // Start the server
-    let pool = ShoalPool::<T>::start(conf)?;
-    // wait for our server to start
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    let mut pool = ShoalPool::<T>::start(conf)?;
+    // wait until every shard is answering, rather than for a fixed number of seconds, and let
+    // a shard that failed say so here rather than as a refused connection below (item 58)
+    let addr = pool.ready(READY_TIMEOUT)?;
     // setup a client
-    let client = Shoal::<T::ClientType>::new(&addr).await?;
+    let client = Shoal::<T::ClientType>::new(&addr.to_string()).await?;
     Ok((client, pool))
 }
 
+/// How long a test waits for a server's shards to bind before it gives up
+///
+/// Generous, because a test binary runs many servers at once and a shard that is merely slow is
+/// not the failure this is meant to catch. A shard that failed is reported at once regardless.
+pub const READY_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// The env var naming the temp dir a crash test child should use
 pub const CRASH_DIR_VAR: &str = "SHOAL_CRASH_TEST_DIR";
-
-/// The env var naming the port a crash test child should bind
-pub const CRASH_PORT_VAR: &str = "SHOAL_CRASH_TEST_PORT";
 
 /// The line a crash test child prints once its writes have been acknowledged
 pub const CRASH_READY_LINE: &str = "SHOAL_CRASH_TEST_READY";

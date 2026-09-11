@@ -664,7 +664,14 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
         // another buffer to the kernel and returns without waiting
         self.intent_log2.sync_blocking().await?;
         // signal our intent log compactor to shutdown
-        self.intent_tx.send(CompactionJob::Shutdown).await?;
+        //
+        // a compactor that has already died - a job of its failed, and its loop stops on the
+        // first failure (item 91) - has no receiver, and the send fails with `ReceiveClosed`.
+        // that is not the error worth reporting: the join below returns the one that killed it,
+        // which names the file it could not read rather than the channel nobody was listening on
+        if self.intent_tx.send(CompactionJob::Shutdown).await.is_err() {
+            event!(Level::WARN, msg = "the compactor was gone before shutdown reached it");
+        }
         // wait for all of our tasks to complete
         while let Some(task) = self.tasks.next().await {
             // check if this task has failed

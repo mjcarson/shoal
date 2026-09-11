@@ -314,7 +314,7 @@ fn workload(inputs: &PlanInputs, id: &str, extra: Vec<String>, stdout: Stdout) -
 /// # Arguments
 ///
 /// * `id` - The workload to find a port for
-fn port_for(id: &str) -> u16 {
+pub fn port_for(id: &str) -> u16 {
     // the declared order is stable, so this is stable
     let offset = crate::workload_ids::IDS
         .iter()
@@ -322,6 +322,83 @@ fn port_for(id: &str) -> u16 {
         .unwrap_or(0);
     BASE_PORT + offset as u16
 }
+
+/// The first port a cluster arm's nodes bind
+///
+/// A block of its own, above everything a single-node workload will ever be given: the
+/// single-node range is `BASE_PORT` plus the position in `workload_ids::IDS`, and moving those
+/// to make room would change every historical assignment
+/// ([C10](../../../docs/src/distributed/performance.md), "preserve historical single-node port
+/// allocations"). Eight thousand ports above the base leaves room for eight thousand more
+/// single-node workloads before the two ranges could meet, and the allocator refuses before then.
+pub const CLUSTER_BASE_PORT: u16 = 20_000;
+
+/// How many ports each node of a cluster arm is given
+///
+/// Client, data and control endpoints, and five more for the proxies a fault schedule puts in
+/// front of them. Fixed, so a node's ports are a function of its position and nothing else.
+pub const CLUSTER_PORTS_PER_NODE: u16 = 8;
+
+/// The ports one node of a cluster arm binds
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NodePorts {
+    /// Where clients connect
+    pub client: u16,
+    /// Where data peers connect
+    pub data: u16,
+    /// Where control peers connect
+    pub control: u16,
+    /// The first of the spare ports, for proxies
+    pub spare: u16,
+}
+
+/// The ports a cluster arm's nodes bind
+///
+/// Derived from the workload's position, like `port_for`, so the same arm binds the same ports
+/// in every capture; each node takes the next `CLUSTER_PORTS_PER_NODE`. Refused, rather than
+/// wrapped, when the block would pass the top of the `u16` range or run into the single-node
+/// range - both of which are collisions that would only show up as a bind failure in some other
+/// arm.
+///
+/// # Arguments
+///
+/// * `id` - The workload
+/// * `nodes` - How many nodes it runs
+pub fn cluster_ports(id: &str, nodes: u16) -> anyhow::Result<Vec<NodePorts>> {
+    // one block per workload, wide enough for the largest cluster this allocator allows
+    let offset = crate::workload_ids::IDS
+        .iter()
+        .position(|declared| *declared == id)
+        .unwrap_or(0) as u32;
+    let block = u32::from(CLUSTER_PORTS_PER_NODE) * u32::from(MAX_CLUSTER_NODES);
+    let first = u32::from(CLUSTER_BASE_PORT) + offset * block;
+    let last = first + u32::from(nodes) * u32::from(CLUSTER_PORTS_PER_NODE) - 1;
+    // the single-node range ends where the last declared workload's port is
+    let single_node_top = u32::from(BASE_PORT) + crate::workload_ids::IDS.len() as u32;
+    if nodes == 0 || nodes > MAX_CLUSTER_NODES {
+        anyhow::bail!("{id}: a cluster arm runs between 1 and {MAX_CLUSTER_NODES} nodes, not {nodes}");
+    }
+    if last > u32::from(u16::MAX) {
+        anyhow::bail!("{id}: its cluster ports would pass {} at {last}", u16::MAX);
+    }
+    if first <= single_node_top {
+        anyhow::bail!("{id}: its cluster ports at {first} overlap the single-node range ending at {single_node_top}");
+    }
+    Ok((0..nodes)
+        .map(|node| {
+            let base = (first + u32::from(node) * u32::from(CLUSTER_PORTS_PER_NODE)) as u16;
+            NodePorts {
+                client: base,
+                data: base + 1,
+                control: base + 2,
+                spare: base + 3,
+            }
+        })
+        .collect())
+}
+
+/// The most nodes a cluster arm may run, which sizes each workload's port block
+pub const MAX_CLUSTER_NODES: u16 = 8;
 
 /// Where one run of one workload writes its result
 ///
@@ -823,6 +900,33 @@ mod tests {
             .map(|id| port_for(id))
             .collect();
         assert_eq!(ports.len(), crate::workload_ids::IDS.len());
+    }
+
+    /// A cluster arm's ports never meet the single-node range, and never wrap
+    #[test]
+    fn cluster_ports_are_disjoint_from_the_single_node_range_and_bounded() {
+        let single_node_top = BASE_PORT + crate::workload_ids::IDS.len() as u16;
+        // every declared workload at the largest cluster, every port above the single-node range
+        // and distinct across nodes
+        let mut all = std::collections::BTreeSet::new();
+        for id in crate::workload_ids::IDS {
+            let ports = cluster_ports(id, MAX_CLUSTER_NODES).expect("the block fits");
+            assert_eq!(ports.len(), usize::from(MAX_CLUSTER_NODES));
+            for node in ports {
+                for port in [node.client, node.data, node.control, node.spare] {
+                    assert!(port > single_node_top, "{id} was given {port}");
+                    assert!(all.insert(port), "{id} shares port {port} with another arm");
+                }
+            }
+        }
+        // the shape is refused, not wrapped, where it would not fit
+        assert!(cluster_ports(crate::workload_ids::IDS[0], 0).is_err());
+        assert!(cluster_ports(crate::workload_ids::IDS[0], MAX_CLUSTER_NODES + 1).is_err());
+        // and the same arm gets the same ports every time
+        assert_eq!(
+            cluster_ports("macro/tmdb", 3).unwrap(),
+            cluster_ports("macro/tmdb", 3).unwrap()
+        );
     }
 
     /// Each stage-profiled workload writes to an artifact of its own

@@ -204,8 +204,8 @@ async fn a_hostile_length_prefix_closes_one_connection_and_the_server_keeps_serv
     // start a server and a healthy client against it
     let temp_dir = utils::test_dir();
     let conf = utils::build_config(&temp_dir);
-    let addr = format!("127.0.0.1:{}", conf.networking.port);
-    let (client, _pool) = utils::start_with_conf::<TestDb>(conf).await?;
+    let (client, pool) = utils::start_with_conf::<TestDb>(conf).await?;
+    let addr = pool.bound_addr().to_string();
     // the server answers before anything hostile happens
     round_trip(&client, "before").await?;
     // open a raw connection alongside it and claim the largest frame a u32 can spell
@@ -230,8 +230,8 @@ async fn a_frame_of_an_unknown_type_closes_one_connection() -> Result<(), TestEr
     // start a server and a healthy client against it
     let temp_dir = utils::test_dir();
     let conf = utils::build_config(&temp_dir);
-    let addr = format!("127.0.0.1:{}", conf.networking.port);
-    let (client, _pool) = utils::start_with_conf::<TestDb>(conf).await?;
+    let (client, pool) = utils::start_with_conf::<TestDb>(conf).await?;
+    let addr = pool.bound_addr().to_string();
     round_trip(&client, "before").await?;
     // send a frame whose type byte names nothing this build knows
     let mut hostile = handshaken(&addr).await?;
@@ -253,8 +253,8 @@ async fn a_response_frame_sent_to_the_server_closes_one_connection() -> Result<(
     // start a server and a healthy client against it
     let temp_dir = utils::test_dir();
     let conf = utils::build_config(&temp_dir);
-    let addr = format!("127.0.0.1:{}", conf.networking.port);
-    let (client, _pool) = utils::start_with_conf::<TestDb>(conf).await?;
+    let (client, pool) = utils::start_with_conf::<TestDb>(conf).await?;
+    let addr = pool.bound_addr().to_string();
     round_trip(&client, "before").await?;
     // send a frame the server could parse but should never be handed
     let mut hostile = handshaken(&addr).await?;
@@ -277,8 +277,8 @@ async fn a_frame_of_an_unsupported_version_closes_one_connection() -> Result<(),
     // start a server and a healthy client against it
     let temp_dir = utils::test_dir();
     let conf = utils::build_config(&temp_dir);
-    let addr = format!("127.0.0.1:{}", conf.networking.port);
-    let (client, _pool) = utils::start_with_conf::<TestDb>(conf).await?;
+    let (client, pool) = utils::start_with_conf::<TestDb>(conf).await?;
+    let addr = pool.bound_addr().to_string();
     round_trip(&client, "before").await?;
     // send a well formed frame from a version that does not exist
     let mut hostile = handshaken(&addr).await?;
@@ -307,8 +307,8 @@ async fn a_hello_of_an_unsupported_version_is_refused_with_an_ack() -> Result<()
     // start a server and a healthy client against it
     let temp_dir = utils::test_dir();
     let conf = utils::build_config(&temp_dir);
-    let addr = format!("127.0.0.1:{}", conf.networking.port);
-    let (client, _pool) = utils::start_with_conf::<TestDb>(conf).await?;
+    let (client, pool) = utils::start_with_conf::<TestDb>(conf).await?;
+    let addr = pool.bound_addr().to_string();
     round_trip(&client, "before").await?;
     // open with a hello from a protocol version that does not exist
     let mut hostile = TcpStream::connect(&addr).await?;
@@ -353,8 +353,8 @@ async fn a_hello_naming_a_different_schema_is_refused_with_an_ack() -> Result<()
     // start a server and a healthy client against it
     let temp_dir = utils::test_dir();
     let conf = utils::build_config(&temp_dir);
-    let addr = format!("127.0.0.1:{}", conf.networking.port);
-    let (client, _pool) = utils::start_with_conf::<TestDb>(conf).await?;
+    let (client, pool) = utils::start_with_conf::<TestDb>(conf).await?;
+    let addr = pool.bound_addr().to_string();
     round_trip(&client, "before").await?;
     // open with a hello claiming a schema this server was not built from
     let mut hostile = TcpStream::connect(&addr).await?;

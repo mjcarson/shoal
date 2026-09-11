@@ -43,6 +43,14 @@ cargo test -p shoal --features otel --test trace_propagation
 # and the same property on a program somebody runs
 cargo build -p shoalctl
 
+# the protocol model (F36) is pure: no engine, no runtime, no shoal crate in its graph. it tests
+# while shoal-core does not compile, and `cargo tree -p shoal-model` must never mention glommio
+cargo test -p shoal-model
+cargo run -p shoal-model --example regenerate_schedules   # after a model change; tests only load
+
+# the cluster fixture (F36) re-executes this binary as its children, so it is its own test target
+cargo test -p shoal --test cluster_fixture
+
 # Run with hotpath profiling enabled (attribution only, never a baseline number)
 cargo build --release --bin shoal-workload --features hotpath
 
@@ -326,6 +334,10 @@ go through `shoal`.**
   `default-features = false`**, which is what keeps egui out of `cargo tree -p shoal-bench
   --no-default-features`. It must never depend on `shoal-bench`: that crate pulls `walkdir`, which
   does not build for `wasm32-unknown-unknown`, and the explorer's primary target is a browser
+- **shoal-model** - The deterministic protocol model ([F36](docs/src/features/cluster-harness.md)):
+  the contract P1–P6 as executable checks over a Raft-shaped tablet group, with saved schedules
+  under `shoal-model/schedules/`. Depends on `serde` and `serde_json` alone and names no shoal
+  crate; keep it that way, since a schedule that needs the engine to replay is worth nothing
 
 ### Key Abstractions
 

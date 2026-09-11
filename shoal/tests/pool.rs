@@ -75,10 +75,9 @@ async fn start_server(temp_dir: &tempfile::TempDir) -> Result<(ShoalPool<TestDb>
 {
     // build a config on a port nothing else in this binary is using
     let conf = utils::build_config(temp_dir);
-    let addr = format!("127.0.0.1:{}", conf.networking.port);
-    // start the server and give its shards time to bind
-    let pool = ShoalPool::<TestDb>::start(conf)?;
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    // start the server and wait until its shards are answering
+    let mut pool = ShoalPool::<TestDb>::start(conf)?;
+    let addr = pool.ready(utils::READY_TIMEOUT)?.to_string();
     Ok((pool, addr))
 }
 
@@ -233,5 +232,64 @@ async fn a_client_with_no_endpoint_is_refused() -> Result<(), TestError> {
         matches!(built, Err(Errors::Config(_))),
         "a client with no endpoint was built anyway"
     );
+    Ok(())
+}
+
+/// A shard that cannot bind is reported by the pool, not swallowed
+///
+/// Item 58: `ShoalPool::start` spawns its shard threads and returns before any of them has bound,
+/// so a shard that fails on its first line - a held port, a missing kernel module - was
+/// indistinguishable from one still starting. The port is held by a plain listener without
+/// `SO_REUSEPORT`, which is exactly what makes every shard's reuse-port bind fail with
+/// `EADDRINUSE`.
+#[tokio::test]
+async fn a_shard_that_cannot_bind_is_reported() -> Result<(), TestError> {
+    let temp_dir = utils::test_dir();
+    // hold a port with a socket that will refuse to share it
+    let holder = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let port = holder.local_addr()?.port();
+    // point a server at that port
+    let conf = utils::build_config(&temp_dir)
+        .networking(shoal::server::conf::Networking::default().port(port));
+    // the pool must say so rather than report a server that will never answer
+    let mut pool = ShoalPool::<TestDb>::start(conf)?;
+    let reported = pool.ready(std::time::Duration::from_secs(10));
+    drop(holder);
+    match reported {
+        Err(error) => {
+            let text = format!("{error:?}");
+            assert!(text.contains("ShardFailed"), "the error names no shard: {text}");
+            assert!(text.contains("in use"), "the error does not say the port was held: {text}");
+        }
+        Ok(addr) => panic!("start reported {addr} ready although no shard could bind port {port}"),
+    }
+    Ok(())
+}
+
+/// A port of zero resolves to one real port that every shard binds
+///
+/// Every shard binds with `SO_REUSEPORT`, so a zero handed to each of them would give each its
+/// own ephemeral port and a client only one of them. The pool reserves a port first, tells the
+/// shards that number, and reports it from `ready`; a client on that address is served by any
+/// shard, which `round_trip` proves.
+#[tokio::test]
+async fn a_port_of_zero_resolves_to_one_every_shard_binds() -> Result<(), TestError> {
+    let temp_dir = utils::test_dir();
+    // ask for any port at all
+    let conf = utils::build_config(&temp_dir)
+        .networking(shoal::server::conf::Networking::default().port(0));
+    let mut pool = ShoalPool::<TestDb>::start(conf)?;
+    // the pool knows the port before a shard has bound it
+    let promised = pool.bound_addr();
+    assert_ne!(promised.port(), 0, "start left the port unresolved");
+    // and readiness reports the same one
+    let addr = pool.ready(utils::READY_TIMEOUT)?;
+    assert_eq!(addr, promised, "ready reported a different address than start promised");
+    // nothing has died
+    assert_eq!(pool.failure(), None);
+    // a client on that address is served
+    let client = Shoal::<TestDbClient>::new(&addr.to_string()).await?;
+    round_trip(&client, "port-zero").await?;
+    pool.exit()?;
     Ok(())
 }

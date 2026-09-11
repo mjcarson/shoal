@@ -575,3 +575,86 @@ fn the_presets_pick_arms_that_answer_their_own_metric() {
         }
     }
 }
+
+/// Every field of the facts a measurement records reaches the explorer's copy of them
+///
+/// `scale_facts`, `conf_facts` and `cluster_facts` are hand-written struct literals, so a field
+/// added to `ScaleFacts`, `ConfFacts` or `ClusterFacts` and forgotten in `shoal-top` compiled and
+/// silently dropped - which is how `trace_level` and `trace_remote` went unmirrored from
+/// [F34](../../docs/src/features/benchmark-tracing.md) until
+/// [F36](../../docs/src/features/cluster-harness.md). Each full record is serialized with every
+/// optional field set and its key set compared to its mirror's; the configuration digest is the
+/// one field deliberately left out, and is named here as such.
+#[test]
+fn the_facts_mirrors_are_total() {
+    use shoal_bench::model::macro_layer::{ClusterFacts, ConfFacts, NodeCores, ScaleFacts};
+    let keys = |value: serde_json::Value| -> Vec<String> {
+        value
+            .as_object()
+            .expect("a record is an object")
+            .keys()
+            .cloned()
+            .collect()
+    };
+    // every optional field set, so a skipped key cannot hide a missing mirror
+    let scale = ScaleFacts {
+        scale: "full".to_string(),
+        rows: 1,
+        row_bytes: 1,
+        keys: 1,
+        concurrency: 1,
+        clients: Some(1),
+        read_pct: Some(50),
+        row_profile: Some("wide".to_string()),
+        distribution: Some("zipf".to_string()),
+        table_kind: Some("unsorted".to_string()),
+    };
+    let mirrored = explore::index::scale_facts(&scale);
+    assert_eq!(keys(serde_json::to_value(&scale).unwrap()), keys(serde_json::to_value(&mirrored).unwrap()));
+    let conf = ConfFacts {
+        shards: 1,
+        memory: "1Gi".to_string(),
+        durability: "fsync".to_string(),
+        tls: true,
+        latency_buffer_size: Some(1),
+        latency_write_behind: Some(1),
+        intent_log_size: Some("1Mi".to_string()),
+        throughput_buffer_size: Some(1),
+        throughput_write_behind: Some(1),
+        max_frame_bytes: Some(1),
+        trace_level: Some("info".to_string()),
+        trace_remote: Some(true),
+        digest: "abc".to_string(),
+    };
+    let mirrored = explore::index::conf_facts(&conf);
+    let mut expected = keys(serde_json::to_value(&conf).unwrap());
+    // the digest rides on the measurement, not on the interned configuration
+    expected.retain(|key| key != "digest");
+    assert_eq!(expected, keys(serde_json::to_value(&mirrored).unwrap()));
+    let cluster = ClusterFacts {
+        nodes: 3,
+        desired_rf: 3,
+        active_rf: 3,
+        write_policy: "Quorum".to_string(),
+        read_policy: "One".to_string(),
+        durability: "fsync".to_string(),
+        driver: "separate".to_string(),
+        cores: vec![NodeCores {
+            data: vec![1],
+            control: Some(0),
+        }],
+        driver_cores: vec![2],
+        tables: 1,
+        tablets: 4096,
+        offered_load: Some(1),
+        emulated: true,
+    };
+    let mirrored = explore::index::cluster_facts(&cluster);
+    assert_eq!(keys(serde_json::to_value(&cluster).unwrap()), keys(serde_json::to_value(&mirrored).unwrap()));
+    assert_eq!(
+        keys(serde_json::to_value(&cluster.cores[0]).unwrap()),
+        keys(serde_json::to_value(&mirrored.cores[0]).unwrap())
+    );
+    // and the corpus, which predates every cluster, interns none
+    assert!(index().clusters.is_empty());
+}

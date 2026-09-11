@@ -388,3 +388,73 @@ fn a_capture_that_counted_no_queries_reports_no_query_rate() {
         }
     }
 }
+
+/// Every committed capture still parses, and every historical port assignment is unchanged
+///
+/// The second half is what nothing guarded before [F36](../../docs/src/features/cluster-harness.md):
+/// a workload's port is its position in `workload_ids::IDS`, so an id inserted anywhere but the
+/// end re-ports every id after it, and a capture taken before the insertion no longer says which
+/// port its server bound. `docs/perf/ports.json` freezes the map as it stood; a new id appended
+/// after it is fine, an id that moved is not.
+#[test]
+fn historical_artifacts_and_ports_remain_compatible() {
+    let store = repo();
+    // every macro capture ever committed still reads, with the record it was written with
+    let paths = files_ending_with(&store.runs_dir(), ".macro.json");
+    assert!(!paths.is_empty(), "no macro captures found");
+    for path in &paths {
+        let capture = store
+            .read_macro(path)
+            .unwrap_or_else(|err| panic!("{}: {err:#}", path.display()));
+        for (id, workload) in &capture.workloads {
+            // no single-node capture carries a cluster record, and none may grow one
+            assert!(
+                workload.cluster.is_none(),
+                "{} records a cluster for {id}, which nothing has ever run",
+                path.display()
+            );
+        }
+    }
+    // and every port in the frozen map is the port that id still gets
+    let frozen: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(store.perf_dir().join("ports.json")).expect("docs/perf/ports.json"),
+    )
+    .expect("ports.json parses");
+    assert_eq!(frozen["base_port"], serde_json::json!(shoal_bench::run::plan::BASE_PORT));
+    let ports = frozen["ports"].as_object().expect("a map of id to port");
+    assert!(!ports.is_empty());
+    for (id, port) in ports {
+        let expected = port.as_u64().expect("a port") as u16;
+        assert_eq!(
+            shoal_bench::run::plan::port_for(id),
+            expected,
+            "{id} moved from port {expected}: an id was inserted before it rather than appended"
+        );
+    }
+    // an id that is not in the map is one added since; it must come after every frozen one
+    let frozen_count = ports.len();
+    for (position, id) in shoal_bench::workload_ids::IDS.iter().enumerate() {
+        if !ports.contains_key(*id) {
+            assert!(
+                position >= frozen_count,
+                "{id} is new but sits at {position}, inside the frozen range"
+            );
+        }
+    }
+}
+
+/// A single-node capture serializes no cluster record
+///
+/// The record is `Option` and skipped when absent, which is what keeps every committed capture
+/// byte-identical after [F36](../../docs/src/features/cluster-harness.md) and what lets a reader
+/// take its absence as "one node" rather than as a record of zeros.
+#[test]
+fn a_single_node_capture_serializes_no_cluster_record() {
+    let text = std::fs::read_to_string(
+        files_ending_with(&repo().runs_dir(), ".macro.json")
+            .first()
+            .expect("a macro capture"),
+    )
+    .expect("the capture reads");
+    assert!(!text.contains("\"cluster\""), "a single-node capture spells a cluster key");
+}

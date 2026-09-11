@@ -1,0 +1,16 @@
+[package]
+name = "shoal-model"
+version = "0.1.0"
+edition = "2021"
+description = "A pure, deterministic model of Shoal's replication protocol, and the oracle that judges its histories"
+license = "MIT"
+publish = false
+
+# This crate is the executable form of the protocol contract in docs/src/distributed/protocol.md
+# (P1-P6), delivered by M0 (F36). It links no runtime, no storage engine and no shoal crate: a
+# schedule replays identically on any machine, and `cargo test -p shoal-model` runs while the
+# engine does not compile. Both dependencies are already in the workspace lockfile; keep it that
+# way, and keep `cargo tree -p shoal-model` free of glommio and tokio.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

@@ -1,8 +1,9 @@
 //! Waiting for a server to actually be able to answer, rather than for a fixed number of seconds
 //!
-//! `ShoalPool::start` spawns a thread per shard and returns without joining them, so there is no
-//! moment at which the pool knows every shard has bound. The workload this replaces handled that
-//! by sleeping five seconds, and `shoal/tests/utils.rs` sleeps two.
+//! `ShoalPool::start` spawns a thread per shard and returns without joining them. Since F36 the
+//! pool hears from every shard and `ShoalPool::ready` waits for all of them, which the harness
+//! calls first; the workload this replaced handled the gap by sleeping five seconds, and
+//! `shoal/tests/utils.rs` slept two until it too waited on `ready`.
 //!
 //! A fixed sleep is wrong in both directions. It is too long on the machine that captures a
 //! baseline, where a capture pays it once per run of every workload and spends minutes waiting on
@@ -10,10 +11,10 @@
 //! it is not merely slow but wrong: the queries that were sent before the shards were up measure
 //! server startup and report it as query latency, with nothing in the artifact saying so.
 //!
-//! Probing costs a connection and one query, and answers the actual question. The proper fix is
-//! for `ShoalPool::start` to have a moment it can return from, which is filed in
-//! `docs/src/appendix/todos.md` - it is a `shoal-core` change and a readiness endpoint wants it
-//! too.
+//! Probing costs a connection and one query, and answers a question `ready` does not: whether
+//! the server answers a query the way the workload will send one, TLS handshake included. A bound
+//! listener is not that, so the probe stays; what it no longer does is race the bind, which was
+//! item 88.
 
 use std::time::{Duration, Instant};
 
@@ -29,7 +30,7 @@ const POLL: Duration = Duration::from_millis(25);
 ///
 /// A server that has not answered in this long is not slow, it is broken, and a capture should say
 /// so rather than hanging until somebody notices.
-const TIMEOUT: Duration = Duration::from_secs(30);
+pub const TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Waits until a server answers a query, or gives up
 ///

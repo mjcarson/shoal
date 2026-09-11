@@ -1,0 +1,107 @@
+{
+  "format": 1,
+  "name": "ack_on_receipt",
+  "seed": 0,
+  "params": {
+    "nodes": 3,
+    "learners": [],
+    "async_nodes": [],
+    "tablets": [
+      {
+        "table": 1,
+        "range": 0
+      }
+    ],
+    "steps": 400,
+    "ops": 48,
+    "keys": 6,
+    "max_retries": 1,
+    "max_down": 1,
+    "dup_window": 8,
+    "weights": {
+      "deliver": 40,
+      "drop": 3,
+      "duplicate": 4,
+      "fsync": 20,
+      "election": 3,
+      "heartbeat": 8,
+      "report": 3,
+      "client": 10,
+      "read": 6,
+      "retry": 4,
+      "timeout": 3,
+      "crash": 2,
+      "restart": 4,
+      "pause": 1,
+      "resume": 3,
+      "checkpoint": 2,
+      "mark_down": 2
+    }
+  },
+  "policy": {
+    "election": "log_matching",
+    "quorum": "durable_distinct_voters",
+    "duplicate_ack": "watermark",
+    "async_receipt": "not_durable",
+    "visibility": "committed_applied",
+    "ack_timing": "on_receipt"
+  },
+  "events": [
+    {
+      "kind": "election_timeout",
+      "node": 1,
+      "tablet": {
+        "table": 1,
+        "range": 0
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "node": 1
+        },
+        "to": {
+          "node": 2
+        },
+        "tablet": {
+          "table": 1,
+          "range": 0
+        },
+        "term": 1,
+        "body": {
+          "request_vote": {
+            "last_index": 0,
+            "last_term": 0
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "node": 2
+        },
+        "to": {
+          "node": 1
+        },
+        "tablet": {
+          "table": 1,
+          "range": 0
+        },
+        "term": 1,
+        "body": {
+          "vote_response": {
+            "granted": true
+          }
+        }
+      }
+    }
+  ],
+  "expected": {
+    "property": "P1",
+    "step": 2,
+    "detail": "P1: node 1 vouched for tablet (1,0) through 1 with only 0 durable"
+  }
+}

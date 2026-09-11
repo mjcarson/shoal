@@ -127,9 +127,11 @@ Every shard binds the same address (`shoal-core/src/server/shard.rs:356`). See
 [Thread per Core](../architecture/thread-per-core.md#accepting-connections) for how that
 works and what it means for which shard receives your query.
 
-`Networking::to_addr` prints to stdout as a side effect of formatting the address
-(`shoal-core/src/server/conf.rs:111`) — a leftover debug line, so you get a "listening on"
-message per shard.
+~~`Networking::to_addr` prints to stdout as a side effect of formatting the address — a leftover
+debug line, so you get a "listening on" message per shard.~~ It no longer does
+([Resolved #17](../appendix/resolved/leftover-printlns.md)). The address the shards actually
+bound — which differs from the configured one when `port` is `0` — is what `ShoalPool::ready`
+and `ShoalPool::bound_addr` return ([F36](../features/cluster-harness.md)).
 
 **Unknown keys in this block are refused.** That is deliberate and it is newer than the rest of the
 section: a misspelled `tls:` key under a block that ignored it would produce a server that starts,

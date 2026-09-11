@@ -1,0 +1,223 @@
+{
+  "format": 1,
+  "name": "async_receipt_counts_as_durable",
+  "seed": 1,
+  "params": {
+    "nodes": 3,
+    "learners": [],
+    "async_nodes": [
+      3
+    ],
+    "tablets": [
+      {
+        "table": 1,
+        "range": 0
+      }
+    ],
+    "steps": 400,
+    "ops": 48,
+    "keys": 6,
+    "max_retries": 1,
+    "max_down": 1,
+    "dup_window": 8,
+    "weights": {
+      "deliver": 40,
+      "drop": 3,
+      "duplicate": 4,
+      "fsync": 20,
+      "election": 3,
+      "heartbeat": 8,
+      "report": 3,
+      "client": 10,
+      "read": 6,
+      "retry": 4,
+      "timeout": 3,
+      "crash": 2,
+      "restart": 4,
+      "pause": 1,
+      "resume": 3,
+      "checkpoint": 2,
+      "mark_down": 2
+    }
+  },
+  "policy": {
+    "election": "log_matching",
+    "quorum": "durable_distinct_voters",
+    "duplicate_ack": "watermark",
+    "async_receipt": "counts_as_durable",
+    "visibility": "committed_applied",
+    "ack_timing": "after_fsync"
+  },
+  "events": [
+    {
+      "kind": "election_timeout",
+      "node": 1,
+      "tablet": {
+        "table": 1,
+        "range": 0
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "node": 1
+        },
+        "to": {
+          "node": 3
+        },
+        "tablet": {
+          "table": 1,
+          "range": 0
+        },
+        "term": 1,
+        "body": {
+          "request_vote": {
+            "last_index": 0,
+            "last_term": 0
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "node": 3
+        },
+        "to": {
+          "node": 1
+        },
+        "tablet": {
+          "table": 1,
+          "range": 0
+        },
+        "term": 1,
+        "body": {
+          "vote_response": {
+            "granted": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "client_invoke",
+      "attempt": {
+        "id": 17,
+        "retry": 0
+      },
+      "tablet": {
+        "table": 1,
+        "range": 0
+      },
+      "op": {
+        "mutate": {
+          "delete": {
+            "key": 4
+          }
+        }
+      },
+      "target": 1
+    },
+    {
+      "kind": "storage_complete",
+      "node": 1,
+      "tablet": {
+        "table": 1,
+        "range": 0
+      }
+    },
+    {
+      "kind": "storage_complete",
+      "node": 1,
+      "tablet": {
+        "table": 1,
+        "range": 0
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "node": 1
+        },
+        "to": {
+          "node": 3
+        },
+        "tablet": {
+          "table": 1,
+          "range": 0
+        },
+        "term": 1,
+        "body": {
+          "append_entries": {
+            "prev_index": 0,
+            "prev_term": 0,
+            "entries": [
+              {
+                "tablet": {
+                  "table": 1,
+                  "range": 0
+                },
+                "index": 1,
+                "term": 1,
+                "command": "noop"
+              },
+              {
+                "tablet": {
+                  "table": 1,
+                  "range": 0
+                },
+                "index": 2,
+                "term": 1,
+                "command": {
+                  "client": {
+                    "attempt": {
+                      "id": 17,
+                      "retry": 0
+                    },
+                    "op": {
+                      "delete": {
+                        "key": 4
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "leader_commit": 0
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "node": 3
+        },
+        "to": {
+          "node": 1
+        },
+        "tablet": {
+          "table": 1,
+          "range": 0
+        },
+        "term": 1,
+        "body": {
+          "append_response": {
+            "success": true,
+            "durable_to": 2,
+            "durable": false,
+            "conflict_hint": 0
+          }
+        }
+      }
+    }
+  ],
+  "expected": {
+    "property": "P3",
+    "step": 7,
+    "detail": "P3: node 1 committed index 2 of tablet (1,0) counting replica 3 without a delivered durable acknowledgement"
+  }
+}

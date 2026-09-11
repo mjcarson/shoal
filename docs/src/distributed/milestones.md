@@ -31,6 +31,14 @@ A custom protocol cannot bypass this gate by calling primary appointment a topol
 
 ### M0. Step 0: the harness and the facts
 
+**Delivered** on 2026-09-11 as [F36](../features/cluster-harness.md), which also closed
+[item 58](../appendix/resolved/unreported-shard-death.md) and
+[item 88](../appendix/resolved/readiness-probe-refusals.md). The eight tests below are runnable:
+`cargo test -p shoal-model`, `cargo test -p shoal --test cluster_fixture`, and
+`cargo test -p shoal-bench --test committed_artifacts --test acceptance_tables`. What was
+delivered, what was not, and the evidence are on the F page; the rest of this section is the
+gate as it was set.
+
 **Delivers.** Pure deterministic protocol/adapter model with stable-storage events, reproducible
 schedules and history oracle. Process fixture with readiness/failure handles, real bound endpoints,
 cleanup, explicit core allocation and directed fault controls. Initial children are isolated
@@ -44,6 +52,11 @@ port mappings and artifact decoding; add cluster environments and separate load-
 **Evidence/exit.** Fixture self-tests and saved schedules reproduce their expected violations.
 A matched single-node arm verifies that the harness did not change what the old comparison meant.
 No storage durability claim is inferred from SIGKILL alone. Full-engine simulation is not required.
+*Met:* seven saved schedules under `shoal-model/schedules/` each replay to the violation they
+record; `macro/get_ephemeral` at smoke scale driven in-process and through `--server` produced
+byte-identical `scale` and `conf` facts and no `cluster` key
+([F36, Performance](../features/cluster-harness.md#performance)); the fixture's `kill` is
+documented as proving nothing about durability, and no test infers one.
 
 ### M1. Node identity and the control-plane thread
 

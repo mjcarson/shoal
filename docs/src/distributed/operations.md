@@ -166,7 +166,9 @@ outcomes and blocked recovery instead of flattening them into success/failure.
 ## Prerequisites
 
 [C1](node-identity.md), [C3](membership.md), [C7](failover.md), [C8](rebalancing.md),
-C13 Q10–Q12. Readiness M0; basic admin M3; lag M4; repair M8; operations expand through M10.
+C13 Q10–Q12. Readiness M0 — the process half is delivered as `ShoalPool::ready` and `failure`
+([F36](../features/cluster-harness.md)); the control-plane and per-tablet states arrive with the
+milestones that add them; basic admin M3; lag M4; repair M8; operations expand through M10.
 
 ## How it would be measured
 

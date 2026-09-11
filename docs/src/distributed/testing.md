@@ -10,10 +10,15 @@ conditional-result, snapshot and reconfiguration defects.
 
 ## What exists today
 
-Integration helpers use fixed sleeps and process-local port counters. Existing crash tests re-exec
-a test binary and synchronize on a readiness line. Benchmark readiness probes and tracing-based
-path assertions provide reusable patterns. There is no whole-engine deterministic simulator;
-this proposal does not require building one before testing the new protocol state machine.
+~~Integration helpers use fixed sleeps and process-local port counters.~~ Since
+[F36](../features/cluster-harness.md), every helper starts on port zero and waits on
+`ShoalPool::ready`, which reports the address the shards bound or the first shard that failed
+([Resolved #38, 58, 88](../appendix/resolved/pool-readiness.md)). Existing crash tests re-exec
+a test binary and synchronize on a readiness line, and the cluster fixture below is that shape
+generalized. Benchmark readiness probes and tracing-based path assertions provide reusable
+patterns. There is no whole-engine deterministic simulator; this proposal does not require
+building one before testing the new protocol state machine, and `shoal-model` is the pure model
+it asks for instead.
 
 ## The design
 
@@ -111,7 +116,12 @@ the soak configuration rather than merely provide an unused feature flag.
 Keep shared fixture helpers under `shoal/tests/cluster/`, with actual Cargo integration-test entry
 points in top-level `tests/*.rs` or explicit `[[test]]` targets; nested files are not automatically
 separate Cargo test binaries. Keep the pure protocol/adapter model near the implementation or in
-a test-support crate that does not require a running storage engine.
+a test-support crate that does not require a running storage engine. *As built by
+[F36](../features/cluster-harness.md):* the fixture is `shoal/tests/cluster/` with its entry
+point `shoal/tests/cluster_fixture.rs`; the model is the workspace crate `shoal-model`, which
+links no shoal crate, no runtime and no engine, with its tests in
+`shoal-model/tests/protocol_model.rs` and its saved schedules under `shoal-model/schedules/`; the
+docs check below is `shoal-bench/tests/acceptance_tables.rs`.
 
 ### The acceptance test table
 

@@ -104,10 +104,9 @@ async fn start_server(
 ) -> Result<(String, ShoalPool<server_schema::Wire>), TestError> {
     // build a config with a port nobody else in this run is using
     let conf = utils::build_config(temp_dir);
-    let addr = format!("127.0.0.1:{}", conf.networking.port);
-    // start the server and give it a moment to bind
-    let pool = ShoalPool::<server_schema::Wire>::start(conf)?;
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    // start the server and wait until its shards are answering
+    let mut pool = ShoalPool::<server_schema::Wire>::start(conf)?;
+    let addr = pool.ready(utils::READY_TIMEOUT)?.to_string();
     Ok((addr, pool))
 }
 

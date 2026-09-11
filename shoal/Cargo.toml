@@ -91,6 +91,12 @@ csv = "1"
 # and deserializes each row straight into the table struct. this facade re-exports `serde_json` but
 # not `serde`, so a schema that derives `serde::Deserialize` has to name it here
 serde = { version = "1", features = ["derive"] }
+# the cluster fixture (F36) sends SIGSTOP/SIGCONT to its children and asks whether a pid is
+# still there, which `std::process` cannot do. already a dependency of `shoal-core`, so this adds
+# nothing to the lockfile
+libc = "0.2"
+# and its children report their bound endpoints on one line of json
+serde_json = "1"
 # `tmdb_dataset` takes flags, unlike `tmdb` which takes none. pinned to the same version the other
 # two crates in this workspace that use it ask for
 clap = { version = "4.2", features = ["derive"] }

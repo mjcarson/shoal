@@ -26,6 +26,7 @@ use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
     Arc,
 };
+use std::net::SocketAddr;
 use std::rc::Rc;
 use std::time::Duration;
 use std::{cell::RefCell, hash::BuildHasherDefault};
@@ -826,6 +827,33 @@ pub enum ShardContact {
     Local(usize),
 }
 
+/// What a shard tells the pool that started it
+///
+/// Sent on a `std::sync::mpsc` channel rather than the kanal mesh because the receiver is the
+/// thread that called `ShoalPool::start`, which is on no executor at all. Exactly one of these is
+/// sent per shard before it enters its loop, and a second `Failed` may follow if the loop itself
+/// returns an error - so a pool that has seen every shard's `Ready` can still learn of a death.
+#[derive(Clone, Debug)]
+pub enum ShardEvent {
+    /// This shard has bound its listener, joined the mesh and started its loaders
+    ///
+    /// Recovery replayed in `Shard::new`, before any of that, so a shard that is `Ready` is a
+    /// shard that answers.
+    Ready {
+        /// Which shard
+        shard: usize,
+        /// The address its listener actually bound, which is what a port of zero resolves to
+        addr: SocketAddr,
+    },
+    /// This shard returned an error, either before it was ready or from its loop afterwards
+    Failed {
+        /// Which shard
+        shard: usize,
+        /// What it said
+        error: String,
+    },
+}
+
 /// The info for a specific shard in Shoal
 #[derive(Clone, Debug)]
 pub struct ShardInfo {
@@ -958,6 +986,11 @@ pub(super) struct Shard<D: ShoalDatabase> {
     memory_usage: Arc<RefCell<usize>>,
     /// The most recently used tables/partitions on this shard
     lru: Arc<RefCell<LruCache<(D::TableNames, u64), usize, BuildHasherDefault<GxHasher>>>>,
+    /// The address our client listener bound, once it has
+    ///
+    /// The config says which port to ask for; this says which one the kernel gave, which
+    /// differs when the config asked for zero.
+    bound: Option<SocketAddr>,
 }
 
 impl<D: ShoalDatabase> Shard<D>
@@ -974,19 +1007,17 @@ where
     ///
     /// * `conf` - The config to build this shard with
     /// * `comms` - The channels to the other shards on this node
-    /// * `shard_counter` - The counter assigning shard ids on this node
+    /// * `shard_id` - This shards id, minted by the pool so a failure here can still name it
     /// * `shard_count` - The number of shards on this node
     #[instrument(name = "Shard::new", skip_all, err(Debug))]
     pub async fn new(
         conf: &Conf,
         comms: Comms<D>,
-        shard_counter: &AtomicUsize,
+        shard_id: usize,
         shard_count: usize,
     ) -> Result<Self, ServerError> {
         // get a handle to our current executor
         let executor = glommio::executor();
-        // assign a shard ID from our counter (always starts at 0 per pool)
-        let shard_id = shard_counter.fetch_add(1, Ordering::Relaxed);
         // build our shard info
         let info = ShardInfo::new(shard_id);
         // create names for our high and low priority task queues
@@ -1052,6 +1083,7 @@ where
             tasks: Vec::with_capacity(100),
             memory_usage,
             lru,
+            bound: None,
         };
         Ok(shard)
     }
@@ -1082,8 +1114,11 @@ where
             }
             None => None,
         };
-        // bind our udp socket
+        // bind our tcp socket
         let tcp_sock = TcpListener::bind(self.conf.networking.to_addr())?;
+        // remember what the kernel actually gave us, which is the only answer when the config
+        // asked for port zero
+        self.bound = Some(tcp_sock.local_addr()?);
         // clone our kanal transmitter
         let node_local_tx = self.shard_local_tx.clone();
         // spawn or client listener
@@ -1154,8 +1189,9 @@ where
     ///
     /// Tables are built in `Shard::new`, so by the time a shard finishes initializing
     /// this is everything its recovery lost. There is no equivalent report across a
-    /// whole pool: `ShoalPool::start` spawns its shard threads and returns without
-    /// joining them, so no moment exists at which every shard has finished starting.
+    /// whole pool yet: `ShoalPool::ready` now knows the moment every shard has finished
+    /// starting, which is what such a report would need, and it is still filed in
+    /// `docs/src/appendix/todos.md`.
     fn report_recovery(&self) {
         // gather what every table on this shard had to discard
         let recovery = self.tables.recovery_stats();
@@ -1774,7 +1810,11 @@ where
     ///
     /// This wil return an error if a message cannot be sent to a coordinator or if a query fails
     #[allow(clippy::future_not_send)]
-    pub async fn start<'a>(mut self, should_shutdown: Arc<AtomicBool>) -> Result<(), ServerError>
+    pub async fn start<'a>(
+        mut self,
+        should_shutdown: Arc<AtomicBool>,
+        events: &std::sync::mpsc::Sender<ShardEvent>,
+    ) -> Result<(), ServerError>
     where
         for<'b> <<<D as ShoalDatabase>::ClientType as QuerySupport>::QueryKinds as Archive>::Archived:
             CheckBytes<
@@ -1783,6 +1823,18 @@ where
     {
         // initalize this shard
         self.init(should_shutdown).await?;
+        // tell the pool we are answering, and on which address
+        //
+        // `init` bound the listener, so `bound` is set by now; a shard with no address after
+        // that is a bug in `spawn_client_listener` rather than a state to report
+        let addr = self
+            .bound
+            .ok_or_else(|| ServerError::GlommioGeneric("shard ready without a listener".into()))?;
+        // the pool may have stopped listening for events, which is not this shard's problem
+        let _ = events.send(ShardEvent::Ready {
+            shard: self.info.mesh_id(),
+            addr,
+        });
         // keep handling messages until we get a shutdown command
         loop {
             // wait for a message on our mesh
@@ -1908,7 +1960,14 @@ where
 pub fn start<S: ShoalDatabase>(
     conf: Conf,
     cpus: CpuSet,
-) -> Result<(PoolThreadHandles<Result<(), ServerError>>, Arc<AtomicBool>), ServerError>
+) -> Result<
+    (
+        PoolThreadHandles<Result<(), ServerError>>,
+        Arc<AtomicBool>,
+        std::sync::mpsc::Receiver<ShardEvent>,
+    ),
+    ServerError,
+>
 where
     for<'a> <<<S as ShoalDatabase>::ClientType as QuerySupport>::QueryKinds as Archive>::Archived:
         CheckBytes<Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>>,
@@ -1926,19 +1985,38 @@ where
     let should_shutdown = Arc::new(AtomicBool::new(false));
     // A counter to assign shard IDs starting from zero, independent of executor IDs
     let shard_counter = Arc::new(AtomicUsize::new(0));
+    // the channel every shard reports its readiness or death on
+    let (events, event_rx) = std::sync::mpsc::channel();
     // setup our executor
     let executor_builder =
         LocalExecutorPoolBuilder::new(PoolPlacement::MaxSpread(shard_count, Some(cpus)));
     // build and spawn our shards on all of remaining available cores
     let shards = executor_builder.on_all_shards(
-        enclose!((comms, should_shutdown, shard_counter) move || {
+        enclose!((comms, should_shutdown, shard_counter, events) move || {
             async move {
-                // build an empty shard
-                let shard: Shard<S> = Shard::new(&conf, comms, &shard_counter, shard_count).await?;
-                // start this shard
-                shard.start(should_shutdown.clone()).await
+                // mint this shards id here rather than in `Shard::new`, so that a failure in
+                // there can still be reported under the id it would have had
+                let shard_id = shard_counter.fetch_add(1, Ordering::Relaxed);
+                // build and run this shard, keeping the outcome so it can be reported first
+                let outcome = async {
+                    // build an empty shard
+                    let shard: Shard<S> = Shard::new(&conf, comms, shard_id, shard_count).await?;
+                    // start this shard
+                    shard.start(should_shutdown.clone(), &events).await
+                }
+                .await;
+                // whoever started the pool is told about a death, whether it happened before
+                // the shard was ready or after (item 58)
+                if let Err(error) = &outcome {
+                    // the pool may already be gone, which is not this shard's problem
+                    let _ = events.send(ShardEvent::Failed {
+                        shard: shard_id,
+                        error: format!("{error:?}"),
+                    });
+                }
+                outcome
             }
         }),
     )?;
-    Ok((shards, should_shutdown))
+    Ok((shards, should_shutdown, event_rx))
 }
