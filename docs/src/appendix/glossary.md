@@ -288,7 +288,7 @@ than mistaking it for the end of the log. See
 | Node | A machine or process in a cluster | Unbuilt. One Shoal process with a `NodeId` and a storage directory ([C1](../distributed/node-identity.md)) |
 | Replica set | The copies of a piece of data | Unbuilt. The `RF` shards on `RF` distinct nodes holding a tablet, stored per tablet in the map ([C4](../distributed/tablet-map.md)) |
 | Primary | A leader node | Unbuilt. A *role* a shard plays for some tablets: the one replica that orders that tablet's writes ([C5](../distributed/replication.md)) |
-| Epoch | A term or generation | Unbuilt. A per-tablet counter incremented on every primary change; what fences a replaced primary ([C7](../distributed/failover.md)). Not the compaction *generation* |
+| Epoch | A term or generation | Unbuilt. The per-tablet leadership term, persisted and established by the tablet's own data protocol ([C13](../distributed/protocol.md#identity-and-progress)); replication messages carry it and receivers reject an obsolete one ([C7](../distributed/failover.md#fencing)). Not the compaction *generation* |
 | Consistency level | How many replicas a read or write waits for | Unbuilt. `One`/`Quorum`/`All` for writes, `One`/`Primary`/`Quorum` for reads ([C6](../distributed/reads.md)) |
 | Control plane | A separate service | Unbuilt. A thread on cpu 0 of every node running Raft, the failure detector and the rebalancer; never on a query path ([C1](../distributed/node-identity.md)) |
 | `sync` | Force to stable storage | On `StreamWriter`, issues a background write and returns. `sync_blocking` is the real one — but on glommio's `DmaStreamWriter`, `sync` *does* fsync |

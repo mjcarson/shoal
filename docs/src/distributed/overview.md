@@ -2,7 +2,8 @@
 
 **Nothing in this part is built.** These pages plan a highly available cluster of Shoal nodes.
 The `C` pages are design records; [milestones](milestones.md) name implementation gates,
-acceptance tests and benchmark evidence. They extend the unbuilt
+acceptance tests and benchmark evidence. One gate is settled: the protocol contract that precedes
+M0 was agreed on 2026-09-11 and is numbered P1–P6 in [C13](protocol.md#the-contract). They extend the unbuilt
 [Distribution](../appendix/todos.md#distribution) and
 [Rebalancing](../appendix/todos.md#rebalancing) entries.
 
@@ -29,8 +30,9 @@ shards. The control-plane core defaults to CPU 0 and is configurable for restric
 multi-process tests. Default writes are durable `Quorum`, default reads are `One`, and automatic
 removal follows a configurable grace (proposed default 30m; `null` disables it).
 
-The first draft's heartbeat-max promotion and map-only fencing are superseded. **Prefer an
-embedded Raft data protocol**, subject to the library/runtime spike in [C13](protocol.md).
+The first draft's heartbeat-max promotion and map-only fencing are superseded. **The data
+protocol is embedded Raft**, agreed at the Before-M0 gate; which library and runtime drive it
+is subject to the spike in [C13](protocol.md#decision-record).
 A control-plane placement decision cannot itself authorize a tablet primary. Table-qualified
 replication streams have explicit durable, committed, applied and checkpointed progress;
 snapshots have a stable cut and atomic installation; migrations use persisted consensus

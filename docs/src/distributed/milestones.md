@@ -1,6 +1,7 @@
 # Milestones
 
-Nothing in this chapter is implemented. Keep M0–M10 as stable identifiers; M9a/b/c refine M9
+Only the Before-M0 gate is settled ([decision record](protocol.md#decision-record), 2026-09-11);
+no numbered milestone is implemented. Keep M0–M10 as stable identifiers; M9a/b/c refine M9
 without renumbering later work. Acceptance tests live in their owning C pages and are indexed
 by [C11](testing.md#the-acceptance-test-table). Each test names one gate below. This is an order
 with dependencies and measurable exit criteria, not dates.
@@ -14,9 +15,17 @@ exact dependency source versions and benchmark provenance.
 
 ### Before M0: the protocol contract
 
+**Settled 2026-09-11.** The six clauses below are [C13's P1–P6](protocol.md#the-contract), one
+numbered property each, with the schedule that violates it and the test that owns it. The data
+protocol is Raft. The [decision record](protocol.md#decision-record) holds the evidence and pins
+the candidate libraries at exact versions; it selects none of them, which stays M1's spike. No
+code, type or dependency was added at this gate.
+
 Agree C13's failure model, table-qualified stream identity, durable quorum, committed visibility,
 control/data authority split and no cross-tablet transaction promise. Prefer embedded data Raft;
-Q1's spike selects the library/runtime and tests whether group count/batching are practical.
+~~Q1's spike selects the library/runtime and tests whether group count/batching are practical~~
+the protocol is fixed here and Q1's spike, in M1, selects the library/runtime and tests whether
+group count/batching are practical.
 The model can begin with that protocol while integration alternatives remain under evaluation.
 A custom protocol cannot bypass this gate by calling primary appointment a topology edit.
 

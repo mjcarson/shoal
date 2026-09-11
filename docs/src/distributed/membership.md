@@ -113,7 +113,9 @@ Tokio sockets or shard relays are implementation choices. Prefer direct control-
 ownership so a stalled Glommio data shard cannot stall control elections. Peer transport has
 separate control/data endpoints or a validated dispatch design; Q1/M2 settles the wiring.
 
-The original source note named 0.9.25 and an alpha 0.10 alternative. Before implementation, pin an
+The original source note named 0.9.25 and an alpha 0.10 alternative; C13's
+[decision record](protocol.md#decision-record) reads both (0.9.25 and 0.10.0-alpha.34 on
+2026-09-11) as data-plane candidates and pins neither for the control plane. Before implementation, pin an
 actual version and record source/API evidence for runtime behavior, storage completions, learner
 membership changes and network driving. Do not assume an alpha API or heartbeat extension is
 available. No handwritten-Raft fallback is planned.

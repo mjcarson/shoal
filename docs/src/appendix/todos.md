@@ -225,6 +225,8 @@ tablet-ring page deferred is [C5](../distributed/replication.md) through
 [C7](../distributed/failover.md). This entry still records *that* it is unbuilt. Nothing there is
 built either. [C13](../distributed/protocol.md) adds the embedded control/data protocol contract
 and the questions that gate implementation; no external membership or failover service is required.
+That contract was agreed on 2026-09-11 as the gate before M0 ([P1–P6](../distributed/protocol.md#the-contract)),
+which settled the protocol and pinned candidate libraries without selecting one or building anything.
 
 ### Rebalancing
 

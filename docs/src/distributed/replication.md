@@ -28,8 +28,8 @@ Keep one primary per `(TableId, range_id)` tablet. Replicas apply the same commi
 the same order. Leaderless last-writer-wins partial updates would require a different conflict
 model and storage metadata; the user chose ordered primary replication.
 
-The preferred implementation is an embedded Raft group per tablet, with library and runtime
-selection gated by C13 Q1. Cluster membership remains embedded `openraft`; it does not elect
+The implementation is an embedded Raft group per tablet, agreed at the Before-M0 gate
+([C13 P2 and P5](protocol.md#the-contract)), with library and runtime selection gated by C13 Q1. Cluster membership remains embedded `openraft`; it does not elect
 individual tablet leaders by comparing heartbeat reports. A consensus library defines the
 append, election and configuration rules, and Shoal's storage adapter must honor them.
 

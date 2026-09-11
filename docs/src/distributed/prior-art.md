@@ -87,7 +87,8 @@ Glommio runtime is not a reason to reject every deterministic schedule test.
 These links were consulted or identify APIs/contracts vital to implementation. Read the source
 for the chosen release at each gate; `latest` documentation and default branches are discovery
 links, not dependency pins. Replace/add exact release and commit permalinks in the decision record
-when Q1/Q2/Q10 settle the implementation.
+when Q1/Q2/Q10 settle the implementation. That [record](protocol.md#decision-record) exists since
+2026-09-11 and pins the Q1 candidates at the versions it read; it selects none of them yet.
 
 | Reference | Why to read it | Gate |
 | --- | --- | --- |
