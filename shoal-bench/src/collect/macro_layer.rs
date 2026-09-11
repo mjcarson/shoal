@@ -211,6 +211,7 @@ mod tests {
                 ..ScaleFacts::default()
             },
             conf: None,
+            cluster: None,
             counters,
             ops,
             runs: None,

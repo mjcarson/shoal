@@ -382,15 +382,13 @@ as much as the recovery one.
 
 ### Debug output that is not tracing
 
-Three places print directly to stdout, bypassing the level filter entirely:
-
-- `Networking::to_addr` — "listening on ..." on every call
-  (`shoal-core/src/server/conf.rs:111`).
-- `compact_if_needed` — a "Compacting ->" line on every rotation (`.../fs.rs:366-370`).
-- `PersistentSortedTable::exists` — six `println!`s including a `{:#?}` of the whole partition
-  (`.../persistent/sorted.rs:546`, `:553`, `:593`, `:594`, `:613`, `:639`).
-
-See [Known Issues](../appendix/known-issues.md#17-leftover-debug-printlns).
+~~Three places print directly to stdout, bypassing the level filter entirely: `Networking::to_addr`,
+`compact_if_needed`, and six lines in `PersistentSortedTable::exists`.~~ None is left. The last of
+them, the `listening on` line — printed once per shard, and before the bind it announced — went
+with [Resolved #38, 58, 88](../appendix/resolved/pool-readiness.md), once `ShoalPool::ready`
+reported the address every shard actually bound. The whole item is
+[Resolved #17](../appendix/resolved/leftover-printlns.md); nothing in `shoal-core/src` prints to
+stdout now.
 
 ## hotpath
 

@@ -233,7 +233,6 @@ impl Networking {
 
     /// Build the address to bind too
     pub fn to_addr(&self) -> String {
-        println!("listening on {}:{}", self.interface, self.port);
         format!("{}:{}", self.interface, self.port)
     }
 }

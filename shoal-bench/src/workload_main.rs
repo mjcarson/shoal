@@ -21,7 +21,7 @@ use shoal_core::server::trace::{self, TraceOptions};
 use shoal_bench::cli::Format;
 use shoal_bench::workloads::harness::metrics::Meters;
 use shoal_bench::workloads::harness::seed::Scale;
-use shoal_bench::workloads::harness::{self, RunRequest};
+use shoal_bench::workloads::harness::{self, RunRequest, ServerSource};
 
 /// The name this process reports itself as to a collector
 ///
@@ -49,6 +49,66 @@ enum Command {
     Run(RunArgs),
     /// Print every workload this build carries
     List(ListArgs),
+    /// Start a workload's server and hold it up for a separate driver, without running anything
+    Serve(ServeArgs),
+}
+
+/// What a server was asked for
+///
+/// The other half of `run --server`: this process is the server, another is the driver. The
+/// configuration is resolved exactly as `run` would resolve it for the same workload, so the
+/// two halves of a matched arm see one configuration, and the address the shards actually bound
+/// is printed on one line once every one of them is answering.
+#[derive(Parser, Debug)]
+struct ServeArgs {
+    /// The workload whose configuration to serve
+    #[clap(long)]
+    id: String,
+    /// The base server configuration to start from
+    #[clap(long, default_value = "shoal.yml")]
+    conf: PathBuf,
+    /// The scale the driver will run at, which decides the workload's overrides
+    #[clap(long, value_enum, default_value_t = Scale::Full)]
+    scale: Scale,
+    /// The port to bind; zero lets the kernel choose and the printed line says which
+    #[clap(long, default_value_t = 0)]
+    port: u16,
+}
+
+/// The line `serve` prints once its shards answer, followed by the bound address
+const SERVE_READY_LINE: &str = "SHOAL_WORKLOAD_SERVING";
+
+/// Starts a workload's server and holds it until killed
+///
+/// # Arguments
+///
+/// * `args` - What was asked for
+fn serve(args: &ServeArgs) -> Result<()> {
+    let Some(workload) = shoal_bench::workloads::find(&args.id) else {
+        bail!("no workload is registered as {:?}", args.id);
+    };
+    // the same resolution `run` performs, so the served configuration is the workload's own
+    let plan = workload.plan(args.scale);
+    let Some(overrides) = plan.server.overrides() else {
+        bail!("{} drives engine internals in process and has no server to serve", args.id);
+    };
+    let conf = harness::conf::resolve(&args.conf, workload.id(), overrides, args.port)?;
+    let mut pool = shoal::ShoalPool::<shoal_bench::workloads::schema::Bench>::start(conf)
+        .map_err(|error| anyhow::anyhow!("failed to start a server: {error:?}"))?;
+    // answering, on the address the shards actually bound
+    let addr = pool
+        .ready(harness::ready::TIMEOUT)
+        .map_err(|error| anyhow::anyhow!("a shard failed to start: {error:?}"))?;
+    println!("{SERVE_READY_LINE} {addr}");
+    use std::io::Write as _;
+    std::io::stdout().flush()?;
+    // hold the server up until killed, reporting a shard that dies rather than serving on
+    loop {
+        if let Some((shard, error)) = pool.failure() {
+            bail!("shard {shard} died: {error}");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
 }
 
 /// What a run was asked for
@@ -91,6 +151,19 @@ struct RunArgs {
     /// queries. Sampling each side independently would leave nothing to join.
     #[clap(long, default_value_t = 1)]
     stage_sample: usize,
+    /// Drive a server somebody else started, at this address, rather than starting one
+    ///
+    /// The separate load driver of F36. `--conf` is still read, for the client's TLS settings
+    /// and the facts the capture records; `--port` is ignored. A workload that restarts its
+    /// server between seeding and measuring is refused, since it does not own this one.
+    #[clap(long)]
+    server: Option<String>,
+    /// A json file describing the cluster the server belongs to, recorded verbatim
+    ///
+    /// The shape is `ClusterFacts` in `shoal_bench::model::macro_layer`. Only meaningful with
+    /// `--server`, since a server this process starts is one node with no cluster around it.
+    #[clap(long, requires = "server")]
+    cluster_facts: Option<PathBuf>,
 }
 
 /// What a listing was asked for
@@ -211,6 +284,19 @@ fn run(args: &RunArgs) -> Result<()> {
             label: args.label.clone(),
             stage_json: args.stage_json.clone(),
             stage_sample: args.stage_sample,
+            server: match &args.server {
+                Some(addr) => ServerSource::External(addr.clone()),
+                None => ServerSource::InProcess,
+            },
+            cluster: match &args.cluster_facts {
+                Some(path) => {
+                    let text = std::fs::read_to_string(path)
+                        .with_context(|| format!("failed to read {}", path.display()))?;
+                    Some(serde_json::from_str(&text)
+                        .with_context(|| format!("failed to parse {}", path.display()))?)
+                }
+                None => None,
+            },
         },
     )?;
     // and write it where the runner will collect it from
@@ -247,6 +333,7 @@ fn main() {
     let result = match &cli.command {
         Command::Run(args) => run(args),
         Command::List(args) => list(args),
+        Command::Serve(args) => serve(args),
     };
     if let Err(error) = result {
         eprintln!("error: {error:#}");
@@ -278,6 +365,8 @@ mod tests {
             label: label.map(str::to_string),
             stage_json: None,
             stage_sample: 1,
+            server: None,
+            cluster_facts: None,
         }
     }
 

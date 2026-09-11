@@ -78,9 +78,8 @@ async fn start_encrypted(
     // generate a certificate for this run and point a server at it
     let cert = TestCertificate::new(temp_dir);
     let conf = utils::build_tls_config(temp_dir, &cert);
-    let addr = format!("127.0.0.1:{}", conf.networking.port);
-    let pool = ShoalPool::<TlsDb>::start(conf)?;
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    let mut pool = ShoalPool::<TlsDb>::start(conf)?;
+    let addr = pool.ready(utils::READY_TIMEOUT)?.to_string();
     // and a client that trusts it and nothing else
     let client =
         Shoal::<TlsDbClient>::with_options(&addr, ClientOptions::new().tls(cert.client_options()))
@@ -221,9 +220,8 @@ async fn scram_over_tls_authenticates() -> Result<(), TestError> {
     let temp_dir = utils::test_dir();
     let cert = TestCertificate::new(&temp_dir);
     let conf = utils::build_tls_auth_config(&temp_dir, &cert, USER, PASSWORD);
-    let addr = format!("127.0.0.1:{}", conf.networking.port);
-    let _pool = ShoalPool::<TlsDb>::start(conf)?;
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    let mut pool = ShoalPool::<TlsDb>::start(conf)?;
+    let addr = pool.ready(utils::READY_TIMEOUT)?.to_string();
     // a client with both halves gets in
     let client = Shoal::<TlsDbClient>::with_options(
         &addr,
@@ -247,9 +245,8 @@ async fn tls_does_not_authenticate_on_its_own() -> Result<(), TestError> {
     let temp_dir = utils::test_dir();
     let cert = TestCertificate::new(&temp_dir);
     let conf = utils::build_tls_auth_config(&temp_dir, &cert, USER, PASSWORD);
-    let addr = format!("127.0.0.1:{}", conf.networking.port);
-    let _pool = ShoalPool::<TlsDb>::start(conf)?;
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    let mut pool = ShoalPool::<TlsDb>::start(conf)?;
+    let addr = pool.ready(utils::READY_TIMEOUT)?.to_string();
     // the right certificate and the wrong password is still a refusal
     let refused = Shoal::<TlsDbClient>::with_options(
         &addr,
@@ -276,9 +273,8 @@ async fn a_plaintext_client_is_refused_by_a_tls_server() -> Result<(), TestError
     let temp_dir = utils::test_dir();
     let cert = TestCertificate::new(&temp_dir);
     let conf = utils::build_tls_config(&temp_dir, &cert);
-    let addr = format!("127.0.0.1:{}", conf.networking.port);
-    let _pool = ShoalPool::<TlsDb>::start(conf)?;
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    let mut pool = ShoalPool::<TlsDb>::start(conf)?;
+    let addr = pool.ready(utils::READY_TIMEOUT)?.to_string();
     // a client that offers no tls at all cannot complete this server's first handshake
     let refused = Shoal::<TlsDbClient>::new(&addr).await;
     assert!(
@@ -298,9 +294,8 @@ async fn a_tls_client_is_refused_by_a_plaintext_server() -> Result<(), TestError
     let temp_dir = utils::test_dir();
     let cert = TestCertificate::new(&temp_dir);
     let conf = utils::build_config(&temp_dir);
-    let addr = format!("127.0.0.1:{}", conf.networking.port);
-    let _pool = ShoalPool::<TlsDb>::start(conf)?;
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    let mut pool = ShoalPool::<TlsDb>::start(conf)?;
+    let addr = pool.ready(utils::READY_TIMEOUT)?.to_string();
     // the server answers a ClientHello with a shoal HelloAck, which is not a TLS record
     let refused =
         Shoal::<TlsDbClient>::with_options(&addr, ClientOptions::new().tls(cert.client_options()))

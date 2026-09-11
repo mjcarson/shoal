@@ -97,6 +97,7 @@
   - [F33. The chart answers where you point, and the capture list says whether it can](features/chart-readout.md)
   - [F34. A capture that honors its tracing config](features/benchmark-tracing.md)
   - [F35. A trace context on the wire](features/wire-trace-context.md)
+  - [F36. The harness and the facts](features/cluster-harness.md)
 
 # Direction
 
@@ -146,6 +147,7 @@
   - [13. Eviction logging can underflow](appendix/resolved/eviction-log-underflow.md)
   - [14. Empty rotated intent logs were never deleted](appendix/resolved/empty-rotated-logs.md)
   - [16, 51. A partition read that failed panicked its shard and stranded its queries](appendix/resolved/partition-load-failure.md)
+  - [17. Leftover debug `println!`s](appendix/resolved/leftover-printlns.md)
   - [18, 50. Core exclusion was ignored and shard placement was random](appendix/resolved/excluded-cores-typo.md)
   - [20. The storage tests were entirely commented out](appendix/resolved/storage-tests.md)
   - [20. Orphaned source files](appendix/resolved/orphaned-sources.md)
@@ -154,6 +156,7 @@
   - [26, 39. A multi-partition get answered in an arbitrary order](appendix/resolved/partition-order.md)
   - [31. Multi-log recovery discarded already-replayed intents](appendix/resolved/multi-log-recovery.md)
   - [34. The request length prefix is unvalidated](appendix/resolved/unvalidated-length-prefix.md)
+  - [38, 58, 88. The pool returned before its shards had bound](appendix/resolved/pool-readiness.md)
   - [44. A compaction discarded a damaged log's tail in silence](appendix/resolved/compaction-tail-loss.md)
   - [45. The storage marker's format field was written and never read](appendix/resolved/storage-marker-format.md)
   - [48. A query that does not parse was answered with silence](appendix/resolved/query-error-display.md)

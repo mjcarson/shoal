@@ -1,9 +1,13 @@
 # Distributed Shoal
 
-**Nothing in this part is built.** These pages plan a highly available cluster of Shoal nodes.
-The `C` pages are design records; [milestones](milestones.md) name implementation gates,
-acceptance tests and benchmark evidence. One gate is settled: the protocol contract that precedes
-M0 was agreed on 2026-09-11 and is numbered P1–P6 in [C13](protocol.md#the-contract). They extend the unbuilt
+~~**Nothing in this part is built.**~~ **Nothing distributed in this part is built.** These pages
+plan a highly available cluster of Shoal nodes. The `C` pages are design records;
+[milestones](milestones.md) name implementation gates, acceptance tests and benchmark evidence.
+Two gates are met: the protocol contract that precedes M0 was agreed on 2026-09-11 and is
+numbered P1–P6 in [C13](protocol.md#the-contract), and
+[M0](milestones.md#m0-step-0-the-harness-and-the-facts) — the executable model of that contract,
+the process fixture, and the benchmark's cluster record — was delivered the same day as
+[F36](../features/cluster-harness.md). No node speaks to a node yet. They extend the unbuilt
 [Distribution](../appendix/todos.md#distribution) and
 [Rebalancing](../appendix/todos.md#rebalancing) entries.
 

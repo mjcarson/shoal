@@ -1,0 +1,124 @@
+{
+  "format": 1,
+  "name": "reads_and_checkpoints_see_appended_suffix",
+  "seed": 0,
+  "params": {
+    "nodes": 3,
+    "learners": [],
+    "async_nodes": [],
+    "tablets": [
+      {
+        "table": 1,
+        "range": 0
+      }
+    ],
+    "steps": 400,
+    "ops": 48,
+    "keys": 6,
+    "max_retries": 1,
+    "max_down": 1,
+    "dup_window": 8,
+    "weights": {
+      "deliver": 40,
+      "drop": 3,
+      "duplicate": 4,
+      "fsync": 20,
+      "election": 3,
+      "heartbeat": 8,
+      "report": 3,
+      "client": 10,
+      "read": 6,
+      "retry": 4,
+      "timeout": 3,
+      "crash": 2,
+      "restart": 4,
+      "pause": 1,
+      "resume": 3,
+      "checkpoint": 2,
+      "mark_down": 2
+    }
+  },
+  "policy": {
+    "election": "log_matching",
+    "quorum": "durable_distinct_voters",
+    "duplicate_ack": "watermark",
+    "async_receipt": "not_durable",
+    "visibility": "appended_suffix",
+    "ack_timing": "after_fsync"
+  },
+  "events": [
+    {
+      "kind": "election_timeout",
+      "node": 1,
+      "tablet": {
+        "table": 1,
+        "range": 0
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "node": 1
+        },
+        "to": {
+          "node": 2
+        },
+        "tablet": {
+          "table": 1,
+          "range": 0
+        },
+        "term": 1,
+        "body": {
+          "request_vote": {
+            "last_index": 0,
+            "last_term": 0
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "node": 2
+        },
+        "to": {
+          "node": 1
+        },
+        "tablet": {
+          "table": 1,
+          "range": 0
+        },
+        "term": 1,
+        "body": {
+          "vote_response": {
+            "granted": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "client_invoke",
+      "attempt": {
+        "id": 5,
+        "retry": 0
+      },
+      "tablet": {
+        "table": 1,
+        "range": 0
+      },
+      "op": {
+        "read": {
+          "key": 5
+        }
+      },
+      "target": 1
+    }
+  ],
+  "expected": {
+    "property": "P4",
+    "step": 3,
+    "detail": "P4: node 1 answered a read of key 5 on tablet (1,0) from index 1 with only 0 committed"
+  }
+}

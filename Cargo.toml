@@ -8,6 +8,7 @@ members = [
     "shoal-client-check",
     "shoal-core",
     "shoal-derive",
+    "shoal-model",
     "shoal-proto",
     "shoal-top",
     "shoalctl",

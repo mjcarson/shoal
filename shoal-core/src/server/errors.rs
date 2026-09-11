@@ -68,6 +68,19 @@ pub enum ServerError {
     /// This covers both halves of taking the wire: a certificate that could not be loaded, which
     /// stops the server before it listens, and a handshake that failed, which ends one connection.
     Tls(TlsError),
+    /// A shard that failed to start, or died after it had
+    ///
+    /// The error is carried as text because it crossed a thread boundary from the shard that hit
+    /// it, and what the pool's owner needs is to be told at all - which nothing did before
+    /// [item 58](../../../docs/src/appendix/resolved/unreported-shard-death.md) - rather than to
+    /// match on it.
+    ShardFailed { shard: usize, error: String },
+    /// Not every shard reported ready before the deadline
+    ///
+    /// `ready` of `of` shards had bound and joined; the rest were still starting, or wedged. A
+    /// shard that failed outright is reported as [`ServerError::ShardFailed`] instead, so this
+    /// is only ever the slow case.
+    ReadyTimeout { ready: usize, of: usize, timeout: Duration },
 }
 
 impl From<TlsError> for ServerError {

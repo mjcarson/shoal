@@ -290,6 +290,9 @@ than mistaking it for the end of the log. See
 | Primary | A leader node | Unbuilt. A *role* a shard plays for some tablets: the one replica that orders that tablet's writes ([C5](../distributed/replication.md)) |
 | Epoch | A term or generation | Unbuilt. The per-tablet leadership term, persisted and established by the tablet's own data protocol ([C13](../distributed/protocol.md#identity-and-progress)); replication messages carry it and receivers reject an obsolete one ([C7](../distributed/failover.md#fencing)). Not the compaction *generation* |
 | Consistency level | How many replicas a read or write waits for | Unbuilt. `One`/`Quorum`/`All` for writes, `One`/`Primary`/`Quorum` for reads ([C6](../distributed/reads.md)) |
+| Fixture | A test's setup | The cluster fixture under `shoal/tests/cluster/` ([F36](../features/cluster-harness.md)): real servers and mock peers as child processes on port zero, with directed links, pause, kill and cleanup — no peer protocol yet |
+| Schedule | A timetable | An explicit list of events the protocol model in `shoal-model` applies in order: generated from a seed, written by a builder, saved as JSON, replayed and minimized. Every subsequence of one is one ([F36](../features/cluster-harness.md)) |
+| Oracle | Prophecy | The sequential state machine `shoal-model` judges a history against, one tablet and one key at a time, with successful, rejected and unknown outcomes held to three different contracts ([C11](../distributed/testing.md#the-write-ledger)) |
 | Control plane | A separate service | Unbuilt. A thread on cpu 0 of every node running Raft, the failure detector and the rebalancer; never on a query path ([C1](../distributed/node-identity.md)) |
 | `sync` | Force to stable storage | On `StreamWriter`, issues a background write and returns. `sync_blocking` is the real one — but on glommio's `DmaStreamWriter`, `sync` *does* fsync |
 

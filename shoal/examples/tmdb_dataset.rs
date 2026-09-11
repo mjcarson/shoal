@@ -806,10 +806,10 @@ fn load_conf(path: &Path) -> Conf {
 ///
 /// * `addr` - The address the server is coming up on
 async fn connect(addr: &str) -> Result<Shoal<TmdbClient>, Errors> {
-    // `ShoalPool::start` spawns its shards and returns without waiting for them to bind, so the
-    // first connection can arrive before the listener does
+    // `ShoalPool::ready` has already waited for every shard to bind, so one attempt is enough;
+    // the retry exists because a loaded machine can still refuse the very first connection
     let mut last = None;
-    for _ in 0..200 {
+    for _ in 0..20 {
         match Shoal::<TmdbClient>::new(addr).await {
             Ok(client) => return Ok(client),
             Err(error) => last = Some(error),
@@ -835,8 +835,10 @@ async fn main() -> Result<(), Errors> {
     // setup tracing/telemetry. the guard has to outlive every span below it, because dropping it
     // is what flushes whatever the exporter has queued
     let traces = shoal_core::server::trace::setup(&conf);
-    // start one shard per configured core
-    let pool = ShoalPool::<Tmdb>::start(conf).expect("failed to start shoal");
+    // start one shard per configured core, and wait until every one of them is answering
+    let mut pool = ShoalPool::<Tmdb>::start(conf).expect("failed to start shoal");
+    pool.ready(std::time::Duration::from_secs(30))
+        .expect("a shard failed to start");
     let client = Arc::new(connect(&addr).await?);
     println!();
     let counts = Arc::new(Counts::default());

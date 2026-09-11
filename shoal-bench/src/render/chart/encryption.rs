@@ -608,6 +608,7 @@ mod tests {
                 // the transport pair varies encryption and nothing about the writers
                 ..ConfFacts::default()
             }),
+            cluster: None,
             counters: BTreeMap::new(),
             ops: stats(median),
             runs: Some(runs_ns.len() as u32),

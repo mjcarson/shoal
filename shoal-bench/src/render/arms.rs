@@ -394,6 +394,7 @@ mod tests {
                     seed: 42,
                     scale: scale.clone(),
                     conf: None,
+                    cluster: None,
                     counters: BTreeMap::new(),
                     ops: BTreeMap::new(),
                     runs: None,

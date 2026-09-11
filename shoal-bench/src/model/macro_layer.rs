@@ -228,6 +228,57 @@ pub struct WorkloadRun {
     pub counters: BTreeMap<String, u64>,
 }
 
+/// The cluster a workload ran against, when it ran against one
+///
+/// A separate record rather than more fields on [`ScaleFacts`], for the reason
+/// [C10](../../../docs/src/distributed/performance.md) gives: a historical single-node capture
+/// has to keep meaning what it meant, so it carries no cluster record at all rather than a
+/// record full of defaults, and `compare` refuses to read one against the other silently. Every
+/// field here is a fact about the environment, not a measurement; the measurements stay where
+/// they were. Delivered by [F36](../../../docs/src/features/cluster-harness.md), which fills in
+/// nothing but the driver placement: no workload runs against a cluster yet.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClusterFacts {
+    /// How many server processes served the workload
+    pub nodes: u32,
+    /// The replication factor the cluster was asked for
+    pub desired_rf: u32,
+    /// The replication factor the tablets actually had
+    pub active_rf: u32,
+    /// The write consistency the workload used, `Quorum` or another named policy
+    pub write_policy: String,
+    /// The read consistency the workload used, `One` or another named policy
+    pub read_policy: String,
+    /// The durability the acknowledgement waited on
+    pub durability: String,
+    /// Where the load driver ran: `in-process` with the server, or `separate`
+    pub driver: String,
+    /// The cores each node was given, in node order
+    pub cores: Vec<NodeCores>,
+    /// The cores the driver was given; empty when it claimed none
+    #[serde(default)]
+    pub driver_cores: Vec<usize>,
+    /// How many tables the schema had
+    pub tables: u32,
+    /// How many tablets those tables were split into
+    pub tablets: u32,
+    /// The offered load, in queries per second, for an open-loop arm
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offered_load: Option<u64>,
+    /// Whether the nodes shared one machine, which is a redundancy experiment and not scale-out
+    pub emulated: bool,
+}
+
+/// The cores one node was given
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeCores {
+    /// The physical cores its data shards ran on; empty when it shared cores
+    pub data: Vec<usize>,
+    /// The core its control thread ran on, once nodes have one
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control: Option<usize>,
+}
+
 /// One workload's result within a capture
 ///
 /// The fields from `runs` down are `None` in the per run file a workload writes and `Some` in the
@@ -244,6 +295,9 @@ pub struct WorkloadCapture {
     /// The server settings it ran against, if it needed a server
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conf: Option<ConfFacts>,
+    /// The cluster it ran against, if it ran against one; absent for every single-node capture
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cluster: Option<ClusterFacts>,
     /// How many rows it moved, per counter
     pub counters: BTreeMap<String, u64>,
     /// The latencies of the run that was kept, per operation
@@ -691,6 +745,7 @@ impl MacroCaptureV1 {
             },
             // version 1 captures did not record what they ran against
             conf: None,
+            cluster: None,
             counters,
             ops,
             runs: self.runs,

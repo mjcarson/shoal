@@ -1,0 +1,763 @@
+{
+  "format": 1,
+  "name": "election_by_heartbeat_max_report",
+  "seed": 0,
+  "params": {
+    "nodes": 3,
+    "learners": [],
+    "async_nodes": [],
+    "tablets": [
+      {
+        "table": 1,
+        "range": 0
+      }
+    ],
+    "steps": 400,
+    "ops": 48,
+    "keys": 6,
+    "max_retries": 1,
+    "max_down": 1,
+    "dup_window": 8,
+    "weights": {
+      "deliver": 40,
+      "drop": 3,
+      "duplicate": 4,
+      "fsync": 20,
+      "election": 3,
+      "heartbeat": 8,
+      "report": 3,
+      "client": 10,
+      "read": 6,
+      "retry": 4,
+      "timeout": 3,
+      "crash": 2,
+      "restart": 4,
+      "pause": 1,
+      "resume": 3,
+      "checkpoint": 2,
+      "mark_down": 2
+    }
+  },
+  "policy": {
+    "election": "heartbeat_max_report",
+    "quorum": "durable_distinct_voters",
+    "duplicate_ack": "watermark",
+    "async_receipt": "not_durable",
+    "visibility": "committed_applied",
+    "ack_timing": "after_fsync"
+  },
+  "events": [
+    {
+      "kind": "election_timeout",
+      "node": 1,
+      "tablet": {
+        "table": 1,
+        "range": 0
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "node": 1
+        },
+        "to": {
+          "node": 2
+        },
+        "tablet": {
+          "table": 1,
+          "range": 0
+        },
+        "term": 1,
+        "body": {
+          "request_vote": {
+            "last_index": 0,
+            "last_term": 0
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "node": 2
+        },
+        "to": {
+          "node": 1
+        },
+        "tablet": {
+          "table": 1,
+          "range": 0
+        },
+        "term": 1,
+        "body": {
+          "vote_response": {
+            "granted": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "storage_complete",
+      "node": 1,
+      "tablet": {
+        "table": 1,
+        "range": 0
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "node": 1
+        },
+        "to": {
+          "node": 3
+        },
+        "tablet": {
+          "table": 1,
+          "range": 0
+        },
+        "term": 1,
+        "body": {
+          "append_entries": {
+            "prev_index": 0,
+            "prev_term": 0,
+            "entries": [
+              {
+                "tablet": {
+                  "table": 1,
+                  "range": 0
+                },
+                "index": 1,
+                "term": 1,
+                "command": "noop"
+              }
+            ],
+            "leader_commit": 0
+          }
+        }
+      }
+    },
+    {
+      "kind": "storage_complete",
+      "node": 3,
+      "tablet": {
+        "table": 1,
+        "range": 0
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "node": 3
+        },
+        "to": {
+          "node": 1
+        },
+        "tablet": {
+          "table": 1,
+          "range": 0
+        },
+        "term": 1,
+        "body": {
+          "append_response": {
+            "success": true,
+            "durable_to": 1,
+            "durable": true,
+            "conflict_hint": 0
+          }
+        }
+      }
+    },
+    {
+      "kind": "client_invoke",
+      "attempt": {
+        "id": 8,
+        "retry": 0
+      },
+      "tablet": {
+        "table": 1,
+        "range": 0
+      },
+      "op": {
+        "mutate": {
+          "insert": {
+            "key": 0,
+            "value": 1008
+          }
+        }
+      },
+      "target": 1
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "node": 1
+        },
+        "to": {
+          "node": 2
+        },
+        "tablet": {
+          "table": 1,
+          "range": 0
+        },
+        "term": 1,
+        "body": {
+          "append_entries": {
+            "prev_index": 0,
+            "prev_term": 0,
+            "entries": [
+              {
+                "tablet": {
+                  "table": 1,
+                  "range": 0
+                },
+                "index": 1,
+                "term": 1,
+                "command": "noop"
+              },
+              {
+                "tablet": {
+                  "table": 1,
+                  "range": 0
+                },
+                "index": 2,
+                "term": 1,
+                "command": {
+                  "client": {
+                    "attempt": {
+                      "id": 8,
+                      "retry": 0
+                    },
+                    "op": {
+                      "insert": {
+                        "key": 0,
+                        "value": 1008
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "leader_commit": 1
+          }
+        }
+      }
+    },
+    {
+      "kind": "storage_complete",
+      "node": 2,
+      "tablet": {
+        "table": 1,
+        "range": 0
+      }
+    },
+    {
+      "kind": "storage_complete",
+      "node": 1,
+      "tablet": {
+        "table": 1,
+        "range": 0
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "node": 1
+        },
+        "to": {
+          "node": 3
+        },
+        "tablet": {
+          "table": 1,
+          "range": 0
+        },
+        "term": 1,
+        "body": {
+          "append_entries": {
+            "prev_index": 1,
+            "prev_term": 1,
+            "entries": [
+              {
+                "tablet": {
+                  "table": 1,
+                  "range": 0
+                },
+                "index": 2,
+                "term": 1,
+                "command": {
+                  "client": {
+                    "attempt": {
+                      "id": 8,
+                      "retry": 0
+                    },
+                    "op": {
+                      "insert": {
+                        "key": 0,
+                        "value": 1008
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "leader_commit": 1
+          }
+        }
+      }
+    },
+    {
+      "kind": "election_timeout",
+      "node": 3,
+      "tablet": {
+        "table": 1,
+        "range": 0
+      }
+    },
+    {
+      "kind": "report",
+      "node": 3,
+      "tablet": {
+        "table": 1,
+        "range": 0
+      }
+    },
+    {
+      "kind": "election_timeout",
+      "node": 3,
+      "tablet": {
+        "table": 1,
+        "range": 0
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "node": 3
+        },
+        "to": "observer",
+        "tablet": {
+          "table": 1,
+          "range": 0
+        },
+        "term": 2,
+        "body": {
+          "progress_report": {
+            "last_index": 2,
+            "last_term": 1,
+            "leader": false
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "node": 3
+        },
+        "to": {
+          "node": 2
+        },
+        "tablet": {
+          "table": 1,
+          "range": 0
+        },
+        "term": 3,
+        "body": {
+          "request_vote": {
+            "last_index": 2,
+            "last_term": 1
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "node": 2
+        },
+        "to": {
+          "node": 3
+        },
+        "tablet": {
+          "table": 1,
+          "range": 0
+        },
+        "term": 3,
+        "body": {
+          "vote_response": {
+            "granted": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "node": 3
+        },
+        "to": {
+          "node": 1
+        },
+        "tablet": {
+          "table": 1,
+          "range": 0
+        },
+        "term": 3,
+        "body": {
+          "append_entries": {
+            "prev_index": 2,
+            "prev_term": 1,
+            "entries": [
+              {
+                "tablet": {
+                  "table": 1,
+                  "range": 0
+                },
+                "index": 3,
+                "term": 3,
+                "command": "noop"
+              }
+            ],
+            "leader_commit": 1
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "node": 3
+        },
+        "to": {
+          "node": 2
+        },
+        "tablet": {
+          "table": 1,
+          "range": 0
+        },
+        "term": 3,
+        "body": {
+          "append_entries": {
+            "prev_index": 2,
+            "prev_term": 1,
+            "entries": [
+              {
+                "tablet": {
+                  "table": 1,
+                  "range": 0
+                },
+                "index": 3,
+                "term": 3,
+                "command": "noop"
+              }
+            ],
+            "leader_commit": 1
+          }
+        }
+      }
+    },
+    {
+      "kind": "election_timeout",
+      "node": 1,
+      "tablet": {
+        "table": 1,
+        "range": 0
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "node": 1
+        },
+        "to": {
+          "node": 2
+        },
+        "tablet": {
+          "table": 1,
+          "range": 0
+        },
+        "term": 4,
+        "body": {
+          "request_vote": {
+            "last_index": 3,
+            "last_term": 3
+          }
+        }
+      }
+    },
+    {
+      "kind": "storage_complete",
+      "node": 1,
+      "tablet": {
+        "table": 1,
+        "range": 0
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "node": 2
+        },
+        "to": {
+          "node": 1
+        },
+        "tablet": {
+          "table": 1,
+          "range": 0
+        },
+        "term": 4,
+        "body": {
+          "vote_response": {
+            "granted": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "storage_complete",
+      "node": 2,
+      "tablet": {
+        "table": 1,
+        "range": 0
+      }
+    },
+    {
+      "kind": "report",
+      "node": 1,
+      "tablet": {
+        "table": 1,
+        "range": 0
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "node": 1
+        },
+        "to": {
+          "node": 2
+        },
+        "tablet": {
+          "table": 1,
+          "range": 0
+        },
+        "term": 4,
+        "body": {
+          "append_entries": {
+            "prev_index": 3,
+            "prev_term": 3,
+            "entries": [
+              {
+                "tablet": {
+                  "table": 1,
+                  "range": 0
+                },
+                "index": 4,
+                "term": 4,
+                "command": "noop"
+              }
+            ],
+            "leader_commit": 1
+          }
+        }
+      }
+    },
+    {
+      "kind": "client_invoke",
+      "attempt": {
+        "id": 39,
+        "retry": 0
+      },
+      "tablet": {
+        "table": 1,
+        "range": 0
+      },
+      "op": {
+        "mutate": {
+          "delete": {
+            "key": 5
+          }
+        }
+      },
+      "target": 1
+    },
+    {
+      "kind": "storage_complete",
+      "node": 1,
+      "tablet": {
+        "table": 1,
+        "range": 0
+      }
+    },
+    {
+      "kind": "storage_complete",
+      "node": 2,
+      "tablet": {
+        "table": 1,
+        "range": 0
+      }
+    },
+    {
+      "kind": "client_invoke",
+      "attempt": {
+        "id": 40,
+        "retry": 0
+      },
+      "tablet": {
+        "table": 1,
+        "range": 0
+      },
+      "op": {
+        "mutate": {
+          "cas": {
+            "key": 4,
+            "expected": 1022,
+            "value": 1040
+          }
+        }
+      },
+      "target": 1
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "node": 1
+        },
+        "to": {
+          "node": 3
+        },
+        "tablet": {
+          "table": 1,
+          "range": 0
+        },
+        "term": 4,
+        "body": {
+          "append_entries": {
+            "prev_index": 3,
+            "prev_term": 3,
+            "entries": [
+              {
+                "tablet": {
+                  "table": 1,
+                  "range": 0
+                },
+                "index": 4,
+                "term": 4,
+                "command": "noop"
+              },
+              {
+                "tablet": {
+                  "table": 1,
+                  "range": 0
+                },
+                "index": 5,
+                "term": 4,
+                "command": {
+                  "client": {
+                    "attempt": {
+                      "id": 39,
+                      "retry": 0
+                    },
+                    "op": {
+                      "delete": {
+                        "key": 5
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "tablet": {
+                  "table": 1,
+                  "range": 0
+                },
+                "index": 6,
+                "term": 4,
+                "command": {
+                  "client": {
+                    "attempt": {
+                      "id": 40,
+                      "retry": 0
+                    },
+                    "op": {
+                      "cas": {
+                        "key": 4,
+                        "expected": 1022,
+                        "value": 1040
+                      }
+                    }
+                  }
+                }
+              }
+            ],
+            "leader_commit": 1
+          }
+        }
+      }
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": {
+          "node": 1
+        },
+        "to": "observer",
+        "tablet": {
+          "table": 1,
+          "range": 0
+        },
+        "term": 4,
+        "body": {
+          "progress_report": {
+            "last_index": 4,
+            "last_term": 4,
+            "leader": true
+          }
+        }
+      }
+    },
+    {
+      "kind": "mark_down",
+      "node": 1
+    },
+    {
+      "kind": "deliver",
+      "msg": {
+        "from": "observer",
+        "to": {
+          "node": 3
+        },
+        "tablet": {
+          "table": 1,
+          "range": 0
+        },
+        "term": 5,
+        "body": {
+          "promote": {
+            "term": 5
+          }
+        }
+      }
+    }
+  ],
+  "expected": {
+    "property": "P5",
+    "step": 34,
+    "detail": "P5: node 3 became leader of tablet (1,0) in term 5 by promotion with votes [3] of voters [1, 2, 3]; its log ends at 6, the committed prefix ends at 4"
+  }
+}

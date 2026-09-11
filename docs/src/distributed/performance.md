@@ -11,9 +11,15 @@ committed work, latency tails and recovery debt rather than a short-lived acknow
 
 `shoal-bench` runs one workload arm at a time, records provenance, compares committed captures and
 renders the performance chapter. The frozen B1 baseline stays unchanged. Workload ids are stable
-and their positions influence port allocation. Core selection is configurable, but logical CPU 0
-is excluded and the driver is not universally pinned. `NoStorage::commit` does no serialization;
-its replication benchmark needs C5's common command path.
+and their positions influence port allocation — since [F36](../features/cluster-harness.md) the
+historical assignments are frozen in `docs/perf/ports.json` and a test holds every id to them,
+and cluster arms get a block of their own above that range. Core selection is configurable, but
+logical CPU 0 is excluded and the driver is not universally pinned. F36 added the
+`ClusterFacts` record this page asks for below, absent from every single-node capture and named by
+`compare` rather than compared across, and the separate load driver: `shoal-workload serve` starts
+a workload's server and `run --server` drives it from another process. No workload runs against a
+cluster yet. `NoStorage::commit` does no serialization; its replication benchmark needs C5's
+common command path.
 
 ## The design
 

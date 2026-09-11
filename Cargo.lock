@@ -5181,11 +5181,13 @@ dependencies = [
  "csv",
  "deepsize2",
  "futures",
+ "libc",
  "opentelemetry",
  "opentelemetry_sdk",
  "rcgen",
  "rkyv 0.8.12",
  "serde",
+ "serde_json",
  "serde_yaml",
  "shoal-client",
  "shoal-core",
@@ -5289,6 +5291,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "shoal-proto",
+ "socket2",
  "tempfile",
  "tracing",
  "tracing-opentelemetry",
@@ -5304,6 +5307,14 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.108",
+]
+
+[[package]]
+name = "shoal-model"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

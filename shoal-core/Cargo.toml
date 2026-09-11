@@ -70,6 +70,9 @@ rustls = { version = "0.23", default-features = false, features = ["std", "aws-l
 rustls-pki-types = "1"
 rustls-pemfile = "2"
 libc = "0.2"
+# the port-zero reservation `ShoalPool::start` holds while its shards bind (F36). the version
+# glommio already resolves, so the lockfile does not grow
+socket2 = "0.6"
 
 [dev-dependencies]
 tempfile = "3"

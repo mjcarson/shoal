@@ -28,7 +28,7 @@ use std::path::Path;
 use anyhow::{bail, Context as _, Result};
 use shoal::{Shoal, ShoalPool};
 
-use crate::model::macro_layer::{MacroCaptureV2, WorkloadCapture};
+use crate::model::macro_layer::{ClusterFacts, MacroCaptureV2, WorkloadCapture};
 use crate::workloads::schema::{Bench, BenchClient, ItemExists};
 use crate::workloads::workload::{Context, Workload};
 
@@ -49,6 +49,26 @@ pub struct RunRequest {
     pub stage_json: Option<std::path::PathBuf>,
     /// Keep a stage record for one in every this many queries
     pub stage_sample: usize,
+    /// Where the server comes from
+    pub server: ServerSource,
+    /// The cluster the server belongs to, when the caller started one; recorded verbatim
+    pub cluster: Option<ClusterFacts>,
+}
+
+/// Where a workload's server comes from
+///
+/// In process is what every capture has done since [F8](../../../docs/src/features/purpose-built-workloads.md).
+/// External is the separate load driver [C10](../../../docs/src/distributed/performance.md) asks
+/// for: somebody else - a cluster fixture, a person - started the server, and this process only
+/// drives it. The configuration file is still resolved, because the client needs its TLS
+/// settings and the capture records its facts, but nothing checks that the server was started
+/// from it: the facts are the caller's claim.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ServerSource {
+    /// Start a `ShoalPool` in this process and stop it afterwards
+    InProcess,
+    /// Drive a server somebody else started, at this address
+    External(String),
 }
 
 /// Runs one workload and returns the capture describing it
@@ -95,15 +115,41 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
             (Some(conf::facts(&conf)), addr, Some(conf))
         }
     };
+    // an external server has to be one the workload could have started for itself, and one it
+    // never needs to restart: a server it does not own is one it cannot cycle
+    let addr = match &request.server {
+        ServerSource::InProcess => addr,
+        ServerSource::External(external) => {
+            if conf.is_none() {
+                bail!(
+                    "{} drives engine internals in process and cannot run against an external server",
+                    workload.id()
+                );
+            }
+            if plan.server.restarts() {
+                bail!(
+                    "{} needs a fresh server between seeding and measuring, which an external server cannot give",
+                    workload.id()
+                );
+            }
+            external.clone()
+        }
+    };
     // build the client runtime. the shards own their own cores, so this stays on the rest
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .thread_name("workload-client")
         .build()
         .context("failed to build the client runtime")?;
-    // start the shards. this returns before they have bound, which is what the readiness probe is
-    // for
-    let mut pool = start(conf.clone(), &runtime, &addr)?;
+    // start the shards and wait until they answer - or, for a server somebody else started,
+    // only wait until it answers
+    let mut pool = match &request.server {
+        ServerSource::InProcess => start(conf.clone(), &runtime, &addr)?,
+        ServerSource::External(_) => {
+            probe(&runtime, &addr, conf.as_ref().and_then(conf::client_tls))?;
+            None
+        }
+    };
     // put whatever this workload reads into the server. deliberately outside the timing below:
     // a read workload's numbers must describe reading, not the writing that had to happen first.
     let ctx = Context {
@@ -192,6 +238,8 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
         wall_clock_ns: Some(vec![wall_clock.as_nanos() as u64]),
         spread_pct: None,
         runs_detail: None,
+        // the cluster record is the caller's, carried whole; a single-node run has none
+        cluster: request.cluster.clone(),
     };
     let mut out = MacroCaptureV2::new(request.label.clone());
     out.workloads.insert(workload.id().to_string(), capture);
@@ -221,9 +269,30 @@ fn start(
     // connects in plaintext, is refused by its own server, and the arm times out looking exactly
     // like a server that never came up
     let tls = conf::client_tls(&conf);
-    let pool = ShoalPool::<Bench>::start(conf)
+    let mut pool = ShoalPool::<Bench>::start(conf)
         .map_err(|error| anyhow::anyhow!("failed to start a server: {error:?}"))?;
-    // wait until it answers, rather than for a fixed number of seconds
+    // wait until every shard has bound, so a shard that cannot start is reported by name here
+    // rather than as thirty seconds of refused connections below (item 58)
+    pool.ready(ready::TIMEOUT)
+        .map_err(|error| anyhow::anyhow!("a shard failed to start: {error:?}"))?;
+    // then wait until it answers, the way the workload will reach it: the probe is what proves
+    // an encrypted arm's handshake, which a bound listener alone does not
+    probe(runtime, addr, tls)?;
+    Ok(Some(pool))
+}
+
+/// Waits until a server answers a query, the way the workload will reach it
+///
+/// # Arguments
+///
+/// * `runtime` - The client runtime to probe on
+/// * `addr` - Where the server is
+/// * `tls` - What a client needs to reach it encrypted, if it is
+fn probe(
+    runtime: &tokio::runtime::Runtime,
+    addr: &str,
+    tls: Option<shoal::shared::tls::TlsClientOptions>,
+) -> Result<()> {
     runtime.block_on(ready::wait_until_answering(addr, |addr| {
         // cloned per attempt, since the probe is an `Fn` and may be called several times
         let tls = tls.clone();
@@ -243,8 +312,7 @@ fn start(
             client.exists(ItemExists::new(u64::MAX)).await?;
             Ok(())
         }
-    }))?;
-    Ok(Some(pool))
+    }))
 }
 
 /// Stops a server, if one was started

@@ -227,6 +227,9 @@ built either. [C13](../distributed/protocol.md) adds the embedded control/data p
 and the questions that gate implementation; no external membership or failover service is required.
 That contract was agreed on 2026-09-11 as the gate before M0 ([P1–P6](../distributed/protocol.md#the-contract)),
 which settled the protocol and pinned candidate libraries without selecting one or building anything.
+M0 itself was delivered the same day as [F36](../features/cluster-harness.md): the contract as an
+executable model in `shoal-model`, the cluster fixture, and the benchmark's cluster record — still
+nothing that makes one node speak to another.
 
 ### Rebalancing
 
@@ -1161,15 +1164,19 @@ need:
 - **`recovery`** needs a second `ShoalPool::start` in one process — which is the thing
   [F8](../features/purpose-built-workloads.md) deliberately avoided, since glommio pins its shards
   at start and there is no supported way to undo that — or the two-process crash-test shape in
-  `shoal/tests/utils.rs`. The `RestartAfterSeed` arm restarts *between* phases, in separate
-  process lifetimes, which is not the same thing.
+  `shoal/tests/utils.rs`, which [F36](../features/cluster-harness.md)'s cluster fixture and
+  `shoal-workload serve` now give the benchmark the pieces of. The `RestartAfterSeed` arm restarts
+  *between* phases, in separate process lifetimes, which is not the same thing.
 
-**A readiness signal in `ShoalPool::start`.** F8 replaced the five-second sleep with a probe that
+~~**A readiness signal in `ShoalPool::start`.** F8 replaced the five-second sleep with a probe that
 retries a real query until one is answered, which is correct but is still the client working
 around a missing server facility. `ShoalPool::start` spawns its shard threads and returns without
-joining them, so there is no moment at which the pool knows every shard has bound. Giving it that
-moment would remove the probe, and a readiness endpoint needs exactly the same thing — as does the
-pool-wide recovery summary described earlier on this page.
+joining them, so there is no moment at which the pool knows every shard has bound.~~ Built as
+`ShoalPool::ready` by [F36](../features/cluster-harness.md)
+([Resolved #38, 58, 88](resolved/pool-readiness.md)). The probe stays, for the question it
+answers — whether an encrypted arm's handshake works — and now runs after `ready`, so it no longer
+logs a dozen refusals. The pool-wide recovery summary described earlier on this page is still
+open: `ready` knows when every shard has finished starting, which is the moment it needs.
 
 **The evicted fanout arms warm up as they run.** A restart empties memory, but the first query to
 touch a partition faults it back in and it stays there. The fanout arms read 4,096 partitions

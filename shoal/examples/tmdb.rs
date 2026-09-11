@@ -418,9 +418,11 @@ async fn main() -> Result<(), Errors> {
     // setup tracing/telemetry. the guard has to outlive every span below it, because dropping
     // it is what flushes whatever the exporter has queued
     let traces = shoal_core::server::trace::setup(&conf);
-    // start one shard per configured core. this returns as soon as the shard threads are spawned,
-    // which is why the client below retries rather than assuming the server is up.
-    let pool = ShoalPool::<Tmdb>::start(conf).expect("failed to start shoal");
+    // start one shard per configured core, and wait until every one of them is answering: a
+    // shard that cannot start says so here rather than as a refused connection below
+    let mut pool = ShoalPool::<Tmdb>::start(conf).expect("failed to start shoal");
+    pool.ready(std::time::Duration::from_secs(30))
+        .expect("a shard failed to start");
     let client = connect(&addr).await?;
     println!();
     // write, then read the same rows back four different ways
@@ -465,10 +467,10 @@ fn target_dir() -> std::path::PathBuf {
 ///
 /// * `addr` - The address the server is coming up on
 async fn connect(addr: &str) -> Result<Shoal<TmdbClient>, Errors> {
-    // `ShoalPool::start` spawns its shards and returns without waiting for them to bind, so the
-    // first connection can arrive before the listener does
+    // `ShoalPool::ready` has already waited for every shard to bind, so one attempt is enough;
+    // the retry exists because a loaded machine can still refuse the very first connection
     let mut last = None;
-    for _ in 0..200 {
+    for _ in 0..20 {
         match Shoal::<TmdbClient>::new(addr).await {
             Ok(client) => return Ok(client),
             Err(error) => last = Some(error),

@@ -72,10 +72,9 @@ async fn start_locked(
 ) -> Result<(String, ShoalPool<AuthDb>), TestError> {
     // build a config with a port nobody else in this run is using, and one user
     let conf = utils::build_auth_config(temp_dir, USER, PASSWORD);
-    let addr = format!("127.0.0.1:{}", conf.networking.port);
-    // start the server and give it a moment to bind
-    let pool = ShoalPool::<AuthDb>::start(conf)?;
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    // start the server and wait until its shards are answering
+    let mut pool = ShoalPool::<AuthDb>::start(conf)?;
+    let addr = pool.ready(utils::READY_TIMEOUT)?.to_string();
     Ok((addr, pool))
 }
 
@@ -89,9 +88,8 @@ async fn start_open(
 ) -> Result<(String, ShoalPool<AuthDb>), TestError> {
     // the default config has no auth section at all
     let conf = utils::build_config(temp_dir);
-    let addr = format!("127.0.0.1:{}", conf.networking.port);
-    let pool = ShoalPool::<AuthDb>::start(conf)?;
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    let mut pool = ShoalPool::<AuthDb>::start(conf)?;
+    let addr = pool.ready(utils::READY_TIMEOUT)?.to_string();
     Ok((addr, pool))
 }
 
