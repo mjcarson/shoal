@@ -202,3 +202,6 @@ database feature and it is the one whose value is least established: the hop it 
   benchmarks that this part inherits
 - [Known Issues](../appendix/known-issues.md) — items 15, 23, 32, 33, 34, 54, 56, and 60 are all
   closed by something proposed here
+- [Distributed Shoal](../distributed/overview.md) — the multi-node half, which this chapter never
+  claimed and which now has a part of its own; its [C4](../distributed/tablet-map.md) builds D7's
+  step 1, the `Topology` frame, because the cluster needs it before the client does
