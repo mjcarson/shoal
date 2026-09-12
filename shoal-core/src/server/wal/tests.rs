@@ -15,7 +15,7 @@ use openraft::type_config::TypeConfigExt as _;
 use openraft::{AsyncRuntime as _, EntryPayload, LogId, OptionalSend, Snapshot, SnapshotMeta, StorageError, StoredMembership};
 
 use super::frame::{Entry, LeaderId, WalLogId};
-use super::{GroupStore, MemoryWal, ShardWal};
+use super::{Checkpoint, GroupCheckpoint, GroupStore, MemoryWal, ShardWal};
 use crate::server::control::runtime::GlommioRuntime;
 use crate::server::replication::{ApplyOutcome, CommandResult, DataConfig, ResultKind};
 use crate::shared::identity::{GroupId, ShardAddr, TableId};
@@ -349,8 +349,37 @@ fn table_streams_recover_independently_without_holes() {
     });
 }
 
+/// The checkpoint file round trips a membership keyed by shard addresses
+///
+/// openraft's membership carries a node map keyed by the node id, which is a shard address and
+/// so no JSON key; the file spells it out as lists and rebuilds it. A checkpoint that could not
+/// be written killed the shard that tried
+/// ([F40](../../../../docs/src/features/replication.md)).
+#[test]
+fn checkpoint_file_round_trips_membership() {
+    let mut runtime = GlommioRuntime::new(1);
+    runtime.block_on(async {
+        let dir = tempfile::tempdir().expect("failed to build a temp dir");
+        let membership = StoredMembership::new(
+            Some(log_id(1, 0)),
+            openraft::Membership::new(
+                vec![members(&[1, 2, 3])],
+                members(&[1, 2, 3, 4]).into_iter().map(|addr| (addr, addr)).collect::<std::collections::BTreeMap<_, _>>(),
+            )
+            .expect("a valid membership"),
+        );
+        let mut file = Checkpoint::default();
+        file.groups.insert(GroupId(7).to_string(), GroupCheckpoint::new(Some(log_id(2, 9)), &membership));
+        file.write(dir.path()).await.expect("failed to write the checkpoint");
+        let read = Checkpoint::read(dir.path()).await.expect("failed to read the checkpoint");
+        assert_eq!(read, file);
+        let point = read.get(GroupId(7)).expect("the group's checkpoint");
+        assert_eq!(point.applied, Some(log_id(2, 9)));
+        assert_eq!(point.membership(), membership);
+    });
+}
+
 /// A membership set of shard addresses, for a membership entry
-#[allow(dead_code)]
 fn members(ids: &[u64]) -> BTreeSet<ShardAddr> {
     ids.iter().map(|id| ShardAddr::from(*id)).collect()
 }

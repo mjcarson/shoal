@@ -416,13 +416,15 @@ impl TabletMap {
         Ring::with_placement(shards, &self.placement_counts(), me).map(Some)
     }
 
-    /// The ring this node serves reads with: a tablet it holds a replica of is read locally
+    /// The ring this node serves queries with: a tablet it holds a replica of is served locally
     ///
-    /// The write ring routes every tablet to its primary; this one routes a tablet this node
-    /// holds a copy of to the shard holding it, and everything else to the primary, which is
-    /// what a `One` read is ([C6](../../../docs/src/distributed/reads.md),
-    /// [F40](../../../docs/src/features/replication.md)). At a placement of the desired size
-    /// every read is local.
+    /// The placement ring routes every tablet to its primary; this one routes a tablet this
+    /// node holds a copy of to the shard holding it, and everything else to the primary. A
+    /// `One` read is answered from the local copy ([C6](../../../docs/src/distributed/reads.md))
+    /// and a write is proposed by it through the group's leader, which the replica knows
+    /// whatever the placement says - so an unreachable primary takes no tablet down with it
+    /// ([F40](../../../docs/src/features/replication.md)). At a placement of the desired size
+    /// every query is served by a local replica.
     ///
     /// # Arguments
     ///
@@ -709,5 +711,100 @@ mod tests {
             ..(*newer).clone()
         })));
         assert_eq!(cell.get().version, 2);
+    }
+
+    /// A placed cluster with nodes of the given shard counts, in placement order
+    ///
+    /// # Arguments
+    ///
+    /// * `shards` - Each node's shard count
+    /// * `rf` - The desired replication factor
+    fn placed(shards: &[usize], rf: u32) -> (TabletMap, Vec<NodeId>) {
+        let (mut state, node) = state_with(Cluster::default().replication_factor(rf).policy());
+        let mut nodes = vec![node];
+        for count in &shards[1..] {
+            let other = NodeId::mint();
+            state.apply(&ControlCommand::Admit(record(other, *count, 1)));
+            state.apply(&ControlCommand::ObserveMember(record(other, *count, 1)));
+            nodes.push(other);
+        }
+        state.apply(&ControlCommand::Initialize {
+            op: uuid::Uuid::new_v4(),
+            principal: String::new(),
+            expected_version: state.topology_version,
+            nodes: nodes.clone(),
+            tables: vec![("Row".to_string(), TableId::of("Row"))],
+        });
+        // the bootstrapper's record says two shards; make it what the caller asked
+        if let Some(member) = state.members.get_mut(&node) {
+            member.record.shards = shards[0];
+        }
+        (TabletMap::from_state(&state, Some(node), &[]), nodes)
+    }
+
+    /// Replicas land on distinct nodes, capacity follows shard counts, and the factor is feasible
+    ///
+    /// Three nodes at a factor of three hold every tablet each; four nodes at three hold three
+    /// quarters each, give or take one, on distinct nodes with the primary first; a node with
+    /// twice the shards holds every tablet across twice as many shards, each replica on the
+    /// shard the primary rule picks; and a factor past the placement's size is the placement's
+    /// size ([F40](../../../docs/src/features/replication.md)).
+    #[test]
+    fn placement_respects_distinct_nodes_and_feasible_capacity() {
+        // every node holds every tablet at n equals rf
+        let (map, nodes) = placed(&[1, 1, 1], 3);
+        assert_eq!(map.active_rf(), 3);
+        for tablet in 0..TABLET_COUNT {
+            let replicas = map.replicas_of(tablet);
+            let mut seen: Vec<NodeId> = replicas.iter().map(|addr| addr.node).collect();
+            seen.sort_unstable();
+            seen.dedup();
+            assert_eq!(seen.len(), 3, "tablet {tablet} repeats a node: {replicas:?}");
+            assert_eq!(replicas[0].node, nodes[tablet % 3], "tablet {tablet} has the wrong primary");
+        }
+        for node in &nodes {
+            assert_eq!((0..TABLET_COUNT).filter(|tablet| map.holds(*node, *tablet)).count(), TABLET_COUNT);
+        }
+        // four nodes at three: distinct nodes, and about three quarters of the tablets each
+        let (map, nodes) = placed(&[1, 1, 1, 1], 3);
+        for tablet in 0..TABLET_COUNT {
+            let replicas = map.replicas_of(tablet);
+            assert_eq!(replicas.len(), 3);
+            let mut seen: Vec<NodeId> = replicas.iter().map(|addr| addr.node).collect();
+            seen.sort_unstable();
+            seen.dedup();
+            assert_eq!(seen.len(), 3, "tablet {tablet} repeats a node: {replicas:?}");
+        }
+        for node in &nodes {
+            let held = (0..TABLET_COUNT).filter(|tablet| map.holds(*node, *tablet)).count();
+            let share = TABLET_COUNT * 3 / 4;
+            assert!(held.abs_diff(share) <= 1, "a node holds {held} tablets, not about {share}");
+        }
+        // a node with twice the shards spreads its replicas over twice as many shards, and a
+        // replica sits on the shard the primary rule would pick were the node primary
+        let (map, nodes) = placed(&[2, 1, 1], 3);
+        let mut on_shard = [0usize; 2];
+        for tablet in 0..TABLET_COUNT {
+            for replica in map.replicas_of(tablet) {
+                if replica.node == nodes[0] {
+                    on_shard[usize::from(replica.shard)] += 1;
+                    assert_eq!(usize::from(replica.shard), (tablet / 3) % 2);
+                } else {
+                    assert_eq!(replica.shard, 0);
+                }
+            }
+        }
+        assert_eq!(on_shard[0] + on_shard[1], TABLET_COUNT);
+        // three tablets in a row share a shard, so the split is even to within one such run
+        assert!(on_shard[0].abs_diff(on_shard[1]) <= 3, "shards hold {on_shard:?}");
+        // the groups a node hosts name its own shard as a member, tablets ascending
+        for group in map.replica_groups(nodes[0]) {
+            assert!(group.members.contains(&group.me(nodes[0])));
+            assert!(group.tablets.windows(2).all(|pair| pair[0] < pair[1]));
+        }
+        // a factor past the placement is the placement, not a node holding two copies
+        let (map, _) = placed(&[1, 1], 3);
+        assert_eq!(map.active_rf(), 2);
+        assert!((0..TABLET_COUNT).all(|tablet| map.replicas_of(tablet).len() == 2));
     }
 }

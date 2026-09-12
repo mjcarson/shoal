@@ -812,6 +812,8 @@ mod tests {
                 learners: 0,
                 hop: None,
                 transport: None,
+                replicas: Vec::new(),
+                outcomes: None,
             });
         }
         capture

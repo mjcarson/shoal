@@ -463,6 +463,53 @@ where
         Ok(views)
     }
 
+    /// What every shard's tablet groups look like, folded over the node
+    ///
+    /// Asks each shard in turn over the mesh. A standalone node hosts no groups and reports
+    /// none ([F40](../../../docs/src/features/replication.md)).
+    pub fn replication(&self) -> Result<replication::NodeReplication, ServerError> {
+        let mut shards = Vec::with_capacity(self.shards);
+        for tx in &self.shard_txs {
+            let (reply, rx) = std::sync::mpsc::channel();
+            tx.send(messages::ServerMsg::ReplicationView(reply))
+                .map_err(|_| ServerError::Shoal(ShoalError::NotClustered))?;
+            match rx.recv_timeout(Duration::from_secs(5)) {
+                Ok(view) => shards.push(view),
+                Err(_) => return Err(ServerError::Shoal(ShoalError::NotClustered)),
+            }
+        }
+        Ok(replication::NodeReplication::fold(shards))
+    }
+
+    /// Drive a replication verb on every shard, for the fixture
+    ///
+    /// # Arguments
+    ///
+    /// * `verb` - What to do
+    ///
+    /// # Errors
+    ///
+    /// Fails if a shard is gone or does not answer; a shard's own refusal is in its answer.
+    pub fn replication_verb(
+        &self,
+        verb: replication::ReplicationVerb,
+    ) -> Result<Vec<Result<serde_json::Value, String>>, ServerError> {
+        let mut answers = Vec::with_capacity(self.shards);
+        for tx in &self.shard_txs {
+            let (reply, rx) = std::sync::mpsc::channel();
+            tx.send(messages::ServerMsg::ReplicationVerb {
+                verb: verb.clone(),
+                reply,
+            })
+            .map_err(|_| ServerError::Shoal(ShoalError::NotClustered))?;
+            match rx.recv_timeout(Duration::from_secs(30)) {
+                Ok(answer) => answers.push(answer),
+                Err(_) => return Err(ServerError::Shoal(ShoalError::NotClustered)),
+            }
+        }
+        Ok(answers)
+    }
+
     /// Start a bulk probe of a given size at a peer, for the bounded-bytes test
     ///
     /// # Arguments

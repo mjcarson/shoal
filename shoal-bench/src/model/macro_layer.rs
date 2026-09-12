@@ -264,9 +264,14 @@ pub struct ClusterFacts {
     pub tables: u32,
     /// How many tablets those tables were split into
     pub tablets: u32,
-    /// The offered load, in queries per second, for an open-loop arm
+    /// How the arm offered its load: closed-loop at a depth, or open-loop at a rate
+    ///
+    /// Absent before [F40](../../../docs/src/features/replication.md), when the field was an
+    /// open-loop rate no arm ever set. A closed-loop arm names its depth here so a capacity
+    /// record says what load was scheduled beside what was completed
+    /// ([C10](../../../docs/src/distributed/performance.md)).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub offered_load: Option<u64>,
+    pub offered_load: Option<OfferedLoad>,
     /// Whether the nodes shared one machine, which is a redundancy experiment and not scale-out
     pub emulated: bool,
     /// ~~The static placement the nodes routed against~~ The order the arm initialized the
@@ -308,6 +313,62 @@ pub struct ClusterFacts {
     /// held the client, after the run and before the server stopped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transport: Option<TransportFacts>,
+    /// Every node's replication debt when the run ended, node zero first
+    ///
+    /// Empty before [F40](../../../docs/src/features/replication.md) and on a cluster of one,
+    /// which replicates to nobody. Read from each node's own report after the measured phase
+    /// and before the servers stop, so the record carries every replica's work and not only
+    /// the node the client wrote through ([C10](../../../docs/src/distributed/performance.md)).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub replicas: Vec<ReplicaFacts>,
+    /// How many writes the run could not answer definitely, summed over every node
+    ///
+    /// Absent before [F40](../../../docs/src/features/replication.md). A throughput number
+    /// beside a nonzero count here is a number a reader has to discount.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcomes: Option<OutcomeFacts>,
+}
+
+/// How an arm scheduled its load
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OfferedLoad {
+    /// `closed`, where the next query waits for the last, or `open`, where it does not
+    pub mode: String,
+    /// How many queries a closed-loop arm kept outstanding
+    pub outstanding: u32,
+    /// The rate an open-loop arm offered, in queries per second; none for a closed-loop arm
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate: Option<u64>,
+}
+
+/// One node's replication state at the end of a run
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplicaFacts {
+    /// The node's identity
+    pub node: String,
+    /// How many tablet groups it hosted, over every shard
+    pub groups: u32,
+    /// How many of them it led
+    pub leading: u32,
+    /// The widest gap between a group's committed and applied index when the run ended
+    pub lag_end: u64,
+    /// Bytes of proposals awaiting an outcome on its groups when the run ended
+    pub pending_bytes_end: u64,
+    /// Bytes its volatile groups held in memory when the run ended
+    pub volatile_bytes_end: u64,
+    /// Writes it answered with an unknown outcome since it started, seeding included
+    pub unknown: u64,
+    /// Writes it shed or refused since it started, seeding included
+    pub rejected: u64,
+}
+
+/// What the run's writes came to that a latency does not say
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutcomeFacts {
+    /// Writes answered with an unknown outcome, over every node
+    pub unknown: u64,
+    /// Writes shed or refused, over every node
+    pub rejected: u64,
 }
 
 /// One member of the cluster, as the topology reported it when the run ended

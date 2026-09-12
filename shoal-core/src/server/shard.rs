@@ -1260,12 +1260,13 @@ pub(super) struct Shard<D: ShoalDatabase> {
     /// subscribed connection and never one per shard
     /// ([F39](../../../docs/src/features/membership.md)).
     subscribed: HashSet<Uuid>,
-    /// The ring this shard routes reads with: a tablet it holds a replica of is read here
+    /// The ring this shard routes queries with: a tablet it holds a replica of is served here
     ///
     /// The same as `ring` on a standalone node and under a placement of one copy; under a
     /// replicated placement it points every tablet this node holds at the local shard holding
-    /// it ([F40](../../../docs/src/features/replication.md)).
-    read_ring: Ring,
+    /// it, which reads its own copy and proposes writes through the group's leader, and every
+    /// other tablet at its primary ([F40](../../../docs/src/features/replication.md)).
+    replica_ring: Ring,
     /// The tablet groups this shard hosts, their WAL and their network, on a cluster node
     ///
     /// `None` on a standalone node, which replicates nothing
@@ -1347,18 +1348,18 @@ where
         // those shards among the members the map names, so a remote key routes to a remote
         // contact ([F38](../../../docs/src/features/inter-node-transport.md)); a node the map
         // does not place holds a ring of its own shards it routes nothing against
-        let (ring, read_ring, placed, map, local) = match &peer_setup {
+        let (ring, replica_ring, placed, map, local) = match &peer_setup {
             Some(setup) => {
                 let map = MapCell::new(setup.initial_map.clone());
                 let mut local = setup.local.clone();
                 local.cluster = local.cluster.or(setup.initial_map.cluster);
                 match setup.initial_map.ring_for(setup.local.node, shard_count)? {
                     Some(ring) => {
-                        let read_ring = setup
+                        let replica_ring = setup
                             .initial_map
                             .read_ring_for(setup.local.node, shard_count)?
                             .unwrap_or_else(|| ring.clone());
-                        (ring, read_ring, true, map, Some(Rc::new(RefCell::new(local))))
+                        (ring, replica_ring, true, map, Some(Rc::new(RefCell::new(local))))
                     }
                     None => {
                         let ring = Ring::new(shard_count)?;
@@ -1401,7 +1402,7 @@ where
             bulk_received: Rc::new(Cell::new(0)),
             control,
             subscribed: HashSet::new(),
-            read_ring,
+            replica_ring,
             replication: None,
         };
         Ok(shard)
@@ -1415,7 +1416,7 @@ where
     /// # Arguments
     ///
     /// * `map` - The map the control plane pushed
-    fn install_map(&mut self, map: Arc<TabletMap>) -> Result<(), ServerError> {
+    async fn install_map(&mut self, map: Arc<TabletMap>) -> Result<(), ServerError> {
         let Some(setup) = &self.peer_setup else {
             return Ok(());
         };
@@ -1433,7 +1434,7 @@ where
         let shards = self.ring.shards.iter().filter(|info| info.contact.local_index().is_some()).count();
         match map.ring_for(setup.local.node, shards)? {
             Some(ring) => {
-                self.read_ring = map
+                self.replica_ring = map
                     .read_ring_for(setup.local.node, shards)?
                     .unwrap_or_else(|| ring.clone());
                 self.ring = ring;
@@ -1450,7 +1451,7 @@ where
         );
         // the groups this shard hosts follow the placement
         // ([F40](../../../docs/src/features/replication.md))
-        self.rebuild_groups();
+        self.rebuild_groups().await?;
         // every subscribed client hears of it; the relay folds a run of them to the newest
         self.push_topology(&map);
         Ok(())
@@ -1898,13 +1899,13 @@ where
             stamps.set_batch(offset, batch_len);
             // remember the index this query answers under, which is half of a records key
             stamps.set_index(index);
-            // find the shards that answer this query, and the keys each of them owns: a write
-            // goes to its tablet's primary, a read to the nearest replica
+            // find the shards that answer this query, and the keys each of them owns: the
+            // local replica when this node holds one, which proposes a write through the
+            // group's leader itself, else the tablet's primary
             // ([F40](../../../docs/src/features/replication.md))
-            let is_write = <<D::ClientType as QuerySupport>::QueryKinds as ArchivedShardRouting>::archived_is_write(kind);
             <<D::ClientType as QuerySupport>::QueryKinds as ArchivedShardRouting>::route_archived(
                 kind,
-                if is_write { &self.ring } else { &self.read_ring },
+                &self.replica_ring,
                 &mut found,
             );
             // record that this query is leaving us for the shards that own its partitions
@@ -3135,7 +3136,7 @@ where
             // handle this message
             match msg {
                 // a newer map from the control plane
-                ServerMsg::Map(map) => self.install_map(map)?,
+                ServerMsg::Map(map) => self.install_map(map).await?,
                 // a test asked this shard to die
                 ServerMsg::Fail => {
                     return Err(ServerError::GlommioGeneric(format!(
@@ -3267,7 +3268,7 @@ where
                     reply,
                 } => self.handle_replication(origin, head, payload, reply),
                 // a group's handle, from the task that built it
-                ServerMsg::GroupUp { group, raft } => self.handle_group_up(group, raft)?,
+                ServerMsg::GroupUp { group, raft } => self.handle_group_up(group, raft).await?,
                 // every group is down: the shutdown that asked for it can finish
                 ServerMsg::GroupsDown => break,
                 // the WAL sealed a segment, which may be resolved already

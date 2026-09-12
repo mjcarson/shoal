@@ -25,7 +25,8 @@ use std::collections::BTreeMap;
 
 use shoal_top::index::{
     Capture, ClusterFactsLite, ConfFactsLite, FamilyText, INDEX_VERSION, Index, Layer as IndexLayer,
-    HopFactsLite, HopMixLite, MacroPoint, NodeCoresLite, OpStats, ScaleFactsLite, Timing, Verdict, Workload,
+    HopFactsLite, HopMixLite, MacroPoint, NodeCoresLite, OfferedLoadLite, OpStats, OutcomeFactsLite,
+    ReplicaFactsLite, ScaleFactsLite, Timing, Verdict, Workload,
 };
 
 use crate::model::macro_layer::{
@@ -445,7 +446,11 @@ pub fn cluster_facts(cluster: &ClusterFacts) -> ClusterFactsLite {
         driver_cores: cluster.driver_cores.clone(),
         tables: cluster.tables,
         tablets: cluster.tablets,
-        offered_load: cluster.offered_load,
+        offered_load: cluster.offered_load.as_ref().map(|load| OfferedLoadLite {
+            mode: load.mode.clone(),
+            outstanding: load.outstanding,
+            rate: load.rate,
+        }),
         emulated: cluster.emulated,
         // the hop record travels; the placement and the transport counters are an environment
         // record the explorer has no axis for, and stay on the artifact
@@ -461,6 +466,26 @@ pub fn cluster_facts(cluster: &ClusterFacts) -> ClusterFactsLite {
         map_version: cluster.map_version,
         voters: cluster.voters,
         learners: cluster.learners,
+        // the replicas' debt and the outcomes travel whole: a capacity point without them is a
+        // throughput with no envelope ([F40](../../../docs/src/features/replication.md))
+        replicas: cluster
+            .replicas
+            .iter()
+            .map(|replica| ReplicaFactsLite {
+                node: replica.node.clone(),
+                groups: replica.groups,
+                leading: replica.leading,
+                lag_end: replica.lag_end,
+                pending_bytes_end: replica.pending_bytes_end,
+                volatile_bytes_end: replica.volatile_bytes_end,
+                unknown: replica.unknown,
+                rejected: replica.rejected,
+            })
+            .collect(),
+        outcomes: cluster.outcomes.as_ref().map(|outcomes| OutcomeFactsLite {
+            unknown: outcomes.unknown,
+            rejected: outcomes.rejected,
+        }),
     }
 }
 

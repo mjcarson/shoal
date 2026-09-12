@@ -1035,5 +1035,58 @@ mod tests {
             .advertise("10.0.0.2")
             .validate("0.0.0.0")
             .expect("an advertised address on 0.0.0.0 was refused");
+        // a write acknowledged by one replica is refused by name until there is an API for it
+        // ([F40](../../../../docs/src/features/replication.md))
+        let error = Cluster::default()
+            .bootstrap(true)
+            .write_consistency(Consistency::One)
+            .validate("127.0.0.1")
+            .expect_err("a One write policy was accepted");
+        assert!(format!("{error}").contains("C5"), "{error}");
+        // a proposal that outlives the forward deadline answers nobody
+        let mut long_write = Cluster::default().bootstrap(true);
+        long_write.replication.write_timeout = DurationSpec(Duration::from_secs(6));
+        let error = long_write.validate("127.0.0.1").expect_err("a write timeout past the forward timeout was accepted");
+        assert!(format!("{error}").contains("forward_timeout"), "{error}");
+        // and the groups' timers derive from the failover base, which has to be a timer
+        let error = Cluster::default()
+            .bootstrap(true)
+            .primary_failover_after(Duration::from_millis(50))
+            .validate("127.0.0.1")
+            .expect_err("a failover base under 100ms was accepted");
+        assert!(format!("{error}").contains("heartbeat"), "{error}");
+        Cluster::default()
+            .bootstrap(true)
+            .primary_failover_after(Duration::from_millis(100))
+            .validate("127.0.0.1")
+            .expect("a failover base of 100ms was refused");
+    }
+
+    /// The replication block's defaults are the documented ones, and every field parses
+    #[test]
+    fn the_replication_block_parses_with_its_defaults() {
+        let defaults = super::Replication::default();
+        assert_eq!(defaults.write_timeout.duration(), Duration::from_secs(5));
+        assert_eq!(defaults.pending_bytes, 64 * 1024 * 1024);
+        assert_eq!(defaults.segment_bytes, 10 * 1024 * 1024);
+        assert_eq!(defaults.checkpoint_entries, 1024);
+        assert_eq!(defaults.retained_entries, 10_000);
+        assert_eq!(defaults.log_cache_bytes, 16 * 1024 * 1024);
+        assert_eq!(defaults.volatile_log_bytes, 256 * 1024 * 1024);
+        // a block naming every field, in the sizes an operator writes
+        let parsed: super::Replication = serde_yaml::from_str(
+            "write_timeout: \"2s\"\npending_bytes: \"8MiB\"\nsegment_bytes: \"1MiB\"\ncheckpoint_entries: 64\nretained_entries: 128\nlog_cache_bytes: \"1MiB\"\nvolatile_log_bytes: \"4MiB\"\n",
+        )
+        .expect("a full replication block parses");
+        assert_eq!(parsed.write_timeout.duration(), Duration::from_secs(2));
+        assert_eq!(parsed.pending_bytes, 8 * 1024 * 1024);
+        assert_eq!(parsed.segment_bytes, 1024 * 1024);
+        assert_eq!(parsed.checkpoint_entries, 64);
+        assert_eq!(parsed.retained_entries, 128);
+        assert_eq!(parsed.volatile_log_bytes, 4 * 1024 * 1024);
+        // an empty block is the defaults, and an unknown field is refused
+        let empty: super::Replication = serde_yaml::from_str("{}").expect("an empty block parses");
+        assert_eq!(empty, defaults);
+        assert!(serde_yaml::from_str::<super::Replication>("fsync_every: 3\n").is_err());
     }
 }

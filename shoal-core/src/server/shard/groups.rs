@@ -62,7 +62,7 @@ use crate::storage::CompactionJob;
 /// How long a proposer waits before asking its own group again while its lease starts
 const LEASE_POLL: Duration = Duration::from_millis(20);
 
-/// How many deadline ticks pass between two replication reports to the control thread
+/// How many deadline ticks pass between two sweeps of the WAL segments
 const REPORT_EVERY_TICKS: u32 = 10;
 
 /// One group this shard hosts
@@ -79,6 +79,12 @@ pub(super) struct Group<D: ShoalDatabase> {
     pub(super) store: GroupStore,
     /// Bytes proposed through this shard for it and not yet answered
     pub(super) pending_bytes: usize,
+    /// Writes that arrived while the handle was still being built, proposed once it is
+    ///
+    /// A map install rebuilds a group's handle on a task of its own, and a write in the gap
+    /// between the install and the handle is a write to a group that exists and is not up yet;
+    /// it waits here rather than being refused, and is refused only if the build fails.
+    pub(super) waiting: Vec<(QueryMetadata, D::TableNames, u64, Vec<u8>)>,
 }
 
 /// An apply batch stopped on a partition read
@@ -128,8 +134,10 @@ pub(super) struct Replication<D: ShoalDatabase> {
     pub(super) stats: ProposalStats,
     /// How many rebuilds of the groups there have been
     pub(super) epoch: u64,
-    /// Deadline ticks since the last report to the control thread
+    /// Deadline ticks since the last segment sweep
     pub(super) ticks: u32,
+    /// The last report the control thread was sent, so an unchanged one is not sent again
+    pub(super) last_report: Option<ShardReplication>,
     /// Whether the groups are being stopped
     pub(super) stopping: bool,
     /// Whether a segment sweep is wanted before the next message
@@ -209,10 +217,11 @@ where
             stats: ProposalStats::default(),
             epoch: 0,
             ticks: 0,
+            last_report: None,
             stopping: false,
             sweep_due: false,
         });
-        self.rebuild_groups();
+        self.rebuild_groups().await?;
         Ok(())
     }
 
@@ -232,7 +241,7 @@ where
     /// A group the map still names is kept, one it no longer names is stopped, and one it
     /// newly names is built on a task of its own. Called on every installed map and once at
     /// start.
-    pub(super) fn rebuild_groups(&mut self) {
+    pub(super) async fn rebuild_groups(&mut self) -> Result<(), ServerError> {
         let me = self.node_id();
         let cluster = self.conf.cluster.clone().unwrap_or_default();
         let shard_id = self.shard_id;
@@ -240,10 +249,10 @@ where
         let tx = self.shard_local_tx.clone();
         let map = self.map.get();
         let Some(replication) = self.replication.as_mut() else {
-            return;
+            return Ok(());
         };
         if replication.stopping {
-            return;
+            return Ok(());
         }
         replication.epoch += 1;
         // the groups this shard hosts under the map, if it is placed at all
@@ -263,9 +272,12 @@ where
             .filter(|id| !wanted.contains(id))
             .copied()
             .collect();
+        // a write waiting on a group the map dropped is answered below, once the borrow is done
+        let mut orphaned = Vec::new();
         for id in gone {
             if let Some(group) = replication.groups.remove(&id) {
                 event!(Level::INFO, msg = "stopping a tablet group the map no longer names", group = %id);
+                orphaned.extend(group.waiting.into_iter().map(|waiting| (id, waiting)));
                 if let Some(raft) = group.raft {
                     glommio::spawn_local(async move {
                         let _ = raft.shutdown().await;
@@ -302,7 +314,7 @@ where
                     let _ = point;
                     (None, StoredMembership::default())
                 }
-                Some(point) => (point.applied.clone(), point.membership.clone()),
+                Some(point) => (point.applied.clone(), point.membership()),
                 None => (None, StoredMembership::default()),
             };
             let state = Rc::new(RefCell::new(MachineState::at(checkpoint, membership)));
@@ -314,6 +326,7 @@ where
                 state,
                 store: store.clone(),
                 pending_bytes: 0,
+                waiting: Vec::new(),
             };
             replication.groups.insert(spec.id, group);
             // the handle is built on a task of its own, since building it applies
@@ -321,7 +334,7 @@ where
                 group: spec.id,
                 network: replication.network.clone(),
             };
-            let config = group_config(&cluster, spec.id);
+            let config = group_config(&cluster, spec.id, store.is_volatile());
             let tx = tx.clone();
             let addr = ShardAddr::new(me, spec.mine);
             let primary = spec.is_primary(me);
@@ -336,6 +349,12 @@ where
             })
             .detach();
         }
+        // the writes that waited on a group this node no longer hosts are refused by name
+        for (id, (meta, table, _, _)) in orphaned {
+            let outcome = ProposalOutcome::NotLeader(format!("group {id} left this node before it was up"));
+            self.answer_proposal(meta, table, None, outcome, 0).await?;
+        }
+        Ok(())
     }
 
     /// Take a group's handle from the task that built it
@@ -344,7 +363,7 @@ where
     ///
     /// * `group` - The group
     /// * `raft` - Its handle, or why it could not be built
-    pub(super) fn handle_group_up(
+    pub(super) async fn handle_group_up(
         &mut self,
         group: GroupId,
         raft: Result<Raft<DataConfig, GroupMachine<D>>, String>,
@@ -353,10 +372,14 @@ where
             return Ok(());
         };
         match (replication.groups.get_mut(&group), raft) {
-            // a handle for a group the map still names
+            // a handle for a group the map still names, and the writes that waited for it
             (Some(slot), Ok(raft)) => {
                 event!(Level::INFO, msg = "a tablet group is up", group = %group, members = slot.spec.members.len());
                 slot.raft = Some(raft);
+                let waiting = std::mem::take(&mut slot.waiting);
+                for (meta, table, key, payload) in waiting {
+                    self.propose_write(meta, table, key, payload).await?;
+                }
             }
             // a handle built for a group the map has since dropped
             (None, Ok(raft)) => {
@@ -569,6 +592,11 @@ where
             let outcome = ProposalOutcome::NotLeader(format!("group {id} is not hosted here"));
             return self.answer_proposal(meta, table, None, outcome, 0).await;
         };
+        // a group whose handle is still being built takes the write once it is up
+        if group.raft.is_none() {
+            group.waiting.push((meta, table, key, payload));
+            return Ok(());
+        }
         let bytes = payload.len();
         // admission: a definite refusal, judged before anything is recorded
         if group.pending_bytes + bytes > cluster.replication.pending_bytes {
@@ -942,10 +970,7 @@ where
             if let Some(applied) = &state.checkpoint {
                 file.groups.insert(
                     id.to_string(),
-                    GroupCheckpoint {
-                        applied: Some(applied.clone()),
-                        membership: state.checkpoint_membership.clone(),
-                    },
+                    GroupCheckpoint::new(Some(applied.clone()), &state.checkpoint_membership),
                 );
             }
         }
@@ -1005,6 +1030,7 @@ where
                     table: slot.spec.table,
                     table_name: slot.table.to_string(),
                     tablets: u32::try_from(slot.spec.tablets.len()).unwrap_or(u32::MAX),
+                    tablet_ids: slot.spec.tablets.clone(),
                     members: slot.spec.members.clone(),
                     leader: leader.clone(),
                     is_leader: leader == Some(me),
@@ -1042,16 +1068,21 @@ where
             return;
         };
         replication.ticks += 1;
-        let due = replication.ticks >= REPORT_EVERY_TICKS;
-        if due {
+        // a segment sweep every so many ticks; a report on every tick something moved, so the
+        // view an admin read folds is at most a tick behind the shard
+        if replication.ticks >= REPORT_EVERY_TICKS {
             replication.ticks = 0;
             replication.sweep_due = true;
         }
-        if !due {
+        let report = self.replication_report();
+        let replication = self.replication.as_mut().expect("still here");
+        if replication.last_report.as_ref() == Some(&report) {
             return;
         }
         if let Some(control) = &self.control {
-            let _ = control.try_send(crate::server::control::ControlRequest::Replication(self.replication_report()));
+            if control.try_send(crate::server::control::ControlRequest::Replication(report.clone())).is_ok() {
+                replication.last_report = Some(report);
+            }
         }
     }
 
@@ -1139,13 +1170,18 @@ where
 /// The openraft configuration a group runs under
 ///
 /// The heartbeat is a tenth of the failover base and the election timeout is one to two of
-/// it, so the policy every node agreed about is what decides how fast a leader is missed.
+/// it, so the policy every node agreed about is what decides how fast a leader is missed. A
+/// volatile group's members lose their log on every restart by design, so its leader is told
+/// to take a follower that comes back empty as a follower to feed from the start rather than
+/// as the bug openraft otherwise stops on; a durable group's log survives, and a member of one
+/// that comes back short has lost what it acknowledged, which the leader refuses to paper over.
 ///
 /// # Arguments
 ///
 /// * `cluster` - The cluster block
 /// * `group` - The group
-fn group_config(cluster: &crate::server::conf::Cluster, group: GroupId) -> Arc<Config> {
+/// * `volatile` - Whether the group's log lives in memory alone
+fn group_config(cluster: &crate::server::conf::Cluster, group: GroupId, volatile: bool) -> Arc<Config> {
     let base = cluster.primary_failover_after.duration().as_millis();
     // truncation cannot happen: a failover base is seconds, not weeks
     #[allow(clippy::cast_possible_truncation)]
@@ -1158,6 +1194,7 @@ fn group_config(cluster: &crate::server::conf::Cluster, group: GroupId) -> Arc<C
         enable_leader_restore: Some(false),
         snapshot_policy: SnapshotPolicy::LogsSinceLast(cluster.replication.checkpoint_entries),
         max_in_snapshot_log_to_keep: cluster.replication.retained_entries,
+        allow_log_reversion: Some(volatile),
         ..Config::default()
     };
     // the defaults validate, and every field set above is within what validate accepts
@@ -1200,24 +1237,41 @@ async fn start_group<D: ShoalDatabase>(
     let raft = Raft::<DataConfig, GroupMachine<D>>::new(me, config, network, store, machine)
         .await
         .map_err(|error| (group, format!("building the group: {error}")))?;
-    // a fresh group is initialized with its members; every member does the same, and an
-    // identical initialization on an initialized group is refused harmlessly
-    match raft.is_initialized().await {
-        Ok(false) => {
-            let members: BTreeMap<ShardAddr, ShardAddr> =
-                spec.members.iter().map(|member| (*member, *member)).collect();
-            if let Err(error) = raft.initialize(members).await {
-                event!(Level::DEBUG, msg = "a group was initialized already", group = %group, %error);
-            }
-        }
-        Ok(true) => {}
+    // a fresh group is initialized by its placement primary alone: openraft's initialize writes
+    // a membership entry whose log id names the node that wrote it, so two members initializing
+    // the same group would each hold a different entry at index zero and refuse each other's
+    // votes until the greater address won. The others start with no membership at all, which
+    // is what accepts the primary's first append; initialize elects, so the primary asks for the
+    // lead at once and the timer retries until its peers have the group up
+    let initialized = match raft.is_initialized().await {
+        Ok(initialized) => initialized,
         Err(error) => return Err((group, format!("asking whether the group is initialized: {error}"))),
-    }
-    // the primary asks for the lead at once; the others wait their election timeout
-    if primary && spec.members.len() > 1 {
-        if let Err(error) = raft.trigger().elect(false).await {
-            event!(Level::WARN, msg = "the primary could not trigger an election", group = %group, %error);
+    };
+    let members: BTreeMap<ShardAddr, ShardAddr> = spec.members.iter().map(|member| (*member, *member)).collect();
+    if !initialized && (primary || spec.members.len() == 1) {
+        if let Err(error) = raft.initialize(members.clone()).await {
+            event!(Level::DEBUG, msg = "a group was initialized already", group = %group, %error);
         }
+    }
+    // the others grant the primary a head start: they do not stand for election themselves
+    // until two election timeouts have passed, so the first leader of a healthy group is the
+    // placement primary. After that any member may win, which is what a failover needs - and
+    // a group the primary never brought up is initialized by whichever member notices first
+    if spec.members.len() > 1 && !primary {
+        raft.runtime_config().elect(false);
+        let head_start = Duration::from_millis(raft.config().election_timeout_max * 2);
+        let handle = raft.clone();
+        glommio::spawn_local(async move {
+            glommio::timer::sleep(head_start).await;
+            if let Ok(false) = handle.is_initialized().await {
+                event!(Level::WARN, msg = "a group's primary never initialized it; initializing", group = %group);
+                if let Err(error) = handle.initialize(members).await {
+                    event!(Level::DEBUG, msg = "a group was initialized already", group = %group, %error);
+                }
+            }
+            handle.runtime_config().elect(true);
+        })
+        .detach();
     }
     Ok((group, raft))
 }

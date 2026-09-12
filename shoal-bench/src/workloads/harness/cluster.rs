@@ -45,7 +45,8 @@ use shoal::server::{AdminKind, AdminRequest};
 use shoal::shared::identity::{ClusterId, NodeId};
 
 use crate::model::macro_layer::{
-    ClusterFacts, HopFacts, LinkFacts, MemberFacts, NodeCores, PlacedNodeFacts, TransportFacts,
+    ClusterFacts, HopFacts, LinkFacts, MemberFacts, NodeCores, OutcomeFacts, PlacedNodeFacts, ReplicaFacts,
+    TransportFacts,
 };
 use crate::run::plan::cluster_ports;
 use crate::workloads::harness::ready;
@@ -716,6 +717,91 @@ pub fn placed_facts(
     Ok(facts)
 }
 
+/// Every node's replication state at the end of a run, node zero first
+///
+/// Node zero's is read from its pool; a peer's through an admin read over its client endpoint,
+/// which the node that accepts the connection answers for itself from the reports its shards
+/// send it - so the read waits two report ticks first, and what it records is the state a
+/// tick or so after the client stopped. Every node is asked, since a capacity record with only
+/// the node the client wrote through would leave the followers' debt out
+/// ([C10](../../../../docs/src/distributed/performance.md),
+/// [F40](../../../../docs/src/features/replication.md)).
+///
+/// # Arguments
+///
+/// * `staged` - The cluster
+/// * `pool` - Node zero's running pool
+/// * `conf` - The configuration node zero was started with, for the report cadence
+/// * `runtime` - The client runtime the peers are asked on
+pub fn replica_facts(
+    staged: &Staged,
+    pool: &shoal::ShoalPool<crate::workloads::schema::Bench>,
+    conf: &Conf,
+    runtime: &tokio::runtime::Runtime,
+) -> Result<Vec<ReplicaFacts>> {
+    // a shard reports to its control thread on the forward sweeper's tick, which is a tenth of
+    // the forward timeout and never under fifty milliseconds
+    let tick = conf
+        .cluster
+        .as_ref()
+        .map_or(Duration::from_millis(500), |cluster| cluster.transport.forward_timeout.duration() / 10)
+        .max(Duration::from_millis(50));
+    std::thread::sleep(tick * 2);
+    let mut replicas = Vec::with_capacity(staged.nodes.len());
+    for node in &staged.nodes {
+        let report = if node.index == 0 {
+            pool.replication()
+                .map_err(|error| anyhow::anyhow!("node 0 did not report its replication: {error:?}"))?
+        } else {
+            // the peer's own report, over its client endpoint
+            let addr = format!("127.0.0.1:{}", node.client_port);
+            let value = runtime.block_on(async {
+                let client = shoal::Shoal::<crate::workloads::schema::BenchClient>::new(&addr)
+                    .await
+                    .with_context(|| format!("failed to reach node {} at {addr}", node.index))?;
+                let response = client
+                    .admin(&AdminRequest {
+                        op: uuid::Uuid::new_v4(),
+                        expected_version: 0,
+                        kind: AdminKind::Replication,
+                    })
+                    .await
+                    .with_context(|| format!("node {} did not answer a replication read", node.index))?;
+                match response.outcome {
+                    Ok(shoal::shared::protocol::admin::AdminOutcome::Read(value)) => Ok(value),
+                    other => bail!("node {} refused a replication read: {other:?}", node.index),
+                }
+            })?;
+            serde_json::from_value::<shoal::server::replication::NodeReplication>(value)
+                .with_context(|| format!("node {}'s replication report did not parse", node.index))?
+        };
+        replicas.push(ReplicaFacts {
+            node: node.node.clone(),
+            groups: u32::try_from(report.groups).unwrap_or(u32::MAX),
+            leading: u32::try_from(report.leading).unwrap_or(u32::MAX),
+            lag_end: report.lag_max,
+            pending_bytes_end: report.pending_bytes as u64,
+            volatile_bytes_end: report.volatile_bytes as u64,
+            unknown: report.unknown_outcomes,
+            rejected: report.rejected,
+        });
+    }
+    Ok(replicas)
+}
+
+/// The writes a run could not answer definitely, summed over every replica
+///
+/// # Arguments
+///
+/// * `replicas` - Every node's record
+#[must_use]
+pub fn outcome_facts(replicas: &[ReplicaFacts]) -> OutcomeFacts {
+    OutcomeFacts {
+        unknown: replicas.iter().map(|replica| replica.unknown).sum(),
+        rejected: replicas.iter().map(|replica| replica.rejected).sum(),
+    }
+}
+
 /// The members a topology view names, as the artifact records them
 ///
 /// # Arguments
@@ -780,7 +866,7 @@ pub fn transport_facts(
 
 #[cfg(test)]
 mod tests {
-    use super::{Candidate, StagedNode, allocate};
+    use super::{Candidate, StagedNode, allocate, outcome_facts};
     use crate::model::macro_layer::PlacedNodeFacts;
 
     /// A machine shaped like the benchmark host: two threads per core, sorted as the server sorts
@@ -859,5 +945,71 @@ mod tests {
         let text = serde_json::to_string(&node).expect("serializes");
         let back: StagedNode = serde_json::from_str(&text).expect("parses");
         assert_eq!(back, node);
+    }
+
+    /// A capacity record carries what was scheduled, what every replica owed and what the
+    /// writes came to, and a record from before any of that still loads
+    /// ([C10](../../../../docs/src/distributed/performance.md))
+    #[test]
+    fn capacity_capture_records_lag_and_offered_load() {
+        use crate::model::macro_layer::{ClusterFacts, OfferedLoad, OutcomeFacts, ReplicaFacts};
+        let replica = |node: &str, lag: u64, unknown: u64, rejected: u64| ReplicaFacts {
+            node: node.to_string(),
+            groups: 6,
+            leading: 2,
+            lag_end: lag,
+            pending_bytes_end: 0,
+            volatile_bytes_end: 4096,
+            unknown,
+            rejected,
+        };
+        let replicas = vec![replica("n0", 0, 1, 0), replica("n1", 3, 0, 2), replica("n2", 1, 0, 0)];
+        // the outcomes are the sum over every node, not the node the client wrote through
+        assert_eq!(outcome_facts(&replicas), OutcomeFacts { unknown: 1, rejected: 2 });
+        let facts = ClusterFacts {
+            nodes: 3,
+            desired_rf: 3,
+            active_rf: 3,
+            write_policy: "quorum".to_string(),
+            read_policy: "one".to_string(),
+            durability: "fsync".to_string(),
+            driver: "in-process".to_string(),
+            cores: Vec::new(),
+            driver_cores: Vec::new(),
+            tables: 1,
+            tablets: 4096,
+            offered_load: Some(OfferedLoad {
+                mode: "closed".to_string(),
+                outstanding: 32,
+                rate: None,
+            }),
+            emulated: true,
+            placement: Vec::new(),
+            members: Vec::new(),
+            map_version: 9,
+            voters: 3,
+            learners: 0,
+            hop: None,
+            transport: None,
+            outcomes: Some(outcome_facts(&replicas)),
+            replicas,
+        };
+        // the record round trips with every replica's debt and the schedule on it
+        let text = serde_json::to_string(&facts).expect("serializes");
+        let back: ClusterFacts = serde_json::from_str(&text).expect("parses");
+        assert_eq!(back, facts);
+        assert_eq!(back.replicas.len(), 3);
+        assert_eq!(back.replicas.iter().map(|replica| replica.lag_end).max(), Some(3));
+        assert_eq!(back.offered_load.as_ref().map(|load| load.outstanding), Some(32));
+        // and a record written before F40 loads with none of it, rather than failing
+        let mut older: serde_json::Value = serde_json::from_str(&text).expect("parses");
+        let object = older.as_object_mut().expect("an object");
+        object.remove("offered_load");
+        object.remove("replicas");
+        object.remove("outcomes");
+        let before: ClusterFacts = serde_json::from_value(older).expect("an older record parses");
+        assert!(before.offered_load.is_none());
+        assert!(before.replicas.is_empty());
+        assert!(before.outcomes.is_none());
     }
 }

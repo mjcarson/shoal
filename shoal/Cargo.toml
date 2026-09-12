@@ -61,6 +61,8 @@ deepsize2 = { workspace = true }
 [dev-dependencies]
 # the shql tests cover autocompletion, which clients opt into
 shoal-core = { version = "0.1.0", path = "../shoal-core", features = ["shql-complete"] }
+# the protocol model's sequential oracle judges the fixture's conditional-write history (F40)
+shoal-model = { version = "0.1.0", path = "../shoal-model" }
 futures = "0.3"
 # the `tmdb` example builds its config in code and stores it under a temp dir, so it needs no
 # shoal.yml. `tmdb_dataset` is the other half of that pair and reads one off disk instead

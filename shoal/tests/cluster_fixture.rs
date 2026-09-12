@@ -1144,14 +1144,6 @@ async fn cluster_server_child() {
                 replication.pending_bytes = bytes;
             }
             block = block.replication(replication);
-            // a table's durability, which a cluster node refuses `async` for
-            if let Some(durability) = &staged.durability {
-                let durability = match durability.as_str() {
-                    "async" => shoal::storage::fs::conf::Durability::Async,
-                    _ => shoal::storage::fs::conf::Durability::Fsync,
-                };
-                conf.storage.default.filesystem.latency_sensitive.durability = durability;
-            }
             for (node, control, data) in &staged.dial {
                 let node = NodeId(node.parse().expect("a node id parses"));
                 block = block.dial(node, Some(control.clone()), Some(data.clone()));
@@ -1166,6 +1158,14 @@ async fn cluster_server_child() {
             }
         }
         conf = conf.cluster(block);
+    }
+    // a table's durability, which a cluster node refuses `async` for and a standalone one serves
+    if let Some(durability) = &request.durability {
+        let durability = match durability.as_str() {
+            "async" => shoal::storage::fs::conf::Durability::Async,
+            _ => shoal::storage::fs::conf::Durability::Fsync,
+        };
+        conf.storage.default.filesystem.latency_sensitive.durability = durability;
     }
     // a marker the test staged, written before the server can claim the directory
     if let Some(marker) = &request.staged_marker {
@@ -1426,6 +1426,67 @@ fn handle_command(
             .control_stale_report()
             .map(|()| serde_json::json!({ "sent": true }))
             .map_err(|error| format!("{error:?}")),
+        // the hashed applied state of a table, with every group's applied index, over every
+        // shard ([F40](../../docs/src/features/replication.md))
+        "DIGEST" => match parts.next() {
+            Some(table) => {
+                let table = shoal::shared::identity::TableId::of(table);
+                pool.replication_verb(shoal::server::replication::ReplicationVerb::Digest { table })
+                    .map_err(|error| format!("{error:?}"))
+                    .and_then(|answers| {
+                        // fold every shard's digest into one, in shard order
+                        let mut rows = 0u64;
+                        let mut hash = 0u64;
+                        let mut groups = serde_json::Map::new();
+                        for answer in answers {
+                            let value = answer?;
+                            rows += value["rows"].as_u64().unwrap_or(0);
+                            let shard_hash = value["hash"].as_u64().unwrap_or(0);
+                            let mut fold = Vec::with_capacity(16);
+                            fold.extend_from_slice(&hash.to_le_bytes());
+                            fold.extend_from_slice(&shard_hash.to_le_bytes());
+                            hash = shoal::gxhash::gxhash64(&fold, 0);
+                            if let Some(found) = value["groups"].as_object() {
+                                for (group, applied) in found {
+                                    groups.insert(group.clone(), applied.clone());
+                                }
+                            }
+                        }
+                        Ok(serde_json::json!({ "rows": rows, "hash": hash, "groups": groups }))
+                    })
+            }
+            None => Err("DIGEST needs a table name".to_string()),
+        },
+        // what every shard's tablet groups look like
+        "GROUPS" => pool
+            .replication()
+            .map(|view| serde_json::to_value(view).expect("a view serializes"))
+            .map_err(|error| format!("{error:?}")),
+        // force every shard's WAL into a new segment
+        "ROTATE" => pool
+            .replication_verb(shoal::server::replication::ReplicationVerb::Rotate)
+            .map_err(|error| format!("{error:?}"))
+            .and_then(|answers| answers.into_iter().collect::<Result<Vec<_>, _>>().map(serde_json::Value::Array)),
+        // hand every resolved segment to the compactors now
+        "COMPACT" => pool
+            .replication_verb(shoal::server::replication::ReplicationVerb::Compact)
+            .map_err(|error| format!("{error:?}"))
+            .and_then(|answers| answers.into_iter().collect::<Result<Vec<_>, _>>().map(serde_json::Value::Array)),
+        // hold back a group's flush completions, or release them
+        "STALL_WAL" | "RELEASE_WAL" => match parts.next().and_then(|hex| u64::from_str_radix(hex, 16).ok()) {
+            Some(group) => {
+                let group = shoal::shared::identity::GroupId(group);
+                let verb = if verb == "STALL_WAL" {
+                    shoal::server::replication::ReplicationVerb::Stall { group }
+                } else {
+                    shoal::server::replication::ReplicationVerb::Release { group }
+                };
+                pool.replication_verb(verb)
+                    .map_err(|error| format!("{error:?}"))
+                    .and_then(|answers| answers.into_iter().collect::<Result<Vec<_>, _>>().map(serde_json::Value::Array))
+            }
+            None => Err(format!("{verb} needs a group id in hex")),
+        },
         // flush this node's exported spans to its trace file
         "FLUSH" => {
             if let Some(provider) = trace_provider {
@@ -2381,3 +2442,879 @@ async fn fresh_failure_reports_do_not_mask_shard_failure() -> Result<(), Fixture
     }
     Ok(())
 }
+
+// ---------------------------------------------------------------------------------------------
+// M4: replication and quorum writes (F40)
+// ---------------------------------------------------------------------------------------------
+
+/// The tablet a row key of either fixture table belongs to
+///
+/// Both tables hash one `u64` into their partition key, so the tablet is the ring's cut of that
+/// hash and not of the key itself.
+///
+/// # Arguments
+///
+/// * `key` - The row key
+fn tablet_of(key: u64) -> usize {
+    use shoal::shared::traits::PartitionKeySupport as _;
+    shoal::server::ring::Ring::tablet_of(Note::get_partition_key_from_values(&key))
+}
+
+/// The `GROUPS` view of one node
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `node` - The node
+fn groups_of(cluster: &mut Cluster, node: usize) -> Result<serde_json::Value, FixtureError> {
+    Ok(cluster.node_mut(node).command("GROUPS")?["ok"].clone())
+}
+
+/// The group serving a key of a table, and which node leads it, as one node sees it
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `node` - The node to ask
+/// * `table` - The table's name
+/// * `key` - The partition key
+fn group_of(
+    cluster: &mut Cluster,
+    node: usize,
+    table: &str,
+    key: u64,
+) -> Result<(String, Option<usize>), FixtureError> {
+    let tablet = tablet_of(key) as u64;
+    let view = groups_of(cluster, node)?;
+    let ids = cluster.node_ids();
+    for shard in view["shards"].as_array().into_iter().flatten() {
+        for group in shard["groups"].as_array().into_iter().flatten() {
+            if group["table_name"] != table {
+                continue;
+            }
+            let serves = group["tablet_ids"]
+                .as_array()
+                .is_some_and(|tablets| tablets.iter().any(|t| t.as_u64() == Some(tablet)));
+            if serves {
+                let leader = group["leader"]["node"]
+                    .as_str()
+                    .and_then(|leader| ids.iter().position(|id| id == leader));
+                // the report carries the group id as a number; the verbs take it as hex
+                let id = group["group"].as_u64().unwrap_or_default();
+                return Ok((format!("{id:016x}"), leader));
+            }
+        }
+    }
+    Err(FixtureError::NotReady(format!("node {node} hosts no group for key {key} of {table}: {view}")))
+}
+
+/// Wait until a key's group has a leader, and say which node it is
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `table` - The table's name
+/// * `key` - The partition key
+fn wait_group_leader(cluster: &mut Cluster, table: &str, key: u64) -> Result<(String, usize), FixtureError> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let (group, leader) = group_of(cluster, 0, table, key)?;
+        if let Some(leader) = leader {
+            return Ok((group, leader));
+        }
+        if std::time::Instant::now() > deadline {
+            return Err(FixtureError::NotReady(format!("group {group} never elected a leader")));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// The `DIGEST` of a table on one node
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `node` - The node
+/// * `table` - The table's name
+fn digest_of(cluster: &mut Cluster, node: usize, table: &str) -> Result<serde_json::Value, FixtureError> {
+    Ok(cluster.node_mut(node).command(&format!("DIGEST {table}"))?["ok"].clone())
+}
+
+/// Wait until every named node's digest of a table agrees with the first's
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `nodes` - The nodes
+/// * `table` - The table's name
+/// * `within` - How long to wait
+fn wait_digests_equal(
+    cluster: &mut Cluster,
+    nodes: &[usize],
+    table: &str,
+    within: Duration,
+) -> Result<serde_json::Value, FixtureError> {
+    let deadline = std::time::Instant::now() + within;
+    loop {
+        let digests: Vec<serde_json::Value> = nodes
+            .iter()
+            .map(|node| digest_of(cluster, *node, table))
+            .collect::<Result<_, _>>()?;
+        // the hash and the row count are the applied state; a group's applied index can lag
+        // on a node whose leader is cut off, so it is the caller's to compare where it matters
+        if digests.iter().all(|digest| digest["hash"] == digests[0]["hash"] && digest["rows"] == digests[0]["rows"]) {
+            return Ok(digests[0].clone());
+        }
+        if std::time::Instant::now() > deadline {
+            return Err(FixtureError::NotReady(format!("the digests of {table} never agreed: {digests:?}")));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Read one note through a node's client endpoint
+///
+/// # Arguments
+///
+/// * `addr` - The endpoint
+/// * `key` - The key
+async fn read_note(addr: &str, key: u64) -> Result<Option<String>, shoal::client::Errors> {
+    let client = Shoal::<TestDbClient>::new(addr).await?;
+    match client.send_one(NoteGet::new(vec![key])).await {
+        Ok(response) => Ok(response
+            .access::<Note>()?
+            .and_then(|notes| notes.into_iter().next())
+            .map(|note| note.text.to_string())),
+        Err(shoal::client::Errors::QueryDidNotSucceed { .. }) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// Write one note through a node's client endpoint
+///
+/// # Arguments
+///
+/// * `addr` - The endpoint
+/// * `key` - The key
+/// * `text` - The text
+async fn write_note(addr: &str, key: u64, text: &str) -> Result<(), shoal::client::Errors> {
+    let client = Shoal::<TestDbClient>::new(addr).await?;
+    client
+        .send_one(Note {
+            key,
+            text: text.to_string(),
+        })
+        .await?;
+    Ok(())
+}
+
+/// Wait until a note reads back with a text through a node, or say it never did
+///
+/// # Arguments
+///
+/// * `addr` - The endpoint
+/// * `key` - The key
+/// * `expected` - The text, or none for absent
+/// * `within` - How long to wait
+async fn wait_note(addr: &str, key: u64, expected: Option<&str>, within: Duration) -> Result<(), FixtureError> {
+    let deadline = std::time::Instant::now() + within;
+    loop {
+        let found = read_note(addr, key).await?;
+        if found.as_deref() == expected {
+            return Ok(());
+        }
+        if std::time::Instant::now() > deadline {
+            return Err(FixtureError::NotReady(format!(
+                "note {key} through {addr} is {found:?}, not {expected:?}"
+            )));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Some keys served by one group, found by trying keys in turn
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `table` - The table's name
+/// * `group` - The group, as `group_of` names it
+/// * `from` - The first key to try
+/// * `count` - How many keys to find
+fn keys_in_group(cluster: &mut Cluster, table: &str, group: &str, from: u64, count: usize) -> Result<Vec<u64>, FixtureError> {
+    let mut keys = Vec::with_capacity(count);
+    for key in from..from + 4096 {
+        if keys.len() == count {
+            break;
+        }
+        let (candidate, _) = group_of(cluster, 0, table, key)?;
+        if candidate == group {
+            keys.push(key);
+        }
+    }
+    if keys.len() < count {
+        return Err(FixtureError::NotReady(format!("fewer than {count} keys from {from} are served by group {group}")));
+    }
+    Ok(keys)
+}
+
+/// Some keys whose groups are led by a given node, found by trying keys in turn
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `table` - The table's name
+/// * `leader` - The node that has to lead
+/// * `from` - The first key to try
+/// * `count` - How many keys to find
+fn keys_led_by(cluster: &mut Cluster, table: &str, leader: usize, from: u64, count: usize) -> Result<Vec<u64>, FixtureError> {
+    let mut keys = Vec::with_capacity(count);
+    let mut next = from;
+    while keys.len() < count {
+        let (key, _) = key_led_by(cluster, table, leader, next)?;
+        keys.push(key);
+        next = key + 1;
+    }
+    Ok(keys)
+}
+
+/// A key whose group is led by a given node, found by trying keys in turn
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `table` - The table's name
+/// * `leader` - The node that has to lead
+/// * `from` - The first key to try
+fn key_led_by(cluster: &mut Cluster, table: &str, leader: usize, from: u64) -> Result<(u64, String), FixtureError> {
+    for key in from..from + 256 {
+        let (group, led) = wait_group_leader(cluster, table, key)?;
+        if led == leader {
+            return Ok((key, group));
+        }
+    }
+    Err(FixtureError::NotReady(format!("no key from {from} is led by node {leader}")))
+}
+
+/// A quorum success needs distinct durable voters, and nothing releases it early (C5 M4)
+///
+/// Three nodes at a factor of three, every lane through a proxy. The replication lane from the
+/// group's leader into both followers is cut, and a write through the leader gets no success
+/// within its deadline: its outcome is unknown, and rotating and flushing the leader's WAL three
+/// times releases nothing, since the leader's own durable copy is one voter and not two. Healing
+/// one follower is the second voter: the write commits, reads back on the leader and on that
+/// follower, and the two agree on the table's digest while the cut follower does not
+/// ([P3](../../docs/src/distributed/protocol.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn quorum_success_requires_distinct_durable_voters() -> Result<(), FixtureError> {
+    use shoal::shared::protocol::error::ErrorCode;
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lane_links(true)
+        .write_timeout(Duration::from_millis(500))
+        .start()
+        .await?;
+    // a key, its group and the node leading it
+    let (key, _group) = key_led_by(&mut cluster, "Note", 0, 1000)?;
+    let leader = 0;
+    let followers = [1usize, 2];
+    let addr = cluster.node(leader).endpoints.client.to_string();
+    // a write before the cut lands, proving the path
+    write_note(&addr, key, "before").await?;
+    // cut the replication lane from the leader into both followers, both ways
+    for follower in followers {
+        cluster.data_link(leader, follower).cut();
+        cluster.data_link(follower, leader).cut();
+    }
+    // a write through the leader gets no success: the outcome is unknown
+    let refused = write_note(&addr, key, "during").await;
+    assert_eq!(failure_code(&refused), Some(ErrorCode::OutcomeUnknown), "{refused:?}");
+    // the leader's own durability releases nothing, however often it rotates and flushes
+    for _ in 0..3 {
+        let _ = cluster.node_mut(leader).command("ROTATE")?;
+        let _ = cluster.node_mut(leader).command("FLUSH")?;
+    }
+    assert_eq!(read_note(&addr, key).await?, Some("before".to_string()), "an uncommitted write was read");
+    // one follower back: two distinct durable voters, and the write commits
+    cluster.data_link(leader, followers[0]).heal();
+    cluster.data_link(followers[0], leader).heal();
+    wait_note(&addr, key, Some("during"), Duration::from_secs(20)).await?;
+    let follower_addr = cluster.node(followers[0]).endpoints.client.to_string();
+    wait_note(&follower_addr, key, Some("during"), Duration::from_secs(20)).await?;
+    // the two members that have it agree; the cut one is behind
+    let agreed = wait_digests_equal(&mut cluster, &[leader, followers[0]], "Note", Duration::from_secs(20))?;
+    let behind = digest_of(&mut cluster, followers[1], "Note")?;
+    assert_ne!(agreed["hash"], behind["hash"], "the cut follower has the write: {behind}");
+    Ok(())
+}
+
+/// A bootstrap under a factor of three does not serve default writes until placed (C5 M4)
+///
+/// RF=3 on one node: readiness reports one active copy of three and refuses default writes, and
+/// a write is refused naming the shortfall. Two joiners and an initialization give every tablet
+/// three members, readiness reports three, and the same write is admitted and committed.
+#[tokio::test(flavor = "multi_thread")]
+async fn bootstrap_does_not_reduce_configured_quorum() -> Result<(), FixtureError> {
+    use shoal::shared::protocol::error::ErrorCode;
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .deferred_from(1)
+        .replication_factor(3)
+        .initialize(false)
+        .start()
+        .await?;
+    let readiness = cluster.node_mut(0).command("READINESS")?;
+    assert_eq!(readiness["ok"]["data"]["desired_rf"], 3, "{readiness}");
+    assert_eq!(readiness["ok"]["data"]["active_rf"], 1, "{readiness}");
+    assert_eq!(readiness["ok"]["data"]["default_writes"], serde_json::json!({ "Err": { "have": 1, "need": 2 } }), "{readiness}");
+    let addr = cluster.node(0).endpoints.client.to_string();
+    let refused = write_note(&addr, 5, "alone").await;
+    assert_eq!(failure_code(&refused), Some(ErrorCode::QuorumUnavailable), "{refused:?}");
+    // every group has one member: the bootstrapper serves one copy and says so
+    let view = groups_of(&mut cluster, 0)?;
+    assert!(view["groups"].as_u64().unwrap_or(0) > 0, "{view}");
+    for shard in view["shards"].as_array().into_iter().flatten() {
+        for group in shard["groups"].as_array().into_iter().flatten() {
+            assert_eq!(group["members"].as_array().map(Vec::len), Some(1), "{group}");
+        }
+    }
+    // two joiners and an initialization: three members per group
+    cluster.start_deferred(1)?;
+    cluster.start_deferred(2)?;
+    cluster.wait_joined(&[1, 2])?;
+    cluster.initialize(&[0, 1, 2])?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let readiness = cluster.node_mut(0).command("READINESS")?;
+        if readiness["ok"]["data"]["active_rf"] == 3 && readiness["ok"]["data"]["members_up"] == 3 {
+            assert_eq!(readiness["ok"]["data"]["default_writes"], serde_json::json!({ "Ok": null }), "{readiness}");
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "the placement never reached three copies: {readiness}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let view = groups_of(&mut cluster, 0)?;
+        let three = view["shards"].as_array().into_iter().flatten().all(|shard| {
+            shard["groups"].as_array().is_some_and(|groups| {
+                !groups.is_empty() && groups.iter().all(|group| group["members"].as_array().map(Vec::len) == Some(3) && group["up"] == true)
+            })
+        });
+        if three {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "the groups never had three members: {view}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    // the write that was refused is admitted and committed now
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let written = write_note(&addr, 5, "placed").await;
+        if written.is_ok() {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "the write was never admitted: {written:?}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    wait_note(&cluster.node(1).endpoints.client.to_string(), 5, Some("placed"), Duration::from_secs(20)).await?;
+    Ok(())
+}
+
+/// An asynchronously durable replica cannot weaken a durable quorum (C5 M4)
+///
+/// A cluster node whose persistent table is configured `Async` refuses to start, naming C5; a
+/// `One` write policy is refused at validation the same way; a standalone node with the same
+/// table setting starts, since nothing counts its acknowledgement as a vote.
+#[tokio::test(flavor = "multi_thread")]
+async fn async_replica_cannot_weaken_durable_quorum() -> Result<(), FixtureError> {
+    // a cluster node with an async persistent table does not come up
+    let refused = Cluster::builder()
+        .cluster(1, CoreClaim::Count(1))
+        .durability(0, "async")
+        .ready_timeout(Duration::from_secs(20))
+        .start()
+        .await;
+    match refused {
+        Err(FixtureError::ChildFailed(msg)) => {
+            assert!(msg.contains("fdatasync") && msg.contains("Async"), "{msg}");
+        }
+        Err(other) => return Err(other),
+        Ok(_) => panic!("a cluster node with an async table started"),
+    }
+    // a One write policy is refused before anything starts
+    let error = ClusterConf::default()
+        .bootstrap(true)
+        .write_consistency(shoal::server::conf::cluster::Consistency::One)
+        .validate("127.0.0.1")
+        .expect_err("a One write policy was accepted");
+    assert!(format!("{error}").contains("fdatasync"), "{error}");
+    // a standalone node with the same table setting starts and serves
+    let standalone = Cluster::builder()
+        .standalone(CoreClaim::Count(1))
+        .durability(0, "async")
+        .start()
+        .await?;
+    round_trip(&standalone.node(0).endpoints.client.to_string(), 1).await?;
+    Ok(())
+}
+
+/// Duplicate appends, a lost frame, reordered responses and a stale term do not reapply (C5 M4)
+///
+/// Writes flow through node zero while one follower's replication lane is delayed, then cut,
+/// then healed - which is retransmission, duplicate appends and a gap the protocol recovers.
+/// Then the node leading the keys' groups is killed, another is elected and takes more writes,
+/// and the old one restarts with a stale term and catches up. Every acknowledged key is present
+/// exactly once on every node, and the digests agree at equal applied indexes.
+#[tokio::test(flavor = "multi_thread")]
+async fn duplicates_gaps_and_old_terms_do_not_reapply() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lane_links(true)
+        .start()
+        .await?;
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    // keys whose groups node zero leads, so every write is proposed there and replicated out
+    let keys = keys_led_by(&mut cluster, "Note", 0, 2000, 24)?;
+    // writes while a follower's lane is delayed, then cut, then healed
+    cluster.data_link(0, 1).delay(Duration::from_millis(150));
+    for key in &keys[..8] {
+        write_note(&addr0, *key, &format!("v{key}")).await?;
+    }
+    cluster.data_link(0, 1).cut();
+    for key in &keys[8..16] {
+        write_note(&addr0, *key, &format!("v{key}")).await?;
+    }
+    cluster.data_link(0, 1).heal();
+    for key in &keys[16..] {
+        write_note(&addr0, *key, &format!("v{key}")).await?;
+    }
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    // kill a node that leads some of the groups, write more through a survivor, restart it
+    let (victim_key, _) = key_led_by(&mut cluster, "Note", 1, 3000)?;
+    cluster.kill(1)?;
+    let addr2 = cluster.node(2).endpoints.client.to_string();
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let written = write_note(&addr2, victim_key, "after").await;
+        if written.is_ok() {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "the survivors never elected: {written:?}");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    for key in 3100..3108u64 {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            if write_note(&addr2, key, &format!("v{key}")).await.is_ok() {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "a write through a survivor never landed");
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+    cluster.restart(1, NodeKind::Server)?;
+    cluster.wait_joined(&[1])?;
+    // every acknowledged key is on every node exactly once, and the digests agree
+    for node in 0..3 {
+        let addr = cluster.node(node).endpoints.client.to_string();
+        for key in keys.iter().chain((3100..3108u64).collect::<Vec<_>>().iter()) {
+            wait_note(&addr, *key, Some(&format!("v{key}")), Duration::from_secs(30)).await?;
+        }
+        wait_note(&addr, victim_key, Some("after"), Duration::from_secs(30)).await?;
+    }
+    let digest = wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    assert_eq!(digest["rows"].as_u64(), Some((keys.len() + 8 + 1) as u64), "{digest}");
+    Ok(())
+}
+
+/// An uncommitted suffix never enters a checkpoint (C5 M4, P4)
+///
+/// The node leading a key's group is isolated and a write through it gets an unknown outcome.
+/// Its WAL is rotated and its compactors driven: the sealed segment holds an unapplied entry, so
+/// it is not handed over and nothing reaches an archive. The majority elects another leader and
+/// commits a write of its own; the old leader is healed, restarted, and comes back with the
+/// majority's history: its write is absent everywhere, the majority's present, the digests
+/// agree, and only then is its segment compacted.
+#[tokio::test(flavor = "multi_thread")]
+async fn uncommitted_suffix_never_enters_checkpoint() -> Result<(), FixtureError> {
+    use shoal::shared::protocol::error::ErrorCode;
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lane_links(true)
+        .write_timeout(Duration::from_millis(500))
+        .start()
+        .await?;
+    let (key, _) = key_led_by(&mut cluster, "Note", 0, 4000)?;
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    write_note(&addr0, key, "committed").await?;
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(20))?;
+    // isolated, the leader takes a write it can never commit
+    cluster.isolate(0);
+    let refused = write_note(&addr0, key, "speculative").await;
+    assert_eq!(failure_code(&refused), Some(ErrorCode::OutcomeUnknown), "{refused:?}");
+    // rotate and compact: the segment with the unapplied entry is not resolved, so not handed
+    let _ = cluster.node_mut(0).command("ROTATE")?;
+    let compacted = cluster.node_mut(0).command("COMPACT")?;
+    assert_eq!(compacted["ok"][0]["handed"], 0, "an unresolved segment was compacted: {compacted}");
+    assert_eq!(read_note(&addr0, key).await?, Some("committed".to_string()), "a speculative write was applied");
+    // the majority elects and moves on
+    let addr1 = cluster.node(1).endpoints.client.to_string();
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        if write_note(&addr1, key, "majority").await.is_ok() {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "the majority never elected");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    // healed, the old leader is told what really happened; restarted, it comes back with it
+    cluster.heal(0);
+    wait_note(&addr0, key, Some("majority"), Duration::from_secs(30)).await?;
+    cluster.restart(0, NodeKind::Server)?;
+    cluster.wait_joined(&[0])?;
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    wait_note(&addr0, key, Some("majority"), Duration::from_secs(30)).await?;
+    for node in 0..3 {
+        let addr = cluster.node(node).endpoints.client.to_string();
+        assert_eq!(read_note(&addr, key).await?, Some("majority".to_string()), "node {node}");
+    }
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    // now that the suffix is truncated and the majority's entries applied, the segment resolves
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let compacted = cluster.node_mut(0).command("COMPACT")?;
+        if compacted["ok"][0]["handed"].as_u64().unwrap_or(0) >= 1 {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "the segment never resolved: {compacted}");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    Ok(())
+}
+
+/// Conditional results follow committed order on every replica (C5 M4, Q4)
+///
+/// Every key is inserted once, then updates, deletes and no-ops on a small key set are sent
+/// concurrently through all three nodes, each answer recorded in a ledger with its invocation
+/// and completion order. The sequential oracle from the protocol model accepts the history, a
+/// read of every key on every node after convergence is added to it and accepted too, and the
+/// three digests agree.
+#[tokio::test(flavor = "multi_thread")]
+async fn conditional_results_follow_committed_order() -> Result<(), FixtureError> {
+    use shoal_model::event::{ClientOp, MutationOp, OpResult};
+    use shoal_model::ids::{Attempt, Key, OpId, TabletId, Value};
+    use shoal_model::oracle::{Ledger, Outcome};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .start()
+        .await?;
+    let keys: Vec<u64> = (1..=6).collect();
+    let addrs: Vec<String> = (0..3).map(|node| cluster.node(node).endpoints.client.to_string()).collect();
+    // the ledger and the clock every attempt is stamped by
+    let ledger = Arc::new(Mutex::new(Ledger::default()));
+    let clock = Arc::new(AtomicU64::new(0));
+    let next_id = Arc::new(AtomicU64::new(0));
+    let tablet_id = |key: u64| TabletId {
+        table: shoal_model::ids::TableId(1),
+        range: tablet_of(key) as u16,
+    };
+    // every key inserted once, sequentially, before anything concurrent
+    for key in &keys {
+        let id = OpId(next_id.fetch_add(1, Ordering::SeqCst) as u32);
+        let attempt = Attempt { id, retry: 0 };
+        let op = ClientOp::Mutate(MutationOp::Insert { key: Key(*key as u8), value: Value(0) });
+        let invoke = clock.fetch_add(1, Ordering::SeqCst);
+        ledger.lock().unwrap().invoke(attempt, tablet_id(*key), op, invoke);
+        write_note(&addrs[0], *key, "0").await?;
+        let complete = clock.fetch_add(1, Ordering::SeqCst);
+        ledger.lock().unwrap().complete(attempt, complete, Outcome::Ok(OpResult::Applied(true)));
+    }
+    // then updates and deletes through every node at once
+    let mut tasks = Vec::new();
+    for (node, addr) in addrs.iter().enumerate() {
+        let addr = addr.clone();
+        let keys = keys.clone();
+        let ledger = ledger.clone();
+        let clock = clock.clone();
+        let next_id = next_id.clone();
+        tasks.push(tokio::spawn(async move {
+            let client = Shoal::<TestDbClient>::new(&addr).await?;
+            for round in 0..8u32 {
+                for (at, key) in keys.iter().enumerate() {
+                    // a mix decided by the node and the round, so the three interleave
+                    let value = Value(node as u32 * 100 + round + 1);
+                    let delete = (round as usize + at + node) % 4 == 0;
+                    let op = if delete {
+                        MutationOp::Delete { key: Key(*key as u8) }
+                    } else {
+                        MutationOp::Update { key: Key(*key as u8), value }
+                    };
+                    let id = OpId(next_id.fetch_add(1, Ordering::SeqCst) as u32);
+                    let attempt = Attempt { id, retry: 0 };
+                    let invoke = clock.fetch_add(1, Ordering::SeqCst);
+                    ledger.lock().unwrap().invoke(attempt, TabletId {
+                        table: shoal_model::ids::TableId(1),
+                        range: tablet_of(*key) as u16,
+                    }, ClientOp::Mutate(op), invoke);
+                    // a delete or an update that did nothing is answered `false`, which the
+                    // client reports as a query that did not succeed
+                    let outcome = if delete {
+                        match client.send_one(cluster::schema::NoteDelete::new(*key)).await {
+                            Ok(_) => Outcome::Ok(OpResult::Applied(true)),
+                            Err(shoal::client::Errors::QueryDidNotSucceed { .. }) => Outcome::Ok(OpResult::Applied(false)),
+                            Err(_) => Outcome::Unknown,
+                        }
+                    } else {
+                        let update = cluster::schema::NoteUpdate {
+                            partition_key: *key,
+                            text: Some(value.0.to_string()),
+                        };
+                        match client.send_one(update).await {
+                            Ok(_) => Outcome::Ok(OpResult::Applied(true)),
+                            Err(shoal::client::Errors::QueryDidNotSucceed { .. }) => Outcome::Ok(OpResult::Applied(false)),
+                            Err(_) => Outcome::Unknown,
+                        }
+                    };
+                    let complete = clock.fetch_add(1, Ordering::SeqCst);
+                    ledger.lock().unwrap().complete(attempt, complete, outcome);
+                }
+            }
+            Ok::<(), shoal::client::Errors>(())
+        }));
+    }
+    for task in tasks {
+        task.await.expect("a writer task panicked")?;
+    }
+    // the replicas converge, and a read of every key on every node joins the ledger
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    for addr in &addrs {
+        for key in &keys {
+            let id = OpId(next_id.fetch_add(1, Ordering::SeqCst) as u32);
+            let attempt = Attempt { id, retry: 0 };
+            let invoke = clock.fetch_add(1, Ordering::SeqCst);
+            ledger.lock().unwrap().invoke(attempt, tablet_id(*key), ClientOp::Read { key: Key(*key as u8) }, invoke);
+            let seen = read_note(addr, *key).await?.map(|text| Value(text.parse().expect("a value")));
+            let complete = clock.fetch_add(1, Ordering::SeqCst);
+            ledger.lock().unwrap().complete(attempt, complete, Outcome::Ok(OpResult::Value(seen)));
+        }
+    }
+    let ledger = ledger.lock().unwrap().clone();
+    shoal_model::oracle::check(&ledger).unwrap_or_else(|error| panic!("the history is not sequential: {error:?}"));
+    Ok(())
+}
+
+/// A tablet without a quorum consumes bounded resources while the others continue (C5 M4)
+///
+/// One group's flush completions are held on both followers, so its writes cannot reach a
+/// durable quorum: the first few pend and are answered unknown at the deadline, the rest are
+/// shed at the group's pending bound rather than queued, and the leader's memory stays bounded.
+/// Writes to every other group commit at once meanwhile. Released, the held completions let the
+/// pending writes commit and apply.
+#[tokio::test(flavor = "multi_thread")]
+async fn slow_tablet_does_not_block_other_tablets() -> Result<(), FixtureError> {
+    use shoal::shared::protocol::error::ErrorCode;
+    // two shards a node, so a node leads two groups of the table and one can stall while
+    // the other is written
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(2))
+        .replication_factor(3)
+        .write_timeout(Duration::from_millis(1500))
+        .pending_bytes(2048)
+        .start()
+        .await?;
+    let (slow_key, group) = key_led_by(&mut cluster, "Note", 0, 5000)?;
+    let slow_keys = keys_in_group(&mut cluster, "Note", &group, slow_key, 24)?;
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    // a key of another group, led by the same node
+    let (other_key, other_group) = (5000..5200u64)
+        .find_map(|key| {
+            let (candidate, leader) = wait_group_leader(&mut cluster, "Note", key).ok()?;
+            (candidate != group && leader == 0).then_some((key, candidate))
+        })
+        .expect("a key of another group led by node 0");
+    assert_ne!(group, other_group);
+    let other_keys = keys_in_group(&mut cluster, "Note", &other_group, other_key, 8)?;
+    // both followers hold the slow group's completions
+    for follower in [1, 2] {
+        let stalled = cluster.node_mut(follower).command(&format!("STALL_WAL {group}"))?;
+        assert!(stalled.get("ok").is_some(), "{stalled}");
+    }
+    let rss_before = cluster.node(0).rss_kib();
+    // many writes to the slow group at once: some pend to the deadline, the rest are shed
+    let mut tasks = Vec::new();
+    for key in slow_keys {
+        let addr = addr0.clone();
+        tasks.push(tokio::spawn(async move { (key, write_note(&addr, key, &"x".repeat(200)).await) }));
+    }
+    // meanwhile writes to the other group land at once
+    let started = std::time::Instant::now();
+    for key in other_keys {
+        write_note(&addr0, key, "fast").await?;
+    }
+    let fast = started.elapsed();
+    assert!(fast < Duration::from_secs(1), "writes to an unaffected group took {fast:?}");
+    // which writes pended to the deadline, and which were shed before entering the log
+    let mut unknown = Vec::new();
+    let mut shed = 0;
+    for task in tasks {
+        match task.await.expect("a writer task panicked") {
+            (_, Ok(())) => panic!("a write to a group without a quorum succeeded"),
+            (key, Err(error)) => match failure_code(&Err::<(), _>(error)) {
+                Some(ErrorCode::OutcomeUnknown) => unknown.push(key),
+                Some(ErrorCode::Shedding) => shed += 1,
+                other => panic!("a write to the slow group failed for another reason: {other:?}"),
+            },
+        }
+    }
+    assert!(!unknown.is_empty(), "no write pended to the deadline");
+    assert!(shed > 0, "no write was shed at the pending bound");
+    let rss_after = cluster.node(0).rss_kib();
+    assert!(
+        rss_after < rss_before + 64 * 1024,
+        "the leader grew by {} KiB with one group stalled",
+        rss_after.saturating_sub(rss_before)
+    );
+    // released, the pending writes commit and apply: an unknown outcome was a write in the
+    // leader's log waiting on the followers, and a shed one never entered it
+    for follower in [1, 2] {
+        let released = cluster.node_mut(follower).command(&format!("RELEASE_WAL {group}"))?;
+        assert!(released.get("ok").is_some(), "{released}");
+    }
+    for key in unknown {
+        wait_note(&addr0, key, Some(&"x".repeat(200)), Duration::from_secs(30)).await?;
+    }
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    Ok(())
+}
+
+/// Volatile replication uses the common encoding, with weaker durability said out loud (C5 M4)
+///
+/// Rows of the ephemeral table written through one node are read from the other two, which
+/// replicate them through the same command encoding the persistent table uses; the three
+/// digests agree; the groups say their logs are volatile; and once every node has restarted
+/// the rows are gone while the persistent table's notes are not.
+#[tokio::test(flavor = "multi_thread")]
+async fn volatile_replication_uses_common_encoding() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .start()
+        .await?;
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    let client = Shoal::<TestDbClient>::new(&addr0).await?;
+    for key in 100..110u64 {
+        client.send_one(Row { key, data: format!("row {key}") }).await?;
+        write_note(&addr0, key, &format!("note {key}")).await?;
+    }
+    // read back from the other two, locally
+    for node in 1..3 {
+        let other = Shoal::<TestDbClient>::new(&cluster.node(node).endpoints.client.to_string()).await?;
+        for key in 100..110u64 {
+            let deadline = std::time::Instant::now() + Duration::from_secs(20);
+            loop {
+                let found = match other.send_one(RowGet::new(vec![key])).await {
+                    Ok(response) => response.access::<Row>()?.is_some_and(|rows| rows.len() == 1),
+                    Err(shoal::client::Errors::QueryDidNotSucceed { .. }) => false,
+                    Err(error) => return Err(error.into()),
+                };
+                if found {
+                    break;
+                }
+                assert!(std::time::Instant::now() < deadline, "row {key} never reached node {node}");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+    }
+    let rows = wait_digests_equal(&mut cluster, &[0, 1, 2], "Row", Duration::from_secs(20))?;
+    assert_eq!(rows["rows"].as_u64(), Some(10), "{rows}");
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(20))?;
+    // the groups of the ephemeral table say so
+    let view = groups_of(&mut cluster, 0)?;
+    let mut volatile = 0;
+    let mut durable = 0;
+    for shard in view["shards"].as_array().into_iter().flatten() {
+        for group in shard["groups"].as_array().into_iter().flatten() {
+            match (group["table_name"].as_str(), group["volatile"].as_bool()) {
+                (Some("Row"), Some(true)) => volatile += 1,
+                (Some("Note"), Some(false)) => durable += 1,
+                other => panic!("a group is labelled wrongly: {other:?} in {group}"),
+            }
+        }
+    }
+    assert!(volatile > 0 && durable > 0, "{view}");
+    // every node restarted: the rows are gone, the notes are not
+    for node in 0..3 {
+        cluster.kill(node)?;
+    }
+    for node in 0..3 {
+        cluster.restart(node, NodeKind::Server)?;
+    }
+    cluster.wait_joined(&[0, 1, 2])?;
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    wait_note(&addr0, 100, Some("note 100"), Duration::from_secs(30)).await?;
+    let client = Shoal::<TestDbClient>::new(&addr0).await?;
+    assert!(found_nothing(client.send_one(RowGet::new(vec![100])).await), "an ephemeral row survived a full restart");
+    Ok(())
+}
+
+/// `One` reads converge without exposing uncommitted state (C6 M4, P4)
+///
+/// A follower cut off from the leader serves its committed, applied state - the old value -
+/// while the leader and the other follower move on; healed, it converges. Then the leader is
+/// isolated and takes a write it cannot commit: a read through it does not show the appended
+/// entry, and once healed every node converges on what the majority committed.
+#[tokio::test(flavor = "multi_thread")]
+async fn one_reads_converge_without_exposing_uncommitted_state() -> Result<(), FixtureError> {
+    use shoal::shared::protocol::error::ErrorCode;
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lane_links(true)
+        .write_timeout(Duration::from_millis(500))
+        .start()
+        .await?;
+    let (key, _) = key_led_by(&mut cluster, "Note", 0, 6000)?;
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    let addr1 = cluster.node(1).endpoints.client.to_string();
+    write_note(&addr0, key, "one").await?;
+    wait_note(&addr1, key, Some("one"), Duration::from_secs(20)).await?;
+    // a cut follower keeps serving the old committed value
+    cluster.data_link(0, 1).cut();
+    cluster.data_link(1, 0).cut();
+    write_note(&addr0, key, "two").await?;
+    assert_eq!(read_note(&addr0, key).await?, Some("two".to_string()));
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(read_note(&addr1, key).await?, Some("one".to_string()), "a cut follower saw a newer value");
+    cluster.data_link(0, 1).heal();
+    cluster.data_link(1, 0).heal();
+    wait_note(&addr1, key, Some("two"), Duration::from_secs(20)).await?;
+    // an isolated leader never shows what it could not commit
+    cluster.isolate(0);
+    let refused = write_note(&addr0, key, "three").await;
+    assert_eq!(failure_code(&refused), Some(ErrorCode::OutcomeUnknown), "{refused:?}");
+    assert_eq!(read_note(&addr0, key).await?, Some("two".to_string()), "an uncommitted write was read");
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let written = write_note(&addr1, key, "four").await;
+        if written.is_ok() {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "the majority never elected: {written:?}");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    cluster.heal(0);
+    for node in 0..3 {
+        let addr = cluster.node(node).endpoints.client.to_string();
+        wait_note(&addr, key, Some("four"), Duration::from_secs(30)).await?;
+    }
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    Ok(())
+}
+

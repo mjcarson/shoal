@@ -253,6 +253,47 @@ impl ClusterBuilder {
         self
     }
 
+    /// Set the base data election timeout, which the groups' heartbeat is a tenth of
+    ///
+    /// # Arguments
+    ///
+    /// * `failover` - The base
+    pub fn primary_failover_after(mut self, failover: Duration) -> Self {
+        self.failover_ms = u64::try_from(failover.as_millis()).unwrap_or(u64::MAX);
+        self
+    }
+
+    /// Configure one node's persistent table with a durability, `"fsync"` or `"async"`
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The node
+    /// * `durability` - The durability
+    pub fn durability(mut self, id: usize, durability: &str) -> Self {
+        self.durability.push((id, durability.to_string()));
+        self
+    }
+
+    /// Shorten the proposal deadline
+    ///
+    /// # Arguments
+    ///
+    /// * `timeout` - The deadline
+    pub fn write_timeout(mut self, timeout: Duration) -> Self {
+        self.write_timeout_ms = Some(u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX));
+        self
+    }
+
+    /// Lower the bound on bytes proposed and unanswered per group
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - The bound
+    pub fn pending_bytes(mut self, bytes: usize) -> Self {
+        self.pending_bytes = Some(bytes);
+        self
+    }
+
     /// Leave the nodes at this index and above unstarted, for [`Cluster::start_deferred`]
     ///
     /// # Arguments
@@ -414,6 +455,11 @@ impl ClusterBuilder {
             }
             let allocation = plan.nodes[id].1.clone();
             let cluster = staged.as_ref().and_then(|staged| staged.per_node.get(id).cloned());
+            let durability = self
+                .durability
+                .iter()
+                .find(|(node, _)| *node == id)
+                .map(|(_, durability)| durability.clone());
             nodes.push(Some(Node::spawn_with(
                 id,
                 spec.kind,
@@ -422,6 +468,7 @@ impl ClusterBuilder {
                 spec.affinity.clone(),
                 spec.staged_marker.clone(),
                 cluster,
+                durability,
             )?));
         }
         // hold the port reservations until every child has bound, so nothing else takes them
@@ -715,6 +762,7 @@ impl Cluster {
             None,
             None,
             if kind == NodeKind::Server { staged } else { None },
+            None,
         )?;
         node.wait_ready(self.ready_timeout)?;
         self.plan.endpoints[id] = node.endpoints.clone();
@@ -751,6 +799,7 @@ impl Cluster {
             None,
             None,
             staged,
+            None,
         )?;
         node.wait_ready(self.ready_timeout)?;
         self.plan.endpoints[id] = node.endpoints.clone();
@@ -800,7 +849,7 @@ impl Cluster {
         // the clone runs on the original's allocation, so it runs the shard count the
         // directory was written by; the two share those cores, which a fencing test can afford
         let allocation = self.plan.nodes[id].1.clone();
-        let node = Node::spawn_with(id, NodeKind::Server, allocation, dir, None, None, Some(staged))?;
+        let node = Node::spawn_with(id, NodeKind::Server, allocation, dir, None, None, Some(staged), None)?;
         drop((data_sock, control_sock));
         Ok(node)
     }
@@ -1162,11 +1211,6 @@ fn build_membership_cluster(
                 .trace
                 .then(|| dir.path().join("trace.jsonl").to_string_lossy().into_owned()),
             failover_ms: Some(builder.failover_ms),
-            durability: builder
-                .durability
-                .iter()
-                .find(|(node, _)| *node == id)
-                .map(|(_, durability)| durability.clone()),
             write_timeout_ms: builder.write_timeout_ms,
             pending_bytes: builder.pending_bytes,
         });

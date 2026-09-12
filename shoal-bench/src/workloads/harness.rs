@@ -116,6 +116,14 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
     let (conf_facts, addr, conf, staged) = match plan.server.overrides() {
         None => (None, String::new(), None, None),
         Some(overrides) => {
+            // an arm asking for more copies than it places nodes is an availability test the
+            // fixture runs, not a throughput arm at a settled factor
+            // ([C10](../../../docs/src/distributed/performance.md))
+            if let Some(cluster) = &overrides.cluster {
+                if let Err(reason) = cluster.feasibility() {
+                    bail!("{}: {reason}", workload.id());
+                }
+            }
             let resolved = conf::resolve(&request.conf, workload.id(), overrides, request.port)?;
             let (conf, staged) = match overrides.cluster.as_ref().filter(|c| !c.peers.is_empty()) {
                 Some(_) if request.server != ServerSource::InProcess => bail!(
@@ -193,10 +201,19 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
     // the link counters are read again after the run, since they are what the run did
     let mut cluster_facts = match (&pool, &conf) {
         (Some(pool), Some(conf)) => match conf::cluster_facts(conf, pool)? {
-            Some(facts) => match &staged {
-                Some(staged) => Some(cluster::placed_facts(staged, pool, conf, facts)?),
-                None => Some(facts),
-            },
+            Some(mut facts) => {
+                // what the arm scheduled: every arm here is a closed loop at its plan's depth
+                // ([F40](../../../docs/src/features/replication.md))
+                facts.offered_load = Some(crate::model::macro_layer::OfferedLoad {
+                    mode: "closed".to_string(),
+                    outstanding: plan.scale.concurrency,
+                    rate: None,
+                });
+                match &staged {
+                    Some(staged) => Some(cluster::placed_facts(staged, pool, conf, facts)?),
+                    None => Some(facts),
+                }
+            }
             None => None,
         },
         _ => None,
@@ -238,11 +255,15 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
             measured.map(|measured| (measured, wall_clock))
         })
     });
-    // what the links did during the run, read before the server that holds them stops
-    if let (Some(facts), Some(pool), Some(conf), true) =
-        (cluster_facts.as_mut(), pool.as_ref(), conf.as_ref(), staged.is_some())
+    // what the links did during the run, and where every replica ended, read before the
+    // servers that hold them stop
+    if let (Some(facts), Some(pool), Some(conf), Some(staged)) =
+        (cluster_facts.as_mut(), pool.as_ref(), conf.as_ref(), staged.as_ref())
     {
         facts.transport = Some(cluster::transport_facts(pool, conf)?);
+        let replicas = cluster::replica_facts(staged, pool, conf, &runtime)?;
+        facts.outcomes = Some(cluster::outcome_facts(&replicas));
+        facts.replicas = replicas;
     }
     // stop the server whatever happened, so a failing run does not leave shards holding cores
     stop(pool)?;

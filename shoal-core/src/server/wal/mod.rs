@@ -47,7 +47,7 @@ pub mod memory;
 mod tests;
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, Bound, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, Bound, HashMap, HashSet, VecDeque};
 use std::fmt::Debug;
 use std::future::Future;
 use std::io;
@@ -61,12 +61,13 @@ use futures_channel::oneshot;
 use glommio::io::{BufferedFile, Directory, OpenOptions};
 use openraft::entry::RaftEntry as _;
 use openraft::storage::{IOFlushed, LogState, RaftLogReader, RaftLogStorage};
-use openraft::OptionalSend;
+use openraft::type_config::alias::StoredMembershipOf;
+use openraft::{EntryPayload, Membership, OptionalSend, StoredMembership};
 use serde::{Deserialize, Serialize};
 use tracing::{event, Level};
 
 use crate::server::replication::DataConfig;
-use crate::shared::identity::GroupId;
+use crate::shared::identity::{GroupId, ShardAddr};
 pub use frame::{Entry, LeaderId, Vote, WalLogId};
 pub use memory::MemoryWal;
 
@@ -123,6 +124,10 @@ struct Slot {
     loc: Loc,
     /// The leader id of the entry's log id, so the log id can be rebuilt without the frame
     leader: LeaderId,
+    /// Whether the entry carries a command, which is what a compactor is handed
+    ///
+    /// A blank or a membership entry is log alone: it moves a checkpoint and reaches no archive.
+    command: bool,
 }
 
 /// One group's logical log within the shared file
@@ -348,13 +353,15 @@ impl WalInner {
     ///
     /// * `group` - The group
     /// * `log_id` - The entry's log id
+    /// * `command` - Whether the entry carries a command
     /// * `loc` - Where its frame lies
-    fn index_entry(&mut self, group: GroupId, log_id: &WalLogId, loc: Loc) {
+    fn index_entry(&mut self, group: GroupId, log_id: &WalLogId, command: bool, loc: Loc) {
         self.group(group).index.insert(
             log_id.index,
             Slot {
                 loc,
                 leader: log_id.leader_id.clone(),
+                command,
             },
         );
         let segment = self.segments.entry(loc.generation).or_insert_with(|| SegmentView {
@@ -483,7 +490,8 @@ impl WalInner {
             frame::Frame::Entry { group, entry } => {
                 // a replayed entry supersedes whatever the index held at that position
                 let log_id = entry.log_id();
-                self.index_entry(group, &log_id, loc);
+                let command = matches!(entry.payload, EntryPayload::Normal(_));
+                self.index_entry(group, &log_id, command, loc);
             }
             frame::Frame::Vote { group, vote } => self.group(group).vote = Some(vote),
             frame::Frame::Committed { group, log_id } => self.group(group).committed = log_id,
@@ -564,12 +572,52 @@ pub async fn write_atomic(dir: &Path, name: &str, bytes: Vec<u8>) -> io::Result<
 }
 
 /// What the checkpoint file records for one group
+///
+/// The membership is spelled out as lists rather than as openraft's type, whose node map is
+/// keyed by a shard address and so has no JSON form.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GroupCheckpoint {
     /// The last log id whose effect the table's archives hold
     pub applied: Option<WalLogId>,
-    /// The membership as of that log id
-    pub membership: openraft::type_config::alias::StoredMembershipOf<DataConfig>,
+    /// The log id of the membership as of that point, if one was ever committed
+    pub membership_at: Option<WalLogId>,
+    /// The joint configuration then: the voters of each config
+    pub configs: Vec<Vec<ShardAddr>>,
+    /// Every member then, learners included
+    pub members: Vec<ShardAddr>,
+}
+
+impl GroupCheckpoint {
+    /// Record a checkpoint and the membership as of it
+    ///
+    /// # Arguments
+    ///
+    /// * `applied` - The checkpoint
+    /// * `membership` - The membership as of it
+    #[must_use]
+    pub fn new(applied: Option<WalLogId>, membership: &StoredMembershipOf<DataConfig>) -> Self {
+        GroupCheckpoint {
+            applied,
+            membership_at: membership.log_id().clone(),
+            configs: membership
+                .membership()
+                .get_joint_config()
+                .iter()
+                .map(|config| config.iter().copied().collect())
+                .collect(),
+            members: membership.membership().nodes().map(|(addr, _)| *addr).collect(),
+        }
+    }
+
+    /// The membership as openraft holds it
+    #[must_use]
+    pub fn membership(&self) -> StoredMembershipOf<DataConfig> {
+        let configs: Vec<BTreeSet<ShardAddr>> = self.configs.iter().map(|config| config.iter().copied().collect()).collect();
+        let nodes: BTreeMap<ShardAddr, ShardAddr> = self.members.iter().map(|addr| (*addr, *addr)).collect();
+        // a configuration read back from a file this node wrote is one openraft accepted
+        let membership = Membership::new(configs, nodes).unwrap_or_default();
+        StoredMembership::new(self.membership_at.clone(), membership)
+    }
 }
 
 /// The checkpoint file: every group's boundary
@@ -934,7 +982,7 @@ impl ShardWal {
         }
     }
 
-    /// The frames of some groups that lie in a segment, in index order per group
+    /// The command frames of some groups that lie in a segment, in index order per group
     ///
     /// # Arguments
     ///
@@ -947,7 +995,8 @@ impl ShardWal {
         for group in groups {
             if let Some(log) = inner.groups.get(group) {
                 for (index, slot) in &log.index {
-                    if slot.loc.generation == generation {
+                    // a blank or a membership entry has nothing for an archive
+                    if slot.command && slot.loc.generation == generation {
                         frames.push(FrameRef {
                             group: *group,
                             index: *index,
@@ -1418,8 +1467,9 @@ impl RaftLogStorage<DataConfig> for GroupStore {
                     let callback = (at == last).then(|| callback_slot.take()).flatten();
                     let loc = wal.stage(&encoded, self.group, callback)?;
                     let log_id = entry.log_id();
+                    let command = matches!(entry.payload, EntryPayload::Normal(_));
                     let mut inner = wal.inner.borrow_mut();
-                    inner.index_entry(self.group, &log_id, loc);
+                    inner.index_entry(self.group, &log_id, command, loc);
                     inner.cache_entry(self.group, entry, encoded.len());
                 }
                 // an empty append is durable already

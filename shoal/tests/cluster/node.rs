@@ -84,6 +84,12 @@ pub struct ChildRequest {
     /// fixture's proxies stand ([F39](../../../docs/src/features/membership.md)).
     #[serde(default)]
     pub cluster: Option<StagedCluster>,
+    /// The durability the persistent table's log is configured with, if the test set it
+    ///
+    /// `"async"` is what a cluster node refuses to start with, and what a standalone node
+    /// serves under ([F40](../../../docs/src/features/replication.md)).
+    #[serde(default)]
+    pub durability: Option<String>,
 }
 
 /// A node's place in a membership cluster the fixture built
@@ -137,11 +143,6 @@ pub struct StagedCluster {
     /// failover inside its deadline ([F40](../../../docs/src/features/replication.md)).
     #[serde(default)]
     pub failover_ms: Option<u64>,
-    /// The durability the persistent table's log is configured with, if the test set it
-    ///
-    /// `"async"` is what a cluster node refuses to start with, which one test asserts.
-    #[serde(default)]
-    pub durability: Option<String>,
     /// The tablet groups' proposal deadline in milliseconds, if the test shortened it
     #[serde(default)]
     pub write_timeout_ms: Option<u64>,
@@ -266,7 +267,7 @@ impl Node {
         allocation: Allocation,
         dir: &Path,
     ) -> Result<Self, FixtureError> {
-        Self::spawn_with(id, kind, allocation, dir, None, None, None)
+        Self::spawn_with(id, kind, allocation, dir, None, None, None, None)
     }
 
     /// Start a child, narrowing the cpus it may run on and staging a marker for it to find
@@ -288,6 +289,7 @@ impl Node {
         affinity: Option<Vec<usize>>,
         staged_marker: Option<String>,
         cluster: Option<StagedCluster>,
+        durability: Option<String>,
     ) -> Result<Self, FixtureError> {
         let topology = super::Topology::detect();
         // a cluster node's control thread runs on the first cpu of its control core, or shares
@@ -309,6 +311,7 @@ impl Node {
             control_shared,
             affinity: affinity.clone(),
             staged_marker,
+            durability: durability.clone(),
             cluster,
         };
         let request = serde_json::to_string(&request).expect("a request serializes");

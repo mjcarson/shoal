@@ -22,6 +22,8 @@ pub struct GroupReport {
     pub table_name: String,
     /// How many tablets it serves
     pub tablets: u32,
+    /// Which tablets it serves, ascending
+    pub tablet_ids: Vec<u16>,
     /// Its members, primary first
     pub members: Vec<ShardAddr>,
     /// The leader this shard knows, if any
