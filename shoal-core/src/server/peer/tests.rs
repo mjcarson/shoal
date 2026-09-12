@@ -31,6 +31,8 @@ fn identity(node: NodeId, cluster: ClusterId) -> Identity {
         layout: 1,
         topology_at_claim: 0,
         fresh: false,
+        mode: crate::server::meta::MarkerMode::Cluster,
+        incarnation: 1,
     }
 }
 

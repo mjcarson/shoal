@@ -42,6 +42,7 @@
 
 use uuid::Uuid;
 
+pub mod admin;
 pub mod auth;
 pub mod error;
 pub mod fingerprint;
@@ -110,9 +111,10 @@ pub const DEFAULT_MAX_FRAME_BYTES: u32 = 64 * 1024 * 1024;
 /// `Hello`, `HelloAck`, `Auth`, `AuthResponse`, `Queries`, `Response` and `Error` are what a client
 /// and a server exchange. Types 13 and above are the peer protocol
 /// ([F38](../../../docs/src/features/inter-node-transport.md)), spoken only between nodes of one
-/// cluster, and `Ping`/`Pong` gained a body there. `Topology`, `GoAway`, `Cancel` and
-/// `StatusReport` stay reserved so that the features that need them are a call site rather than
-/// another flag day.
+/// cluster, and `Ping`/`Pong` gained a body there. `Topology` and the two `Admin` types are the
+/// membership milestone's ([F39](../../../docs/src/features/membership.md)); `GoAway`, `Cancel`
+/// and `StatusReport` stay reserved so that the features that need them are a call site rather
+/// than another flag day.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum MessageType {
@@ -132,7 +134,11 @@ pub enum MessageType {
     Ping = 7,
     /// The answer to a `Ping` - reserved
     Pong = 8,
-    /// The shards in this cluster and what each one owns - reserved for shard aware routing
+    /// The cluster's members, placement and policy
+    ///
+    /// From a client it is a subscription: an empty body under a query id, answered with the
+    /// current topology under that id and followed by every later version under the nil id
+    /// ([F39](../../../docs/src/features/membership.md)).
     Topology = 9,
     /// A failure with no query to attach it to - reserved for the error channel
     Error = 10,
@@ -160,6 +166,10 @@ pub enum MessageType {
     SnapshotChunk = 21,
     /// The end of a snapshot stream, with what the whole of it hashed to
     SnapshotEnd = 22,
+    /// A client's administrative request - a topology read or a versioned cluster mutation
+    Admin = 23,
+    /// The answer to an `Admin` request, under the same id
+    AdminResponse = 24,
 }
 
 impl MessageType {
@@ -200,6 +210,8 @@ impl MessageType {
             20 => Ok(MessageType::SnapshotBegin),
             21 => Ok(MessageType::SnapshotChunk),
             22 => Ok(MessageType::SnapshotEnd),
+            23 => Ok(MessageType::Admin),
+            24 => Ok(MessageType::AdminResponse),
             // anything else was written by a peer we do not understand, including a zeroed buffer
             unknown => Err(ProtocolError::UnknownMessageType(unknown)),
         }
@@ -231,6 +243,8 @@ impl MessageType {
             MessageType::SnapshotBegin => "SnapshotBegin",
             MessageType::SnapshotChunk => "SnapshotChunk",
             MessageType::SnapshotEnd => "SnapshotEnd",
+            MessageType::Admin => "Admin",
+            MessageType::AdminResponse => "AdminResponse",
         }
     }
 }

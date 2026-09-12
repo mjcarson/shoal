@@ -40,7 +40,8 @@ pub mod snapshot;
 mod tests;
 
 pub use control::{
-    ControlKind, ControlRequestHead, ControlResponseHead, ControlStatus, CONTROL_HEAD_LEN,
+    ControlKind, ControlRequestHead, ControlResponseHead, ControlStatus, StatusReport,
+    CONTROL_HEAD_LEN,
 };
 pub use forward::{
     decode_entries, decode_error_payload, encode_entries, encode_error_payload, ForwardEntry,
@@ -49,7 +50,7 @@ pub use forward::{
 };
 pub use hello::{
     PeerHello, PeerHelloAck, CAPABILITIES, CAP_BULK_SNAPSHOT_V1, CAP_CONTROL_RAFT_V1,
-    CAP_FORWARD_V1, PEER_HELLO_BODY_LEN, PEER_HELLO_FRAME_LEN,
+    CAP_FORWARD_V1, CAP_MEMBERSHIP_V1, PEER_HELLO_BODY_LEN, PEER_HELLO_FRAME_LEN,
 };
 pub use snapshot::{
     checksum, SnapshotBegin, SnapshotChunk, SnapshotEnd, SnapshotStatus, SNAPSHOT_BEGIN_LEN,
@@ -135,10 +136,10 @@ pub enum PeerRefusal {
     Accepted = 0,
     /// The peer belongs to a different cluster
     WrongCluster = 1,
-    /// The peer's node id is not in this node's placement
+    /// The peer's node id is not a member this node knows
     UnknownNode = 2,
-    /// The peer's node id is in the placement, but not at the address it connected from, or it
-    /// answered a dial with an identity other than the one dialled
+    /// The peer's node id is known, but not at the address it connected from, it answered a
+    /// dial with an identity other than the one dialled, or its certificate names another node
     IdentityMismatch = 3,
     /// The two builds share no wire version
     NoCommonVersion = 4,
@@ -150,6 +151,15 @@ pub enum PeerRefusal {
     LaneRefused = 7,
     /// The peer's transport credentials did not prove membership
     Unauthorized = 8,
+    /// The peer's incarnation is below the one the cluster has committed for its identity
+    ///
+    /// A later start of the same directory has been admitted, so this one is a run the cluster
+    /// has already replaced ([F39](../../../../../docs/src/features/membership.md), Q11).
+    Fenced = 10,
+    /// A joiner presented an identity the cluster already holds at the same or a higher incarnation
+    DuplicateIdentity = 11,
+    /// A join was asked of a node that cannot admit one - not a member, or not on the control lane
+    NotJoinable = 12,
     /// A reason this build does not know, which is still a refusal
     Unrecognized = 255,
 }
@@ -178,6 +188,9 @@ impl PeerRefusal {
             6 => PeerRefusal::ShardCountMismatch,
             7 => PeerRefusal::LaneRefused,
             8 => PeerRefusal::Unauthorized,
+            10 => PeerRefusal::Fenced,
+            11 => PeerRefusal::DuplicateIdentity,
+            12 => PeerRefusal::NotJoinable,
             // a reason we cannot name is still a node that would not have us
             _ => PeerRefusal::Unrecognized,
         }
@@ -200,13 +213,18 @@ impl std::fmt::Display for PeerRefusal {
         match self {
             PeerRefusal::Accepted => write!(f, "accepted"),
             PeerRefusal::WrongCluster => write!(f, "wrong cluster"),
-            PeerRefusal::UnknownNode => write!(f, "node not in placement"),
-            PeerRefusal::IdentityMismatch => write!(f, "identity does not match the placement"),
+            PeerRefusal::UnknownNode => write!(f, "node not a known member"),
+            PeerRefusal::IdentityMismatch => write!(f, "identity does not match the membership"),
             PeerRefusal::NoCommonVersion => write!(f, "no wire version in common"),
             PeerRefusal::SchemaMismatch => write!(f, "schema mismatch"),
-            PeerRefusal::ShardCountMismatch => write!(f, "shard count does not match the placement"),
+            PeerRefusal::ShardCountMismatch => write!(f, "shard count does not match the membership"),
             PeerRefusal::LaneRefused => write!(f, "lane not served on this listener"),
             PeerRefusal::Unauthorized => write!(f, "not authorized"),
+            PeerRefusal::Fenced => write!(f, "fenced by a later start of the same node"),
+            PeerRefusal::DuplicateIdentity => {
+                write!(f, "the cluster already holds this identity at this incarnation or later")
+            }
+            PeerRefusal::NotJoinable => write!(f, "this node cannot admit a joiner here"),
             PeerRefusal::Unrecognized => write!(f, "refused for a reason this build does not know"),
         }
     }

@@ -415,10 +415,14 @@ async fn node_identity_persists_and_wrong_cluster_is_refused() -> Result<(), Fix
         "the refusal did not name the migration and the node: {reason}"
     );
     // a peer from another cluster is refused by the identity, and the marker is untouched
-    let before = std::fs::read(StorageMeta::path(cluster.dir(0)))?;
+    //
+    // the claim itself counts one more start of the directory and writes that down, so the
+    // bytes held to are the ones after it; a refusal is what must not move them
     let identity = StorageMeta::claim(cluster.dir(0), marker.shards, ClusterIntent::Bootstrap)
         .expect("the directory reopens under its own mode");
     assert_eq!(identity.node.to_string(), node);
+    assert!(identity.incarnation > marker.incarnation, "a reopen did not count a start");
+    let before = std::fs::read(StorageMeta::path(cluster.dir(0)))?;
     let other = shoal::shared::identity::ClusterId::mint();
     let error = identity.verify_cluster(other).expect_err("another cluster was accepted");
     assert!(matches!(
@@ -436,10 +440,9 @@ async fn node_identity_persists_and_wrong_cluster_is_refused() -> Result<(), Fix
 /// An unknown configuration setting and an unknown marker format are refused by name
 ///
 /// Three refusals, each naming what was wrong and where the way out is when there is one: a
-/// misspelled key under `cluster:` names the key; a setting this build does not implement
-/// names the milestone that does; and a format 1 marker - the shape every directory written
-/// before M1 has - names the format, the formats this build reads, and that no migration
-/// exists yet.
+/// misspelled key under `cluster:` names the key; a block that both creates a cluster and
+/// joins one says so; and a format 1 marker - the shape every directory written before M1
+/// has - names the format, the formats this build reads, and that no migration exists yet.
 #[tokio::test(flavor = "multi_thread")]
 async fn unknown_configuration_and_storage_formats_are_refused() -> Result<(), FixtureError> {
     // a misspelled key under the cluster block is refused, naming the key
@@ -454,22 +457,24 @@ async fn unknown_configuration_and_storage_formats_are_refused() -> Result<(), F
         error.to_string().contains("replication_factr"),
         "the error did not name the key: {error}"
     );
-    // a setting this build cannot act on is refused at startup, naming the milestone
+    // a block that both creates a cluster and joins one is refused at startup, saying which
     let conf = utils::build_crash_config(dir.path(), 0).cluster(
-        ClusterConf::default().seeds(vec!["10.0.0.1:12001".to_string()]),
+        ClusterConf::default()
+            .bootstrap(true)
+            .seeds(vec!["10.0.0.1:12002".to_string()]),
     );
     let error = match ShoalPool::<TestDb>::start(conf) {
         Ok(pool) => {
             let _ = pool.exit();
-            panic!("a joiner started before M3");
+            panic!("a node that both bootstraps and joins started");
         }
         Err(error) => error,
     };
     assert!(
-        matches!(&error, ServerError::Shoal(ShoalError::NotImplemented { milestone: "M3", .. })),
+        matches!(&error, ServerError::Shoal(ShoalError::InvalidConfig(_))),
         "the wrong refusal: {error:?}"
     );
-    assert!(format!("{error}").contains("M3"), "{error}");
+    assert!(format!("{error}").contains("not both"), "{error}");
     // a format 1 marker is refused by name, with the formats this build reads and the fact
     // that no migration exists
     let refused = match Cluster::builder()
@@ -483,19 +488,19 @@ async fn unknown_configuration_and_storage_formats_are_refused() -> Result<(), F
     };
     let reason = format!("{refused:?}");
     assert!(reason.contains("format 1"), "the refusal did not name the format: {reason}");
-    assert!(reason.contains("reads [2]"), "the refusal did not name what it reads: {reason}");
+    assert!(reason.contains("reads [2, 3]"), "the refusal did not name what it reads: {reason}");
     assert!(reason.contains("no migration"), "the refusal did not say there is no migration: {reason}");
     // and a format from the future the same way, whatever else it carries
     let refused = match Cluster::builder()
         .standalone(CoreClaim::Count(1))
-        .staged_marker("{\n  \"format\": 3,\n  \"shards\": 2,\n  \"future\": true\n}")
+        .staged_marker("{\n  \"format\": 4,\n  \"shards\": 2,\n  \"future\": true\n}")
         .start()
         .await
     {
-        Ok(_) => panic!("a format 3 marker started"),
+        Ok(_) => panic!("a format 4 marker started"),
         Err(refused) => refused,
     };
-    assert!(format!("{refused:?}").contains("format 3"));
+    assert!(format!("{refused:?}").contains("format 4"));
     Ok(())
 }
 

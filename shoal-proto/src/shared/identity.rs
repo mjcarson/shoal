@@ -108,9 +108,59 @@ impl fmt::Display for ClusterId {
     }
 }
 
+/// The seed every table identity is hashed under
+///
+/// Frozen: a table's identity is persisted in the control state and named on the wire, so a
+/// changed seed would give every table a new identity and orphan every placement that named
+/// the old one. Zero, which is what every partition key is hashed under as well.
+pub const TABLE_ID_SEED: i64 = 0;
+
+/// The identity of one table, stable across builds, peers and restarts
+///
+/// The hash of the table's name under [`TABLE_ID_SEED`], which is what makes it schema metadata
+/// rather than layout: a peer's enum discriminant moves when a table is added ahead of it, and
+/// P2 of the protocol contract ([C13](../../../docs/src/distributed/protocol.md)) forbids a
+/// stream identity that can move like that. Two tables of one schema with one name is a schema
+/// that does not compile, so the identities of one schema are distinct by construction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TableId(pub u64);
+
+impl TableId {
+    /// Derive the identity of a table from its name
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The table's name, which is the variant the schema's table enum spells it as
+    #[must_use]
+    pub fn of(name: &str) -> Self {
+        TableId(gxhash::gxhash64(name.as_bytes(), TABLE_ID_SEED))
+    }
+}
+
+impl fmt::Display for TableId {
+    /// Render the whole hash in hex, since a prefix is not a key
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:016x}", self.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ClusterId, NodeId};
+    use super::{ClusterId, NodeId, TableId};
+
+    /// A table identity is the hash of its name, distinct across names and stable across calls
+    #[test]
+    fn table_ids_follow_their_names() {
+        assert_eq!(TableId::of("Movie"), TableId::of("Movie"));
+        assert_ne!(TableId::of("Movie"), TableId::of("Person"));
+        assert_ne!(TableId::of("Movie"), TableId::of("movie"));
+        // it serializes as the bare number, and renders as sixteen hex digits
+        let id = TableId::of("Movie");
+        let json = serde_json::to_string(&id).expect("a table id serializes");
+        assert_eq!(json, id.0.to_string());
+        assert_eq!(id.to_string().len(), 16);
+    }
 
     /// Two minted identities are never the same one
     #[test]

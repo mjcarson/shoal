@@ -99,7 +99,7 @@ pub async fn control_acceptor(
             event!(Level::DEBUG, msg = "accepted a control peer", node = %accepted.node);
             let (rx, tx) = stream.split();
             if let Err(error) =
-                serve_control(rx, tx, &raft, &machine, local.max_frame_bytes).await
+                serve_control(rx, tx, &raft, &machine, &local).await
             {
                 event!(Level::DEBUG, msg = "a control peer ended", node = %accepted.node, ?error);
             }
@@ -116,14 +116,15 @@ pub async fn control_acceptor(
 /// * `tx` - The write half
 /// * `raft` - This node's group
 /// * `machine` - The state machine, for a ping's topology version
-/// * `max_frame_bytes` - The largest frame this end accepts
+/// * `local` - What this node says about itself, for the frame bound and a pong's incarnation
 async fn serve_control(
     mut rx: ReadHalf<TcpStream>,
     mut tx: WriteHalf<TcpStream>,
     raft: &Raft<ControlConfig, ControlStateMachine>,
     machine: &ControlStateMachine,
-    max_frame_bytes: u32,
+    local: &Local,
 ) -> Result<(), ServerError> {
+    let max_frame_bytes = local.max_frame_bytes;
     loop {
         // the header, or a clean end between requests
         let Some(header) = codec::read_header(&mut rx, max_frame_bytes).await? else {
@@ -142,7 +143,7 @@ async fn serve_control(
         };
         let payload = codec::read_vec(&mut rx, payload_len).await?;
         // drive it into the group, and frame whatever it produced under the same id
-        let (status, answer) = dispatch(head.kind, &payload, raft, machine).await;
+        let (status, answer) = dispatch(head.kind, &payload, raft, machine, local.incarnation).await;
         let response_head = ControlResponseHead {
             id: head.id,
             status,
@@ -165,11 +166,13 @@ async fn serve_control(
 /// * `payload` - Its serialized request
 /// * `raft` - This node's group
 /// * `machine` - The state machine, for a ping's topology version
+/// * `incarnation` - Which start of this node this is, for a pong
 async fn dispatch(
     kind: ControlKind,
     payload: &[u8],
     raft: &Raft<ControlConfig, ControlStateMachine>,
     machine: &ControlStateMachine,
+    incarnation: u64,
 ) -> (ControlStatus, Vec<u8>) {
     match kind {
         ControlKind::AppendEntries => {
@@ -198,10 +201,14 @@ async fn dispatch(
         ControlKind::Ping => {
             let state = machine.state();
             let pong = Pong {
-                incarnation: crate::server::peer::incarnation(),
+                incarnation,
                 topology_version: state.topology_version,
             };
             ok(&pong)
+        }
+        // the membership RPCs are answered by the control loop, which the next change wires in
+        ControlKind::Join | ControlKind::StatusReport | ControlKind::Propose => {
+            err(format!("{} is not served on this listener yet", kind.name()))
         }
     }
 }

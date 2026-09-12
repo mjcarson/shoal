@@ -502,7 +502,7 @@ async fn run<F: Fn(LinkEvent) + 'static>(
                     reason: format!("{error:?}"),
                 });
                 // wait out the backoff, growing it with jitter, and try again if still wanted
-                let wait = jittered(backoff, attempt);
+                let wait = jittered(backoff, attempt, settings.local.incarnation);
                 attempt = attempt.wrapping_add(1);
                 backoff = (backoff * 2).min(settings.reconnect_max);
                 glommio::timer::sleep(wait).await;
@@ -546,7 +546,7 @@ async fn run<F: Fn(LinkEvent) + 'static>(
             return;
         }
         // a link that dropped waits the shortest backoff before dialling again
-        glommio::timer::sleep(jittered(settings.reconnect_min, attempt)).await;
+        glommio::timer::sleep(jittered(settings.reconnect_min, attempt, settings.local.incarnation)).await;
         attempt = attempt.wrapping_add(1);
     }
 }
@@ -668,11 +668,12 @@ async fn carry<F: Fn(LinkEvent) + 'static>(
 ///
 /// * `base` - The backoff to jitter
 /// * `attempt` - Which attempt this is, which seeds the jitter
-fn jittered(base: Duration, attempt: u64) -> Duration {
-    // a small hash of the attempt and the time, spread over plus or minus a quarter
+/// * `incarnation` - Which start of this node this is, so two nodes' links differ too
+fn jittered(base: Duration, attempt: u64, incarnation: u64) -> Duration {
+    // a small hash of the attempt and the start, spread over plus or minus a quarter
     let seed = attempt
         .wrapping_mul(0x9e37_79b9_7f4a_7c15)
-        .wrapping_add(super::incarnation());
+        .wrapping_add(incarnation);
     let unit = (seed >> 11) as f64 / (1u64 << 53) as f64;
     let factor = 0.75 + unit * 0.5;
     base.mul_f64(factor)

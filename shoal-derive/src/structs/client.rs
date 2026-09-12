@@ -585,6 +585,11 @@ pub fn add(
                 &[#(#table_name_strs),*]
             }
 
+            /// Get the stable identity of every table in this database, paired with its name
+            fn table_ids() -> Vec<(&'static str, ::shoal::shared::identity::TableId)> {
+                vec![#((#table_name_strs, ::shoal::shared::identity::TableId::of(#table_name_strs))),*]
+            }
+
             /// Get every projection in this database, paired with the table it projects
             fn projection_names() -> &'static [(&'static str, &'static str)] {
                 &[#(#projection_name_pairs),*]

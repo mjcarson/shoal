@@ -102,6 +102,23 @@ pub enum ErrorCode {
     /// A definite refusal, like [`ErrorCode::Shedding`]: the frame carrying this query was never
     /// written to the peer that owns it, because the link went down with the frame still queued.
     Unavailable = 50,
+    /// Fewer members are up than the write's consistency needs
+    ///
+    /// A definite refusal, judged at admission on the coordinator against the installed
+    /// topology: a `Quorum` write needs a majority of the desired replicas to be up and an `All`
+    /// write every one of them ([F39](../../../../docs/src/features/membership.md)). The message
+    /// names how many are up and how many are needed.
+    QuorumUnavailable = 51,
+    /// The connection's principal may not perform this administrative request
+    Unauthorized = 60,
+    /// The request named a topology version other than the current one
+    StaleVersion = 61,
+    /// The node asked cannot commit this request and knows no leader that can
+    NotLeader = 62,
+    /// This node holds no tablets yet, so no data query can be answered by it
+    ///
+    /// A joiner before the placement is initialized, or a node the placement does not name.
+    NotInitialized = 63,
 }
 
 impl ErrorCode {
@@ -138,6 +155,11 @@ impl ErrorCode {
             40 => ErrorCode::ConnectionLost,
             41 => ErrorCode::GoingAway,
             50 => ErrorCode::Unavailable,
+            51 => ErrorCode::QuorumUnavailable,
+            60 => ErrorCode::Unauthorized,
+            61 => ErrorCode::StaleVersion,
+            62 => ErrorCode::NotLeader,
+            63 => ErrorCode::NotInitialized,
             // zero, and anything a newer peer knows about that we do not
             _ => ErrorCode::Unknown,
         }
@@ -159,6 +181,11 @@ impl ErrorCode {
             ErrorCode::ConnectionLost => "ConnectionLost",
             ErrorCode::GoingAway => "GoingAway",
             ErrorCode::Unavailable => "Unavailable",
+            ErrorCode::QuorumUnavailable => "QuorumUnavailable",
+            ErrorCode::Unauthorized => "Unauthorized",
+            ErrorCode::StaleVersion => "StaleVersion",
+            ErrorCode::NotLeader => "NotLeader",
+            ErrorCode::NotInitialized => "NotInitialized",
         }
     }
 }

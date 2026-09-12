@@ -15,7 +15,6 @@
 use futures::{AsyncReadExt, AsyncWriteExt};
 use glommio::net::TcpStream;
 
-use super::incarnation;
 use crate::server::conf::cluster::{PlacedNode, Placement};
 use crate::server::errors::ShoalError;
 use crate::server::meta::Identity;
@@ -39,6 +38,12 @@ pub struct Local {
     pub schema_id: u64,
     /// The largest frame it accepts
     pub max_frame_bytes: u32,
+    /// Which start of this node this is, from the marker
+    ///
+    /// Carried in every hello, so a peer can tell a restart from a duplicate and the control
+    /// plane can fence the lower of two runs of one directory
+    /// ([F39](../../../../docs/src/features/membership.md)).
+    pub incarnation: u64,
 }
 
 impl Local {
@@ -71,6 +76,7 @@ impl Local {
             shards: shards as u16,
             schema_id,
             max_frame_bytes,
+            incarnation: identity.incarnation,
         })
     }
 
@@ -84,7 +90,7 @@ impl Local {
         PeerHello {
             cluster: *self.cluster.0.as_bytes(),
             node: *self.node.0.as_bytes(),
-            incarnation: incarnation(),
+            incarnation: self.incarnation,
             lane,
             wire_min: PROTOCOL_VERSION,
             wire_max: PROTOCOL_VERSION,

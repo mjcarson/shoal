@@ -338,6 +338,20 @@ pub enum ShoalError {
     /// can do it, and refusing is what keeps a node from claiming a cluster it was never
     /// bootstrapped into.
     StandaloneDirectoryInCluster { node: NodeId },
+    /// This storage directory is a joiner's that was never admitted, and the configuration bootstraps
+    ///
+    /// A directory started with seeds was meant for the cluster those seeds name. Creating a
+    /// cluster of its own on it would turn that node into another cluster, which is the fork
+    /// [C1](../../../docs/src/distributed/node-identity.md) forbids an unreachable seed list from
+    /// causing.
+    JoiningDirectoryBootstrapped { node: NodeId },
+    /// This storage directory is a joiner's that was never admitted, and the configuration is standalone
+    JoiningDirectoryInStandalone { node: NodeId },
+    /// A cluster was adopted into a directory that is not joining one
+    ///
+    /// A member already has its cluster and a standalone directory never adopts one, so the
+    /// adoption is refused rather than becoming a mode change.
+    MarkerNotJoining { node: NodeId, mode: String },
     /// A peer proved it belongs to a cluster other than the one this directory is in
     ///
     /// `expected` is `None` for a standalone directory, which belongs to no cluster at all.
@@ -446,6 +460,21 @@ impl std::fmt::Display for ShoalError {
                 "the storage directory belongs to standalone node {node} and the configuration \
                  names a cluster; converting single node data into a cluster member is the \
                  migration M10 owns, and there is no supported path yet"
+            ),
+            ShoalError::JoiningDirectoryBootstrapped { node } => write!(
+                f,
+                "the storage directory belongs to node {node}, which was started as a joiner and \
+                 never admitted to its cluster; bootstrapping it would create a second cluster, so \
+                 start it with its seeds again or use an empty directory"
+            ),
+            ShoalError::JoiningDirectoryInStandalone { node } => write!(
+                f,
+                "the storage directory belongs to node {node}, which was started as a joiner and \
+                 never admitted to its cluster; it cannot be served standalone"
+            ),
+            ShoalError::MarkerNotJoining { node, mode } => write!(
+                f,
+                "node {node} was asked to adopt a cluster but its directory is {mode}, not joining"
             ),
             ShoalError::WrongCluster { found, expected } => match expected {
                 Some(expected) => write!(

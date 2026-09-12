@@ -355,7 +355,7 @@ two to each other.
 ```yaml
 cluster:
   bootstrap: true                 # create the cluster on an empty directory; keeps it on a claimed one
-  seeds: []                       # addresses to join through. refused until M3 delivers joining
+  seeds: []                       # control addresses to join through; a joiner names them, a bootstrapper none
   port: 12001                     # the data and bulk lanes, bound by every shard with SO_REUSEPORT
   control_port: 12002             # the control lane, bound by the control thread
   control_core: 0                 # the cpu the control thread is pinned to
@@ -365,8 +365,10 @@ cluster:
   write_consistency: Quorum       # One, Quorum or All
   read_consistency: One
   failure_detector:
-    interval_ms: 500
-    phi_threshold: 8.0
+    interval_ms: 500              # how often a member reports to the control leader
+    phi_threshold: 8.0            # the suspicion at which the leader commits Down
+    window: 100                   # report arrivals the leader keeps per member
+    min_samples: 5                # arrivals the leader needs before it will suspect anybody
   primary_failover_after: "5s"    # base data election timeout
   auto_remove_after: "30m"        # null disables automatic removal of a Down node
   admins: []
@@ -379,7 +381,7 @@ cluster:
     reconnect_min: "100ms"        # the first backoff after a lost link, with a quarter of jitter
     reconnect_max: "5s"           # the longest
     handshake_timeout: "10s"      # to dial and finish the hello
-    ping_interval: "1s"           # parsed and honored by nothing yet (item 96)
+    ping_interval: "1s"           # how often a node pings each member over its control lane
 ```
 
 Two settings have no default and are absent above: `advertise`, the address peers reach this

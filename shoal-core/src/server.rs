@@ -185,7 +185,8 @@ where
         // this happens before any shard is spawned, so a mismatch is refused before a
         // single write can land in the wrong place
         let intent = match &conf.cluster {
-            Some(_) => ClusterIntent::Bootstrap,
+            Some(cluster) if cluster.bootstrap => ClusterIntent::Bootstrap,
+            Some(_) => ClusterIntent::Join,
             None => ClusterIntent::Standalone,
         };
         let identity = StorageMeta::claim(&root, cpus.len(), intent)?;

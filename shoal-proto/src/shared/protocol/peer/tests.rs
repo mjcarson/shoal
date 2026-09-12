@@ -59,6 +59,9 @@ fn every_peer_refusal_round_trips_and_unknown_fails_closed() {
         (PeerRefusal::ShardCountMismatch, 6),
         (PeerRefusal::LaneRefused, 7),
         (PeerRefusal::Unauthorized, 8),
+        (PeerRefusal::Fenced, 10),
+        (PeerRefusal::DuplicateIdentity, 11),
+        (PeerRefusal::NotJoinable, 12),
     ];
     for (reason, byte) in pinned {
         assert_eq!(reason.as_byte(), byte);

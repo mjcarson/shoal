@@ -38,8 +38,6 @@ pub mod tls;
 #[cfg(test)]
 mod tests;
 
-use std::sync::OnceLock;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::server::conf::cluster::{PeerTls, Placement, Transport};
 
@@ -79,23 +77,4 @@ pub struct ShardTransportView {
     pub links: Vec<LinkView>,
     /// Bytes received on bulk lanes accepted by this shard
     pub bulk_received: u64,
-}
-
-/// Which run of this process this is
-///
-/// The process start time in nanoseconds since the epoch, read once. A later start of the same
-/// node reads a larger number, which is what a peer needs to tell a restart from a duplicate.
-/// Q11 records this as provisional: a clock that goes backwards across a restart would make a
-/// restart look older than the run before it, and a persisted counter is what replaces it when
-/// fencing needs it.
-pub fn incarnation() -> u64 {
-    static INCARNATION: OnceLock<u64> = OnceLock::new();
-    *INCARNATION.get_or_init(|| {
-        // truncation cannot happen for any date this software will see
-        #[allow(clippy::cast_possible_truncation)]
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|since| since.as_nanos() as u64)
-            .unwrap_or(0)
-    })
 }
