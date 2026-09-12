@@ -219,11 +219,13 @@ process keeps both true: a multi-node arm is one `run` command, and the children
 
 - **A certificate is not yet bound to a node.** The listener checks the chain to `ca` and
   nothing else; the `shoal-node://<id>` SAN is written and unread, and `PeerRefusal::Unauthorized`
-  and `IdentityMismatch` are defined and never produced. That binding is Q11's and lands with
-  the joiner at M3.
-- **The placement is static and every node is a group of one.** `seeds` is refused naming M3;
+  and `IdentityMismatch` are defined and never produced. ~~That binding is Q11's and lands with
+  the joiner at M3.~~ The joiner landed at M3 ([F39](membership.md)) and fences by incarnation;
+  the certificate binding is still open.
+- ~~**The placement is static and every node is a group of one.** `seeds` is refused naming M3;
   a placement is replaced, never extended; nothing observes a peer's topology version beyond the
-  pong that carries it.
+  pong that carries it.~~ Since [F39](membership.md) the placement is the committed map, pushed
+  whole to every shard, and the `placement` block is gone.
 - **Nothing retries.** `attempt` is always zero. A shed, a lost link and a deadline are answered
   with a code; M6 owns the identity that makes a retry safe.
 - **Snapshots are counted, checksummed and discarded.** The bulk lane has a probe for a producer
@@ -233,9 +235,11 @@ process keeps both true: a multi-node arm is one `run` command, and the children
   relay that would gather every shard's view is not built. A four-shard node's artifact shows
   shard zero's links, which for the hop arms is the whole story on one-shard node zero and an
   empty list on the four-shard one. Filed as an item.
-- **`transport.ping_interval` is parsed and consumed by nothing.** No periodic pinger exists;
-  the pings the fixture sends are on demand. The failure detector is M3's. Filed as an item.
-- **`StatusReport` (message type 19) is reserved and unsent.**
+- ~~**`transport.ping_interval` is parsed and consumed by nothing.** No periodic pinger exists;
+  the pings the fixture sends are on demand. The failure detector is M3's. Filed as an item.~~
+  Consumed since [F39](membership.md) ([Resolved #96](../appendix/resolved/ping-interval-consumer.md)).
+- **`StatusReport` (message type 19) is reserved and unsent** - and stays so: the report is a
+  `ControlKind` over the control lane's existing framing ([F39](membership.md)).
 - **`local_shard` is a mixture until D7.** Its artifact says so, and its median is a mesh hop
   by construction, but a pure per-query local-shard control needs a shard-addressable
   connection. Filed in todos against D7.
@@ -245,7 +249,8 @@ process keeps both true: a multi-node arm is one `run` command, and the children
 - **The hop capture on the benchmark host has not been taken.** What ran is a smoke run on the
   development host, below. The `cluster-hop` family lands on the all-workloads page; a page of
   its own comes with the first committed capture.
-- **Incarnation is provisional.** Process start time, not a persisted counter.
+- ~~**Incarnation is provisional.** Process start time, not a persisted counter.~~ A persisted
+  counter in the marker since [F39](membership.md), and the fencing rule is written against it.
 - **Wire version and capabilities match exactly or refuse.** M10's codecs are what make a
   range mean something.
 

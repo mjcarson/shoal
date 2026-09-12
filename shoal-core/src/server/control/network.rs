@@ -1,11 +1,17 @@
 //! The control group's network: a `RaftNetworkV2` over the control lane
 //!
 //! At M1 this returned `Unreachable` for every peer, because a group of one never sends. M2
-//! replaces it with the real adapter ([F38](../../../../docs/src/features/inter-node-transport.md)):
+//! made it the real adapter ([F38](../../../../docs/src/features/inter-node-transport.md)):
 //! openraft's append, vote and snapshot RPCs are serialized to JSON, framed as
 //! [`ControlRequest`](crate::shared::protocol::peer::ControlRequestHead) frames with a
 //! correlation id, and sent on a [`ControlLink`] to the peer's control listener, which drives
-//! them into that peer's own `Raft` and answers under the same id.
+//! them into that peer's own `Raft` and answers under the same id. M3 made it dial the
+//! **committed member record** openraft hands it rather than a static placement
+//! ([F39](../../../../docs/src/features/membership.md)): a member's address is what the cluster
+//! agreed it is, a `cluster.dial` override is where this node was told to reach it instead, and
+//! a link whose address the member has moved away from is dropped and dialled afresh. The same
+//! links carry the membership RPCs - a joiner's admission, a member's report, a proposal to the
+//! leader - which the control loop sends through [`PeerNetwork::peer`].
 //!
 //! Everything here runs on the control thread's single executor, so it is `Rc`/`RefCell` by
 //! construction: openraft's `single-threaded` feature empties every `Send`/`Sync` bound, and the
@@ -14,7 +20,7 @@
 //! whose reader already frames a `ControlResponse` beside a `Forwarded`.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::io::Cursor;
 use std::rc::Rc;
@@ -35,7 +41,8 @@ use tracing::{event, Level};
 
 use super::store::SnapshotData;
 use super::types::{ControlConfig, MemberRecord};
-use crate::server::conf::cluster::{Placement, Transport};
+use crate::server::conf::cluster::{DialOverride, Transport};
+use crate::server::peer::handshake::PeerAddr;
 use crate::server::peer::{self, Frame, FrameKey, Lane, LinkEvent, Local};
 use crate::shared::identity::NodeId;
 use crate::shared::protocol::peer::{
@@ -51,6 +58,24 @@ enum ControlOutcome {
     Remote(String),
     /// The link went down, or the queue was full, before an answer arrived
     Unreachable(String),
+}
+
+/// Why a control RPC produced no answer
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RpcFailure {
+    /// The peer answered with a failure, and this is what it said
+    Remote(String),
+    /// The link was down, its queue full, or the deadline passed
+    Unreachable(String),
+}
+
+impl std::fmt::Display for RpcFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RpcFailure::Remote(msg) => write!(f, "the peer refused the rpc: {msg}"),
+            RpcFailure::Unreachable(msg) => write!(f, "{msg}"),
+        }
+    }
 }
 
 /// One control connection to one peer, shared by every `ControlPeer` for that node
@@ -75,19 +100,19 @@ impl ControlLink {
     ///
     /// # Arguments
     ///
-    /// * `entry` - The peer's placement entry, which is where to dial and who to expect
+    /// * `entry` - Where to dial and who to expect there
     /// * `local` - What this node says about itself
     /// * `transport` - The bounds and timers
     /// * `tls` - What to dial with, if the lanes are encrypted
     fn new(
-        entry: crate::server::conf::cluster::PlacedNode,
-        local: Local,
+        entry: PeerAddr,
+        local: Rc<RefCell<Local>>,
         transport: &Transport,
         tls: Option<Arc<ClientConfig>>,
     ) -> Self {
         let pending: Rc<RefCell<HashMap<u64, oneshot::Sender<ControlOutcome>>>> =
             Rc::new(RefCell::new(HashMap::new()));
-        let max_frame_bytes = local.max_frame_bytes;
+        let max_frame_bytes = local.borrow().max_frame_bytes;
         // the link delivers every answer to this closure, on the control executor
         let on_event = {
             let pending = pending.clone();
@@ -141,7 +166,7 @@ impl ControlLink {
         kind: ControlKind,
         payload: Vec<u8>,
         deadline: Duration,
-    ) -> Result<Vec<u8>, String> {
+    ) -> Result<Vec<u8>, RpcFailure> {
         // mint an id and a oneshot for the answer
         let id = self.next_id.get();
         self.next_id.set(id.wrapping_add(1));
@@ -160,26 +185,28 @@ impl ControlLink {
             FrameKey::Control(id),
             self.max_frame_bytes,
         )
-        .map_err(|error| format!("framing a control request: {error:?}"))?;
+        .map_err(|error| RpcFailure::Unreachable(format!("framing a control request: {error:?}")))?;
         // a queue that is full or a link that is down is a definite non-answer
         if self.link.enqueue(frame).is_err() {
             self.pending.borrow_mut().remove(&id);
-            return Err("the control link's queue is full or its link is down".to_string());
+            return Err(RpcFailure::Unreachable(
+                "the control link's queue is full or its link is down".to_string(),
+            ));
         }
         // wait for the answer, or the deadline, whichever comes first
         match glommio::timer::timeout(deadline, async { Ok(rx.await) }).await {
             Ok(Ok(ControlOutcome::Ok(payload))) => Ok(payload),
-            Ok(Ok(ControlOutcome::Remote(msg))) => Err(format!("the peer refused the rpc: {msg}")),
-            Ok(Ok(ControlOutcome::Unreachable(msg))) => Err(msg),
+            Ok(Ok(ControlOutcome::Remote(msg))) => Err(RpcFailure::Remote(msg)),
+            Ok(Ok(ControlOutcome::Unreachable(msg))) => Err(RpcFailure::Unreachable(msg)),
             // the sender was dropped without answering
             Ok(Err(_)) => {
                 self.pending.borrow_mut().remove(&id);
-                Err("the control rpc was cancelled".to_string())
+                Err(RpcFailure::Unreachable("the control rpc was cancelled".to_string()))
             }
             // the deadline passed
             Err(_) => {
                 self.pending.borrow_mut().remove(&id);
-                Err("the control rpc timed out".to_string())
+                Err(RpcFailure::Unreachable("the control rpc timed out".to_string()))
             }
         }
     }
@@ -187,12 +214,12 @@ impl ControlLink {
 
 /// The state every `ControlPeer` shares
 struct Shared {
-    /// One link per peer, opened on first use
-    links: RefCell<HashMap<NodeId, Rc<ControlLink>>>,
-    /// Every node this factory may dial
-    placement: Rc<Placement>,
+    /// One link per peer, opened on first use, keyed by where it dials
+    links: RefCell<HashMap<String, Rc<ControlLink>>>,
     /// What this node says about itself
-    local: Local,
+    local: Rc<RefCell<Local>>,
+    /// Where particular members are dialled instead of where they advertise
+    dial: BTreeMap<NodeId, DialOverride>,
     /// What to dial with, if the lanes are encrypted
     tls: Option<Arc<ClientConfig>>,
     /// The bounds and timers
@@ -201,7 +228,8 @@ struct Shared {
 
 /// The control group's network factory
 ///
-/// Hands openraft a [`ControlPeer`] per target, each sharing the one [`ControlLink`] to that node.
+/// Hands openraft a [`ControlPeer`] per target, each sharing the one [`ControlLink`] to that
+/// node's control address.
 #[derive(Clone)]
 pub struct PeerNetwork {
     /// The shared state
@@ -213,96 +241,185 @@ impl PeerNetwork {
     ///
     /// # Arguments
     ///
-    /// * `placement` - Every node this node may dial
     /// * `local` - What this node says about itself
+    /// * `dial` - Where particular members are dialled instead of where they advertise
     /// * `tls` - What to dial peers with, if encrypted
     /// * `transport` - The bounds and timers
     pub fn new(
-        placement: Rc<Placement>,
-        local: Local,
+        local: Rc<RefCell<Local>>,
+        dial: BTreeMap<NodeId, DialOverride>,
         tls: Option<Arc<ClientConfig>>,
         transport: Transport,
     ) -> Self {
         PeerNetwork {
             shared: Rc::new(Shared {
                 links: RefCell::new(HashMap::new()),
-                placement,
                 local,
+                dial,
                 tls,
                 transport,
             }),
         }
     }
 
-    /// Get or open the control link to a peer
+    /// Where to dial a member, from its committed record and this node's overrides
     ///
     /// # Arguments
     ///
-    /// * `target` - The peer
-    fn link(&self, target: NodeId) -> Option<Rc<ControlLink>> {
-        if let Some(link) = self.shared.links.borrow().get(&target) {
-            return Some(link.clone());
+    /// * `record` - The member's committed record
+    #[must_use]
+    pub fn addr_of(&self, record: &MemberRecord) -> PeerAddr {
+        // a node runs fewer shards than a u16 holds; the ring refuses more
+        #[allow(clippy::cast_possible_truncation)]
+        let mut addr = PeerAddr {
+            node: Some(record.node),
+            data: record.data.clone(),
+            control: record.control.clone(),
+            shards: record.shards as u16,
+        };
+        if let Some(target) = self.shared.dial.get(&record.node) {
+            if let Some(control) = &target.control {
+                addr.control.clone_from(control);
+            }
+            if let Some(data) = &target.data {
+                addr.data.clone_from(data);
+            }
         }
-        // the control lane dials the placement's control address, keyed by node id, so it never
-        // trusts openraft's own record of where a peer is
-        let entry = self.shared.placement.peer(target)?.clone();
+        addr
+    }
+
+    /// Get or open the control link to an address
+    ///
+    /// Keyed by the address rather than the node, so a member that moved gets a fresh link and
+    /// a seed that turned out to be a member is not dialled twice.
+    ///
+    /// # Arguments
+    ///
+    /// * `entry` - Where to dial and who to expect
+    fn link(&self, entry: &PeerAddr) -> Rc<ControlLink> {
+        if let Some(link) = self.shared.links.borrow().get(&entry.control) {
+            // the same address dialled for another node is a member that was replaced there
+            if *link.link.target() == *entry {
+                return link.clone();
+            }
+        }
         let link = Rc::new(ControlLink::new(
-            entry,
+            entry.clone(),
             self.shared.local.clone(),
             &self.shared.transport,
             self.shared.tls.clone(),
         ));
-        self.shared.links.borrow_mut().insert(target, link.clone());
-        Some(link)
+        self.shared
+            .links
+            .borrow_mut()
+            .insert(entry.control.clone(), link.clone());
+        link
+    }
+
+    /// A peer at an address, for the control loop's own RPCs
+    ///
+    /// # Arguments
+    ///
+    /// * `entry` - Where to dial and who to expect
+    #[must_use]
+    pub fn peer(&self, entry: &PeerAddr) -> ControlPeer {
+        ControlPeer {
+            target: entry.node_or_nil(),
+            link: self.link(entry),
+        }
+    }
+
+    /// This node's identity
+    #[must_use]
+    pub fn local_node(&self) -> NodeId {
+        self.shared.local.borrow().node
+    }
+
+    /// Drop the link to an address, so the next RPC dials afresh
+    ///
+    /// # Arguments
+    ///
+    /// * `control` - The address
+    pub fn forget(&self, control: &str) {
+        self.shared.links.borrow_mut().remove(control);
+    }
+
+    /// How many links are open
+    #[must_use]
+    pub fn link_count(&self) -> usize {
+        self.shared.links.borrow().len()
     }
 }
 
 impl RaftNetworkFactory<ControlConfig> for PeerNetwork {
     type Network = ControlPeer;
 
-    /// A client for a peer, which dials lazily on its first RPC
-    async fn new_client(&mut self, target: NodeId, _node: &MemberRecord) -> Self::Network {
+    /// A client for a peer, dialling the address the committed record names
+    async fn new_client(&mut self, target: NodeId, node: &MemberRecord) -> Self::Network {
+        let mut entry = self.addr_of(node);
+        entry.node = Some(target);
         ControlPeer {
             target,
-            link: self.link(target),
+            link: self.link(&entry),
         }
     }
 }
 
 /// The network to one peer
 pub struct ControlPeer {
-    /// Who it reaches
+    /// Who it reaches, or the nil id for a seed
     target: NodeId,
-    /// The link, or nothing if the peer is not in the placement
-    link: Option<Rc<ControlLink>>,
+    /// The link
+    link: Rc<ControlLink>,
 }
 
 impl ControlPeer {
-    /// The error a peer that is not in the placement answers every RPC with
-    fn no_placement(&self) -> RPCError<ControlConfig> {
-        RPCError::Unreachable(Unreachable::new(&NotPlaced { target: self.target }))
-    }
-
     /// Turn a link error into openraft's retriable unreachable
     ///
     /// # Arguments
     ///
-    /// * `msg` - What went wrong
-    fn unreachable(msg: String) -> RPCError<ControlConfig> {
-        RPCError::Unreachable(Unreachable::new(&LinkFailed { msg }))
+    /// * `failure` - What went wrong
+    fn unreachable(failure: RpcFailure) -> RPCError<ControlConfig> {
+        RPCError::Unreachable(Unreachable::new(&LinkFailed {
+            msg: failure.to_string(),
+        }))
+    }
+
+    /// Who this peer reaches
+    #[must_use]
+    pub fn target(&self) -> NodeId {
+        self.target
+    }
+
+    /// Send one control RPC and wait for its answer
+    ///
+    /// # Arguments
+    ///
+    /// * `kind` - Which RPC this is
+    /// * `payload` - Its serialized request
+    /// * `deadline` - How long to wait
+    ///
+    /// # Errors
+    ///
+    /// Says whether the peer refused it or could not be reached.
+    pub async fn rpc(
+        &self,
+        kind: ControlKind,
+        payload: Vec<u8>,
+        deadline: Duration,
+    ) -> Result<Vec<u8>, RpcFailure> {
+        self.link.rpc(kind, payload, deadline).await
     }
 
     /// Ping the peer over the control lane, proving its listener answers
     ///
     /// A liveness probe with no consensus meaning: the peer's control listener answers it with
-    /// its incarnation and topology version, which this discards - the round trip is the point.
-    pub async fn ping(&mut self) -> Result<(), String> {
-        let Some(link) = &self.link else {
-            return Err(format!("{} is not in this node's placement", self.target));
-        };
-        link.rpc(ControlKind::Ping, Vec::new(), std::time::Duration::from_secs(5))
+    /// its incarnation and topology version, which this hands back.
+    pub async fn ping(&mut self) -> Result<Vec<u8>, String> {
+        self.link
+            .rpc(ControlKind::Ping, Vec::new(), Duration::from_secs(5))
             .await
-            .map(|_| ())
+            .map_err(|failure| failure.to_string())
     }
 }
 
@@ -315,17 +432,17 @@ impl RaftNetworkV2<ControlConfig> for ControlPeer {
         rpc: AppendEntriesRequest<ControlConfig>,
         option: RPCOption,
     ) -> Result<AppendEntriesResponse<ControlConfig>, RPCError<ControlConfig>> {
-        let Some(link) = &self.link else {
-            return Err(self.no_placement());
-        };
-        let payload = serde_json::to_vec(&rpc)
-            .map_err(|error| Self::unreachable(format!("encoding append_entries: {error}")))?;
-        let answer = link
+        let payload = serde_json::to_vec(&rpc).map_err(|error| {
+            Self::unreachable(RpcFailure::Unreachable(format!("encoding append_entries: {error}")))
+        })?;
+        let answer = self
+            .link
             .rpc(ControlKind::AppendEntries, payload, option.hard_ttl())
             .await
             .map_err(Self::unreachable)?;
-        serde_json::from_slice(&answer)
-            .map_err(|error| Self::unreachable(format!("decoding append_entries: {error}")))
+        serde_json::from_slice(&answer).map_err(|error| {
+            Self::unreachable(RpcFailure::Unreachable(format!("decoding append_entries: {error}")))
+        })
     }
 
     /// Vote: serialize, send, deserialize the response
@@ -334,24 +451,23 @@ impl RaftNetworkV2<ControlConfig> for ControlPeer {
         rpc: VoteRequest<ControlConfig>,
         option: RPCOption,
     ) -> Result<VoteResponse<ControlConfig>, RPCError<ControlConfig>> {
-        let Some(link) = &self.link else {
-            return Err(self.no_placement());
-        };
-        let payload = serde_json::to_vec(&rpc)
-            .map_err(|error| Self::unreachable(format!("encoding vote: {error}")))?;
-        let answer = link
+        let payload = serde_json::to_vec(&rpc).map_err(|error| {
+            Self::unreachable(RpcFailure::Unreachable(format!("encoding vote: {error}")))
+        })?;
+        let answer = self
+            .link
             .rpc(ControlKind::Vote, payload, option.hard_ttl())
             .await
             .map_err(Self::unreachable)?;
-        serde_json::from_slice(&answer)
-            .map_err(|error| Self::unreachable(format!("decoding vote: {error}")))
+        serde_json::from_slice(&answer).map_err(|error| {
+            Self::unreachable(RpcFailure::Unreachable(format!("decoding vote: {error}")))
+        })
     }
 
     /// Install a full snapshot in one request
     ///
-    /// Real but unexercised at M2: a group of one never installs a snapshot on a follower, and
-    /// the chunked stream C2 describes is the bulk lane's, for M7. The whole snapshot - the vote,
-    /// the metadata and the bytes - rides in one control request here.
+    /// The whole snapshot - the vote, the metadata and the bytes - rides in one control request.
+    /// A joiner that arrives after the leader purged its log is the first thing that exercised it.
     async fn full_snapshot(
         &mut self,
         vote: VoteOf<ControlConfig>,
@@ -359,19 +475,19 @@ impl RaftNetworkV2<ControlConfig> for ControlPeer {
         _cancel: impl Future<Output = ReplicationClosed> + OptionalSend + 'static,
         option: RPCOption,
     ) -> Result<SnapshotResponse<ControlConfig>, StreamingError<ControlConfig>> {
-        let Some(link) = &self.link else {
-            return Err(StreamingError::Unreachable(Unreachable::new(&NotPlaced {
-                target: self.target,
-            })));
-        };
         // vote, metadata and bytes, length-prefixed so the listener can split them
         let payload = encode_snapshot(&vote, &snapshot).map_err(|error| {
             StreamingError::Unreachable(Unreachable::new(&LinkFailed { msg: error }))
         })?;
-        let answer = link
+        let answer = self
+            .link
             .rpc(ControlKind::Snapshot, payload, option.hard_ttl())
             .await
-            .map_err(|msg| StreamingError::Unreachable(Unreachable::new(&LinkFailed { msg })))?;
+            .map_err(|failure| {
+                StreamingError::Unreachable(Unreachable::new(&LinkFailed {
+                    msg: failure.to_string(),
+                }))
+            })?;
         serde_json::from_slice(&answer).map_err(|error| {
             StreamingError::Unreachable(Unreachable::new(&LinkFailed {
                 msg: format!("decoding a snapshot response: {error}"),
@@ -441,21 +557,6 @@ pub fn decode_snapshot(
     Ok((vote, Snapshot { meta, snapshot: Cursor::new(bytes) }))
 }
 
-/// A peer that is not in this node's placement
-#[derive(Debug)]
-struct NotPlaced {
-    /// Who was asked for
-    target: NodeId,
-}
-
-impl std::fmt::Display for NotPlaced {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} is not in this node's placement", self.target)
-    }
-}
-
-impl std::error::Error for NotPlaced {}
-
 /// A control link that could not carry an RPC
 #[derive(Debug)]
 struct LinkFailed {
@@ -472,6 +573,6 @@ impl std::fmt::Display for LinkFailed {
 impl std::error::Error for LinkFailed {}
 
 /// Log that the network was built, for the control thread's startup trace
-pub fn built(peers: usize) {
-    event!(Level::DEBUG, msg = "control network ready", peers);
+pub fn built(links: usize) {
+    event!(Level::DEBUG, msg = "control network ready", links);
 }

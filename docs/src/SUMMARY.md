@@ -100,6 +100,7 @@
   - [F36. The harness and the facts](features/cluster-harness.md)
   - [F37. Node identity and the control-plane thread](features/node-identity-control-plane.md)
   - [F38. The inter-node transport](features/inter-node-transport.md)
+  - [F39. Membership](features/membership.md)
 
 # Direction
 
@@ -182,6 +183,7 @@
   - [89. One query produced several disjoint traces](appendix/resolved/fragmented-query-traces.md)
   - [90. Setting `RUST_LOG` could fragment every exported trace](appendix/resolved/divergent-layer-filters.md)
   - [94. An answer owed to a client that had left ended the shard](appendix/resolved/disconnected-client-cleanup.md)
+  - [96. `cluster.transport.ping_interval` is parsed, documented and consumed by nothing](appendix/resolved/ping-interval-consumer.md)
 - [TODOs and Unbuilt Work](appendix/todos.md)
 - [Review, August 2026](appendix/review-2026-08.md)
 - [Glossary](appendix/glossary.md)

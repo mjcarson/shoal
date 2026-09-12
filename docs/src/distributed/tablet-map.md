@@ -8,9 +8,20 @@ Separating these facts prevents a stale map or a metadata-majority decision from
 
 ## What exists today
 
-`Ring` (`shoal-core/src/server/ring.rs`) stores 4096 `u16` shard assignments, derived from shard
-count at startup. `tablet_of` uses the partition hash's high twelve bits. `Topology` and
-`STALE_TOPOLOGY` are reserved protocol surfaces; [D7](../direction/shard-aware-routing.md)
+**Delivered at M3 by [F39](../features/membership.md)** as far as membership goes: a `TabletMap`
+(`shoal-core/src/server/map.rs`) built by the control thread from the applied state on every
+version - members, placement order, tables with their ids, the factors, the consistencies, the
+admins - and pushed whole to every shard, which installs a newer version between two messages
+and rebuilds its `Ring` from the order with one rule; a `TableId` that is the hash of the name;
+an explicit `Initialize` that places the tablets once, with the bootstrapper placed on itself
+before it and a joiner unplaced; and a `Topology` frame pushed to every subscribed client,
+folded to the newest per connection. What is not there yet: per-tablet records, replica sets,
+leader hints and deltas - the value has not widened, since nothing moves a tablet before M9a
+and nothing replicates one before M4. Before that: `Ring` (`shoal-core/src/server/ring.rs`) stores
+4096 `u16` shard assignments, derived from shard
+count at startup. `tablet_of` uses the partition hash's high twelve bits. ~~`Topology` and
+`STALE_TOPOLOGY` are reserved protocol surfaces~~ `Topology` is wired and `STALE_TOPOLOGY` is
+still reserved; [D7](../direction/shard-aware-routing.md)
 describes the client half. Assignment is shared across all tables today.
 
 ## The design
@@ -78,6 +89,10 @@ shard-aware routing. Advertise both peer and client endpoints, including address
 than asking clients to dial peer ports. Define reachability/private-address behavior in Q11.
 Full-map fanout cost scales with tables × tablets × subscribers × transition rate; it is measured,
 not described as unconditionally negligible. Bound send queues and coalesce obsolete versions.
+*Measured at M3 as the ordered node list the map is until a tablet can move: under 16 KiB a
+frame at sixty-four members, a thousand subscribers pushed in four milliseconds
+([C13](protocol.md#q11-and-q13-at-m3)); the relay folds a run of queued frames to the newest
+([F39](../features/membership.md)).*
 
 ### Staleness, on servers too
 

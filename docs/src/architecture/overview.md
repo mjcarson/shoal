@@ -2,7 +2,8 @@
 
 Shoal is a single process containing N independent shards, one per usable CPU core - or, since
 [F38](../features/inter-node-transport.md), one of several such processes that forward queries
-to each other over a static placement; this chapter describes one process, and the
+to each other over ~~a static placement~~ the placement their cluster committed
+([F39](../features/membership.md)); this chapter describes one process, and the
 [distributed part](../distributed/overview.md) describes what is between them. A shard
 owns a slice of every table, its own write-ahead log, its own set of archive files, and its
 own background tasks. Nothing is shared between shards except channels.

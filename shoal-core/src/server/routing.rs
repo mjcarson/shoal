@@ -215,6 +215,18 @@ pub trait ArchivedShardRouting: rkyv::Archive + Sized {
     /// * `archived` - The query, still in the buffer it arrived in
     fn archived_limit(archived: &<Self as rkyv::Archive>::Archived) -> Option<usize>;
 
+    /// Whether this query changes a table, which is what a write quorum is judged against
+    ///
+    /// An insert, an update and a delete are writes; a get and an exists are not. Judged from
+    /// the archive on the origin node before anything is routed, so a write the cluster cannot
+    /// admit is refused without a shard ever seeing it
+    /// ([F39](../../../docs/src/features/membership.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `archived` - The query, still in the buffer it arrived in
+    fn archived_is_write(archived: &<Self as rkyv::Archive>::Archived) -> bool;
+
     /// Narrow this query to the partitions the shard executing it owns
     ///
     /// This is the other half of [`ArchivedShardRouting::route_archived`], run on the shard
@@ -301,6 +313,16 @@ impl<T: ShoalSortedTable + std::fmt::Debug> ArchivedShardRouting for SortedQuery
     /// # Arguments
     ///
     /// * `keys` - The partition keys this shard owns
+    fn archived_is_write(archived: &<Self as rkyv::Archive>::Archived) -> bool {
+        // everything but a read changes the table
+        matches!(
+            archived,
+            ArchivedSortedQuery::Insert { .. }
+                | ArchivedSortedQuery::Delete { .. }
+                | ArchivedSortedQuery::Update(_)
+        )
+    }
+
     fn narrow_to(self, keys: Vec<u64>) -> Self {
         // only the two multi partition queries have anything to narrow
         match self {
@@ -387,6 +409,16 @@ impl<T: ShoalUnsortedTable + std::fmt::Debug> ArchivedShardRouting for UnsortedQ
     /// # Arguments
     ///
     /// * `keys` - The partition keys this shard owns
+    fn archived_is_write(archived: &<Self as rkyv::Archive>::Archived) -> bool {
+        // everything but a read changes the table
+        matches!(
+            archived,
+            ArchivedUnsortedQuery::Insert { .. }
+                | ArchivedUnsortedQuery::Delete { .. }
+                | ArchivedUnsortedQuery::Update(_)
+        )
+    }
+
     fn narrow_to(self, keys: Vec<u64>) -> Self {
         // only a get names more than one partition, so only a get has anything to narrow
         match self {

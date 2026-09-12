@@ -806,6 +806,10 @@ mod tests {
                 offered_load: None,
                 emulated: true,
                 placement: Vec::new(),
+                members: Vec::new(),
+                map_version: 0,
+                voters: 0,
+                learners: 0,
                 hop: None,
                 transport: None,
             });

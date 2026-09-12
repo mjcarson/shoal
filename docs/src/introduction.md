@@ -34,10 +34,14 @@ database") oversell the current state:
   (`shoal-core/src/server/shard.rs:169`). All routing is to shards on the current process.
   There is no node discovery, no inter-node transport, and no cluster membership.~~ Since
   [F38](features/inter-node-transport.md) `ShardContact` has a `Remote { node, shard }` variant
-  and a node forwards queries to the nodes a **static placement** names, over bounded, optionally
-  encrypted lanes. There is still no node discovery, no cluster membership and no replication:
+  and a node forwards queries to the nodes ~~a **static placement** names~~ the cluster's
+  membership names, over bounded, optionally
+  encrypted lanes. ~~There is still no node discovery, no cluster membership and no replication:
   every node is a consensus group of one, and a placement is a file a test or a benchmark
-  writes, not something the cluster agrees on ([Distributed Shoal](distributed/overview.md)).
+  writes, not something the cluster agrees on~~ Since [F39](features/membership.md) a node joins
+  a cluster through its seeds, the cluster agrees on its members, its placement and its tables,
+  fences a duplicate and calls a silent member down; there is still no replication - every
+  tablet has one home ([Distributed Shoal](distributed/overview.md)).
 - **No replication.** Every partition lives on exactly one shard, in one copy, on one disk.
 - **No transactions.** There is no atomicity across queries, no isolation between them, and
   no rollback. A bundle of queries is a batch, not a transaction.

@@ -50,7 +50,10 @@ cargo run -p shoal-model --example regenerate_schedules   # after a model change
 
 # the cluster fixture (F36) re-executes this binary as its children, so it is its own test target.
 # since F37 its servers are cluster nodes: each child runs a control thread on a core the fixture
-# allocates, and the five M1 acceptance tests live here too
+# allocates; since F39 they join each other through node zero and the M1, M2 and M3 acceptance
+# tests live here. every test allocates whole cores, so the suite is what a loaded machine
+# makes it: a failure that passes alone was a timeout, and the child logs are under
+# SHOAL_CHILD_LOG=<dir> (one file per child, DEBUG, large)
 cargo test -p shoal --test cluster_fixture
 
 # the control plane's two conformance suites and its crash test (F37): the glommio runtime under
@@ -60,6 +63,9 @@ cargo test -p shoal-core control
 # the Q1/Q13 spike (F37): not a benchmark and never a capture. prints the idle and durable tables
 # the decision record in docs/src/distributed/protocol.md carries, labelled by host and governor
 cargo run -p shoal-spike --release
+# and its second question (F39): what a topology push and the members' status reports cost as
+# the cluster grows, which is the Q13-at-M3 record on the same page
+cargo run -p shoal-spike --release -- fanout
 
 # Run with hotpath profiling enabled (attribution only, never a baseline number)
 cargo build --release --bin shoal-workload --features hotpath
@@ -349,7 +355,9 @@ go through `shoal`.**
   does not build for `wasm32-unknown-unknown`, and the explorer's primary target is a browser
 - **shoal-spike** - The Q1/Q13 spike ([F37](docs/src/features/node-identity-control-plane.md)): a
   binary, `publish = false`, that drives N openraft groups on one pinned glommio executor through
-  a counting loopback network and prints what they cost. Depends on `shoal` with the engine, and
+  a counting loopback network and prints what they cost; `fanout`
+  ([F39](docs/src/features/membership.md)) prices the topology push and the status reports
+  instead. Depends on `shoal` with the engine, and
   is the one place the control store is driven with three members in a group
 - **shoal-model** - The deterministic protocol model ([F36](docs/src/features/cluster-harness.md)):
   the contract P1–P6 as executable checks over a Raft-shaped tablet group, with saved schedules
@@ -384,9 +392,17 @@ go through `shoal`.**
 - One shard per CPU core (cpu 0 reserved for coordination; a cluster node also reserves the
   control core's whole physical core for its control thread unless `cluster.control_core_shared`)
 - A `cluster:` block makes the node a cluster member ([F37](docs/src/features/node-identity-control-plane.md)):
-  `server/meta.rs` mints a `NodeId` and a `ClusterId` into a format 2 marker, `server/control/`
+  `server/meta.rs` mints a `NodeId` and a `ClusterId` into a format 3 marker, `server/control/`
   runs an embedded `openraft 0.10.0-alpha.34` group on a glommio `AsyncRuntime` written there, and
   `ShoalPool::topology()` reports what it committed. Absent, none of that exists
+- Since [F39](docs/src/features/membership.md) the group is the cluster's membership: a node with
+  `seeds` joins through them as a learner, the leader promotes voters up to `control_voters`, a
+  `TabletMap` built from the committed state is pushed whole to every shard (`server/map.rs`)
+  and to every subscribed client, admin operations ride the client connection, writes are
+  admitted against the write quorum, and the leader's phi-accrual detector (`control/detector.rs`)
+  commits a silent member `Down`. Never hold a `RefCell` borrow across an `.await` on the control
+  core, and never retry a proposal on a metrics change without a backoff - both starve the one
+  executor RaftCore, the links and the loop share
 - Uses `glommio` LocalExecutor for thread-per-core async I/O
 - `kanal` channels for lock-free inter-shard communication
 - Consistent hash ring for partition routing

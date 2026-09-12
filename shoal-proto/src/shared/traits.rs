@@ -243,6 +243,14 @@ pub trait QuerySupport: 'static + Sized {
     /// These are the names that can follow `FROM` in a query.
     fn table_names() -> &'static [&'static str];
 
+    /// Get the stable identity of every table in this database, paired with its name
+    ///
+    /// The identities the control plane records when a placement is initialized and that every
+    /// node compares its own against ([F39](../../../docs/src/features/membership.md)): a
+    /// table's identity is the hash of its name, never its position in the schema, so a table
+    /// added ahead of another moves nothing. In the order the schema declares them.
+    fn table_ids() -> Vec<(&'static str, crate::shared::identity::TableId)>;
+
     /// Get the name of every projection in this database, paired with the table it projects
     ///
     /// These are the names that can stand in place of the `*` in a query. They are not scoped
@@ -328,6 +336,11 @@ pub trait QuerySupport: 'static + Sized {
 pub trait TableNameSupport:
     std::fmt::Display + std::fmt::Debug + PartialEq + Eq + Ord + std::hash::Hash + Clone + Copy + Send
 {
+    /// Get the stable identity of this table
+    ///
+    /// The hash of the table's name, which is stable across builds, peers and restarts where
+    /// this enum's discriminant is not ([F39](../../../docs/src/features/membership.md)).
+    fn table_id(&self) -> crate::shared::identity::TableId;
 }
 
 pub trait PartitionKeySupport: std::fmt::Debug + Clone + RkyvSupport + Sized {

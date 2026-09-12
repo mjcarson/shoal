@@ -45,6 +45,7 @@ pub
 use shoal_proto::shared::queries::Queries;
 use shoal_proto::shared::auth::scram::{ClientStep, ScramClient};
 use shoal_proto::shared::auth::{AuthError, Credentials};
+use shoal_proto::shared::protocol::admin::{self as proto_admin, AdminRequest, AdminResponse, TopologyFrame};
 use shoal_proto::shared::protocol::auth::{self as proto_auth, AuthMechanism, AuthStatus};
 use shoal_proto::shared::protocol::error::{self, ErrorCode};
 use shoal_proto::shared::protocol::trace::TraceContext;
@@ -145,6 +146,45 @@ fn current_trace_context() -> Option<TraceContext> {
 /// The connection is here rather than in a map of its own so that there is exactly one place a
 /// query's routing state lives. A second map would have to be inserted into and removed from in
 /// step with this one, and the failure mode of getting that wrong is a leak that nothing notices.
+/// The topology this client last heard, shared by every connection's reader
+///
+/// A frame arrives on every connection that subscribed, and only a newer version replaces what
+/// is held, so the frame here is the newest any connection has read
+/// ([F39](../../../../docs/src/features/membership.md)).
+struct TopologyState {
+    /// The newest frame, if any connection has read one
+    frame: std::sync::RwLock<Option<TopologyFrame>>,
+    /// The version of that frame, which a waiter watches
+    version: tokio::sync::watch::Sender<u64>,
+}
+
+impl TopologyState {
+    /// An empty state, at version zero
+    fn new() -> Self {
+        TopologyState {
+            frame: std::sync::RwLock::new(None),
+            version: tokio::sync::watch::Sender::new(0),
+        }
+    }
+
+    /// Install a frame if it is newer than what is held
+    ///
+    /// # Arguments
+    ///
+    /// * `frame` - The frame a connection read
+    fn install(&self, frame: TopologyFrame) {
+        // under the lock, so two connections cannot race an older frame over a newer one
+        let mut held = self.frame.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if held.as_ref().is_some_and(|held| held.version >= frame.version) {
+            return;
+        }
+        let version = frame.version;
+        *held = Some(frame);
+        drop(held);
+        self.version.send_replace(version);
+    }
+}
+
 #[derive(Clone)]
 struct Waiter {
     /// The connection this query was written to, if it has been written yet
@@ -582,6 +622,20 @@ impl ShoalConnectionManager {
         // remember how large a frame this server is willing to be sent
         self.peer_max_frame_bytes
             .store(ack.max_frame_bytes, Ordering::Relaxed);
+        // subscribe to the topology, so this connection is pushed every map the server installs
+        //
+        // after the handshake and any authentication, since a server that never heard of a
+        // subscription would close the connection on the frame; still before the split, so the
+        // frame is on the wire before anything else this connection carries
+        // ([F39](../../../../docs/src/features/membership.md))
+        let subscribe = protocol::client_preamble(
+            MessageType::Topology,
+            protocol::QUERY_ID_LEN,
+            ack.max_frame_bytes,
+        )?;
+        stream.write_all(&subscribe).await?;
+        stream.write_all(Uuid::nil().as_bytes()).await?;
+        stream.flush().await?;
         // claim an id for this connection, so a read loop that dies can say which one it was
         let id = self.next_conn_id.fetch_add(1, Ordering::Relaxed);
         // split our stream into read and write halves
@@ -707,6 +761,8 @@ pub struct Shoal<S: QuerySupport> {
     peer_max_frame_bytes: Arc<AtomicU32>,
     /// The handle to this clients proxy
     proxy_handle: JoinHandle<()>,
+    /// The topology the servers last pushed, and a watch on its version
+    topology: Arc<TopologyState>,
     /// The database kind we are querying
     phantom: PhantomData<S>,
 }
@@ -970,12 +1026,15 @@ impl<S: QuerySupport> Shoal<S> {
         let channel_map = Arc::new(HashMap::with_capacity(1024));
         // create a bool to track when this client is shutting down
         let is_shutting_down = Arc::new(AtomicBool::new(false));
+        // the topology every connection's reader installs into
+        let topology = Arc::new(TopologyState::new());
         // create the response proxy for this client
         let proxy = ShoalTcpProxy::<S::QueryKinds, S::ResponseKinds>::new(
             proxy_rx,
             &channel_map,
             &dead_conns,
             &is_shutting_down,
+            &topology,
         );
         // start our proxy
         let proxy_handle = tokio::spawn(async move { proxy.start().await });
@@ -989,6 +1048,7 @@ impl<S: QuerySupport> Shoal<S> {
             dead_conns,
             peer_max_frame_bytes,
             proxy_handle,
+            topology,
             phantom: PhantomData,
         };
         Ok(shoal)
@@ -998,6 +1058,112 @@ impl<S: QuerySupport> Shoal<S> {
     #[allow(clippy::unused_self)]
     pub fn query(&self) -> Queries<S> {
         Queries::default()
+    }
+
+    /// The cluster's topology as the servers last pushed it, if any connection has read one
+    ///
+    /// Every connection subscribes as it opens, so this is populated soon after the client is,
+    /// and moves whenever a member joins, leaves, changes role or health, or the placement is
+    /// initialized ([F39](../../../../docs/src/features/membership.md)).
+    #[must_use]
+    pub fn topology(&self) -> Option<TopologyFrame> {
+        self.topology
+            .frame
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// Wait until the topology is newer than a version, and say which version it reached
+    ///
+    /// # Arguments
+    ///
+    /// * `since` - The version already seen; zero waits for the first frame
+    ///
+    /// # Errors
+    ///
+    /// Fails if the client is dropped while waiting.
+    pub async fn topology_changed(&self, since: u64) -> Result<u64, Errors> {
+        let mut watch = self.topology.version.subscribe();
+        let reached = watch
+            .wait_for(|version| *version > since)
+            .await
+            .map_err(|_| Errors::ConnectionPool("the client was dropped".to_string()))?;
+        Ok(*reached)
+    }
+
+    /// Send an admin request over a connection and wait for the cluster's answer
+    ///
+    /// A read is answered by whichever node the connection reached; a mutation is authorized
+    /// against the committed admins by this connection's principal, versioned by the request's
+    /// expected topology version, made idempotent by its operation id, and committed by the
+    /// control leader ([F39](../../../../docs/src/features/membership.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `request` - What is asked
+    ///
+    /// # Errors
+    ///
+    /// Fails if no connection could be had, the request could not be written or the server
+    /// answered with a frame level error; a refusal is an `Err` inside the response.
+    #[instrument(name = "Shoal::admin", skip_all, err(Debug))]
+    pub async fn admin(&self, request: &AdminRequest) -> Result<AdminResponse, Errors> {
+        // an id for the answer to come back under, tracked like a query's
+        let mut id = Uuid::new_v4();
+        let (response_tx, response_rx) = self.track_response(&mut id)?;
+        // the body, then the header that announces it
+        let body = proto_admin::encode_body(&id, request)
+            .map_err(|error| Errors::Config(format!("encoding an admin request: {error}")))?;
+        let preamble = protocol::client_preamble(
+            MessageType::Admin,
+            body.len(),
+            self.peer_max_frame_bytes(),
+        )?;
+        // write it over a pooled connection
+        let outcome = async {
+            let mut conn = self.pool.get().await.map_err(|e| {
+                Errors::ConnectionPool(format!("failed to get connection from pool: {e}"))
+            })?;
+            conn.write_all(&preamble).await?;
+            conn.write_all(&body).await?;
+            // the answer is owed by this connection, so a dead one fails it
+            self.channel_map.pin().insert(
+                id,
+                Waiter {
+                    conn: Some(conn.id),
+                    tx: response_tx.clone(),
+                    span: Span::current(),
+                },
+            );
+            if self.dead_conns.pin().contains_key(&conn.id) {
+                return Err(Errors::Server {
+                    query_id: Some(id),
+                    index: None,
+                    code: ErrorCode::ConnectionLost,
+                    msg: "the connection this request was written to had already stopped".to_owned(),
+                });
+            }
+            // wait for the answer, whichever shape it takes
+            match response_rx.recv().await.map_err(receive_failed)? {
+                ClientMsg::Admin(json) => proto_admin::decode_rest::<AdminResponse>(&json)
+                    .map_err(|error| Errors::Config(format!("decoding an admin answer: {error}"))),
+                ClientMsg::ServerError(code, msg, _) => Err(Errors::Server {
+                    query_id: Some(id),
+                    index: None,
+                    code,
+                    msg,
+                }),
+                ClientMsg::Response(..) | ClientMsg::End(_) => Err(Errors::Config(
+                    "the server answered an admin request with a query response".to_string(),
+                )),
+            }
+        }
+        .await;
+        // whatever happened, this id is done and its channel pair goes back to the queue
+        self.channel_map.pin().remove(&id);
+        let _ = self.channel_queue_tx.send((response_tx, response_rx)).await;
+        outcome
     }
 
     /// Get the largest frame the server on the other end of this client will accept
@@ -1464,6 +1630,10 @@ enum Frame {
     Response(Uuid, AlignedVec<16>),
     /// A failure, for the query it names or for the connection if that id is nil
     Error(Uuid, ErrorCode, String),
+    /// A topology frame the server pushed, as its JSON
+    Topology(Vec<u8>),
+    /// The answer to an admin request, as its JSON
+    Admin(Uuid, Vec<u8>),
 }
 
 /// Read a response payload of a known length into an aligned buffer
@@ -1537,6 +1707,8 @@ struct TcpProxy {
     dead_conns: Arc<HashMap<u64, ()>>,
     /// Whether shoal or the client is shutting down
     is_shutting_down: Arc<AtomicBool>,
+    /// Where the topology frames this connection reads are installed
+    topology: Arc<TopologyState>,
     /// The largest frame this client will read before it refuses the connection
     max_frame_bytes: u32,
 }
@@ -1551,12 +1723,14 @@ impl TcpProxy {
     /// * `channel_map` - A distributed map of channels to relay messages with
     /// * `dead_conns` - Where to record that this connection has stopped
     /// * `is_shutting_down` - A flag used to tell the proxy to shutdown
+    /// * `topology` - Where the topology frames this connection reads are installed
     pub fn new(
         reader: OwnedReadHalf,
         conn_id: u64,
         channel_map: &Arc<HashMap<Uuid, Waiter>>,
         dead_conns: &Arc<HashMap<u64, ()>>,
         is_shutting_down: &Arc<AtomicBool>,
+        topology: &Arc<TopologyState>,
     ) -> Self {
         // Create a new tcp proxy
         TcpProxy {
@@ -1565,6 +1739,7 @@ impl TcpProxy {
             channel_map: channel_map.clone(),
             dead_conns: dead_conns.clone(),
             is_shutting_down: is_shutting_down.clone(),
+            topology: topology.clone(),
             max_frame_bytes: protocol::DEFAULT_MAX_FRAME_BYTES,
         }
     }
@@ -1634,7 +1809,19 @@ impl TcpProxy {
                 let (code, msg) = error::decode_error_tail(&rest)?;
                 Ok(Some(Frame::Error(frame.query_id, code, msg.into_owned())))
             }
-            // a server only ever sends these two down a connection, so anything else is a peer
+            // a topology frame and an admin answer are json after the id, read whole
+            // ([F39](../../../../docs/src/features/membership.md))
+            MessageType::Topology => {
+                let mut rest = vec![0u8; frame.rest_len];
+                self.reader.read_exact(&mut rest).await?;
+                Ok(Some(Frame::Topology(rest)))
+            }
+            MessageType::AdminResponse => {
+                let mut rest = vec![0u8; frame.rest_len];
+                self.reader.read_exact(&mut rest).await?;
+                Ok(Some(Frame::Admin(frame.query_id, rest)))
+            }
+            // a server only ever sends these four down a connection, so anything else is a peer
             // that is out of step with us rather than a frame we can act on
             got => Err(Errors::Protocol(ProtocolError::UnexpectedMessageType {
                 expected: MessageType::Response,
@@ -1764,6 +1951,20 @@ impl TcpProxy {
                     }
                     (query_id, ClientMsg::ServerError(code, msg, stamps))
                 }
+                // a topology frame answers no query: it is installed if newer and that is all
+                Frame::Topology(json) => {
+                    match proto_admin::decode_rest::<TopologyFrame>(&json) {
+                        Ok(topology) => self.topology.install(topology),
+                        Err(error) => event!(
+                            Level::WARN,
+                            msg = "a topology frame did not decode",
+                            conn = self.conn_id,
+                            %error,
+                        ),
+                    }
+                    continue;
+                }
+                Frame::Admin(query_id, json) => (query_id, ClientMsg::Admin(json)),
             };
             // get the channel for this query
             match self.channel_map.pin_owned().get(&query_id) {
@@ -1815,6 +2016,8 @@ struct ShoalTcpProxy<S: ShoalQuerySupport, R: ShoalResponseSupport> {
     dead_conns: Arc<HashMap<u64, ()>>,
     /// Whether this client is shutting down
     is_shutting_down: Arc<AtomicBool>,
+    /// Where every connection's topology frames are installed
+    topology: Arc<TopologyState>,
     /// The database we are getting responses from
     phantom_query: PhantomData<S>,
     /// The database we are getting responses from
@@ -1829,11 +2032,13 @@ impl<S: ShoalQuerySupport, R: ShoalResponseSupport + 'static> ShoalTcpProxy<S, R
     /// * `socket` - The socket to listen on
     /// * `channel_map` - A distributed map of channels to relay messages with
     /// * `shutdown` - A flag used to tell the proxy to shutdown
+    /// * `topology` - Where every connection's topology frames are installed
     pub fn new(
         proxy_rx: AsyncReceiver<(u64, OwnedReadHalf)>,
         channel_map: &Arc<HashMap<Uuid, Waiter>>,
         dead_conns: &Arc<HashMap<u64, ()>>,
         is_shutting_down: &Arc<AtomicBool>,
+        topology: &Arc<TopologyState>,
     ) -> Self {
         // create our proxy
         ShoalTcpProxy {
@@ -1841,6 +2046,7 @@ impl<S: ShoalQuerySupport, R: ShoalResponseSupport + 'static> ShoalTcpProxy<S, R
             channel_map: channel_map.clone(),
             dead_conns: dead_conns.clone(),
             is_shutting_down: is_shutting_down.clone(),
+            topology: topology.clone(),
             phantom_query: PhantomData,
             phantom_response: PhantomData,
         }
@@ -1873,6 +2079,7 @@ impl<S: ShoalQuerySupport, R: ShoalResponseSupport + 'static> ShoalTcpProxy<S, R
                 &self.channel_map,
                 &self.dead_conns,
                 &self.is_shutting_down,
+                &self.topology,
             );
             // spawn a task to watch this tcp reader for results, saying so if it gives up
             //
@@ -2173,6 +2380,12 @@ where
                             }
                             // a failure ends this stream where it lands, since it names the
                             // bundle rather than a position in it
+                            // an admin answer belongs to no query stream, so one here is a server out of step
+                            ClientMsg::Admin(_) => {
+                                return Err(Errors::Config(
+                                    "an admin answer arrived on a query stream".to_string(),
+                                ));
+                            }
                             ClientMsg::ServerError(code, msg, _) => {
                                 return Err(Errors::Server {
                                     query_id: Some(self.id),
@@ -2223,6 +2436,12 @@ where
                 }
                 // a failure ends this stream where it lands, since it names the bundle rather
                 // than a position in it - there is no index to buffer it at
+                // an admin answer belongs to no query stream, so one here is a server out of step
+                ClientMsg::Admin(_) => {
+                    return Err(Errors::Config(
+                        "an admin answer arrived on a query stream".to_string(),
+                    ));
+                }
                 ClientMsg::ServerError(code, msg, _) => {
                     return Err(Errors::Server {
                         query_id: Some(self.id),
@@ -2497,6 +2716,12 @@ where
                 }
                 // a failure ends this stream where it lands, since it names the bundle rather
                 // than a position in it
+                // an admin answer belongs to no query stream, so one here is a server out of step
+                ClientMsg::Admin(_) => {
+                    return Err(Errors::Config(
+                        "an admin answer arrived on a query stream".to_string(),
+                    ));
+                }
                 ClientMsg::ServerError(code, msg, _) => {
                     return Err(Errors::Server {
                         query_id: Some(self.id),
@@ -2708,7 +2933,7 @@ impl<Q: QuerySupport> ShoalQueryStream<Q> {
 
 #[cfg(test)]
 mod tests {
-    use super::{endpoint_order, error, protocol, ClientMsg, ErrorCode, Frame, Span, TcpProxy, Waiter};
+    use super::{endpoint_order, error, protocol, ClientMsg, ErrorCode, Frame, Span, TcpProxy, TopologyState, Waiter};
     use papaya::HashMap;
     use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
@@ -2782,7 +3007,7 @@ mod tests {
             let channel_map = Arc::new(HashMap::with_capacity(1));
             let dead_conns = Arc::new(HashMap::with_capacity(1));
             let is_shutting_down = Arc::new(AtomicBool::new(false));
-            let mut proxy = TcpProxy::new(reader, 1, &channel_map, &dead_conns, &is_shutting_down);
+            let mut proxy = TcpProxy::new(reader, 1, &channel_map, &dead_conns, &is_shutting_down, &Arc::new(TopologyState::new()));
             let frame = proxy
                 .read_frame()
                 .await
@@ -2853,7 +3078,7 @@ mod tests {
         let channel_map = Arc::new(HashMap::with_capacity(1));
         let dead_conns = Arc::new(HashMap::with_capacity(1));
         let is_shutting_down = Arc::new(AtomicBool::new(false));
-        let mut proxy = TcpProxy::new(reader, 1, &channel_map, &dead_conns, &is_shutting_down);
+        let mut proxy = TcpProxy::new(reader, 1, &channel_map, &dead_conns, &is_shutting_down, &Arc::new(TopologyState::new()));
         let frame = proxy
             .read_frame()
             .await
@@ -2899,7 +3124,7 @@ mod tests {
         let channel_map = Arc::new(HashMap::with_capacity(1));
         let dead_conns = Arc::new(HashMap::with_capacity(1));
         let is_shutting_down = Arc::new(AtomicBool::new(false));
-        let mut proxy = TcpProxy::new(reader, 1, &channel_map, &dead_conns, &is_shutting_down);
+        let mut proxy = TcpProxy::new(reader, 1, &channel_map, &dead_conns, &is_shutting_down, &Arc::new(TopologyState::new()));
         let error = proxy
             .read_frame()
             .await
@@ -2936,7 +3161,7 @@ mod tests {
         let channel_map = Arc::new(HashMap::with_capacity(1));
         let dead_conns = Arc::new(HashMap::with_capacity(1));
         let is_shutting_down = Arc::new(AtomicBool::new(false));
-        let mut proxy = TcpProxy::new(reader, 1, &channel_map, &dead_conns, &is_shutting_down);
+        let mut proxy = TcpProxy::new(reader, 1, &channel_map, &dead_conns, &is_shutting_down, &Arc::new(TopologyState::new()));
         let error = proxy
             .read_frame()
             .await
@@ -2991,7 +3216,7 @@ mod tests {
             let channel_map = Arc::new(HashMap::with_capacity(1));
             let dead_conns = Arc::new(HashMap::with_capacity(1));
             let is_shutting_down = Arc::new(AtomicBool::new(false));
-            let mut proxy = TcpProxy::new(reader, 1, &channel_map, &dead_conns, &is_shutting_down);
+            let mut proxy = TcpProxy::new(reader, 1, &channel_map, &dead_conns, &is_shutting_down, &Arc::new(TopologyState::new()));
             // the error frame reads back whole, naming its query and its code
             let first = proxy
                 .read_frame()
@@ -3063,7 +3288,7 @@ mod tests {
             );
         let dead_conns = Arc::new(HashMap::with_capacity(1));
         let is_shutting_down = Arc::new(AtomicBool::new(false));
-        let proxy = TcpProxy::new(reader, 1, &channel_map, &dead_conns, &is_shutting_down);
+        let proxy = TcpProxy::new(reader, 1, &channel_map, &dead_conns, &is_shutting_down, &Arc::new(TopologyState::new()));
         tokio::spawn(proxy.start());
         // the failure arrives on that query's channel, with the code and message it was sent with
         let msg = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
@@ -3121,7 +3346,7 @@ mod tests {
             );
         let dead_conns = Arc::new(HashMap::with_capacity(1));
         let is_shutting_down = Arc::new(AtomicBool::new(false));
-        let proxy = TcpProxy::new(reader, 1, &channel_map, &dead_conns, &is_shutting_down);
+        let proxy = TcpProxy::new(reader, 1, &channel_map, &dead_conns, &is_shutting_down, &Arc::new(TopologyState::new()));
         tokio::spawn(proxy.start());
         // the second frame still arrives, which it could not do if the first had ended the loop
         let msg = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
@@ -3181,7 +3406,7 @@ mod tests {
         // read that connection until it ends
         let dead_conns = Arc::new(HashMap::with_capacity(1));
         let is_shutting_down = Arc::new(AtomicBool::new(false));
-        let proxy = TcpProxy::new(reader, 1, &channel_map, &dead_conns, &is_shutting_down);
+        let proxy = TcpProxy::new(reader, 1, &channel_map, &dead_conns, &is_shutting_down, &Arc::new(TopologyState::new()));
         let _ = proxy.start().await;
         server.await.expect("the listener task panicked");
         // the query on the dead connection was told, rather than left waiting

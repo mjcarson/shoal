@@ -296,3 +296,34 @@ fn the_schema_id_is_the_fingerprint_without_the_version() {
         }
     }
 }
+
+/// A table's identity is the hash of its name, so it survives a reorder and differs by name
+///
+/// The schema id and the fingerprint move when a row is reordered; a table identity must not,
+/// since it is what the control plane records a placement under and what P2 of the protocol
+/// contract calls stable schema metadata. The reordered schema above is the same table under
+/// the same name, so it has the same identity; a second table in one schema has another.
+#[test]
+fn table_ids_are_stable_across_a_reorder_and_distinct_by_name() {
+    use shoal::shared::identity::TableId;
+    use shoal::shared::traits::TableNameSupport;
+    // the base and the reordered schema name one table the same way
+    let base = <base::WireClient as QuerySupport>::table_ids();
+    let reordered = <reordered::WireClient as QuerySupport>::table_ids();
+    assert_eq!(base, reordered);
+    assert_eq!(base.len(), 1);
+    assert_eq!(base[0].0, "Row");
+    // the identity is the hash of that name, from either side of the trait
+    assert_eq!(base[0].1, TableId::of("Row"));
+    assert_eq!(base::WireTableNames::Row.table_id(), TableId::of("Row"));
+    // and a different name is a different identity, while the schema id still moved
+    assert_ne!(TableId::of("Row"), TableId::of("Rows"));
+    // the ids are frozen: a stream on disk is named by one, so a change to the hash or its seed
+    // is a change to what every persisted table is called (F39)
+    assert_eq!(TableId::of("Row").0, 9_298_178_980_900_292_585, "TableId::of(\"Row\") moved");
+    assert_eq!(TableId::of("Note").0, 5_620_453_994_926_889_807, "TableId::of(\"Note\") moved");
+    assert_ne!(
+        <base::WireClient as QuerySupport>::SCHEMA_ID,
+        <reordered::WireClient as QuerySupport>::SCHEMA_ID
+    );
+}

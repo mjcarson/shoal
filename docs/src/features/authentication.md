@@ -86,8 +86,10 @@ nothing writes a zero there, which is the byte every server wrote before this ex
 
 Three things it produces that did not exist before:
 
-- **A `Principal`** — a name and how it was proved — which the connection task logs and nothing
-  else consults yet. Authorization is what it exists for and is deliberately still unbuilt.
+- **A `Principal`** — a name and how it was proved — which the connection task logs and ~~nothing
+  else consults yet~~, since [F39](membership.md), the cluster's admin operations consult: a
+  mutation is authorized against `cluster.admins` by it. Per-table authorization is what it
+  exists for and is deliberately still unbuilt.
 - **A refusal at connect time** rather than a closed socket, in two shapes: a `HelloAck` carrying
   `RefusalReason::NoCommonAuthMechanism` for a client that offered nothing the server accepts, and
   an `AuthResponse` with `AuthStatus::Failed` for one that offered something and could not prove it.
@@ -205,7 +207,8 @@ derivation and could not produce a user's password if it were asked to.
   `tls-exporter` binding is available and unwired, and F14 turned up the ordering trap it will hit
   — the exporter has to be taken from rustls *before* `dangerous_into_kernel_connection` consumes
   the session. Filed in [TODOs](../appendix/todos.md).
-- **No authorization.** A `Principal` is produced, logged, and consulted by nothing. Who may read
+- **No ~~authorization~~ per-table authorization.** A `Principal` is produced, logged, and
+  consulted by ~~nothing~~ the cluster's admin operations alone ([F39](membership.md)). Who may read
   which table is a server-side catalog problem and stays in
   [TODOs](../appendix/todos.md#per-table-authorization), now unblocked rather than blocked.
 - **Three round trips per connection, and the pool opens ten before it is idle.** `min_idle` is 10

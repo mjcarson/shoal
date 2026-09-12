@@ -30,10 +30,11 @@ use std::net::SocketAddr;
 use std::rc::Rc;
 use std::time::Duration;
 use std::{cell::Cell, cell::RefCell, hash::BuildHasherDefault};
-use std::{collections::HashMap, io::IoSlice};
+use std::{collections::HashMap, collections::HashSet, io::IoSlice};
 use tracing::{event, info_span, instrument, Instrument, Level, Span};
 use uuid::Uuid;
 
+use super::control::{AdminCall, ControlRequest};
 use super::messages::{Answer, PeerEvent, QueryMetadata, Reply, ReplyKind, ServerMsg};
 use super::peer::{
     self, Frame, FrameKey, Lane, LinkEvent, ListenerContext, Local, PeerSetup, Peers, Pending,
@@ -41,6 +42,7 @@ use super::peer::{
 };
 use super::request_body::RequestBody;
 use super::database::ShoalDatabase;
+use super::map::{MapCell, TabletMap};
 use super::ring::Ring;
 use super::routing::ArchivedShardRouting;
 use super::stage_profile::{self, StageStamps, Stamp};
@@ -56,6 +58,7 @@ use crate::{
         },
         protocol::{
             self,
+            admin::{self as proto_admin, AdminError, AdminRequest, AdminResponse},
             auth::{self as proto_auth, AuthMechanism, AuthStatus},
             error::{self as proto_error, ErrorCode},
             handshake,
@@ -123,11 +126,13 @@ fn hex_trace_id(wire_trace: &TraceContext) -> String {
 /// * `tcp_rx` - The read half of that client's connection
 /// * `kanal_tx` - The channel to forward bundles into this node on
 /// * `max_frame_bytes` - The largest frame this server will accept
+/// * `principal` - Who this connection authenticated as, if it did, for its admin requests
 async fn client_rx_relay<S: ShoalDatabase>(
     peer: Uuid,
     mut tcp_rx: ReadHalf<TcpStream>,
     kanal_tx: AsyncSender<ServerMsg<S>>,
     max_frame_bytes: u32,
+    principal: Option<String>,
 ) {
     // keep waiting for messages until  our tcp socket closes
     loop {
@@ -147,13 +152,30 @@ async fn client_rx_relay<S: ShoalDatabase>(
         //
         // this is what closes the hole where a peer could name its own allocation size, and it
         // has to happen here rather than after the allocation below
-        let header = match protocol::decode_request(&preamble, max_frame_bytes) {
+        let header = match protocol::decode_client_request(&preamble, max_frame_bytes) {
             Ok(header) => header,
             Err(error) => {
                 event!(Level::ERROR, msg = "refused a frame", %peer, %error);
                 break;
             }
         };
+        // a topology subscription or an admin request is a query id and some json, handed to
+        // the accepting shard rather than routed anywhere
+        // ([F39](../../../docs/src/features/membership.md))
+        if header.kind != MessageType::Queries {
+            let msg = match read_control_frame(&mut tcp_rx, &header, peer, principal.as_deref()).await {
+                Ok(msg) => msg,
+                Err(error) => {
+                    event!(Level::ERROR, msg = "refused a control frame", %peer, %error);
+                    break;
+                }
+            };
+            if let Err(error) = kanal_tx.send(msg).await {
+                event!(Level::ERROR, msg = "failed to forward a control frame", %peer, ?error);
+                break;
+            }
+            continue;
+        }
         // read the trace context this frame carries, if its flags say it carries one
         //
         // this is a read of its own rather than the front of the body buffer below, because that
@@ -247,6 +269,111 @@ async fn client_rx_relay<S: ShoalDatabase>(
     }
 }
 
+/// Read the body of a topology subscription or an admin request and say what it asks
+///
+/// The body is a query id followed by the request's JSON; a subscription carries no JSON at all.
+/// A body too short for its id, or JSON that is not an admin request, is refused, which ends the
+/// connection the way a bad header does.
+///
+/// # Arguments
+///
+/// * `tcp_rx` - The read half of the connection, positioned after the header
+/// * `header` - The header, which says which of the two this is and how long its body is
+/// * `peer` - The client
+/// * `principal` - Who the connection authenticated as, if it did
+async fn read_control_frame<S: ShoalDatabase>(
+    tcp_rx: &mut ReadHalf<TcpStream>,
+    header: &Header,
+    peer: Uuid,
+    principal: Option<&str>,
+) -> Result<ServerMsg<S>, ServerError> {
+    // a body that cannot hold its own id is not one of these
+    let body_len = header.body_len();
+    if body_len < protocol::QUERY_ID_LEN {
+        return Err(ProtocolError::BodyTooShort {
+            need: protocol::QUERY_ID_LEN,
+            got: header.len,
+        }
+        .into());
+    }
+    // the id, then whatever json follows it
+    let mut body = vec![0u8; body_len];
+    tcp_rx.read_exact(&mut body).await?;
+    let id = Uuid::from_slice(&body[..protocol::QUERY_ID_LEN])
+        .map_err(|error| ServerError::GlommioGeneric(format!("a control frame's id: {error}")))?;
+    match header.kind {
+        // a subscription asks for nothing but the frames
+        MessageType::Topology => Ok(ServerMsg::Subscribe { client: peer }),
+        // an admin request is judged by the shard, so its json is decoded here
+        MessageType::Admin => {
+            let request: AdminRequest = proto_admin::decode_rest(&body[protocol::QUERY_ID_LEN..])
+                .map_err(|error| ServerError::GlommioGeneric(format!("decoding an admin request: {error}")))?;
+            Ok(ServerMsg::Admin {
+                client: peer,
+                id,
+                principal: principal.map(str::to_string),
+                request,
+            })
+        }
+        other => Err(ProtocolError::UnexpectedMessageType {
+            expected: MessageType::Queries,
+            got: other,
+        }
+        .into()),
+    }
+}
+
+/// Keep only the newest topology frame among the replies queued to one client
+///
+/// A topology frame supersedes every older one, so a client that fell behind by several map
+/// versions is written the last of them and none of the rest. Answers and admin responses are
+/// untouched and keep their order; the surviving frame takes the place of the last one, so it
+/// is never written ahead of an answer that was queued before it
+/// ([F39](../../../docs/src/features/membership.md)).
+///
+/// # Arguments
+///
+/// * `batch` - Everything queued to the client at this moment, in queue order
+fn coalesce_topology(batch: &mut Vec<Reply>) {
+    // which frame is newest, where the last frame sits, and how many there are
+    let mut newest: Option<(u64, usize)> = None;
+    let mut last = None;
+    let mut frames = 0;
+    for (at, reply) in batch.iter().enumerate() {
+        if let ReplyKind::Topology { version } = reply.kind {
+            frames += 1;
+            last = Some(at);
+            if newest.is_none_or(|(best, _)| version > best) {
+                newest = Some((version, at));
+            }
+        }
+    }
+    // nothing to fold with fewer than two frames
+    let (Some(last), Some((_, newest))) = (last, newest) else {
+        return;
+    };
+    if frames < 2 {
+        return;
+    }
+    // rebuild: every answer in its order, and the newest frame where the last frame was
+    let mut kept = Vec::with_capacity(batch.len() - frames + 1);
+    let mut winner = None;
+    for (at, reply) in batch.drain(..).enumerate() {
+        match reply.kind {
+            ReplyKind::Topology { .. } if at == newest => winner = Some(reply),
+            ReplyKind::Topology { .. } => {}
+            _ => kept.push(reply),
+        }
+        // the newest frame is at or before the last one, so it is in hand by now
+        if at == last {
+            if let Some(frame) = winner.take() {
+                kept.push(frame);
+            }
+        }
+    }
+    *batch = kept;
+}
+
 /// Tell one client that a query failed, without ending the connection it failed on
 ///
 /// Returns whether the failure could be written. A client that cannot be told is a client that
@@ -328,102 +455,154 @@ async fn client_tx_relay<S: ShoalDatabase>(
     peer_max_frame_bytes: u32,
 ) {
     // loop over messages to send back to our client
-    loop {
-        // try to get a message from our channel
-        let Reply {
-            id: query_id,
-            span,
-            mut stamps,
-            archived,
-            ..
-        } = match client_rx.recv().await {
+    'relay: loop {
+        // wait for the next reply, then take everything else already queued behind it, so a
+        // run of topology frames can be folded to the newest before any of them is written
+        let first = match client_rx.recv().await {
             Ok(msg) => msg,
             // if this channel was closed then stop our task
             // this should only happen exit/shutdown or when our client shutsdown
             Err(_) => break,
         };
-        // enter this query's own span for the framing and the write
-        //
-        // this is what puts the end of the trace on the socket rather than at the reply that
-        // queued the bytes: `tracing-opentelemetry` timestamps a span when it is *exited*, so
-        // a span that is only ever held and never entered exports with no duration at all.
-        // entering it here is what makes `Coordinator::route` cover the whole query
-        let span_guard = span.enter();
-        // build the header and query id that go ahead of this response
-        //
-        // a response too large for this client to accept is answered with a failure naming the
-        // query and both sizes, rather than by closing a connection the client would never
-        // learn the reason for. every other query on this connection is unaffected
-        let preamble = match protocol::response_preamble(
-            &query_id,
-            archived.len(),
-            peer_max_frame_bytes,
-        ) {
-            Ok(preamble) => preamble,
-            Err(error) => {
-                event!(Level::ERROR, msg = "response too large to frame", %query_id, %error);
-                // say what happened in terms of sizes rather than of internals
-                let told = format!(
-                    "this response is {} bytes, larger than the {peer_max_frame_bytes} byte frame this connection accepts",
-                    archived.len()
-                );
-                // a client we cannot even tell is a client we cannot serve
-                if !write_error_frame(
-                    &mut tcp_tx,
-                    &query_id,
-                    ErrorCode::ResponseTooLarge,
-                    &told,
-                    peer_max_frame_bytes,
-                )
-                .await
-                {
-                    drop(span_guard);
-                    break;
-                }
-                // this query's journey ended here, so hand it to the profile before it is
-                // forgotten - the failure is the last thing this server knows about it
-                stamps.mark_socket_written();
-                stage_profile::emit(query_id, stamps);
-                drop(span_guard);
-                continue;
-            }
-        };
-        // build our vectored byte slices to send
-        let mut bufs = &mut [IoSlice::new(&preamble), IoSlice::new(&archived)][..];
-        // keep sending our data until all of this archive has been sent
-        //
-        // a short write or a write error here means this client is gone, so this connection ends
-        let mut failed = false;
-        while !bufs.is_empty() {
-            // send this data back to our client
-            match tcp_tx.write_vectored(bufs).await {
-                Ok(0) => {
-                    event!(Level::ERROR, msg = "wrote no bytes to a client", %query_id);
-                    failed = true;
-                    break;
-                }
-                Ok(n) => IoSlice::advance_slices(&mut bufs, n),
+        let mut batch = vec![first];
+        while let Ok(Some(next)) = client_rx.try_recv() {
+            batch.push(next);
+        }
+        coalesce_topology(&mut batch);
+        for reply in batch {
+            let Reply {
+                id: query_id,
+                kind,
+                span,
+                mut stamps,
+                archived,
+                ..
+            } = reply;
+            // enter this query's own span for the framing and the write
+            //
+            // this is what puts the end of the trace on the socket rather than at the reply that
+            // queued the bytes: `tracing-opentelemetry` timestamps a span when it is *exited*, so
+            // a span that is only ever held and never entered exports with no duration at all.
+            // entering it here is what makes `Coordinator::route` cover the whole query
+            let span_guard = span.enter();
+            // an answer is a response frame; a topology frame and an admin answer are their own
+            // kinds under the same preamble, and only an answer has a journey to profile
+            // ([F39](../../../docs/src/features/membership.md))
+            let (message, profiled) = match kind {
+                ReplyKind::Whole | ReplyKind::Share => (MessageType::Response, true),
+                ReplyKind::Topology { .. } => (MessageType::Topology, false),
+                ReplyKind::Admin => (MessageType::AdminResponse, false),
+            };
+            // build the header and query id that go ahead of this frame
+            //
+            // a response too large for this client to accept is answered with a failure naming
+            // the query and both sizes, rather than by closing a connection the client would
+            // never learn the reason for. every other query on this connection is unaffected
+            let preamble = match protocol::server_preamble(
+                message,
+                &query_id,
+                archived.len(),
+                peer_max_frame_bytes,
+            ) {
+                Ok(preamble) => preamble,
                 Err(error) => {
-                    event!(Level::ERROR, msg = "failed to write a response", %query_id, ?error);
-                    failed = true;
-                    break;
+                    event!(Level::ERROR, msg = "response too large to frame", %query_id, %error);
+                    // say what happened in terms of sizes rather than of internals
+                    let told = format!(
+                        "this response is {} bytes, larger than the {peer_max_frame_bytes} byte frame this connection accepts",
+                        archived.len()
+                    );
+                    // a client we cannot even tell is a client we cannot serve
+                    if !write_error_frame(
+                        &mut tcp_tx,
+                        &query_id,
+                        ErrorCode::ResponseTooLarge,
+                        &told,
+                        peer_max_frame_bytes,
+                    )
+                    .await
+                    {
+                        drop(span_guard);
+                        break 'relay;
+                    }
+                    // this query's journey ended here, so hand it to the profile before it is
+                    // forgotten - the failure is the last thing this server knows about it
+                    if profiled {
+                        stamps.mark_socket_written();
+                        stage_profile::emit(query_id, stamps);
+                    }
+                    drop(span_guard);
+                    continue;
+                }
+            };
+            // build our vectored byte slices to send
+            let mut bufs = &mut [IoSlice::new(&preamble), IoSlice::new(&archived)][..];
+            // keep sending our data until all of this archive has been sent
+            //
+            // a short write or a write error here means this client is gone, so this connection
+            // ends
+            let mut failed = false;
+            while !bufs.is_empty() {
+                // send this data back to our client
+                match tcp_tx.write_vectored(bufs).await {
+                    Ok(0) => {
+                        event!(Level::ERROR, msg = "wrote no bytes to a client", %query_id);
+                        failed = true;
+                        break;
+                    }
+                    Ok(n) => IoSlice::advance_slices(&mut bufs, n),
+                    Err(error) => {
+                        event!(Level::ERROR, msg = "failed to write a response", %query_id, ?error);
+                        failed = true;
+                        break;
+                    }
                 }
             }
-        }
-        // stop relaying to a client we could not write to
-        if failed {
+            // stop relaying to a client we could not write to
+            if failed {
+                drop(span_guard);
+                break 'relay;
+            }
+            // a frame or an admin answer has no journey to record
+            if profiled {
+                // record that this responses last byte is now the sockets problem
+                stamps.mark_socket_written();
+                // hand this queries journey to the profile
+                //
+                // this is the last moment the server knows anything about the query, so it is
+                // the only place a record can be emitted with every server side stage filled in
+                stage_profile::emit(query_id, stamps);
+            }
+            // drop our span since we are done writting
             drop(span_guard);
-            break;
         }
-        // record that this responses last byte is now the sockets problem
-        stamps.mark_socket_written();
-        // hand this queries journey to the profile
-        //
-        // this is the last moment the server knows anything about the query, so it is the
-        // only place a record can be emitted with every server side stage filled in
-        stage_profile::emit(query_id, stamps);
-        // drop our span since we are done writting
-        drop(span_guard);
+    }
+}
+
+/// How long a shard waits for the control thread to answer a client's admin request
+///
+/// The control thread's own proposal deadline, plus a second for the hop.
+const ADMIN_TIMEOUT: Duration = Duration::from_secs(11);
+
+/// A reply that carries a topology frame or an admin answer rather than a query's response
+///
+/// # Arguments
+///
+/// * `id` - The id the frame is written under: nil for a push, the request's for an answer
+/// * `kind` - Which of the two it is
+/// * `json` - The encoded body
+fn control_reply(id: Uuid, kind: ReplyKind, json: &[u8]) -> Reply {
+    // the relay writes an aligned buffer, so the json goes into one
+    let mut archived = AlignedVec::new();
+    archived.extend_from_slice(json);
+    Reply {
+        id,
+        index: 0,
+        end: true,
+        kind,
+        span: Span::none(),
+        stamps: StageStamps::new(Stamp::now()),
+        archived,
     }
 }
 
@@ -768,8 +947,9 @@ async fn client_acceptor<S: ShoalDatabase>(
                     return;
                 }
             };
-            // say who this connection belongs to, which is the only thing that consults a
-            // principal today - authorization is what it exists for and does not exist yet
+            // say who this connection belongs to; the cluster's admin operations are judged by
+            // it ([F39](../../../docs/src/features/membership.md)), per-table authorization is
+            // still what it exists for and does not exist yet
             match &principal {
                 Some(principal) => {
                     event!(Level::INFO, msg = "authenticated a client", %client, %principal);
@@ -796,8 +976,10 @@ async fn client_acceptor<S: ShoalDatabase>(
                 tcp_tx,
                 hello.max_frame_bytes,
             ));
-            // read this clients bundles until it goes away or sends something we refuse
-            client_rx_relay(client, tcp_rx, node_local_tx, max_frame_bytes).await;
+            // read this clients bundles until it goes away or sends something we refuse; its
+            // principal rides along, since an admin request on this connection is judged by it
+            let principal = principal.map(|principal| principal.name);
+            client_rx_relay(client, tcp_rx, node_local_tx, max_frame_bytes, principal).await;
             // stop writing to a client that is not reading, which drops the last half of the
             // stream and closes the socket
             tx_task.cancel().await;
@@ -1048,8 +1230,33 @@ pub(super) struct Shard<D: ShoalDatabase> {
     /// `None` on a standalone node. Built lazily on a cluster node so a shard that never
     /// forwards a query dials nothing ([F38](../../../docs/src/features/inter-node-transport.md)).
     peers: Option<Peers<D>>,
+    /// The map this shard holds, which its ring, its links and its listener all read
+    ///
+    /// Installed whole from what the control plane pushes; a standalone node holds the default
+    /// and never installs another ([F39](../../../docs/src/features/membership.md)).
+    map: MapCell,
+    /// Whether this node holds tablets under the placement
+    ///
+    /// A joiner before the placement is initialized holds none and answers every data query
+    /// with `NotInitialized`; a standalone node always holds its own.
+    placed: bool,
+    /// What this node says about itself in a hello, shared with the links and the listener
+    ///
+    /// A cell rather than a value because a joiner's cluster is learned after its shards start,
+    /// from the map, and every later hello has to carry it.
+    local: Option<Rc<RefCell<Local>>>,
     /// Bytes this shard has received on bulk lanes, for the transport view
     bulk_received: Rc<Cell<u64>>,
+    /// The control thread's request channel, for the admin requests clients send this shard
+    ///
+    /// None on a standalone node, which answers every admin request by saying so.
+    control: Option<kanal::Sender<ControlRequest>>,
+    /// The clients this shard accepted that asked for the topology and every change to it
+    ///
+    /// Only the accepting shard holds a connection here, so a map install pushes one frame per
+    /// subscribed connection and never one per shard
+    /// ([F39](../../../docs/src/features/membership.md)).
+    subscribed: HashSet<Uuid>,
 }
 
 impl<D: ShoalDatabase> Shard<D>
@@ -1068,6 +1275,8 @@ where
     /// * `comms` - The channels to the other shards on this node
     /// * `shard_id` - This shards id, minted by the pool so a failure here can still name it
     /// * `shard_count` - The number of shards on this node
+    /// * `peer_setup` - What this shard needs to dial and judge peers, on a cluster node
+    /// * `control` - The control thread's request channel, on a cluster node
     #[instrument(name = "Shard::new", skip_all, err(Debug))]
     pub async fn new(
         conf: &Conf,
@@ -1075,6 +1284,7 @@ where
         shard_id: usize,
         shard_count: usize,
         peer_setup: Option<PeerSetup>,
+        control: Option<kanal::Sender<ControlRequest>>,
     ) -> Result<Self, ServerError> {
         // get a handle to our current executor
         let executor = glommio::executor();
@@ -1120,11 +1330,20 @@ where
         )
         .await?;
         // build our tablet map: a standalone node's is its own shards, a cluster node's places
-        // those shards among the peers the placement names, so a remote key routes to a remote
-        // contact ([F38](../../../docs/src/features/inter-node-transport.md))
-        let ring = match &peer_setup {
-            Some(setup) => Ring::with_placement(shard_count, &setup.placement, setup.local.node)?,
-            None => Ring::new(shard_count)?,
+        // those shards among the members the map names, so a remote key routes to a remote
+        // contact ([F38](../../../docs/src/features/inter-node-transport.md)); a node the map
+        // does not place holds a ring of its own shards it routes nothing against
+        let (ring, placed, map, local) = match &peer_setup {
+            Some(setup) => {
+                let map = MapCell::new(setup.initial_map.clone());
+                let mut local = setup.local.clone();
+                local.cluster = local.cluster.or(setup.initial_map.cluster);
+                match setup.initial_map.ring_for(setup.local.node, shard_count)? {
+                    Some(ring) => (ring, true, map, Some(Rc::new(RefCell::new(local)))),
+                    None => (Ring::new(shard_count)?, false, map, Some(Rc::new(RefCell::new(local)))),
+                }
+            }
+            None => (Ring::new(shard_count)?, true, MapCell::default(), None),
         };
         // build our shard
         let shard = Shard {
@@ -1150,9 +1369,223 @@ where
             bound: None,
             peer_setup,
             peers: None,
+            map,
+            placed,
+            local,
             bulk_received: Rc::new(Cell::new(0)),
+            control,
+            subscribed: HashSet::new(),
         };
         Ok(shard)
+    }
+
+    /// Install a newer map, rebuilding the ring this shard routes with
+    ///
+    /// One assignment between two messages, so nothing ever routes against half a map; a map at
+    /// or below the installed version is ignored.
+    ///
+    /// # Arguments
+    ///
+    /// * `map` - The map the control plane pushed
+    fn install_map(&mut self, map: Arc<TabletMap>) -> Result<(), ServerError> {
+        let Some(setup) = &self.peer_setup else {
+            return Ok(());
+        };
+        if !self.map.install(map.clone()) {
+            return Ok(());
+        }
+        // a joiner learns its cluster from the first map that names one
+        if let Some(local) = &self.local {
+            let mut local = local.borrow_mut();
+            if local.cluster.is_none() {
+                local.cluster = map.cluster;
+            }
+        }
+        // the ring this node routes with under the placement, or none if it is not placed
+        match map.ring_for(setup.local.node, self.ring.shards.iter().filter(|info| info.contact.local_index().is_some()).count())? {
+            Some(ring) => {
+                self.ring = ring;
+                self.placed = true;
+            }
+            None => self.placed = false,
+        }
+        event!(
+            Level::INFO,
+            msg = "installed a tablet map",
+            version = map.version,
+            placed = self.placed,
+            members = map.members.len(),
+        );
+        // every subscribed client hears of it; the relay folds a run of them to the newest
+        self.push_topology(&map);
+        Ok(())
+    }
+
+    /// Push a map's frame to every client subscribed on this shard
+    ///
+    /// # Arguments
+    ///
+    /// * `map` - The map to describe
+    fn push_topology(&mut self, map: &TabletMap) {
+        if self.subscribed.is_empty() {
+            return;
+        }
+        // one encoding, cloned per client
+        let json = match serde_json::to_vec(&map.frame()) {
+            Ok(json) => json,
+            Err(error) => {
+                event!(Level::ERROR, msg = "a topology frame did not encode", ?error);
+                return;
+            }
+        };
+        let kind = ReplyKind::Topology { version: map.version };
+        // a client whose channel is gone is one the acceptor is about to report gone
+        self.subscribed.retain(|client| match self.client_map.get(client) {
+            Some(tx) => tx.try_send(control_reply(Uuid::nil(), kind, &json)).is_ok(),
+            None => false,
+        });
+    }
+
+    /// Subscribe a client to the topology, answering with the current map at once
+    ///
+    /// # Arguments
+    ///
+    /// * `client` - The client
+    fn subscribe(&mut self, client: Uuid) {
+        self.subscribed.insert(client);
+        let map = self.map.get();
+        let json = match serde_json::to_vec(&map.frame()) {
+            Ok(json) => json,
+            Err(error) => {
+                event!(Level::ERROR, msg = "a topology frame did not encode", ?error);
+                return;
+            }
+        };
+        if let Some(tx) = self.client_map.get(&client) {
+            let _ = tx.try_send(control_reply(
+                Uuid::nil(),
+                ReplyKind::Topology { version: map.version },
+                &json,
+            ));
+        }
+    }
+
+    /// Answer an admin request a client sent this shard
+    ///
+    /// A read and an authorized mutation go to the control thread; a mutation from a principal
+    /// the map's admins do not name is refused here, and a standalone node refuses everything by
+    /// saying what it is ([F39](../../../docs/src/features/membership.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `client` - The client
+    /// * `id` - The id the request was sent under
+    /// * `principal` - Who the connection authenticated as, if it did
+    /// * `request` - What is asked
+    fn handle_admin(
+        &mut self,
+        client: Uuid,
+        id: Uuid,
+        principal: Option<String>,
+        request: AdminRequest,
+    ) {
+        let Some(tx) = self.client_map.get(&client).cloned() else {
+            return;
+        };
+        let map = self.map.get();
+        let node = self
+            .local
+            .as_ref()
+            .map_or(NodeId(Uuid::nil()), |local| local.borrow().node);
+        // a refusal decided here, before the control thread hears of it
+        let refuse = |error: AdminError| AdminResponse {
+            node,
+            topology_version: map.version,
+            outcome: Err(error),
+        };
+        let Some(control) = self.control.clone() else {
+            let answer = refuse(AdminError::new(
+                ErrorCode::Unavailable,
+                "this node is not a cluster member, so there is no cluster to administer",
+            ));
+            self.answer_admin(&tx, id, &answer);
+            return;
+        };
+        // a mutation needs a principal the committed policy names
+        if request.kind.is_mutation() {
+            let allowed = principal
+                .as_ref()
+                .is_some_and(|principal| map.admins.contains(principal));
+            if !allowed {
+                let answer = refuse(AdminError::new(
+                    ErrorCode::Unauthorized,
+                    format!(
+                        "{} may not change the cluster; cluster.admins names {:?}",
+                        principal.as_deref().unwrap_or("an unauthenticated connection"),
+                        map.admins
+                    ),
+                ));
+                self.answer_admin(&tx, id, &answer);
+                return;
+            }
+        }
+        // the control thread answers on a channel of its own; a task waits for it so this
+        // shard keeps serving meanwhile
+        let (reply, rx) = kanal::bounded(1);
+        let call = AdminCall {
+            request,
+            principal,
+            trusted: false,
+            reply,
+        };
+        if control.try_send(ControlRequest::Admin(call)).is_err() {
+            let answer = refuse(AdminError::new(
+                ErrorCode::Unavailable,
+                "the control thread is not taking requests",
+            ));
+            self.answer_admin(&tx, id, &answer);
+            return;
+        }
+        glommio::spawn_local(async move {
+            let answered = glommio::timer::timeout(ADMIN_TIMEOUT, async {
+                Ok(rx.as_async().recv().await)
+            })
+            .await;
+            let answer = match answered {
+                Ok(Ok(answer)) => answer,
+                _ => AdminResponse {
+                    node,
+                    topology_version: map.version,
+                    outcome: Err(AdminError::new(
+                        ErrorCode::Timeout,
+                        "the control thread did not answer within the deadline",
+                    )),
+                },
+            };
+            match serde_json::to_vec(&answer) {
+                Ok(json) => {
+                    let _ = tx.send(control_reply(id, ReplyKind::Admin, &json)).await;
+                }
+                Err(error) => event!(Level::ERROR, msg = "an admin answer did not encode", ?error),
+            }
+        })
+        .detach();
+    }
+
+    /// Write an admin answer decided on this shard to the client's relay
+    ///
+    /// # Arguments
+    ///
+    /// * `tx` - The client's relay channel
+    /// * `id` - The id the request was sent under
+    /// * `answer` - The answer
+    fn answer_admin(&self, tx: &AsyncSender<Reply>, id: Uuid, answer: &AdminResponse) {
+        match serde_json::to_vec(answer) {
+            Ok(json) => {
+                let _ = tx.try_send(control_reply(id, ReplyKind::Admin, &json));
+            }
+            Err(error) => event!(Level::ERROR, msg = "an admin answer did not encode", ?error),
+        }
     }
 
     /// Spawn our client network listener
@@ -1207,15 +1640,6 @@ where
         Ok(())
     }
 
-    /// broadcast this join to all shards
-    pub async fn join_cluster(&mut self) -> Result<(), ServerError> {
-        // build our join message
-        let join_msg = ServerMsg::Join(self.info.clone());
-        // broadcast this message
-        self.comms.broadcast(&join_msg).await?;
-        Ok(())
-    }
-
     /// Initialize this shard
     ///
     /// # Arguments
@@ -1232,8 +1656,6 @@ where
         self.spawn_client_listener()?;
         // stand up the peer listener and links, on a cluster node
         self.spawn_peer_listener()?;
-        // broadcast our join message
-        self.join_cluster().await?;
         // start our loaders
         self.tables
             .init_storage_loaders(
@@ -1331,16 +1753,80 @@ where
         // be read back into whatever this host uses
         let bundle_id = queries.id;
         let base_index = queries.base_index.to_native() as usize;
-        // initialize a vec to store the per shard shares we find
-        let mut found = Vec::with_capacity(3);
-        // the remote shares of this bundle, gathered per node into one forward each
-        let mut remote: HashMap<NodeId, Vec<(crate::shared::protocol::peer::ForwardEntry, Pending<D>)>> =
-            HashMap::new();
         // get the absolute index for the last query in this bundle
         //
         // every index below is absolute, so this has to carry the base index too or a
         // streamed bundle would compare an absolute index against a relative one
         let end_index = base_index + last_offset;
+        // a node the placement does not name holds no tablets, so nothing here can be answered;
+        // every query is refused by name rather than routed to a shard that would find nothing
+        // ([F39](../../../docs/src/features/membership.md))
+        if !self.placed {
+            for (offset, kind) in queries.queries.iter().enumerate() {
+                let index = offset + base_index;
+                let table = <D::ClientType as QuerySupport>::archived_query_table(kind);
+                let error = crate::shared::responses::ResponseError::new(
+                    ErrorCode::NotInitialized,
+                    "this node holds no tablets: the placement has not been initialized, or does not name it",
+                );
+                let response = <D::ClientType as QuerySupport>::failed(
+                    table,
+                    bundle_id,
+                    index,
+                    index == end_index,
+                    error,
+                );
+                let span = info_span!(parent: request, "Coordinator::route", id = %bundle_id, index);
+                self.reply(client, bundle_id, span, stamps, response).await?;
+            }
+            return Ok(());
+        }
+        // a write under the cluster's write consistency needs enough members up, judged once
+        // per bundle on the map this shard holds; a standalone node has nobody to be short of
+        // ([F39](../../../docs/src/features/membership.md))
+        let admission = if self.peer_setup.is_some() {
+            let map = self.map.get();
+            map.write_admission().map_err(|shortfall| (shortfall, map))
+        } else {
+            Ok(())
+        };
+        // a write the cluster cannot admit is refused by name before anything is routed, and
+        // skipped below; a read in the same bundle is served as usual
+        let mut refused = vec![false; batch_len];
+        if let Err((shortfall, map)) = &admission {
+            for (offset, kind) in queries.queries.iter().enumerate() {
+                if !<<D::ClientType as QuerySupport>::QueryKinds as ArchivedShardRouting>::archived_is_write(kind) {
+                    continue;
+                }
+                refused[offset] = true;
+                let index = offset + base_index;
+                let table = <D::ClientType as QuerySupport>::archived_query_table(kind);
+                let error = crate::shared::responses::ResponseError::new(
+                    ErrorCode::QuorumUnavailable,
+                    format!(
+                        "writes need {} up nodes for {} at rf {}; have {}",
+                        shortfall.need,
+                        map.write_consistency.as_str(),
+                        map.desired_rf,
+                        shortfall.have
+                    ),
+                );
+                let response = <D::ClientType as QuerySupport>::failed(
+                    table,
+                    bundle_id,
+                    index,
+                    index == end_index,
+                    error,
+                );
+                let span = info_span!(parent: request, "Coordinator::route", id = %bundle_id, index);
+                self.reply(client, bundle_id, span, stamps, response).await?;
+            }
+        }
+        // initialize a vec to store the per shard shares we find
+        let mut found = Vec::with_capacity(3);
+        // the remote shares of this bundle, gathered per node into one forward each
+        let mut remote: HashMap<NodeId, Vec<(crate::shared::protocol::peer::ForwardEntry, Pending<D>)>> =
+            HashMap::new();
         // crawl over our queries
         for (offset, kind) in queries.queries.iter().enumerate() {
             // get this queries absolute index in its stream
@@ -1350,6 +1836,10 @@ where
             let index = offset + base_index;
             // check if this is the last query or not
             let end = index == end_index;
+            // a write refused above was already answered
+            if refused[offset] {
+                continue;
+            }
             // open the span this query and everything it causes hangs off
             //
             // per query rather than per bundle, so a batch is one trace with one subtree per
@@ -2444,12 +2934,16 @@ where
             }
             None => (None, None),
         };
-        // the placement, shared by the listener and the links on this shard
-        let placement = Rc::new(setup.placement.clone());
+        // what this node says about itself, shared by the listener and the links on this shard
+        let local = self
+            .local
+            .clone()
+            .unwrap_or_else(|| Rc::new(RefCell::new(setup.local.clone())));
         // the links this shard forwards through, delivering what they learn onto this shard
         self.peers = Some(Peers::new(
-            placement.clone(),
-            setup.local.clone(),
+            self.map.clone(),
+            setup.dial.clone(),
+            local.clone(),
             client_tls,
             setup.transport.clone(),
             self.shard_local_tx.clone_sync(),
@@ -2459,8 +2953,8 @@ where
         let ctx = ListenerContext {
             comms: self.comms.clone(),
             node_local_tx: self.shard_local_tx.clone(),
-            local: Rc::new(setup.local.clone()),
-            placement,
+            local,
+            map: self.map.clone(),
             tls: server_tls,
             handshake_timeout: setup.transport.handshake_timeout.duration(),
             inflight_bound: setup.transport.inflight_bytes,
@@ -2568,8 +3062,15 @@ where
             let msg = self.shard_local_rx.recv().await?;
             // handle this message
             match msg {
-                // Join our ring
-                ServerMsg::Join(info) => self.ring.add(info),
+                // a newer map from the control plane
+                ServerMsg::Map(map) => self.install_map(map)?,
+                // a test asked this shard to die
+                ServerMsg::Fail => {
+                    return Err(ServerError::GlommioGeneric(format!(
+                        "shard {} failed on request",
+                        self.shard_id
+                    )));
+                }
                 // Add this new client to our client map
                 ServerMsg::NewClient { client, client_tx } => {
                     // add this client to our client map
@@ -2584,7 +3085,17 @@ where
                 // ended ([Resolved #32](../../../docs/src/appendix/resolved/disconnected-client-cleanup.md))
                 ServerMsg::ClientGone(client) => {
                     self.client_map.remove(&client);
+                    self.subscribed.remove(&client);
                 }
+                // a client asked for the topology and every change to it
+                ServerMsg::Subscribe { client } => self.subscribe(client),
+                // a client sent an admin request over its connection
+                ServerMsg::Admin {
+                    client,
+                    id,
+                    principal,
+                    request,
+                } => self.handle_admin(client, id, principal, request),
                 // Handle this client query
                 ServerMsg::Client {
                     peer,
@@ -2707,17 +3218,45 @@ where
     }
 }
 
+/// The sync senders to every shard's mesh channel, for the pool to push maps through
+///
+/// One per shard, in shard order. Handed to the control thread inside the map sink, which is
+/// why it needs to be `Send`: the mesh's senders already cross threads as [`Comms`] does, and
+/// this is the same set of channels under the same argument.
+pub struct ShardSenders<S: ShoalDatabase>(pub Vec<kanal::Sender<ServerMsg<S>>>);
+
+// SAFETY: these are the same senders `Comms` carries across the shard threads, and `Comms` is
+// `Send` under the same bound; the map they carry is an `Arc<TabletMap>`, which is `Send` and
+// `Sync`, and nothing about a `ServerMsg::Map` is executor local
+unsafe impl<S: ShoalDatabase> Send for ShardSenders<S> where S::TableNames: Send {}
+
+impl<S: ShoalDatabase> ShardSenders<S> {
+    /// Push a map to every shard
+    ///
+    /// A shard that is gone is one the pool is already reporting dead; its channel is skipped.
+    ///
+    /// # Arguments
+    ///
+    /// * `map` - The map to install
+    pub fn push_map(&self, map: &Arc<TabletMap>) {
+        for tx in &self.0 {
+            let _ = tx.try_send(ServerMsg::Map(map.clone()));
+        }
+    }
+}
+
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub fn start<S: ShoalDatabase>(
     conf: Conf,
     cpus: CpuSet,
     peer_setup: Option<PeerSetup>,
+    control_requests: Option<kanal::Sender<crate::server::control::ControlRequest>>,
 ) -> Result<
     (
         PoolThreadHandles<Result<(), ServerError>>,
         Arc<AtomicBool>,
         std::sync::mpsc::Receiver<ShardEvent>,
-        kanal::Sender<ServerMsg<S>>,
+        ShardSenders<S>,
     ),
     ServerError,
 >
@@ -2745,7 +3284,7 @@ where
         LocalExecutorPoolBuilder::new(PoolPlacement::MaxSpread(shard_count, Some(cpus)));
     // build and spawn our shards on all of remaining available cores
     let shards = executor_builder.on_all_shards(
-        enclose!((comms, should_shutdown, shard_counter, events, peer_setup) move || {
+        enclose!((comms, should_shutdown, shard_counter, events, peer_setup, control_requests) move || {
             async move {
                 // mint this shards id here rather than in `Shard::new`, so that a failure in
                 // there can still be reported under the id it would have had
@@ -2754,7 +3293,7 @@ where
                 let outcome = async {
                     // build an empty shard
                     let shard: Shard<S> =
-                        Shard::new(&conf, comms, shard_id, shard_count, peer_setup).await?;
+                        Shard::new(&conf, comms, shard_id, shard_count, peer_setup, control_requests.clone()).await?;
                     // start this shard
                     shard.start(should_shutdown.clone(), &events).await
                 }
@@ -2767,13 +3306,72 @@ where
                         shard: shard_id,
                         error: format!("{error:?}"),
                     });
+                    // and the control plane, so the cluster hears of it too
+                    // ([F39](../../../docs/src/features/membership.md))
+                    if let Some(control) = &control_requests {
+                        let _ = control.send(crate::server::control::ControlRequest::ShardHealth(
+                            crate::server::control::ShardHealthEvent {
+                                shard: shard_id,
+                                error: format!("{error:?}"),
+                            },
+                        ));
+                    }
                 }
                 outcome
             }
         }),
     )?;
-    // a sync sender to shard 0's mesh channel, so the pool (which is on no executor) can ask it
-    // for the transport view or drive a bulk probe
-    let control_tx = comms.get_shards_channels(0).0.clone_sync();
-    Ok((shards, should_shutdown, event_rx, control_tx))
+    // a sync sender to every shard's mesh channel, so the pool (which is on no executor) can
+    // ask shard 0 for the transport view, drive a bulk probe, and push every map to all of them
+    let senders = ShardSenders(
+        (0..shard_count)
+            .map(|shard| comms.get_shards_channels(shard).0.clone_sync())
+            .collect(),
+    );
+    Ok((shards, should_shutdown, event_rx, senders))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A reply of a kind, with nothing else worth reading
+    fn reply(kind: ReplyKind, id: Uuid) -> Reply {
+        control_reply(id, kind, b"{}")
+    }
+
+    /// A run of topology frames queued to one client is folded to the newest, where the last
+    /// one sat, and every answer keeps its place (F39)
+    #[test]
+    fn topology_frames_fold_to_the_newest_and_answers_keep_their_order() {
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        // frames 3, 5 and 4 around two answers: 5 is newest, the last frame sits at index 4
+        let mut batch = vec![
+            reply(ReplyKind::Topology { version: 3 }, Uuid::nil()),
+            reply(ReplyKind::Whole, a),
+            reply(ReplyKind::Topology { version: 5 }, Uuid::nil()),
+            reply(ReplyKind::Admin, b),
+            reply(ReplyKind::Topology { version: 4 }, Uuid::nil()),
+            reply(ReplyKind::Whole, a),
+        ];
+        coalesce_topology(&mut batch);
+        let kinds: Vec<ReplyKind> = batch.iter().map(|reply| reply.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                ReplyKind::Whole,
+                ReplyKind::Admin,
+                ReplyKind::Topology { version: 5 },
+                ReplyKind::Whole,
+            ]
+        );
+        // a single frame, or none, is left alone
+        let mut single = vec![reply(ReplyKind::Whole, a), reply(ReplyKind::Topology { version: 1 }, Uuid::nil())];
+        coalesce_topology(&mut single);
+        assert_eq!(single.len(), 2);
+        let mut none = vec![reply(ReplyKind::Whole, a), reply(ReplyKind::Share, b)];
+        coalesce_topology(&mut none);
+        assert_eq!(none.len(), 2);
+    }
 }

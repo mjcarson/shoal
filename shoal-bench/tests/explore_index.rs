@@ -652,6 +652,10 @@ fn the_facts_mirrors_are_total() {
         // are an environment record it has no axis for, and are absent here so the key sets
         // below agree on what does travel
         placement: Vec::new(),
+        members: Vec::new(),
+        map_version: 0,
+        voters: 0,
+        learners: 0,
         hop: Some(HopFacts {
             target: "remote".to_string(),
             owner_node: 1,

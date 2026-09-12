@@ -56,10 +56,11 @@ in the other direction — it had one row left open, that row was fixed, and the
 [moved](resolved/claude-md-drift.md).
 
 **Baseline as of writing:** `cargo check --workspace --all-targets` passes with warnings;
-`cargo test --workspace` passes — ~~**1,238 tests**~~ **1,289 tests**, four ignored, plus ~~13~~ 14
+`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ **1,320 tests**, four ignored, plus ~~13~~ 14
 more behind `--features stage-profile` that a default run does not reach ([Test Coverage](test-coverage.md)).
 [F37](../features/node-identity-control-plane.md) took the total to 1,265 and did not update this
-line; [F38](../features/inter-node-transport.md) added 24 more and did.
+line; [F38](../features/inter-node-transport.md) added 24 more and did;
+[F39](../features/membership.md) added 31 and took it to 1,320.
 [F36](../features/cluster-harness.md) added 40 — 28 of them in the new `shoal-model` crate, 4 in
 the new `cluster_fixture.rs` binary whose two ignored functions are the children it re-executes
 the binary as, and the rest over the pool's readiness handle, the frozen ports, the cluster record
@@ -1799,25 +1800,26 @@ the views before answering, or the pool holds a sender per shard the way the fix
 `shard_cpus` are already per shard. The record should then say which shards answered, since a
 shard that is wedged is exactly the one whose links matter.
 
-### 96. `cluster.transport.ping_interval` is parsed, documented and consumed by nothing
+### 98. An admin refusal's error code is derived from its reason text
 
-`shoal-core/src/server/conf/cluster.rs`, `Transport::ping_interval`
+`shoal-core/src/server/control/plane.rs`, `handle_admin`
 
-The field says how often the control thread pings every placed peer. Nothing reads it: the
-only pings sent are the ones the fixture asks for over `ControlHandle::ping`, on demand. A file
-that sets it to a second or an hour gets the same server, which is the shape
-[item 71](#71-throughput_sensitive-is-configured-documented-and-mostly-unused) has - a setting
-that exists ahead of the code that would honor it.
+The state machine answers a refused admin operation with `ControlResponse::Refused { reason }`,
+a sentence, and the control thread turns that into an `AdminError` for the client by reading
+the sentence: a reason containing "stale version" becomes `ErrorCode::StaleVersion`, and every
+other refusal - a node that is not a member, a node that is not up, a duplicate, a second
+initialization, a voter count outside {1, 3, 5} - becomes `ErrorCode::Internal` with the
+sentence as its message. A client that wants to act on *why* it was refused has a string to
+parse, and a reason whose wording changes changes a code.
 
-**Established by reading the source**: `grep ping_interval` finds the field, its default and
-its serde attribute, and nothing else. Filed with [F38](../features/inter-node-transport.md).
-The periodic pinger is the failure detector's, which is [M3](../distributed/milestones.md#m3-membership)'s
-- the field was added so the block would not change shape when it lands.
+**Established by reading the source**, while writing
+[F39](../features/membership.md)'s admin test, which asserts on the message for the
+"already initialized" case because there is no code to assert on.
 
-**Fix direction:** either the control thread's tick task pings each placed peer on this interval
-and records the last pong per node in the topology view, or the field is removed until M3 and
-the configuration page stops listing it. Leaving a knob that turns nothing is the one option
-this page does not allow.
+**Fix direction:** `Refused` carries a reason *kind* beside the sentence - not a member, not
+up, duplicate, already initialized, stale version, bad voter count - and `handle_admin` maps
+the kind to a code, with `Internal` kept for a kind it does not know. The sentence stays for
+the log.
 
 ### 97. `stage_join.rs` had not compiled since F36, and needs `/opt/shoal` to run
 

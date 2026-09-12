@@ -26,7 +26,7 @@ use super::{
 };
 
 /// Every message type this build knows, so a test can walk all of them
-const ALL_TYPES: [MessageType; 22] = [
+const ALL_TYPES: [MessageType; 24] = [
     MessageType::Hello,
     MessageType::HelloAck,
     MessageType::Auth,
@@ -49,10 +49,12 @@ const ALL_TYPES: [MessageType; 22] = [
     MessageType::SnapshotBegin,
     MessageType::SnapshotChunk,
     MessageType::SnapshotEnd,
+    MessageType::Admin,
+    MessageType::AdminResponse,
 ];
 
 /// Every error code this build knows, so a test can walk all of them
-const ALL_CODES: [ErrorCode; 13] = [
+const ALL_CODES: [ErrorCode; 18] = [
     ErrorCode::Unknown,
     ErrorCode::Internal,
     ErrorCode::StorageRead,
@@ -66,6 +68,11 @@ const ALL_CODES: [ErrorCode; 13] = [
     ErrorCode::ConnectionLost,
     ErrorCode::GoingAway,
     ErrorCode::Unavailable,
+    ErrorCode::QuorumUnavailable,
+    ErrorCode::Unauthorized,
+    ErrorCode::StaleVersion,
+    ErrorCode::NotLeader,
+    ErrorCode::NotInitialized,
 ];
 
 /// A frame bound big enough that no test trips it by accident
@@ -157,6 +164,8 @@ fn every_message_type_round_trips_through_its_discriminant() {
         (MessageType::SnapshotBegin, 20),
         (MessageType::SnapshotChunk, 21),
         (MessageType::SnapshotEnd, 22),
+        (MessageType::Admin, 23),
+        (MessageType::AdminResponse, 24),
     ];
     // check both directions for each one
     for (kind, byte) in pinned {
@@ -239,7 +248,7 @@ fn a_header_of_an_unknown_version_is_still_readable() {
 #[test]
 fn an_unknown_message_type_is_refused() {
     // zero in particular, so that a zeroed buffer is never mistaken for a hello
-    for kind in [0u8, 23, 255] {
+    for kind in [0u8, 25, 255] {
         let mut raw = Header::new(MessageType::Queries, Flags::NONE, 8, ROOMY)
             .unwrap()
             .encode();
@@ -490,6 +499,11 @@ fn every_error_code_round_trips_through_its_discriminant() {
         (ErrorCode::ConnectionLost, 40),
         (ErrorCode::GoingAway, 41),
         (ErrorCode::Unavailable, 50),
+        (ErrorCode::QuorumUnavailable, 51),
+        (ErrorCode::Unauthorized, 60),
+        (ErrorCode::StaleVersion, 61),
+        (ErrorCode::NotLeader, 62),
+        (ErrorCode::NotInitialized, 63),
     ];
     // check both directions for each one
     for (code, raw) in pinned {
@@ -508,7 +522,7 @@ fn every_error_code_round_trips_through_its_discriminant() {
 #[test]
 fn an_unknown_error_code_reads_as_unknown() {
     // walk some numbers no variant claims, including the gaps inside the bands
-    for raw in [2u16, 13, 22, 42, 51, 9000, u16::MAX] {
+    for raw in [2u16, 13, 22, 42, 52, 64, 9000, u16::MAX] {
         assert_eq!(ErrorCode::from_u16(raw), ErrorCode::Unknown);
     }
 }

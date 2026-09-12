@@ -338,6 +338,20 @@ pub enum ShoalError {
     /// can do it, and refusing is what keeps a node from claiming a cluster it was never
     /// bootstrapped into.
     StandaloneDirectoryInCluster { node: NodeId },
+    /// This storage directory is a joiner's that was never admitted, and the configuration bootstraps
+    ///
+    /// A directory started with seeds was meant for the cluster those seeds name. Creating a
+    /// cluster of its own on it would turn that node into another cluster, which is the fork
+    /// [C1](../../../docs/src/distributed/node-identity.md) forbids an unreachable seed list from
+    /// causing.
+    JoiningDirectoryBootstrapped { node: NodeId },
+    /// This storage directory is a joiner's that was never admitted, and the configuration is standalone
+    JoiningDirectoryInStandalone { node: NodeId },
+    /// A cluster was adopted into a directory that is not joining one
+    ///
+    /// A member already has its cluster and a standalone directory never adopts one, so the
+    /// adoption is refused rather than becoming a mode change.
+    MarkerNotJoining { node: NodeId, mode: String },
     /// A peer proved it belongs to a cluster other than the one this directory is in
     ///
     /// `expected` is `None` for a standalone directory, which belongs to no cluster at all.
@@ -372,18 +386,16 @@ pub enum ShoalError {
     /// A standalone server runs no control thread and no group; the topology it would report
     /// does not exist.
     NotClustered,
-    /// The static placement does not name this node
+    /// The placement a ring was built for does not name this node
     ///
     /// A node routes against a placement it is part of; one that leaves it out would send every
     /// query to a peer, including the ones for its own tablets.
     PlacementMissingSelf { node: NodeId },
-    /// The static placement names this node with a shard count other than the one it runs
+    /// The placement names this node with a shard count other than the one it runs
     ///
-    /// A peer routes to `tablet % shards` on this node from the count in its file, so a count
+    /// A peer routes to a shard on this node from the count the cluster recorded, so a count
     /// that differs from the truth would name shards that do not exist or leave some unowned.
     PlacementShardCount { node: NodeId, entry: u16, actual: usize },
-    /// The static placement names a node twice
-    PlacementDuplicateNode { node: NodeId },
     /// A contact names a shard on another node, and was handed to the node local mesh
     ///
     /// The mesh carries messages between this node's shards and nothing else; a remote contact
@@ -399,6 +411,17 @@ pub enum ShoalError {
     PeerSchema { node: NodeId, ours: u64, theirs: u64 },
     /// A peer's hello named a lane this listener does not serve
     PeerLane { node: NodeId, lane: Lane },
+    /// A peer's hello carried an incarnation the cluster has superseded
+    PeerFenced { node: NodeId, committed: u64, offered: u64 },
+    /// This node's own incarnation has been superseded by a later start of it
+    ///
+    /// The fencing rule's other half: a run the cluster has replaced stops serving, since two
+    /// runs of one identity cannot both be the replica it names.
+    Fenced { node: NodeId, committed: u64, ours: u64 },
+    /// A command could not be committed because no control leader could be reached
+    NoLeader { what: String },
+    /// A joiner was refused admission, and why
+    JoinRefused { reason: String },
     /// A lane's queue to a peer is at its byte bound, so nothing more was accepted for it
     PeerQueueFull { node: NodeId, lane: Lane, bound: usize },
     /// A peer link is down and the frame was never written to it
@@ -447,6 +470,21 @@ impl std::fmt::Display for ShoalError {
                  names a cluster; converting single node data into a cluster member is the \
                  migration M10 owns, and there is no supported path yet"
             ),
+            ShoalError::JoiningDirectoryBootstrapped { node } => write!(
+                f,
+                "the storage directory belongs to node {node}, which was started as a joiner and \
+                 never admitted to its cluster; bootstrapping it would create a second cluster, so \
+                 start it with its seeds again or use an empty directory"
+            ),
+            ShoalError::JoiningDirectoryInStandalone { node } => write!(
+                f,
+                "the storage directory belongs to node {node}, which was started as a joiner and \
+                 never admitted to its cluster; it cannot be served standalone"
+            ),
+            ShoalError::MarkerNotJoining { node, mode } => write!(
+                f,
+                "node {node} was asked to adopt a cluster but its directory is {mode}, not joining"
+            ),
             ShoalError::WrongCluster { found, expected } => match expected {
                 Some(expected) => write!(
                     f,
@@ -483,17 +521,14 @@ impl std::fmt::Display for ShoalError {
             ShoalError::NotClustered => write!(f, "this server is standalone and has no control plane"),
             ShoalError::PlacementMissingSelf { node } => write!(
                 f,
-                "cluster.placement does not name this node, {node}; a node routes against a \
+                "the placement does not name this node, {node}; a node routes against a \
                  placement it is part of"
             ),
             ShoalError::PlacementShardCount { node, entry, actual } => write!(
                 f,
-                "cluster.placement names this node, {node}, with {entry} shards but it runs \
-                 {actual}; every peer routes to tablet % shards from that entry"
+                "the placement names this node, {node}, with {entry} shards but it runs \
+                 {actual}; every peer routes to a shard on it from that count"
             ),
-            ShoalError::PlacementDuplicateNode { node } => {
-                write!(f, "cluster.placement names {node} twice")
-            }
             ShoalError::NotLocal { node, shard } => write!(
                 f,
                 "shard {shard} of {node} is on another node and was handed to the local mesh"
@@ -515,6 +550,23 @@ impl std::fmt::Display for ShoalError {
                 "{node} was built from a different schema: ours is {ours:#018x} and theirs is \
                  {theirs:#018x}"
             ),
+            ShoalError::PeerFenced { node, committed, offered } => write!(
+                f,
+                "{node} presented incarnation {offered} and the cluster holds {committed}; a \
+                 later start of it has been admitted"
+            ),
+            ShoalError::Fenced { node, committed, ours } => write!(
+                f,
+                "this node, {node}, is incarnation {ours} and the cluster has admitted \
+                 incarnation {committed} of it; another run of this directory has replaced this \
+                 one, so it stops"
+            ),
+            ShoalError::NoLeader { what } => write!(
+                f,
+                "{what} could not be committed: no control leader could be reached within the \
+                 deadline"
+            ),
+            ShoalError::JoinRefused { reason } => write!(f, "the cluster refused this joiner: {reason}"),
             ShoalError::PeerLane { node, lane } => {
                 write!(f, "{node} asked for the {lane} lane on a listener that does not serve it")
             }

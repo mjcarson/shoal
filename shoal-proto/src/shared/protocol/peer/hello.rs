@@ -38,8 +38,12 @@ pub const CAP_CONTROL_RAFT_V1: u64 = 1 << 1;
 /// This peer carries snapshot streams on its bulk lane
 pub const CAP_BULK_SNAPSHOT_V1: u64 = 1 << 2;
 
+/// This peer admits joiners over its control lane and carries membership RPCs and status reports
+pub const CAP_MEMBERSHIP_V1: u64 = 1 << 3;
+
 /// Everything this build can act on
-pub const CAPABILITIES: u64 = CAP_FORWARD_V1 | CAP_CONTROL_RAFT_V1 | CAP_BULK_SNAPSHOT_V1;
+pub const CAPABILITIES: u64 =
+    CAP_FORWARD_V1 | CAP_CONTROL_RAFT_V1 | CAP_BULK_SNAPSHOT_V1 | CAP_MEMBERSHIP_V1;
 
 /// Where each field sits in the body
 const CLUSTER_AT: usize = 0;

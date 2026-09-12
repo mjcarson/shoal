@@ -77,27 +77,56 @@ pub struct ChildRequest {
     /// Which marker the child should find, if the test staged one: none stages nothing
     #[serde(default)]
     pub staged_marker: Option<String>,
-    /// The static cluster this node is part of, if the test built one
+    /// The cluster this node is part of, if the test built one
     ///
-    /// Present, the child builds a `cluster:` block with this placement and these ports and
-    /// stages the marker naming this node ([F38](../../../docs/src/features/inter-node-transport.md)).
+    /// Present, the child builds a `cluster:` block from it: node zero bootstraps, every other
+    /// node joins through node zero's control address, and each dials its peers where the
+    /// fixture's proxies stand ([F39](../../../docs/src/features/membership.md)).
     #[serde(default)]
     pub cluster: Option<StagedCluster>,
 }
 
-/// A node's place in a statically placed cluster the fixture built
+/// A node's place in a membership cluster the fixture built
+///
+/// The markers are staged by the fixture before the child starts: node zero's names the
+/// cluster, a joiner's names only its node and is in the joining mode, so every id is known
+/// before anything runs and a command can name a peer by its index.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StagedCluster {
-    /// The cluster's identity, as a string
-    pub cluster: String,
+    /// This node's index in the cluster
+    pub index: usize,
+    /// Whether this node creates the cluster
+    pub bootstrap: bool,
     /// This node's identity, as a string
     pub node: String,
     /// The port this node's peer listener binds
     pub data_port: u16,
     /// The port this node's control listener binds
     pub control_port: u16,
-    /// Every node of the cluster: (node id, data addr, control addr, shards)
-    pub placement: Vec<(String, String, String, u16)>,
+    /// The control addresses this node joins through, if it joins
+    #[serde(default)]
+    pub seeds: Vec<String>,
+    /// Every node's identity, in index order, for a command to resolve an index against
+    pub peers: Vec<String>,
+    /// Where this node dials each other node, as (node id, control addr, data addr)
+    ///
+    /// The fixture's per-direction proxies, when the test asked for lane links; empty means
+    /// every member is dialled where it advertises itself.
+    #[serde(default)]
+    pub dial: Vec<(String, String, String)>,
+    /// The replication factor the bootstrapper seeds
+    pub replication_factor: u32,
+    /// The voter policy the bootstrapper seeds
+    pub control_voters: u32,
+    /// The principals allowed to change the cluster
+    #[serde(default)]
+    pub admins: Vec<String>,
+    /// A user and password to require of every client, if the test asked for authentication
+    #[serde(default)]
+    pub auth: Vec<(String, String)>,
+    /// The detector's report interval, if the test shortened it
+    #[serde(default)]
+    pub detector_interval_ms: Option<u64>,
     /// A file the node writes its exported spans to, for the cross-node trace test
     #[serde(default)]
     pub trace_file: Option<String>,
@@ -138,6 +167,12 @@ pub struct Endpoints {
     /// The cpus the shards run on, so a test can check them against the control core
     #[serde(default)]
     pub shard_cpus: Vec<usize>,
+    /// Which start of this node this is; none for a mock peer
+    #[serde(default)]
+    pub incarnation: Option<u64>,
+    /// Where the node stood with its group when it reported; none without a control plane
+    #[serde(default)]
+    pub control_status: Option<String>,
 }
 
 impl Endpoints {
@@ -153,6 +188,8 @@ impl Endpoints {
             control_shared: false,
             topology_version: None,
             shard_cpus: Vec::new(),
+            incarnation: None,
+            control_status: None,
         }
     }
 }

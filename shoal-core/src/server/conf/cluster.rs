@@ -90,6 +90,16 @@ fn default_phi_threshold() -> f64 {
     8.0
 }
 
+/// The default number of report arrivals the detector keeps per node
+fn default_detector_window() -> usize {
+    100
+}
+
+/// The default number of arrivals the detector needs before it will suspect anybody
+fn default_detector_min_samples() -> usize {
+    5
+}
+
 /// A consistency level a write waits for or a read is served at
 ///
 /// The two the bootstrap policy names. `Quorum` for writes is P3's durable quorum; `One` for
@@ -200,17 +210,28 @@ impl<'de> Deserialize<'de> for DurationSpec {
 
 /// The failure detector's settings
 ///
-/// Phi accrual, the shape [C3](../../../../docs/src/distributed/membership.md) describes. Recorded
-/// at M1; the detector itself is M3's.
+/// Phi accrual, the shape [C3](../../../../docs/src/distributed/membership.md) describes and
+/// [F39](../../../../docs/src/features/membership.md) built: every member sends the control
+/// leader a status report every `interval_ms`, the leader keeps the last `window` arrival
+/// intervals per member, and once it has `min_samples` of them it computes how unlikely the
+/// current silence is against that distribution; past `phi_threshold` it commits `Down`.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct FailureDetector {
-    /// How often a node is pinged, in milliseconds
+    /// How often a member reports to the leader, in milliseconds
     #[serde(default = "default_detector_interval_ms")]
     pub interval_ms: u64,
     /// The suspicion level at which a node is called Down
     #[serde(default = "default_phi_threshold")]
     pub phi_threshold: f64,
+    /// How many arrival intervals the leader keeps per member
+    #[serde(default = "default_detector_window")]
+    pub window: usize,
+    /// How many arrivals the leader needs from a member before it will suspect it
+    ///
+    /// A fresh leader starts with none, so no verdict is reached on stale evidence.
+    #[serde(default = "default_detector_min_samples")]
+    pub min_samples: usize,
 }
 
 impl Default for FailureDetector {
@@ -219,125 +240,27 @@ impl Default for FailureDetector {
         FailureDetector {
             interval_ms: default_detector_interval_ms(),
             phi_threshold: default_phi_threshold(),
+            window: default_detector_window(),
+            min_samples: default_detector_min_samples(),
         }
     }
 }
 
-/// One node of a static placement
+/// Where this node dials one member, if not where that member advertises itself
 ///
-/// What a node has to know about a peer before it can route to it: who it is, where its two
-/// listeners are, and how many shards it runs - the last because a tablet's shard on that node
-/// is `tablet % shards`, the same rule the node itself uses, and the handshake refuses a peer
-/// whose count differs from this entry.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct PlacedNode {
-    /// The node's identity, which its marker holds and its hello proves
-    pub node: NodeId,
-    /// Its data peer endpoint, `host:port`, which the bulk lane dials too
-    pub data: String,
-    /// Its control listener, `host:port`
-    pub control: String,
-    /// How many shards it runs
-    pub shards: u16,
-}
-
-/// A static placement of tablets over nodes
-///
-/// [F38](../../../../docs/src/features/inter-node-transport.md)'s stand-in for the membership M3
-/// commits: a list of every node in the cluster, this one included, in an order every node's
-/// file agrees on. Tablet `t` belongs to `nodes[t % N]`, and on that node to shard `t % shards`.
-/// A placement of one node is exactly the standalone tablet map, which is what keeps a one node
-/// cluster's routing byte for byte what it was.
-///
-/// This is test-shaped on purpose: it names node identities in a file, which only a fixture that
-/// staged the markers can do. It is replaced, not extended, when the control plane commits
-/// membership.
+/// For a network where a member's advertised address is not the one this node can reach it at
+/// - a split horizon, a NAT, or a test's fault proxy standing in one direction between two
+/// nodes ([F39](../../../../docs/src/features/membership.md)). Either lane may be overridden
+/// alone; an absent one dials what the member advertises.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
 #[serde(deny_unknown_fields)]
-pub struct Placement {
-    /// Every node of the cluster, in placement order
-    #[serde(default)]
-    pub nodes: Vec<PlacedNode>,
-}
-
-impl Placement {
-    /// Find this node's own entry
-    ///
-    /// # Arguments
-    ///
-    /// * `me` - This node's identity
-    pub fn entry(&self, me: NodeId) -> Option<&PlacedNode> {
-        self.nodes.iter().find(|placed| placed.node == me)
-    }
-
-    /// Find a peer's entry
-    ///
-    /// # Arguments
-    ///
-    /// * `node` - The peer's identity
-    pub fn peer(&self, node: NodeId) -> Option<&PlacedNode> {
-        self.entry(node)
-    }
-
-    /// The nodes other than this one
-    ///
-    /// # Arguments
-    ///
-    /// * `me` - This node's identity
-    pub fn peers(&self, me: NodeId) -> impl Iterator<Item = &PlacedNode> {
-        self.nodes.iter().filter(move |placed| placed.node != me)
-    }
-
-    /// Check that this placement can be routed against by the node reading it
-    ///
-    /// # Arguments
-    ///
-    /// * `me` - This node's identity
-    /// * `my_shards` - How many shards this node runs
-    ///
-    /// # Errors
-    ///
-    /// Refuses a placement that does not name this node, names it with another shard count,
-    /// names a node twice, names a node with no shards, or names an address that is not one.
-    pub fn validate(&self, me: NodeId, my_shards: usize) -> Result<(), ServerError> {
-        // every node once
-        for (i, placed) in self.nodes.iter().enumerate() {
-            if self.nodes[..i].iter().any(|other| other.node == placed.node) {
-                return Err(ServerError::Shoal(ShoalError::PlacementDuplicateNode {
-                    node: placed.node,
-                }));
-            }
-            // a node with no shards owns no tablet
-            if placed.shards == 0 {
-                return Err(ServerError::Shoal(ShoalError::InvalidConfig(format!(
-                    "cluster.placement names {} with zero shards",
-                    placed.node
-                ))));
-            }
-            // both addresses have to be addresses
-            for (what, addr) in [("data", &placed.data), ("control", &placed.control)] {
-                if addr.parse::<std::net::SocketAddr>().is_err() {
-                    return Err(ServerError::Shoal(ShoalError::InvalidConfig(format!(
-                        "cluster.placement names {} with a {what} address that is not one: {addr}",
-                        placed.node
-                    ))));
-                }
-            }
-        }
-        // and this node among them, with the shard count it actually runs
-        let Some(mine) = self.entry(me) else {
-            return Err(ServerError::Shoal(ShoalError::PlacementMissingSelf { node: me }));
-        };
-        if usize::from(mine.shards) != my_shards {
-            return Err(ServerError::Shoal(ShoalError::PlacementShardCount {
-                node: me,
-                entry: mine.shards,
-                actual: my_shards,
-            }));
-        }
-        Ok(())
-    }
+pub struct DialOverride {
+    /// Where to dial that member's control lane
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control: Option<String>,
+    /// Where to dial that member's data and bulk lanes
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<String>,
 }
 
 /// The byte bounds and timers of the peer lanes
@@ -497,10 +420,12 @@ pub struct Cluster {
     /// restart keeps it. Never set on a node that is meant to join one.
     #[serde(default)]
     pub bootstrap: bool,
-    /// The addresses of nodes to contact when joining
+    /// The control addresses of members to join through
     ///
-    /// Discovery addresses, not identities: a seed's identity is what it proves in the handshake.
-    /// Refused until M3 delivers joining.
+    /// Discovery addresses, not identities: a seed's identity is what it proves in the handshake,
+    /// and the cluster a joiner adopts is the one the seed proves. A node that bootstraps has
+    /// nothing to discover and is refused a seed list; a node that has been admitted keeps its
+    /// list and never needs it again, since its peers are the committed members.
     #[serde(default)]
     pub seeds: Vec<String>,
     /// The address peers reach this node at
@@ -566,15 +491,12 @@ pub struct Cluster {
     /// whatever boundary the deployment draws around them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls: Option<PeerTls>,
-    /// The static placement of tablets over nodes
-    ///
-    /// Absent, this node is placed alone and its tablet map is the standalone one. Present, it
-    /// has to name this node, and every other node in it is a peer to dial.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub placement: Option<Placement>,
     /// The byte bounds and timers of the peer lanes
     #[serde(default)]
     pub transport: Transport,
+    /// Where this node dials particular members, keyed by their identity, when not where they advertise
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub dial: std::collections::BTreeMap<NodeId, DialOverride>,
 }
 
 impl Default for Cluster {
@@ -598,8 +520,8 @@ impl Default for Cluster {
             auto_remove_after: default_auto_remove_after(),
             admins: Vec::new(),
             tls: None,
-            placement: None,
             transport: Transport::default(),
+            dial: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -611,9 +533,27 @@ impl Cluster {
         self
     }
 
-    /// Set the nodes to contact when joining
+    /// Set the control addresses of members to join through
     pub fn seeds(mut self, seeds: Vec<String>) -> Self {
         self.seeds = seeds;
+        self
+    }
+
+    /// Dial one member somewhere other than where it advertises itself
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The member
+    /// * `control` - Where to dial its control lane, or none to dial what it advertises
+    /// * `data` - Where to dial its data and bulk lanes, or none to dial what it advertises
+    pub fn dial(mut self, node: NodeId, control: Option<String>, data: Option<String>) -> Self {
+        self.dial.insert(node, DialOverride { control, data });
+        self
+    }
+
+    /// Set the failure detector's report interval
+    pub fn detector_interval_ms(mut self, interval_ms: u64) -> Self {
+        self.failure_detector.interval_ms = interval_ms;
         self
     }
 
@@ -689,47 +629,10 @@ impl Cluster {
         self
     }
 
-    /// Set the static placement of tablets over nodes
-    pub fn placement(mut self, placement: Placement) -> Self {
-        self.placement = Some(placement);
-        self
-    }
-
     /// Set the byte bounds and timers of the peer lanes
     pub fn transport(mut self, transport: Transport) -> Self {
         self.transport = transport;
         self
-    }
-
-    /// The placement this node routes against, which is itself alone when none was given
-    ///
-    /// # Arguments
-    ///
-    /// * `me` - This node's identity
-    /// * `interface` - The interface the client listener binds, for the advertised address
-    /// * `shards` - How many shards this node runs
-    pub fn placement_for(
-        &self,
-        me: NodeId,
-        interface: &str,
-        shards: usize,
-    ) -> Result<Placement, ServerError> {
-        // a placement that was written down is used as it is
-        if let Some(placement) = &self.placement {
-            return Ok(placement.clone());
-        }
-        // none is this node alone, which is the standalone map with a name on it
-        let advertise = self.advertised(interface)?;
-        // a node runs fewer shards than a u16 holds, which `Ring::new` refuses otherwise
-        #[allow(clippy::cast_possible_truncation)]
-        Ok(Placement {
-            nodes: vec![PlacedNode {
-                node: me,
-                data: format!("{advertise}:{}", self.port),
-                control: format!("{advertise}:{}", self.control_port),
-                shards: shards as u16,
-            }],
-        })
     }
 
     /// The policy this configuration would seed into a cluster it bootstraps
@@ -781,12 +684,45 @@ impl Cluster {
     /// Every refusal is a [`ShoalError::NotImplemented`] or a [`ShoalError::InvalidConfig`],
     /// and the first one found is returned.
     pub fn validate(&self, interface: &str) -> Result<(), ServerError> {
-        // joining is M3's: a seed list on a node that is not bootstrapping means join
-        if !self.seeds.is_empty() && !self.bootstrap {
-            return Err(ServerError::Shoal(ShoalError::NotImplemented {
-                setting: "cluster.seeds (joining an existing cluster)".to_string(),
-                milestone: "M3",
-            }));
+        // a node bootstraps or joins; one that has a cluster to create has nothing to discover
+        if !self.seeds.is_empty() && self.bootstrap {
+            return Err(ServerError::Shoal(ShoalError::InvalidConfig(
+                "a cluster: block names both bootstrap: true and a seeds: list; a node creates a \
+                 cluster or joins one, not both"
+                    .to_string(),
+            )));
+        }
+        // every seed has to be an address something can dial
+        for seed in &self.seeds {
+            if seed.parse::<std::net::SocketAddr>().is_err() {
+                return Err(ServerError::Shoal(ShoalError::InvalidConfig(format!(
+                    "cluster.seeds names {seed:?}, which is not a control address of the form \
+                     host:port"
+                ))));
+            }
+        }
+        // every dial override has to be one too
+        for (node, target) in &self.dial {
+            for (lane, addr) in [("control", &target.control), ("data", &target.data)] {
+                if let Some(addr) = addr {
+                    if addr.parse::<std::net::SocketAddr>().is_err() {
+                        return Err(ServerError::Shoal(ShoalError::InvalidConfig(format!(
+                            "cluster.dial names {addr:?} for the {lane} lane of {node}, which \
+                             is not an address of the form host:port"
+                        ))));
+                    }
+                }
+            }
+        }
+        // the detector cannot suspect anybody without samples, and cannot keep fewer than it needs
+        if self.failure_detector.min_samples == 0
+            || self.failure_detector.window < self.failure_detector.min_samples
+        {
+            return Err(ServerError::Shoal(ShoalError::InvalidConfig(
+                "cluster.failure_detector needs min_samples of at least one and a window no \
+                 smaller than it"
+                    .to_string(),
+            )));
         }
         // a cluster node that neither bootstraps nor joins is a node that would run a group of
         // one with no way for anything to ever find it
@@ -875,8 +811,10 @@ mod tests {
         assert_eq!(cluster.primary_failover_after.duration(), Duration::from_secs(5));
         assert_eq!(cluster.failure_detector.interval_ms, 500);
         assert!((cluster.failure_detector.phi_threshold - 8.0).abs() < f64::EPSILON);
+        assert_eq!(cluster.failure_detector.window, 100);
+        assert_eq!(cluster.failure_detector.min_samples, 5);
+        assert!(cluster.dial.is_empty());
         // the transport bounds and timers are the ones the configuration page writes down
-        assert!(cluster.placement.is_none());
         assert_eq!(cluster.transport.data_queue_bytes, 64 * 1024 * 1024);
         assert_eq!(cluster.transport.control_queue_bytes, 8 * 1024 * 1024);
         assert_eq!(cluster.transport.bulk_queue_bytes, 64 * 1024 * 1024);
@@ -890,14 +828,42 @@ mod tests {
     fn validation_refuses_what_is_not_built() {
         // a bootstrapping node on a real interface is what runs
         Cluster::default().bootstrap(true).validate("127.0.0.1").expect("a bootstrap was refused");
-        // joining is M3
-        let error = Cluster::default()
-            .seeds(vec!["10.0.0.1:12001".to_string()])
+        // a joiner names the control addresses it discovers the cluster through
+        Cluster::default()
+            .seeds(vec!["10.0.0.1:12002".to_string()])
             .validate("127.0.0.1")
-            .expect_err("a joiner started");
-        assert!(format!("{error}").contains("M3"), "{error}");
+            .expect("a joiner was refused");
+        // and a seed has to be an address
+        let error = Cluster::default()
+            .seeds(vec!["seed-one".to_string()])
+            .validate("127.0.0.1")
+            .expect_err("a seed that is not an address was accepted");
+        assert!(format!("{error}").contains("host:port"), "{error}");
+        // a node creates a cluster or joins one, not both
+        let error = Cluster::default()
+            .bootstrap(true)
+            .seeds(vec!["10.0.0.1:12002".to_string()])
+            .validate("127.0.0.1")
+            .expect_err("a bootstrapper with seeds started");
+        assert!(format!("{error}").contains("not both"), "{error}");
         // a node that does neither is nothing
         assert!(Cluster::default().validate("127.0.0.1").is_err());
+        // a dial override has to be an address, and one that is parses
+        let node = super::NodeId::mint();
+        assert!(Cluster::default()
+            .bootstrap(true)
+            .dial(node, Some("nowhere".to_string()), None)
+            .validate("127.0.0.1")
+            .is_err());
+        Cluster::default()
+            .bootstrap(true)
+            .dial(node, Some("127.0.0.1:1".to_string()), None)
+            .validate("127.0.0.1")
+            .expect("a dial override was refused");
+        // the detector needs samples before it can suspect anybody
+        let mut no_samples = Cluster::default().bootstrap(true);
+        no_samples.failure_detector.min_samples = 0;
+        assert!(no_samples.validate("127.0.0.1").is_err());
         // peer tls is accepted now, but a certificate that cannot be read is refused as it is read
         let mut with_missing_tls = Cluster::default().bootstrap(true);
         with_missing_tls.tls = Some(super::PeerTls {

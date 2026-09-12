@@ -90,7 +90,7 @@ unreliable: correctness in the initial protocol must not depend on lease timing.
 | No tablet majority | No successful quorum writes or strong reads; eligible replicas may serve `One` |
 | Control-plane quorum lost, tablet quorum intact | Established tablet groups continue ordinary operations/elections; joins, placement changes, removal and policy changes stop |
 | Control plane available, tablet quorum lost | Control plane must not manufacture a replacement authority from stale reports |
-| Fewer nodes than configured RF at initial bootstrap | Admin/readiness available, but default writes wait for the intended initial configuration; no implicit RF reduction |
+| Fewer nodes than configured RF at initial bootstrap | Admin/readiness available, but default writes wait for the intended initial configuration; no implicit RF reduction. *At M3 ([F39](../features/membership.md)): readiness reports `default_writes` short by name, a write is refused `QuorumUnavailable` until `rf / 2 + 1` members are up under `Quorum` (all of them under `All`, one under `One`), reads are served, and the factor never moves on its own* |
 | Capacity insufficient to restore RF | Mark blocked under-replication; retain surviving copies and configuration evidence |
 | Entire cluster restarted from durable storage | Recover committed state without inventing empty membership or discarding acknowledged writes |
 
@@ -210,7 +210,67 @@ what the 4096-group run touched. The per-group delta is the number to read.
 **What M1's spike did not do.** It measured no data-plane library under a *shard's* ownership -
 every group here ran on a control-shaped thread with nothing else on it - and it measured on
 the wrong host. Q13's target-scale budgets for connections, map dissemination and control-plane
-reports are M3's, and stay open.
+reports ~~are M3's, and stay open~~ are below, at M3.
+
+#### Q11 and Q13 at M3
+
+Recorded 2026-09-12 by [F39](../features/membership.md).
+
+**Q11, decided as far as identity goes: the highest incarnation wins.** The storage marker
+carries an `incarnation` bumped by every claim of an established directory; it rides in the
+committed member record, the hello, the pong, every status report and every proposal. The
+state machine's `observe` rule is the policy - a lower incarnation than the committed one is
+refused, an equal one from a different control address is refused as a duplicate, an equal one
+from the same address is a re-observation, a higher one supersedes - and a running node that
+sees a higher run of itself committed stops `Fenced`. `cluster.dial` answers the
+private-address question: where this node dials a member instead of where it advertises. The
+certificate half - the `shoal-node://<id>` SAN, provisioning before a node id exists, rotation -
+stays open; a certificate still chains to `ca` and binds to nothing.
+
+**Q13, measured: topology fanout and report traffic**, `cargo run -p shoal-spike --release --
+fanout` on `europa` under `powersave`, JSON bodies as the wire carries them. The map at M3 is
+an ordered node list, so a frame grows with members and barely with tables:
+
+| members | tables | frame bytes | encode µs |
+| --- | --- | --- | --- |
+| 3 | 1 | 857 | 0.5 |
+| 3 | 64 | 2958 | 1.2 |
+| 8 | 16 | 2348 | 1.3 |
+| 16 | 16 | 3940 | 2.2 |
+| 32 | 16 | 7124 | 4.7 |
+| 64 | 1 | 12998 | 7.6 |
+| 64 | 16 | 13493 | 7.7 |
+| 64 | 64 | 15099 | 8.4 |
+
+One version pushed to every subscriber of a sixty-four member, sixteen table cluster, encoded
+once and copied once per subscriber:
+
+| subscribers | bytes written | µs per version |
+| --- | --- | --- |
+| 1 | 13,493 | 8.0 |
+| 100 | 1,349,300 | 377.2 |
+| 1000 | 13,493,000 | 3,983.9 |
+
+The status reports every member sends the leader at the default 500 ms interval, carrying its
+reachability of every other member:
+
+| members | report bytes | reports/s at the leader | bytes/s in at the leader |
+| --- | --- | --- | --- |
+| 3 | 248 | 4 | 992 |
+| 8 | 473 | 14 | 6,622 |
+| 16 | 833 | 30 | 24,990 |
+| 32 | 1,553 | 62 | 96,286 |
+| 64 | 2,993 | 126 | 377,118 |
+
+**What the numbers decide.** Whole-map fanout is the right shape while the map is a node list:
+a version is pushed to a thousand clients in the time of one disk write, and the leader's report
+intake at sixty-four members is a third of a megabyte a second of JSON, which is a budget and not
+a problem. Per-tablet records - 4096 a table - would multiply the frame by three orders of
+magnitude, which is why they wait for the day a tablet moves and arrive as deltas when they do.
+The report's reachability list is what grows quadratically; at a hundred members it is the
+first thing to bound. Connections are not measured here: a client's pool subscribes on every
+connection, so a pool of ten reads ten frames a version, and a server's subscriber count is
+its connection count.
 
 #### Q10 and Q11 at M2
 
@@ -274,7 +334,7 @@ A preferred answer is a design hypothesis, not evidence that a library already s
 | Q8 | What initial capacity weights, disk reserve and hotspot thresholds avoid oscillation on unequal hardware? | M9b; heterogeneous placement and stalled-recovery workloads |
 | Q9 | What replication retention budget supports catch-up without pinning unbounded shared WALs? | M7; time/byte budgets, slow follower and snapshot starvation tests |
 | Q10 | How do clients negotiate schema identity separately from wire capabilities and on-disk format? **Contract recorded at M2** ([decision record](#q10-and-q11-at-m2)): three separately compared fields in the hello, exact match until M10's codecs | ~~M2 contract~~, M10 release gate; mixed-version operation and rollback tests |
-| Q11 | How are node certificates provisioned before first join, identities protected against cloned directories, and address changes authenticated? **Shape recorded at M2** ([decision record](#q10-and-q11-at-m2)): chain to `ca` on every lane now, the certificate-to-node binding with the joiner | ~~M2~~ M3 onward; join, replacement, duplicate identity and certificate rotation tests |
+| Q11 | How are node certificates provisioned before first join, identities protected against cloned directories, and address changes authenticated? **Shape recorded at M2** ([decision record](#q10-and-q11-at-m2)): chain to `ca` on every lane now, the certificate-to-node binding with the joiner. **Identity decided at M3** ([decision record](#q11-and-q13-at-m3)): a persisted incarnation, highest wins, `dial` for private addresses; the certificate binding still open | ~~M2~~ M3 onward; join, replacement, duplicate identity and certificate rotation tests |
 | Q12 | What checksummed checkpoint or backup is authoritative when replicas disagree? What operator recovery is possible after a majority is permanently lost? | M8/M10; corruption and disaster-recovery exercises, no automatic destructive choice |
 | Q13 | What scale targets bound table count, tablet count, connections, map dissemination and control-plane reports? **First numbers at M1** ([decision record](#q1-and-q13-decided-at-m1)): about a thousand groups a thread at openraft's timers, four thousand at C1's, 350 KiB a group idle. Connections, dissemination and reports are M3's | M1/M3; memory, idle CPU and update-fanout budgets measured at target scale |
 

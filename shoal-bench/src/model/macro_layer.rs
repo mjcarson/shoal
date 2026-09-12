@@ -269,11 +269,31 @@ pub struct ClusterFacts {
     pub offered_load: Option<u64>,
     /// Whether the nodes shared one machine, which is a redundancy experiment and not scale-out
     pub emulated: bool,
-    /// The static placement the nodes routed against, in node order; empty before
+    /// ~~The static placement the nodes routed against~~ The order the arm initialized the
+    /// placement in, node by node; empty before
     /// [F38](../../../docs/src/features/inter-node-transport.md), when a cluster was one node
-    /// with no map to record
+    /// with no map to record. Since [F39](../../../docs/src/features/membership.md) the nodes
+    /// are members the cluster admitted and this is the order `Initialize` named them in, which
+    /// is what decides which node owns which tablet
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub placement: Vec<PlacedNodeFacts>,
+    /// The members the cluster had committed when the run ended, as its topology reported them
+    ///
+    /// Empty before [F39](../../../docs/src/features/membership.md), when a cluster of one had
+    /// nothing to report but itself and did not.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub members: Vec<MemberFacts>,
+    /// The topology version the run ended at; zero before
+    /// [F39](../../../docs/src/features/membership.md)
+    #[serde(default)]
+    pub map_version: u64,
+    /// How many members were control voters at the end of the run; zero before
+    /// [F39](../../../docs/src/features/membership.md)
+    #[serde(default)]
+    pub voters: u32,
+    /// How many were learners; zero before [F39](../../../docs/src/features/membership.md)
+    #[serde(default)]
+    pub learners: u32,
     /// Which hop the arm was built to take, and what mix of hops that construction implies
     ///
     /// Only the hop arms carry one. It is a fact about how the arm was built, not a measurement:
@@ -290,7 +310,26 @@ pub struct ClusterFacts {
     pub transport: Option<TransportFacts>,
 }
 
-/// One node of a static placement, as the artifact records it
+/// One member of the cluster, as the topology reported it when the run ended
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemberFacts {
+    /// The member's identity
+    pub node: String,
+    /// `voter` or `learner`
+    pub role: String,
+    /// `joining`, `up` or `down`
+    pub health: String,
+    /// How many shards it runs
+    pub shards: u16,
+    /// Where its clients connect
+    pub client: String,
+    /// Where its data lane listens
+    pub data: String,
+    /// Where its control lane listens
+    pub control: String,
+}
+
+/// One node of ~~a static placement~~ the initialization order, as the artifact records it
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlacedNodeFacts {
     /// The node's identity, as it was minted for the run

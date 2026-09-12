@@ -98,9 +98,12 @@ in a system table.
 ~~Shoal is node-local today, so there is no authority to speak of~~ Standalone, there is no
 authority to speak of — every shard derives the same map from `cores`, and they agree because the
 derivation is identical rather than because anyone coordinated. A placed cluster node
-([F38](../features/inter-node-transport.md)) derives it from the `placement` instead - tablet `t`
-to node `t % N`, then to a shard of that node - and the nodes agree for the same reason, because
-they read one file; the authority that could *change* the map is M3's. What the shape buys now is exactness and speed; what it buys later is the ability to
+([F38](../features/inter-node-transport.md)) derives it from the ~~`placement`~~ tablet map the
+control group committed and pushed ([F39](../features/membership.md)) - tablet `t`
+to node `t % N`, then to a shard of that node - and the nodes agree ~~for the same reason, because
+they read one file~~ because they install the same map and derive with the same rule; the
+authority that could *change* the map ~~is M3's~~ is the control group, through one explicit
+`Initialize`, and what could move a tablet is M9a's. What the shape buys now is exactness and speed; what it buys later is the ability to
 move a tablet at all.
 
 ### Why the id comes from the high bits

@@ -17,11 +17,24 @@
 //! turns a silent loss into a refusal to start; moving data between shard counts needs tablet
 //! migration, which does not exist yet.
 //!
-//! **Exactly one field is ever rewritten in place: `topology`.** The identities, the shard count
-//! and the layout are written once, at the claim, and never again. Every write of the file -
-//! the claim and each topology observation - goes through the same temp file, fsync, rename and
-//! directory fsync, so a crash at any point leaves either the old marker or the new one and
-//! never a torn one.
+//! Since [F39](../../../docs/src/features/membership.md) it is format 3: the same fields plus
+//! the `mode` the directory was claimed in - standalone, a cluster member, or a joiner that has
+//! not been admitted yet - and an `incarnation` that counts the starts of this directory. The
+//! mode is what tells a joiner's directory before admission (a node id and no cluster) apart
+//! from a standalone one, which format 2 could not; the incarnation is what fences two
+//! processes running one copy of a directory on two machines, which the lock cannot see
+//! ([C1](../../../docs/src/distributed/node-identity.md), Q11). A format 2 marker is read as
+//! format 3 with its mode inferred from whether it names a cluster and its incarnation at zero,
+//! and the first rewrite writes it as 3; nothing about it has to be invented, which is why this
+//! is an upgrade where format 1 was a refusal.
+//!
+//! **Three fields are ever rewritten in place: `topology`, `incarnation`, and - once, for a
+//! joiner - `cluster`.** The identities, the shard count and the layout are written once, at
+//! the claim, and never again; a joiner's cluster is filled in exactly once, when the cluster
+//! it dialled proves its identity, and `mode` moves from joining to cluster with it. Every
+//! write of the file - the claim, each start's incarnation bump, each topology observation and
+//! the adoption - goes through the same temp file, fsync, rename and directory fsync, so a crash
+//! at any point leaves either the old marker or the new one and never a torn one.
 
 use serde::{Deserialize, Serialize};
 use std::fs::File;
@@ -38,14 +51,19 @@ use crate::shared::identity::{ClusterId, NodeId};
 ///
 /// Bumped from 1 when the identities, the layout and the topology version were added, since a
 /// reader of format 1 has no idea what those fields mean and a reader of format 2 cannot invent
-/// a node id for a directory that has none.
-pub const META_FORMAT: u32 = 2;
+/// a node id for a directory that has none. Bumped from 2 when the mode and the incarnation
+/// were added; a format 2 marker is read as 3, since both can be inferred rather than invented.
+pub const META_FORMAT: u32 = 3;
+
+/// The format a joiner's mode and the incarnation were added in
+const FORMAT_WITH_MODE: u32 = 3;
 
 /// The formats this build can read
 ///
-/// One entry today. The refusal of any other names this list, so an operator holding a marker
-/// from another build is told what this one understands rather than only what it does not.
-pub const SUPPORTED_FORMATS: &[u32] = &[META_FORMAT];
+/// Format 2 is read and upgraded on its first rewrite; format 3 is what this build writes. The
+/// refusal of any other names this list, so an operator holding a marker from another build is
+/// told what this one understands rather than only what it does not.
+pub const SUPPORTED_FORMATS: &[u32] = &[2, META_FORMAT];
 
 /// The version of the shard layout the data is under
 ///
@@ -87,9 +105,40 @@ pub struct StorageMeta {
     /// to resume from rather than proof of anything: tablet freshness is settled by the tablet's
     /// own term and vote, never by this counter.
     pub topology: u64,
+    /// The mode this directory was claimed in
+    ///
+    /// Absent from a format 2 marker, where it is inferred from `cluster`: a directory naming a
+    /// cluster is a member, one naming none is standalone. A joiner is the third case format 2
+    /// could not spell, since before admission it too names no cluster.
+    #[serde(default)]
+    pub mode: MarkerMode,
+    /// How many times this directory has been started, counting this start
+    ///
+    /// Bumped on every claim of an established directory, so two processes started from one
+    /// copy of a directory carry the same number and a later start carries a higher one; the
+    /// control plane's fencing rule is that the highest wins
+    /// ([C1](../../../docs/src/distributed/node-identity.md), Q11). Zero in a format 2 marker.
+    #[serde(default)]
+    pub incarnation: u64,
 }
 
-/// Whether a server is being started as a standalone node or as a member of a cluster
+/// What kind of node a storage directory belongs to
+///
+/// Recorded at the claim so that a joiner's directory before admission, which has a node id and
+/// no cluster, is never mistaken for a standalone one, which looks the same without this.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum MarkerMode {
+    /// A single node that never mints a cluster and belongs to none
+    #[default]
+    Standalone,
+    /// A member of the cluster the marker names, whether it bootstrapped it or joined it
+    Cluster,
+    /// A node started with seeds that has not been admitted to a cluster yet
+    Joining,
+}
+
+/// Whether a server is being started as a standalone node, a cluster's creator or a joiner
 ///
 /// Derived from the `cluster:` block of the configuration, and the thing the claim checks a
 /// directory against: a directory bootstrapped into a cluster is refused by a standalone
@@ -101,6 +150,11 @@ pub enum ClusterIntent {
     Standalone,
     /// `cluster.bootstrap: true`: mint a cluster on an empty directory, keep it on an established one
     Bootstrap,
+    /// `cluster.seeds`: mint a node identity on an empty directory and adopt a cluster later
+    ///
+    /// On an established directory that already belongs to a cluster this is an ordinary member
+    /// restart: seeds are discovery, and a node that has been admitted no longer needs them.
+    Join,
 }
 
 /// What a storage directory says about who it belongs to
@@ -123,6 +177,16 @@ pub struct Identity {
     pub topology_at_claim: u64,
     /// Whether the directory was minted by this claim rather than reopened
     pub fresh: bool,
+    /// The mode the directory is in
+    ///
+    /// A joiner reads `Joining` here until it is admitted, and the marker moves to `Cluster`
+    /// through [`StorageMeta::adopt_cluster`] without this copy being told.
+    pub mode: MarkerMode,
+    /// Which start of this directory this is
+    ///
+    /// One for a directory minted by this claim, and one more than the marker held for a
+    /// reopened one. Carried in every peer hello and in the committed member record.
+    pub incarnation: u64,
 }
 
 impl Identity {
@@ -224,6 +288,11 @@ impl StorageMeta {
     /// * `cluster` - The cluster it is bootstrapped into, if any
     #[must_use]
     pub fn new(shards: usize, node: NodeId, cluster: Option<ClusterId>) -> Self {
+        // a directory that names a cluster is a member of it, one that names none is standalone
+        let mode = match cluster {
+            Some(_) => MarkerMode::Cluster,
+            None => MarkerMode::Standalone,
+        };
         StorageMeta {
             format: META_FORMAT,
             shards,
@@ -231,6 +300,25 @@ impl StorageMeta {
             cluster,
             layout: SHARD_LAYOUT,
             topology: 0,
+            mode,
+            incarnation: 1,
+        }
+    }
+
+    /// Build the metadata for a directory claimed by a joiner that has not been admitted yet
+    ///
+    /// A node id and no cluster, exactly what a standalone marker holds, told apart by the mode.
+    /// The cluster is filled in by [`StorageMeta::adopt_cluster`] once a seed has proved it.
+    ///
+    /// # Arguments
+    ///
+    /// * `shards` - The number of shards writing to this directory
+    /// * `node` - The node the directory belongs to
+    #[must_use]
+    pub fn joining(shards: usize, node: NodeId) -> Self {
+        StorageMeta {
+            mode: MarkerMode::Joining,
+            ..StorageMeta::new(shards, node, None)
         }
     }
 
@@ -275,7 +363,17 @@ impl StorageMeta {
             }));
         }
         // now the rest of it can be read as this build understands it
-        let found: StorageMeta = serde_json::from_slice(&raw)?;
+        let mut found: StorageMeta = serde_json::from_slice(&raw)?;
+        // a marker from before the mode existed is read as the mode its cluster field implies:
+        // a joiner never wrote one of these, so no cluster means standalone
+        if found.format < FORMAT_WITH_MODE {
+            found.mode = match found.cluster {
+                Some(_) => MarkerMode::Cluster,
+                None => MarkerMode::Standalone,
+            };
+            found.incarnation = 0;
+            found.format = META_FORMAT;
+        }
         Ok(Some(found))
     }
 
@@ -315,27 +413,31 @@ impl StorageMeta {
     /// An established directory is held to what it already says. Bootstrapping on top of one is
     /// idempotent - the identities and everything under them are kept, and a second cluster is
     /// never minted - because "bootstrap" in a configuration file is a statement about how the
-    /// cluster was created and not an instruction to create another every restart.
+    /// cluster was created and not an instruction to create another every restart. Joining on
+    /// top of an admitted directory is a member restart for the same reason. Every reopen bumps
+    /// the incarnation and rewrites the marker before the identity is handed out, so a start
+    /// that is fenced by a later one has already recorded that it happened.
     ///
     /// # Arguments
     ///
     /// * `root` - The root of the storage directory
     /// * `shards` - The number of shards about to be started
-    /// * `intent` - Whether the server is standalone or a cluster member
+    /// * `intent` - Whether the server is standalone, a cluster's creator or a joiner
     ///
     /// # Errors
     ///
     /// This will fail if the directory was marked in a format we cannot read, if it was
     /// written by a different number of shards or under a different layout, if it belongs to a
-    /// cluster and the configuration is standalone or the reverse, or if the metadata cannot be
-    /// read or written.
+    /// cluster and the configuration is standalone or the reverse, if it is a joiner's that was
+    /// never admitted and the configuration is anything but a joiner's, or if the metadata
+    /// cannot be read or written.
     #[instrument(name = "StorageMeta::claim", skip_all, err(Debug))]
     pub fn claim(root: &Path, shards: usize, intent: ClusterIntent) -> Result<Identity, ServerError> {
         // read whatever metadata this directory already carries, format settled first
         match Self::read(root)? {
             // this directory has been written before, so it has a shard count and an identity
             // to honour
-            Some(found) => {
+            Some(mut found) => {
                 // a different shard count would look for every partition in the wrong place
                 if found.shards != shards {
                     return Err(ServerError::Shoal(ShoalError::ShardCountMismatch {
@@ -351,44 +453,69 @@ impl StorageMeta {
                     }));
                 }
                 // the mode the directory was claimed in has to be the mode it is reopened in
-                match (intent, found.cluster) {
+                match (intent, found.mode) {
                     // a standalone directory reopened standalone, the ordinary restart
-                    (ClusterIntent::Standalone, None) => {}
+                    (ClusterIntent::Standalone, MarkerMode::Standalone) => {}
                     // a cluster member reopened as one, which keeps its cluster and never mints
-                    // another however the configuration spells bootstrap
-                    (ClusterIntent::Bootstrap, Some(_)) => {}
+                    // another however the configuration spells bootstrap; a member restarted
+                    // with seeds is the same restart, since it no longer needs them
+                    (ClusterIntent::Bootstrap | ClusterIntent::Join, MarkerMode::Cluster) => {}
+                    // a joiner that never finished joining, started as a joiner again: the join
+                    // resumes under the identity it minted
+                    (ClusterIntent::Join, MarkerMode::Joining) => {}
                     // a directory bootstrapped into a cluster, opened by a standalone config
-                    (ClusterIntent::Standalone, Some(cluster)) => {
+                    (ClusterIntent::Standalone, MarkerMode::Cluster) => {
                         return Err(ServerError::Shoal(ShoalError::ClusterDirectoryInStandalone {
-                            cluster,
+                            // a cluster directory always names its cluster
+                            cluster: found.cluster.unwrap_or_default(),
                         }));
                     }
                     // a standalone directory opened by a cluster config, which is the migration
                     // M10 owns and nothing here can do
-                    (ClusterIntent::Bootstrap, None) => {
+                    (ClusterIntent::Bootstrap | ClusterIntent::Join, MarkerMode::Standalone) => {
                         return Err(ServerError::Shoal(ShoalError::StandaloneDirectoryInCluster {
                             node: found.node,
                         }));
                     }
+                    // a joiner's directory that was never admitted, asked to create a cluster of
+                    // its own: that would turn a node meant for one cluster into another
+                    (ClusterIntent::Bootstrap, MarkerMode::Joining) => {
+                        return Err(ServerError::Shoal(ShoalError::JoiningDirectoryBootstrapped {
+                            node: found.node,
+                        }));
+                    }
+                    // the same directory opened standalone, which is a node changing what it is
+                    (ClusterIntent::Standalone, MarkerMode::Joining) => {
+                        return Err(ServerError::Shoal(ShoalError::JoiningDirectoryInStandalone {
+                            node: found.node,
+                        }));
+                    }
                 }
+                // this is one more start of the directory, and the marker says so before the
+                // identity is handed out: a start that is later fenced has already been counted
+                found.incarnation += 1;
+                found.write(root)?;
                 Ok(Identity {
                     node: found.node,
                     cluster: found.cluster,
                     layout: found.layout,
                     topology_at_claim: found.topology,
                     fresh: false,
+                    mode: found.mode,
+                    incarnation: found.incarnation,
                 })
             }
             // this directory has never been written to, so claim it for this node
             None => {
                 // mint who this directory is going to be, and the cluster it starts if it does
                 let node = NodeId::mint();
-                let cluster = match intent {
-                    ClusterIntent::Standalone => None,
-                    ClusterIntent::Bootstrap => Some(ClusterId::mint()),
+                let meta = match intent {
+                    ClusterIntent::Standalone => StorageMeta::new(shards, node, None),
+                    ClusterIntent::Bootstrap => {
+                        StorageMeta::new(shards, node, Some(ClusterId::mint()))
+                    }
+                    ClusterIntent::Join => StorageMeta::joining(shards, node),
                 };
-                // build the metadata describing who is about to write here
-                let meta = StorageMeta::new(shards, node, cluster);
                 // write it before any shard has had the chance to store anything
                 meta.write(root)?;
                 // say what we claimed, since it is what a later start is held to
@@ -398,17 +525,57 @@ impl StorageMeta {
                     path = Self::path(root).display().to_string(),
                     shards,
                     node = node.to_string(),
-                    cluster = cluster.map(|cluster| cluster.to_string()),
+                    cluster = meta.cluster.map(|cluster| cluster.to_string()),
+                    mode = ?meta.mode,
                 );
                 Ok(Identity {
                     node,
-                    cluster,
+                    cluster: meta.cluster,
                     layout: SHARD_LAYOUT,
                     topology_at_claim: 0,
                     fresh: true,
+                    mode: meta.mode,
+                    incarnation: meta.incarnation,
                 })
             }
         }
+    }
+
+    /// Fill in the cluster a joiner has been admitted to, once
+    ///
+    /// The one time the marker's cluster field is written after the claim. A directory that is
+    /// not joining is refused: a member already has its cluster and a standalone directory
+    /// never adopts one, so either would be a mode change and not an adoption.
+    ///
+    /// # Arguments
+    ///
+    /// * `root` - The root of the storage directory
+    /// * `cluster` - The cluster a seed proved and the leader admitted this node to
+    ///
+    /// # Errors
+    ///
+    /// Fails if there is no marker, if the directory is not a joiner's, or if the file cannot be
+    /// written.
+    #[instrument(name = "StorageMeta::adopt_cluster", skip_all, err(Debug))]
+    pub fn adopt_cluster(root: &Path, cluster: ClusterId) -> Result<(), ServerError> {
+        // the marker has to exist already: adopting a cluster is something a claimed node does
+        let Some(mut found) = Self::read(root)? else {
+            return Err(ServerError::IO(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "no storage marker to adopt a cluster into",
+            )));
+        };
+        // only a joiner adopts; anything else already knows what it is
+        if found.mode != MarkerMode::Joining {
+            return Err(ServerError::Shoal(ShoalError::MarkerNotJoining {
+                node: found.node,
+                mode: format!("{:?}", found.mode).to_lowercase(),
+            }));
+        }
+        // move the two fields that move together, and swap the marker
+        found.cluster = Some(cluster);
+        found.mode = MarkerMode::Cluster;
+        found.write(root)
     }
 
     /// Record the topology version this node has now observed
@@ -482,7 +649,10 @@ mod tests {
             .expect("no metadata written")
             .expect("no marker written");
         assert_eq!(found, StorageMeta::new(4, identity.node, None));
-        assert_eq!(found.format, 2);
+        assert_eq!(found.format, 3);
+        assert_eq!(found.mode, MarkerMode::Standalone);
+        assert_eq!(found.incarnation, 1);
+        assert_eq!(identity.incarnation, 1);
         // with nothing staged left behind
         assert!(!dir.path().join(META_TEMP_FILE).exists());
     }
@@ -500,6 +670,119 @@ mod tests {
             .expect("failed to reopen with the same shard count");
         assert_eq!(again.node, first.node);
         assert!(!again.fresh);
+        // and each reopen is one more start of the directory, on disk before it is handed out
+        assert_eq!(again.incarnation, 2);
+        let third = StorageMeta::claim(dir.path(), 4, ClusterIntent::Standalone)
+            .expect("failed to reopen a third time");
+        assert_eq!(third.incarnation, 3);
+        let found = StorageMeta::read(dir.path()).expect("a marker").expect("a marker");
+        assert_eq!(found.incarnation, 3);
+    }
+
+    /// A format 2 marker is read as format 3, with its mode inferred and no incarnation yet
+    #[test]
+    fn a_format_2_marker_is_upgraded_on_its_first_rewrite() {
+        let dir = tempfile::tempdir().expect("failed to build a temp dir");
+        std::fs::create_dir_all(dir.path()).expect("failed to build our storage directory");
+        let node = NodeId::mint();
+        let cluster = ClusterId::mint();
+        // a cluster member's marker exactly as F37 wrote one
+        let raw = format!(
+            "{{\"format\": 2, \"shards\": 4, \"node\": \"{node}\", \"cluster\": \"{cluster}\", \
+             \"layout\": 1, \"topology\": 7}}"
+        );
+        std::fs::write(StorageMeta::path(dir.path()), raw).expect("failed to stage our marker");
+        // read, it is a member of its cluster with no starts counted
+        let found = StorageMeta::read(dir.path()).expect("a marker").expect("a marker");
+        assert_eq!(found.mode, MarkerMode::Cluster);
+        assert_eq!(found.incarnation, 0);
+        assert_eq!(found.format, 3);
+        // claimed, it is that member's first counted start, and the file is now format 3
+        let identity = StorageMeta::claim(dir.path(), 4, ClusterIntent::Bootstrap)
+            .expect("a format 2 marker was refused");
+        assert_eq!(identity.node, node);
+        assert_eq!(identity.cluster, Some(cluster));
+        assert_eq!(identity.mode, MarkerMode::Cluster);
+        assert_eq!(identity.incarnation, 1);
+        assert_eq!(identity.topology_at_claim, 7);
+        let raw = std::fs::read_to_string(StorageMeta::path(dir.path())).expect("a marker");
+        assert!(raw.contains("\"format\": 3"), "{raw}");
+        assert!(raw.contains("\"mode\": \"cluster\""), "{raw}");
+        // a standalone one the same way
+        let dir = tempfile::tempdir().expect("failed to build a temp dir");
+        std::fs::create_dir_all(dir.path()).expect("failed to build our storage directory");
+        let raw = format!(
+            "{{\"format\": 2, \"shards\": 4, \"node\": \"{node}\", \"cluster\": null, \
+             \"layout\": 1, \"topology\": 0}}"
+        );
+        std::fs::write(StorageMeta::path(dir.path()), raw).expect("failed to stage our marker");
+        let identity = StorageMeta::claim(dir.path(), 4, ClusterIntent::Standalone)
+            .expect("a standalone format 2 marker was refused");
+        assert_eq!(identity.mode, MarkerMode::Standalone);
+        assert_eq!(identity.incarnation, 1);
+    }
+
+    /// A joiner mints a node and no cluster, adopts a cluster once, and is refused any other mode
+    #[test]
+    fn a_joiner_adopts_its_cluster_once() {
+        let dir = tempfile::tempdir().expect("failed to build a temp dir");
+        // the claim mints an identity that belongs to nothing yet
+        let joiner = StorageMeta::claim(dir.path(), 2, ClusterIntent::Join)
+            .expect("failed to claim a joiner's directory");
+        assert!(joiner.fresh);
+        assert_eq!(joiner.cluster, None);
+        assert_eq!(joiner.mode, MarkerMode::Joining);
+        assert_eq!(joiner.incarnation, 1);
+        // a joiner that never finished can be started as a joiner again, as the same node
+        let again = StorageMeta::claim(dir.path(), 2, ClusterIntent::Join)
+            .expect("failed to resume a join");
+        assert_eq!(again.node, joiner.node);
+        assert_eq!(again.mode, MarkerMode::Joining);
+        assert_eq!(again.incarnation, 2);
+        // but not as a cluster's creator, and not standalone
+        let error = StorageMeta::claim(dir.path(), 2, ClusterIntent::Bootstrap)
+            .expect_err("a joiner's directory bootstrapped a cluster");
+        assert!(matches!(
+            error,
+            ServerError::Shoal(ShoalError::JoiningDirectoryBootstrapped { node }) if node == joiner.node
+        ));
+        assert!(format!("{error}").contains("second cluster"), "{error}");
+        let error = StorageMeta::claim(dir.path(), 2, ClusterIntent::Standalone)
+            .expect_err("a joiner's directory started standalone");
+        assert!(matches!(
+            error,
+            ServerError::Shoal(ShoalError::JoiningDirectoryInStandalone { .. })
+        ));
+        // admission fills in the cluster, exactly once
+        let cluster = ClusterId::mint();
+        StorageMeta::adopt_cluster(dir.path(), cluster).expect("failed to adopt a cluster");
+        let found = StorageMeta::read(dir.path()).expect("a marker").expect("a marker");
+        assert_eq!(found.cluster, Some(cluster));
+        assert_eq!(found.mode, MarkerMode::Cluster);
+        assert_eq!(found.node, joiner.node);
+        assert_eq!(found.incarnation, 2);
+        let error = StorageMeta::adopt_cluster(dir.path(), ClusterId::mint())
+            .expect_err("a member adopted a second cluster");
+        assert!(matches!(error, ServerError::Shoal(ShoalError::MarkerNotJoining { .. })));
+        // and from then on it is a member, restarted with seeds or with bootstrap alike
+        let member = StorageMeta::claim(dir.path(), 2, ClusterIntent::Join)
+            .expect("failed to restart a joined member with its seeds");
+        assert_eq!(member.cluster, Some(cluster));
+        assert_eq!(member.mode, MarkerMode::Cluster);
+        assert_eq!(member.incarnation, 3);
+        StorageMeta::claim(dir.path(), 2, ClusterIntent::Bootstrap)
+            .expect("failed to restart a joined member as a bootstrapper");
+        // a standalone directory never adopts one either
+        let dir = tempfile::tempdir().expect("failed to build a temp dir");
+        StorageMeta::claim(dir.path(), 2, ClusterIntent::Standalone).expect("failed to claim");
+        assert!(StorageMeta::adopt_cluster(dir.path(), cluster).is_err());
+        // and a standalone directory refuses a joiner's configuration, naming the migration
+        let error = StorageMeta::claim(dir.path(), 2, ClusterIntent::Join)
+            .expect_err("a standalone directory joined a cluster");
+        assert!(matches!(
+            error,
+            ServerError::Shoal(ShoalError::StandaloneDirectoryInCluster { .. })
+        ));
     }
 
     /// A marker written by a format we do not understand is refused, naming what we do
@@ -525,7 +808,7 @@ mod tests {
             error,
             ServerError::Shoal(ShoalError::StorageFormatMismatch {
                 found: 1,
-                supported: &[2]
+                supported: &[2, 3]
             })
         ));
         // and the message has to say there is no migration yet, since that is what an operator
@@ -547,7 +830,7 @@ mod tests {
             .expect_err("an unknown marker format started");
         assert!(matches!(
             error,
-            ServerError::Shoal(ShoalError::StorageFormatMismatch { found: 3, .. })
+            ServerError::Shoal(ShoalError::StorageFormatMismatch { found: 4, .. })
         ));
     }
 
@@ -648,6 +931,9 @@ mod tests {
     }
 
     /// Observing a topology rewrites that one field, never goes backwards, and survives a restart
+    ///
+    /// The incarnation is the other field a restart moves, and the claim above already holds
+    /// it; an observation leaves it where the claim put it.
     #[test]
     fn a_topology_observation_moves_one_field() {
         let dir = tempfile::tempdir().expect("failed to build a temp dir");
@@ -662,6 +948,8 @@ mod tests {
         assert_eq!(found.cluster, identity.cluster);
         assert_eq!(found.shards, 2);
         assert_eq!(found.layout, SHARD_LAYOUT);
+        assert_eq!(found.incarnation, identity.incarnation);
+        assert_eq!(found.mode, MarkerMode::Cluster);
         // going backwards is refused
         let error = StorageMeta::observe_topology(dir.path(), 2)
             .expect_err("a topology version went backwards");

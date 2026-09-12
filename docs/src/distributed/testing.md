@@ -23,7 +23,14 @@ carry the identities and the control core a child reported. Since
 child, a marker each, a data and a control port each, and one placement every child reads; a
 byte proxy can stand in front of each node's lanes so a test can cut, delay or heal one lane to
 one node, and a child answers `PING`, `VOTE_PROBE`, `TRANSPORT`, `PROBE_BULK` and `FLUSH` on
-stdin. Benchmark readiness probes and tracing-based path assertions provide reusable
+stdin. Since [F39](../features/membership.md) it stages a membership cluster - node zero's
+marker names the cluster, every other child's says `joining` with a pre-minted id and node
+zero's control address as its seed, the proxies are per direction and each child dials the
+others through its own set - initializes it once every child has joined, and can restart a
+node on its directory or with other seeds, start a deferred node, kill, clone a directory and
+spawn the clone, isolate and heal; a child also answers `MEMBERS`, `READINESS`, `MAP`,
+`INITIALIZE`, `SET_VOTERS`, `ADMIN`, `INCARNATION`, `LOG_LEN`, `FAIL_SHARD` and `STALE_REPORT`,
+and `SHOAL_CHILD_LOG` keeps every child's log. Benchmark readiness probes and tracing-based path assertions provide reusable
 patterns. There is no whole-engine deterministic simulator; this proposal does not require
 building one before testing the new protocol state machine, and `shoal-model` is the pure model
 it asks for instead.

@@ -586,6 +586,12 @@ struct MachineInner {
     persisted: PersistedState,
     /// The last snapshot built or installed
     snapshot: Option<SnapshotOf<ControlConfig, SnapshotData>>,
+    /// Who to tell after every persisted apply or install, with the index applied
+    ///
+    /// The control loop hangs off this: it is how a joiner learns it has been admitted and
+    /// how every node learns the topology moved, without polling the state
+    /// ([F39](../../../../docs/src/features/membership.md)).
+    on_applied: Option<Rc<dyn Fn(u64)>>,
 }
 
 /// The control state machine
@@ -627,6 +633,7 @@ impl ControlStateMachine {
                 dir: dir.to_path_buf(),
                 persisted,
                 snapshot,
+                on_applied: None,
             })),
         })
     }
@@ -634,6 +641,39 @@ impl ControlStateMachine {
     /// The applied state, as it is now
     pub fn state(&self) -> ControlState {
         self.inner.borrow().persisted.state.clone()
+    }
+
+    /// The last applied log index, or zero before anything was
+    pub fn applied_index(&self) -> u64 {
+        self.inner
+            .borrow()
+            .persisted
+            .applied
+            .as_ref()
+            .map_or(0, |log_id| log_id.index())
+    }
+
+    /// Hear about every persisted apply or install, with the index applied
+    ///
+    /// # Arguments
+    ///
+    /// * `hook` - Called on the state machine's own thread after each write lands
+    pub fn on_applied(&self, hook: Rc<dyn Fn(u64)>) {
+        self.inner.borrow_mut().on_applied = Some(hook);
+    }
+
+    /// Tell whoever asked that something was applied
+    fn notify_applied(&self) {
+        let (hook, index) = {
+            let inner = self.inner.borrow();
+            (
+                inner.on_applied.clone(),
+                inner.persisted.applied.as_ref().map_or(0, |log_id| log_id.index()),
+            )
+        };
+        if let Some(hook) = hook {
+            hook(index);
+        }
     }
 
     /// Write the applied state to disk
@@ -709,8 +749,10 @@ impl RaftStateMachine<ControlConfig> for ControlStateMachine {
                     },
                     // a command, applied by the state
                     EntryPayload::Normal(command) => inner.persisted.state.apply(&command),
-                    // a membership change, recorded as of this entry
+                    // a membership change, recorded as of this entry and reflected into the
+                    // members' roles, so the state and the configuration never disagree
                     EntryPayload::Membership(membership) => {
+                        inner.persisted.state.observe_membership(&membership);
                         inner.persisted.membership =
                             StoredMembership::new(Some(log_id.clone()), membership);
                         ControlResponse::Applied {
@@ -725,12 +767,13 @@ impl RaftStateMachine<ControlConfig> for ControlStateMachine {
         }
         // then on disk, so an answer is never given for a state a crash could lose
         self.persist().await?;
-        // and only then the answers
+        // and only then the answers, and whoever is listening for applies
         for (responder, response) in responders {
             if let Some(responder) = responder {
                 responder.send(response);
             }
         }
+        self.notify_applied();
         Ok(())
     }
 
@@ -751,9 +794,11 @@ impl RaftStateMachine<ControlConfig> for ControlStateMachine {
         {
             let mut inner = self.inner.borrow_mut();
             inner.persisted = persisted;
-            // the snapshot's meta is authoritative about where it ends
+            // the snapshot's meta is authoritative about where it ends, and its membership is
+            // reflected into the roles as an entry's would be
             inner.persisted.applied = meta.last_log_id.clone();
             inner.persisted.membership = meta.last_membership.clone();
+            inner.persisted.state.observe_membership(meta.last_membership.membership());
             inner.snapshot = Some(Snapshot {
                 meta: meta.clone(),
                 snapshot: Cursor::new(data.clone()),
@@ -769,7 +814,9 @@ impl RaftStateMachine<ControlConfig> for ControlStateMachine {
                 data,
             },
         )
-        .await
+        .await?;
+        self.notify_applied();
+        Ok(())
     }
 
     /// The last snapshot built or installed

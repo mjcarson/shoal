@@ -40,11 +40,12 @@ use serde::{Deserialize, Serialize};
 use shoal::Conf;
 use shoal::server::StorageMeta;
 use shoal::server::conf::Resources;
-use shoal::server::conf::cluster::{Cluster, PlacedNode, Placement};
+use shoal::server::conf::cluster::Cluster;
+use shoal::server::{AdminKind, AdminRequest};
 use shoal::shared::identity::{ClusterId, NodeId};
 
 use crate::model::macro_layer::{
-    ClusterFacts, HopFacts, LinkFacts, NodeCores, PlacedNodeFacts, TransportFacts,
+    ClusterFacts, HopFacts, LinkFacts, MemberFacts, NodeCores, PlacedNodeFacts, TransportFacts,
 };
 use crate::run::plan::cluster_ports;
 use crate::workloads::harness::ready;
@@ -92,10 +93,17 @@ pub struct StagedNode {
     /// recognizes a Shoal store by a marker at most one level down, and a nested node would
     /// hide its marker from that check.
     pub suffix: String,
-    /// The placement every node routes against
+    /// The placement the arm expects once node zero has initialized it, in node order
+    ///
+    /// Recorded on the artifact and used to choose keys; the nodes route against the map the
+    /// control plane commits, which `initialize` places in exactly this order
+    /// ([F39](../../../../docs/src/features/membership.md)).
     pub placement: Vec<PlacedNodeFacts>,
-    /// The replication factor every node's bootstrap records
+    /// The replication factor node zero's bootstrap records
     pub replication_factor: u32,
+    /// The control addresses a peer joins through, which is node zero's; empty for node zero
+    #[serde(default)]
+    pub seeds: Vec<String>,
 }
 
 /// A staged cluster, ready to start
@@ -213,12 +221,22 @@ pub fn stage(base: &Conf, id: &str, overrides: &ConfOverrides, port: u16) -> Res
             suffix: if index == 0 { String::new() } else { format!("-node{index}") },
             placement: placement.clone(),
             replication_factor: cluster.replication_factor,
+            seeds: if index == 0 {
+                Vec::new()
+            } else {
+                vec![format!("{interface}:{}", ports[0].control)]
+            },
         };
-        // the marker, written before the node can claim the directory for itself
+        // the marker, written before the node can claim the directory for itself: node zero's
+        // names the cluster it creates, a peer's names only itself and joins
         let dir = node_dir(base, &node);
         std::fs::create_dir_all(&dir)
             .with_context(|| format!("failed to create {}", dir.display()))?;
-        let marker = StorageMeta::new(usize::from(node.shards), ids[index], Some(cluster_id));
+        let marker = if index == 0 {
+            StorageMeta::new(usize::from(node.shards), ids[index], Some(cluster_id))
+        } else {
+            StorageMeta::joining(usize::from(node.shards), ids[index])
+        };
         std::fs::write(
             StorageMeta::path(&dir),
             serde_json::to_vec_pretty(&marker).context("failed to serialize a marker")?,
@@ -263,34 +281,135 @@ pub fn apply(mut conf: Conf, node: &StagedNode) -> Result<Conf> {
     conf.resources.exclude_cores = node.exclude_cores.clone();
     // its client port
     conf.networking.port = node.client_port;
-    // and the placement every node shares, with this node's own lanes and control core
-    let nodes = node
-        .placement
-        .iter()
-        .map(|placed| {
-            Ok(PlacedNode {
-                node: NodeId(
-                    placed
-                        .node
-                        .parse()
-                        .with_context(|| format!("{} is not a node id", placed.node))?,
-                ),
-                data: placed.data.clone(),
-                control: placed.control.clone(),
-                shards: placed.shards,
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
+    // and its own lanes and control core: node zero creates the cluster, a peer joins through it
     conf.cluster = Some(
         Cluster::default()
-            .bootstrap(true)
+            .bootstrap(node.index == 0)
+            .seeds(node.seeds.clone())
             .control_core(node.control_cpu)
             .replication_factor(node.replication_factor)
             .port(node.data_port)
-            .control_port(node.control_port)
-            .placement(Placement { nodes }),
+            .control_port(node.control_port),
     );
     Ok(conf)
+}
+
+/// Places the tablets over every node, once all of them have joined
+///
+/// What an operator does once a cluster's nodes are up: wait until every one is a member, then
+/// initialize the placement in the order the arm expects. Node zero's pool is the operator
+/// here, through its in-process admin seam.
+///
+/// # Arguments
+///
+/// * `staged` - The cluster
+/// * `pool` - Node zero's running pool
+pub fn initialize(staged: &Staged, pool: &shoal::ShoalPool<crate::workloads::schema::Bench>) -> Result<()> {
+    let ids = staged
+        .nodes
+        .iter()
+        .map(|node| {
+            node.node
+                .parse()
+                .map(NodeId)
+                .with_context(|| format!("{} is not a node id", node.node))
+        })
+        .collect::<Result<Vec<NodeId>>>()?;
+    initialize_nodes(pool, ids)
+}
+
+/// Initializes a cluster of one on itself
+///
+/// The overhead arm's node bootstraps alone and nothing joins it, so nobody else would place
+/// it; before `Initialize` its map already routes every tablet to itself, which is the
+/// standalone ring, but the committed state records no placement and its record would say so.
+/// Placing it is what an operator does to a one node cluster, and it keeps `active_rf` on the
+/// artifact meaning the same thing on every cluster arm
+/// ([F39](../../../../docs/src/features/membership.md)).
+///
+/// # Arguments
+///
+/// * `pool` - The node's running pool
+pub fn initialize_alone(pool: &shoal::ShoalPool<crate::workloads::schema::Bench>) -> Result<()> {
+    // the one node is the one the pool reports itself as
+    let me = pool
+        .topology()
+        .map_err(|error| anyhow::anyhow!("the control plane did not answer: {error}"))?
+        .node;
+    initialize_nodes(pool, vec![me])
+}
+
+/// Initializes the placement over the nodes given, in that order, through node zero's pool
+///
+/// Waits first for every node to be up and for the leader to have promoted as many voters as
+/// the policy allows, so the record taken afterwards describes a settled group rather than
+/// whichever instant the promotion had reached; then proposes the one `Initialize`, retrying
+/// a stale version; then waits for node zero's shards to hold the map.
+///
+/// # Arguments
+///
+/// * `pool` - Node zero's running pool
+/// * `ids` - The nodes, in placement order
+fn initialize_nodes(pool: &shoal::ShoalPool<crate::workloads::schema::Bench>, ids: Vec<NodeId>) -> Result<()> {
+    // every node up, which is every joiner admitted and observed, and the voter policy met as
+    // far as the nodes allow with no membership change half way through
+    let deadline = std::time::Instant::now() + ready::TIMEOUT;
+    let version = loop {
+        let view = pool.topology().map_err(|error| anyhow::anyhow!("the control plane did not answer: {error}"))?;
+        let up = ids
+            .iter()
+            .all(|id| view.members.iter().any(|member| member.record.node == *id && member.health == shoal::server::control::types::MemberHealth::Up));
+        let wanted = view
+            .policy
+            .as_ref()
+            .map_or(1, |policy| usize::try_from(policy.control_voters).unwrap_or(usize::MAX))
+            .min(ids.len());
+        if up && !view.joint && view.voters.len() >= wanted {
+            break view.version;
+        }
+        if std::time::Instant::now() > deadline {
+            bail!("not every node joined and was promoted within {:?}: {view:?}", ready::TIMEOUT);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    // then the one explicit placement, retried if the version moves under it, which is what an
+    // operator's tool does when a member observes itself between the read and the proposal
+    let op = uuid::Uuid::new_v4();
+    let mut expected_version = version;
+    let placed = loop {
+        let response = pool
+            .admin(AdminRequest {
+                op,
+                expected_version,
+                kind: AdminKind::Initialize { nodes: ids.clone() },
+            })
+            .map_err(|error| anyhow::anyhow!("the initialization was not answered: {error}"))?;
+        match response.outcome {
+            Ok(shoal::shared::protocol::admin::AdminOutcome::Applied { version })
+            | Ok(shoal::shared::protocol::admin::AdminOutcome::Repeated { version }) => break version,
+            Err(error)
+                if error.code() == shoal::shared::protocol::error::ErrorCode::StaleVersion
+                    && std::time::Instant::now() < deadline =>
+            {
+                expected_version = pool
+                    .topology()
+                    .map_err(|error| anyhow::anyhow!("the control plane did not answer: {error}"))?
+                    .version;
+            }
+            other => bail!("the initialization was refused: {other:?}"),
+        }
+    };
+    // and node zero's shards holding the map before anything is measured against them
+    loop {
+        let map = pool.map().map_err(|error| anyhow::anyhow!("the control plane did not answer: {error}"))?;
+        if map.version >= placed && map.placement == ids {
+            return Ok(());
+        }
+        if std::time::Instant::now() > deadline {
+            bail!("the placement did not reach node zero's shards");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 /// Reads a staged node's description back
@@ -586,7 +705,35 @@ pub fn placed_facts(
     facts.placement = claimed.placement.clone();
     facts.hop = staged.hop.clone();
     facts.transport = Some(transport_facts(pool, conf)?);
+    // what the cluster committed, as node zero's control thread reports it
+    let view = pool
+        .topology()
+        .map_err(|error| anyhow::anyhow!("the control plane did not answer: {error}"))?;
+    facts.members = member_facts(&view);
+    facts.map_version = view.version;
+    facts.voters = u32::try_from(view.voters.len()).unwrap_or(u32::MAX);
+    facts.learners = u32::try_from(view.learners.len()).unwrap_or(u32::MAX);
     Ok(facts)
+}
+
+/// The members a topology view names, as the artifact records them
+///
+/// # Arguments
+///
+/// * `view` - The view a node's control thread answered
+pub fn member_facts(view: &shoal::server::TopologyView) -> Vec<MemberFacts> {
+    view.members
+        .iter()
+        .map(|member| MemberFacts {
+            node: member.record.node.to_string(),
+            role: member.role.name().to_string(),
+            health: member.health.name().to_string(),
+            shards: u16::try_from(member.record.shards).unwrap_or(u16::MAX),
+            client: member.record.client.clone(),
+            data: member.record.data.clone(),
+            control: member.record.control.clone(),
+        })
+        .collect()
 }
 
 /// The transport's bounds and what node zero's links did
@@ -691,6 +838,7 @@ mod tests {
             index: 1,
             node: "00000000-0000-0000-0000-000000000001".to_string(),
             cluster: "00000000-0000-0000-0000-000000000002".to_string(),
+            seeds: vec!["127.0.0.1:44070".to_string()],
             client_port: 44_072,
             data_port: 44_073,
             control_port: 44_074,

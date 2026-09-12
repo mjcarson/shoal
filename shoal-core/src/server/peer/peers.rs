@@ -8,14 +8,16 @@
 //! the deadline passes - is an unknown outcome, because a write may have applied.
 
 use rustls::ClientConfig;
-use std::collections::HashMap;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 use std::sync::Arc;
 
 use super::handshake::Local;
 use super::link::{Frame, FrameKey, Link, LinkEvent, LinkView};
 use super::Lane;
-use crate::server::conf::cluster::{Placement, Transport};
+use crate::server::conf::cluster::{DialOverride, Transport};
+use crate::server::map::MapCell;
 use crate::server::database::ShoalDatabase;
 use crate::server::messages::{PeerEvent, ServerMsg};
 use crate::server::stage_profile::{StageStamps, Stamp};
@@ -46,10 +48,12 @@ pub struct Pending<D: ShoalDatabase> {
 pub struct Peers<D: ShoalDatabase> {
     /// One link per peer and lane, spawned on first use
     links: HashMap<(NodeId, Lane), Link>,
-    /// Every node this shard may forward to
-    placement: Rc<Placement>,
+    /// The map this shard holds, which is where every member's address comes from
+    map: MapCell,
+    /// Where particular members are dialled instead of where they advertise
+    dial: BTreeMap<NodeId, DialOverride>,
     /// What this node says about itself in a hello
-    local: Local,
+    local: Rc<RefCell<Local>>,
     /// What to dial peers with, if the lanes are encrypted
     tls: Option<Arc<ClientConfig>>,
     /// The bounds and timers
@@ -65,21 +69,24 @@ impl<D: ShoalDatabase> Peers<D> {
     ///
     /// # Arguments
     ///
-    /// * `placement` - Every node this shard may forward to
+    /// * `map` - The map this shard holds
+    /// * `dial` - Where particular members are dialled instead of where they advertise
     /// * `local` - What this node says about itself
     /// * `tls` - What to dial peers with, if encrypted
     /// * `transport` - The bounds and timers
     /// * `events` - This shard's own mesh channel, for links to deliver on
     pub fn new(
-        placement: Rc<Placement>,
-        local: Local,
+        map: MapCell,
+        dial: BTreeMap<NodeId, DialOverride>,
+        local: Rc<RefCell<Local>>,
         tls: Option<Arc<ClientConfig>>,
         transport: Transport,
         events: Sender<ServerMsg<D>>,
     ) -> Self {
         Peers {
             links: HashMap::new(),
-            placement,
+            map,
+            dial,
             local,
             tls,
             transport,
@@ -95,8 +102,27 @@ impl<D: ShoalDatabase> Peers<D> {
     /// * `node` - The peer
     /// * `lane` - The lane
     fn link(&mut self, node: NodeId, lane: Lane) -> Option<&Link> {
-        // a peer we cannot place is one we cannot dial
-        let entry = self.placement.peer(node)?.clone();
+        // a peer the map does not know is one we cannot dial
+        let mut entry = self.map.get().peer_addr(node)?;
+        // dialled where this node was told to dial it, if it was told
+        if let Some(target) = self.dial.get(&node) {
+            if let Some(control) = &target.control {
+                entry.control.clone_from(control);
+            }
+            if let Some(data) = &target.data {
+                entry.data.clone_from(data);
+            }
+        }
+        // a link to an address the member no longer advertises is dropped and dialled afresh;
+        // every frame it held is reported down, which the shard answers as it answers any lost
+        // link
+        if self
+            .links
+            .get(&(node, lane))
+            .is_some_and(|link| *link.target() != entry)
+        {
+            self.links.remove(&(node, lane));
+        }
         let local = self.local.clone();
         let tls = self.tls.clone();
         let transport = self.transport.clone();

@@ -127,8 +127,13 @@ topology epoch — and every one of them makes the format more likely to change,
   where no marker exists.~~ **The identities, the shard count and the layout are never rewritten.**
   Narrowed by [F37](../../features/node-identity-control-plane.md): the format 2 marker carries a
   `topology` field that the control plane rewrites through `StorageMeta::observe_topology` -
-  the one field that ever moves, on the same staged-rename path the claim uses, and never
-  backwards. `claim` still writes a marker on exactly one path, the one where no marker exists.
+  ~~the one field that ever moves~~, on the same staged-rename path the claim uses, and never
+  backwards. Narrowed again by [F39](../../features/membership.md): format 3 adds an
+  `incarnation` that every claim of an established directory bumps and a `mode` that
+  `adopt_cluster` moves from `joining` to `cluster` exactly once, filling in the cluster id a
+  joiner was minted without - so three fields move, each on that path, each only forwards.
+  ~~`claim` still writes a marker on exactly one path, the one where no marker exists.~~ `claim`
+  writes a fresh marker where none exists and rewrites an established one's incarnation.
   Anything that "upgrades" a marker has to move the data it describes
   first, and no such migration exists ([items 11, 12](tablet-ring.md)).
 - **`StorageMeta::new` is the only constructor used outside tests**, so every marker written
@@ -157,6 +162,10 @@ field: every directory written before that feature. The refusal names the format
 formats the build reads (`SUPPORTED_FORMATS`), and that no migration exists yet, with M10 owning
 one. The format is now read from a one-field struct before the rest of the marker is parsed,
 which is what keeps a format 1 marker failing on its format rather than on a field it never had.
+**And format 3**, since [F39](../../features/membership.md), is the first upgrade the marker has
+had: `SUPPORTED_FORMATS` is `[2, 3]`, a format 2 marker is read with its mode inferred from
+whether it names a cluster and its incarnation zero, and the first rewrite writes format 3. The
+match on known versions this page said a second format would be is that match.
 
 ## Tests
 

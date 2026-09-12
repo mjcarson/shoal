@@ -196,8 +196,10 @@ pub enum ShardContact {
 contact as `NotLocal`, and the coordinator accumulates remote shares into one forward per node
 instead. Everything above it — the tablet map, `ShardInfo`, the `Join` broadcast — was already
 shaped for a multi-node cluster; ~~the transport and membership are missing. Adding a `Remote`
-variant is the seam.~~ the transport exists and membership is missing: a node's peers come from a
-static `placement` a test or the benchmark harness writes, not from anything the cluster agrees on.
+variant is the seam.~~ ~~the transport exists and membership is missing: a node's peers come from a
+static `placement` a test or the benchmark harness writes, not from anything the cluster agrees on.~~
+Since [F39](../features/membership.md) a node's peers are the members the control group
+committed: a `TabletMap` pushed whole from the control thread, and the `placement` block is gone.
 
 The tablet map ([items 11, 12, 37](resolved/tablet-ring.md)) changed what this costs. Ownership is
 now *stored* per tablet rather than derived from a hash, so the multi-node work is to make that
@@ -228,7 +230,8 @@ have grown a design rather than staying this sketch. That design is the
 the placement authority is [C3](../distributed/membership.md), and the "actual work" the
 tablet-ring page deferred is [C5](../distributed/replication.md) through
 [C7](../distributed/failover.md). This entry still records *that* it is unbuilt. ~~Nothing there is
-built either.~~ C2 is built ([F38](../features/inter-node-transport.md)); C3 onward are not. [C13](../distributed/protocol.md) adds the embedded control/data protocol contract
+built either.~~ C2 is built ([F38](../features/inter-node-transport.md)); ~~C3 onward are not~~
+C3's membership half and C4's map are built ([F39](../features/membership.md)); C5 onward are not. [C13](../distributed/protocol.md) adds the embedded control/data protocol contract
 and the questions that gate implementation; no external membership or failover service is required.
 That contract was agreed on 2026-09-11 as the gate before M0 ([P1–P6](../distributed/protocol.md#the-contract)),
 which settled the protocol and pinned candidate libraries without selecting one or building anything.
@@ -243,7 +246,28 @@ and its policy. ~~Still nothing that makes one node speak to another: the peer e
 advertised and bound by nothing, which is M2.~~ M2 is delivered as
 [F38](../features/inter-node-transport.md): a node speaks to the nodes its placement names over
 three bounded lanes, forwards bundles as validated bytes, and carries its control group's RPCs and
-its traces across the hop.
+its traces across the hop. M3 is delivered as [F39](../features/membership.md): a node joins
+through seeds as a learner, the leader promotes voters under the policy and fences a duplicate
+by incarnation, the map is committed and pushed to every shard and every subscribed client,
+admin operations ride the client connection, writes need their quorum, and the leader's
+phi-accrual detector commits a silent member `Down`.
+
+**What F39 left undone, deliberately.** Recorded here so the next milestone starts from the list
+rather than from the diff:
+
+- **Per-tablet map records and deltas.** The map is an ordered node list pushed whole, which the
+  fanout spike prices at under 16 KiB for sixty-four members; per-tablet records arrive when a
+  tablet can move (M9a), and a delta arrives when a whole map is too large to push.
+- **A second `Initialize`**, and placing anything on a node admitted after the first. M9a.
+- **Grace expiry, `Leaving`, `Removing` and removal.** A `Down` episode is minted and committed
+  so that M9b has something to name; nothing acts on it.
+- **The certificate-to-node binding** the `shoal-node://<id>` SAN is written for. Q11's identity
+  half is the incarnation; the certificate half is still unread.
+- **A detector grace that is a setting** rather than five intervals, and the `Detector` view on a
+  follower meaning more than its local table.
+- **A refusal kind beside a refusal's reason**, so an admin client gets a code rather than a
+  sentence to parse ([item 98](known-issues.md#98-an-admin-refusals-error-code-is-derived-from-its-reason-text)).
+- **A data quorum that refuses writes a partitioned leader's stale map admits.** M4's.
 
 **What F38 left undone, deliberately.** Recorded here so the next milestone starts from the list
 rather than from the diff:
@@ -255,13 +279,16 @@ rather than from the diff:
   its `expected_mix` become `{same: 0, local: 100}`.
 - **`ShoalPool::transport()` across every shard**, not shard zero's view
   ([item 95](known-issues.md#95-shoalpooltransport-reports-shard-zeros-links-and-calls-them-the-nodes)).
-- **A consumer for `transport.ping_interval`** - the failure detector, M3's
-  ([item 96](known-issues.md#96-clustertransportping_interval-is-parsed-documented-and-consumed-by-nothing)).
+- ~~**A consumer for `transport.ping_interval`** - the failure detector, M3's
+  ([item 96](known-issues.md#96-clustertransportping_interval-is-parsed-documented-and-consumed-by-nothing)).~~
+  Built by [F39](../features/membership.md) as the control thread's pinger, beside the detector
+  and not as it ([Resolved #96](resolved/ping-interval-consumer.md)).
 - **Retrying a forward.** `attempt` is carried and always zero; a shed, a lost link and a
   deadline are answered with a code and left to the client. M6's identity is what makes a
   server-side retry safe.
 - **The certificate-to-node binding** the `shoal-node://<id>` SAN is written for, with the
-  joiner (Q11).
+  joiner (Q11). The joiner came ([F39](../features/membership.md)) and fences by incarnation;
+  the binding is still open, above.
 - **Draining the serving node's stage records.** A query served for a peer is stamped
   `served_for_peer` in the peer's process; the harness drains only its own. The origin's record
   now carries the op and the hop, which is enough for the report; the serving side's stages are
@@ -276,15 +303,20 @@ rather than from the diff:
 **What F37 left undone, deliberately.** Three pieces of C1's design were not built and are
 recorded here rather than dropped:
 
-- **A `Join` intent for the marker.** `ClusterIntent` has `Standalone` and `Bootstrap`; joining is
+- ~~**A `Join` intent for the marker.** `ClusterIntent` has `Standalone` and `Bootstrap`; joining is
   refused at `Cluster::validate` naming M3. A joiner's directory before it is admitted — a node id
   and no cluster yet — looks exactly like a standalone directory, and the marker has no field
   that tells them apart. M3 has to add one (a `mode` the claim records, or an `adopting` state)
   and decide what a joiner that never finished joining is refused as; deciding it now, with no
-  joiner to test against, would be guessing.
+  joiner to test against, would be guessing.~~ Built by [F39](../features/membership.md) as
+  format 3's `mode` - `standalone`, `cluster`, `joining` - with `ClusterIntent::Join`; a
+  joiner that never finished is refused by `bootstrap: true` and by a standalone configuration,
+  each naming the joiner.
 - **Enforcing the replication policy.** `write_consistency`, `read_consistency` and
   `replication_factor` are recorded in the control state and reported in the topology view;
-  nothing acts on them. A one node cluster serves every read and write locally. M4 and M5 own the
+  ~~nothing acts on them~~ since [F39](../features/membership.md) a write needs the members its
+  consistency implies to be up, and is refused `QuorumUnavailable` otherwise; what is written
+  still lives in one copy. ~~A one node cluster serves every read and write locally.~~ M4 and M5 own the
   enforcement, and `active_rf` — the members that could hold a replica, capped at the desired
   factor — becomes a count of placed replicas when C4's tablet map has something to place.
 - **A page for the cluster benchmark family.** `macro/cluster/overhead/nodes/1` lives on

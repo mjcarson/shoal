@@ -42,6 +42,7 @@
 
 use uuid::Uuid;
 
+pub mod admin;
 pub mod auth;
 pub mod error;
 pub mod fingerprint;
@@ -110,9 +111,10 @@ pub const DEFAULT_MAX_FRAME_BYTES: u32 = 64 * 1024 * 1024;
 /// `Hello`, `HelloAck`, `Auth`, `AuthResponse`, `Queries`, `Response` and `Error` are what a client
 /// and a server exchange. Types 13 and above are the peer protocol
 /// ([F38](../../../docs/src/features/inter-node-transport.md)), spoken only between nodes of one
-/// cluster, and `Ping`/`Pong` gained a body there. `Topology`, `GoAway`, `Cancel` and
-/// `StatusReport` stay reserved so that the features that need them are a call site rather than
-/// another flag day.
+/// cluster, and `Ping`/`Pong` gained a body there. `Topology` and the two `Admin` types are the
+/// membership milestone's ([F39](../../../docs/src/features/membership.md)); `GoAway`, `Cancel`
+/// and `StatusReport` stay reserved so that the features that need them are a call site rather
+/// than another flag day.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum MessageType {
@@ -132,7 +134,11 @@ pub enum MessageType {
     Ping = 7,
     /// The answer to a `Ping` - reserved
     Pong = 8,
-    /// The shards in this cluster and what each one owns - reserved for shard aware routing
+    /// The cluster's members, placement and policy
+    ///
+    /// From a client it is a subscription: an empty body under a query id, answered with the
+    /// current topology under that id and followed by every later version under the nil id
+    /// ([F39](../../../docs/src/features/membership.md)).
     Topology = 9,
     /// A failure with no query to attach it to - reserved for the error channel
     Error = 10,
@@ -160,6 +166,10 @@ pub enum MessageType {
     SnapshotChunk = 21,
     /// The end of a snapshot stream, with what the whole of it hashed to
     SnapshotEnd = 22,
+    /// A client's administrative request - a topology read or a versioned cluster mutation
+    Admin = 23,
+    /// The answer to an `Admin` request, under the same id
+    AdminResponse = 24,
 }
 
 impl MessageType {
@@ -200,6 +210,8 @@ impl MessageType {
             20 => Ok(MessageType::SnapshotBegin),
             21 => Ok(MessageType::SnapshotChunk),
             22 => Ok(MessageType::SnapshotEnd),
+            23 => Ok(MessageType::Admin),
+            24 => Ok(MessageType::AdminResponse),
             // anything else was written by a peer we do not understand, including a zeroed buffer
             unknown => Err(ProtocolError::UnknownMessageType(unknown)),
         }
@@ -231,6 +243,8 @@ impl MessageType {
             MessageType::SnapshotBegin => "SnapshotBegin",
             MessageType::SnapshotChunk => "SnapshotChunk",
             MessageType::SnapshotEnd => "SnapshotEnd",
+            MessageType::Admin => "Admin",
+            MessageType::AdminResponse => "AdminResponse",
         }
     }
 }
@@ -754,19 +768,64 @@ pub fn response_preamble(
     payload_len: usize,
     max_frame_bytes: u32,
 ) -> Result<[u8; RESPONSE_PREAMBLE_LEN], ProtocolError> {
+    server_preamble(MessageType::Response, query_id, payload_len, max_frame_bytes)
+}
+
+/// Build the header and query id that go ahead of any frame a server writes under a query id
+///
+/// A response, a topology push and an admin answer share one shape on the wire: the header,
+/// sixteen bytes of id, then the payload. Only the kind differs, so the three are one function
+/// ([F39](../../../../docs/src/features/membership.md)).
+///
+/// # Arguments
+///
+/// * `kind` - What kind of frame this is
+/// * `query_id` - The query this frame answers, or the nil id for a push nobody asked for
+/// * `payload_len` - How many bytes follow the id
+/// * `max_frame_bytes` - The largest frame the receiver will accept
+///
+/// # Errors
+///
+/// Fails if the frame would be larger than the receiver accepts.
+pub fn server_preamble(
+    kind: MessageType,
+    query_id: &Uuid,
+    payload_len: usize,
+    max_frame_bytes: u32,
+) -> Result<[u8; RESPONSE_PREAMBLE_LEN], ProtocolError> {
     // the query id is part of the frame body, so it counts towards the length
     let body_len = QUERY_ID_LEN.saturating_add(payload_len);
-    let header = Header::new(
-        MessageType::Response,
-        Flags::NONE,
-        body_len,
-        max_frame_bytes,
-    )?;
+    let header = Header::new(kind, Flags::NONE, body_len, max_frame_bytes)?;
     // lay the header down first and the query id after it
     let mut preamble = [0u8; RESPONSE_PREAMBLE_LEN];
     preamble[..HEADER_LEN].copy_from_slice(&header.encode());
     preamble[HEADER_LEN..].copy_from_slice(query_id.as_bytes());
     Ok(preamble)
+}
+
+/// Build the header that goes ahead of a client's topology subscription or admin request
+///
+/// The body it announces is a query id followed by the request's JSON, which
+/// [`admin::encode_body`] produces.
+///
+/// # Arguments
+///
+/// * `kind` - `Topology` for a subscription, `Admin` for an operation
+/// * `body_len` - How many bytes follow the header, id included
+/// * `max_frame_bytes` - The largest frame the server will accept
+///
+/// # Errors
+///
+/// Fails if the frame would be larger than the server accepts.
+pub const fn client_preamble(
+    kind: MessageType,
+    body_len: usize,
+    max_frame_bytes: u32,
+) -> Result<[u8; REQUEST_PREAMBLE_LEN], ProtocolError> {
+    match Header::new(kind, Flags::NONE, body_len, max_frame_bytes) {
+        Ok(header) => Ok(header.encode()),
+        Err(error) => Err(error),
+    }
 }
 
 /// The bytes that go ahead of a bundle of queries, however many of them there are
@@ -909,6 +968,34 @@ pub const fn decode_request(
     // check the header, then check that this frame is a bundle of queries and not something else
     match Header::decode(raw, max_frame_bytes) {
         Ok(header) => header.expect(MessageType::Queries),
+        Err(error) => Err(error),
+    }
+}
+
+/// Decode the header of any frame a client may send once it is connected
+///
+/// A bundle of queries, a topology subscription or an admin request; anything else is refused
+/// naming `Queries`, since that is what a connection is for
+/// ([F39](../../../../docs/src/features/membership.md)).
+///
+/// # Arguments
+///
+/// * `raw` - The header bytes
+/// * `max_frame_bytes` - The largest frame this server accepts
+///
+/// # Errors
+///
+/// Fails if the header is malformed, the frame too large, or the kind not one a client sends.
+pub const fn decode_client_request(
+    raw: &[u8; REQUEST_PREAMBLE_LEN],
+    max_frame_bytes: u32,
+) -> Result<Header, ProtocolError> {
+    // check the header, then that the kind is one of the three a client sends
+    match Header::decode(raw, max_frame_bytes) {
+        Ok(header) => match header.kind {
+            MessageType::Queries | MessageType::Topology | MessageType::Admin => Ok(header),
+            _ => header.expect(MessageType::Queries),
+        },
         Err(error) => Err(error),
     }
 }

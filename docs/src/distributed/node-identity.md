@@ -20,7 +20,13 @@ group of one on a glommio executor. The schema fingerprint detects mismatched ge
 and currently includes the protocol version. Networking has a client address/port and optional
 TLS; the peer endpoints are advertised in the member record ~~and bound by nothing until M2~~
 and, since [F38](../features/inter-node-transport.md), bound: the data port by every shard with
-`SO_REUSEPORT` and the control port by the control thread.
+`SO_REUSEPORT` and the control port by the control thread. **Since
+[F39](../features/membership.md) the marker is at format 3** - a `mode` that tells a joiner's
+directory from a standalone one and an `incarnation` bumped on every start - `seeds` is
+accepted, a node joins through them, an established directory with unreachable seeds comes back
+`recovering` and creates nothing, and a cloned directory is fenced by its incarnation: the
+higher run wins and the lower stops. The certificate half of Q11 - the SAN binding - is still
+unread.
 
 ## The design
 
@@ -32,11 +38,14 @@ joiner adopts the authenticated cluster identity, and a directory naming a diffe
 is refused. An established directory with unreachable seeds must not create another cluster.
 
 A directory lock prevents two local processes using one path; cloned disks require an additional
-cluster-wide incarnation/fencing protocol (Q11). Address changes are authenticated membership
+cluster-wide incarnation/fencing protocol (Q11). *Built at M3 as the marker's persisted
+incarnation and the state machine's `observe` rule: lower refused, equal from another address
+refused as a duplicate, higher supersedes, and a superseded run stops
+([F39](../features/membership.md)).* Address changes are authenticated membership
 updates. A Removed identity remains tombstoned and must use an explicit replacement/import flow
 rather than resume old voting state.
 
-### The storage marker, format 2
+### The storage marker, format ~~2~~ 3
 
 The marker records node/cluster identity, storage format, shard-layout version and last observed
 topology version. Tablet term/vote, committed configuration and checkpoint/log boundaries live
@@ -57,9 +66,12 @@ standalone directory opened by a cluster configuration.
 as first written - `control_core_shared`, the explicit shared core on a small machine that the
 paragraph on the control thread below asks for - and with `seeds` ~~, `tls`~~ and any `control_voters`
 outside {1, 3, 5} refused at startup naming the milestone that delivers them. `tls` is accepted
-since [F38](../features/inter-node-transport.md), and so are two blocks C1 did not draw:
+since [F38](../features/inter-node-transport.md), and so ~~are two blocks C1 did not draw:
 `placement`, the static map a fixture or the benchmark harness writes in place of membership,
-and `transport`, the byte bounds and timeouts of the peer lanes.
+and~~ is a block C1 did not draw, `transport`, the byte bounds and timeouts of the peer lanes;
+`seeds` is accepted since [F39](../features/membership.md), the `placement` block is gone with
+the membership that replaced it, and `dial` names where a member is dialled instead of where it
+advertises.
 [Configuration](../getting-started/configuration.md#cluster) is the reference with every default:
 
 ```yaml
@@ -88,7 +100,9 @@ cluster:                          # absent: standalone local operation
     ca: "/etc/shoal/cluster-ca.pem"
 ```
 
-The data peer seed endpoint returns the authenticated control endpoint during discovery; stored
+~~The data peer seed endpoint returns the authenticated control endpoint during discovery~~ A seed
+is a control endpoint, and a joiner's only conversation before it is a member is on that lane
+([F39](../features/membership.md)); stored
 control peers subsequently reconnect directly even if data shards stall. Q11 settles certificate
 identity encoding and address changes before this handshake is finalized. Separate control and
 data listeners must not create two independently configured membership systems.
