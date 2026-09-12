@@ -128,6 +128,14 @@ pub struct ClusterBuilder {
     initialize: bool,
     /// Nodes at this index and above are not started until asked
     deferred_from: Option<usize>,
+    /// The base data election timeout, in milliseconds
+    failover_ms: u64,
+    /// The durability one node's persistent table is configured with, by node index
+    durability: Vec<(usize, String)>,
+    /// The proposal deadline, in milliseconds, if shortened
+    write_timeout_ms: Option<u64>,
+    /// The bound on bytes proposed and unanswered per group, if lowered
+    pending_bytes: Option<usize>,
 }
 
 impl ClusterBuilder {
@@ -507,6 +515,10 @@ impl Cluster {
             detector_interval_ms: None,
             initialize: true,
             deferred_from: None,
+            failover_ms: 1000,
+            durability: Vec::new(),
+            write_timeout_ms: None,
+            pending_bytes: None,
         }
     }
 
@@ -1149,6 +1161,14 @@ fn build_membership_cluster(
             trace_file: builder
                 .trace
                 .then(|| dir.path().join("trace.jsonl").to_string_lossy().into_owned()),
+            failover_ms: Some(builder.failover_ms),
+            durability: builder
+                .durability
+                .iter()
+                .find(|(node, _)| *node == id)
+                .map(|(_, durability)| durability.clone()),
+            write_timeout_ms: builder.write_timeout_ms,
+            pending_bytes: builder.pending_bytes,
         });
     }
     Ok(StagedPlan { per_node, reservations })

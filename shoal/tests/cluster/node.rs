@@ -130,6 +130,24 @@ pub struct StagedCluster {
     /// A file the node writes its exported spans to, for the cross-node trace test
     #[serde(default)]
     pub trace_file: Option<String>,
+    /// The base data election timeout in milliseconds, if the test shortened it
+    ///
+    /// The fixture shortens it to a second by default: a paused group leader is missed in one
+    /// to two seconds rather than five to ten, which is what keeps a write proposed during a
+    /// failover inside its deadline ([F40](../../../docs/src/features/replication.md)).
+    #[serde(default)]
+    pub failover_ms: Option<u64>,
+    /// The durability the persistent table's log is configured with, if the test set it
+    ///
+    /// `"async"` is what a cluster node refuses to start with, which one test asserts.
+    #[serde(default)]
+    pub durability: Option<String>,
+    /// The tablet groups' proposal deadline in milliseconds, if the test shortened it
+    #[serde(default)]
+    pub write_timeout_ms: Option<u64>,
+    /// The bound on bytes proposed and unanswered per group, if the test lowered it
+    #[serde(default)]
+    pub pending_bytes: Option<usize>,
 }
 
 /// The endpoints a child bound, and the identity it reported

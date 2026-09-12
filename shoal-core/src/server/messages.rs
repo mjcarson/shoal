@@ -238,7 +238,7 @@ pub enum PeerEvent {
 ///
 /// The same holds for every variant a tablet group sends its own shard - `Apply`, `Proposed`,
 /// `Replication`, `GroupUp`, `GroupsDown`, `WalSealed`, `SegmentCompacted`,
-/// `CheckpointWritten`, `Replication_` and `ReplicationVerb`: they carry responders, oneshots
+/// `CheckpointWritten`, `ReplicationView` and `ReplicationVerb`: they carry responders, oneshots
 /// and `Raft` handles that belong to one executor, and only a task on that shard's executor
 /// ever builds one ([F40](../../../docs/src/features/replication.md)). `Comms::broadcast`
 /// never sees them.
@@ -471,8 +471,12 @@ where
         meta: QueryMetadata,
         /// The table it named
         table: D::TableNames,
+        /// The group it went through, if admission let it that far
+        group: Option<crate::shared::identity::GroupId>,
         /// What the group answered, or why it could not
         outcome: crate::server::replication::proposal::ProposalOutcome,
+        /// How many bytes were held pending for it
+        bytes: usize,
     },
     /// A replication request a peer sent this shard over the replication lane
     ///
@@ -528,7 +532,7 @@ where
         outcome: Result<(), String>,
     },
     /// Report what this shard's tablet groups look like, for readiness and the fixture
-    Replication_(std::sync::mpsc::Sender<crate::server::replication::report::ShardReplication>),
+    ReplicationView(std::sync::mpsc::Sender<crate::server::replication::report::ShardReplication>),
     /// Drive a replication verb, for the fixture
     ReplicationVerb {
         /// What to do
@@ -627,7 +631,7 @@ impl<D: ShoalDatabase> Clone for ServerMsg<D> {
             ServerMsg::WalSealed { .. } => panic!("A sealed segment is the writing shard's"),
             ServerMsg::SegmentCompacted { .. } => panic!("A compacted segment is the writing shard's"),
             ServerMsg::CheckpointWritten { .. } => panic!("A checkpoint write is the writing shard's"),
-            ServerMsg::Replication_(_) => panic!("A replication view is asked of one shard"),
+            ServerMsg::ReplicationView(_) => panic!("A replication view is asked of one shard"),
             ServerMsg::ReplicationVerb { .. } => panic!("A replication verb is for one shard"),
             // a subscription and an admin request go to the accepting shard alone
             ServerMsg::Subscribe { .. } => panic!("A subscription is for one shard"),

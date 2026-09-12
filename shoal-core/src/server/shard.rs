@@ -1,5 +1,7 @@
 //! A single shard in Shoal
 
+mod groups;
+
 use bytes::Bytes;
 use futures::{
     io::{ReadHalf, WriteHalf},
@@ -36,6 +38,7 @@ use uuid::Uuid;
 
 use super::control::{AdminCall, ControlRequest};
 use super::messages::{Answer, PeerEvent, QueryMetadata, Reply, ReplyKind, ServerMsg};
+use super::replication::ShardNetwork;
 use super::peer::{
     self, Frame, FrameKey, Lane, LinkEvent, ListenerContext, Local, PeerSetup, Peers, Pending,
     ShardTransportView,
@@ -1257,6 +1260,17 @@ pub(super) struct Shard<D: ShoalDatabase> {
     /// subscribed connection and never one per shard
     /// ([F39](../../../docs/src/features/membership.md)).
     subscribed: HashSet<Uuid>,
+    /// The ring this shard routes reads with: a tablet it holds a replica of is read here
+    ///
+    /// The same as `ring` on a standalone node and under a placement of one copy; under a
+    /// replicated placement it points every tablet this node holds at the local shard holding
+    /// it ([F40](../../../docs/src/features/replication.md)).
+    read_ring: Ring,
+    /// The tablet groups this shard hosts, their WAL and their network, on a cluster node
+    ///
+    /// `None` on a standalone node, which replicates nothing
+    /// ([F40](../../../docs/src/features/replication.md)).
+    replication: Option<groups::Replication<D>>,
 }
 
 impl<D: ShoalDatabase> Shard<D>
@@ -1333,17 +1347,29 @@ where
         // those shards among the members the map names, so a remote key routes to a remote
         // contact ([F38](../../../docs/src/features/inter-node-transport.md)); a node the map
         // does not place holds a ring of its own shards it routes nothing against
-        let (ring, placed, map, local) = match &peer_setup {
+        let (ring, read_ring, placed, map, local) = match &peer_setup {
             Some(setup) => {
                 let map = MapCell::new(setup.initial_map.clone());
                 let mut local = setup.local.clone();
                 local.cluster = local.cluster.or(setup.initial_map.cluster);
                 match setup.initial_map.ring_for(setup.local.node, shard_count)? {
-                    Some(ring) => (ring, true, map, Some(Rc::new(RefCell::new(local)))),
-                    None => (Ring::new(shard_count)?, false, map, Some(Rc::new(RefCell::new(local)))),
+                    Some(ring) => {
+                        let read_ring = setup
+                            .initial_map
+                            .read_ring_for(setup.local.node, shard_count)?
+                            .unwrap_or_else(|| ring.clone());
+                        (ring, read_ring, true, map, Some(Rc::new(RefCell::new(local))))
+                    }
+                    None => {
+                        let ring = Ring::new(shard_count)?;
+                        (ring.clone(), ring, false, map, Some(Rc::new(RefCell::new(local))))
+                    }
                 }
             }
-            None => (Ring::new(shard_count)?, true, MapCell::default(), None),
+            None => {
+                let ring = Ring::new(shard_count)?;
+                (ring.clone(), ring, true, MapCell::default(), None)
+            }
         };
         // build our shard
         let shard = Shard {
@@ -1375,6 +1401,8 @@ where
             bulk_received: Rc::new(Cell::new(0)),
             control,
             subscribed: HashSet::new(),
+            read_ring,
+            replication: None,
         };
         Ok(shard)
     }
@@ -1402,8 +1430,12 @@ where
             }
         }
         // the ring this node routes with under the placement, or none if it is not placed
-        match map.ring_for(setup.local.node, self.ring.shards.iter().filter(|info| info.contact.local_index().is_some()).count())? {
+        let shards = self.ring.shards.iter().filter(|info| info.contact.local_index().is_some()).count();
+        match map.ring_for(setup.local.node, shards)? {
             Some(ring) => {
+                self.read_ring = map
+                    .read_ring_for(setup.local.node, shards)?
+                    .unwrap_or_else(|| ring.clone());
                 self.ring = ring;
                 self.placed = true;
             }
@@ -1416,6 +1448,9 @@ where
             placed = self.placed,
             members = map.members.len(),
         );
+        // the groups this shard hosts follow the placement
+        // ([F40](../../../docs/src/features/replication.md))
+        self.rebuild_groups();
         // every subscribed client hears of it; the relay folds a run of them to the newest
         self.push_topology(&map);
         Ok(())
@@ -1654,8 +1689,11 @@ where
     async fn init(&mut self, should_shutdown: Arc<AtomicBool>) -> Result<(), ServerError> {
         // spawn our client listeners
         self.spawn_client_listener()?;
-        // stand up the peer listener and links, on a cluster node
-        self.spawn_peer_listener()?;
+        // stand up the peer listener and links, on a cluster node, and the tablet groups
+        // behind them ([F40](../../../docs/src/features/replication.md))
+        if let Some(network) = self.spawn_peer_listener()? {
+            self.open_replication(network).await?;
+        }
         // start our loaders
         self.tables
             .init_storage_loaders(
@@ -1860,10 +1898,13 @@ where
             stamps.set_batch(offset, batch_len);
             // remember the index this query answers under, which is half of a records key
             stamps.set_index(index);
-            // find the shards that answer this query, and the keys each of them owns
+            // find the shards that answer this query, and the keys each of them owns: a write
+            // goes to its tablet's primary, a read to the nearest replica
+            // ([F40](../../../docs/src/features/replication.md))
+            let is_write = <<D::ClientType as QuerySupport>::QueryKinds as ArchivedShardRouting>::archived_is_write(kind);
             <<D::ClientType as QuerySupport>::QueryKinds as ArchivedShardRouting>::route_archived(
                 kind,
-                &self.ring,
+                if is_write { &self.ring } else { &self.read_ring },
                 &mut found,
             );
             // record that this query is leaving us for the shards that own its partitions
@@ -2423,6 +2464,14 @@ where
         // answer owed to a peer needs them to be framed, and it cannot read them back out of
         // the bytes it just sealed
         let (m_index, m_end) = (meta.index, meta.end);
+        // on a cluster node a write is a command its tablet group commits before anything
+        // applies it, so it never reaches the table from here
+        // ([F40](../../../docs/src/features/replication.md))
+        if self.replication.is_some() {
+            if let Some((table, key, payload)) = self.tables.write_command(&query) {
+                return self.propose_write(meta, table, key, payload).await;
+            }
+        }
         // try to handle this query
         if let Some((addr, query_id, mut stamps, answer)) = self.tables.handle(meta, query).await {
             // an answer the table already serialized has nothing left to do here but be sent
@@ -2686,6 +2735,14 @@ where
     #[allow(clippy::future_not_send)]
     async fn handle_peer_event(&mut self, event: PeerEvent) -> Result<(), ServerError> {
         match event {
+            // the replication lane's events are the tablet groups'
+            PeerEvent::Link(event @ (LinkEvent::Frame { lane: Lane::Replication, .. }
+            | LinkEvent::Down { lane: Lane::Replication, .. })) => {
+                if let LinkEvent::Down { node, reason, .. } = &event {
+                    event!(Level::WARN, msg = "a replication link went down", %node, reason);
+                }
+                self.handle_replication_link(event);
+            }
             PeerEvent::Link(LinkEvent::Up { node, lane, incarnation }) => {
                 event!(Level::DEBUG, msg = "a peer link came up", %node, %lane, incarnation);
             }
@@ -2696,7 +2753,10 @@ where
                 event!(Level::WARN, msg = "a peer link went down", %node, reason);
                 self.resolve_lost_link(node, &unsent).await?;
             }
-            PeerEvent::Tick => self.sweep_deadlines().await?,
+            PeerEvent::Tick => {
+                self.sweep_deadlines().await?;
+                self.maybe_report_replication();
+            }
         }
         Ok(())
     }
@@ -2913,9 +2973,9 @@ where
     /// binds `advertise:port` beside its client listener with `SO_REUSEPORT`, builds the tls
     /// configs on its own executor the way the client listener does, and stands up the `Peers`
     /// its forwards go through.
-    fn spawn_peer_listener(&mut self) -> Result<(), ServerError> {
+    fn spawn_peer_listener(&mut self) -> Result<Option<ShardNetwork>, ServerError> {
         let Some(setup) = self.peer_setup.clone() else {
-            return Ok(());
+            return Ok(None);
         };
         // the configs are built here, per shard, on this shard's executor
         let (client_tls, server_tls) = match &setup.tls {
@@ -2944,10 +3004,22 @@ where
             self.map.clone(),
             setup.dial.clone(),
             local.clone(),
-            client_tls,
+            client_tls.clone(),
             setup.transport.clone(),
             self.shard_local_tx.clone_sync(),
         ));
+        // and the replication links its tablet groups speak over, delivering the same way
+        let events = self.shard_local_tx.clone_sync();
+        let network = ShardNetwork::new(
+            self.map.clone(),
+            setup.dial.clone(),
+            local.clone(),
+            client_tls,
+            setup.transport.clone(),
+            Rc::new(move |event| {
+                let _ = events.try_send(ServerMsg::Peer(PeerEvent::Link(event)));
+            }),
+        );
         // bind the peer listener, every shard on the same port with SO_REUSEPORT
         let listener = TcpListener::bind(setup.bind)?;
         let ctx = ListenerContext {
@@ -2979,7 +3051,7 @@ where
             self._medium_priority,
         )?;
         self.tasks.push(sweeper);
-        Ok(())
+        Ok(Some(network))
     }
 
     /// Find partitions to evict
@@ -3120,9 +3192,12 @@ where
                 }
                 // load this partition from disk
                 ServerMsg::Partition(loaded) => {
+                    let (table, partition_id) = (loaded.table, loaded.loaded.partition_id);
                     self.tables
                         .load_partition(loaded, &self.shard_local_tx)
-                        .await?
+                        .await?;
+                    // an apply batch waiting on this read carries on
+                    self.resume_parked(table, partition_id, false).await?;
                 }
                 // this partition could not be read, so release the queries waiting on it
                 ServerMsg::PartitionLoadFailed {
@@ -3131,6 +3206,7 @@ where
                     partition_id,
                     error,
                 } => {
+                    let failed = error.is_some();
                     self.tables
                         .fail_partition(
                             table,
@@ -3140,7 +3216,9 @@ where
                             error,
                             &self.shard_local_tx,
                         )
-                        .await?
+                        .await?;
+                    // an apply batch waiting on this read carries on, or the shard cannot
+                    self.resume_parked(table, partition_id, failed).await?;
                 }
                 // Inform a table that some of its data has been flushed to storage
                 // this carries no position, it only tells us a durable watermark may
@@ -3169,17 +3247,51 @@ where
                 ServerMsg::Transport(reply) => {
                     let _ = reply.send(self.transport_view());
                 }
-                // the tablet groups' messages, which the next step wires up
-                ServerMsg::Apply { .. }
-                | ServerMsg::Proposed { .. }
-                | ServerMsg::Replication { .. }
-                | ServerMsg::GroupUp { .. }
-                | ServerMsg::GroupsDown
-                | ServerMsg::WalSealed { .. }
-                | ServerMsg::SegmentCompacted { .. }
-                | ServerMsg::CheckpointWritten { .. }
-                | ServerMsg::Replication_(_)
-                | ServerMsg::ReplicationVerb { .. } => {}
+                // a tablet group's committed batch, applied here in committed order
+                ServerMsg::Apply { group, entries, done } => {
+                    self.handle_apply(group, entries, done).await?;
+                }
+                // a proposal this shard made resolved
+                ServerMsg::Proposed {
+                    meta,
+                    table,
+                    group,
+                    outcome,
+                    bytes,
+                } => self.answer_proposal(meta, table, group, outcome, bytes).await?,
+                // a peer's replication request for a group this shard hosts
+                ServerMsg::Replication {
+                    origin,
+                    head,
+                    payload,
+                    reply,
+                } => self.handle_replication(origin, head, payload, reply),
+                // a group's handle, from the task that built it
+                ServerMsg::GroupUp { group, raft } => self.handle_group_up(group, raft)?,
+                // every group is down: the shutdown that asked for it can finish
+                ServerMsg::GroupsDown => break,
+                // the WAL sealed a segment, which may be resolved already
+                ServerMsg::WalSealed { generation } => {
+                    event!(Level::DEBUG, msg = "the wal sealed a segment", generation);
+                    self.sweep_segments().await?;
+                }
+                // a table's compactor finished a segment
+                ServerMsg::SegmentCompacted { table, generation } => {
+                    self.handle_segment_compacted(table, generation);
+                }
+                // the checkpoint file landed
+                ServerMsg::CheckpointWritten { version, outcome } => {
+                    self.handle_checkpoint_written(version, outcome)?;
+                }
+                // report what this shard's groups look like
+                ServerMsg::ReplicationView(reply) => {
+                    let _ = reply.send(self.replication_report());
+                }
+                // drive a replication verb, for the fixture
+                ServerMsg::ReplicationVerb { verb, reply } => {
+                    let answer = self.handle_replication_verb(verb).await;
+                    let _ = reply.send(answer);
+                }
                 // shutdown this shard
                 ServerMsg::Shutdown => {
                     // signal all of our loaders to shutdown
@@ -3193,8 +3305,19 @@ where
                     // covers the tail sitting below that batch size. Without it the last
                     // few thousand queries of a run would be missing from the profile.
                     stage_profile::flush();
+                    // the tablet groups stop first, on a task that posts back when they are
+                    // down; the loop keeps applying for them until then, since a group mid
+                    // apply has to hear the batch is through before it can stop
+                    // ([F40](../../../docs/src/features/replication.md))
+                    if self.stop_groups() {
+                        continue;
+                    }
                     break;
                 }
+            }
+            // a sealed or applied segment is judged between two messages
+            if self.replication.as_ref().is_some_and(|replication| replication.sweep_due) {
+                self.sweep_segments().await?;
             }
             // if we have no more messages then flush our current queries to disk
             if self.shard_local_rx.is_empty() {
@@ -3221,6 +3344,8 @@ where
         // unconditional on purpose, unlike the call in the loop: shutdown has to drain
         // whatever is still pending whether or not a wakeup happened to arrive for it
         self.handle_flushed().await?;
+        // the WAL closes once every group is down, and before the tables
+        self.close_replication().await;
         // shudown our tables
         self.tables.shutdown().await?;
         // shutdown all of our tasks

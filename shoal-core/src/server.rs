@@ -167,6 +167,25 @@ where
         let placement = match &conf.cluster {
             Some(cluster) => {
                 cluster.validate(&conf.networking.interface)?;
+                // a persistent table acknowledged before its fdatasync cannot be a voter in a
+                // durable quorum, and the durability is per table under `storage`, which the
+                // block's own validation cannot see (C5, F40)
+                for table in S::persistent_tables() {
+                    let settings = conf
+                        .storage
+                        .tables
+                        .get(table)
+                        .map(|settings| match settings {
+                            conf::TableSettings::FS(settings) => settings.clone(),
+                        })
+                        .unwrap_or_else(|| conf.storage.default.filesystem.clone());
+                    if settings.latency_sensitive.durability == tables::storage::fs::conf::Durability::Async {
+                        return Err(ServerError::Shoal(ShoalError::InvalidConfig(format!(
+                            "table {table} is configured with durability: Async on a cluster node; a durable \
+                             quorum cannot be built from an acknowledgement that precedes fdatasync (C5)"
+                        ))));
+                    }
+                }
                 Some(ControlPlacement::resolve(&conf)?)
             }
             None => None,

@@ -187,16 +187,26 @@ async fn fixture_faults_cover_directed_links_and_reconnects() -> Result<(), Fixt
     .await;
     assert!(stalled.is_err(), "a query to a paused server did not stall");
     cluster.node(0).resume()?;
-    let answered = tokio::time::timeout(
-        Duration::from_secs(10),
-        client.send_one(RowGet::new(vec![7])),
-    )
-    .await;
-    assert!(answered.is_ok(), "a query to a resumed server never came back");
-    assert!(
-        answered.unwrap()?.access::<Row>()?.is_some(),
-        "the write sent during the pause was lost, rather than delayed"
-    );
+    // the write was never acknowledged, and a read that overtakes an unacknowledged write is
+    // not promised to see it: on a cluster node the write is committed by its tablet group off
+    // the shard's loop, so the read is asked again until the row is there, within a bound
+    // ([F40](../../docs/src/features/replication.md))
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let answered = tokio::time::timeout(Duration::from_secs(10), client.send_one(RowGet::new(vec![7]))).await;
+        assert!(answered.is_ok(), "a query to a resumed server never came back");
+        // a get that found nothing is a query that did not succeed, and is asked again
+        match answered.unwrap() {
+            Ok(response) if response.access::<Row>()?.is_some() => break,
+            Ok(_) | Err(shoal::client::Errors::QueryDidNotSucceed { .. }) => {}
+            Err(error) => return Err(error.into()),
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the write sent during the pause was lost, rather than delayed"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     // and a kill is a kill: the node is gone, and nothing here says anything about its disk
     cluster.node_mut(0).kill()?;
     assert!(!cluster.node(0).is_alive());
@@ -1120,6 +1130,27 @@ async fn cluster_server_child() {
             block.admins = staged.admins.clone();
             if let Some(interval) = staged.detector_interval_ms {
                 block = block.detector_interval_ms(interval);
+            }
+            // the groups' timers, shortened so a failover fits a test
+            // ([F40](../../docs/src/features/replication.md))
+            if let Some(failover) = staged.failover_ms {
+                block = block.primary_failover_after(Duration::from_millis(failover));
+            }
+            let mut replication = shoal::server::conf::cluster::Replication::default();
+            if let Some(timeout) = staged.write_timeout_ms {
+                replication.write_timeout = Duration::from_millis(timeout).into();
+            }
+            if let Some(bytes) = staged.pending_bytes {
+                replication.pending_bytes = bytes;
+            }
+            block = block.replication(replication);
+            // a table's durability, which a cluster node refuses `async` for
+            if let Some(durability) = &staged.durability {
+                let durability = match durability.as_str() {
+                    "async" => shoal::storage::fs::conf::Durability::Async,
+                    _ => shoal::storage::fs::conf::Durability::Fsync,
+                };
+                conf.storage.default.filesystem.latency_sensitive.durability = durability;
             }
             for (node, control, data) in &staged.dial {
                 let node = NodeId(node.parse().expect("a node id parses"));
@@ -2313,8 +2344,25 @@ async fn fresh_failure_reports_do_not_mask_shard_failure() -> Result<(), Fixture
     let readiness = cluster.node_mut(leader).command("READINESS")?;
     assert_eq!(readiness["ok"]["data"]["members_up"], 2, "{readiness}");
     assert_eq!(readiness["ok"]["data"]["default_writes"], serde_json::json!({ "Ok": null }), "{readiness}");
+    // the write's tablet group may have been led by the paused member, in which case the two
+    // members left elect another within the failover base and a retry lands; a write proposed
+    // in the middle of that is refused by name rather than lost
+    // ([F40](../../docs/src/features/replication.md))
     let client = Shoal::<TestDbClient>::new(&cluster.node(leader).endpoints.client.to_string()).await?;
-    client.send_one(Row { key: 7, data: "seven".to_string() }).await?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let written = client.send_one(Row { key: 7, data: "seven".to_string() }).await;
+        if written.is_ok() {
+            break;
+        }
+        let code = failure_code(&written);
+        assert!(
+            matches!(code, Some(shoal::shared::protocol::error::ErrorCode::NotLeader | shoal::shared::protocol::error::ErrorCode::OutcomeUnknown)),
+            "a write with two members up was refused for another reason: {written:?}"
+        );
+        assert!(std::time::Instant::now() < deadline, "the write never landed: {written:?}");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
     // and back: its next fresh report brings it up again
     cluster.node(victim).resume().map_err(|error| FixtureError::ChildFailed(format!("resuming: {error}")))?;
     let deadline = std::time::Instant::now() + Duration::from_secs(20);

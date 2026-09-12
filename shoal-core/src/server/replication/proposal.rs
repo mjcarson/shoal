@@ -8,13 +8,20 @@
 //! last two is the whole point of this type: a refusal means nothing accepted the command, an
 //! unknown means the leader may have.
 
+use serde::{Deserialize, Serialize};
+
 use super::types::ApplyOutcome;
 
 /// What a proposal came to
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProposalOutcome {
     /// The group applied it, or refused it as a group, and this is what it said
-    Answered(ApplyOutcome),
+    Answered {
+        /// What applying it produced
+        outcome: ApplyOutcome,
+        /// The log index it was committed at, which the proposer waits to see applied locally
+        index: u64,
+    },
     /// Admission refused it before it reached the group: a definite refusal
     ///
     /// The group's pending bytes, or a volatile log's bound, would have passed its limit.

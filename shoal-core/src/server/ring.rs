@@ -194,6 +194,31 @@ impl Ring {
         (which, shard)
     }
 
+    /// Hand a tablet to a shard by its index in `shards`
+    ///
+    /// For the read ring, which points a tablet this node holds a replica of at the local
+    /// shard holding it ([F40](../../../docs/src/features/replication.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `tablet` - The tablet
+    /// * `owner` - The shard's index in `shards`
+    pub fn set_owner(&mut self, tablet: usize, owner: u16) {
+        if let Some(slot) = self.tablets.get_mut(tablet) {
+            *slot = owner;
+        }
+    }
+
+    /// The owner of a tablet, as an index into `shards`
+    ///
+    /// # Arguments
+    ///
+    /// * `tablet` - The tablet
+    #[must_use]
+    pub fn owner(&self, tablet: usize) -> u16 {
+        self.tablets[tablet]
+    }
+
     /// Get the tablet a partition key belongs to
     ///
     /// # Arguments

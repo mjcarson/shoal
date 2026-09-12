@@ -392,6 +392,104 @@ impl Default for Transport {
     }
 }
 
+/// The default proposal deadline
+fn default_write_timeout() -> DurationSpec {
+    DurationSpec(Duration::from_secs(5))
+}
+
+/// The default bound on bytes proposed and not yet answered, per shard
+fn default_pending_bytes() -> usize {
+    64 * 1024 * 1024
+}
+
+/// The default WAL segment size
+fn default_segment_bytes() -> u64 {
+    10 * 1024 * 1024
+}
+
+/// The default number of entries between snapshots
+fn default_checkpoint_entries() -> u64 {
+    1024
+}
+
+/// The default number of entries kept behind a snapshot
+fn default_retained_entries() -> u64 {
+    10_000
+}
+
+/// The default bound on the WAL's in-memory tail, per shard
+fn default_log_cache_bytes() -> usize {
+    16 * 1024 * 1024
+}
+
+/// The default bound on every volatile group's log together, per shard
+fn default_volatile_log_bytes() -> usize {
+    256 * 1024 * 1024
+}
+
+/// The tablet groups' timers and bounds, which are this node's and not the cluster's
+///
+/// Every field is node-local: a deadline, a byte bound, a segment size. None of them enters
+/// the [`BootstrapPolicy`], since none of them is something two nodes have to agree about
+/// ([F40](../../../../docs/src/features/replication.md)). The election and heartbeat timers
+/// are derived from the policy's `primary_failover_after`, which two nodes do have to agree
+/// about, and are not here.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Replication {
+    /// How long a proposal waits for the group before its outcome is reported unknown
+    ///
+    /// Has to be no longer than `transport.forward_timeout`, since the node that forwarded a
+    /// write answers its client unknown at that deadline and drops a later answer.
+    #[serde(default = "default_write_timeout")]
+    pub write_timeout: DurationSpec,
+    /// The most bytes a shard holds proposed and unanswered before it sheds a write
+    #[serde(
+        default = "default_pending_bytes",
+        deserialize_with = "utils::deserialize_byte_size"
+    )]
+    pub pending_bytes: usize,
+    /// How large a WAL segment grows before the next append opens a new one
+    #[serde(
+        default = "default_segment_bytes",
+        deserialize_with = "utils::deserialize_byte_size_u64"
+    )]
+    pub segment_bytes: u64,
+    /// How many entries a group commits between snapshots at its checkpoint
+    #[serde(default = "default_checkpoint_entries")]
+    pub checkpoint_entries: u64,
+    /// How many entries a group keeps behind its snapshot, for a slow member to catch up from
+    #[serde(default = "default_retained_entries")]
+    pub retained_entries: u64,
+    /// How many bytes of entries the WAL keeps in memory past its durable tail
+    #[serde(
+        default = "default_log_cache_bytes",
+        deserialize_with = "utils::deserialize_byte_size"
+    )]
+    pub log_cache_bytes: usize,
+    /// How many bytes every volatile group's log may hold together before proposals are shed
+    #[serde(
+        default = "default_volatile_log_bytes",
+        deserialize_with = "utils::deserialize_byte_size"
+    )]
+    pub volatile_log_bytes: usize,
+}
+
+impl Default for Replication {
+    /// The defaults the configuration page writes down
+    fn default() -> Self {
+        Replication {
+            write_timeout: default_write_timeout(),
+            pending_bytes: default_pending_bytes(),
+            segment_bytes: default_segment_bytes(),
+            checkpoint_entries: default_checkpoint_entries(),
+            retained_entries: default_retained_entries(),
+            log_cache_bytes: default_log_cache_bytes(),
+            volatile_log_bytes: default_volatile_log_bytes(),
+        }
+    }
+}
+
 /// The replication policy a bootstrap seeds into the cluster
 ///
 /// Everything in the `cluster:` block that belongs to the cluster rather than to one node, in
@@ -509,6 +607,9 @@ pub struct Cluster {
     /// The byte bounds and timers of the peer lanes
     #[serde(default)]
     pub transport: Transport,
+    /// The tablet groups' timers and bounds, which are this node's alone
+    #[serde(default)]
+    pub replication: Replication,
     /// Where this node dials particular members, keyed by their identity, when not where they advertise
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub dial: std::collections::BTreeMap<NodeId, DialOverride>,
@@ -536,6 +637,7 @@ impl Default for Cluster {
             admins: Vec::new(),
             tls: None,
             transport: Transport::default(),
+            replication: Replication::default(),
             dial: std::collections::BTreeMap::new(),
         }
     }
@@ -647,6 +749,18 @@ impl Cluster {
     /// Set the byte bounds and timers of the peer lanes
     pub fn transport(mut self, transport: Transport) -> Self {
         self.transport = transport;
+        self
+    }
+
+    /// Set the tablet groups' timers and bounds
+    pub fn replication(mut self, replication: Replication) -> Self {
+        self.replication = replication;
+        self
+    }
+
+    /// Set the base data election timeout, which the groups' heartbeat is a tenth of
+    pub fn primary_failover_after(mut self, after: Duration) -> Self {
+        self.primary_failover_after = DurationSpec::from(after);
         self
     }
 
@@ -770,6 +884,28 @@ impl Cluster {
         if self.replication_factor == 0 {
             return Err(ServerError::Shoal(ShoalError::InvalidConfig(
                 "cluster.replication_factor is 0; a tablet needs at least one replica".to_string(),
+            )));
+        }
+        // a write acknowledged by one replica is one a later leader may roll back, and the
+        // accepted-or-pending API that would make that legible is not built: refused, as C5
+        // says a `One` write is in v1 (F40)
+        if self.write_consistency == Consistency::One {
+            return Err(ServerError::Shoal(ShoalError::NotImplemented {
+                setting: "cluster.write_consistency: One (C5 refuses a One write in v1: a durable quorum cannot be built from an acknowledgement that precedes fdatasync)".to_string(),
+                milestone: "a distinct accepted/pending write API",
+            }));
+        }
+        // the node that forwarded a write answers its client at the forward deadline, so a
+        // proposal that waits longer than that answers nobody
+        if self.replication.write_timeout.duration() > self.transport.forward_timeout.duration() {
+            return Err(ServerError::Shoal(ShoalError::InvalidConfig(
+                "cluster.replication.write_timeout is longer than cluster.transport.forward_timeout; a proposal that outlives the forward deadline answers nobody".to_string(),
+            )));
+        }
+        // the timers the groups derive from the failover base have to be timers at all
+        if self.primary_failover_after.duration() < Duration::from_millis(100) {
+            return Err(ServerError::Shoal(ShoalError::InvalidConfig(
+                "cluster.primary_failover_after is under 100ms; the groups' heartbeat is a tenth of it".to_string(),
             )));
         }
         // the advertised address has to be one, whether or not anything dials it yet

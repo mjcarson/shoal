@@ -65,13 +65,36 @@ const FORMAT_WITH_MODE: u32 = 3;
 /// told what this one understands rather than only what it does not.
 pub const SUPPORTED_FORMATS: &[u32] = &[2, META_FORMAT];
 
-/// The version of the shard layout the data is under
+/// The version of the shard layout a standalone node's data is under
 ///
 /// Layout 1 is the `tablet % shard_count` ring [`super::ring::Ring::new`] builds and the per
-/// shard directories under it. A rehome that changed how tablets map to shards would be layout 2,
-/// and a marker naming a layout this build does not lay data out in is refused the same way a
-/// format is.
+/// shard directories under it, each table with an intent log of its own. ~~A rehome that changed
+/// how tablets map to shards would be layout 2~~ Layout 2 is a cluster node's
+/// ([`CLUSTER_LAYOUT`]), and a marker naming a layout this build does not lay data out in is
+/// refused the same way a format is.
 pub const SHARD_LAYOUT: u32 = 1;
+
+/// The version of the shard layout a cluster node's data is under
+///
+/// The same archives, with the per table intent logs replaced by one shared WAL per shard under
+/// `wal/` that every tablet group's log lives in ([F40](../../../docs/src/features/replication.md)).
+/// A cluster directory written at layout 1 - by a build before F40 - is refused, since its
+/// intent logs would be replayed by nothing; there is no migration tool, which is the same
+/// policy a format 1 marker met at M1.
+pub const CLUSTER_LAYOUT: u32 = 2;
+
+/// The layout a node lays data out in, by what it is
+///
+/// # Arguments
+///
+/// * `intent` - Whether the node is standalone or a cluster member
+#[must_use]
+pub const fn layout_for(intent: ClusterIntent) -> u32 {
+    match intent {
+        ClusterIntent::Standalone => SHARD_LAYOUT,
+        ClusterIntent::Bootstrap | ClusterIntent::Join => CLUSTER_LAYOUT,
+    }
+}
 
 /// The name of the metadata file within a storage directory
 const META_FILE: &str = "shoal-meta.json";
@@ -298,7 +321,13 @@ impl StorageMeta {
             shards,
             node,
             cluster,
-            layout: SHARD_LAYOUT,
+            // a cluster member lays its data out under a shared WAL, a standalone node under
+            // intent logs of its own
+            layout: match mode {
+                MarkerMode::Cluster => CLUSTER_LAYOUT,
+                MarkerMode::Standalone => SHARD_LAYOUT,
+                MarkerMode::Joining => CLUSTER_LAYOUT,
+            },
             topology: 0,
             mode,
             incarnation: 1,
@@ -318,6 +347,7 @@ impl StorageMeta {
     pub fn joining(shards: usize, node: NodeId) -> Self {
         StorageMeta {
             mode: MarkerMode::Joining,
+            layout: CLUSTER_LAYOUT,
             ..StorageMeta::new(shards, node, None)
         }
     }
@@ -445,13 +475,6 @@ impl StorageMeta {
                         expected: shards,
                     }));
                 }
-                // a different layout would too, even at the same count
-                if found.layout != SHARD_LAYOUT {
-                    return Err(ServerError::Shoal(ShoalError::ShardLayoutMismatch {
-                        found: found.layout,
-                        expected: SHARD_LAYOUT,
-                    }));
-                }
                 // the mode the directory was claimed in has to be the mode it is reopened in
                 match (intent, found.mode) {
                     // a standalone directory reopened standalone, the ordinary restart
@@ -490,6 +513,15 @@ impl StorageMeta {
                             node: found.node,
                         }));
                     }
+                }
+                // a different layout would too, even at the same count: a cluster directory
+                // at layout 1 was written by a build before the shared WAL, and its intent
+                // logs would be replayed by nothing (F40)
+                if found.layout != layout_for(intent) {
+                    return Err(ServerError::Shoal(ShoalError::ShardLayoutMismatch {
+                        found: found.layout,
+                        expected: layout_for(intent),
+                    }));
                 }
                 // this is one more start of the directory, and the marker says so before the
                 // identity is handed out: a start that is later fenced has already been counted
@@ -531,7 +563,7 @@ impl StorageMeta {
                 Ok(Identity {
                     node,
                     cluster: meta.cluster,
-                    layout: SHARD_LAYOUT,
+                    layout: meta.layout,
                     topology_at_claim: 0,
                     fresh: true,
                     mode: meta.mode,
@@ -689,7 +721,7 @@ mod tests {
         // a cluster member's marker exactly as F37 wrote one
         let raw = format!(
             "{{\"format\": 2, \"shards\": 4, \"node\": \"{node}\", \"cluster\": \"{cluster}\", \
-             \"layout\": 1, \"topology\": 7}}"
+             \"layout\": 2, \"topology\": 7}}"
         );
         std::fs::write(StorageMeta::path(dir.path()), raw).expect("failed to stage our marker");
         // read, it is a member of its cluster with no starts counted
@@ -947,7 +979,7 @@ mod tests {
         assert_eq!(found.node, identity.node);
         assert_eq!(found.cluster, identity.cluster);
         assert_eq!(found.shards, 2);
-        assert_eq!(found.layout, SHARD_LAYOUT);
+        assert_eq!(found.layout, CLUSTER_LAYOUT);
         assert_eq!(found.incarnation, identity.incarnation);
         assert_eq!(found.mode, MarkerMode::Cluster);
         // going backwards is refused

@@ -77,16 +77,31 @@ pub fn find_inactive_intent_logs(intent_dir: &PathBuf, shard_name: &str) -> Vec<
     inactive_logs
 }
 
+/// Where a table's writes are logged before they reach an archive
+///
+/// A standalone node's table writes its own intent log. On a cluster node the shard's shared
+/// WAL is the log - every write is a replicated command the tablet group commits and the shard
+/// applies - so the table writes none of its own, and what it keeps is the WAL generation the
+/// shard tells it a command was applied in ([F40](../../../docs/src/features/replication.md)).
+/// Decided once, at construction, from whether the configuration carries a `cluster:` block.
+pub enum LogSink<D: ShoalDatabase> {
+    /// This table's own intent log, which standalone writes
+    Intent(StreamWriter<D>),
+    /// The shard's shared WAL, which the shard writes and this engine only hears the generation of
+    Shared {
+        /// The WAL's active generation, as the shard last said
+        generation: u64,
+    },
+}
+
 /// Store shoal data in an existing filesytem for persistence
 pub struct FileSystem<D: ShoalDatabase> {
     /// The name of the shard we are storing data for
     shard_name: String,
     /// The path to our current intent log
     intent_path: PathBuf,
-    ///// The intent log to write too
-    //intent_log: DmaStreamWriter,
-    /// The intent log to write to
-    intent_log2: StreamWriter<D>,
+    /// The log this table's writes go through
+    sink: LogSink<D>,
     /// The current intent log generation
     ///
     /// This starts at 1 rather than 0 so that a generation of 0 can be used to mean
@@ -307,14 +322,20 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
         let mut intent_path = table_conf.get_intent_path(R::name());
         // add our shard name
         intent_path.push(format!("{shard_name}-active"));
-        // build the writer for this shards intent log
-        let intent_log2 = StreamWriter::builder(&intent_path, shard_local_tx.clone())
-            .buffer_size(table_conf.latency_sensitive.buffer_size)
-            .max_buffer_size(table_conf.latency_sensitive.max_buffer_size)
-            .write_behind(table_conf.latency_sensitive.write_behind)
-            .durability(table_conf.latency_sensitive.durability)
-            .build()
-            .await?;
+        // build the writer for this shards intent log, unless the shard's WAL is the log
+        let sink = if conf.cluster.is_some() {
+            LogSink::Shared { generation: 1 }
+        } else {
+            LogSink::Intent(
+                StreamWriter::builder(&intent_path, shard_local_tx.clone())
+                    .buffer_size(table_conf.latency_sensitive.buffer_size)
+                    .max_buffer_size(table_conf.latency_sensitive.max_buffer_size)
+                    .write_behind(table_conf.latency_sensitive.write_behind)
+                    .durability(table_conf.latency_sensitive.durability)
+                    .build()
+                    .await?,
+            )
+        };
         // build the channel to our compactor
         let (intent_tx, intent_rx) = kanal::unbounded_async();
         // get this shards shared archive map
@@ -327,7 +348,7 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
         let mut fs = FileSystem {
             shard_name: shard_name.to_owned(),
             intent_path,
-            intent_log2,
+            sink,
             // generations start at 1 so 0 can mean "nothing has been compacted yet"
             generation: 1,
             medium_priority,
@@ -364,6 +385,13 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
     /// * `data` - The data to commit
     #[allow(async_fn_in_trait)]
     async fn commit<I: RkyvSupport>(&mut self, data: &I) -> Result<u64, ServerError> {
+        // a cluster node's table never commits: its writes are replicated commands the shard
+        // applies, and a commit here is a write that skipped the group
+        let LogSink::Intent(writer) = &mut self.sink else {
+            return Err(ServerError::GlommioGeneric(
+                "a table on a cluster node committed to an intent log it does not have; every write goes through its tablet group".to_string(),
+            ));
+        };
         // serialize our data
         let archived = RkyvSupport::serialize(data);
         // get the size of the data to write
@@ -378,7 +406,7 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
         // 16 bytes for size + checksum and then the size of our data
         let total_size = 16 + archived_slice.len();
         // get a buffer to write this commit data too
-        let mut buff = self.intent_log2.prep(total_size).await;
+        let mut buff = writer.prep(total_size).await;
         // write our size
         buff.write_all(&size.to_le_bytes())?;
         // write our checksum
@@ -386,10 +414,10 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
         // write our data
         buff.write_all(archived.as_slice())?;
         // tell our writer that we have consumed some data
-        self.intent_log2.consume(total_size).await;
+        writer.consume(total_size).await;
         // return the offset one past this record, which is the position it will be
         // durable at once our writers watermark reaches it
-        Ok(self.intent_log2.get_unflushed_pos())
+        Ok(writer.get_unflushed_pos())
     }
 
     /// Fill in the durability stages for responses that have just been released
@@ -399,12 +427,19 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
     /// * `stamps` - The stamps to fill in, each already carrying its commit offset
     #[cfg(feature = "stage-profile")]
     fn fill_durability(&self, stamps: &mut StageStamps) {
-        // the writer owns the timeline these stages are looked up in
-        self.intent_log2.fill_durability(stamps);
+        // the writer owns the timeline these stages are looked up in; a shared WAL has none here
+        if let LogSink::Intent(writer) = &self.sink {
+            writer.fill_durability(stamps);
+        }
     }
 
     /// Get how this storage engine makes a committed intent durable
     fn durability(&self) -> StageDurability {
+        // a replicated write is acknowledged on a quorum's fdatasync, whatever this table's
+        // own log would have been configured with
+        if matches!(self.sink, LogSink::Shared { .. }) {
+            return StageDurability::Fsync;
+        }
         // report what this tables intent log was actually configured with, since a report
         // that assumed the default would invent an fdatasync stage for a table that has none
         match self.table_conf.latency_sensitive.durability {
@@ -420,10 +455,14 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
     /// and no await. That is what makes it cheap enough for the shard to ask on every
     /// message before deciding whether to sweep its tables.
     fn compaction_due(&self) -> bool {
+        // a shared WAL rotates on the shard's say, never on this table's
+        let LogSink::Intent(writer) = &self.sink else {
+            return false;
+        };
         // get the latency sensistive max intent log size
         let max_size = self.table_conf.latency_sensitive.intent_log_size;
         // our log is due to rotate once it has accepted more than that
-        self.intent_log2.get_unflushed_pos() > max_size
+        writer.get_unflushed_pos() > max_size
     }
 
     /// Set our intent log to be compact if its needed
@@ -438,10 +477,23 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
         &mut self,
         force: bool,
     ) -> Result<FlushProgress, ServerError> {
+        // a shared WAL has no positions of its own to report: nothing is ever parked on it
+        // here, and the generation is what the shard last said
+        let writer = match &mut self.sink {
+            LogSink::Intent(writer) => writer,
+            LogSink::Shared { generation } => {
+                return Ok(FlushProgress {
+                    durable_pos: 0,
+                    generation: *generation,
+                    rotated: false,
+                });
+            }
+        };
         // surface any error our background write tasks hit
-        self.intent_log2.check_error()?;
+        writer.check_error()?;
         // check if this intent log is too big or if compaction is being forced
-        if force || self.compaction_due() {
+        let due = writer.get_unflushed_pos() > self.table_conf.latency_sensitive.intent_log_size;
+        if force || due {
             // get our base intent path
             let mut new_path = self.table_conf.get_intent_path(R::name());
             // build the file name to rename our current intent log too
@@ -449,7 +501,7 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
             // build the path to this shards new intent log
             new_path.push(name);
             // refresh this writer to a write to a new file
-            let flushed_pos = self.intent_log2.refresh(&new_path).await?;
+            let flushed_pos = writer.refresh(&new_path).await?;
             // create an intent log compaction job
             self.intent_tx
                 .send(CompactionJob::IntentLog {
@@ -468,7 +520,7 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
             })
         } else {
             // get the current position of durable data
-            let flushed_pos = self.intent_log2.get_flushed_pos();
+            let flushed_pos = writer.get_flushed_pos();
             Ok(FlushProgress {
                 durable_pos: flushed_pos,
                 generation: self.generation,
@@ -480,10 +532,14 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
     /// Flush all currently pending writes to storage
     #[allow(async_fn_in_trait)]
     async fn flush(&mut self) -> Result<(), ServerError> {
+        // a shared WAL is the shard's to flush
+        let LogSink::Intent(writer) = &mut self.sink else {
+            return Ok(());
+        };
         // surface any error our background write tasks hit
-        self.intent_log2.check_error()?;
+        writer.check_error()?;
         // sync our intent log to disk
-        self.intent_log2.sync().await?;
+        writer.sync().await?;
         Ok(())
     }
 
@@ -517,6 +573,11 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
     {
         // start with nothing discarded
         let mut stats = RecoveryStats::default();
+        // a cluster node's table has no log of its own to replay: its history is the shard's
+        // WAL, which the tablet groups re-apply from the checkpoint once they start
+        if matches!(self.sink, LogSink::Shared { .. }) {
+            return Ok(stats);
+        }
         // get this tables settings
         let table_conf = Self::get_settings::<R>(conf)?;
         // get our intent log directory for this table
@@ -655,14 +716,29 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
         }
     }
 
+    /// Note the WAL generation a replicated command is applied in
+    fn observe_generation(&mut self, observed: u64) {
+        if let LogSink::Shared { generation } = &mut self.sink {
+            *generation = observed;
+        }
+    }
+
+    /// The channel this engine's compactor takes jobs on
+    fn compaction_sink(&self) -> Option<AsyncSender<CompactionJob>> {
+        Some(self.intent_tx.clone())
+    }
+
     /// Shutdown this storage engine
     #[allow(async_fn_in_trait)]
     async fn shutdown(mut self) -> Result<(), ServerError> {
         // durably flush any remaining intent log writes to disk
         //
         // this has to be the blocking sync, not `flush`, since `flush` only hands
-        // another buffer to the kernel and returns without waiting
-        self.intent_log2.sync_blocking().await?;
+        // another buffer to the kernel and returns without waiting; a shared WAL is the
+        // shard's to close
+        if let LogSink::Intent(writer) = &mut self.sink {
+            writer.sync_blocking().await?;
+        }
         // signal our intent log compactor to shutdown
         //
         // a compactor that has already died - a job of its failed, and its loop stops on the
@@ -678,7 +754,9 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
             task?;
         }
         // close any glommio files
-        self.intent_log2.close().await?;
+        if let LogSink::Intent(writer) = self.sink {
+            writer.close().await?;
+        }
         // close our archive map
         self.map.close_all().await?;
         Ok(())

@@ -25,12 +25,16 @@ use uuid::Uuid;
 use tracing::Span;
 
 use crate::server::messages::{Answer, LoadedPartitionKinds, QueryMetadata, ServerMsg};
+use crate::server::replication::CommandResult;
 use crate::server::routing::{ArchivedShardRouting, ShardRouting};
+use crate::server::tables::ApplyStep;
 use crate::server::{Conf, ServerError};
+use crate::shared::identity::TableId;
+use crate::shared::protocol::peer::Command;
 use crate::shared::queries::{ArchivedQueries, Queries};
 use crate::shared::responses::ResponseError;
 use crate::shared::traits::{QuerySupport, TableNameSupport};
-use crate::storage::{FullArchiveMap, LoaderMsg, Loaders, RecoveryStats};
+use crate::storage::{CompactionJob, FullArchiveMap, LoaderMsg, Loaders, RecoveryStats};
 
 /// The core trait that all databases in shoal must support
 pub trait ShoalDatabase: 'static + Sized
@@ -64,7 +68,10 @@ where
     /// deserialized query, kept as the reference the tests check that against. A
     /// `#[shoal::db(client)]` schema implements neither, which is what keeps them - and
     /// therefore the ring and the shard - out of a client build.
-    type ClientType: QuerySupport<QueryKinds: ShardRouting + ArchivedShardRouting> + Sized;
+    type ClientType: QuerySupport<
+            QueryKinds: ShardRouting + ArchivedShardRouting,
+            TableNames = Self::TableNames,
+        > + Sized;
 
     /// The different tables in this database
     type TableNames: TableNameSupport;
@@ -264,6 +271,90 @@ where
         error: Option<ResponseError>,
         shard_local_tx: &AsyncSender<ServerMsg<Self>>,
     ) -> Result<(), ServerError>;
+
+    /// The command a write proposes through its tablet group, or none for a read
+    ///
+    /// The table the write names, the partition key it names, and the table's intent serialized
+    /// once - the bytes every replica's log and state machine see
+    /// ([F40](../../../docs/src/features/replication.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `query` - The query
+    fn write_command(
+        &self,
+        query: &<Self::ClientType as QuerySupport>::QueryKinds,
+    ) -> Option<(Self::TableNames, u64, Vec<u8>)>;
+
+    /// Apply a committed command to the table it names, in committed order
+    ///
+    /// # Arguments
+    ///
+    /// * `table` - The table
+    /// * `command` - The command
+    /// * `generation` - The WAL generation the command's frame is in
+    /// * `skip_disk` - Whether to answer without reading, because a read was already tried
+    fn apply_command(
+        &mut self,
+        table: Self::TableNames,
+        command: &Command,
+        generation: u64,
+        skip_disk: bool,
+    ) -> ApplyStep;
+
+    /// The response a proposal's result is answered with, in the table's own variant
+    ///
+    /// # Arguments
+    ///
+    /// * `table` - The table the write named
+    /// * `id` - The bundle the write arrived in
+    /// * `index` - The index the answer is owed under
+    /// * `end` - Whether the write was the last of its stream
+    /// * `result` - What applying it produced
+    fn write_response(
+        table: Self::TableNames,
+        id: Uuid,
+        index: usize,
+        end: bool,
+        result: CommandResult,
+    ) -> <Self::ClientType as QuerySupport>::ResponseKinds;
+
+    /// Ask a table for a partition a replicated apply needs, saying whether a read is coming
+    ///
+    /// # Arguments
+    ///
+    /// * `table` - The table
+    /// * `partition_key` - The partition
+    /// * `span` - The span the read hangs off
+    #[allow(async_fn_in_trait)]
+    async fn request_load(
+        &mut self,
+        table: Self::TableNames,
+        partition_key: u64,
+        span: &Span,
+    ) -> Result<bool, ServerError>;
+
+    /// Every table's compactor channel, for the shard to hand a WAL segment to
+    ///
+    /// A table with no compactor - an ephemeral one - is not listed.
+    fn compaction_sinks(&self) -> Vec<(Self::TableNames, AsyncSender<CompactionJob>)>;
+
+    /// Hash a table's applied state, for a fixture comparing replicas
+    ///
+    /// # Arguments
+    ///
+    /// * `table` - The table
+    fn digest_table(&self, table: Self::TableNames) -> (u64, u64);
+
+    /// The table a stable identity names, if the schema has it
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The identity
+    fn table_of_id(id: TableId) -> Option<Self::TableNames>;
+
+    /// The names of every persistent table, whose storage a configuration can set
+    fn persistent_tables() -> Vec<&'static str>;
 
     /// Shutdown this table and flush any data to disk if needed
     #[allow(async_fn_in_trait)]

@@ -61,7 +61,13 @@ enum Outcome {
 pub enum RpcFailure {
     /// The peer answered with a failure, and this is what it said
     Remote(String),
-    /// The link was down, its queue full, or the deadline passed
+    /// The request was never written: the queue was full or the link was down
+    ///
+    /// A definite non-answer, which for a proposal means nothing was accepted.
+    NotSent(String),
+    /// The link dropped after the request was written, or the deadline passed
+    ///
+    /// The peer may have acted on it.
     Unreachable(String),
 }
 
@@ -69,7 +75,7 @@ impl std::fmt::Display for RpcFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             RpcFailure::Remote(msg) => write!(f, "the peer refused the rpc: {msg}"),
-            RpcFailure::Unreachable(msg) => write!(f, "{msg}"),
+            RpcFailure::NotSent(msg) | RpcFailure::Unreachable(msg) => write!(f, "{msg}"),
         }
     }
 }
@@ -188,7 +194,7 @@ impl ReplicationLink {
         // a queue that is full or a link that is down is a definite non-answer
         if self.link.enqueue(frame).is_err() {
             self.pending.borrow_mut().remove(&id);
-            return Err(RpcFailure::Unreachable(
+            return Err(RpcFailure::NotSent(
                 "the replication link's queue is full or its link is down".to_string(),
             ));
         }

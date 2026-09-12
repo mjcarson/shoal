@@ -812,11 +812,19 @@ impl ControlState {
 
     /// The replication factor the members can actually give
     ///
-    /// One where a placement exists, since every tablet has exactly one owner under it
-    /// ([F39](../../../../docs/src/features/membership.md), "serve one copy, report the gap");
-    /// zero before one does. Never the desired factor, until M4 places replicas.
+    /// ~~One where a placement exists, since every tablet has exactly one owner under it~~
+    /// The desired factor or the placement's size, whichever is smaller, since
+    /// [F40](../../../../docs/src/features/replication.md) places that many copies; zero before
+    /// a placement exists. A placement smaller than the factor serves what it can and reports
+    /// the gap ([F39](../../../../docs/src/features/membership.md)).
     pub fn active_rf(&self) -> u32 {
-        u32::from(self.initialized.is_some())
+        match &self.initialized {
+            Some(nodes) => self
+                .desired_rf()
+                .max(1)
+                .min(u32::try_from(nodes.len()).unwrap_or(u32::MAX)),
+            None => 0,
+        }
     }
 
     /// How many members are up
@@ -1152,7 +1160,8 @@ mod tests {
         );
         assert_eq!(state.initialized, Some(vec![node, joiner]));
         assert_eq!(state.tables, tables);
-        assert_eq!(state.active_rf(), 1);
+        // two nodes under a factor of three give two copies (F40)
+        assert_eq!(state.active_rf(), 2);
         // the same op again is answered as it was, and moves nothing
         assert_eq!(
             state.apply(&initialize(op, 4, vec![joiner])),

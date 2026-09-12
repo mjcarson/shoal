@@ -62,6 +62,11 @@ pub enum AdminKind {
     Readiness,
     /// What the failure detector currently believes, committed and local
     Detector,
+    /// What the node's tablet groups look like: leaders, applied lag, pending bytes
+    ///
+    /// The "lag" record [C9](../../../../docs/src/distributed/operations.md) asks for, as every
+    /// shard last reported it ([F40](../../../../docs/src/features/replication.md)).
+    Replication,
     /// Place every tablet across these nodes, once, in this order
     ///
     /// Explicit by design: nothing places data on a node because it happened to join
@@ -94,6 +99,7 @@ impl AdminKind {
             AdminKind::Members => "members",
             AdminKind::Readiness => "readiness",
             AdminKind::Detector => "detector",
+            AdminKind::Replication => "replication",
             AdminKind::Initialize { .. } => "initialize",
             AdminKind::SetControlVoters { .. } => "set_control_voters",
         }

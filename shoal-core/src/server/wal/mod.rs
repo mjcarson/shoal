@@ -1228,6 +1228,20 @@ impl GroupStore {
         matches!(self.backend, Backend::Memory(_))
     }
 
+    /// The index this group's log is purged to, if it was ever purged
+    #[must_use]
+    pub fn purged_index(&self) -> Option<u64> {
+        match &self.backend {
+            Backend::Shared(wal) => wal
+                .inner
+                .borrow()
+                .groups
+                .get(&self.group)
+                .and_then(|log| log.purged.as_ref().map(|log_id| log_id.index)),
+            Backend::Memory(memory) => memory.log_state(self.group).last_purged_log_id.map(|log_id| log_id.index),
+        }
+    }
+
     /// How many bytes of entries this group holds, for admission against a volatile bound
     #[must_use]
     pub fn bytes(&self) -> usize {

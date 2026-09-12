@@ -206,6 +206,8 @@ pub enum ControlRequest {
     AttachSink(MapSink, mpsc::Sender<()>),
     /// A shard died
     ShardHealth(ShardHealthEvent),
+    /// A shard's tablet groups, as it last reported them
+    Replication(crate::server::replication::ShardReplication),
     /// Send the leader one report behind the last, as a replay would be, for a test
     StaleReport(mpsc::Sender<Result<(), String>>),
     /// Stop the group and exit the thread
@@ -273,6 +275,11 @@ pub struct DataReadiness {
     pub default_writes: Result<(), QuorumShortfall>,
     /// The shards that have failed on this node, by index
     pub shards_failed: Vec<u16>,
+    /// What the node's tablet groups look like, folded over every shard
+    ///
+    /// Empty before any shard reported ([F40](../../../../docs/src/features/replication.md)).
+    #[serde(default)]
+    pub replication: crate::server::replication::NodeReplication,
 }
 
 /// Where this node stands: live, with its group, and with its data
@@ -822,6 +829,8 @@ struct Core {
     detector: Detector,
     /// The members whose health this leader is proposing, so one verdict is in flight per member
     health_in_flight: BTreeSet<NodeId>,
+    /// What every shard last reported about its tablet groups, by shard
+    replication: BTreeMap<usize, crate::server::replication::ShardReplication>,
 }
 
 impl Core {
@@ -888,6 +897,9 @@ impl Core {
                     })
                 },
                 shards_failed: self.shards_failed.clone(),
+                replication: crate::server::replication::NodeReplication::fold(
+                    self.replication.values().cloned().collect(),
+                ),
             },
         }
     }
@@ -1214,6 +1226,7 @@ async fn serve(startup: Startup) -> Result<(), ServerError> {
         reported_shards: Vec::new(),
         detector: Detector::new(&policy.failure_detector),
         health_in_flight: BTreeSet::new(),
+        replication: BTreeMap::new(),
     };
     core.publish();
     event!(
@@ -1362,6 +1375,10 @@ impl Core {
                 .detach();
             }
             ControlRequest::Admin(call) => self.handle_admin(call),
+            ControlRequest::Replication(report) => {
+                // the newest report per shard is what readiness folds
+                self.replication.insert(report.shard, report);
+            }
             ControlRequest::ShardHealth(health) => {
                 // a shard runs fewer than a u16 holds
                 #[allow(clippy::cast_possible_truncation)]
@@ -1666,6 +1683,15 @@ impl Core {
             AdminKind::Readiness => {
                 let _ = call.reply.send(answer(Ok(AdminOutcome::Read(
                     serde_json::to_value(self.readiness()).unwrap_or_default(),
+                ))));
+                return;
+            }
+            AdminKind::Replication => {
+                let folded = crate::server::replication::NodeReplication::fold(
+                    self.replication.values().cloned().collect(),
+                );
+                let _ = call.reply.send(answer(Ok(AdminOutcome::Read(
+                    serde_json::to_value(folded).unwrap_or_default(),
                 ))));
                 return;
             }
