@@ -39,7 +39,8 @@ pub mod tls;
 mod tests;
 
 
-use crate::server::conf::cluster::{PeerTls, Placement, Transport};
+use crate::server::conf::cluster::{DialOverride, PeerTls, Transport};
+use crate::shared::identity::NodeId;
 
 pub use crate::shared::protocol::peer::Lane;
 pub use handshake::Local;
@@ -52,14 +53,17 @@ pub use peers::{Peers, Pending};
 /// A standalone node has none of this and builds no peer links, binds no peer listener, and
 /// routes against a ring of its own shards. A cluster node gets one of these, shared by every
 /// shard - it is `Send` and `Clone` so the pool can hand a copy to each shard thread, which
-/// wraps the placement in an `Rc` and builds its rustls configs on its own executor, the way
-/// each shard already builds the client listener's config.
+/// wraps what it needs in an `Rc` and builds its rustls configs on its own executor, the way
+/// each shard already builds the client listener's config. Who the peers are is not here: that
+/// is the map the control plane pushes ([F39](../../../../docs/src/features/membership.md)).
 #[derive(Clone)]
 pub struct PeerSetup {
     /// What this node says about itself in every hello
     pub local: Local,
-    /// The static placement of tablets over nodes
-    pub placement: Placement,
+    /// Where particular members are dialled instead of where they advertise
+    pub dial: std::collections::BTreeMap<NodeId, DialOverride>,
+    /// The map the control plane held when the shards started; later ones are pushed
+    pub initial_map: std::sync::Arc<crate::server::map::TabletMap>,
     /// The certificate and authority the lanes use, if they are encrypted
     pub tls: Option<PeerTls>,
     /// The bounds and timers

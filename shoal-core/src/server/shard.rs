@@ -41,6 +41,7 @@ use super::peer::{
 };
 use super::request_body::RequestBody;
 use super::database::ShoalDatabase;
+use super::map::{MapCell, TabletMap};
 use super::ring::Ring;
 use super::routing::ArchivedShardRouting;
 use super::stage_profile::{self, StageStamps, Stamp};
@@ -1048,6 +1049,21 @@ pub(super) struct Shard<D: ShoalDatabase> {
     /// `None` on a standalone node. Built lazily on a cluster node so a shard that never
     /// forwards a query dials nothing ([F38](../../../docs/src/features/inter-node-transport.md)).
     peers: Option<Peers<D>>,
+    /// The map this shard holds, which its ring, its links and its listener all read
+    ///
+    /// Installed whole from what the control plane pushes; a standalone node holds the default
+    /// and never installs another ([F39](../../../docs/src/features/membership.md)).
+    map: MapCell,
+    /// Whether this node holds tablets under the placement
+    ///
+    /// A joiner before the placement is initialized holds none and answers every data query
+    /// with `NotInitialized`; a standalone node always holds its own.
+    placed: bool,
+    /// What this node says about itself in a hello, shared with the links and the listener
+    ///
+    /// A cell rather than a value because a joiner's cluster is learned after its shards start,
+    /// from the map, and every later hello has to carry it.
+    local: Option<Rc<RefCell<Local>>>,
     /// Bytes this shard has received on bulk lanes, for the transport view
     bulk_received: Rc<Cell<u64>>,
 }
@@ -1120,11 +1136,20 @@ where
         )
         .await?;
         // build our tablet map: a standalone node's is its own shards, a cluster node's places
-        // those shards among the peers the placement names, so a remote key routes to a remote
-        // contact ([F38](../../../docs/src/features/inter-node-transport.md))
-        let ring = match &peer_setup {
-            Some(setup) => Ring::with_placement(shard_count, &setup.placement, setup.local.node)?,
-            None => Ring::new(shard_count)?,
+        // those shards among the members the map names, so a remote key routes to a remote
+        // contact ([F38](../../../docs/src/features/inter-node-transport.md)); a node the map
+        // does not place holds a ring of its own shards it routes nothing against
+        let (ring, placed, map, local) = match &peer_setup {
+            Some(setup) => {
+                let map = MapCell::new(setup.initial_map.clone());
+                let mut local = setup.local.clone();
+                local.cluster = local.cluster.or(setup.initial_map.cluster);
+                match setup.initial_map.ring_for(setup.local.node, shard_count)? {
+                    Some(ring) => (ring, true, map, Some(Rc::new(RefCell::new(local)))),
+                    None => (Ring::new(shard_count)?, false, map, Some(Rc::new(RefCell::new(local)))),
+                }
+            }
+            None => (Ring::new(shard_count)?, true, MapCell::default(), None),
         };
         // build our shard
         let shard = Shard {
@@ -1150,9 +1175,52 @@ where
             bound: None,
             peer_setup,
             peers: None,
+            map,
+            placed,
+            local,
             bulk_received: Rc::new(Cell::new(0)),
         };
         Ok(shard)
+    }
+
+    /// Install a newer map, rebuilding the ring this shard routes with
+    ///
+    /// One assignment between two messages, so nothing ever routes against half a map; a map at
+    /// or below the installed version is ignored.
+    ///
+    /// # Arguments
+    ///
+    /// * `map` - The map the control plane pushed
+    fn install_map(&mut self, map: Arc<TabletMap>) -> Result<(), ServerError> {
+        let Some(setup) = &self.peer_setup else {
+            return Ok(());
+        };
+        if !self.map.install(map.clone()) {
+            return Ok(());
+        }
+        // a joiner learns its cluster from the first map that names one
+        if let Some(local) = &self.local {
+            let mut local = local.borrow_mut();
+            if local.cluster.is_none() {
+                local.cluster = map.cluster;
+            }
+        }
+        // the ring this node routes with under the placement, or none if it is not placed
+        match map.ring_for(setup.local.node, self.ring.shards.iter().filter(|info| info.contact.local_index().is_some()).count())? {
+            Some(ring) => {
+                self.ring = ring;
+                self.placed = true;
+            }
+            None => self.placed = false,
+        }
+        event!(
+            Level::INFO,
+            msg = "installed a tablet map",
+            version = map.version,
+            placed = self.placed,
+            members = map.members.len(),
+        );
+        Ok(())
     }
 
     /// Spawn our client network listener
@@ -1207,15 +1275,6 @@ where
         Ok(())
     }
 
-    /// broadcast this join to all shards
-    pub async fn join_cluster(&mut self) -> Result<(), ServerError> {
-        // build our join message
-        let join_msg = ServerMsg::Join(self.info.clone());
-        // broadcast this message
-        self.comms.broadcast(&join_msg).await?;
-        Ok(())
-    }
-
     /// Initialize this shard
     ///
     /// # Arguments
@@ -1232,8 +1291,6 @@ where
         self.spawn_client_listener()?;
         // stand up the peer listener and links, on a cluster node
         self.spawn_peer_listener()?;
-        // broadcast our join message
-        self.join_cluster().await?;
         // start our loaders
         self.tables
             .init_storage_loaders(
@@ -1331,16 +1388,39 @@ where
         // be read back into whatever this host uses
         let bundle_id = queries.id;
         let base_index = queries.base_index.to_native() as usize;
-        // initialize a vec to store the per shard shares we find
-        let mut found = Vec::with_capacity(3);
-        // the remote shares of this bundle, gathered per node into one forward each
-        let mut remote: HashMap<NodeId, Vec<(crate::shared::protocol::peer::ForwardEntry, Pending<D>)>> =
-            HashMap::new();
         // get the absolute index for the last query in this bundle
         //
         // every index below is absolute, so this has to carry the base index too or a
         // streamed bundle would compare an absolute index against a relative one
         let end_index = base_index + last_offset;
+        // a node the placement does not name holds no tablets, so nothing here can be answered;
+        // every query is refused by name rather than routed to a shard that would find nothing
+        // ([F39](../../../docs/src/features/membership.md))
+        if !self.placed {
+            for (offset, kind) in queries.queries.iter().enumerate() {
+                let index = offset + base_index;
+                let table = <D::ClientType as QuerySupport>::archived_query_table(kind);
+                let error = crate::shared::responses::ResponseError::new(
+                    ErrorCode::NotInitialized,
+                    "this node holds no tablets: the placement has not been initialized, or does not name it",
+                );
+                let response = <D::ClientType as QuerySupport>::failed(
+                    table,
+                    bundle_id,
+                    index,
+                    index == end_index,
+                    error,
+                );
+                let span = info_span!(parent: request, "Coordinator::route", id = %bundle_id, index);
+                self.reply(client, bundle_id, span, stamps, response).await?;
+            }
+            return Ok(());
+        }
+        // initialize a vec to store the per shard shares we find
+        let mut found = Vec::with_capacity(3);
+        // the remote shares of this bundle, gathered per node into one forward each
+        let mut remote: HashMap<NodeId, Vec<(crate::shared::protocol::peer::ForwardEntry, Pending<D>)>> =
+            HashMap::new();
         // crawl over our queries
         for (offset, kind) in queries.queries.iter().enumerate() {
             // get this queries absolute index in its stream
@@ -2444,12 +2524,16 @@ where
             }
             None => (None, None),
         };
-        // the placement, shared by the listener and the links on this shard
-        let placement = Rc::new(setup.placement.clone());
+        // what this node says about itself, shared by the listener and the links on this shard
+        let local = self
+            .local
+            .clone()
+            .unwrap_or_else(|| Rc::new(RefCell::new(setup.local.clone())));
         // the links this shard forwards through, delivering what they learn onto this shard
         self.peers = Some(Peers::new(
-            placement.clone(),
-            setup.local.clone(),
+            self.map.clone(),
+            setup.dial.clone(),
+            local.clone(),
             client_tls,
             setup.transport.clone(),
             self.shard_local_tx.clone_sync(),
@@ -2459,8 +2543,8 @@ where
         let ctx = ListenerContext {
             comms: self.comms.clone(),
             node_local_tx: self.shard_local_tx.clone(),
-            local: Rc::new(setup.local.clone()),
-            placement,
+            local,
+            map: self.map.clone(),
             tls: server_tls,
             handshake_timeout: setup.transport.handshake_timeout.duration(),
             inflight_bound: setup.transport.inflight_bytes,
@@ -2568,8 +2652,15 @@ where
             let msg = self.shard_local_rx.recv().await?;
             // handle this message
             match msg {
-                // Join our ring
-                ServerMsg::Join(info) => self.ring.add(info),
+                // a newer map from the control plane
+                ServerMsg::Map(map) => self.install_map(map)?,
+                // a test asked this shard to die
+                ServerMsg::Fail => {
+                    return Err(ServerError::GlommioGeneric(format!(
+                        "shard {} failed on request",
+                        self.shard_id
+                    )));
+                }
                 // Add this new client to our client map
                 ServerMsg::NewClient { client, client_tx } => {
                     // add this client to our client map
@@ -2707,17 +2798,45 @@ where
     }
 }
 
+/// The sync senders to every shard's mesh channel, for the pool to push maps through
+///
+/// One per shard, in shard order. Handed to the control thread inside the map sink, which is
+/// why it needs to be `Send`: the mesh's senders already cross threads as [`Comms`] does, and
+/// this is the same set of channels under the same argument.
+pub struct ShardSenders<S: ShoalDatabase>(pub Vec<kanal::Sender<ServerMsg<S>>>);
+
+// SAFETY: these are the same senders `Comms` carries across the shard threads, and `Comms` is
+// `Send` under the same bound; the map they carry is an `Arc<TabletMap>`, which is `Send` and
+// `Sync`, and nothing about a `ServerMsg::Map` is executor local
+unsafe impl<S: ShoalDatabase> Send for ShardSenders<S> where S::TableNames: Send {}
+
+impl<S: ShoalDatabase> ShardSenders<S> {
+    /// Push a map to every shard
+    ///
+    /// A shard that is gone is one the pool is already reporting dead; its channel is skipped.
+    ///
+    /// # Arguments
+    ///
+    /// * `map` - The map to install
+    pub fn push_map(&self, map: &Arc<TabletMap>) {
+        for tx in &self.0 {
+            let _ = tx.try_send(ServerMsg::Map(map.clone()));
+        }
+    }
+}
+
 #[cfg_attr(feature = "hotpath", hotpath::measure)]
 pub fn start<S: ShoalDatabase>(
     conf: Conf,
     cpus: CpuSet,
     peer_setup: Option<PeerSetup>,
+    control_requests: Option<kanal::Sender<crate::server::control::ControlRequest>>,
 ) -> Result<
     (
         PoolThreadHandles<Result<(), ServerError>>,
         Arc<AtomicBool>,
         std::sync::mpsc::Receiver<ShardEvent>,
-        kanal::Sender<ServerMsg<S>>,
+        ShardSenders<S>,
     ),
     ServerError,
 >
@@ -2745,7 +2864,7 @@ where
         LocalExecutorPoolBuilder::new(PoolPlacement::MaxSpread(shard_count, Some(cpus)));
     // build and spawn our shards on all of remaining available cores
     let shards = executor_builder.on_all_shards(
-        enclose!((comms, should_shutdown, shard_counter, events, peer_setup) move || {
+        enclose!((comms, should_shutdown, shard_counter, events, peer_setup, control_requests) move || {
             async move {
                 // mint this shards id here rather than in `Shard::new`, so that a failure in
                 // there can still be reported under the id it would have had
@@ -2767,13 +2886,27 @@ where
                         shard: shard_id,
                         error: format!("{error:?}"),
                     });
+                    // and the control plane, so the cluster hears of it too
+                    // ([F39](../../../docs/src/features/membership.md))
+                    if let Some(control) = &control_requests {
+                        let _ = control.send(crate::server::control::ControlRequest::ShardHealth(
+                            crate::server::control::ShardHealthEvent {
+                                shard: shard_id,
+                                error: format!("{error:?}"),
+                            },
+                        ));
+                    }
                 }
                 outcome
             }
         }),
     )?;
-    // a sync sender to shard 0's mesh channel, so the pool (which is on no executor) can ask it
-    // for the transport view or drive a bulk probe
-    let control_tx = comms.get_shards_channels(0).0.clone_sync();
-    Ok((shards, should_shutdown, event_rx, control_tx))
+    // a sync sender to every shard's mesh channel, so the pool (which is on no executor) can
+    // ask shard 0 for the transport view, drive a bulk probe, and push every map to all of them
+    let senders = ShardSenders(
+        (0..shard_count)
+            .map(|shard| comms.get_shards_channels(shard).0.clone_sync())
+            .collect(),
+    );
+    Ok((shards, should_shutdown, event_rx, senders))
 }

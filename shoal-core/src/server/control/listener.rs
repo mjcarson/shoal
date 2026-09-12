@@ -1,36 +1,38 @@
-//! The control listener: peer control RPCs, driven into this node's own group
+//! The control listener: accept control peers and drive their RPCs into the group
 //!
-//! The inbound half of the control lane. It binds `advertise:control_port`, accepts a peer that
-//! proves its identity on the [`Lane::Control`] lane, and reads
-//! [`ControlRequest`](crate::shared::protocol::peer::ControlRequestHead) frames, driving each
-//! into this node's `Raft`: an append into `append_entries`, a vote into `vote`, a snapshot into
-//! `install_full_snapshot`, and a ping into a small liveness reply. Every answer carries the
-//! request's correlation id back, so one connection can hold many RPCs at once.
+//! Bound by the control thread on `advertise:control_port` and served on its executor, so a
+//! stalled data shard cannot stall a vote ([C2](../../../../docs/src/distributed/transport.md)).
+//! Every accepted connection runs its own task, reads `ControlRequest` frames, and answers each
+//! under the id it carried. The consensus RPCs and pings are driven straight into this node's
+//! `Raft` here; the membership RPCs - a joiner's admission, a member's report, a proposal for
+//! the leader - are handed to the control loop as [`Inbound`] events and answered when it
+//! answers them ([F39](../../../../docs/src/features/membership.md)), since only the loop
+//! knows who leads and what it has promised.
 //!
-//! It runs on the control thread's executor beside the group, so a stalled data shard can never
-//! stop it - which is the whole point of the control lane being its own socket on its own thread
-//! ([F38](../../../../docs/src/features/inter-node-transport.md)).
+//! A connection the handshake let in as a **joiner** - no cluster, on this lane alone - may ask
+//! to join and ping, and nothing else; anything else it sends is answered as an error and ends
+//! the connection.
 
-use std::rc::Rc;
-
-use futures::io::{ReadHalf, WriteHalf};
-use futures::AsyncReadExt;
+use futures::AsyncReadExt as _;
+use futures_channel::oneshot;
 use glommio::net::{TcpListener, TcpStream};
 use openraft::raft::{AppendEntriesRequest, VoteRequest};
 use openraft::Raft;
 use rustls::ServerConfig;
 use serde::Serialize;
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::Arc;
 use tracing::{event, Level};
 
 use super::network::decode_snapshot;
 use super::store::ControlStateMachine;
-use super::types::ControlConfig;
-use crate::server::conf::cluster::Placement;
+use super::types::{ControlConfig, MemberHealth};
 use crate::server::peer::codec;
-use crate::server::peer::handshake::{self, Local};
+use crate::server::peer::handshake::{self, Accepted, Admission, Local, Verdict};
 use crate::server::peer::Lane;
 use crate::server::ServerError;
+use crate::shared::identity::{ClusterId, NodeId};
 use crate::shared::protocol::peer::{
     self, ControlKind, ControlRequestHead, ControlResponseHead, ControlStatus, CONTROL_HEAD_LEN,
 };
@@ -45,24 +47,86 @@ struct Pong {
     topology_version: u64,
 }
 
+/// A membership RPC a peer sent, handed to the control loop with a way to answer it
+pub struct Inbound {
+    /// Which RPC it is
+    pub kind: ControlKind,
+    /// The peer that sent it
+    pub peer: Accepted,
+    /// Its serialized request
+    pub payload: Vec<u8>,
+    /// Where the answer goes, as the status and the payload to frame under the request's id
+    pub reply: oneshot::Sender<(ControlStatus, Vec<u8>)>,
+}
+
+/// The control thread's judge: the applied state, and this node's own record of its cluster
+///
+/// A node whose state names no member yet - a joiner between admission and its first log
+/// entry - trusts any member of the cluster it adopted, since the leader replicating to it is
+/// the only thing that can ever tell it who its members are.
+pub struct StateAdmission {
+    /// The applied state
+    pub machine: ControlStateMachine,
+    /// What this node says about itself, whose cluster a joiner learns before its state does
+    pub local: Rc<RefCell<Local>>,
+}
+
+impl Admission for StateAdmission {
+    /// Judge a peer against the applied state
+    fn judge(&self, node: NodeId, incarnation: u64, shards: u16) -> Verdict {
+        let state = self.machine.state();
+        if state.members.is_empty() {
+            return Verdict::Member;
+        }
+        match state.members.get(&node) {
+            None => Verdict::Unknown,
+            Some(member) if incarnation < member.record.incarnation => Verdict::Fenced {
+                committed: member.record.incarnation,
+            },
+            // a member that was fenced and is down is still a member at its last incarnation;
+            // a shard count is what its record says
+            Some(member)
+                if member.health != MemberHealth::Joining
+                    && usize::from(shards) != member.record.shards =>
+            {
+                // a node runs fewer shards than a u16 holds; the ring refuses more
+                #[allow(clippy::cast_possible_truncation)]
+                Verdict::ShardCount {
+                    expected: member.record.shards as u16,
+                }
+            }
+            Some(_) => Verdict::Member,
+        }
+    }
+
+    /// The cluster this node serves, from its state or from what it adopted
+    fn cluster(&self) -> Option<ClusterId> {
+        self.machine.state().cluster.or(self.local.borrow().cluster)
+    }
+}
+
 /// Accept control connections and serve each in a task of its own
 ///
 /// # Arguments
 ///
 /// * `listener` - The bound control socket
-/// * `raft` - This node's group, which inbound RPCs are driven into
-/// * `machine` - The state machine, for a ping's topology version
+/// * `raft` - This node's group, which inbound consensus RPCs are driven into
+/// * `machine` - The state machine, for a ping's topology version and the judge
 /// * `local` - What this node says about itself
-/// * `placement` - Every node this listener will accept a hello from
 /// * `tls` - What to take the wire with, if the lanes are encrypted
+/// * `inbound` - Where the membership RPCs go, for the control loop to answer
 pub async fn control_acceptor(
     listener: TcpListener,
     raft: Raft<ControlConfig, ControlStateMachine>,
     machine: ControlStateMachine,
-    local: Local,
-    placement: Rc<Placement>,
+    local: Rc<RefCell<Local>>,
     tls: Option<Arc<ServerConfig>>,
+    inbound: kanal::AsyncSender<Inbound>,
 ) -> Result<(), ServerError> {
+    let admission = Rc::new(StateAdmission {
+        machine: machine.clone(),
+        local: local.clone(),
+    });
     loop {
         // a per-connection error must never close the control listener, for the same reason the
         // data listener survives one ([F38](../../../../docs/src/features/inter-node-transport.md))
@@ -76,8 +140,9 @@ pub async fn control_acceptor(
         let raft = raft.clone();
         let machine = machine.clone();
         let local = local.clone();
-        let placement = placement.clone();
+        let admission = admission.clone();
         let tls = tls.clone();
+        let inbound = inbound.clone();
         glommio::spawn_local(async move {
             // nodelay's error is this connection's alone, not the listener's
             let _ = stream.set_nodelay(true);
@@ -88,18 +153,30 @@ pub async fn control_acceptor(
                     return;
                 }
             }
-            let accepted =
-                match handshake::accept(&mut stream, &local, &[Lane::Control], &placement).await {
-                    Ok(accepted) => accepted,
-                    Err(error) => {
-                        event!(Level::WARN, msg = "refused a control peer", ?error);
-                        return;
-                    }
-                };
-            event!(Level::DEBUG, msg = "accepted a control peer", node = %accepted.node);
+            let ours = local.borrow().clone();
+            let accepted = match handshake::accept(
+                &mut stream,
+                &ours,
+                &[Lane::Control],
+                admission.as_ref(),
+            )
+            .await
+            {
+                Ok(accepted) => accepted,
+                Err(error) => {
+                    event!(Level::WARN, msg = "refused a control peer", ?error);
+                    return;
+                }
+            };
+            event!(
+                Level::DEBUG,
+                msg = "accepted a control peer",
+                node = %accepted.node,
+                joining = accepted.joining
+            );
             let (rx, tx) = stream.split();
             if let Err(error) =
-                serve_control(rx, tx, &raft, &machine, &local).await
+                serve_control(rx, tx, &raft, &machine, &local, &accepted, &inbound).await
             {
                 event!(Level::DEBUG, msg = "a control peer ended", node = %accepted.node, ?error);
             }
@@ -108,7 +185,7 @@ pub async fn control_acceptor(
     }
 }
 
-/// Read control requests off one connection and answer each into the group
+/// Read control requests off one connection and answer each
 ///
 /// # Arguments
 ///
@@ -117,14 +194,18 @@ pub async fn control_acceptor(
 /// * `raft` - This node's group
 /// * `machine` - The state machine, for a ping's topology version
 /// * `local` - What this node says about itself, for the frame bound and a pong's incarnation
+/// * `peer` - Who is on the other end, and whether it is a joiner
+/// * `inbound` - Where the membership RPCs go
 async fn serve_control(
-    mut rx: ReadHalf<TcpStream>,
-    mut tx: WriteHalf<TcpStream>,
+    mut rx: futures::io::ReadHalf<TcpStream>,
+    mut tx: futures::io::WriteHalf<TcpStream>,
     raft: &Raft<ControlConfig, ControlStateMachine>,
     machine: &ControlStateMachine,
-    local: &Local,
+    local: &Rc<RefCell<Local>>,
+    peer: &Accepted,
+    inbound: &kanal::AsyncSender<Inbound>,
 ) -> Result<(), ServerError> {
-    let max_frame_bytes = local.max_frame_bytes;
+    let max_frame_bytes = local.borrow().max_frame_bytes;
     loop {
         // the header, or a clean end between requests
         let Some(header) = codec::read_header(&mut rx, max_frame_bytes).await? else {
@@ -142,8 +223,43 @@ async fn serve_control(
             .into());
         };
         let payload = codec::read_vec(&mut rx, payload_len).await?;
-        // drive it into the group, and frame whatever it produced under the same id
-        let (status, answer) = dispatch(head.kind, &payload, raft, machine, local.incarnation).await;
+        // a joiner may ask to join and ping, and nothing else
+        let (status, answer) = if peer.joining
+            && !matches!(head.kind, ControlKind::Join | ControlKind::Ping)
+        {
+            err(format!("a joiner may not send {}", head.kind.name()))
+        } else {
+            match head.kind {
+                // the consensus RPCs and pings, driven straight into the group
+                ControlKind::AppendEntries
+                | ControlKind::Vote
+                | ControlKind::Snapshot
+                | ControlKind::Ping => {
+                    let incarnation = local.borrow().incarnation;
+                    dispatch(head.kind, &payload, raft, machine, incarnation).await
+                }
+                // the membership RPCs, answered by the control loop
+                ControlKind::Join | ControlKind::StatusReport | ControlKind::Propose => {
+                    let (reply, answer) = oneshot::channel();
+                    let sent = inbound
+                        .send(Inbound {
+                            kind: head.kind,
+                            peer: peer.clone(),
+                            payload,
+                            reply,
+                        })
+                        .await;
+                    match sent {
+                        Ok(()) => match answer.await {
+                            Ok(answered) => answered,
+                            Err(_) => err("the control loop dropped the request".to_string()),
+                        },
+                        Err(_) => err("the control loop is gone".to_string()),
+                    }
+                }
+            }
+        };
+        // frame whatever it produced under the same id
         let response_head = ControlResponseHead {
             id: head.id,
             status,
@@ -155,10 +271,14 @@ async fn serve_control(
             max_frame_bytes,
         )?;
         codec::write_frame(&mut tx, &frame_header, &[&response_head, &answer]).await?;
+        // a joiner that asked for something else is done here
+        if status == ControlStatus::Error && peer.joining {
+            return Ok(());
+        }
     }
 }
 
-/// Drive one request into the group and return its answer, or a failure message
+/// Drive one consensus request into the group and return its answer, or a failure message
 ///
 /// # Arguments
 ///
@@ -177,7 +297,7 @@ async fn dispatch(
     match kind {
         ControlKind::AppendEntries => {
             match serde_json::from_slice::<AppendEntriesRequest<ControlConfig>>(payload) {
-                Ok(request) => match raft.append_entries(request).await {
+                Ok(rpc) => match raft.append_entries(rpc).await {
                     Ok(response) => ok(&response),
                     Err(error) => err(format!("append_entries: {error}")),
                 },
@@ -185,7 +305,7 @@ async fn dispatch(
             }
         }
         ControlKind::Vote => match serde_json::from_slice::<VoteRequest<ControlConfig>>(payload) {
-            Ok(request) => match raft.vote(request).await {
+            Ok(rpc) => match raft.vote(rpc).await {
                 Ok(response) => ok(&response),
                 Err(error) => err(format!("vote: {error}")),
             },
@@ -206,30 +326,36 @@ async fn dispatch(
             };
             ok(&pong)
         }
-        // the membership RPCs are answered by the control loop, which the next change wires in
+        // the membership RPCs never reach here
         ControlKind::Join | ControlKind::StatusReport | ControlKind::Propose => {
-            err(format!("{} is not served on this listener yet", kind.name()))
+            err(format!("{} is answered by the control loop", kind.name()))
         }
     }
 }
 
-/// Serialize a successful answer
+/// An answer, serialized
 ///
 /// # Arguments
 ///
-/// * `value` - The answer to serialize
-fn ok<T: Serialize>(value: &T) -> (ControlStatus, Vec<u8>) {
+/// * `value` - The answer
+pub fn ok<T: Serialize>(value: &T) -> (ControlStatus, Vec<u8>) {
     match serde_json::to_vec(value) {
         Ok(bytes) => (ControlStatus::Ok, bytes),
-        Err(error) => err(format!("encoding a control answer: {error}")),
+        Err(error) => err(format!("encoding an answer: {error}")),
     }
 }
 
-/// Build a failure answer
+/// A failure, as its message
 ///
 /// # Arguments
 ///
-/// * `message` - What went wrong
-fn err(message: String) -> (ControlStatus, Vec<u8>) {
-    (ControlStatus::Error, message.into_bytes())
+/// * `msg` - What went wrong
+pub fn err(msg: String) -> (ControlStatus, Vec<u8>) {
+    (ControlStatus::Error, msg.into_bytes())
+}
+
+/// The lane name, for a log line
+#[allow(dead_code)]
+fn lane_name(lane: peer::Lane) -> &'static str {
+    lane.name()
 }

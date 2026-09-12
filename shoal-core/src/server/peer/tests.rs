@@ -9,9 +9,10 @@
 use futures::AsyncReadExt;
 use glommio::net::{TcpListener, TcpStream};
 
-use super::handshake::{self, Local};
+use super::handshake::{self, Admission, Local};
 use super::Lane;
-use crate::server::conf::cluster::{PlacedNode, Placement};
+use crate::server::control::types::{MemberHealth, MemberRole};
+use crate::server::map::{MapCell, MapMember, TabletMap};
 use crate::server::control::runtime::GlommioRuntime;
 use openraft::AsyncRuntime as _;
 use crate::server::meta::Identity;
@@ -36,24 +37,27 @@ fn identity(node: NodeId, cluster: ClusterId) -> Identity {
     }
 }
 
-/// A placement of two nodes, each running two shards
-fn two_nodes(a: NodeId, b: NodeId) -> Placement {
-    Placement {
-        nodes: vec![
-            PlacedNode {
-                node: a,
-                data: "127.0.0.1:1".to_string(),
-                control: "127.0.0.1:2".to_string(),
-                shards: 2,
-            },
-            PlacedNode {
-                node: b,
-                data: "127.0.0.1:3".to_string(),
-                control: "127.0.0.1:4".to_string(),
-                shards: 2,
-            },
-        ],
-    }
+/// A map of two members of one cluster, each running two shards at incarnation 1
+fn two_nodes(cluster: ClusterId, a: NodeId, b: NodeId) -> MapCell {
+    let member = |node: NodeId, port: u16| MapMember {
+        node,
+        client: "127.0.0.1:0".to_string(),
+        data: format!("127.0.0.1:{port}"),
+        control: format!("127.0.0.1:{}", port + 1),
+        shards: 2,
+        role: MemberRole::Voter,
+        health: MemberHealth::Up,
+        incarnation: 1,
+        shards_failed: Vec::new(),
+    };
+    let map = TabletMap {
+        version: 1,
+        cluster: Some(cluster),
+        members: [(a, member(a, 1)), (b, member(b, 3))].into_iter().collect(),
+        placement: vec![a, b],
+        ..TabletMap::default()
+    };
+    MapCell::new(std::sync::Arc::new(map))
 }
 
 /// Drive one hello against `accept`, returning the reason the client read and whether accept let
@@ -63,13 +67,13 @@ fn two_nodes(a: NodeId, b: NodeId) -> Placement {
 ///
 /// * `listener` - The bound listener the client dials
 /// * `local` - What the accepting node says about itself
-/// * `placement` - Who it will accept a hello from
+/// * `admission` - What it judges a hello against
 /// * `served` - The lanes this listener serves
 /// * `hello` - The hello the client sends
 async fn exchange(
     listener: &TcpListener,
     local: &Local,
-    placement: &Placement,
+    admission: &dyn Admission,
     served: &[Lane],
     hello: PeerHello,
 ) -> (PeerRefusal, bool) {
@@ -88,17 +92,29 @@ async fn exchange(
     });
     // the server accepts and judges
     let mut stream = listener.accept().await.expect("accept");
-    let accepted = handshake::accept(&mut stream, local, served, placement).await.is_ok();
+    let accepted = handshake::accept(&mut stream, local, served, admission).await.is_ok();
     let reason = client.await;
     (reason, accepted)
 }
 
 /// A hello with every field settable, so each case moves exactly one
 fn a_hello(cluster: [u8; 16], node: [u8; 16], shards: u16, lane: Lane, schema_id: u64) -> PeerHello {
+    a_hello_at(cluster, node, shards, lane, schema_id, 1)
+}
+
+/// A hello at a particular incarnation
+fn a_hello_at(
+    cluster: [u8; 16],
+    node: [u8; 16],
+    shards: u16,
+    lane: Lane,
+    schema_id: u64,
+    incarnation: u64,
+) -> PeerHello {
     PeerHello {
         cluster,
         node,
-        incarnation: 1,
+        incarnation,
         lane,
         wire_min: PROTOCOL_VERSION,
         wire_max: PROTOCOL_VERSION,
@@ -122,8 +138,8 @@ fn peer_rejects_wrong_cluster_identity_and_malformed_payload() {
     let node0 = NodeId::mint();
     let node1 = NodeId::mint();
     let schema_id = 0xabcd_1234_5678_9abc;
-    let local = Local::new(&identity(node1, cluster), 2, schema_id, 1 << 20).expect("a local");
-    let placement = two_nodes(node0, node1);
+    let local = Local::new(&identity(node1, cluster), 2, schema_id, 1 << 20);
+    let placement = two_nodes(cluster, node0, node1);
 
     let mut runtime = GlommioRuntime::new(1);
     runtime.block_on(async move {
@@ -137,11 +153,37 @@ fn peer_rejects_wrong_cluster_identity_and_malformed_payload() {
             exchange(&listener, &local, &placement, data, a_hello([9; 16], n0, 2, Lane::Data, schema_id)).await;
         assert_eq!(reason, PeerRefusal::WrongCluster);
         assert!(!ok);
-        // a node the placement does not name
+        // a node the membership does not name
         let (reason, ok) =
             exchange(&listener, &local, &placement, data, a_hello(c, [7; 16], 2, Lane::Data, schema_id)).await;
         assert_eq!(reason, PeerRefusal::UnknownNode);
         assert!(!ok);
+        // a run of node 0 the cluster has superseded
+        let (reason, ok) =
+            exchange(&listener, &local, &placement, data, a_hello_at(c, n0, 2, Lane::Data, schema_id, 0)).await;
+        assert_eq!(reason, PeerRefusal::Fenced);
+        assert!(!ok);
+        // a joiner - no cluster at all - may open the control lane and nothing else
+        let control = &[Lane::Control];
+        let (reason, ok) =
+            exchange(&listener, &local, &placement, data, a_hello([0; 16], [7; 16], 2, Lane::Data, schema_id)).await;
+        assert_eq!(reason, PeerRefusal::NotJoinable);
+        assert!(!ok);
+        let (reason, ok) =
+            exchange(&listener, &local, &placement, control, a_hello([0; 16], [7; 16], 2, Lane::Control, schema_id)).await;
+        assert_eq!(reason, PeerRefusal::Accepted);
+        assert!(ok);
+        // but not with another schema
+        let (reason, ok) =
+            exchange(&listener, &local, &placement, control, a_hello([0; 16], [7; 16], 2, Lane::Control, schema_id ^ 1)).await;
+        assert_eq!(reason, PeerRefusal::SchemaMismatch);
+        assert!(!ok);
+        // a node that has been told nothing yet trusts any member of its cluster
+        let empty = MapCell::default();
+        let (reason, ok) =
+            exchange(&listener, &local, &empty, data, a_hello(c, [7; 16], 5, Lane::Data, schema_id)).await;
+        assert_eq!(reason, PeerRefusal::Accepted);
+        assert!(ok);
         // node 0 with the wrong shard count
         let (reason, ok) =
             exchange(&listener, &local, &placement, data, a_hello(c, n0, 99, Lane::Data, schema_id)).await;

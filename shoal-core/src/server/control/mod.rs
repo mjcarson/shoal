@@ -13,8 +13,9 @@
 //! - [`runtime`] is the glommio [`AsyncRuntime`](openraft_rt::AsyncRuntime) openraft drives on
 //! - [`types`] declares the Raft type configuration and the commands and state it carries
 //! - [`store`] is the durable log and state machine, under the latency sensitive path
-//! - [`network`] is the factory whose every peer is unreachable, since a group of one never sends
-//! - [`plane`] starts the thread, runs the group, and answers the pool's questions
+//! - [`network`] is the factory that dials the committed member records over the control lane
+//! - [`listener`] accepts control peers and hands the membership RPCs to the loop
+//! - [`plane`] starts the thread, runs the group, joins, promotes, and answers the pool
 //!
 //! Standalone mode touches none of this. A server without a `cluster:` block spawns no thread,
 //! opens no group and writes no file under `control/`, and the shard path is unchanged.
@@ -28,4 +29,7 @@ pub mod store;
 pub mod types;
 
 pub use cores::ControlPlacement;
-pub use plane::{ControlEvent, ControlHandle, ControlPlane, TopologyView, VoteProbe};
+pub use plane::{
+    AdminCall, ControlEvent, ControlHandle, ControlPlane, ControlRequest, DataReadiness,
+    JoinStatus, MapSink, ReadinessView, ShardHealthEvent, TopologyView, VoteProbe,
+};

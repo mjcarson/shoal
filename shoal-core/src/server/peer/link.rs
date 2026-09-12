@@ -38,9 +38,9 @@ use tracing::{event, Level};
 use uuid::Uuid;
 
 use super::codec;
-use super::handshake::{self, Local};
+use super::handshake::{self, Local, PeerAddr};
 use super::Lane;
-use crate::server::conf::cluster::{PlacedNode, Transport};
+use crate::server::conf::cluster::Transport;
 use crate::server::ServerError;
 use crate::shared::identity::NodeId;
 use crate::shared::protocol::peer::{CONTROL_HEAD_LEN, FORWARDED_PREAMBLE_LEN};
@@ -241,10 +241,12 @@ impl Queue {
 
 /// A lane to one peer, from the owner's side
 pub struct Link {
-    /// The peer
+    /// The peer, or the nil id for a seed
     node: NodeId,
     /// The lane
     lane: Lane,
+    /// Where it dials, and who it expects there
+    target: PeerAddr,
     /// The queue shared with the task
     queue: Rc<RefCell<Queue>>,
     /// The task, held so dropping the link stops it
@@ -257,15 +259,15 @@ impl Link {
     /// # Arguments
     ///
     /// * `lane` - Which lane this is
-    /// * `entry` - The peer's placement entry, which is where to dial and who to expect
-    /// * `local` - What this node says about itself
+    /// * `entry` - Where to dial and who to expect there
+    /// * `local` - What this node says about itself, read at every dial
     /// * `transport` - The bounds and timers
     /// * `tls` - What to dial with, if the lanes are encrypted
     /// * `on_event` - Where to deliver what the link learns
     pub fn spawn<F: Fn(LinkEvent) + 'static>(
         lane: Lane,
-        entry: PlacedNode,
-        local: Local,
+        entry: PeerAddr,
+        local: Rc<RefCell<Local>>,
         transport: &Transport,
         tls: Option<Arc<ClientConfig>>,
         on_event: F,
@@ -289,7 +291,8 @@ impl Link {
             dials: 0,
             closed: false,
         }));
-        let node = entry.node;
+        let node = entry.node_or_nil();
+        let target = entry.clone();
         let settings = Settings {
             lane,
             entry,
@@ -305,9 +308,16 @@ impl Link {
         Link {
             node,
             lane,
+            target,
             queue,
             task: Some(task),
         }
+    }
+
+    /// Where this link dials, and who it expects there
+    #[must_use]
+    pub fn target(&self) -> &PeerAddr {
+        &self.target
     }
 
     /// Queue a frame, or refuse it because the queue is at its bound
@@ -386,10 +396,10 @@ impl Drop for Link {
 struct Settings {
     /// Which lane this is
     lane: Lane,
-    /// The peer's placement entry
-    entry: PlacedNode,
-    /// What this node says about itself
-    local: Local,
+    /// Where to dial and who to expect there
+    entry: PeerAddr,
+    /// What this node says about itself, read at every dial since a joiner's cluster changes
+    local: Rc<RefCell<Local>>,
     /// What to dial with, if the lanes are encrypted
     tls: Option<Arc<ClientConfig>>,
     /// How long a dial and handshake may take
@@ -459,7 +469,7 @@ async fn run<F: Fn(LinkEvent) + 'static>(
     queue: Rc<RefCell<Queue>>,
     on_event: F,
 ) {
-    let node = settings.entry.node;
+    let node = settings.entry.node_or_nil();
     let lane = settings.lane;
     let mut backoff = settings.reconnect_min;
     let mut attempt = 0u64;
@@ -502,7 +512,7 @@ async fn run<F: Fn(LinkEvent) + 'static>(
                     reason: format!("{error:?}"),
                 });
                 // wait out the backoff, growing it with jitter, and try again if still wanted
-                let wait = jittered(backoff, attempt, settings.local.incarnation);
+                let wait = jittered(backoff, attempt, settings.local.borrow().incarnation);
                 attempt = attempt.wrapping_add(1);
                 backoff = (backoff * 2).min(settings.reconnect_max);
                 glommio::timer::sleep(wait).await;
@@ -526,7 +536,8 @@ async fn run<F: Fn(LinkEvent) + 'static>(
         });
         // carry frames both ways until either direction fails
         let (rx, tx) = stream.split();
-        let outcome = carry(rx, tx, &queue, node, lane, settings.local.max_frame_bytes, &on_event)
+        let max_frame_bytes = settings.local.borrow().max_frame_bytes;
+        let outcome = carry(rx, tx, &queue, node, lane, max_frame_bytes, &on_event)
             .await;
         // whatever was still queued was never written
         let unsent = {
@@ -546,7 +557,8 @@ async fn run<F: Fn(LinkEvent) + 'static>(
             return;
         }
         // a link that dropped waits the shortest backoff before dialling again
-        glommio::timer::sleep(jittered(settings.reconnect_min, attempt, settings.local.incarnation)).await;
+        let incarnation = settings.local.borrow().incarnation;
+        glommio::timer::sleep(jittered(settings.reconnect_min, attempt, incarnation)).await;
         attempt = attempt.wrapping_add(1);
     }
 }
@@ -557,14 +569,14 @@ async fn run<F: Fn(LinkEvent) + 'static>(
 ///
 /// * `settings` - How to dial and shake hands
 async fn connect(settings: &Settings) -> Result<(TcpStream, u64), ServerError> {
-    // the placement's address for this lane, which the bulk lane shares with data
+    // the member's address for this lane, which the bulk lane shares with data
     let addr = match settings.lane {
         Lane::Control => &settings.entry.control,
         Lane::Data | Lane::Bulk => &settings.entry.data,
     };
     let addr: SocketAddr = addr.parse().map_err(|_| {
         ServerError::Shoal(crate::server::errors::ShoalError::InvalidConfig(format!(
-            "placement address {addr} is not an address"
+            "peer address {addr} is not an address"
         )))
     })?;
     let mut stream = TcpStream::connect(addr).await?;
@@ -574,8 +586,9 @@ async fn connect(settings: &Settings) -> Result<(TcpStream, u64), ServerError> {
         let name = ServerName::from(addr.ip());
         super::tls::connect(&mut stream, config.clone(), name).await?;
     }
-    // then say who we are and check who answered
-    let peer = handshake::dial(&mut stream, &settings.local, settings.lane, &settings.entry).await?;
+    // then say who we are and check who answered, as we are right now
+    let local = settings.local.borrow().clone();
+    let peer = handshake::dial(&mut stream, &local, settings.lane, &settings.entry).await?;
     Ok((stream, peer.incarnation))
 }
 

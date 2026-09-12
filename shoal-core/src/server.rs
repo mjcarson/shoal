@@ -20,6 +20,7 @@ pub mod conf;
 pub mod control;
 pub mod database;
 pub mod errors;
+pub mod map;
 pub mod messages;
 pub mod peer;
 pub mod meta;
@@ -34,7 +35,9 @@ pub mod trace;
 
 use comms::Comms;
 pub use conf::Conf;
-pub use control::{ControlHandle, ControlPlacement, TopologyView};
+pub use control::{ControlHandle, ControlPlacement, DataReadiness, JoinStatus, ReadinessView, TopologyView};
+pub use map::TabletMap;
+pub use crate::shared::protocol::admin::{AdminKind, AdminRequest, AdminResponse};
 pub use errors::ServerError;
 pub use meta::{ClusterIntent, DirectoryLock, Identity, StorageMeta};
 pub use shard::ShardEvent;
@@ -43,6 +46,12 @@ use crate::server::errors::ShoalError;
 
 use crate::server::database::ShoalDatabase;
 use crate::shared::{queries::Queries, traits::QuerySupport};
+
+/// How long the pool waits for its control plane before it starts a shard
+///
+/// A fresh bootstrap is a group of one electing itself; a joiner and a restart are a store
+/// opened and a listener bound. None of them waits on a peer.
+const CONTROL_START_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// A pool of ShoalDB shards
 ///
@@ -97,6 +106,8 @@ pub struct ShoalPool<S: ShoalDatabase> {
     /// 0's channel, used to ask it for the transport view or to start a bulk probe
     /// ([F38](../../../docs/src/features/inter-node-transport.md)).
     control_tx: kanal::Sender<messages::ServerMsg<S>>,
+    /// A sync sender to every shard's mesh channel, for a test to fail one
+    shard_txs: Vec<kanal::Sender<messages::ServerMsg<S>>>,
     /// The database this shoal pool is handling
     phantom: PhantomData<S>,
 }
@@ -195,30 +206,39 @@ where
         let mut shard_cpus: Vec<usize> = cpus.iter().map(|location| location.cpu).collect();
         shard_cpus.sort_unstable();
         // the control plane starts before the shards, so a group that cannot start refuses the
-        // node before any shard has bound
-        let control = match placement {
-            Some(placement) => Some(control::ControlPlane::start(
-                placement,
-                identity.clone(),
-                &conf,
-                bound.to_string(),
-                shards,
-                <S::ClientType as QuerySupport>::SCHEMA_ID,
-            )?),
+        // node before any shard has bound; and it is waited for here, so the shards start with
+        // the map it holds rather than none
+        let mut control = match placement {
+            Some(placement) => {
+                let mut control = control::ControlPlane::start(
+                    placement,
+                    identity.clone(),
+                    &conf,
+                    bound.to_string(),
+                    shards,
+                    <S::ClientType as QuerySupport>::SCHEMA_ID,
+                    <S::ClientType as QuerySupport>::table_ids()
+                        .into_iter()
+                        .map(|(name, id)| (name.to_string(), id))
+                        .collect(),
+                )?;
+                control.ready(Instant::now() + CONTROL_START_TIMEOUT)?;
+                Some(control)
+            }
             None => None,
         };
-        // resolve what the shards need to talk to their peers, on a cluster node: the placement
-        // they route against, what they say about themselves, and where the listeners bind
-        let peer_setup = match &conf.cluster {
-            Some(cluster) => {
-                let placement = cluster.placement_for(identity.node, &conf.networking.interface, shards)?;
+        // resolve what the shards need to talk to their peers, on a cluster node: what they say
+        // about themselves, the map they start with, and where the listeners bind
+        let peer_setup = match (&conf.cluster, &control) {
+            (Some(cluster), Some(control)) => {
+                let initial_map = control.map()?;
                 let schema_id = <S::ClientType as QuerySupport>::SCHEMA_ID;
                 let local = peer::Local::new(
                     &identity,
                     shards,
                     schema_id,
                     conf.networking.max_frame_bytes,
-                )?;
+                );
                 let bind = format!(
                     "{}:{}",
                     conf.networking.interface, cluster.port
@@ -230,17 +250,29 @@ where
                 ))))?;
                 Some(peer::PeerSetup {
                     local,
-                    placement,
+                    dial: cluster.dial.clone(),
+                    initial_map,
                     tls: cluster.tls.clone(),
                     transport: cluster.transport.clone(),
                     bind,
                 })
             }
-            None => None,
+            _ => None,
         };
-        // spawn our shards
-        let (shard_handles, should_shutdown, events, control_tx) =
-            shard::start::<S>(conf, cpus, peer_setup)?;
+        // spawn our shards, telling the control plane about any that die
+        let (shard_handles, should_shutdown, events, senders) = shard::start::<S>(
+            conf,
+            cpus,
+            peer_setup,
+            control.as_ref().map(ControlHandle::requests),
+        )?;
+        // every map the control plane builds from now on goes to every shard
+        let control_tx = senders.0[0].clone();
+        let shard_txs = senders.0.clone();
+        if let Some(control) = &mut control {
+            let sink: control::MapSink = Box::new(move |map| senders.push_map(&map));
+            control.attach_sink(sink)?;
+        }
         // build the shoal pool object
         let pool = ShoalPool {
             shard_handles,
@@ -255,6 +287,7 @@ where
             control,
             shard_cpus,
             control_tx,
+            shard_txs,
             phantom: PhantomData,
         };
         Ok(pool)
@@ -287,6 +320,87 @@ where
     /// unless the configuration said the core was shared.
     pub fn shard_cpus(&self) -> &[usize] {
         &self.shard_cpus
+    }
+
+    /// Where this node stands: live, with its group, and with its data
+    ///
+    /// # Errors
+    ///
+    /// Refuses with [`ShoalError::NotClustered`] on a standalone node, and fails if the control
+    /// thread is gone.
+    pub fn readiness(&self) -> Result<ReadinessView, ServerError> {
+        match &self.control {
+            Some(control) => control.readiness(),
+            None => Err(ServerError::Shoal(ShoalError::NotClustered)),
+        }
+    }
+
+    /// The map this node's shards route with
+    ///
+    /// # Errors
+    ///
+    /// Refuses with [`ShoalError::NotClustered`] on a standalone node, and fails if the control
+    /// thread is gone.
+    pub fn map(&self) -> Result<Arc<TabletMap>, ServerError> {
+        match &self.control {
+            Some(control) => control.map(),
+            None => Err(ServerError::Shoal(ShoalError::NotClustered)),
+        }
+    }
+
+    /// Make an administrative request as the process itself
+    ///
+    /// The in-process seam the benchmark harness and the fixture use: it needs no principal,
+    /// since the process that owns the pool is its own operator. A request off the wire goes
+    /// through the shards, which check the principal ([F39](../../../docs/src/features/membership.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `request` - What is asked
+    ///
+    /// # Errors
+    ///
+    /// Refuses with [`ShoalError::NotClustered`] on a standalone node, and fails if the control
+    /// thread is gone or did not answer.
+    pub fn admin(&self, request: AdminRequest) -> Result<AdminResponse, ServerError> {
+        match &self.control {
+            Some(control) => control.admin(request, None, true),
+            None => Err(ServerError::Shoal(ShoalError::NotClustered)),
+        }
+    }
+
+    /// Make one shard fail, for a test of what the cluster does about a dead shard
+    ///
+    /// # Arguments
+    ///
+    /// * `shard` - The shard
+    ///
+    /// # Errors
+    ///
+    /// Fails if there is no such shard or it is already gone.
+    pub fn fail_shard(&self, shard: usize) -> Result<(), ServerError> {
+        let tx = self.shard_txs.get(shard).ok_or_else(|| {
+            ServerError::ShardFailed {
+                shard,
+                error: "no such shard".to_string(),
+            }
+        })?;
+        tx.send(messages::ServerMsg::Fail).map_err(|_| ServerError::ShardFailed {
+            shard,
+            error: "the shard is already gone".to_string(),
+        })
+    }
+
+    /// Send the control leader one report at an incarnation below this node's, for a test
+    ///
+    /// # Errors
+    ///
+    /// Refuses with [`ShoalError::NotClustered`] on a standalone node.
+    pub fn control_stale_report(&self) -> Result<(), ServerError> {
+        match &self.control {
+            Some(control) => control.stale_report(),
+            None => Err(ServerError::Shoal(ShoalError::NotClustered)),
+        }
     }
 
     /// The cluster as this node sees it

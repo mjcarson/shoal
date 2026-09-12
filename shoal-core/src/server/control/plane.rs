@@ -1,22 +1,34 @@
 //! The control thread: one pinned executor, one group, and the pool's handle to both
 //!
 //! [`ControlPlane::start`] spawns a thread, pins it to the control core, builds a glommio
-//! executor on it, opens the store, and runs the group. On a directory that has never been
-//! bootstrapped it initializes the group with itself as the only member, writes the
-//! [`ControlCommand::Bootstrap`] that creates the cluster, and writes an
-//! [`ControlCommand::ObserveMember`] saying where it is; on a restart it recovers the log and
-//! the applied state and writes only the observation, since an address may have changed. Either
-//! way it reports [`ControlEvent::Ready`] once the group has a leader and the writes are
-//! committed, and every applied entry that moved the topology version is recorded in the
-//! storage marker through [`StorageMeta::observe_topology`], on a blocking thread so the
-//! executor's timers keep running.
+//! executor on it, opens the store, and runs the group. What it does next depends on what the
+//! directory is ([F39](../../../../docs/src/features/membership.md)):
 //!
-//! The [`Raft`] handle never leaves this thread. The pool talks to it over a channel, and the
-//! only things it asks are for the topology and for a shutdown. That is the seam
-//! [C1](../../../../docs/src/distributed/node-identity.md) asks for: a shard never waits on the
-//! control plane, and the control plane never touches a shard.
+//! - a **fresh bootstrap** initializes the group with itself, waits to lead it, and writes the
+//!   [`ControlCommand::Bootstrap`] that creates the cluster;
+//! - a **joiner** dials its seeds' control lanes with no cluster, asks the leader to admit it,
+//!   adopts the cluster the leader names into its marker, and waits for the leader's
+//!   replication to tell it who its members are;
+//! - a **member restarting** does neither: its group has a log, its peers are the committed
+//!   members, and it comes up whether or not any of them answers.
+//!
+//! Every one of them then observes itself through the leader - where it is, and which start
+//! of it this is - and is `Joined` once that commits. Readiness is reported before that, once
+//! the store is open, the group built and the listener bound, so a member whose peers are all
+//! gone still comes up, reports its identity and its log, and never re-initializes.
+//!
+//! The thread is **one loop over one channel of events**: the pool's requests, the shards'
+//! admin calls, the membership RPCs the listener hands over, two timers, the group's metrics
+//! and the store's applied hook all post to it. Anything that awaits - a proposal, a join, a
+//! promotion, a ping - is a task spawned with clones of the handles it needs and posts what it
+//! learned back as another event, so no `RefCell` is ever held across an await.
+//!
+//! The [`Raft`] handle never leaves this thread. The pool talks to it over a channel, and a
+//! shard never waits on the control plane for an ordinary read or write
+//! ([C1](../../../../docs/src/distributed/node-identity.md)).
 
-use std::collections::BTreeMap;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -26,34 +38,81 @@ use std::time::{Duration, Instant};
 
 use glommio::net::TcpListener;
 use glommio::{LocalExecutorBuilder, Placement};
+use openraft::error::{ClientWriteError, RaftError};
+use openraft::metrics::RaftMetrics;
 use openraft::raft::VoteRequest;
-use openraft::{Config, Raft, RaftNetworkFactory, RaftNetworkV2};
+use openraft::{ChangeMembers, Config, Raft, RaftNetworkV2};
+use openraft_rt::WatchReceiver as _;
 use serde::{Deserialize, Serialize};
 use tracing::{event, instrument, Level};
 
 use super::cores::ControlPlacement;
-use super::listener::control_acceptor;
-use super::network::PeerNetwork;
+use super::listener::{control_acceptor, err, ok, Inbound};
+use super::network::{PeerNetwork, RpcFailure};
 use super::store::{self, ControlStateMachine, CONTROL_DIR};
-use super::types::{ControlCommand, ControlConfig, ControlResponse, ControlState, MemberRecord};
-use crate::server::conf::cluster::{BootstrapPolicy, PeerTls, Placement as StaticPlacement};
+use super::types::{
+    ControlCommand, ControlConfig, ControlResponse, ControlState, MemberHealth, MemberRecord,
+    MemberRole, MemberState,
+};
+use crate::server::conf::cluster::{BootstrapPolicy, DialOverride, PeerTls, Transport};
 use crate::server::conf::Conf;
 use crate::server::errors::ShoalError;
-use crate::server::meta::{Identity, StorageMeta};
+use crate::server::map::{QuorumShortfall, TabletMap};
+use crate::server::meta::{Identity, MarkerMode, StorageMeta};
+use crate::server::peer::handshake::PeerAddr;
 use crate::server::peer::Local;
 use crate::server::ServerError;
-use crate::shared::identity::{ClusterId, NodeId};
+use crate::shared::identity::{ClusterId, NodeId, TableId};
+use crate::shared::protocol::admin::{
+    AdminError, AdminKind, AdminOutcome, AdminRequest, AdminResponse,
+};
+use crate::shared::protocol::error::ErrorCode;
+use crate::shared::protocol::peer::{ControlKind, StatusReport};
 
-/// How long the control plane waits for its group to elect a leader
+/// How long the control plane waits for a fresh group of one to elect itself
 ///
 /// A group of one elects itself on its first tick, so this is a bound on a broken runtime
 /// rather than on an election.
 const LEADER_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long a proposal may take to commit, leader search included
+pub const PROPOSE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How often a write asks its own group again while the leader's lease is being established
+///
+/// A leader answers a write with an empty forward hint until a quorum has acknowledged it, and
+/// the metrics name it as the leader all the while. Asking again at once is a busy loop on the
+/// control core that starves the links the acknowledgements ride, so a write polls at this pace.
+const LEASE_POLL: Duration = Duration::from_millis(50);
+
+/// How many leaders a proposal follows before it gives up
+///
+/// A hint may name a leader that has just changed, and a leader whose lease is not established
+/// yet answers with no hint at all; each is one more hop.
+const PROPOSE_HOPS: usize = 4;
+
+/// How long a node waits after a failed observation before it tries again
+///
+/// The metrics and the applied index both prompt an observation, and either can change many
+/// times a second while a group is settling; without this a failure is retried on every change.
+const OBSERVE_BACKOFF: Duration = Duration::from_millis(250);
+
+/// How long a joiner keeps dialling its seeds before it gives up
+pub const JOIN_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How long one join RPC waits for the leader's answer
+const JOIN_RPC_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long a promotion waits for a learner to catch up
+const CATCHUP_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How long the pool waits for the thread to answer a request
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// What the control plane tells the pool
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ControlEvent {
-    /// The group has a leader and the bootstrap or recovery is committed
+    /// The store is open, the group built and the listener bound
     Ready,
     /// The control plane failed, before or after it was ready
     Failed(String),
@@ -63,16 +122,68 @@ pub enum ControlEvent {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VoteProbe {
     /// Whether the peer granted the vote
-    ///
-    /// A peer that has elected itself does not grant a vote for a lower term, so this is false;
-    /// that the peer answered at all is the proof its `Raft` was reached over the control lane.
     pub granted: bool,
 }
 
+/// Where a node stands with its control group
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum JoinStatus {
+    /// A joiner that has not been admitted yet
+    Joining,
+    /// A member with its log, not yet observed at this incarnation through a leader
+    Recovering,
+    /// Observed at this incarnation; the cluster has this run on record
+    Joined,
+}
+
+impl JoinStatus {
+    /// The name this status is spelled as
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            JoinStatus::Joining => "joining",
+            JoinStatus::Recovering => "recovering",
+            JoinStatus::Joined => "joined",
+        }
+    }
+}
+
+/// An administrative request from a shard or the pool, with a way to answer it
+pub struct AdminCall {
+    /// What is asked
+    pub request: AdminRequest,
+    /// Who asked, if the connection authenticated
+    pub principal: Option<String>,
+    /// Whether the caller is the process itself, which needs no principal
+    ///
+    /// The pool's own seam, which the benchmark harness and the fixture use; a request off the
+    /// wire never sets it.
+    pub trusted: bool,
+    /// Where the answer goes
+    pub reply: kanal::Sender<AdminResponse>,
+}
+
+/// A shard telling the control plane it died
+#[derive(Debug, Clone)]
+pub struct ShardHealthEvent {
+    /// Which shard
+    pub shard: usize,
+    /// What it said
+    pub error: String,
+}
+
+/// Where a new map goes: to every shard, as one `Arc` each
+pub type MapSink = Box<dyn FnMut(Arc<TabletMap>) + Send>;
+
 /// What the pool asks the control plane
-enum ControlRequest {
+pub enum ControlRequest {
     /// Describe the cluster as this node sees it
     Topology(mpsc::Sender<TopologyView>),
+    /// Say where this node stands
+    Readiness(mpsc::Sender<ReadinessView>),
+    /// The map as it is now
+    Map(mpsc::Sender<Arc<TabletMap>>),
     /// Ping a peer over the control lane and report the round trip
     Ping {
         /// The peer
@@ -81,16 +192,20 @@ enum ControlRequest {
         reply: mpsc::Sender<Result<Duration, String>>,
     },
     /// Send a peer a vote for a low term and report its answer
-    ///
-    /// A test seam: the peer, leader of its own newer term, does not grant it, which proves the
-    /// vote reached the peer's own `Raft` over the control lane
-    /// ([F38](../../../../docs/src/features/inter-node-transport.md)).
     VoteProbe {
         /// The peer
         node: NodeId,
         /// Where to send what it answered
         reply: mpsc::Sender<Result<VoteProbe, String>>,
     },
+    /// An administrative request
+    Admin(AdminCall),
+    /// Where new maps go from now on
+    AttachSink(MapSink, mpsc::Sender<()>),
+    /// A shard died
+    ShardHealth(ShardHealthEvent),
+    /// Send the leader one report at an incarnation below this node's, for a test
+    StaleReport(mpsc::Sender<Result<(), String>>),
     /// Stop the group and exit the thread
     Shutdown,
 }
@@ -98,55 +213,149 @@ enum ControlRequest {
 /// The cluster as one node sees it
 ///
 /// Built from the applied state on request, so it is what the committed log says and never a
-/// cached copy of it. `active_rf` is the replicas the members could give, not the replicas any
-/// tablet has: nothing places tablets yet, and this view is what says so rather than hiding it.
+/// cached copy of it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TopologyView {
-    /// The cluster
+    /// The cluster, or the nil id on a joiner that has adopted none yet
     pub cluster: ClusterId,
     /// The node reporting
     pub node: NodeId,
+    /// Which start of it this is
+    pub incarnation: u64,
+    /// Where it stands with its group
+    pub control: JoinStatus,
+    /// The control leader it knows, if any
+    pub leader: Option<NodeId>,
     /// How many committed changes the topology has seen
     pub version: u64,
     /// Every member the group knows, in node order
-    pub members: Vec<MemberRecord>,
+    pub members: Vec<MemberState>,
+    /// The members that vote, in node order
+    pub voters: Vec<NodeId>,
+    /// The members that only learn, in node order
+    pub learners: Vec<NodeId>,
+    /// Whether a membership change is half way through, so the voters above are a union
+    pub joint: bool,
+    /// The nodes tablets are placed over, once initialized
+    pub initialized: Option<Vec<NodeId>>,
     /// The replication factor the policy asks for
     pub desired_rf: u32,
-    /// The replication factor the members can give
+    /// The replication factor the placement gives
     pub active_rf: u32,
     /// How many replicas short of the policy the cluster is
     pub missing_replicas: u32,
+    /// How many members are up
+    pub up_members: u32,
     /// The cpu this node's control thread runs on
     pub control_core: usize,
     /// Whether that cpu's physical core is shared with a shard
     pub control_shared: bool,
-    /// The policy the cluster was bootstrapped with
+    /// The policy the cluster runs under
     pub policy: Option<BootstrapPolicy>,
 }
 
-impl TopologyView {
-    /// Build the view from the applied state
-    ///
-    /// # Arguments
-    ///
-    /// * `state` - The applied state
-    /// * `node` - The node reporting
-    /// * `placement` - Where its control thread runs
-    fn from_state(state: &ControlState, node: NodeId, placement: &ControlPlacement) -> Self {
-        let desired_rf = state.desired_rf();
-        let active_rf = state.active_rf();
-        TopologyView {
-            // a view is only ever built after the bootstrap, so the cluster exists
-            cluster: state.cluster.unwrap_or_default(),
-            node,
-            version: state.topology_version,
-            members: state.members.values().cloned().collect(),
-            desired_rf,
-            active_rf,
-            missing_replicas: desired_rf.saturating_sub(active_rf),
-            control_core: placement.cpu,
-            control_shared: placement.shared,
-            policy: state.policy.clone(),
+/// Whether the data on this node can be served under the cluster's policy
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DataReadiness {
+    /// Whether an operator has initialized a placement
+    pub initialized: bool,
+    /// Whether this node holds tablets under the placement
+    pub placed: bool,
+    /// How many members are up
+    pub members_up: u32,
+    /// The replication factor the policy asks for
+    pub desired_rf: u32,
+    /// The replication factor the placement gives
+    pub active_rf: u32,
+    /// Whether a default write is admitted, and if not, why
+    pub default_writes: Result<(), QuorumShortfall>,
+    /// The shards that have failed on this node, by index
+    pub shards_failed: Vec<u16>,
+}
+
+/// Where this node stands: live, with its group, and with its data
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadinessView {
+    /// Whether the process is serving
+    pub process: bool,
+    /// Where it stands with its group
+    pub control: JoinStatus,
+    /// The control leader it knows, if any
+    pub leader: Option<NodeId>,
+    /// Whether it is that leader
+    pub is_leader: bool,
+    /// How many members vote
+    pub voters: usize,
+    /// How many members only learn
+    pub learners: usize,
+    /// Whether its data can be served under the policy
+    pub data: DataReadiness,
+}
+
+/// What a joiner asks the leader
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JoinRequest {
+    /// What the joiner advertises, at its incarnation
+    pub member: MemberRecord,
+    /// The structural fingerprint of the schema it serves
+    pub schema_id: u64,
+}
+
+/// What the leader, or a member the joiner reached, answers
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum JoinResponse {
+    /// Admitted: the cluster, who leads it, and the topology version the admission moved it to
+    Admitted {
+        /// The cluster the joiner now belongs to
+        cluster: ClusterId,
+        /// The leader that admitted it
+        leader: NodeId,
+        /// The topology version after the admission
+        topology_version: u64,
+    },
+    /// Not the leader; ask this one, or nobody if none is known
+    Redirect {
+        /// The leader's record, if the answering node knows one
+        leader: Option<MemberRecord>,
+    },
+    /// Refused, and why
+    Refused {
+        /// Why
+        reason: String,
+        /// Whether asking again later may succeed
+        ///
+        /// A refusal of the joiner's identity or schema is final; one because the group was
+        /// busy with another membership change, or had no quorum for a moment, is not.
+        retry: bool,
+    },
+}
+
+/// What the leader answers a proposal forwarded to it
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ProposeResponse {
+    /// Applied, with what the state machine produced
+    Applied(ControlResponse),
+    /// Not the leader; ask this one, or nobody if none is known
+    NotLeader {
+        /// The leader's record, if known
+        leader: Option<MemberRecord>,
+    },
+}
+
+/// Why a proposal produced no answer
+#[derive(Debug, Clone)]
+pub enum ProposeError {
+    /// No leader could be reached within the deadline
+    NoLeader,
+    /// The group is stopped or the RPC failed in a way that is not a missing leader
+    Failed(String),
+}
+
+impl std::fmt::Display for ProposeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProposeError::NoLeader => write!(f, "no control leader could be reached"),
+            ProposeError::Failed(msg) => write!(f, "{msg}"),
         }
     }
 }
@@ -163,14 +372,20 @@ struct Startup {
     member: MemberRecord,
     /// The policy a bootstrap seeds
     policy: BootstrapPolicy,
+    /// Whether the configuration creates the cluster
+    bootstrap: bool,
+    /// The control addresses a joiner discovers the cluster through
+    seeds: Vec<String>,
+    /// Where particular members are dialled instead of where they advertise
+    dial: BTreeMap<NodeId, DialOverride>,
     /// Where events go
     events: mpsc::Sender<ControlEvent>,
     /// Where requests come from
     requests: kanal::Receiver<ControlRequest>,
-    /// The static placement this node routes control traffic against
-    static_placement: StaticPlacement,
     /// The structural fingerprint of the schema this node serves
     schema_id: u64,
+    /// The tables it serves, with their stable identities
+    tables: Vec<(String, TableId)>,
     /// The largest frame the peer lanes accept
     max_frame_bytes: u32,
     /// The certificate and authority the peer lanes use, if encrypted
@@ -178,7 +393,7 @@ struct Startup {
     /// Where this node's control listener binds
     bind: SocketAddr,
     /// The bounds and timers the peer lanes use
-    transport: crate::server::conf::cluster::Transport,
+    transport: Transport,
 }
 
 /// The control plane, which is only a namespace for `start`
@@ -198,6 +413,8 @@ impl ControlPlane {
     /// * `conf` - The configuration, which has to carry a `cluster:` block
     /// * `client` - The address clients reach the shards at
     /// * `shards` - How many shards this node runs
+    /// * `schema_id` - The structural fingerprint of the schema it serves
+    /// * `tables` - The tables it serves, with their stable identities
     ///
     /// # Errors
     ///
@@ -210,6 +427,7 @@ impl ControlPlane {
         client: String,
         shards: usize,
         schema_id: u64,
+        tables: Vec<(String, TableId)>,
     ) -> Result<ControlHandle, ServerError> {
         let cluster = conf
             .cluster
@@ -225,8 +443,9 @@ impl ControlPlane {
             control_core: placement.cpu,
             control_shared: placement.shared,
             shards,
+            incarnation: identity.incarnation,
         };
-        // where the control listener binds, and the placement it accepts peers from
+        // where the control listener binds
         let bind: SocketAddr = format!("{advertise}:{}", cluster.control_port)
             .parse()
             .map_err(|_| {
@@ -235,8 +454,6 @@ impl ControlPlane {
                     cluster.control_port
                 )))
             })?;
-        let static_placement =
-            cluster.placement_for(identity.node, &conf.networking.interface, shards)?;
         let root = conf
             .storage
             .default
@@ -246,17 +463,20 @@ impl ControlPlane {
             .clone();
         // the two channels: events up to the pool, requests down to the thread
         let (events_tx, events) = mpsc::channel();
-        let (requests_tx, requests_rx) = kanal::bounded(16);
+        let (requests_tx, requests_rx) = kanal::bounded(64);
         let startup = Startup {
             root,
             identity,
             placement: placement.clone(),
             member,
             policy: cluster.policy(),
+            bootstrap: cluster.bootstrap,
+            seeds: cluster.seeds.clone(),
+            dial: cluster.dial.clone(),
             events: events_tx,
             requests: requests_rx,
-            static_placement,
             schema_id,
+            tables,
             max_frame_bytes: conf.networking.max_frame_bytes,
             tls: cluster.tls.clone(),
             bind,
@@ -296,7 +516,13 @@ impl ControlHandle {
         &self.placement
     }
 
-    /// Wait until the group is ready, or report that it failed
+    /// A sender the shards use to report their health and relay admin calls
+    #[must_use]
+    pub fn requests(&self) -> kanal::Sender<ControlRequest> {
+        self.requests.clone()
+    }
+
+    /// Wait until the thread is serving, or report that it failed
     ///
     /// # Arguments
     ///
@@ -335,6 +561,29 @@ impl ControlHandle {
         }
     }
 
+    /// Ask the thread something and wait for its answer
+    ///
+    /// # Arguments
+    ///
+    /// * `build` - Builds the request around the reply channel
+    /// * `what` - What was asked, for the error
+    fn ask<T>(
+        &self,
+        build: impl FnOnce(mpsc::Sender<T>) -> ControlRequest,
+        what: &str,
+    ) -> Result<T, ServerError> {
+        let (tx, rx) = mpsc::channel();
+        self.requests
+            .send(build(tx))
+            .map_err(|_| ServerError::ControlFailed {
+                error: "the control thread is not answering".to_string(),
+            })?;
+        rx.recv_timeout(REQUEST_TIMEOUT)
+            .map_err(|_| ServerError::ControlFailed {
+                error: format!("the control thread did not answer {what}"),
+            })
+    }
+
     /// Ping a peer over the control lane and report the round trip
     ///
     /// # Arguments
@@ -345,19 +594,8 @@ impl ControlHandle {
     ///
     /// Fails if the control thread is gone or the peer did not answer.
     pub fn ping(&self, node: NodeId) -> Result<Duration, ServerError> {
-        let (tx, rx) = mpsc::channel();
-        self.requests
-            .send(ControlRequest::Ping { node, reply: tx })
-            .map_err(|_| ServerError::ControlFailed {
-                error: "the control thread is not answering".to_string(),
-            })?;
-        match rx.recv_timeout(LEADER_TIMEOUT) {
-            Ok(Ok(elapsed)) => Ok(elapsed),
-            Ok(Err(error)) => Err(ServerError::ControlFailed { error }),
-            Err(_) => Err(ServerError::ControlFailed {
-                error: "the control thread did not answer a ping".to_string(),
-            }),
-        }
+        self.ask(|reply| ControlRequest::Ping { node, reply }, "a ping")?
+            .map_err(|error| ServerError::ControlFailed { error })
     }
 
     /// Send a peer a vote for a low term and report its answer
@@ -370,19 +608,8 @@ impl ControlHandle {
     ///
     /// Fails if the control thread is gone or the peer did not answer.
     pub fn vote_probe(&self, node: NodeId) -> Result<VoteProbe, ServerError> {
-        let (tx, rx) = mpsc::channel();
-        self.requests
-            .send(ControlRequest::VoteProbe { node, reply: tx })
-            .map_err(|_| ServerError::ControlFailed {
-                error: "the control thread is not answering".to_string(),
-            })?;
-        match rx.recv_timeout(LEADER_TIMEOUT) {
-            Ok(Ok(probe)) => Ok(probe),
-            Ok(Err(error)) => Err(ServerError::ControlFailed { error }),
-            Err(_) => Err(ServerError::ControlFailed {
-                error: "the control thread did not answer a vote probe".to_string(),
-            }),
-        }
+        self.ask(|reply| ControlRequest::VoteProbe { node, reply }, "a vote probe")?
+            .map_err(|error| ServerError::ControlFailed { error })
     }
 
     /// The cluster as this node sees it
@@ -391,16 +618,82 @@ impl ControlHandle {
     ///
     /// Fails if the control thread is gone.
     pub fn topology(&self) -> Result<TopologyView, ServerError> {
-        let (tx, rx) = mpsc::channel();
+        self.ask(ControlRequest::Topology, "a topology request")
+    }
+
+    /// Where this node stands
+    ///
+    /// # Errors
+    ///
+    /// Fails if the control thread is gone.
+    pub fn readiness(&self) -> Result<ReadinessView, ServerError> {
+        self.ask(ControlRequest::Readiness, "a readiness request")
+    }
+
+    /// The map as it is now
+    ///
+    /// # Errors
+    ///
+    /// Fails if the control thread is gone.
+    pub fn map(&self) -> Result<Arc<TabletMap>, ServerError> {
+        self.ask(ControlRequest::Map, "the map")
+    }
+
+    /// Hand the thread where new maps go, and wait until the current one has gone there
+    ///
+    /// # Arguments
+    ///
+    /// * `sink` - Where every map goes from now on
+    ///
+    /// # Errors
+    ///
+    /// Fails if the control thread is gone.
+    pub fn attach_sink(&self, sink: MapSink) -> Result<(), ServerError> {
+        self.ask(|ack| ControlRequest::AttachSink(sink, ack), "a sink attachment")
+    }
+
+    /// Make an administrative request as the process itself
+    ///
+    /// # Arguments
+    ///
+    /// * `request` - What is asked
+    /// * `principal` - Who is asking, if a wire principal is
+    /// * `trusted` - Whether the caller is the process itself
+    ///
+    /// # Errors
+    ///
+    /// Fails if the control thread is gone or did not answer within the proposal deadline.
+    pub fn admin(
+        &self,
+        request: AdminRequest,
+        principal: Option<String>,
+        trusted: bool,
+    ) -> Result<AdminResponse, ServerError> {
+        let (reply, rx) = kanal::bounded(1);
         self.requests
-            .send(ControlRequest::Topology(tx))
+            .send(ControlRequest::Admin(AdminCall {
+                request,
+                principal,
+                trusted,
+                reply,
+            }))
             .map_err(|_| ServerError::ControlFailed {
                 error: "the control thread is not answering".to_string(),
             })?;
-        rx.recv_timeout(LEADER_TIMEOUT)
+        rx.recv_timeout(PROPOSE_TIMEOUT + REQUEST_TIMEOUT)
             .map_err(|_| ServerError::ControlFailed {
-                error: "the control thread did not answer a topology request".to_string(),
+                error: "the control thread did not answer an admin request".to_string(),
             })
+    }
+
+    /// Send the leader one stale report, for a test
+    ///
+    /// # Errors
+    ///
+    /// Fails if the control thread is gone or the report could not be sent.
+    pub fn stale_report(&self) -> Result<(), ServerError> {
+        self.ask(ControlRequest::StaleReport, "a stale report")?
+            .map_err(|error| ServerError::ControlFailed { error })
     }
 
     /// Stop the group and join the thread
@@ -419,10 +712,218 @@ impl ControlHandle {
     }
 }
 
+/// Everything that can happen to the control loop
+enum Event {
+    /// The pool asked something
+    Pool(ControlRequest),
+    /// A peer sent a membership RPC
+    Rpc(Inbound),
+    /// The detector's report interval elapsed
+    ReportTick,
+    /// The ping interval elapsed
+    PingTick,
+    /// The group's metrics changed
+    Metrics(Box<RaftMetrics<ControlConfig>>),
+    /// The state machine applied up to this index
+    Applied(u64),
+    /// A joiner's admission finished
+    Joined(Result<(ClusterId, NodeId), String>),
+    /// This node's own observation finished
+    Observed(Result<ControlResponse, ProposeError>),
+    /// A promotion finished
+    Promoted(NodeId, Result<(), String>),
+    /// An admission finished, and the next queued joiner may be admitted
+    Admitted,
+    /// A report was answered, or refused
+    Reported(Result<Vec<u8>, RpcFailure>),
+    /// A ping was answered, or not
+    Pinged(NodeId, Result<Duration, ()>),
+}
+
+/// What one ping learned about a member, this node's local view
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Reachability {
+    /// The last round trip, in microseconds
+    pub rtt_us: u32,
+    /// Consecutive pings that got no answer
+    pub misses: u32,
+}
+
+/// What the loop owns
+///
+/// Never borrowed across an await: every handler that awaits is a task spawned with clones of
+/// the handles here, posting what it learned back as an [`Event`].
+struct Core {
+    /// This node
+    node: NodeId,
+    /// Where the store lives
+    root: PathBuf,
+    /// Where the thread runs
+    placement: ControlPlacement,
+    /// What this node advertises
+    member: MemberRecord,
+    /// The policy the configuration would seed
+    policy: BootstrapPolicy,
+    /// The tables this node serves
+    tables: Vec<(String, TableId)>,
+    /// The control addresses a joiner discovers the cluster through
+    seeds: Vec<String>,
+    /// The bounds and timers
+    transport: Transport,
+    /// The group
+    raft: Raft<ControlConfig, ControlStateMachine>,
+    /// The state machine
+    machine: ControlStateMachine,
+    /// The control network
+    network: PeerNetwork,
+    /// What this node says about itself
+    local: Rc<RefCell<Local>>,
+    /// Where events to the pool go
+    events: mpsc::Sender<ControlEvent>,
+    /// Where events to this loop go
+    tx: kanal::AsyncSender<Event>,
+    /// The map as last built
+    map: Arc<TabletMap>,
+    /// Where new maps go
+    sink: Option<MapSink>,
+    /// The leader the metrics last named
+    leader: Option<NodeId>,
+    /// Whether this node is the leader
+    is_leader: bool,
+    /// The last metrics seen
+    metrics: Option<Box<RaftMetrics<ControlConfig>>>,
+    /// Where this node stands with its group
+    status: JoinStatus,
+    /// Whether this node's own observation is in flight
+    observing: bool,
+    /// When the next observation may start, after one failed
+    observe_after: Option<Instant>,
+    /// Whether a promotion is in flight
+    promoting: bool,
+    /// Whether a join is in flight
+    joining: bool,
+    /// Whether an admission is in flight, since the group takes one membership change at a time
+    admitting: bool,
+    /// The joiners waiting to be admitted, in the order they asked
+    join_queue: std::collections::VecDeque<(Inbound, JoinRequest)>,
+    /// The shards that have failed on this node
+    shards_failed: Vec<u16>,
+    /// The next report's sequence
+    report_seq: u64,
+    /// What this node's own pings learned
+    reachability: BTreeMap<NodeId, Reachability>,
+    /// The shard health last proposed, so a change is proposed once
+    reported_shards: Vec<u16>,
+}
+
+impl Core {
+    /// The topology as this node sees it
+    fn topology(&self) -> TopologyView {
+        let state = self.machine.state();
+        let desired_rf = state.desired_rf();
+        let active_rf = state.active_rf();
+        TopologyView {
+            cluster: state
+                .cluster
+                .or(self.local.borrow().cluster)
+                .unwrap_or_default(),
+            node: self.node,
+            incarnation: self.member.incarnation,
+            control: self.status,
+            leader: self.leader,
+            version: state.topology_version,
+            members: state.members.values().cloned().collect(),
+            voters: state.voters(),
+            learners: state.learners(),
+            joint: state.joint,
+            initialized: state.initialized.clone(),
+            desired_rf,
+            active_rf,
+            missing_replicas: desired_rf.saturating_sub(active_rf),
+            up_members: state.up_members(),
+            control_core: self.placement.cpu,
+            control_shared: self.placement.shared,
+            policy: state.policy,
+        }
+    }
+
+    /// Where this node stands
+    fn readiness(&self) -> ReadinessView {
+        let map = &self.map;
+        ReadinessView {
+            process: true,
+            control: self.status,
+            leader: self.leader,
+            is_leader: self.is_leader,
+            voters: map
+                .members
+                .values()
+                .filter(|member| member.role == MemberRole::Voter)
+                .count(),
+            learners: map
+                .members
+                .values()
+                .filter(|member| member.role == MemberRole::Learner)
+                .count(),
+            data: DataReadiness {
+                initialized: self.machine.state().initialized.is_some(),
+                placed: map.places(self.node),
+                members_up: map.up(),
+                desired_rf: map.desired_rf,
+                active_rf: map.active_rf(),
+                default_writes: if map.places(self.node) {
+                    map.write_admission()
+                } else {
+                    Err(QuorumShortfall {
+                        have: map.up(),
+                        need: map.quorum_for(map.write_consistency),
+                    })
+                },
+                shards_failed: self.shards_failed.clone(),
+            },
+        }
+    }
+
+    /// Rebuild the map from the applied state and push it if its version moved
+    fn publish(&mut self) {
+        let state = self.machine.state();
+        let map = TabletMap::from_state(&state, self.leader, &self.tables);
+        // the leader is not part of the version, so a leader change alone still goes out
+        let moved = map.version != self.map.version || map.leader != self.map.leader;
+        if !moved {
+            return;
+        }
+        let map = Arc::new(map);
+        self.map = map.clone();
+        if let Some(sink) = &mut self.sink {
+            sink(map);
+        }
+    }
+
+    /// The committed record of a member, for dialling it
+    fn record_of(&self, node: NodeId) -> Option<MemberRecord> {
+        self.machine
+            .state()
+            .members
+            .get(&node)
+            .map(|member| member.record.clone())
+    }
+
+    /// The leader's committed record, if one is known
+    fn leader_record(&self) -> Option<MemberRecord> {
+        self.leader.and_then(|leader| self.record_of(leader))
+    }
+
+    /// Fail the thread: tell the pool, and stop
+    fn fail(&self, error: &ServerError) {
+        let _ = self.events.send(ControlEvent::Failed(format!("{error}")));
+    }
+}
+
 /// Everything the thread does, from open to shutdown
 ///
-/// A failure anywhere before ready is reported as [`ControlEvent::Failed`] and returned; the
-/// pool sees both, one through `ready` and one through `exit`.
+/// A failure anywhere is reported as [`ControlEvent::Failed`] and returned; the pool sees both,
+/// one through `ready` or `failure` and one through `exit`.
 ///
 /// # Arguments
 ///
@@ -438,11 +939,12 @@ async fn run(startup: Startup) -> Result<(), ServerError> {
     }
 }
 
-/// Open the store, run the group, and answer requests until shutdown
+/// Open the store, run the group, and answer events until shutdown
 ///
 /// # Arguments
 ///
 /// * `startup` - What the thread was started with
+#[allow(clippy::too_many_lines)]
 async fn serve(startup: Startup) -> Result<(), ServerError> {
     let Startup {
         root,
@@ -450,10 +952,13 @@ async fn serve(startup: Startup) -> Result<(), ServerError> {
         placement,
         member,
         policy,
+        bootstrap,
+        seeds,
+        dial,
         events,
         requests,
-        static_placement,
         schema_id,
+        tables,
         max_frame_bytes,
         tls,
         bind,
@@ -463,12 +968,14 @@ async fn serve(startup: Startup) -> Result<(), ServerError> {
     // the store, recovered from whatever the directory holds
     let dir = root.join(CONTROL_DIR);
     let (log, machine) = store::open(&dir).await?;
-    // the group's configuration: openraft's defaults, named after the cluster
-    let cluster = identity
+    // the cluster: the marker's, or none for a joiner that has not adopted one
+    let recovered = machine.state();
+    let cluster_name = identity
         .cluster
-        .ok_or(ServerError::Shoal(ShoalError::NotClustered))?;
+        .or(recovered.cluster)
+        .map_or_else(|| "joining".to_string(), |cluster| cluster.to_string());
     let config = Config {
-        cluster_name: cluster.to_string(),
+        cluster_name,
         ..Config::default()
     }
     .validate()
@@ -476,7 +983,12 @@ async fn serve(startup: Startup) -> Result<(), ServerError> {
         error: format!("openraft config: {error}"),
     })?;
     // what this node says about itself on the control lane, and the rustls configs it uses
-    let local = Local::new(&identity, member.shards, schema_id, max_frame_bytes)?;
+    let local = Rc::new(RefCell::new(Local::new(
+        &identity,
+        member.shards,
+        schema_id,
+        max_frame_bytes,
+    )));
     let (client_tls, server_tls) = match &tls {
         Some(tls) => {
             // a control node that asked for TLS refuses to start if the kernel cannot do kTLS,
@@ -495,15 +1007,8 @@ async fn serve(startup: Startup) -> Result<(), ServerError> {
         }
         None => (None, None),
     };
-    let placement_rc = Rc::new(static_placement);
-    // the network the group drives its peers with
-    let network = PeerNetwork::new(
-        placement_rc.clone(),
-        local.clone(),
-        client_tls,
-        transport.clone(),
-    );
-    super::network::built(placement_rc.peers(node).count());
+    // the network the group drives its peers with, dialling committed records
+    let network = PeerNetwork::new(local.clone(), dial, client_tls, transport.clone());
     let raft = Raft::<ControlConfig, ControlStateMachine>::new(
         node,
         Arc::new(config),
@@ -515,11 +1020,14 @@ async fn serve(startup: Startup) -> Result<(), ServerError> {
     .map_err(|error| ServerError::ControlFailed {
         error: format!("starting the group: {error}"),
     })?;
-    // a group that has never been initialized is initialized with this node as its one member
+    // the one channel every event arrives on
+    let (tx, rx) = kanal::unbounded_async::<Event>();
+    // a fresh bootstrap creates its group and its cluster before anything else can see it
     let initialized = raft.is_initialized().await.map_err(|error| ServerError::ControlFailed {
         error: format!("{error}"),
     })?;
-    if !initialized {
+    let fresh_bootstrap = bootstrap && !initialized && recovered.cluster.is_none();
+    if fresh_bootstrap {
         let mut members = BTreeMap::new();
         members.insert(node, member.clone());
         raft.initialize(members)
@@ -527,187 +1035,1325 @@ async fn serve(startup: Startup) -> Result<(), ServerError> {
             .map_err(|error| ServerError::ControlFailed {
                 error: format!("initializing the group: {error}"),
             })?;
+        // a group of one elects itself; wait for it
+        raft.wait(Some(LEADER_TIMEOUT))
+            .current_leader(node, "the control group elects this node")
+            .await
+            .map_err(|error| ServerError::ControlFailed {
+                error: format!("{error}"),
+            })?;
+        let cluster = identity
+            .cluster
+            .ok_or(ServerError::Shoal(ShoalError::NotClustered))?;
+        let response = raft
+            .client_write(ControlCommand::Bootstrap {
+                cluster,
+                policy: policy.clone(),
+                member: member.clone(),
+            })
+            .await
+            .map_err(|error| ServerError::ControlFailed {
+                error: format!("writing the bootstrap: {error}"),
+            })?;
+        match response.data {
+            ControlResponse::Applied { topology_version } => observe(&root, topology_version).await?,
+            other => {
+                return Err(ServerError::ControlFailed {
+                    error: format!("the control group refused the bootstrap: {other:?}"),
+                })
+            }
+        }
+    } else if let (Some(marker), Some(committed)) = (identity.cluster, recovered.cluster) {
+        // a member whose directory and log disagree about its cluster is a directory copied
+        // between clusters
+        if marker != committed {
+            return Err(ServerError::Shoal(ShoalError::WrongCluster {
+                found: committed,
+                expected: Some(marker),
+            }));
+        }
     }
-    // a group of one elects itself; wait for it
-    raft.wait(Some(LEADER_TIMEOUT))
-        .current_leader(node, "the control group elects this node")
-        .await
-        .map_err(|error| ServerError::ControlFailed {
-            error: format!("{error}"),
-        })?;
     // record what recovery found, before anything new is written
     let recovered = machine.state();
     if recovered.topology_version > 0 {
         observe(&root, recovered.topology_version).await?;
     }
-    // create the cluster if the directory was just claimed for one; refuse to run one whose
-    // committed identity is not the marker's, since that is a directory copied between clusters
-    match recovered.cluster {
-        None => {
-            let response = write(
-                &raft,
-                ControlCommand::Bootstrap {
-                    cluster,
-                    policy,
-                    member: member.clone(),
-                },
-            )
-            .await?;
-            observe_response(&root, &response).await?;
-        }
-        Some(committed) if committed != cluster => {
-            return Err(ServerError::Shoal(ShoalError::WrongCluster {
-                found: committed,
-                expected: Some(cluster),
-            }));
-        }
-        Some(_) => {}
+    // the store tells the loop about every apply from here on
+    {
+        let hook_tx = tx.clone_sync();
+        machine.on_applied(Rc::new(move |index| {
+            let _ = hook_tx.try_send(Event::Applied(index));
+        }));
     }
-    // and say where this node is now, whether or not that changed
-    let response = write(&raft, ControlCommand::ObserveMember(member)).await?;
-    observe_response(&root, &response).await?;
-    event!(
-        Level::INFO,
-        msg = "Control plane ready",
-        node = node.to_string(),
-        cluster = cluster.to_string(),
-        control_core = placement.cpu,
-        control_shared = placement.shared,
-        topology_version = machine.state().topology_version,
-    );
     // bind the control listener and drive inbound RPCs into this node's group, on this executor
-    //
-    // this is after the leader wait, so a listener never answers before the group is up; it is
-    // held in a task cancelled before the group shuts down
     let listener = TcpListener::bind(bind).map_err(|error| ServerError::ControlFailed {
         error: format!("binding the control listener on {bind}: {error}"),
     })?;
+    let (inbound_tx, inbound_rx) = kanal::unbounded_async::<Inbound>();
     let acceptor = glommio::spawn_local(control_acceptor(
         listener,
         raft.clone(),
         machine.clone(),
         local.clone(),
-        placement_rc.clone(),
         server_tls,
+        inbound_tx,
     ));
+    // the relays: the pool's requests, the listener's RPCs, the metrics and the two timers
+    let pool_relay = {
+        let tx = tx.clone();
+        let requests = requests.to_async();
+        glommio::spawn_local(async move {
+            while let Ok(request) = requests.recv().await {
+                if tx.send(Event::Pool(request)).await.is_err() {
+                    break;
+                }
+            }
+            // the pool dropped its handle, which is a shutdown
+            let _ = tx.send(Event::Pool(ControlRequest::Shutdown)).await;
+        })
+    };
+    let rpc_relay = {
+        let tx = tx.clone();
+        glommio::spawn_local(async move {
+            while let Ok(inbound) = inbound_rx.recv().await {
+                if tx.send(Event::Rpc(inbound)).await.is_err() {
+                    break;
+                }
+            }
+        })
+    };
+    let metrics_task = {
+        let tx = tx.clone();
+        let mut metrics = raft.metrics();
+        glommio::spawn_local(async move {
+            loop {
+                let current = metrics.borrow_watched().clone();
+                if tx.send(Event::Metrics(Box::new(current))).await.is_err() {
+                    break;
+                }
+                if metrics.changed().await.is_err() {
+                    break;
+                }
+            }
+        })
+    };
+    let report_timer = {
+        let tx = tx.clone();
+        let interval = Duration::from_millis(policy.failure_detector.interval_ms.max(10));
+        glommio::spawn_local(async move {
+            loop {
+                glommio::timer::sleep(interval).await;
+                if tx.send(Event::ReportTick).await.is_err() {
+                    break;
+                }
+            }
+        })
+    };
+    let ping_timer = {
+        let tx = tx.clone();
+        let interval = transport.ping_interval.duration().max(Duration::from_millis(10));
+        glommio::spawn_local(async move {
+            loop {
+                glommio::timer::sleep(interval).await;
+                if tx.send(Event::PingTick).await.is_err() {
+                    break;
+                }
+            }
+        })
+    };
+    // where this node stands to begin with
+    let status = if identity.mode == MarkerMode::Joining {
+        JoinStatus::Joining
+    } else {
+        JoinStatus::Recovering
+    };
+    let mut core = Core {
+        node,
+        root: root.clone(),
+        placement: placement.clone(),
+        member: member.clone(),
+        policy: policy.clone(),
+        tables,
+        seeds,
+        transport,
+        raft: raft.clone(),
+        machine: machine.clone(),
+        network: network.clone(),
+        local: local.clone(),
+        events: events.clone(),
+        tx: tx.clone(),
+        map: Arc::new(TabletMap::default()),
+        sink: None,
+        leader: None,
+        is_leader: false,
+        metrics: None,
+        status,
+        observing: false,
+        observe_after: None,
+        promoting: false,
+        joining: false,
+        admitting: false,
+        join_queue: std::collections::VecDeque::new(),
+        shards_failed: Vec::new(),
+        report_seq: 0,
+        reachability: BTreeMap::new(),
+        reported_shards: Vec::new(),
+    };
+    core.publish();
+    event!(
+        Level::INFO,
+        msg = "Control plane ready",
+        node = node.to_string(),
+        cluster = identity.cluster.map(|cluster| cluster.to_string()),
+        status = status.name(),
+        control_core = placement.cpu,
+        control_shared = placement.shared,
+        topology_version = machine.state().topology_version,
+    );
     let _ = events.send(ControlEvent::Ready);
-    // then answer the pool until it says stop
-    let requests = requests.to_async();
-    loop {
-        match requests.recv().await {
-            Ok(ControlRequest::Topology(reply)) => {
-                let view = TopologyView::from_state(&machine.state(), node, &placement);
-                let _ = reply.send(view);
-            }
-            // ping a peer over the control lane and time the round trip
-            Ok(ControlRequest::Ping { node: target, reply }) => {
-                let outcome = ping_peer(&network, target).await;
-                let _ = reply.send(outcome);
-            }
-            // send a peer a vote for a low term and report what its Raft answered
-            Ok(ControlRequest::VoteProbe { node: target, reply }) => {
-                let outcome = vote_probe(&network, node, target).await;
-                let _ = reply.send(outcome);
-            }
-            // a shutdown, or a pool that dropped its handle, which is the same thing
-            Ok(ControlRequest::Shutdown) | Err(_) => break,
-        }
+    // a joiner starts dialling its seeds now
+    if status == JoinStatus::Joining {
+        core.start_join();
     }
+    // then answer events until the pool says stop
+    let outcome = loop {
+        let Ok(event) = rx.recv().await else {
+            break Ok(());
+        };
+        match core.handle(event).await {
+            Ok(true) => {}
+            Ok(false) => break Ok(()),
+            Err(error) => {
+                core.fail(&error);
+                break Err(error);
+            }
+        }
+    };
     // stop answering peers before the group goes away
     acceptor.cancel().await;
+    pool_relay.cancel().await;
+    rpc_relay.cancel().await;
+    metrics_task.cancel().await;
+    report_timer.cancel().await;
+    ping_timer.cancel().await;
     raft.shutdown().await.map_err(|error| ServerError::ControlFailed {
         error: format!("stopping the group: {error}"),
     })?;
-    Ok(())
+    outcome
 }
 
-/// Ping a peer over the control lane and time the round trip
-///
-/// # Arguments
-///
-/// * `network` - The control network
-/// * `target` - The peer to ping
-async fn ping_peer(network: &PeerNetwork, target: NodeId) -> Result<Duration, String> {
-    let mut peer = clone_factory(network).new_client(target, &MemberRecord::default()).await;
-    let started = Instant::now();
-    // a ping rides as an empty-bodied vote to a term this node holds; but simpler, the listener
-    // answers a dedicated Ping. We reuse the network's own append with an empty request is not
-    // possible without a real payload, so a ping is its own control kind sent directly.
-    match peer.ping().await {
-        Ok(()) => Ok(started.elapsed()),
-        Err(error) => Err(error),
+impl Core {
+    /// Handle one event; `Ok(false)` means shut down
+    ///
+    /// # Arguments
+    ///
+    /// * `event` - What happened
+    async fn handle(&mut self, event: Event) -> Result<bool, ServerError> {
+        match event {
+            Event::Pool(request) => return self.handle_request(request),
+            Event::Rpc(inbound) => self.handle_rpc(inbound),
+            Event::Applied(_) => self.handle_applied()?,
+            Event::Metrics(metrics) => self.handle_metrics(metrics),
+            Event::Joined(outcome) => self.handle_joined(outcome).await?,
+            Event::Observed(outcome) => self.handle_observed(outcome)?,
+            Event::Promoted(learner, outcome) => {
+                self.promoting = false;
+                match outcome {
+                    Ok(()) => event!(Level::INFO, msg = "promoted a learner to voter", node = %learner),
+                    Err(error) => event!(Level::WARN, msg = "a promotion failed", node = %learner, error),
+                }
+                self.maybe_promote();
+            }
+            Event::Admitted => {
+                self.admitting = false;
+                self.drain_joins();
+            }
+            Event::ReportTick => {
+                // the tick is also when anything that failed for want of a leader is tried
+                // again: this node's own observation, a promotion, a queued admission
+                self.maybe_observe();
+                self.maybe_promote();
+                self.drain_joins();
+                self.report();
+            }
+            Event::PingTick => self.ping_members(),
+            Event::Reported(outcome) => self.handle_reported(outcome)?,
+            Event::Pinged(node, answered) => self.handle_pinged(node, answered),
+        }
+        Ok(true)
+    }
+
+    /// Answer the pool
+    ///
+    /// # Arguments
+    ///
+    /// * `request` - What it asked
+    fn handle_request(&mut self, request: ControlRequest) -> Result<bool, ServerError> {
+        match request {
+            ControlRequest::Topology(reply) => {
+                let _ = reply.send(self.topology());
+            }
+            ControlRequest::Readiness(reply) => {
+                let _ = reply.send(self.readiness());
+            }
+            ControlRequest::Map(reply) => {
+                let _ = reply.send(self.map.clone());
+            }
+            ControlRequest::AttachSink(mut sink, ack) => {
+                sink(self.map.clone());
+                self.sink = Some(sink);
+                let _ = ack.send(());
+            }
+            ControlRequest::Ping { node, reply } => {
+                let Some(record) = self.record_of(node) else {
+                    let _ = reply.send(Err(format!("{node} is not a member this node knows")));
+                    return Ok(true);
+                };
+                let network = self.network.clone();
+                glommio::spawn_local(async move {
+                    let mut peer = network.peer(&network.addr_of(&record));
+                    let started = Instant::now();
+                    let outcome = peer.ping().await.map(|_| started.elapsed());
+                    let _ = reply.send(outcome);
+                })
+                .detach();
+            }
+            ControlRequest::VoteProbe { node, reply } => {
+                let Some(record) = self.record_of(node) else {
+                    let _ = reply.send(Err(format!("{node} is not a member this node knows")));
+                    return Ok(true);
+                };
+                let network = self.network.clone();
+                let me = self.node;
+                glommio::spawn_local(async move {
+                    let mut peer = network.peer(&network.addr_of(&record));
+                    // a vote for term 1 from this node: a peer that holds a term at least this
+                    // high and has voted does not grant it, and answering at all proves its
+                    // Raft was reached over the control lane
+                    let vote = openraft::vote::Vote::new(1, me);
+                    let request = VoteRequest::<ControlConfig>::new(vote, None);
+                    let option = openraft::network::RPCOption::new(Duration::from_secs(5));
+                    let outcome = match RaftNetworkV2::vote(&mut peer, request, option).await {
+                        Ok(response) => Ok(VoteProbe {
+                            granted: response.vote_granted,
+                        }),
+                        Err(error) => Err(format!("{error}")),
+                    };
+                    let _ = reply.send(outcome);
+                })
+                .detach();
+            }
+            ControlRequest::Admin(call) => self.handle_admin(call),
+            ControlRequest::ShardHealth(health) => {
+                // a shard runs fewer than a u16 holds
+                #[allow(clippy::cast_possible_truncation)]
+                let shard = health.shard as u16;
+                if !self.shards_failed.contains(&shard) {
+                    self.shards_failed.push(shard);
+                    self.shards_failed.sort_unstable();
+                }
+                event!(Level::WARN, msg = "a shard died", shard = health.shard, error = health.error);
+                // say so at once rather than on the next tick
+                self.report();
+            }
+            ControlRequest::StaleReport(reply) => {
+                let _ = reply.send(self.send_report(self.member.incarnation.saturating_sub(1)));
+            }
+            ControlRequest::Shutdown => return Ok(false),
+        }
+        Ok(true)
+    }
+
+    /// Answer a membership RPC a peer sent
+    ///
+    /// # Arguments
+    ///
+    /// * `inbound` - The RPC and where its answer goes
+    fn handle_rpc(&mut self, inbound: Inbound) {
+        match inbound.kind {
+            ControlKind::Join => self.handle_join(inbound),
+            ControlKind::Propose => self.handle_propose(inbound),
+            ControlKind::StatusReport => self.handle_report(inbound),
+            _ => {
+                let _ = inbound
+                    .reply
+                    .send(err(format!("{} is not a membership rpc", inbound.kind.name())));
+            }
+        }
+    }
+
+    /// Admit a joiner, or send it to the leader
+    ///
+    /// # Arguments
+    ///
+    /// * `inbound` - The join request and where its answer goes
+    fn handle_join(&mut self, inbound: Inbound) {
+        let request: JoinRequest = match serde_json::from_slice(&inbound.payload) {
+            Ok(request) => request,
+            Err(error) => {
+                let _ = inbound.reply.send(err(format!("decoding a join: {error}")));
+                return;
+            }
+        };
+        // only the leader admits; anybody else says who does
+        if !self.is_leader {
+            let _ = inbound.reply.send(ok(&JoinResponse::Redirect {
+                leader: self.leader_record(),
+            }));
+            return;
+        }
+        // built from the same schema, or never
+        if request.schema_id != self.local.borrow().schema_id {
+            let _ = inbound.reply.send(ok(&JoinResponse::Refused {
+                reason: format!(
+                    "the joiner was built from schema {:#018x} and this cluster serves {:#018x}",
+                    request.schema_id,
+                    self.local.borrow().schema_id
+                ),
+                retry: false,
+            }));
+            return;
+        }
+        // the group takes one membership change at a time, so admissions queue
+        self.join_queue.push_back((inbound, request));
+        self.drain_joins();
+    }
+
+    /// Admit the next queued joiner, if none is being admitted
+    fn drain_joins(&mut self) {
+        if self.admitting {
+            return;
+        }
+        let Some((inbound, request)) = self.join_queue.pop_front() else {
+            return;
+        };
+        // the leader may have changed while this joiner waited
+        if !self.is_leader {
+            let _ = inbound.reply.send(ok(&JoinResponse::Redirect {
+                leader: self.leader_record(),
+            }));
+            self.drain_joins();
+            return;
+        }
+        let state = self.machine.state();
+        let Some(cluster) = state.cluster else {
+            let _ = inbound.reply.send(ok(&JoinResponse::Refused {
+                reason: "this node has no cluster to admit a joiner to".to_string(),
+                retry: true,
+            }));
+            self.drain_joins();
+            return;
+        };
+        // the fencing rule, before the group is told anything: a run the cluster has replaced,
+        // or a second run of the same copy, is refused as a duplicate identity
+        if let Some(existing) = state.members.get(&request.member.node) {
+            let committed = existing.record.incarnation;
+            let offered = request.member.incarnation;
+            let same_run = offered == committed && existing.record.control == request.member.control;
+            if offered < committed || (offered == committed && !same_run) {
+                let _ = inbound.reply.send(ok(&JoinResponse::Refused {
+                    reason: format!(
+                        "duplicate identity: {} is already a member at incarnation {committed} \
+                         and this joiner offers {offered}",
+                        request.member.node
+                    ),
+                    retry: false,
+                }));
+                self.drain_joins();
+                return;
+            }
+        }
+        // add it as a learner, then commit its admission, then answer; the next joiner waits
+        self.admitting = true;
+        let raft = self.raft.clone();
+        let network = self.network.clone();
+        let machine = self.machine.clone();
+        let tx = self.tx.clone();
+        let me = self.node;
+        let record = request.member;
+        let reply = inbound.reply;
+        glommio::spawn_local(async move {
+            // a promotion may hold the group's one membership change; wait it out briefly
+            let mut added = Err(String::new());
+            for _ in 0..50 {
+                match raft.add_learner(record.node, record.clone(), false).await {
+                    Ok(_) => {
+                        added = Ok(());
+                        break;
+                    }
+                    Err(error) => {
+                        added = Err(format!("adding the learner: {error}"));
+                        glommio::timer::sleep(Duration::from_millis(100)).await;
+                    }
+                }
+            }
+            let answer = match added {
+                Err(reason) => JoinResponse::Refused { reason, retry: true },
+                Ok(()) => match propose(&raft, &network, &machine, ControlCommand::Admit(record)).await {
+                    Ok(ControlResponse::Applied { topology_version }) => JoinResponse::Admitted {
+                        cluster,
+                        leader: me,
+                        topology_version,
+                    },
+                    Ok(ControlResponse::Fenced { committed, offered, .. }) => JoinResponse::Refused {
+                        reason: format!(
+                            "duplicate identity: the cluster holds incarnation {committed} and this \
+                             joiner offers {offered}"
+                        ),
+                        retry: false,
+                    },
+                    Ok(ControlResponse::Refused { reason }) => JoinResponse::Refused { reason, retry: false },
+                    Ok(ControlResponse::Repeated { .. }) => JoinResponse::Refused {
+                        reason: "an admission is not an operation".to_string(),
+                        retry: false,
+                    },
+                    Err(error) => JoinResponse::Refused {
+                        reason: format!("committing the admission: {error}"),
+                        retry: true,
+                    },
+                },
+            };
+            let _ = reply.send(ok(&answer));
+            let _ = tx.send(Event::Admitted).await;
+        })
+        .detach();
+    }
+
+    /// Commit a command a member proposed through this node, if it leads
+    ///
+    /// # Arguments
+    ///
+    /// * `inbound` - The proposal and where its answer goes
+    fn handle_propose(&mut self, inbound: Inbound) {
+        let command: ControlCommand = match serde_json::from_slice(&inbound.payload) {
+            Ok(command) => command,
+            Err(error) => {
+                let _ = inbound.reply.send(err(format!("decoding a proposal: {error}")));
+                return;
+            }
+        };
+        // a bootstrap is never proposed through anybody
+        if matches!(command, ControlCommand::Bootstrap { .. }) {
+            let _ = inbound.reply.send(err("a bootstrap cannot be proposed".to_string()));
+            return;
+        }
+        if !self.is_leader {
+            let _ = inbound.reply.send(ok(&ProposeResponse::NotLeader {
+                leader: self.leader_record(),
+            }));
+            return;
+        }
+        let raft = self.raft.clone();
+        let me = self.node;
+        let reply = inbound.reply;
+        glommio::spawn_local(async move {
+            // through this node's own group, waiting out a lease that is still being established
+            let written = glommio::timer::timeout(PROPOSE_TIMEOUT, async {
+                Ok(write_here(&raft, me, command).await)
+            })
+            .await;
+            let answer = match written {
+                Ok(Ok(response)) => ok(&ProposeResponse::Applied(response)),
+                Ok(Err(LocalWrite::Forward(leader))) => ok(&ProposeResponse::NotLeader { leader }),
+                Ok(Err(LocalWrite::Failed(msg))) => err(format!("writing the proposal: {msg}")),
+                Err(_) => err("the proposal did not commit within the deadline".to_string()),
+            };
+            let _ = reply.send(answer);
+        })
+        .detach();
+    }
+
+    /// Take a member's status report, if this node leads
+    ///
+    /// # Arguments
+    ///
+    /// * `inbound` - The report and where its answer goes
+    fn handle_report(&mut self, inbound: Inbound) {
+        let report: StatusReport = match serde_json::from_slice(&inbound.payload) {
+            Ok(report) => report,
+            Err(error) => {
+                let _ = inbound.reply.send(err(format!("decoding a report: {error}")));
+                return;
+            }
+        };
+        if !self.is_leader {
+            let _ = inbound.reply.send(ok(&ProposeResponse::NotLeader {
+                leader: self.leader_record(),
+            }));
+            return;
+        }
+        // a report about a run the cluster has replaced is answered as fenced, so the run stops
+        let state = self.machine.state();
+        if let Some(member) = state.members.get(&report.node) {
+            if report.incarnation < member.record.incarnation {
+                let _ = inbound.reply.send(err(format!(
+                    "fenced: the cluster holds incarnation {} of {} and this report is from {}",
+                    member.record.incarnation, report.node, report.incarnation
+                )));
+                return;
+            }
+            // a change in shard health is committed, so every node sees it
+            if member.shards_failed != report.shards_failed {
+                let raft = self.raft.clone();
+                let network = self.network.clone();
+                let machine = self.machine.clone();
+                let command = ControlCommand::ReportShards {
+                    node: report.node,
+                    incarnation: report.incarnation,
+                    failed: report.shards_failed.clone(),
+                };
+                glommio::spawn_local(async move {
+                    let _ = propose(&raft, &network, &machine, command).await;
+                })
+                .detach();
+            }
+        }
+        let _ = inbound.reply.send(ok(&serde_json::json!({ "seq": report.seq })));
+    }
+
+    /// Answer an administrative request
+    ///
+    /// # Arguments
+    ///
+    /// * `call` - The request, who made it, and where the answer goes
+    fn handle_admin(&mut self, call: AdminCall) {
+        let state = self.machine.state();
+        let version = state.topology_version;
+        let answer = |outcome: Result<AdminOutcome, AdminError>| AdminResponse {
+            node: self.node,
+            topology_version: version,
+            outcome,
+        };
+        // the reads answer from the applied state
+        let mutation = match &call.request.kind {
+            AdminKind::Members => {
+                let _ = call.reply.send(answer(Ok(AdminOutcome::Read(
+                    serde_json::to_value(self.topology()).unwrap_or_default(),
+                ))));
+                return;
+            }
+            AdminKind::Readiness => {
+                let _ = call.reply.send(answer(Ok(AdminOutcome::Read(
+                    serde_json::to_value(self.readiness()).unwrap_or_default(),
+                ))));
+                return;
+            }
+            AdminKind::Detector => {
+                let _ = call.reply.send(answer(Ok(AdminOutcome::Read(serde_json::json!({
+                    "local": self.reachability,
+                    "leader": self.leader,
+                    "is_leader": self.is_leader,
+                })))));
+                return;
+            }
+            AdminKind::Initialize { nodes } => ControlCommand::Initialize {
+                op: call.request.op,
+                principal: call.principal.clone().unwrap_or_else(|| "process".to_string()),
+                expected_version: call.request.expected_version,
+                nodes: nodes.clone(),
+                tables: self.tables.clone(),
+            },
+            AdminKind::SetControlVoters { count } => ControlCommand::SetControlVoters {
+                op: call.request.op,
+                principal: call.principal.clone().unwrap_or_else(|| "process".to_string()),
+                expected_version: call.request.expected_version,
+                count: *count,
+            },
+        };
+        // a mutation needs a principal the committed policy names, unless the process itself asks
+        if !call.trusted {
+            let admins = state.policy.as_ref().map(|policy| policy.admins.clone()).unwrap_or_default();
+            let allowed = call
+                .principal
+                .as_ref()
+                .is_some_and(|principal| admins.contains(principal));
+            if !allowed {
+                let _ = call.reply.send(answer(Err(AdminError::new(
+                    ErrorCode::Unauthorized,
+                    format!(
+                        "{} may not change the cluster; cluster.admins names {admins:?}",
+                        call.principal.as_deref().unwrap_or("an unauthenticated connection")
+                    ),
+                ))));
+                return;
+            }
+        }
+        // a stale version is refused before anything is proposed
+        if call.request.expected_version != version {
+            let _ = call.reply.send(answer(Err(AdminError::new(
+                ErrorCode::StaleVersion,
+                format!(
+                    "the request was written against topology version {} and the cluster is at {version}",
+                    call.request.expected_version
+                ),
+            ))));
+            return;
+        }
+        event!(
+            Level::INFO,
+            msg = "admin operation",
+            principal = call.principal.as_deref().unwrap_or("process"),
+            op = %call.request.op,
+            kind = call.request.kind.name(),
+            expected_version = call.request.expected_version,
+        );
+        let raft = self.raft.clone();
+        let network = self.network.clone();
+        let machine = self.machine.clone();
+        let node = self.node;
+        glommio::spawn_local(async move {
+            let outcome = match propose(&raft, &network, &machine, mutation).await {
+                Ok(ControlResponse::Applied { topology_version }) => Ok(AdminOutcome::Applied {
+                    version: topology_version,
+                }),
+                Ok(ControlResponse::Repeated { first }) => match *first {
+                    ControlResponse::Applied { topology_version } => Ok(AdminOutcome::Repeated {
+                        version: topology_version,
+                    }),
+                    ControlResponse::Refused { reason } => Err(AdminError::new(
+                        if reason.contains("stale version") {
+                            ErrorCode::StaleVersion
+                        } else {
+                            ErrorCode::Internal
+                        },
+                        format!("repeated: {reason}"),
+                    )),
+                    other => Err(AdminError::new(ErrorCode::Internal, format!("repeated: {other:?}"))),
+                },
+                Ok(ControlResponse::Refused { reason }) => Err(AdminError::new(
+                    if reason.contains("stale version") {
+                        ErrorCode::StaleVersion
+                    } else {
+                        ErrorCode::Internal
+                    },
+                    reason,
+                )),
+                Ok(ControlResponse::Fenced { .. }) => {
+                    Err(AdminError::new(ErrorCode::Internal, "fenced".to_string()))
+                }
+                Err(ProposeError::NoLeader) => Err(AdminError::new(
+                    ErrorCode::NotLeader,
+                    "no control leader could be reached; the cluster may lack a quorum".to_string(),
+                )),
+                Err(ProposeError::Failed(msg)) => Err(AdminError::new(ErrorCode::Internal, msg)),
+            };
+            let version = machine.state().topology_version;
+            let _ = call.reply.send(AdminResponse {
+                node,
+                topology_version: version,
+                outcome,
+            });
+        })
+        .detach();
+    }
+
+    /// Act on the state machine having applied something
+    fn handle_applied(&mut self) -> Result<(), ServerError> {
+        let state = self.machine.state();
+        // a run of this node the cluster has replaced stops here
+        if let Some(mine) = state.members.get(&self.node) {
+            if mine.record.incarnation > self.member.incarnation {
+                return Err(ServerError::Shoal(ShoalError::Fenced {
+                    node: self.node,
+                    committed: mine.record.incarnation,
+                    ours: self.member.incarnation,
+                }));
+            }
+        }
+        // a joiner that now sees itself in the state has been replicated to; it observes itself
+        if self.status == JoinStatus::Joining && state.members.contains_key(&self.node) {
+            self.status = JoinStatus::Recovering;
+            self.joining = false;
+        }
+        // the marker's high water mark, and the map
+        if state.topology_version > 0 {
+            let root = self.root.clone();
+            let version = state.topology_version;
+            glommio::spawn_local(async move {
+                if let Err(error) = observe(&root, version).await {
+                    event!(Level::WARN, msg = "could not record the topology version", ?error);
+                }
+            })
+            .detach();
+        }
+        self.publish();
+        self.maybe_observe();
+        self.maybe_promote();
+        Ok(())
+    }
+
+    /// Act on the group's metrics having changed
+    ///
+    /// # Arguments
+    ///
+    /// * `metrics` - The metrics
+    fn handle_metrics(&mut self, metrics: Box<RaftMetrics<ControlConfig>>) {
+        let leader = metrics.current_leader;
+        let was_leader = self.is_leader;
+        self.is_leader = leader == Some(self.node);
+        if leader != self.leader {
+            event!(Level::INFO, msg = "control leader", leader = ?leader, me = self.is_leader);
+            self.leader = leader;
+            self.publish();
+        }
+        if self.is_leader && !was_leader {
+            // a new leader starts with no evidence about anybody
+            self.reachability.clear();
+        }
+        self.metrics = Some(metrics);
+        self.maybe_observe();
+        self.maybe_promote();
+    }
+
+    /// Observe this node through the leader, once one is known and it has not been done
+    fn maybe_observe(&mut self) {
+        if self.status != JoinStatus::Recovering || self.observing || self.leader.is_none() {
+            return;
+        }
+        // a failed observation is not retried on every metrics change, only after the backoff
+        if self.observe_after.is_some_and(|at| Instant::now() < at) {
+            return;
+        }
+        self.observing = true;
+        let raft = self.raft.clone();
+        let network = self.network.clone();
+        let machine = self.machine.clone();
+        let tx = self.tx.clone();
+        let command = ControlCommand::ObserveMember(self.member.clone());
+        glommio::spawn_local(async move {
+            let outcome = propose(&raft, &network, &machine, command).await;
+            let _ = tx.send(Event::Observed(outcome)).await;
+        })
+        .detach();
+    }
+
+    /// Act on this node's own observation having finished
+    ///
+    /// # Arguments
+    ///
+    /// * `outcome` - What it produced
+    fn handle_observed(&mut self, outcome: Result<ControlResponse, ProposeError>) -> Result<(), ServerError> {
+        self.observing = false;
+        match outcome {
+            Ok(ControlResponse::Applied { .. } | ControlResponse::Repeated { .. }) => {
+                self.status = JoinStatus::Joined;
+                self.observe_after = None;
+                event!(Level::INFO, msg = "joined", node = %self.node, incarnation = self.member.incarnation);
+                self.publish();
+                Ok(())
+            }
+            Ok(ControlResponse::Fenced { committed, offered, .. }) => Err(ServerError::Shoal(ShoalError::Fenced {
+                node: self.node,
+                committed,
+                ours: offered,
+            })),
+            Ok(ControlResponse::Refused { reason }) => {
+                event!(Level::WARN, msg = "the observation was refused", reason);
+                self.observe_after = Some(Instant::now() + OBSERVE_BACKOFF);
+                Ok(())
+            }
+            Err(error) => {
+                // no leader yet; the tick, or a metrics change after the backoff, tries again
+                event!(Level::DEBUG, msg = "the observation did not commit", %error);
+                self.observe_after = Some(Instant::now() + OBSERVE_BACKOFF);
+                Ok(())
+            }
+        }
+    }
+
+    /// Start dialling the seeds
+    fn start_join(&mut self) {
+        if self.joining {
+            return;
+        }
+        self.joining = true;
+        let network = self.network.clone();
+        let seeds = self.seeds.clone();
+        let member = self.member.clone();
+        let schema_id = self.local.borrow().schema_id;
+        let transport = self.transport.clone();
+        let tx = self.tx.clone();
+        glommio::spawn_local(async move {
+            let outcome = join(&network, &seeds, member, schema_id, &transport).await;
+            let _ = tx.send(Event::Joined(outcome)).await;
+        })
+        .detach();
+    }
+
+    /// Act on the join having finished
+    ///
+    /// # Arguments
+    ///
+    /// * `outcome` - The cluster and the leader that admitted this node, or why not
+    async fn handle_joined(&mut self, outcome: Result<(ClusterId, NodeId), String>) -> Result<(), ServerError> {
+        match outcome {
+            Ok((cluster, leader)) => {
+                // the cluster is known now, before the leader's first append arrives
+                self.local.borrow_mut().cluster = Some(cluster);
+                self.leader = Some(leader);
+                // and durably, so a restart resumes as a member of it
+                let root = self.root.clone();
+                glommio::executor()
+                    .spawn_blocking(move || StorageMeta::adopt_cluster(&root, cluster))
+                    .await?;
+                event!(Level::INFO, msg = "admitted", node = %self.node, cluster = %cluster, leader = %leader);
+                // the state may already hold this node, if replication beat the answer
+                self.handle_applied()
+            }
+            Err(reason) => Err(ServerError::Shoal(ShoalError::JoinRefused { reason })),
+        }
+    }
+
+    /// Promote a learner to voter while the policy asks for more voters, if this node leads
+    fn maybe_promote(&mut self) {
+        if !self.is_leader || self.promoting {
+            return;
+        }
+        let Some(metrics) = &self.metrics else {
+            return;
+        };
+        // no promotion while a joint configuration is uncommitted
+        if metrics.membership_config.membership() != metrics.committed_membership_config.membership() {
+            return;
+        }
+        let state = self.machine.state();
+        let want = state
+            .policy
+            .as_ref()
+            .map_or(self.policy.control_voters, |policy| policy.control_voters);
+        let voters: BTreeSet<NodeId> = metrics.membership_config.membership().voter_ids().collect();
+        if voters.len() >= want as usize {
+            return;
+        }
+        // the first learner that is up, in node order
+        let candidate = state
+            .members
+            .iter()
+            .find(|(node, member)| {
+                member.health == MemberHealth::Up
+                    && !voters.contains(node)
+                    && metrics.membership_config.membership().nodes().any(|(id, _)| id == *node)
+            })
+            .map(|(node, member)| (*node, member.record.clone()));
+        let Some((learner, record)) = candidate else {
+            return;
+        };
+        self.promoting = true;
+        let raft = self.raft.clone();
+        let tx = self.tx.clone();
+        glommio::spawn_local(async move {
+            let outcome = promote(&raft, learner, record).await;
+            let _ = tx.send(Event::Promoted(learner, outcome)).await;
+        })
+        .detach();
+    }
+
+    /// Send the leader this node's status report
+    fn report(&mut self) {
+        if self.status != JoinStatus::Joined {
+            return;
+        }
+        // the leader keeps its own health; a change in its shards is committed directly
+        if self.is_leader {
+            if self.reported_shards != self.shards_failed {
+                self.reported_shards = self.shards_failed.clone();
+                let raft = self.raft.clone();
+                let network = self.network.clone();
+                let machine = self.machine.clone();
+                let command = ControlCommand::ReportShards {
+                    node: self.node,
+                    incarnation: self.member.incarnation,
+                    failed: self.shards_failed.clone(),
+                };
+                glommio::spawn_local(async move {
+                    let _ = propose(&raft, &network, &machine, command).await;
+                })
+                .detach();
+            }
+            return;
+        }
+        let _ = self.send_report(self.member.incarnation);
+    }
+
+    /// Send one report at an incarnation
+    ///
+    /// # Arguments
+    ///
+    /// * `incarnation` - The incarnation to report as, which a test may lower
+    fn send_report(&mut self, incarnation: u64) -> Result<(), String> {
+        let Some(leader) = self.leader_record() else {
+            return Err("no leader to report to".to_string());
+        };
+        self.report_seq += 1;
+        let report = StatusReport {
+            node: self.node,
+            incarnation,
+            seq: self.report_seq,
+            topology_version: self.machine.state().topology_version,
+            applied_index: self.machine.applied_index(),
+            shards_failed: self.shards_failed.clone(),
+            reachability: self
+                .reachability
+                .iter()
+                .filter(|(_, reach)| reach.misses == 0)
+                .map(|(node, reach)| (*node, reach.rtt_us))
+                .collect(),
+        };
+        let payload = serde_json::to_vec(&report).map_err(|error| error.to_string())?;
+        let network = self.network.clone();
+        let tx = self.tx.clone();
+        let deadline = Duration::from_millis(self.policy.failure_detector.interval_ms.max(50));
+        glommio::spawn_local(async move {
+            let peer = network.peer(&network.addr_of(&leader));
+            let outcome = peer.rpc(ControlKind::StatusReport, payload, deadline).await;
+            let _ = tx.send(Event::Reported(outcome)).await;
+        })
+        .detach();
+        Ok(())
+    }
+
+    /// Act on the leader's answer to a report
+    ///
+    /// # Arguments
+    ///
+    /// * `outcome` - What it answered
+    fn handle_reported(&mut self, outcome: Result<Vec<u8>, RpcFailure>) -> Result<(), ServerError> {
+        match outcome {
+            Ok(_) => Ok(()),
+            // a fence is the leader telling this run it has been replaced
+            Err(RpcFailure::Remote(msg)) if msg.starts_with("fenced") => {
+                let committed = self
+                    .machine
+                    .state()
+                    .members
+                    .get(&self.node)
+                    .map_or(0, |member| member.record.incarnation);
+                Err(ServerError::Shoal(ShoalError::Fenced {
+                    node: self.node,
+                    committed,
+                    ours: self.member.incarnation,
+                }))
+            }
+            Err(error) => {
+                event!(Level::DEBUG, msg = "a report was not answered", %error);
+                Ok(())
+            }
+        }
+    }
+
+    /// Ping every member this node knows, and note who answered
+    ///
+    /// A local observation and nothing more: it feeds the detector view and the report's
+    /// reachability, and never a membership decision.
+    fn ping_members(&mut self) {
+        let state = self.machine.state();
+        for (node, member) in &state.members {
+            if *node == self.node {
+                continue;
+            }
+            let record = member.record.clone();
+            let network = self.network.clone();
+            let tx = self.tx.clone();
+            let node = *node;
+            glommio::spawn_local(async move {
+                let mut peer = network.peer(&network.addr_of(&record));
+                let started = Instant::now();
+                let answered = peer.ping().await.map(|_| started.elapsed()).map_err(|_| ());
+                let _ = tx.send(Event::Pinged(node, answered)).await;
+            })
+            .detach();
+        }
+    }
+
+    /// Note what a ping learned
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The member pinged
+    /// * `answered` - The round trip, or that it did not answer
+    fn handle_pinged(&mut self, node: NodeId, answered: Result<Duration, ()>) {
+        let entry = self.reachability.entry(node).or_insert(Reachability {
+            rtt_us: 0,
+            misses: 0,
+        });
+        match answered {
+            Ok(rtt) => {
+                // truncation cannot happen for a round trip anybody waits for
+                #[allow(clippy::cast_possible_truncation)]
+                let rtt_us = rtt.as_micros().min(u128::from(u32::MAX)) as u32;
+                entry.rtt_us = rtt_us;
+                entry.misses = 0;
+            }
+            Err(()) => entry.misses = entry.misses.saturating_add(1),
+        }
     }
 }
 
-/// Send a peer a vote for a low term and report its answer
+/// What a write through this node's own group produced when it did not commit here
+enum LocalWrite {
+    /// The group said where the leader is, if it knows
+    Forward(Option<MemberRecord>),
+    /// The write failed for a reason asking again cannot mend
+    Failed(String),
+}
+
+/// Write a command through this node's own group, waiting out a lease that is not established
+///
+/// A leader answers a write with an empty forward hint until a quorum has acknowledged it,
+/// which is when its lease starts; the metrics name it as the leader all the while, and a node
+/// that was leading when it stopped comes back that way too. Taking the empty hint as "no
+/// leader" and asking again at once is a busy loop on the control core that starves the links
+/// the acknowledgements ride, so this polls at [`LEASE_POLL`] and leaves the deadline to the
+/// caller.
 ///
 /// # Arguments
 ///
-/// * `network` - The control network
+/// * `raft` - This node's group
 /// * `me` - This node
-/// * `target` - The peer to probe
-async fn vote_probe(
-    network: &PeerNetwork,
+/// * `command` - The command
+///
+/// # Errors
+///
+/// Says where to forward the write, or why it cannot be written at all.
+async fn write_here(
+    raft: &Raft<ControlConfig, ControlStateMachine>,
     me: NodeId,
-    target: NodeId,
-) -> Result<VoteProbe, String> {
-    let mut peer = clone_factory(network).new_client(target, &MemberRecord::default()).await;
-    // a vote for term 1 from this node: a peer that has elected itself holds a term at least this
-    // high and has already voted, so it does not grant it - and answering at all proves its Raft
-    // was reached over the control lane
-    let vote = openraft::vote::Vote::new(1, me);
-    let request = VoteRequest::<ControlConfig>::new(vote, None);
-    let option = openraft::network::RPCOption::new(Duration::from_secs(5));
-    match RaftNetworkV2::vote(&mut peer, request, option).await {
-        Ok(response) => Ok(VoteProbe {
-            granted: response.vote_granted,
-        }),
-        Err(error) => Err(format!("{error}")),
+    command: ControlCommand,
+) -> Result<ControlResponse, LocalWrite> {
+    loop {
+        match raft.client_write(command.clone()).await {
+            Ok(response) => return Ok(response.data),
+            Err(RaftError::APIError(ClientWriteError::ForwardToLeader(forward))) => {
+                // a hint naming this node, or none while the metrics name it, is a lease that
+                // has not started: wait for it rather than spin
+                let names_me = forward.leader_id == Some(me)
+                    || (forward.leader_id.is_none()
+                        && raft.metrics().borrow_watched().current_leader == Some(me));
+                if names_me {
+                    glommio::timer::sleep(LEASE_POLL).await;
+                    continue;
+                }
+                return Err(LocalWrite::Forward(forward.leader_node));
+            }
+            Err(error) => {
+                return Err(LocalWrite::Failed(format!(
+                    "writing to the control log: {error}"
+                )))
+            }
+        }
     }
 }
 
-/// Clone the network factory so an RPC can be sent without holding the group's copy mutably
+/// Write a command through the leader, wherever it is
+///
+/// This node's own group takes it if this node leads; otherwise it is forwarded to the leader
+/// the write named, or to the one the metrics name after a bounded wait, and the answer comes
+/// back as what the state machine produced. Everything is under one deadline.
+///
+/// # Arguments
+///
+/// * `raft` - This node's group
+/// * `network` - The control network
+/// * `machine` - The state machine, for the leader's record
+/// * `command` - The command
+///
+/// # Errors
+///
+/// Says whether no leader could be reached or the write failed some other way.
+pub async fn propose(
+    raft: &Raft<ControlConfig, ControlStateMachine>,
+    network: &PeerNetwork,
+    machine: &ControlStateMachine,
+    command: ControlCommand,
+) -> Result<ControlResponse, ProposeError> {
+    let me = network.local_node();
+    let attempt = async {
+        // the local group first, which waits out its own lease if this node leads
+        let mut hint = match write_here(raft, me, command.clone()).await {
+            Ok(response) => return Ok(response),
+            Err(LocalWrite::Forward(hint)) => hint,
+            Err(LocalWrite::Failed(msg)) => return Err(ProposeError::Failed(msg)),
+        };
+        let payload = serde_json::to_vec(&command)
+            .map_err(|error| ProposeError::Failed(format!("encoding a proposal: {error}")))?;
+        // a hint may name a leader that has just changed, so this follows a few of them
+        for _ in 0..PROPOSE_HOPS {
+            // no hint: the leader the metrics name once the group elects one
+            let Some(record) = hint.take().or_else(|| leader_record(raft, machine)) else {
+                let elected = raft
+                    .wait(Some(Duration::from_secs(3)))
+                    .metrics(|metrics| metrics.current_leader.is_some(), "a leader")
+                    .await;
+                match elected {
+                    Ok(_) => {
+                        hint = leader_record(raft, machine);
+                        if hint.is_none() {
+                            return Err(ProposeError::NoLeader);
+                        }
+                        continue;
+                    }
+                    Err(_) => return Err(ProposeError::NoLeader),
+                }
+            };
+            // the leader may be this node by now, in which case its own group takes the write
+            // or says where to go next
+            if record.node == me {
+                match write_here(raft, me, command.clone()).await {
+                    Ok(response) => return Ok(response),
+                    Err(LocalWrite::Forward(next)) => {
+                        hint = next.filter(|next| next.node != me);
+                        continue;
+                    }
+                    Err(LocalWrite::Failed(msg)) => return Err(ProposeError::Failed(msg)),
+                }
+            }
+            let peer = network.peer(&network.addr_of(&record));
+            match peer.rpc(ControlKind::Propose, payload.clone(), PROPOSE_TIMEOUT).await {
+                Ok(answer) => match serde_json::from_slice::<ProposeResponse>(&answer) {
+                    Ok(ProposeResponse::Applied(response)) => return Ok(response),
+                    Ok(ProposeResponse::NotLeader { leader: next }) => {
+                        // an answer naming nobody is a leader in flux: a moment before asking
+                        // the metrics again, so a change of leader is not chased at full speed
+                        if next.is_none() {
+                            glommio::timer::sleep(LEASE_POLL).await;
+                        }
+                        hint = next.filter(|next| next.node != me).or_else(|| {
+                            leader_record(raft, machine).filter(|record| record.node != me)
+                        });
+                        // a hint naming this node goes through its own group, above
+                        if hint.is_none() && raft.metrics().borrow_watched().current_leader == Some(me) {
+                            hint = machine.state().members.get(&me).map(|member| member.record.clone());
+                        }
+                    }
+                    Err(error) => {
+                        return Err(ProposeError::Failed(format!("decoding a proposal's answer: {error}")))
+                    }
+                },
+                Err(RpcFailure::Remote(msg)) => return Err(ProposeError::Failed(msg)),
+                Err(RpcFailure::Unreachable(_)) => return Err(ProposeError::NoLeader),
+            }
+        }
+        Err(ProposeError::NoLeader)
+    };
+    match glommio::timer::timeout(PROPOSE_TIMEOUT, async { Ok(attempt.await) }).await {
+        Ok(outcome) => outcome,
+        Err(_) => Err(ProposeError::NoLeader),
+    }
+}
+
+/// The record of the leader the metrics name, if they name one this node knows
+///
+/// The membership the group holds is asked first, then the committed state, since a member's
+/// record can be in either before it is in both.
+///
+/// # Arguments
+///
+/// * `raft` - This node's group
+/// * `machine` - The state machine
+fn leader_record(
+    raft: &Raft<ControlConfig, ControlStateMachine>,
+    machine: &ControlStateMachine,
+) -> Option<MemberRecord> {
+    let metrics = raft.metrics();
+    let metrics = metrics.borrow_watched();
+    let id = metrics.current_leader?;
+    metrics
+        .membership_config
+        .membership()
+        .get_node(&id)
+        .cloned()
+        .or_else(|| machine.state().members.get(&id).map(|member| member.record.clone()))
+}
+
+/// Catch a learner up and make it a voter
+///
+/// # Arguments
+///
+/// * `raft` - This node's group, which has to lead
+/// * `learner` - The learner
+/// * `record` - Its committed record
+async fn promote(
+    raft: &Raft<ControlConfig, ControlStateMachine>,
+    learner: NodeId,
+    record: MemberRecord,
+) -> Result<(), String> {
+    // re-adding a learner with `blocking` waits until it has the leader's log, which is the
+    // catch-up before promotion C3 requires
+    let caught_up = glommio::timer::timeout(CATCHUP_TIMEOUT, async {
+        Ok(raft.add_learner(learner, record, true).await)
+    })
+    .await;
+    match caught_up {
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => return Err(format!("catching the learner up: {error}")),
+        Err(_) => return Err("the learner did not catch up within the deadline".to_string()),
+    }
+    // then the configuration change, through joint consensus, keeping the others as they are
+    let mut ids = BTreeSet::new();
+    ids.insert(learner);
+    raft.change_membership(ChangeMembers::AddVoterIds(ids), true)
+        .await
+        .map(|_| ())
+        .map_err(|error| format!("changing the membership: {error}"))
+}
+
+/// Dial the seeds until one of them, or the leader it names, admits this node
 ///
 /// # Arguments
 ///
 /// * `network` - The control network
-fn clone_factory(network: &PeerNetwork) -> PeerNetwork {
-    network.clone()
-}
-
-/// Write a command through the group and hand back what applying it produced
-///
-/// # Arguments
-///
-/// * `raft` - The group
-/// * `command` - The command
-async fn write(
-    raft: &Raft<ControlConfig, ControlStateMachine>,
-    command: ControlCommand,
-) -> Result<ControlResponse, ServerError> {
-    let written = raft
-        .client_write(command)
-        .await
-        .map_err(|error| ServerError::ControlFailed {
-            error: format!("writing to the control log: {error}"),
-        })?;
-    Ok(written.data)
-}
-
-/// Record the topology version a response reports, if it applied
-///
-/// # Arguments
-///
-/// * `root` - The storage root the marker is in
-/// * `response` - What applying a command produced
-async fn observe_response(root: &Path, response: &ControlResponse) -> Result<(), ServerError> {
-    match response {
-        ControlResponse::Applied { topology_version } => observe(root, *topology_version).await,
-        // a refusal changed nothing, and a bootstrap refused is a directory that already was one
-        ControlResponse::Refused { reason } => Err(ServerError::ControlFailed {
-            error: format!("the control group refused a command: {reason}"),
-        }),
+/// * `seeds` - The control addresses to try, in order
+/// * `member` - What this node advertises
+/// * `schema_id` - The structural fingerprint of the schema it serves
+/// * `transport` - The bounds and timers, for the backoff
+async fn join(
+    network: &PeerNetwork,
+    seeds: &[String],
+    member: MemberRecord,
+    schema_id: u64,
+    transport: &Transport,
+) -> Result<(ClusterId, NodeId), String> {
+    let deadline = Instant::now() + JOIN_TIMEOUT;
+    let request = serde_json::to_vec(&JoinRequest {
+        member: member.clone(),
+        schema_id,
+    })
+    .map_err(|error| format!("encoding a join: {error}"))?;
+    let mut backoff = transport.reconnect_min.duration();
+    let mut last = String::from("no seed answered");
+    while Instant::now() < deadline {
+        // every seed in order, then whoever a seed redirected to
+        let mut targets: Vec<PeerAddr> = seeds.iter().map(|seed| PeerAddr::seed(seed)).collect();
+        while let Some(target) = targets.first().cloned() {
+            targets.remove(0);
+            let peer = network.peer(&target);
+            match peer.rpc(ControlKind::Join, request.clone(), JOIN_RPC_TIMEOUT).await {
+                Ok(answer) => match serde_json::from_slice::<JoinResponse>(&answer) {
+                    Ok(JoinResponse::Admitted { cluster, leader, .. }) => return Ok((cluster, leader)),
+                    Ok(JoinResponse::Redirect { leader: Some(record) }) => {
+                        // a seed that is not the leader names it; dial it next, expecting it
+                        let mut addr = network.addr_of(&record);
+                        addr.node = None;
+                        addr.shards = 0;
+                        targets.insert(0, addr);
+                    }
+                    Ok(JoinResponse::Redirect { leader: None }) => {
+                        last = format!("{} knows no leader yet", target.control);
+                    }
+                    Ok(JoinResponse::Refused { reason, retry: true }) => {
+                        last = format!("{} refused for now: {reason}", target.control);
+                    }
+                    Ok(JoinResponse::Refused { reason, retry: false }) => return Err(reason),
+                    Err(error) => last = format!("decoding {}'s answer: {error}", target.control),
+                },
+                Err(error) => last = format!("{}: {error}", target.control),
+            }
+        }
+        // nobody admitted us this round; back off and try again
+        glommio::timer::sleep(backoff).await;
+        backoff = (backoff * 2).min(transport.reconnect_max.duration());
     }
+    Err(format!("no seed admitted this node within {JOIN_TIMEOUT:?}: {last}"))
 }
 
 /// Record a topology version in the marker, off the executor thread
@@ -724,4 +2370,14 @@ async fn observe(root: &Path, version: u64) -> Result<(), ServerError> {
     glommio::executor()
         .spawn_blocking(move || StorageMeta::observe_topology(&root, version))
         .await
+}
+
+/// The applied state, for a caller that holds only the machine
+///
+/// # Arguments
+///
+/// * `machine` - The state machine
+#[must_use]
+pub fn state_of(machine: &ControlStateMachine) -> ControlState {
+    machine.state()
 }

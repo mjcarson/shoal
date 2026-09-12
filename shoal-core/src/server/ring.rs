@@ -11,9 +11,6 @@
 //! The map is built whole from the shard count before any shard starts, so no shard ever
 //! routes against a partial one.
 
-use tracing::{event, Level};
-
-use super::conf::cluster::Placement;
 use super::shard::{ShardContact, ShardInfo};
 use super::ServerError;
 use crate::server::errors::ShoalError;
@@ -98,7 +95,7 @@ impl Ring {
 
     /// Build the tablet map for a node with a static placement of tablets over nodes
     ///
-    /// Tablet `t` belongs to `placement.nodes[t % N]`, and on that node to shard `t % shards`
+    /// Tablet `t` belongs to `placement[t % N]`, and on that node to shard `(t / N) % shards`
     /// ([F38](../../../docs/src/features/inter-node-transport.md)). This node's own shards come
     /// first in `shards`, at the indices they have on the mesh, and every remote shard follows
     /// with a `Remote` contact; the map indexes the whole list. A placement of one node builds
@@ -108,7 +105,7 @@ impl Ring {
     /// # Arguments
     ///
     /// * `shard_count` - The number of shards on this node
-    /// * `placement` - Every node of the cluster, this one included
+    /// * `placement` - Every placed node with its shard count, in placement order, this one included
     /// * `me` - This node's identity
     ///
     /// # Errors
@@ -117,29 +114,39 @@ impl Ring {
     /// shard count it runs.
     pub fn with_placement(
         shard_count: usize,
-        placement: &Placement,
+        placement: &[(NodeId, u16)],
         me: NodeId,
     ) -> Result<Self, ServerError> {
         // this node's own map is the local half of the answer, and the check on shard_count
         let mut ring = Ring::new(shard_count)?;
-        // the placement has to be one this node can route against
-        placement.validate(me, shard_count)?;
+        // the placement has to be one this node can route against: it names this node, once,
+        // with the shards it runs
+        let Some((_, placed_shards)) = placement.iter().find(|(node, _)| *node == me) else {
+            return Err(ServerError::Shoal(ShoalError::PlacementMissingSelf { node: me }));
+        };
+        if usize::from(*placed_shards) != shard_count {
+            return Err(ServerError::Shoal(ShoalError::PlacementShardCount {
+                node: me,
+                entry: *placed_shards,
+                actual: shard_count,
+            }));
+        }
         // append an info for every remote shard, remembering where each node's run starts
-        let mut first_index = Vec::with_capacity(placement.nodes.len());
-        for placed in &placement.nodes {
-            if placed.node == me {
+        let mut first_index = Vec::with_capacity(placement.len());
+        for (node, shards) in placement {
+            if *node == me {
                 // this node's shards are already at 0..shard_count
                 first_index.push(0usize);
                 continue;
             }
+            if *shards == 0 {
+                return Err(ServerError::Shoal(ShoalError::NoShards));
+            }
             first_index.push(ring.shards.len());
-            for shard in 0..placed.shards {
+            for shard in 0..*shards {
                 ring.shards.push(ShardInfo {
-                    name: format!("Node-{}/Shard-{shard}", placed.node),
-                    contact: ShardContact::Remote {
-                        node: placed.node,
-                        shard,
-                    },
+                    name: format!("Node-{node}/Shard-{shard}"),
+                    contact: ShardContact::Remote { node: *node, shard },
                 });
             }
         }
@@ -153,10 +160,10 @@ impl Ring {
         // shards by the next digit up, so a node and a shard are chosen independently: with the
         // shard taken from the same modulus as the node, a node whose shard count shared a
         // factor with the node count would leave some of its shards owning nothing
-        let nodes = placement.nodes.len();
+        let nodes = placement.len();
         for (tablet, owner) in ring.tablets.iter_mut().enumerate() {
             let which = tablet % nodes;
-            let shard = (tablet / nodes) % usize::from(placement.nodes[which].shards);
+            let shard = (tablet / nodes) % usize::from(placement[which].1);
             // truncation cannot happen: the list was bounded above
             #[allow(clippy::cast_possible_truncation)]
             let index = (first_index[which] + shard) as u16;
@@ -201,30 +208,6 @@ impl Ring {
         tablet
     }
 
-    /// Add a shard to our tablet map
-    ///
-    /// Every shard on this node is already placed by [`Ring::new`], so a join naming one
-    /// of them is the broadcast arriving for a shard we built ourselves and is ignored.
-    /// The seam is kept for the multi node case, where a join will name a shard this node
-    /// did not build.
-    ///
-    /// # Arguments
-    ///
-    /// * `shard` - The shard to add
-    pub fn add(&mut self, shard: ShardInfo) {
-        // a shard we already placed is this nodes own join coming back to us
-        if self.shards.iter().any(|known| known.name == shard.name) {
-            return;
-        }
-        // anything else is a shard we cannot give tablets to, since moving a tablet needs
-        // a rebalancer and its data moved with it, and neither exists yet
-        event!(
-            Level::WARN,
-            msg = "Ignoring a join from an unknown shard, as rebalancing is unimplemented",
-            shard = shard.name,
-        );
-    }
-
     /// Get a shard for this partition
     ///
     /// # Arguments
@@ -236,8 +219,8 @@ impl Ring {
         // get the shard that owns that tablet
         //
         // neither index can be out of bounds: `new` fills a tablet for every id this can
-        // produce and rejects an empty shard list, and `add` never places an owner it
-        // has no info for
+        // produce and rejects an empty shard list, and `with_placement` appends every remote
+        // shard before it names one as an owner
         let owner = usize::from(self.tablets[tablet]);
         &self.shards[owner]
     }
@@ -346,17 +329,9 @@ mod tests {
     /// A placement of one node is the standalone map, tablet for tablet
     #[test]
     fn a_one_node_placement_is_the_standalone_ring() {
-        use crate::server::conf::cluster::PlacedNode;
         let me = NodeId::mint();
         for shard_count in [1, 2, 7, 16] {
-            let placement = Placement {
-                nodes: vec![PlacedNode {
-                    node: me,
-                    data: "127.0.0.1:12001".to_string(),
-                    control: "127.0.0.1:12002".to_string(),
-                    shards: shard_count,
-                }],
-            };
+            let placement = vec![(me, shard_count)];
             let placed = Ring::with_placement(usize::from(shard_count), &placement, me)
                 .expect("a placement of one");
             let alone = Ring::new(usize::from(shard_count)).expect("a ring");
@@ -371,21 +346,9 @@ mod tests {
     /// A placement of several nodes hands tablets to nodes in turn, then to shards in turn
     #[test]
     fn a_placement_interleaves_nodes_then_shards() {
-        use crate::server::conf::cluster::PlacedNode;
         let ids = [NodeId::mint(), NodeId::mint(), NodeId::mint()];
         let shards = [2u16, 3, 1];
-        let placement = Placement {
-            nodes: ids
-                .iter()
-                .zip(shards)
-                .map(|(node, shards)| PlacedNode {
-                    node: *node,
-                    data: "127.0.0.1:1".to_string(),
-                    control: "127.0.0.1:2".to_string(),
-                    shards,
-                })
-                .collect(),
-        };
+        let placement: Vec<(NodeId, u16)> = ids.iter().copied().zip(shards).collect();
         // seen from the second node, which runs three shards
         let ring = Ring::with_placement(3, &placement, ids[1]).expect("a placement of three");
         assert_eq!(ring.shards.len(), 6);

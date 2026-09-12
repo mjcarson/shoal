@@ -178,6 +178,11 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
             None
         }
     };
+    // a placed cluster is initialized once every peer has joined, which is what an operator
+    // does and what the arm's keys assume ([F39](../../../docs/src/features/membership.md))
+    if let (Some(staged), Some(pool)) = (&staged, pool.as_ref()) {
+        cluster::initialize(staged, pool)?;
+    }
     // a cluster node this process started records what its control plane committed; a server
     // somebody else started carries whatever record they handed over, and a standalone one none.
     // the link counters are read again after the run, since they are what the run did

@@ -8,7 +8,7 @@ use tracing::Span;
 use uuid::Uuid;
 
 use super::request_body::RequestBody;
-use super::shard::{ShardContact, ShardInfo};
+use super::shard::ShardContact;
 use super::stage_profile::{StageStamps, Stamp};
 use crate::shared::responses::{Response, ResponseError};
 use crate::shared::row_ref::RowRef;
@@ -226,8 +226,12 @@ pub enum ServerMsg<D: ShoalDatabase>
 where
     <D::ClientType as QuerySupport>::QueryKinds: Clone,
 {
-    /// Join this nodes token ring
-    Join(ShardInfo),
+    /// Install a newer tablet map, pushed whole by the control plane
+    ///
+    /// A shard swaps its map and rebuilds its ring between two messages, so nothing ever routes
+    /// against half a map; a version at or below the installed one is ignored
+    /// ([F39](../../../docs/src/features/membership.md)).
+    Map(std::sync::Arc<crate::server::map::TabletMap>),
     /// Tell this shard about a new client
     NewClient {
         /// This clients id
@@ -393,6 +397,11 @@ where
         table: D::TableNames,
         partitions: Vec<u64>,
     },
+    /// Make this shard fail, for a test of what the cluster does about a dead shard
+    ///
+    /// The shard's loop returns an error, which the pool and the control plane both hear of
+    /// exactly as they would for any other death ([F39](../../../docs/src/features/membership.md)).
+    Fail,
     /// Tell this shard to shutdown
     Shutdown,
 }
@@ -400,7 +409,7 @@ where
 impl<D: ShoalDatabase> Clone for ServerMsg<D> {
     fn clone(&self) -> Self {
         match self {
-            ServerMsg::Join(info) => ServerMsg::Join(info.clone()),
+            ServerMsg::Map(map) => ServerMsg::Map(map.clone()),
             ServerMsg::Client {
                 peer,
                 span,
@@ -473,6 +482,8 @@ impl<D: ShoalDatabase> Clone for ServerMsg<D> {
                 table: *table,
                 partitions: partitions.clone(),
             },
+            // a failure is asked of one shard
+            ServerMsg::Fail => panic!("A failure is asked of one shard"),
             ServerMsg::Shutdown => ServerMsg::Shutdown,
         }
     }

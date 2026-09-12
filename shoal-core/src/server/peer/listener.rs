@@ -38,7 +38,7 @@ use super::codec;
 use super::handshake::{self, Local};
 use super::Lane;
 use crate::server::comms::Comms;
-use crate::server::conf::cluster::Placement;
+use crate::server::map::MapCell;
 use crate::server::database::ShoalDatabase;
 use crate::server::messages::{Reply, ReplyKind, ServerMsg};
 use crate::server::request_body::RequestBody;
@@ -46,7 +46,7 @@ use crate::server::stage_profile::{self, Stamp};
 use crate::server::ServerError;
 use crate::shared::identity::NodeId;
 use crate::shared::protocol::peer::{
-    self, ForwardEntry, ForwardPreamble, ForwardedKind, ForwardedPreamble, SnapshotBegin,
+    self, ForwardPreamble, ForwardedKind, ForwardedPreamble, SnapshotBegin,
     SnapshotChunk, SnapshotEnd, FORWARD_PREAMBLE_LEN, SNAPSHOT_BEGIN_LEN, SNAPSHOT_CHUNK_LEN,
     SNAPSHOT_END_LEN,
 };
@@ -59,9 +59,9 @@ pub struct ListenerContext<S: ShoalDatabase> {
     /// The channel to hand this shard's own work on
     pub node_local_tx: AsyncSender<ServerMsg<S>>,
     /// What this node says about itself
-    pub local: Rc<Local>,
-    /// Every node this listener accepts a hello from
-    pub placement: Rc<Placement>,
+    pub local: Rc<std::cell::RefCell<Local>>,
+    /// The map this shard holds, which is what a hello is judged against
+    pub map: MapCell,
     /// What to take the wire with, if the lanes are encrypted
     pub tls: Option<Arc<ServerConfig>>,
     /// How long a peer has to finish its handshake
@@ -80,7 +80,7 @@ impl<S: ShoalDatabase> Clone for ListenerContext<S> {
             comms: self.comms.clone(),
             node_local_tx: self.node_local_tx.clone(),
             local: self.local.clone(),
-            placement: self.placement.clone(),
+            map: self.map.clone(),
             tls: self.tls.clone(),
             handshake_timeout: self.handshake_timeout,
             inflight_bound: self.inflight_bound,
@@ -191,13 +191,8 @@ pub async fn peer_acceptor<S: ShoalDatabase>(
                         return Ok(Err(error));
                     }
                 }
-                Ok(handshake::accept(
-                    &mut stream,
-                    &ctx.local,
-                    &[Lane::Data, Lane::Bulk],
-                    &ctx.placement,
-                )
-                .await)
+                let local = ctx.local.borrow().clone();
+                Ok(handshake::accept(&mut stream, &local, &[Lane::Data, Lane::Bulk], &ctx.map).await)
             })
             .await;
             let accepted = match accepted {
@@ -307,7 +302,8 @@ async fn peer_rx_relay<S: ShoalDatabase>(
 ) -> Result<(), ServerError> {
     loop {
         // the header, or a clean end
-        let Some(header) = codec::read_header(&mut rx, ctx.local.max_frame_bytes).await? else {
+        let max_frame_bytes = ctx.local.borrow().max_frame_bytes;
+        let Some(header) = codec::read_header(&mut rx, max_frame_bytes).await? else {
             return Ok(());
         };
         let header = codec::expect(header, MessageType::Forward)?;
@@ -465,7 +461,8 @@ async fn serve_bulk<S: ShoalDatabase>(
 ) {
     let outcome: Result<(), ServerError> = async {
         loop {
-            let Some(header) = codec::read_header(&mut rx, ctx.local.max_frame_bytes).await? else {
+            let max_frame_bytes = ctx.local.borrow().max_frame_bytes;
+            let Some(header) = codec::read_header(&mut rx, max_frame_bytes).await? else {
                 return Ok(());
             };
             match header.kind {

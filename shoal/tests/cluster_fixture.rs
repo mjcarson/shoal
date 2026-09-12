@@ -375,9 +375,9 @@ async fn node_identity_persists_and_wrong_cluster_is_refused() -> Result<(), Fix
     let node = first.node.clone().expect("a node id");
     let cluster_id = first.cluster.clone().expect("a cluster id");
     let version = first.topology_version.expect("a topology version");
-    // the bootstrap is one change, and the observation that follows it repeats the member
-    // record the bootstrap carried, so it moves nothing
-    assert_eq!(version, 1, "a fresh bootstrap is one topology change, saw {version}");
+    // the group's own membership entry is one change and the bootstrap another; the observation
+    // that follows repeats the member record the bootstrap carried, so it moves nothing
+    assert_eq!(version, 2, "a fresh bootstrap is two topology changes, saw {version}");
     // killed and restarted, it is the same node in the same cluster
     cluster.restart(0, NodeKind::Server)?;
     let again = cluster.node(0).endpoints.clone();
@@ -712,8 +712,8 @@ async fn slow_peer_has_bounded_bytes_and_independent_lanes() -> Result<(), Fixtu
         .lane_links(true)
         .start()
         .await?;
-    // node 0's bulk link to node 1 shares node 1's data proxy; delay it so the stream stalls
-    cluster.data_link(1).delay(Duration::from_secs(60));
+    // node 0's bulk link to node 1 shares its data proxy toward node 1; delay it so the stream stalls
+    cluster.data_link(0, 1).delay(Duration::from_secs(60));
     let before = cluster.node(0).rss_kib();
     // stream far more than the 64 MiB bulk queue holds
     let probe = cluster.node_mut(0).command("PROBE_BULK 1 536870912")?;
@@ -751,8 +751,8 @@ async fn slow_peer_has_bounded_bytes_and_independent_lanes() -> Result<(), Fixtu
     assert!(ping.get("ok").is_some(), "a control ping did not survive the bulk stall: {ping}");
 
     // now cut the data lane to node 1: a forwarded query gets a definite outcome, not a hang
-    cluster.data_link(1).cut();
-    assert_eq!(cluster.data_link(1).state(), LinkState::Cut);
+    cluster.data_link(0, 1).cut();
+    assert_eq!(cluster.data_link(0, 1).state(), LinkState::Cut);
     // a key owned by node 1: node 0 forwards it, the cut lane fails it definitely
     let addr = cluster.node(0).endpoints.client.to_string();
     let client = Shoal::<TestDbClient>::new(&addr).await?;
@@ -1072,6 +1072,20 @@ async fn cluster_server_child() {
     // nodes' spans back and check the hop's parentage. The pool installs no subscriber, so this
     // global default is uncontested ([F38](../../docs/src/features/inter-node-transport.md))
     let trace_provider = install_trace_exporter(request.cluster.as_ref().and_then(|c| c.trace_file.clone()));
+    // a log file per child when asked for, so a failing cluster test leaves its children's
+    // side of the story behind: `SHOAL_CHILD_LOG=<dir>` writes `<dir>/child-<pid>.log`
+    if trace_provider.is_none() {
+        if let Ok(dir) = std::env::var("SHOAL_CHILD_LOG") {
+            let path = std::path::Path::new(&dir).join(format!("child-{}.log", std::process::id()));
+            if let Ok(file) = std::fs::File::create(path) {
+                let _ = tracing_subscriber::fmt()
+                    .with_writer(std::sync::Mutex::new(file))
+                    .with_ansi(false)
+                    .with_max_level(tracing::Level::DEBUG)
+                    .try_init();
+            }
+        }
+    }
     // exactly the allocation the parent decided on, and any port at all
     let mut resources = Resources::default()
         .exclude_cores(request.exclude_cores.clone())
@@ -1085,30 +1099,40 @@ async fn cluster_server_child() {
     let mut conf = utils::build_crash_config(&request.dir, 0)
         .resources(resources)
         .networking(Networking::default().port(0));
-    // a cluster node bootstraps itself, with its control thread where the parent put it
+    // a cluster node bootstraps itself or joins, with its control thread where the parent put it
     if request.kind == NodeKind::Server {
         let mut block = ClusterConf::default()
             .bootstrap(true)
             .control_core(request.control_cpu.unwrap_or(0))
-            .control_core_shared(request.control_shared);
-        // a statically placed node also gets its ports and the placement every node shares
+            .control_core_shared(request.control_shared)
+            .replication_factor(1);
+        // a member of a fixture cluster gets its ports, its seeds, its policy and where it
+        // dials its peers ([F39](../../docs/src/features/membership.md))
         if let Some(staged) = &request.cluster {
-            use shoal::server::conf::cluster::{PlacedNode, Placement};
             use shoal::shared::identity::NodeId;
-            let nodes = staged
-                .placement
-                .iter()
-                .map(|(node, data, control, shards)| PlacedNode {
-                    node: NodeId(node.parse().expect("a node id parses")),
-                    data: data.clone(),
-                    control: control.clone(),
-                    shards: *shards,
-                })
-                .collect();
             block = block
+                .bootstrap(staged.bootstrap)
+                .seeds(staged.seeds.clone())
                 .port(staged.data_port)
                 .control_port(staged.control_port)
-                .placement(Placement { nodes });
+                .replication_factor(staged.replication_factor)
+                .control_voters(staged.control_voters);
+            block.admins = staged.admins.clone();
+            if let Some(interval) = staged.detector_interval_ms {
+                block = block.detector_interval_ms(interval);
+            }
+            for (node, control, data) in &staged.dial {
+                let node = NodeId(node.parse().expect("a node id parses"));
+                block = block.dial(node, Some(control.clone()), Some(data.clone()));
+            }
+            // a cluster that requires authentication names its users on every node
+            if !staged.auth.is_empty() {
+                let mut auth = shoal::server::conf::Auth::default().required(true);
+                for (user, password) in &staged.auth {
+                    auth = auth.user(user, password);
+                }
+                conf = conf.auth(auth);
+            }
         }
         conf = conf.cluster(block);
     }
@@ -1125,7 +1149,7 @@ async fn cluster_server_child() {
         }
     };
     // ready means every shard is answering, on the port the pool resolved, and the control
-    // plane - if there is one - has its group
+    // plane - if there is one - is serving
     let client = match pool.ready(utils::READY_TIMEOUT) {
         Ok(addr) => addr,
         Err(error) => {
@@ -1136,6 +1160,7 @@ async fn cluster_server_child() {
     // what the node is, which the parent records and the tests read
     let identity = pool.identity().clone();
     let topology = pool.topology().ok();
+    let readiness = pool.readiness().ok();
     let shard_cpus = pool.shard_cpus().to_vec();
     // the peer and control endpoints a cluster node bound, for the parent to record
     let (data, control_ep) = match &request.cluster {
@@ -1155,29 +1180,39 @@ async fn cluster_server_child() {
         control_shared: pool.control_placement().is_some_and(|placement| placement.shared),
         topology_version: topology.as_ref().map(|view| view.version),
         shard_cpus,
+        incarnation: Some(identity.incarnation),
+        control_status: readiness.map(|view| view.control.name().to_string()),
     };
     report(&format!(
         "{} {}",
         cluster::READY_LINE,
         serde_json::to_string(&endpoints).expect("endpoints serialize")
     ));
-    // a cluster node answers commands on its stdin, for the tests to drive its peer lanes, while
-    // still watching for a shard death; a standalone node has no peers and just watches
+    // a cluster node answers commands on its stdin, for the tests to drive it, while still
+    // watching for a shard death; a standalone node has no peers and just watches
     if let Some(staged) = request.cluster.clone() {
         use tokio::io::AsyncBufReadExt as _;
-        // resolve a node index in a command to the NodeId the placement staged
-        let placement: Vec<shoal::shared::identity::NodeId> = staged
-            .placement
+        // resolve a node index in a command to the NodeId the fixture minted for it
+        let peers: Vec<shoal::shared::identity::NodeId> = staged
+            .peers
             .iter()
-            .map(|(node, ..)| shoal::shared::identity::NodeId(node.parse().expect("a node id")))
+            .map(|node| shoal::shared::identity::NodeId(node.parse().expect("a node id")))
             .collect();
         let mut stdin = tokio::io::BufReader::new(tokio::io::stdin()).lines();
         let mut watch = tokio::time::interval(Duration::from_millis(50));
+        // whether a shard death was asked for, in which case it is logged rather than fatal
+        let mut tolerate_failure = false;
         loop {
             tokio::select! {
                 // the next command line, or stdin closing
                 line = stdin.next_line() => match line {
-                    Ok(Some(line)) => report(&handle_command(&pool, &placement, trace_provider.as_ref(), line.trim())),
+                    Ok(Some(line)) => {
+                        let line = line.trim();
+                        if line.starts_with("FAIL_SHARD") {
+                            tolerate_failure = true;
+                        }
+                        report(&handle_command(&pool, &peers, &request.dir, trace_provider.as_ref(), line));
+                    }
                     // stdin closed: the parent is done with us, run until killed
                     Ok(None) => break,
                     Err(_) => break,
@@ -1185,8 +1220,12 @@ async fn cluster_server_child() {
                 // watch for a shard death between commands
                 _ = watch.tick() => {
                     if let Some((shard, error)) = pool.failure() {
-                        report(&format!("{} shard {shard} died: {error}", cluster::FAILED_LINE));
-                        std::process::exit(1);
+                        if tolerate_failure && shard != usize::MAX {
+                            eprintln!("shard {shard} died as asked: {error}");
+                        } else {
+                            report(&format!("{} shard {shard} died: {error}", cluster::FAILED_LINE));
+                            std::process::exit(1);
+                        }
                     }
                 }
             }
@@ -1207,19 +1246,54 @@ async fn cluster_server_child() {
 /// # Arguments
 ///
 /// * `pool` - This node's pool
-/// * `placement` - The node ids a command's index resolves against
+/// * `peers` - The node ids a command's index resolves against, in index order
+/// * `dir` - This node's storage directory
+/// * `trace_provider` - The span exporter, if one was installed
 /// * `line` - The command line
 fn handle_command(
     pool: &ShoalPool<TestDb>,
-    placement: &[shoal::shared::identity::NodeId],
+    peers: &[shoal::shared::identity::NodeId],
+    dir: &std::path::Path,
     trace_provider: Option<&opentelemetry_sdk::trace::SdkTracerProvider>,
     line: &str,
 ) -> String {
+    use shoal::server::{AdminKind, AdminRequest};
     let mut parts = line.split_whitespace();
     let verb = parts.next().unwrap_or("");
-    // resolve the next token as a node index into the placement
+    // resolve the next token as a node index
     let node_at = |parts: &mut std::str::SplitWhitespace| -> Option<shoal::shared::identity::NodeId> {
-        parts.next().and_then(|idx| idx.parse::<usize>().ok()).and_then(|idx| placement.get(idx).copied())
+        parts.next().and_then(|idx| idx.parse::<usize>().ok()).and_then(|idx| peers.get(idx).copied())
+    };
+    // an administrative request made as the process itself, against the current version
+    //
+    // a version that moved between the read and the proposal - a promotion committing, a
+    // member observing itself - is what an operator's tool retries, so this does, a few times
+    let admin = |kind: AdminKind| -> Result<serde_json::Value, String> {
+        let op = uuid::Uuid::new_v4();
+        let mut last = String::new();
+        for _ in 0..8 {
+            let version = pool.topology().map_err(|error| format!("{error:?}"))?.version;
+            let response = pool
+                .admin(AdminRequest {
+                    op,
+                    expected_version: version,
+                    kind: kind.clone(),
+                })
+                .map_err(|error| format!("{error:?}"))?;
+            match response.outcome {
+                Ok(shoal::shared::protocol::admin::AdminOutcome::Applied { version })
+                | Ok(shoal::shared::protocol::admin::AdminOutcome::Repeated { version }) => {
+                    return Ok(serde_json::json!({ "version": version }));
+                }
+                Ok(shoal::shared::protocol::admin::AdminOutcome::Read(value)) => return Ok(value),
+                Err(error) if error.code() == shoal::shared::protocol::error::ErrorCode::StaleVersion => {
+                    last = format!("{}: {}", error.code(), error.msg);
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                Err(error) => return Err(format!("{}: {}", error.code(), error.msg)),
+            }
+        }
+        Err(last)
     };
     let result: Result<serde_json::Value, String> = match verb {
         // ping a peer over the control lane; the reply is how many microseconds it took
@@ -1256,6 +1330,71 @@ fn handle_command(
                 }),
             None => Err("PROBE_BULK needs a node index".to_string()),
         },
+        // the cluster as this node sees it
+        "MEMBERS" => pool
+            .topology()
+            .map(|view| serde_json::to_value(view).expect("a view serializes"))
+            .map_err(|error| format!("{error:?}")),
+        // where this node stands
+        "READINESS" => pool
+            .readiness()
+            .map(|view| serde_json::to_value(view).expect("a view serializes"))
+            .map_err(|error| format!("{error:?}")),
+        // the map this node's shards route with
+        "MAP" => pool
+            .map()
+            .map(|map| serde_json::to_value(&*map).expect("a map serializes"))
+            .map_err(|error| format!("{error:?}")),
+        // place the tablets over these nodes, in this order
+        "INITIALIZE" => {
+            let mut nodes = Vec::new();
+            let mut bad = None;
+            for token in parts.by_ref() {
+                match token.parse::<usize>().ok().and_then(|idx| peers.get(idx).copied()) {
+                    Some(node) => nodes.push(node),
+                    None => bad = Some(token.to_string()),
+                }
+            }
+            match bad {
+                Some(token) => Err(format!("INITIALIZE: {token} is not a node index")),
+                None => admin(AdminKind::Initialize { nodes }),
+            }
+        }
+        // change the voter policy
+        "SET_VOTERS" => match parts.next().and_then(|count| count.parse::<u32>().ok()) {
+            Some(count) => admin(AdminKind::SetControlVoters { count }),
+            None => Err("SET_VOTERS needs a count".to_string()),
+        },
+        // any administrative request, as json
+        "ADMIN" => {
+            let json = line.trim_start_matches("ADMIN").trim();
+            match serde_json::from_str::<AdminRequest>(json) {
+                Ok(request) => pool
+                    .admin(request)
+                    .map(|response| serde_json::to_value(response).expect("a response serializes"))
+                    .map_err(|error| format!("{error:?}")),
+                Err(error) => Err(format!("ADMIN: {error}")),
+            }
+        }
+        // which start of this node this is
+        "INCARNATION" => Ok(serde_json::json!({ "incarnation": pool.identity().incarnation })),
+        // how many bytes the control log holds, so a test can see whether an entry was written
+        "LOG_LEN" => std::fs::metadata(dir.join("control").join("log"))
+            .map(|meta| serde_json::json!({ "bytes": meta.len() }))
+            .map_err(|error| format!("{error}")),
+        // kill one of this node's shards, for the shard-health test
+        "FAIL_SHARD" => match parts.next().and_then(|idx| idx.parse::<usize>().ok()) {
+            Some(shard) => pool
+                .fail_shard(shard)
+                .map(|()| serde_json::json!({ "failed": shard }))
+                .map_err(|error| format!("{error:?}")),
+            None => Err("FAIL_SHARD needs a shard index".to_string()),
+        },
+        // send the leader one report at an incarnation below this node's
+        "STALE_REPORT" => pool
+            .control_stale_report()
+            .map(|()| serde_json::json!({ "sent": true }))
+            .map_err(|error| format!("{error:?}")),
         // flush this node's exported spans to its trace file
         "FLUSH" => {
             if let Some(provider) = trace_provider {
@@ -1271,6 +1410,391 @@ fn handle_command(
         Err(error) => serde_json::json!({ "error": error }),
     };
     format!("{} {}", cluster::REPLY_LINE, json)
+}
+
+/// Three Shoal processes converge on one cluster and recover its metadata after a restart (C3 M3)
+///
+/// Node 0 bootstraps, nodes 1 and 2 join through it, and the three-voter policy promotes both
+/// joiners. Every node's view of the members, the voters and the leader is the same. Then all
+/// three are killed and restarted on their directories: each comes back as itself, in the same
+/// cluster, from its own log, and a leader is elected again from what they recovered - with no
+/// process the test did not start ([C3](../../docs/src/distributed/membership.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn three_nodes_bootstrap_without_external_membership() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder().cluster(3, CoreClaim::Count(1)).start().await?;
+    cluster.wait_voters(0, 3)?;
+    // every node agrees on the cluster, its members, its voters and its leader
+    let views: Vec<serde_json::Value> = (0..3).map(|id| cluster.members(id)).collect::<Result<_, _>>()?;
+    let ids = cluster.node_ids();
+    for (id, view) in views.iter().enumerate() {
+        assert_eq!(view["cluster"], views[0]["cluster"], "node {id} is in another cluster");
+        assert_eq!(view["members"].as_array().map(Vec::len), Some(3), "node {id} sees {}", view["members"]);
+        let mut voters: Vec<String> = view["voters"].as_array().expect("voters").iter().map(|v| v.as_str().unwrap().to_string()).collect();
+        voters.sort();
+        let mut expected = ids.clone();
+        expected.sort();
+        assert_eq!(voters, expected, "node {id} sees other voters");
+        assert!(view["learners"].as_array().is_some_and(Vec::is_empty), "node {id} sees a learner");
+        assert_eq!(view["control"], "joined", "node {id} is not joined");
+    }
+    let leader_before = cluster.leader_of(0)?.expect("a leader");
+    for id in 1..3 {
+        assert_eq!(cluster.leader_of(id)?, Some(leader_before.clone()), "node {id} names another leader");
+    }
+    let version_before = views[0]["version"].as_u64().expect("a version");
+    // the only processes are the three children
+    assert_eq!(cluster.pids().len(), 3);
+    // kill every node, then restart every one on its own directory
+    for id in 0..3 {
+        cluster.kill(id)?;
+    }
+    for id in 0..3 {
+        cluster.restart(id, NodeKind::Server)?;
+    }
+    cluster.wait_joined(&[0, 1, 2])?;
+    // each is the same node in the same cluster, with the same members, and a leader again
+    let leader_after = cluster.wait_leader_among(0, &[0, 1, 2], Duration::from_secs(30))?;
+    for id in 0..3 {
+        let view = cluster.members(id)?;
+        assert_eq!(view["cluster"], views[0]["cluster"], "node {id} came back in another cluster");
+        assert_eq!(cluster.node(id).endpoints.node, Some(ids[id].clone()), "node {id} came back as somebody else");
+        assert_eq!(view["members"].as_array().map(Vec::len), Some(3));
+        assert!(view["version"].as_u64().expect("a version") >= version_before, "node {id} lost history");
+        assert_eq!(cluster.wait_leader_among(id, &[0, 1, 2], Duration::from_secs(30))?, leader_after, "node {id} names another leader after the restart");
+    }
+    // and the data path works across them: a write through node 1 read through node 2
+    let one = Shoal::<TestDbClient>::new(&cluster.node(1).endpoints.client.to_string()).await?;
+    let two = Shoal::<TestDbClient>::new(&cluster.node(2).endpoints.client.to_string()).await?;
+    for key in 0..30u64 {
+        one.send_one(Row { key, data: format!("row-{key}") }).await?;
+    }
+    for key in 0..30u64 {
+        let response = two.send_one(RowGet::new(vec![key])).await?;
+        let rows = response.access::<Row>()?.expect("a get that found nothing");
+        assert_eq!(rows.first().expect("a row").data.as_str(), format!("row-{key}"));
+    }
+    for id in 0..3 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
+
+/// A fourth node joins as a learner under the three-voter policy, and the policy decides (C3 M3)
+///
+/// Three voters, then a fourth node joins: it is admitted, it is up, it holds the log, and it
+/// does not vote, because the policy says three. Raising the policy to five is what promotes
+/// it - the count of nodes never does.
+#[tokio::test(flavor = "multi_thread")]
+async fn fourth_data_node_does_not_change_control_voter_count() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .cluster(4, CoreClaim::Count(1))
+        .deferred_from(3)
+        .start()
+        .await?;
+    cluster.wait_voters(0, 3)?;
+    // the fourth joins
+    cluster.start_deferred(3)?;
+    cluster.wait_joined(&[3])?;
+    let fourth = cluster.node_ids()[3].clone();
+    // and stays a learner: given time to be promoted, it is not
+    std::thread::sleep(Duration::from_secs(3));
+    for id in 0..4 {
+        let view = cluster.members(id)?;
+        assert_eq!(view["voters"].as_array().map(Vec::len), Some(3), "node {id} sees {}", view["voters"]);
+        assert_eq!(view["learners"], serde_json::json!([fourth]), "node {id} sees {}", view["learners"]);
+        assert_eq!(view["members"].as_array().map(Vec::len), Some(4));
+        let member = view["members"].as_array().unwrap().iter().find(|m| m["record"]["node"] == fourth).expect("the fourth");
+        assert_eq!(member["health"], "up");
+        assert_eq!(member["role"], "learner");
+    }
+    // the policy, not the count, decides: five voters asked for promotes the learner
+    let reply = cluster.node_mut(0).command("SET_VOTERS 5")?;
+    assert!(reply.get("ok").is_some(), "the policy change was refused: {reply}");
+    cluster.wait_voters(0, 4)?;
+    let view = cluster.members(0)?;
+    assert_eq!(view["policy"]["control_voters"], 5);
+    assert!(view["learners"].as_array().is_some_and(Vec::is_empty));
+    Ok(())
+}
+
+/// An isolated control minority cannot change the membership (C3 M3)
+///
+/// Three voters with a proxy per direction per lane. Node 0's control lanes to and from the
+/// other two are cut. A policy change asked of node 0 is refused for want of a leader; nodes 1
+/// and 2 elect a leader between them and commit one. A fourth node whose only seed is node 0
+/// is not admitted while node 0 is cut off. Healed, node 0 takes the majority's state and its
+/// own attempt is nowhere, and the fourth node joins.
+#[tokio::test(flavor = "multi_thread")]
+async fn minority_cannot_commit_membership_changes() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .cluster(4, CoreClaim::Count(1))
+        .deferred_from(3)
+        .lane_links(true)
+        .start()
+        .await?;
+    cluster.wait_voters(0, 3)?;
+    // cut node 0 off from the other two voters, in both directions, on the control lane
+    for (from, to) in [(0, 1), (0, 2), (1, 0), (2, 0)] {
+        cluster.control_link(from, to).cut();
+    }
+    // the majority elects a leader between themselves
+    let majority_leader = cluster.wait_leader_among(1, &[1, 2], Duration::from_secs(30))?;
+    assert_eq!(cluster.wait_leader_among(2, &[1, 2], Duration::from_secs(30))?, majority_leader);
+    // node 0 cannot commit a membership change: it has no quorum and can reach no leader
+    let refused = cluster.node_mut(0).command("SET_VOTERS 5")?;
+    let error = refused["error"].as_str().unwrap_or("");
+    assert!(
+        error.contains("NotLeader") || error.contains("StaleVersion") || error.contains("leader"),
+        "the minority committed or answered oddly: {refused}"
+    );
+    // a fourth node seeded only through node 0 is not admitted
+    cluster.start_deferred(3)?;
+    std::thread::sleep(Duration::from_secs(5));
+    let readiness = cluster.node_mut(3).command("READINESS")?;
+    assert_ne!(readiness["ok"]["control"], "joined", "the minority admitted a joiner: {readiness}");
+    let fourth = cluster.node_ids()[3].clone();
+    let majority_view = cluster.members(majority_leader)?;
+    assert!(
+        !majority_view["members"].as_array().unwrap().iter().any(|m| m["record"]["node"] == fourth),
+        "the majority saw the joiner the minority admitted: {majority_view}"
+    );
+    // the majority commits the same change
+    let applied = cluster.node_mut(majority_leader).command("SET_VOTERS 5")?;
+    assert!(applied.get("ok").is_some(), "the majority could not commit: {applied}");
+    let majority_version = applied["ok"]["version"].as_u64().expect("a version");
+    // healed, node 0 follows the majority's leader and holds the majority's state
+    for (from, to) in [(0, 1), (0, 2), (1, 0), (2, 0)] {
+        cluster.control_link(from, to).heal();
+    }
+    cluster.wait_version(0, majority_version)?;
+    let leader = cluster.wait_leader_among(0, &[0, 1, 2], Duration::from_secs(30))?;
+    for id in 1..3 {
+        assert_eq!(cluster.wait_leader_among(id, &[0, 1, 2], Duration::from_secs(30))?, leader);
+    }
+    let view = cluster.members(0)?;
+    assert_eq!(view["policy"]["control_voters"], 5);
+    // and the fourth node joins now that its seed can reach a leader
+    cluster.wait_joined(&[3])?;
+    for id in 0..4 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
+
+/// A restart with unreachable seeds keeps the established cluster and never bootstraps (C3 M3)
+///
+/// A member restarted with seeds naming nothing that answers comes up from its own log, as the
+/// same node in the same cluster, recovering rather than joined, and writes no bootstrap. Once
+/// a peer is back it joins again. And a fresh joiner whose seeds never answer stays a joiner:
+/// its marker names no cluster, and bootstrapping it is refused by name.
+#[tokio::test(flavor = "multi_thread")]
+async fn lost_seeds_do_not_rebootstrap_existing_directory() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .cluster(4, CoreClaim::Count(1))
+        .deferred_from(3)
+        .start()
+        .await?;
+    cluster.wait_voters(0, 3)?;
+    let ids = cluster.node_ids();
+    let before = cluster.members(1)?;
+    let log_before = cluster.node_mut(1).command("LOG_LEN")?["ok"]["bytes"].as_u64().expect("a length");
+    // kill both of node 1's peers, then restart it with seeds nothing answers at
+    cluster.kill(0)?;
+    cluster.kill(2)?;
+    cluster.restart_with_seeds(1, vec!["127.0.0.1:1".to_string()])?;
+    let endpoints = cluster.node(1).endpoints.clone();
+    assert_eq!(endpoints.node, Some(ids[1].clone()), "node 1 came back as somebody else");
+    assert_eq!(endpoints.cluster, before["cluster"].as_str().map(str::to_string), "node 1 changed cluster");
+    // it is recovering: its log is there, and nobody leads
+    let readiness = cluster.node_mut(1).command("READINESS")?;
+    assert_eq!(readiness["ok"]["control"], "recovering", "{readiness}");
+    let view = cluster.members(1)?;
+    assert_eq!(view["members"].as_array().map(Vec::len), Some(3));
+    assert!(view["version"].as_u64().unwrap() >= before["version"].as_u64().unwrap());
+    let log_after = cluster.node_mut(1).command("LOG_LEN")?["ok"]["bytes"].as_u64().expect("a length");
+    assert_eq!(log_after, log_before, "a restart with dead seeds wrote to the control log");
+    // the same members, which a second cluster would not have
+    assert_eq!(view["members"], before["members"], "node 1 came back with other members");
+    // a peer back makes a majority, and node 1 is joined again through it
+    cluster.restart(0, NodeKind::Server)?;
+    cluster.wait_joined(&[0, 1])?;
+    assert_eq!(cluster.members(1)?["cluster"], before["cluster"]);
+    // a fresh joiner whose seeds never answer stays a joiner
+    cluster.set_seeds(3, vec!["127.0.0.1:1".to_string()]);
+    cluster.start_deferred(3)?;
+    std::thread::sleep(Duration::from_secs(3));
+    let readiness = cluster.node_mut(3).command("READINESS")?;
+    assert_eq!(readiness["ok"]["control"], "joining", "{readiness}");
+    let marker = StorageMeta::read(cluster.dir(3)).expect("a marker").expect("a marker");
+    assert_eq!(marker.mode, shoal::server::meta::MarkerMode::Joining);
+    assert_eq!(marker.cluster, None);
+    // nothing was minted or committed: no cluster, no members, no version
+    let view = cluster.members(3)?;
+    assert_eq!(view["members"].as_array().map(Vec::len), Some(0), "{view}");
+    assert_eq!(view["version"], 0, "{view}");
+    // and it cannot be turned into a cluster of its own
+    cluster.kill(3)?;
+    let mut staged = cluster.staged(3).clone();
+    staged.bootstrap = true;
+    staged.seeds = Vec::new();
+    let refused = cluster.restart_with(3, NodeKind::Server, Some(staged)).expect_err("a joiner's directory bootstrapped");
+    let reason = format!("{refused:?}");
+    assert!(reason.contains("joiner") && reason.contains("second cluster"), "{reason}");
+    Ok(())
+}
+
+/// Isolated Shoal processes bootstrap, elect and recover with nothing but each other (C13 M3)
+///
+/// Three nodes, the tablets placed over nodes 1 and 2 alone. The bootstrapper leads; killing it
+/// leaves the other two to elect a leader from their own storage and serve every write and
+/// read. Restarted, the bootstrapper comes back as a follower of whoever leads now. Nothing but
+/// the three children exists, and every address any of them dials is a member's.
+#[tokio::test(flavor = "multi_thread")]
+async fn cluster_needs_no_external_coordinator() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .initialize(false)
+        .start()
+        .await?;
+    cluster.wait_voters(0, 3)?;
+    cluster.initialize(&[1, 2])?;
+    assert_eq!(cluster.pids().len(), 3);
+    // the bootstrapper leads a fresh cluster
+    let leader = cluster.wait_leader_among(1, &[0, 1, 2], Duration::from_secs(30))?;
+    // kill whoever leads; the survivors elect between themselves
+    cluster.kill(leader)?;
+    let survivors: Vec<usize> = (0..3).filter(|id| *id != leader).collect();
+    let new_leader = cluster.wait_leader_among(survivors[0], &survivors, Duration::from_secs(30))?;
+    assert_eq!(cluster.wait_leader_among(survivors[1], &survivors, Duration::from_secs(30))?, new_leader);
+    // and serve: a write through one survivor read through the other, every tablet on them
+    let a = Shoal::<TestDbClient>::new(&cluster.node(survivors[0]).endpoints.client.to_string()).await?;
+    let b = Shoal::<TestDbClient>::new(&cluster.node(survivors[1]).endpoints.client.to_string()).await?;
+    for key in 100..140u64 {
+        a.send_one(Row { key, data: format!("row-{key}") }).await?;
+    }
+    for key in 100..140u64 {
+        let response = b.send_one(RowGet::new(vec![key])).await?;
+        let rows = response.access::<Row>()?.expect("a get that found nothing");
+        assert_eq!(rows.first().expect("a row").data.as_str(), format!("row-{key}"));
+    }
+    // the killed node comes back a member, following the leader the survivors chose
+    cluster.restart(leader, NodeKind::Server)?;
+    cluster.wait_joined(&[leader])?;
+    let agreed = cluster.wait_leader_among(leader, &[0, 1, 2], Duration::from_secs(30))?;
+    for id in 0..3 {
+        assert_eq!(cluster.wait_leader_among(id, &[0, 1, 2], Duration::from_secs(30))?, agreed);
+    }
+    // every address any node knows is a member's, and every member is one of the three
+    let view = cluster.members(0)?;
+    let ids = cluster.node_ids();
+    for member in view["members"].as_array().expect("members") {
+        let node = member["record"]["node"].as_str().expect("a node");
+        assert!(ids.contains(&node.to_string()), "a member nobody started: {member}");
+        let control = member["record"]["control"].as_str().expect("an address");
+        assert!(control.starts_with("127.0.0.1:"), "a member reached somewhere else: {control}");
+    }
+    Ok(())
+}
+
+/// Two processes of one node identity cannot both serve (C1 M3)
+///
+/// Node 1 is killed and its directory copied. Restarted, it runs at the next incarnation; a
+/// clone started from the copy runs at that same incarnation from another address, and is
+/// refused as a duplicate identity. Started once more, the clone is a run later than the
+/// original - and the original, superseded, stops. The cluster ends with one run of the node
+/// on record, the newest.
+#[tokio::test(flavor = "multi_thread")]
+async fn duplicate_node_identity_is_fenced() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder().cluster(2, CoreClaim::Count(1)).start().await?;
+    cluster.wait_voters(0, 2)?;
+    let node1 = cluster.node_ids()[1].clone();
+    let incarnation = cluster.node_mut(1).command("INCARNATION")?["ok"]["incarnation"].as_u64().expect("an incarnation");
+    // stop node 1 and copy its directory as it stands
+    cluster.kill(1)?;
+    let copy = cluster.clone_dir(1)?;
+    // the original comes back one start later
+    cluster.restart(1, NodeKind::Server)?;
+    cluster.wait_joined(&[1])?;
+    assert_eq!(cluster.node(1).endpoints.incarnation, Some(incarnation + 1));
+    // the clone starts from the copy at that same incarnation, from other ports: a duplicate
+    let clone = cluster.spawn_clone(1, copy.path())?;
+    let mut clone = clone;
+    clone.wait_ready(Duration::from_secs(60))?;
+    assert_eq!(clone.endpoints.incarnation, Some(incarnation + 1));
+    let refused = Cluster::wait_failure(&clone, Duration::from_secs(60)).expect("the clone kept running");
+    assert!(
+        refused.contains("incarnation") || refused.contains("duplicate") || refused.contains("fenced"),
+        "the clone failed for another reason: {refused}"
+    );
+    assert_eq!(cluster.node(1).failure(), None, "the original was fenced by a duplicate");
+    drop(clone);
+    // the clone's own start counted, so its next run is later than the original's, and wins
+    let mut clone = cluster.spawn_clone(1, copy.path())?;
+    clone.wait_ready(Duration::from_secs(60))?;
+    assert_eq!(clone.endpoints.incarnation, Some(incarnation + 2));
+    let fenced = Cluster::wait_failure(cluster.node(1), Duration::from_secs(60)).expect("the original kept running");
+    assert!(fenced.contains("fenced") || fenced.contains("incarnation"), "the original stopped for another reason: {fenced}");
+    // the cluster holds the newest run of the node, at the clone's address
+    let view = cluster.members(0)?;
+    let member = view["members"].as_array().unwrap().iter().find(|m| m["record"]["node"] == node1).expect("node 1");
+    assert_eq!(member["record"]["incarnation"], incarnation + 2);
+    assert_eq!(member["record"]["control"], format!("127.0.0.1:{}", clone.endpoints.control.expect("a control endpoint").port()));
+    assert_eq!(clone.failure(), None, "the winning clone died");
+    Ok(())
+}
+
+/// Control elections do not depend on the data lanes (C2 M3)
+///
+/// Three voters with every data lane delayed for a minute and then cut. The leader is killed
+/// and the survivors elect a new one over their control lanes alone, which keep answering
+/// pings; a data query that needs the cut lane fails with a named code rather than hanging.
+#[tokio::test(flavor = "multi_thread")]
+async fn control_elections_do_not_depend_on_data_shard_relay() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .lane_links(true)
+        .start()
+        .await?;
+    cluster.wait_voters(0, 3)?;
+    // stall then cut every data lane between every pair
+    for from in 0..3 {
+        for to in 0..3 {
+            if from != to {
+                cluster.data_link(from, to).delay(Duration::from_secs(60));
+            }
+        }
+    }
+    let leader = cluster.wait_leader_among(0, &[0, 1, 2], Duration::from_secs(30))?;
+    cluster.kill(leader)?;
+    let survivors: Vec<usize> = (0..3).filter(|id| *id != leader).collect();
+    for from in &survivors {
+        for to in &survivors {
+            if from != to {
+                cluster.data_link(*from, *to).cut();
+            }
+        }
+    }
+    // the survivors elect over their control lanes alone
+    let new_leader = cluster.wait_leader_among(survivors[0], &survivors, Duration::from_secs(30))?;
+    assert_eq!(cluster.wait_leader_among(survivors[1], &survivors, Duration::from_secs(30))?, new_leader);
+    // and those lanes still answer pings both ways
+    let ping = cluster.node_mut(survivors[0]).command(&format!("PING {}", survivors[1]))?;
+    assert!(ping.get("ok").is_some(), "a control ping failed during the data stall: {ping}");
+    let ping = cluster.node_mut(survivors[1]).command(&format!("PING {}", survivors[0]))?;
+    assert!(ping.get("ok").is_some(), "a control ping failed during the data stall: {ping}");
+    // a read that needs a cut data lane gets a named failure within the deadline, not a hang
+    let client = Shoal::<TestDbClient>::new(&cluster.node(survivors[0]).endpoints.client.to_string()).await?;
+    let mut failed = 0;
+    for key in 0..12u64 {
+        let outcome = tokio::time::timeout(Duration::from_secs(12), client.send_one(RowGet::new(vec![key]))).await;
+        match outcome {
+            Ok(Ok(_)) => {}
+            Ok(Err(_)) => failed += 1,
+            Err(_) => panic!("a read for key {key} hung instead of failing"),
+        }
+    }
+    assert!(failed > 0, "no read needed a cut lane, which the placement makes impossible");
+    Ok(())
 }
 
 /// A mock peer child: a listener that echoes, so a link can be exercised with no peer protocol

@@ -263,123 +263,6 @@ pub struct DialOverride {
     pub data: Option<String>,
 }
 
-/// One node of a static placement
-///
-/// What a node has to know about a peer before it can route to it: who it is, where its two
-/// listeners are, and how many shards it runs - the last because a tablet's shard on that node
-/// is `tablet % shards`, the same rule the node itself uses, and the handshake refuses a peer
-/// whose count differs from this entry.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct PlacedNode {
-    /// The node's identity, which its marker holds and its hello proves
-    pub node: NodeId,
-    /// Its data peer endpoint, `host:port`, which the bulk lane dials too
-    pub data: String,
-    /// Its control listener, `host:port`
-    pub control: String,
-    /// How many shards it runs
-    pub shards: u16,
-}
-
-/// A static placement of tablets over nodes
-///
-/// [F38](../../../../docs/src/features/inter-node-transport.md)'s stand-in for the membership M3
-/// commits: a list of every node in the cluster, this one included, in an order every node's
-/// file agrees on. Tablet `t` belongs to `nodes[t % N]`, and on that node to shard `t % shards`.
-/// A placement of one node is exactly the standalone tablet map, which is what keeps a one node
-/// cluster's routing byte for byte what it was.
-///
-/// This is test-shaped on purpose: it names node identities in a file, which only a fixture that
-/// staged the markers can do. It is replaced, not extended, when the control plane commits
-/// membership.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
-#[serde(deny_unknown_fields)]
-pub struct Placement {
-    /// Every node of the cluster, in placement order
-    #[serde(default)]
-    pub nodes: Vec<PlacedNode>,
-}
-
-impl Placement {
-    /// Find this node's own entry
-    ///
-    /// # Arguments
-    ///
-    /// * `me` - This node's identity
-    pub fn entry(&self, me: NodeId) -> Option<&PlacedNode> {
-        self.nodes.iter().find(|placed| placed.node == me)
-    }
-
-    /// Find a peer's entry
-    ///
-    /// # Arguments
-    ///
-    /// * `node` - The peer's identity
-    pub fn peer(&self, node: NodeId) -> Option<&PlacedNode> {
-        self.entry(node)
-    }
-
-    /// The nodes other than this one
-    ///
-    /// # Arguments
-    ///
-    /// * `me` - This node's identity
-    pub fn peers(&self, me: NodeId) -> impl Iterator<Item = &PlacedNode> {
-        self.nodes.iter().filter(move |placed| placed.node != me)
-    }
-
-    /// Check that this placement can be routed against by the node reading it
-    ///
-    /// # Arguments
-    ///
-    /// * `me` - This node's identity
-    /// * `my_shards` - How many shards this node runs
-    ///
-    /// # Errors
-    ///
-    /// Refuses a placement that does not name this node, names it with another shard count,
-    /// names a node twice, names a node with no shards, or names an address that is not one.
-    pub fn validate(&self, me: NodeId, my_shards: usize) -> Result<(), ServerError> {
-        // every node once
-        for (i, placed) in self.nodes.iter().enumerate() {
-            if self.nodes[..i].iter().any(|other| other.node == placed.node) {
-                return Err(ServerError::Shoal(ShoalError::PlacementDuplicateNode {
-                    node: placed.node,
-                }));
-            }
-            // a node with no shards owns no tablet
-            if placed.shards == 0 {
-                return Err(ServerError::Shoal(ShoalError::InvalidConfig(format!(
-                    "cluster.placement names {} with zero shards",
-                    placed.node
-                ))));
-            }
-            // both addresses have to be addresses
-            for (what, addr) in [("data", &placed.data), ("control", &placed.control)] {
-                if addr.parse::<std::net::SocketAddr>().is_err() {
-                    return Err(ServerError::Shoal(ShoalError::InvalidConfig(format!(
-                        "cluster.placement names {} with a {what} address that is not one: {addr}",
-                        placed.node
-                    ))));
-                }
-            }
-        }
-        // and this node among them, with the shard count it actually runs
-        let Some(mine) = self.entry(me) else {
-            return Err(ServerError::Shoal(ShoalError::PlacementMissingSelf { node: me }));
-        };
-        if usize::from(mine.shards) != my_shards {
-            return Err(ServerError::Shoal(ShoalError::PlacementShardCount {
-                node: me,
-                entry: mine.shards,
-                actual: my_shards,
-            }));
-        }
-        Ok(())
-    }
-}
-
 /// The byte bounds and timers of the peer lanes
 ///
 /// Every queue between this node and a peer is bounded in bytes, and every wait has a deadline.
@@ -608,12 +491,6 @@ pub struct Cluster {
     /// whatever boundary the deployment draws around them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls: Option<PeerTls>,
-    /// The static placement of tablets over nodes
-    ///
-    /// Absent, this node is placed alone and its tablet map is the standalone one. Present, it
-    /// has to name this node, and every other node in it is a peer to dial.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub placement: Option<Placement>,
     /// The byte bounds and timers of the peer lanes
     #[serde(default)]
     pub transport: Transport,
@@ -643,7 +520,6 @@ impl Default for Cluster {
             auto_remove_after: default_auto_remove_after(),
             admins: Vec::new(),
             tls: None,
-            placement: None,
             transport: Transport::default(),
             dial: std::collections::BTreeMap::new(),
         }
@@ -753,47 +629,10 @@ impl Cluster {
         self
     }
 
-    /// Set the static placement of tablets over nodes
-    pub fn placement(mut self, placement: Placement) -> Self {
-        self.placement = Some(placement);
-        self
-    }
-
     /// Set the byte bounds and timers of the peer lanes
     pub fn transport(mut self, transport: Transport) -> Self {
         self.transport = transport;
         self
-    }
-
-    /// The placement this node routes against, which is itself alone when none was given
-    ///
-    /// # Arguments
-    ///
-    /// * `me` - This node's identity
-    /// * `interface` - The interface the client listener binds, for the advertised address
-    /// * `shards` - How many shards this node runs
-    pub fn placement_for(
-        &self,
-        me: NodeId,
-        interface: &str,
-        shards: usize,
-    ) -> Result<Placement, ServerError> {
-        // a placement that was written down is used as it is
-        if let Some(placement) = &self.placement {
-            return Ok(placement.clone());
-        }
-        // none is this node alone, which is the standalone map with a name on it
-        let advertise = self.advertised(interface)?;
-        // a node runs fewer shards than a u16 holds, which `Ring::new` refuses otherwise
-        #[allow(clippy::cast_possible_truncation)]
-        Ok(Placement {
-            nodes: vec![PlacedNode {
-                node: me,
-                data: format!("{advertise}:{}", self.port),
-                control: format!("{advertise}:{}", self.control_port),
-                shards: shards as u16,
-            }],
-        })
     }
 
     /// The policy this configuration would seed into a cluster it bootstraps
@@ -976,7 +815,6 @@ mod tests {
         assert_eq!(cluster.failure_detector.min_samples, 5);
         assert!(cluster.dial.is_empty());
         // the transport bounds and timers are the ones the configuration page writes down
-        assert!(cluster.placement.is_none());
         assert_eq!(cluster.transport.data_queue_bytes, 64 * 1024 * 1024);
         assert_eq!(cluster.transport.control_queue_bytes, 8 * 1024 * 1024);
         assert_eq!(cluster.transport.bulk_queue_bytes, 64 * 1024 * 1024);
