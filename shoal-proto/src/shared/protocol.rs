@@ -46,6 +46,7 @@ pub mod auth;
 pub mod error;
 pub mod fingerprint;
 pub mod handshake;
+pub mod peer;
 pub mod trace;
 
 #[cfg(test)]
@@ -106,8 +107,12 @@ pub const DEFAULT_MAX_FRAME_BYTES: u32 = 64 * 1024 * 1024;
 /// must never silently renumber the wire. `every_message_type_round_trips_through_its_discriminant`
 /// is the test that turns an insertion into a failure instead of a compatibility break.
 ///
-/// Only `Hello`, `HelloAck`, `Queries` and `Response` are constructed today. The other eight are
-/// reserved so that the features that need them are a call site rather than another flag day.
+/// `Hello`, `HelloAck`, `Auth`, `AuthResponse`, `Queries`, `Response` and `Error` are what a client
+/// and a server exchange. Types 13 and above are the peer protocol
+/// ([F38](../../../docs/src/features/inter-node-transport.md)), spoken only between nodes of one
+/// cluster, and `Ping`/`Pong` gained a body there. `Topology`, `GoAway`, `Cancel` and
+/// `StatusReport` stay reserved so that the features that need them are a call site rather than
+/// another flag day.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum MessageType {
@@ -135,6 +140,26 @@ pub enum MessageType {
     GoAway = 11,
     /// A client abandoning a query it will never read - reserved
     Cancel = 12,
+    /// A node opening a peer connection, naming its cluster, its identity and the lane
+    PeerHello = 13,
+    /// A node accepting or refusing a `PeerHello`
+    PeerHelloAck = 14,
+    /// A bundle of queries forwarded to the node that owns some of its partitions
+    Forward = 15,
+    /// One query's answer, or one shard's share of it, going back to the node that forwarded it
+    Forwarded = 16,
+    /// A control plane request - a consensus RPC or a ping - with a correlation id
+    ControlRequest = 17,
+    /// The answer to a `ControlRequest`, under the same correlation id
+    ControlResponse = 18,
+    /// A node's bounded status report - reserved for the failure detector
+    StatusReport = 19,
+    /// The start of a snapshot stream on the bulk lane
+    SnapshotBegin = 20,
+    /// One checksummed chunk of a snapshot stream
+    SnapshotChunk = 21,
+    /// The end of a snapshot stream, with what the whole of it hashed to
+    SnapshotEnd = 22,
 }
 
 impl MessageType {
@@ -165,6 +190,16 @@ impl MessageType {
             10 => Ok(MessageType::Error),
             11 => Ok(MessageType::GoAway),
             12 => Ok(MessageType::Cancel),
+            13 => Ok(MessageType::PeerHello),
+            14 => Ok(MessageType::PeerHelloAck),
+            15 => Ok(MessageType::Forward),
+            16 => Ok(MessageType::Forwarded),
+            17 => Ok(MessageType::ControlRequest),
+            18 => Ok(MessageType::ControlResponse),
+            19 => Ok(MessageType::StatusReport),
+            20 => Ok(MessageType::SnapshotBegin),
+            21 => Ok(MessageType::SnapshotChunk),
+            22 => Ok(MessageType::SnapshotEnd),
             // anything else was written by a peer we do not understand, including a zeroed buffer
             unknown => Err(ProtocolError::UnknownMessageType(unknown)),
         }
@@ -186,6 +221,16 @@ impl MessageType {
             MessageType::Error => "Error",
             MessageType::GoAway => "GoAway",
             MessageType::Cancel => "Cancel",
+            MessageType::PeerHello => "PeerHello",
+            MessageType::PeerHelloAck => "PeerHelloAck",
+            MessageType::Forward => "Forward",
+            MessageType::Forwarded => "Forwarded",
+            MessageType::ControlRequest => "ControlRequest",
+            MessageType::ControlResponse => "ControlResponse",
+            MessageType::StatusReport => "StatusReport",
+            MessageType::SnapshotBegin => "SnapshotBegin",
+            MessageType::SnapshotChunk => "SnapshotChunk",
+            MessageType::SnapshotEnd => "SnapshotEnd",
         }
     }
 }
@@ -335,6 +380,29 @@ pub enum ProtocolError {
         /// The reason the peer gave
         reason: RefusalReason,
     },
+    /// A node refused our peer handshake
+    PeerRefused {
+        /// The reason it gave
+        reason: peer::PeerRefusal,
+    },
+    /// A peer named a lane this build does not know
+    UnknownLane(u8),
+    /// A peer named a control request kind this build does not know
+    UnknownControlKind(u8),
+    /// A peer named a forwarded answer kind this build does not know
+    UnknownForwardedKind(u8),
+    /// A forwarded bundle's fixed fields do not describe its bytes
+    ///
+    /// Carries what was wrong in a sentence rather than a code, because every one of these ends
+    /// the connection it arrived on and is logged once, and a person is the only reader.
+    MalformedForward(&'static str),
+    /// A snapshot chunk's bytes do not hash to what its header says
+    SnapshotChecksum {
+        /// What the chunk said it hashed to
+        claimed: u32,
+        /// What it hashed to
+        computed: u32,
+    },
 }
 
 impl std::fmt::Display for ProtocolError {
@@ -386,6 +454,23 @@ impl std::fmt::Display for ProtocolError {
             ProtocolError::Refused { reason } => {
                 write!(f, "the peer refused our handshake: {reason}")
             }
+            ProtocolError::PeerRefused { reason } => {
+                write!(f, "the node refused our peer handshake: {reason}")
+            }
+            ProtocolError::UnknownLane(raw) => write!(f, "the peer named an unknown lane: {raw}"),
+            ProtocolError::UnknownControlKind(raw) => {
+                write!(f, "the peer named an unknown control request kind: {raw}")
+            }
+            ProtocolError::UnknownForwardedKind(raw) => {
+                write!(f, "the peer named an unknown forwarded answer kind: {raw}")
+            }
+            ProtocolError::MalformedForward(what) => {
+                write!(f, "the peer sent a malformed forward: {what}")
+            }
+            ProtocolError::SnapshotChecksum { claimed, computed } => write!(
+                f,
+                "a snapshot chunk claimed checksum {claimed:#010x} but hashed to {computed:#010x}"
+            ),
         }
     }
 }

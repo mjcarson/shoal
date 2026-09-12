@@ -60,6 +60,7 @@ pub fn add(
     let query_ident = format_ident!("{struct_ident}QueryKinds");
     let response_ident = format_ident!("{struct_ident}ResponseKinds");
     let archived_response_ident = format_ident!("Archived{struct_ident}ResponseKinds");
+    let archived_query_ident = format_ident!("Archived{struct_ident}QueryKinds");
     // build our succeeded response arms
     let succeeded_arms = tables
         .iter()
@@ -464,6 +465,34 @@ pub fn add(
         .collect();
     let schema_fingerprint =
         crate::traits::fingerprint::db_expr(struct_ident, fields, &variants, projections);
+    // and the same walk without the protocol version, which is what two nodes compare
+    let schema_id = crate::traits::fingerprint::db_structural_expr(
+        struct_ident,
+        fields,
+        &variants,
+        projections,
+    );
+    // build our archived_query_table arms, one per table, from the archived query enum
+    let archived_query_table_arms = tables.iter().map(|table| {
+        let variant_ident = &table.variant_ident;
+        quote! {
+            #archived_query_ident::#variant_ident(_) => #table_names_ident::#variant_ident,
+        }
+    });
+    // build our failed arms, one per table, answering in that table's own response variant
+    let failed_arms = tables.iter().map(|table| {
+        let variant_ident = &table.variant_ident;
+        quote! {
+            #table_names_ident::#variant_ident => #response_ident::#variant_ident(
+                ::shoal::shared::responses::Response {
+                    id,
+                    index,
+                    data: ::shoal::shared::responses::ResponseAction::Error(error),
+                    end,
+                },
+            ),
+        }
+    });
     // add our client struct and query support for the client
     stream.extend(quote! {
         pub struct #client_ident {}
@@ -471,6 +500,9 @@ pub fn add(
         impl ::shoal::shared::traits::QuerySupport for #client_ident {
             /// A hash over every part of this databases schema that can reach the wire
             const SCHEMA_FINGERPRINT: u64 = #schema_fingerprint;
+
+            /// A hash over the structure of this databases schema alone
+            const SCHEMA_ID: u64 = #schema_id;
 
             /// The different tables or types of queries we will handle
             type QueryKinds = #query_ident;
@@ -590,6 +622,28 @@ pub fn add(
             fn query_table_name(query: &Self::QueryKinds) -> Self::TableNames {
                 match query {
                     #(#query_table_name_arms)*
+                }
+            }
+
+            /// Get the table name from a query still in the buffer it arrived in
+            fn archived_query_table(
+                archived: &<Self::QueryKinds as ::shoal::rkyv::Archive>::Archived,
+            ) -> Self::TableNames {
+                match archived {
+                    #(#archived_query_table_arms)*
+                }
+            }
+
+            /// Build the failure a query is answered with when nothing else can answer it
+            fn failed(
+                table: Self::TableNames,
+                id: ::shoal::uuid::Uuid,
+                index: usize,
+                end: bool,
+                error: ::shoal::shared::responses::ResponseError,
+            ) -> Self::ResponseKinds {
+                match table {
+                    #(#failed_arms)*
                 }
             }
 

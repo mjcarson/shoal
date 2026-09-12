@@ -78,15 +78,29 @@ pub enum ErrorCode {
     ResponseTooLarge = 20,
     /// This request is larger than the frame bound the connection agreed on - reserved
     RequestTooLarge = 21,
-    /// The server is over capacity and did not run this query - reserved for backpressure
+    /// The server is over capacity and did not run this query
+    ///
+    /// A definite refusal: nothing accepted the query, so a write behind it did not apply. Sent
+    /// when a forward to another node would take its queue past its byte bound
+    /// ([F38](../../../../docs/src/features/inter-node-transport.md)).
     Shedding = 30,
     /// This query ran for longer than it was given - reserved
     Timeout = 31,
+    /// This query was handed to another node and its outcome is not known
+    ///
+    /// The forwarding node accepted the query and then lost the peer, or the peer never answered
+    /// within the deadline. A write may or may not have applied. This is deliberately not
+    /// [`ErrorCode::Shedding`], which says the query was refused before anything accepted it
+    /// ([F38](../../../../docs/src/features/inter-node-transport.md)).
+    OutcomeUnknown = 32,
     /// The connection this query was sent on ended before it was answered
     ConnectionLost = 40,
     /// The server is draining this connection - reserved for `GoAway`
     GoingAway = 41,
-    /// No shard that could answer this query is reachable - reserved for shard aware routing
+    /// No shard that could answer this query is reachable
+    ///
+    /// A definite refusal, like [`ErrorCode::Shedding`]: the frame carrying this query was never
+    /// written to the peer that owns it, because the link went down with the frame still queued.
     Unavailable = 50,
 }
 
@@ -120,6 +134,7 @@ impl ErrorCode {
             21 => ErrorCode::RequestTooLarge,
             30 => ErrorCode::Shedding,
             31 => ErrorCode::Timeout,
+            32 => ErrorCode::OutcomeUnknown,
             40 => ErrorCode::ConnectionLost,
             41 => ErrorCode::GoingAway,
             50 => ErrorCode::Unavailable,
@@ -140,6 +155,7 @@ impl ErrorCode {
             ErrorCode::RequestTooLarge => "RequestTooLarge",
             ErrorCode::Shedding => "Shedding",
             ErrorCode::Timeout => "Timeout",
+            ErrorCode::OutcomeUnknown => "OutcomeUnknown",
             ErrorCode::ConnectionLost => "ConnectionLost",
             ErrorCode::GoingAway => "GoingAway",
             ErrorCode::Unavailable => "Unavailable",

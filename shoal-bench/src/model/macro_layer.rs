@@ -235,8 +235,10 @@ pub struct WorkloadRun {
 /// has to keep meaning what it meant, so it carries no cluster record at all rather than a
 /// record full of defaults, and `compare` refuses to read one against the other silently. Every
 /// field here is a fact about the environment, not a measurement; the measurements stay where
-/// they were. Delivered by [F36](../../../docs/src/features/cluster-harness.md), which fills in
-/// nothing but the driver placement: no workload runs against a cluster yet.
+/// they were. Delivered by [F36](../../../docs/src/features/cluster-harness.md), which filled in
+/// nothing but the driver placement; [F37](../../../docs/src/features/node-identity-control-plane.md)
+/// filled it from a cluster of one, and [F38](../../../docs/src/features/inter-node-transport.md)
+/// from a two-node placement, adding the placement, the hop and the transport counters.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClusterFacts {
     /// How many server processes served the workload
@@ -267,6 +269,101 @@ pub struct ClusterFacts {
     pub offered_load: Option<u64>,
     /// Whether the nodes shared one machine, which is a redundancy experiment and not scale-out
     pub emulated: bool,
+    /// The static placement the nodes routed against, in node order; empty before
+    /// [F38](../../../docs/src/features/inter-node-transport.md), when a cluster was one node
+    /// with no map to record
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub placement: Vec<PlacedNodeFacts>,
+    /// Which hop the arm was built to take, and what mix of hops that construction implies
+    ///
+    /// Only the hop arms carry one. It is a fact about how the arm was built, not a measurement:
+    /// the accepting shard is the kernel's choice, so an arm on a node with several shards is a
+    /// mixture by construction and says so here rather than letting a reader take its median for
+    /// a pure hop ([F38](../../../docs/src/features/inter-node-transport.md)).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hop: Option<HopFacts>,
+    /// The peer transport's bounds and what its links did during the run
+    ///
+    /// The "queue facts" the M2 gate asks for beside the hop capture. Read from the node that
+    /// held the client, after the run and before the server stopped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport: Option<TransportFacts>,
+}
+
+/// One node of a static placement, as the artifact records it
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlacedNodeFacts {
+    /// The node's identity, as it was minted for the run
+    pub node: String,
+    /// How many shards the placement gave it
+    pub shards: u16,
+    /// Where its data lane listened
+    pub data: String,
+    /// Where its control lane listened
+    pub control: String,
+}
+
+/// Which hop a hop arm was built to measure, and the mix its construction implies
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HopFacts {
+    /// The hop the arm is named for: `same`, `local` or `remote`
+    pub target: String,
+    /// The node, by position in the placement, that owns every key the arm reads
+    pub owner_node: u32,
+    /// The share of queries expected to take each hop, in whole percentages summing to a hundred
+    pub expected_mix: HopMix,
+}
+
+/// A share of queries per hop, in whole percentages
+///
+/// Percentages rather than fractions so the record stays `Eq`, which the override that carries it
+/// into a workload's plan has to be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HopMix {
+    /// Served by the shard that accepted the connection
+    pub same: u32,
+    /// Served by another shard of the same node, over the mesh
+    pub local: u32,
+    /// Served by another node, over a peer link
+    pub remote: u32,
+}
+
+/// The peer transport's bounds and what its links did
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransportFacts {
+    /// The bound on bytes queued to one peer on the data lane, past which forwards are shed
+    pub data_queue_bytes: u64,
+    /// The bound on unanswered forwarded bytes one accepted connection may hold
+    pub inflight_bytes: u64,
+    /// How long a forwarded query waits before it is reported with an unknown outcome
+    pub forward_timeout_ms: u64,
+    /// Every link the reporting shard held at the end of the run
+    pub links: Vec<LinkFacts>,
+}
+
+/// One outbound peer link at the end of a run
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkFacts {
+    /// The node it led to
+    pub node: String,
+    /// The lane it carried: `data`, `control` or `bulk`
+    pub lane: String,
+    /// Its state when read: `idle`, `connecting`, `up` or `backoff`
+    pub state: String,
+    /// Frames written to the socket
+    pub sent_frames: u64,
+    /// Bytes written to the socket
+    pub sent_bytes: u64,
+    /// Frames refused at the queue bound
+    pub shed_frames: u64,
+    /// Frames dropped when the link went down
+    pub dropped_frames: u64,
+    /// Connections attempted
+    pub dials: u64,
+    /// Bytes queued and not yet written when read
+    pub queued_bytes: u64,
+    /// The queue bound this lane ran under
+    pub bound: u64,
 }
 
 /// The cores one node was given

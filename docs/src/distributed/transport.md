@@ -9,19 +9,34 @@ explicit rather than assume reliable sockets eliminate distributed failures.
 
 ## What exists today
 
-`ShardContact::Local`, `Comms::send` and the kanal mesh route queries within a process.
-`ServerMsg::Partition` carries a Glommio read result with a restricted Send safety argument.
-`QueryMetadata` carries routing/gather and trace metadata; local responses can bypass the
-coordinator because client relays are shared within the node. The protocol module in
-`shoal-proto` has runtime-free framing and handshake code. F14 provides TLS/kTLS and F35 trace
-context. Existing local queues are mostly unbounded.
+**Delivered at M2 by [F38](../features/inter-node-transport.md)**, against a static placement
+rather than the membership M3 brings. `ShardContact` has `Local` and `Remote { node, shard }`;
+`mesh_id()` is gone and a remote contact cannot become a local index. Three lanes on three
+sockets - data and bulk owned by shards, control by the control thread - each with a byte bound
+that sheds before anything is recorded, and an in-flight bound per accepted connection. A 68
+byte pre-schema hello is judged in one order on both ends; a bundle is forwarded as the client's
+bytes, one frame per node, and re-validated on arrival; whole answers come back sealed and shares
+are merged at the gather; `Shedding`, `Unavailable` and `OutcomeUnknown` keep a definite refusal
+apart from an unknown outcome. The control group's RPCs go over the control lane as JSON. A trace
+crosses the hop from each query's own span. Every lane is mutual kTLS when `cluster.tls` is set.
+The four M2 rows of the table below exist as tests, and the hop arms of
+[C10](performance.md#the-workloads) exist as workloads.
+
+Before that: ~~`ShardContact::Local`, `Comms::send` and the kanal mesh route queries within a
+process.~~ `ServerMsg::Partition` still carries a Glommio read result with a restricted Send
+safety argument, and has no wire form. `QueryMetadata` carries routing/gather and trace metadata;
+local responses bypass the coordinator *within a node* because client relays are shared there,
+and across nodes they return to the coordinator holding the client. F14 provides TLS/kTLS and
+F35 trace context. ~~Existing local queues are mostly unbounded~~ - the peer queues are bounded
+in bytes; the local mesh queues still are not ([item 15](../appendix/known-issues.md#15-no-backpressure-anywhere)).
 
 ## The design
 
 ### The second variant
 
 Add `ShardContact::Remote { node, shard }`, and audit every `mesh_id()` caller so a remote contact
-cannot be converted into a local array index. Peer encoders accept only explicitly serializable
+cannot be converted into a local array index. *Built at M2: `mesh_id()` was replaced by
+`local_index() -> Option<usize>`, so the audit is the type's.* Peer encoders accept only explicitly serializable
 message types; there is no wire form for `ServerMsg::Partition`, a kanal sender, a Span handle,
 or any other process-local ownership object.
 
@@ -36,7 +51,9 @@ already written to it.
 The embedded control runtime owns independent control connections/listener (C1), including
 metadata Raft and status reports. A stalled data shard must not block them. Data-consensus vote,
 heartbeat and acknowledgement messages also need reserved scheduling/buffer capacity so bulk
-transfer cannot cause elections or deadlock. Q1/M2 documents which lanes use separate sockets.
+transfer cannot cause elections or deadlock. ~~Q1/M2 documents which lanes use separate sockets.~~
+*At M2 every lane is a separate socket: data, bulk and control, the first two dialled to the
+peer's data address and the third to its control address.*
 
 With S shards and N nodes, one lane starts with S × (N−1) outbound data connections per node;
 additional lanes/inbound connections/control traffic increase that. Bound reconnect attempts,
@@ -51,7 +68,8 @@ endpoints during discovery. Reject a wrong cluster and mismatched identity befor
 A seed address discovers the embedded cluster; it is not an external membership authority.
 
 Use mTLS and a defined certificate-to-node binding when configured; validate chain, expected
-identity and authorization to join. Q11 resolves first-boot certificate provisioning before a
+identity and authorization to join. *At M2 the chain is validated to `ca` on every lane and the
+`shoal-node://<id>` SAN is written and not yet read; the binding lands with the joiner.* Q11 resolves first-boot certificate provisioning before a
 random NodeId exists, SAN encoding, CA/certificate rotation and cloned-node fencing. TLS cannot
 be described as a complete identity design until that bootstrap path exists. When deployment
 policy allows plaintext, document that peer identity is trusted inside that explicit boundary.
@@ -110,9 +128,12 @@ consumer needs that same resource. End-to-end budgets and cancellation bound orp
 ### Compatibility and rolling upgrades
 
 Negotiate a supported protocol and capability set, then actually encode/decode that version.
-The current schema fingerprint folds PROTOCOL_VERSION (`shoal-derive/src/traits/fingerprint.rs`);
-separate structural schema identity from transport capabilities or provide explicit versioned
-fingerprints/codecs. Merely accepting n−1 in the handshake leaves incompatible payload layouts.
+~~The current schema fingerprint folds PROTOCOL_VERSION (`shoal-derive/src/traits/fingerprint.rs`);
+separate structural schema identity from transport capabilities~~ *Done at M2: `SCHEMA_ID` is the
+structural fingerprint without the version, and the hello carries it beside a version range and a
+capability set as three things; at M2 all three must match exactly* ~~or provide explicit versioned
+fingerprints/codecs~~. Merely accepting n−1 in the handshake leaves incompatible payload layouts,
+which is why M2 does not.
 
 Define a cluster minimum/active feature version. Enable new commands or formats only after all
 required participants can process them; persist that activation decision. Record rollback limits

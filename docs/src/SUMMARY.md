@@ -99,6 +99,7 @@
   - [F35. A trace context on the wire](features/wire-trace-context.md)
   - [F36. The harness and the facts](features/cluster-harness.md)
   - [F37. Node identity and the control-plane thread](features/node-identity-control-plane.md)
+  - [F38. The inter-node transport](features/inter-node-transport.md)
 
 # Direction
 
@@ -180,6 +181,7 @@
   - [86. The hover label read a logarithmic chart in decades](appendix/resolved/hover-label-reads-in-decades.md)
   - [89. One query produced several disjoint traces](appendix/resolved/fragmented-query-traces.md)
   - [90. Setting `RUST_LOG` could fragment every exported trace](appendix/resolved/divergent-layer-filters.md)
+  - [94. An answer owed to a client that had left ended the shard](appendix/resolved/disconnected-client-cleanup.md)
 - [TODOs and Unbuilt Work](appendix/todos.md)
 - [Review, August 2026](appendix/review-2026-08.md)
 - [Glossary](appendix/glossary.md)

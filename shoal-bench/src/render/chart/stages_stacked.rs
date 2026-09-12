@@ -245,6 +245,7 @@ mod tests {
             clock_overhead_ns: 20,
             join: JoinStats::default(),
             ops,
+            hops: BTreeMap::new(),
         }
     }
 

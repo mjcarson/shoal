@@ -297,6 +297,25 @@ pub fn add(
                 #archived_response_ident::#variant(resp) => resp.end
             }
         });
+    // Generate index and end match arms over the owned response
+    let owned_index_arms = tables
+        .iter()
+        .map(|table| table.variant_ident.clone())
+        .chain(projected.iter().map(|projection| (*projection).clone()))
+        .map(|variant| {
+            quote! {
+                #response_ident::#variant(resp) => resp.index
+            }
+        });
+    let owned_end_arms = tables
+        .iter()
+        .map(|table| table.variant_ident.clone())
+        .chain(projected.iter().map(|projection| (*projection).clone()))
+        .map(|variant| {
+            quote! {
+                #response_ident::#variant(resp) => resp.end
+            }
+        });
     // Generate get_query_id match arms
     let get_query_id_arms = tables
         .iter()
@@ -520,6 +539,20 @@ pub fn add(
             fn truncate(&mut self, limit: usize) {
                 match self {
                     #(#truncate_arms),*
+                }
+            }
+
+            /// Get the index this response answers under
+            fn index(&self) -> usize {
+                match self {
+                    #(#owned_index_arms),*
+                }
+            }
+
+            /// Get whether this response is the last of its stream
+            fn end(&self) -> bool {
+                match self {
+                    #(#owned_end_arms),*
                 }
             }
         }

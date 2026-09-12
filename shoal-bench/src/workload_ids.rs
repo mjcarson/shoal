@@ -464,6 +464,11 @@ pub const IDS: &[&str] = &[
     "macro/conf/storage/latency_buffer/r50/w65536/256Ki",
     // the cluster overhead arm (F37): the reference cell served by a one node cluster
     "macro/cluster/overhead/nodes/1",
+    // the hop arms (F38): one read against a two node placement, served three ways. appended
+    // after the overhead arm, in the order the hops are declared
+    "macro/cluster/hop/same_shard",
+    "macro/cluster/hop/local_shard",
+    "macro/cluster/hop/remote_node",
 ];
 
 /// Whether an id names a workload this build knows about

@@ -125,6 +125,47 @@ pub fn db_expr(
     variants: &[Ident],
     projections: &[Vec<Ident>],
 ) -> proc_macro2::TokenStream {
+    db_expr_with(struct_ident, fields, variants, projections, true)
+}
+
+/// Build the expression for a database's structural schema id
+///
+/// [`db_expr`] with the protocol version left out: the same tables, rows and projections in the
+/// same order, hashed from the same seed, so that this moves exactly when the schema does and
+/// never when the framing does. It is what two nodes compare beside their wire versions
+/// ([F38](../../../../docs/src/features/inter-node-transport.md)).
+///
+/// # Arguments
+///
+/// * `struct_ident` - The name of the database struct
+/// * `fields` - The tables it declares, in declaration order
+/// * `variants` - The row type of each of those tables, in field order
+/// * `projections` - The projections each of those tables declared, in field order
+pub fn db_structural_expr(
+    struct_ident: &Ident,
+    fields: &syn::FieldsNamed,
+    variants: &[Ident],
+    projections: &[Vec<Ident>],
+) -> proc_macro2::TokenStream {
+    db_expr_with(struct_ident, fields, variants, projections, false)
+}
+
+/// Build either fingerprint expression
+///
+/// # Arguments
+///
+/// * `struct_ident` - The name of the database struct
+/// * `fields` - The tables it declares, in declaration order
+/// * `variants` - The row type of each of those tables, in field order
+/// * `projections` - The projections each of those tables declared, in field order
+/// * `with_version` - Whether to mix the protocol version in after the database name
+fn db_expr_with(
+    struct_ident: &Ident,
+    fields: &syn::FieldsNamed,
+    variants: &[Ident],
+    projections: &[Vec<Ident>],
+    with_version: bool,
+) -> proc_macro2::TokenStream {
     // build one block of mixes per table, in the order they were declared
     let mixes: Vec<_> = fields
         .named
@@ -173,18 +214,26 @@ pub fn db_expr(
             }
         })
         .collect();
-    // start from the name of the database and the version of the protocol it speaks
+    // start from the name of the database and, for the fingerprint, the version of the protocol
+    // it speaks; the structural id skips that one mix and is otherwise the same walk
     let db_name = struct_ident.to_string();
+    let version = if with_version {
+        quote! {
+            let hash = ::shoal::shared::protocol::fingerprint::mix_u64(
+                hash,
+                ::shoal::shared::protocol::PROTOCOL_VERSION as u64,
+            );
+        }
+    } else {
+        quote! {}
+    };
     quote! {
         {
             let hash = ::shoal::shared::protocol::fingerprint::mix_str(
                 ::shoal::shared::protocol::fingerprint::SEED,
                 #db_name,
             );
-            let hash = ::shoal::shared::protocol::fingerprint::mix_u64(
-                hash,
-                ::shoal::shared::protocol::PROTOCOL_VERSION as u64,
-            );
+            #version
             #(#mixes)*
             hash
         }

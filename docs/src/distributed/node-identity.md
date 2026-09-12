@@ -18,7 +18,9 @@ off the control core's whole physical core. The `cluster:` block below is implem
 settings later milestones own refused at startup. The control thread runs an embedded openraft
 group of one on a glommio executor. The schema fingerprint detects mismatched generated schemas
 and currently includes the protocol version. Networking has a client address/port and optional
-TLS; the peer endpoints are advertised in the member record and bound by nothing until M2.
+TLS; the peer endpoints are advertised in the member record ~~and bound by nothing until M2~~
+and, since [F38](../features/inter-node-transport.md), bound: the data port by every shard with
+`SO_REUSEPORT` and the control port by the control thread.
 
 ## The design
 
@@ -53,8 +55,11 @@ standalone directory opened by a cluster configuration.
 
 ~~Proposed configuration (not implemented):~~ Implemented by F37, with one addition to the block
 as first written - `control_core_shared`, the explicit shared core on a small machine that the
-paragraph on the control thread below asks for - and with `seeds`, `tls` and any `control_voters`
-outside {1, 3, 5} refused at startup naming the milestone that delivers them.
+paragraph on the control thread below asks for - and with `seeds` ~~, `tls`~~ and any `control_voters`
+outside {1, 3, 5} refused at startup naming the milestone that delivers them. `tls` is accepted
+since [F38](../features/inter-node-transport.md), and so are two blocks C1 did not draw:
+`placement`, the static map a fixture or the benchmark harness writes in place of membership,
+and `transport`, the byte bounds and timeouts of the peer lanes.
 [Configuration](../getting-started/configuration.md#cluster) is the reference with every default:
 
 ```yaml
@@ -93,8 +98,8 @@ configuration seeds RF, defaults and grace policy into control-plane state; late
 versioned admin operations. Joining nodes cannot silently redefine those defaults with local YAML.
 Reject incompatible local storage durability settings for admitted table policies.
 
-Additional settings are specified by their owning pages before implementation: bounded peer and
-pending bytes (C2/C5), read/write deadlines (C5/C6), snapshot/retention/transfer/disk budgets (C7/C8),
+Additional settings are specified by their owning pages before implementation: ~~bounded peer and
+pending bytes (C2/C5)~~ bounded peer bytes are `cluster.transport` since M2, pending bytes stay C5's, read/write deadlines (C5/C6), snapshot/retention/transfer/disk budgets (C7/C8),
 capacity/failure-domain weights (C8), maintenance and repair scheduling (C9). C13 records unresolved
 values and gates. Per-table overrides require table identity and supported transitions; unknown
 or unimplemented overrides fail validation.

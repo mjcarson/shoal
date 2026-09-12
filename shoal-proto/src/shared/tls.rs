@@ -371,6 +371,96 @@ pub fn client_config(options: &TlsClientOptions) -> Result<Arc<ClientConfig>, Tl
     Ok(Arc::new(config))
 }
 
+/// Where a cluster node's certificate, key and the cluster's authority are read from
+///
+/// This is the shape `cluster.tls` deserializes into. It differs from [`TlsServerOptions`] in one
+/// field, `ca`, because a peer connection is mutual: each end proves itself to the other with a
+/// certificate the cluster's authority signed, and each end checks the other's against that same
+/// authority. A client connection has only the server proving anything.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PeerTlsOptions {
+    /// The PEM file holding this node's certificate chain, leaf first
+    pub cert: PathBuf,
+    /// The PEM file holding the private key for that chain
+    pub key: PathBuf,
+    /// The PEM file holding the authority every node of the cluster is signed by
+    pub ca: PathBuf,
+}
+
+/// Build the root store of one authority
+///
+/// # Arguments
+///
+/// * `ca` - The PEM file holding the authority to trust
+fn roots_of(ca: &Path) -> Result<rustls::RootCertStore, TlsError> {
+    let mut roots = rustls::RootCertStore::empty();
+    for cert in load_certs(ca)? {
+        roots.add(cert).map_err(TlsError::Config)?;
+    }
+    Ok(roots)
+}
+
+/// Build the config a node accepts peer connections with
+///
+/// [`server_config`] with one decision changed: a peer *must* present a certificate, and it must
+/// chain to `ca`. Everything else - TLS 1.3 only, the kernel's suites, secret extraction, no
+/// tickets - is the same, for the same reasons, since a peer lane is handed to kTLS exactly as a
+/// client connection is ([F38](../../../docs/src/features/inter-node-transport.md)).
+///
+/// What the certificate *says* is not checked here beyond its chain: the binding of a certificate
+/// to a node identity is Q11's contract, enforced when a joiner exists.
+///
+/// # Arguments
+///
+/// * `options` - This node's certificate and key, and the cluster's authority
+pub fn peer_server_config(options: &PeerTlsOptions) -> Result<Arc<ServerConfig>, TlsError> {
+    // load what this node proves itself with, and what it checks peers against
+    let certs = load_certs(&options.cert)?;
+    let key = load_key(&options.key)?;
+    let roots = roots_of(&options.ca)?;
+    let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(
+        Arc::new(roots),
+        suite_limited_provider(),
+    )
+    .build()
+    .map_err(|error| TlsError::Config(rustls::Error::General(error.to_string())))?;
+    let mut config = ServerConfig::builder_with_provider(suite_limited_provider())
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .map_err(TlsError::Config)?
+        .with_client_cert_verifier(verifier)
+        .with_single_cert(certs, key)
+        .map_err(TlsError::Config)?;
+    // the keys have to be reachable, or there is nothing to hand the kernel
+    config.enable_secret_extraction = true;
+    // see `server_config`'s invariants - a ticket after the handshake breaks every read
+    config.send_tls13_tickets = 0;
+    Ok(Arc::new(config))
+}
+
+/// Build the config a node dials peers with
+///
+/// [`client_config`] with one decision changed: this node presents its own certificate, since the
+/// accepting node requires one.
+///
+/// # Arguments
+///
+/// * `options` - This node's certificate and key, and the cluster's authority
+pub fn peer_client_config(options: &PeerTlsOptions) -> Result<Arc<ClientConfig>, TlsError> {
+    let certs = load_certs(&options.cert)?;
+    let key = load_key(&options.key)?;
+    let roots = roots_of(&options.ca)?;
+    let mut config = ClientConfig::builder_with_provider(suite_limited_provider())
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .map_err(TlsError::Config)?
+        .with_root_certificates(roots)
+        .with_client_auth_cert(certs, key)
+        .map_err(TlsError::Config)?;
+    // the node's own keys have to be reachable for the same reason a client's do
+    config.enable_secret_extraction = true;
+    Ok(Arc::new(config))
+}
+
 /// Build a client config that trusts a verifier of the caller's choosing
 ///
 /// This exists for tests and for the benchmark harness, which generate a certificate per run and

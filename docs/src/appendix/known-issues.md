@@ -32,9 +32,11 @@ Defects that have been fixed move to [Resolved Issues](resolved-issues.md), one 
 carrying the reasoning and the invariants the fix depends on. Item numbers are shared between
 the two pages and never reused, so a number appears on exactly one of them — which is why this
 list starts at 15 and skips 17, 25, 26, 31, 34, 38, 39, 44, 45, 48, 51, 56, 57, 58, 61, 67, 68, 74,
-76, 78, 79, 80, 82, 83, 84, 85, 86, 88, 89 and 90, and
-why item 91 is the newest entry here and the newest number, and why 17, 78, 79, 80, 82, 83, 84,
-85, 86, 88, 89 and 90 are on the resolved page. **38, 58 and 88 moved together**
+76, 78, 79, 80, 82, 83, 84, 85, 86, 88, 89, 90 and 94, and
+why ~~item 91~~ item 97 is the newest entry here and the newest number, and why 17, 78, 79, 80, 82,
+83, 84, 85, 86, 88, 89, 90 and 94 are on the resolved page. **94 never appeared here either**: it
+was found and fixed while [F38](../features/inter-node-transport.md) made a peer link a client,
+and is the fixed half of item 32 ([Resolved #94](resolved/disconnected-client-cleanup.md)). **38, 58 and 88 moved together**
 ([Resolved #38, 58, 88](resolved/pool-readiness.md)): three symptoms of one cause, the pool
 returning before its shards had bound. **91 was found by fixing them** — the honest `exit` that
 closed 58 surfaced a compactor that had been dying silently for as long as one test had existed. **79, 82, 83, 84, 85 and 86 never appeared here at all**: each was
@@ -47,15 +49,17 @@ found and fixed in the same change ([Resolved #79](resolved/micro-only-capture-c
 worth noting because it makes the numbering look like six entries went missing. Item 80 is the other way round —
 it was filed here rather than fixed, because the fix turned on a question about the storage layer
 that reading `block_on_load` alone could not answer, and stayed here until somebody answered it
-([Resolved #80](resolved/never-flushed-partitions.md)). The exceptions are items 16, 20, 24, 54 and 73, which were only
+([Resolved #80](resolved/never-flushed-partitions.md)). The exceptions are items 16, 20, 24, 32, 54 and 73, which were only
 partly fixed: the open remainder is here and the rest is there. Items 9 and 51 were each one such
 exception until their second half was fixed, and are now on the resolved page alone; item 25 was one
 in the other direction — it had one row left open, that row was fixed, and the whole item
 [moved](resolved/claude-md-drift.md).
 
 **Baseline as of writing:** `cargo check --workspace --all-targets` passes with warnings;
-`cargo test --workspace` passes — **1,238 tests**, four ignored, plus 13 more behind
-`--features stage-profile` that a default run does not reach ([Test Coverage](test-coverage.md)).
+`cargo test --workspace` passes — ~~**1,238 tests**~~ **1,289 tests**, four ignored, plus ~~13~~ 14
+more behind `--features stage-profile` that a default run does not reach ([Test Coverage](test-coverage.md)).
+[F37](../features/node-identity-control-plane.md) took the total to 1,265 and did not update this
+line; [F38](../features/inter-node-transport.md) added 24 more and did.
 [F36](../features/cluster-harness.md) added 40 — 28 of them in the new `shoal-model` crate, 4 in
 the new `cluster_fixture.rs` binary whose two ignored functions are the children it re-executes
 the binary as, and the rest over the pool's readiness handle, the frozen ports, the cluster record
@@ -315,16 +319,30 @@ its own left the write relay parked on an empty channel holding a socket nobody 
 from again. What is still leaked is the bookkeeping every *other* shard holds, which is what
 `ClientGone` below is for.
 
-A response that arrives for a dead client is not an error either — it is sent into an unbounded
-channel ([item 15](#15-no-backpressure-anywhere)) that nothing will ever read.
+~~A response that arrives for a dead client is not an error either — it is sent into an unbounded
+channel ([item 15](#15-no-backpressure-anywhere)) that nothing will ever read.~~ It was worse than
+that, and it is fixed: the send used `?`, so an answer owed to a client that had left ended the
+shard ([Resolved #94](resolved/disconnected-client-cleanup.md)). An answer with nowhere to go is
+now logged at `DEBUG` and dropped, whether the receiver is gone or the map entry is.
+
+**The peer half is done.** [F38](../features/inter-node-transport.md) made a peer link a client
+of the node it dials, and the peer listener broadcasts `ServerMsg::ClientGone(conn)` when a lane
+ends (`shoal-core/src/server/peer/listener.rs`); every shard removes the entry. So the variant
+exists and the retirement path is exercised - by peers. **What remains is the ordinary client:**
+`client_rx_relay` still ends and tells nobody, and the table above still describes every
+connection a client opens.
 
 This is the cost of a *disconnect*, not of a failure: an ordinary client that opens a pool, does
 its work, and exits leaves all of it behind. The client's own pool is 50 connections
 (`shoal-core/src/client.rs:140-148`).
 
-**Fix direction:** a `ServerMsg::ClientGone` broadcast from `client_rx_relay` when its loop ends.
+**Fix direction:** ~~a `ServerMsg::ClientGone` broadcast from `client_rx_relay` when its loop ends~~
+the same `ClientGone` broadcast the peer listener does, from `client_rx_relay` when its loop ends.
 Dropping the sender from every `client_map` is what closes the channel, which is what lets
-`client_tx_relay` return on its own.
+`client_tx_relay` return on its own. It was deliberately not done with the peer half, because it
+changes what every ordinary disconnect costs every shard - one message per shard per connection -
+and the capture that would show that cost is the benchmark host's to take
+([Resolved #94, Alternatives rejected](resolved/disconnected-client-cleanup.md#alternatives-rejected)).
 
 That handles the socket dying. The *clean* case — a client shutting down deliberately — is better
 served by [D2](../direction/framing.md#message-types)'s `GoAway`, which lets the server drain
@@ -827,7 +845,9 @@ addressed to.
    and a composite sort key. Item 42 is the sharper of the two now that
    [item 8](resolved/sort-keys.md) is fixed, since a sort key is a thing you can query with.
 6. **Items 32 and 33** — two leaks with one shape: state keyed by something that goes away and is
-   never told. They are cheap together, since a `ClientGone` broadcast is what both want.
+   never told. They are cheap together, since a `ClientGone` broadcast is what both want - and
+   the broadcast now exists, sent for peer lanes ([Resolved #94](resolved/disconnected-client-cleanup.md));
+   what is left of 32 is sending it for ordinary clients, once the cost is measured.
 7. **Items 43 and 46** — the two remaining holes in the storage marker. Worth doing together,
    since both are changes to what `StorageMeta::claim` looks at before it writes.
 
@@ -1757,3 +1777,67 @@ an error. **Established by reading the source** while writing the golden key tes
 what `Hash for str` writes - `write_str`, which the std hasher contract spells as the bytes then
 `0xff` - and freeze the archived hash beside the live one in `partition_keys.rs` so the two cannot
 drift again.
+
+### 95. `ShoalPool::transport()` reports shard zero's links and calls them the node's
+
+`shoal-core/src/server.rs`, `ShoalPool::transport`
+
+The method's doc says it gathers every shard's peer links and its loop runs once: the pool
+reaches the shards through a channel to shard zero alone, and the relay that would ask the rest
+is not built. A node with one shard is reported whole. A node with four reports whatever shard
+zero happened to dial - for the `local_shard` hop arm, which forwards nothing from any shard, an
+empty list, and for a node whose other shards forward, a fraction of the frames with no sign
+that it is one.
+
+**Established by reading the source**, and seen on the artifact: `macro/cluster/hop/local_shard`
+records `transport.links: []` on a node that served two hundred reads, which is true of shard
+zero and would be read as true of the node. Filed with [F38](../features/inter-node-transport.md),
+whose `ClusterFacts` record is the first consumer.
+
+**Fix direction:** either `ServerMsg::Transport` fans out across the mesh and shard zero collects
+the views before answering, or the pool holds a sender per shard the way the fixture's
+`shard_cpus` are already per shard. The record should then say which shards answered, since a
+shard that is wedged is exactly the one whose links matter.
+
+### 96. `cluster.transport.ping_interval` is parsed, documented and consumed by nothing
+
+`shoal-core/src/server/conf/cluster.rs`, `Transport::ping_interval`
+
+The field says how often the control thread pings every placed peer. Nothing reads it: the
+only pings sent are the ones the fixture asks for over `ControlHandle::ping`, on demand. A file
+that sets it to a second or an hour gets the same server, which is the shape
+[item 71](#71-throughput_sensitive-is-configured-documented-and-mostly-unused) has - a setting
+that exists ahead of the code that would honor it.
+
+**Established by reading the source**: `grep ping_interval` finds the field, its default and
+its serde attribute, and nothing else. Filed with [F38](../features/inter-node-transport.md).
+The periodic pinger is the failure detector's, which is [M3](../distributed/milestones.md#m3-membership)'s
+- the field was added so the block would not change shape when it lands.
+
+**Fix direction:** either the control thread's tick task pings each placed peer on this interval
+and records the last pong per node in the topology view, or the field is removed until M3 and
+the configuration page stops listing it. Leaving a knob that turns nothing is the one option
+this page does not allow.
+
+### 97. `stage_join.rs` had not compiled since F36, and needs `/opt/shoal` to run
+
+`shoal-bench/tests/stage_join.rs`
+
+The one integration test that starts a server under `--features stage-profile` and reads the
+report it wrote. [F36](../features/cluster-harness.md) added `server` and `cluster` to
+`RunRequest` and did not add them here, so from that commit until
+[F38](../features/inter-node-transport.md) the binary failed to compile - and because it is
+behind a feature no default run enables, nothing said so. F38 fixed the initializer. What it
+found underneath is that the test resolves the **committed** `shoal.yml`, whose storage paths are
+`/opt/shoal`, so on a host without that directory it fails at server start with
+`PermissionDenied` before it can join anything; on the development host it does.
+
+**Established by running it**: `cargo test -p shoal-bench --features stage-profile --test
+stage_join` on `europa`, `the arm runs: failed to start a server: IO(Os { code: 13, kind:
+PermissionDenied })`.
+
+**Fix direction:** two things. The test should write a scratch copy of `shoal.yml` with its
+storage under a `tempfile` directory, the way the F38 smoke runs did by hand, so it runs
+wherever the suite does. And the feature-gated binaries want a place in CI or in the
+[test-coverage](test-coverage.md) runbook that builds them, since a binary that does not compile
+for two features is a gap the count cannot see.

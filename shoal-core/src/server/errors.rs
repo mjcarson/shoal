@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 use crate::shared::auth::AuthError;
 use crate::shared::identity::{ClusterId, NodeId};
+use crate::shared::protocol::peer::{Lane, PeerRefusal};
 use crate::shared::protocol::ProtocolError;
 use crate::shared::tls::TlsError;
 
@@ -371,6 +372,39 @@ pub enum ShoalError {
     /// A standalone server runs no control thread and no group; the topology it would report
     /// does not exist.
     NotClustered,
+    /// The static placement does not name this node
+    ///
+    /// A node routes against a placement it is part of; one that leaves it out would send every
+    /// query to a peer, including the ones for its own tablets.
+    PlacementMissingSelf { node: NodeId },
+    /// The static placement names this node with a shard count other than the one it runs
+    ///
+    /// A peer routes to `tablet % shards` on this node from the count in its file, so a count
+    /// that differs from the truth would name shards that do not exist or leave some unowned.
+    PlacementShardCount { node: NodeId, entry: u16, actual: usize },
+    /// The static placement names a node twice
+    PlacementDuplicateNode { node: NodeId },
+    /// A contact names a shard on another node, and was handed to the node local mesh
+    ///
+    /// The mesh carries messages between this node's shards and nothing else; a remote contact
+    /// goes through the shard's peer links. Reaching this is a routing bug, not a peer's doing.
+    NotLocal { node: NodeId, shard: u16 },
+    /// A peer refused this node's hello, and why
+    PeerRefused { node: NodeId, reason: PeerRefusal },
+    /// A peer's hello named an identity other than the one this node dialled or placed
+    PeerIdentity { expected: NodeId, found: NodeId },
+    /// A peer's hello named a shard count other than the placement's
+    PeerShardCount { node: NodeId, placed: u16, claimed: u16 },
+    /// A peer's hello named a schema other than this node's
+    PeerSchema { node: NodeId, ours: u64, theirs: u64 },
+    /// A peer's hello named a lane this listener does not serve
+    PeerLane { node: NodeId, lane: Lane },
+    /// A lane's queue to a peer is at its byte bound, so nothing more was accepted for it
+    PeerQueueFull { node: NodeId, lane: Lane, bound: usize },
+    /// A peer link is down and the frame was never written to it
+    PeerUnavailable { node: NodeId, lane: Lane },
+    /// The peer handshake did not finish, and what stopped it
+    PeerHandshake(String),
     /// The config file says something this server cannot act on
     ///
     /// This is for the checks a type cannot make. A user named in the `auth` section with neither
@@ -447,6 +481,51 @@ impl std::fmt::Display for ShoalError {
                 "{setting} is not implemented in this build; {milestone} delivers it"
             ),
             ShoalError::NotClustered => write!(f, "this server is standalone and has no control plane"),
+            ShoalError::PlacementMissingSelf { node } => write!(
+                f,
+                "cluster.placement does not name this node, {node}; a node routes against a \
+                 placement it is part of"
+            ),
+            ShoalError::PlacementShardCount { node, entry, actual } => write!(
+                f,
+                "cluster.placement names this node, {node}, with {entry} shards but it runs \
+                 {actual}; every peer routes to tablet % shards from that entry"
+            ),
+            ShoalError::PlacementDuplicateNode { node } => {
+                write!(f, "cluster.placement names {node} twice")
+            }
+            ShoalError::NotLocal { node, shard } => write!(
+                f,
+                "shard {shard} of {node} is on another node and was handed to the local mesh"
+            ),
+            ShoalError::PeerRefused { node, reason } => {
+                write!(f, "{node} refused our hello: {reason}")
+            }
+            ShoalError::PeerIdentity { expected, found } => write!(
+                f,
+                "a peer identified itself as {found} where the placement expected {expected}"
+            ),
+            ShoalError::PeerShardCount { node, placed, claimed } => write!(
+                f,
+                "{node} runs {claimed} shards but the placement says {placed}; a query routed \
+                 by that entry would name shards it does not have"
+            ),
+            ShoalError::PeerSchema { node, ours, theirs } => write!(
+                f,
+                "{node} was built from a different schema: ours is {ours:#018x} and theirs is \
+                 {theirs:#018x}"
+            ),
+            ShoalError::PeerLane { node, lane } => {
+                write!(f, "{node} asked for the {lane} lane on a listener that does not serve it")
+            }
+            ShoalError::PeerQueueFull { node, lane, bound } => write!(
+                f,
+                "the {lane} lane to {node} holds its whole bound of {bound} bytes unsent"
+            ),
+            ShoalError::PeerUnavailable { node, lane } => {
+                write!(f, "the {lane} lane to {node} is down and the frame was never written")
+            }
+            ShoalError::PeerHandshake(what) => write!(f, "the peer handshake failed: {what}"),
             ShoalError::InvalidConfig(reason) => write!(f, "invalid config: {reason}"),
             ShoalError::NoShards => write!(f, "this node has no cores to run a shard on"),
             other => write!(f, "{other:?}"),

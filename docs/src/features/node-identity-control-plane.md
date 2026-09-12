@@ -59,8 +59,9 @@ claiming one identity. The kernel releases it when the process dies.
 **The `cluster:` block** in `shoal-core/src/server/conf/cluster.rs`, `deny_unknown_fields`, with
 C1's fields and defaults and one addition, `control_core_shared`. Absent means standalone and
 standalone is byte-for-byte what the server was. `Cluster::validate` refuses at startup what this
-build does not act on, naming the milestone: `seeds` without `bootstrap` is joining (M3), `tls` is
-the peer handshake (M2), `control_voters` outside {1, 3, 5} is not a quorum anyone wants, and an
+build does not act on, naming the milestone: `seeds` without `bootstrap` is joining (M3), ~~`tls` is
+the peer handshake (M2)~~ `tls` is accepted since [F38](inter-node-transport.md) and a certificate it
+names that cannot be read is refused, `control_voters` outside {1, 3, 5} is not a quorum anyone wants, and an
 unspecified interface with nothing advertised is not an address. Durations are a `DurationSpec`
 written as `500ms`, `5s`, `30m`, `2h`, with a bare number refused. `Cluster::policy()` is the
 `BootstrapPolicy` the bootstrap writes into the control state.
@@ -203,17 +204,25 @@ A spike-only type configuration would have measured a harness.
 
 ## Limitations
 
-- **No control listener is bound.** `control_port` and `port` are advertised in the member record
-  and listened on by nothing; `Endpoints.data` and `.control` stay `None`. M2.
-- **No joiner.** `seeds` is refused naming M3. A second node cannot be admitted, and the group's
-  network returns `Unreachable` for every peer it would ever be told about.
+- ~~**No control listener is bound.** `control_port` and `port` are advertised in the member record
+  and listened on by nothing; `Endpoints.data` and `.control` stay `None`. M2.~~ Both are bound
+  since [F38](inter-node-transport.md): the data port by every shard, the control port by the
+  control thread, and the fixture reports both.
+- **No joiner.** `seeds` is refused naming M3. A second node cannot be admitted ~~, and the group's
+  network returns `Unreachable` for every peer it would ever be told about~~; since
+  [F38](inter-node-transport.md) the group's network reaches the peers a static placement names,
+  and every node is still a group of one.
 - **The replication policy is recorded and reported, never enforced.** A one node cluster serves
   every read and write locally exactly as a standalone node does. `active_rf` is the members that
   could hold a replica, not the replicas any tablet has.
 - **The topology version is not proof of freshness.** C1 says so and the marker's docs repeat it:
   tablet term and vote live in the tablet's own manifest, which does not exist yet.
 - **Format 1 has no migration**, and neither does standalone-to-cluster. Both refusals name M10.
-- **`verify_cluster` has no caller.** It is the seam the M2 handshake will call, tested directly.
+- **`verify_cluster` has no caller** outside its tests. The M2 handshake
+  ([F38](inter-node-transport.md)) makes the same comparison against the same identity and
+  refuses with the same `WrongCluster`, in its own judge, because the judge has to write the
+  refusal into the ack before the error returns and the seam's signature has nowhere to put that.
+  The seam stays as the tested statement of the rule.
 - **The marker's `layout` is always 1.** The check exists so that a rehome (M9c) has a place to
   bump it; nothing bumps it.
 - **The control thread's failure is reported as shard `usize::MAX`** through `ShoalPool::failure`,
@@ -229,7 +238,9 @@ A spike-only type configuration would have measured a harness.
 - **A composite partition key does not compile** ([item 92](../appendix/known-issues.md)), which
   the golden test found and did not fix; the frozen shapes are the two that build.
 - **The benchmark arm has no page of its own.** It lives on *Every workload* with its family's
-  four blocks; a cluster page is for when there is a second node to draw.
+  four blocks ~~; a cluster page is for when there is a second node to draw~~ - and so do the
+  three hop arms [F38](inter-node-transport.md) added beside it; the page waits on a committed
+  capture from the benchmark host.
 
 ## Invariants to uphold
 
@@ -316,7 +327,7 @@ fsyncs, about eight. Both are unit tests of `shoal-core`.
 | `control::types::tests::a_bootstrap_is_applied_once` | `ControlState::apply`: a second bootstrap refused, an observation before one refused, an unchanged observation moving nothing, a changed one moving the version |
 | `control::cores::tests::*` (four) | The affinity read and ascending; the default core resolving to cpu 0's whole core or refused by name when cpu 0 is not allowed; an impossible cpu refused naming the affinity; standalone having no placement |
 | `meta::tests::*` (nine) | The format 2 claim, restart, refusal of format 1 and 3 by name, shard count, bootstrap idempotence, both mode changes, `verify_cluster` without a write, the one-field rewrite that never goes backwards, and the exclusive lock |
-| `conf::cluster::tests::*` (four) | `DurationSpec` parsing and round trip; the defaults being C1's; `validate` refusing seeds (M3), tls (M2), an even voter count and an unadvertised `0.0.0.0` |
+| `conf::cluster::tests::*` (four) | `DurationSpec` parsing and round trip; the defaults being C1's; `validate` refusing seeds (M3), ~~tls (M2)~~ an unreadable peer certificate (since F38), an even voter count and an unadvertised `0.0.0.0` |
 | `identity::tests::*` (three) | Distinct mints, transparent serde, integer ids ordered and never minted |
 | `cluster_overhead::tests::the_arm_is_the_reference_cell_with_a_cluster_block` | The arm differing from `macro/grid/unsorted/r50/1024` in the block alone |
 | `workload_ids::tests::the_declared_ids_are_the_registered_ones`, `committed_artifacts::historical_artifacts_and_ports_remain_compatible` | The new id last, at port 12374, with every frozen port unchanged |

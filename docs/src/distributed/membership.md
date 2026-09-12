@@ -126,7 +126,9 @@ Implement the library's network adapter over Shoal's control traffic framing. Th
 preserve request identity, deadlines and shutdown behavior. It owns no external service; local
 Tokio sockets or shard relays are implementation choices. Prefer direct control-plane socket
 ownership so a stalled Glommio data shard cannot stall control elections. Peer transport has
-separate control/data endpoints or a validated dispatch design; Q1/M2 settles the wiring.
+separate control/data endpoints or a validated dispatch design; ~~Q1/M2 settles the wiring~~ M2
+settled it ([F38](../features/inter-node-transport.md)): the control thread binds its own
+listener and owns its own links, and a stalled data lane leaves it pinging.
 
 The original source note named 0.9.25 and an alpha 0.10 alternative; C13's
 [decision record](protocol.md#decision-record) reads both (0.9.25 and 0.10.0-alpha.34 on
@@ -134,8 +136,11 @@ The original source note named 0.9.25 and an alpha 0.10 alternative; C13's
 actual version and record source/API evidence for runtime behavior, storage completions, learner
 membership changes and network driving~~. **M1 pinned `0.10.0-alpha.34` exactly** for the control
 plane, with the runtime, storage and network seams built and the two conformance suites
-passing ([decision record](protocol.md#q1-and-q13-decided-at-m1)); learner membership changes
-and network driving are M2/M3's and still unevidenced. Do not assume an alpha API or heartbeat
+passing ([decision record](protocol.md#q1-and-q13-decided-at-m1)); ~~learner membership changes
+and network driving are M2/M3's and still unevidenced~~ network driving is evidenced at M2 -
+`PeerNetwork` carries `append_entries` and `vote` over the control lane and a placed peer answers
+a vote probe ([F38](../features/inter-node-transport.md)); learner membership changes are M3's
+and still unevidenced. Do not assume an alpha API or heartbeat
 extension is available. No handwritten-Raft fallback is planned.
 
 ## Alternatives rejected

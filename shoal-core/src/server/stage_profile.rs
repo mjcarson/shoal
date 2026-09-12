@@ -43,6 +43,38 @@ pub enum StageOp {
 }
 
 impl StageOp {
+    /// The byte this op travels as when a peer reports what it served
+    ///
+    /// Zero is [`StageOp::Other`], so a peer that recorded nothing reads as unclassified.
+    #[must_use]
+    pub fn as_byte(self) -> u8 {
+        match self {
+            StageOp::Other => 0,
+            StageOp::Insert => 1,
+            StageOp::Get => 2,
+            StageOp::Exists => 3,
+            StageOp::Delete => 4,
+            StageOp::Update => 5,
+        }
+    }
+
+    /// The op a byte names; anything unknown is [`StageOp::Other`]
+    ///
+    /// # Arguments
+    ///
+    /// * `raw` - The byte a peer sent
+    #[must_use]
+    pub fn from_byte(raw: u8) -> Self {
+        match raw {
+            1 => StageOp::Insert,
+            2 => StageOp::Get,
+            3 => StageOp::Exists,
+            4 => StageOp::Delete,
+            5 => StageOp::Update,
+            _ => StageOp::Other,
+        }
+    }
+
     /// Get the name this op is reported under
     #[must_use]
     pub fn as_str(self) -> &'static str {
@@ -53,6 +85,35 @@ impl StageOp {
             StageOp::Delete => "delete",
             StageOp::Update => "update",
             StageOp::Other => "other",
+        }
+    }
+}
+
+/// Where a query was executed relative to the shard that accepted it
+///
+/// The kernel picks which shard's listener a connection lands on, so a query's hop is a property
+/// of the query and its connection rather than of a workload: the same arm produces records of
+/// two kinds and a report that pooled them would hide the hop it exists to measure
+/// ([F38](../../../docs/src/features/inter-node-transport.md)). A record carries which it was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StageHop {
+    /// Executed on the shard that accepted the connection
+    #[default]
+    Same,
+    /// Executed on another shard of the same node, over the kanal mesh
+    LocalShard,
+    /// Executed on another node, over a peer link
+    RemoteNode,
+}
+
+impl StageHop {
+    /// Get the name this hop is reported under
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StageHop::Same => "same",
+            StageHop::LocalShard => "local",
+            StageHop::RemoteNode => "remote",
         }
     }
 }
@@ -73,6 +134,30 @@ pub enum StageDurability {
 }
 
 impl StageDurability {
+    /// The code this mode travels as when a peer reports what it served
+    #[must_use]
+    pub fn as_byte(self) -> u8 {
+        match self {
+            StageDurability::None => 0,
+            StageDurability::Fsync => 1,
+            StageDurability::Async => 2,
+        }
+    }
+
+    /// The mode a code names; anything unknown is [`StageDurability::None`]
+    ///
+    /// # Arguments
+    ///
+    /// * `raw` - The code a peer sent
+    #[must_use]
+    pub fn from_byte(raw: u8) -> Self {
+        match raw {
+            1 => StageDurability::Fsync,
+            2 => StageDurability::Async,
+            _ => StageDurability::None,
+        }
+    }
+
     /// Get the name this durability mode is reported under
     #[must_use]
     pub fn as_str(self) -> &'static str {
@@ -93,6 +178,13 @@ pub struct StageFlags {
     pub durability: StageDurability,
     /// The shard that executed this query
     pub shard: u16,
+    /// Where that shard was, relative to the one that accepted the connection
+    pub hop: StageHop,
+    /// Whether this record was made on a node that served the query for a peer
+    ///
+    /// The origin holds the client's half of the join, so a record made on the other node
+    /// has nothing to join to and is reported as its own population, never counted twice.
+    pub served_for_peer: bool,
     /// This query's position in the batch it arrived in
     ///
     /// Uninterpretable without [`StageFlags::batch_len`] beside it — position four means
@@ -126,6 +218,8 @@ impl Default for StageFlags {
             op: StageOp::Other,
             durability: StageDurability::None,
             shard: 0,
+            hop: StageHop::Same,
+            served_for_peer: false,
             batch_pos: 0,
             batch_len: 0,
             rotated: false,
@@ -414,6 +508,53 @@ impl StageStamps {
         /// Record which shard executed this query
         set_shard(u16) => shard
     );
+    stage_setter!(
+        /// Record where this query was executed relative to the shard that accepted it
+        set_hop(StageHop) => hop
+    );
+    stage_setter!(
+        /// Record that this node served the query for a peer, so the record has no client half
+        set_served_for_peer(bool) => served_for_peer
+    );
+
+    /// What this node knows about a query it served for a peer, as one byte for the answer
+    ///
+    /// The op in the low nibble and the durability in the high one. The origin forwarded bytes
+    /// it never decoded, so its own record of the query knows neither until the answer says
+    /// ([F38](../../../docs/src/features/inter-node-transport.md)).
+    #[cfg(feature = "stage-profile")]
+    #[must_use]
+    pub fn served_byte(&self) -> u8 {
+        self.flags.op.as_byte() | (self.flags.durability.as_byte() << 4)
+    }
+
+    /// What this node knows about a query it served, which in this build is nothing
+    #[cfg(not(feature = "stage-profile"))]
+    #[inline(always)]
+    #[must_use]
+    pub fn served_byte(&self) -> u8 {
+        0
+    }
+
+    /// Take a peer's classification of a query this node forwarded onto this record
+    ///
+    /// # Arguments
+    ///
+    /// * `served` - The byte the peer's [`StageStamps::served_byte`] produced
+    #[cfg(feature = "stage-profile")]
+    pub fn adopt_served(&mut self, served: u8) {
+        self.flags.op = StageOp::from_byte(served & 0x0f);
+        self.flags.durability = StageDurability::from_byte(served >> 4);
+    }
+
+    /// Take a peer's classification, which does nothing in this build
+    ///
+    /// # Arguments
+    ///
+    /// * `served` - Ignored, since there is nothing to record it on
+    #[cfg(not(feature = "stage-profile"))]
+    #[inline(always)]
+    pub fn adopt_served(&mut self, _served: u8) {}
     stage_setter!(
         /// Record that this response was released by a rotation, not by a watermark
         set_rotated(bool) => rotated

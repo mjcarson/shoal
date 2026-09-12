@@ -17,7 +17,7 @@ mod unsorted;
 
 use crate::client::{Errors, QuerySuceededOpts, ShqlParseError};
 use crate::shared::queries::parser::{FieldInfo, FieldRole, TypeValidator};
-use crate::shared::responses::{ArchivedResponseError, ResponseActionNames};
+use crate::shared::responses::{ArchivedResponseError, ResponseActionNames, ResponseError};
 
 pub use sorted::ShoalSortedTable;
 pub use unsorted::ShoalUnsortedTable;
@@ -139,6 +139,17 @@ pub trait ShoalResponseSupport: std::fmt::Debug + RkyvSupport + Sized + Send {
     ///
     /// * `limit` - The most rows this query asked for
     fn truncate(&mut self, limit: usize);
+
+    /// Get the index this response answers under
+    ///
+    /// The owned twin of [`ShoalResponseSupport::get_index_archived`]: a server framing a
+    /// forwarded answer needs the index beside the bytes, and reading it back out of the archive
+    /// it just sealed would mean validating what it wrote
+    /// ([F38](../../../docs/src/features/inter-node-transport.md)).
+    fn index(&self) -> usize;
+
+    /// Get whether this response is the last of its stream
+    fn end(&self) -> bool;
 }
 
 pub trait QuerySupport: 'static + Sized {
@@ -153,6 +164,16 @@ pub trait QuerySupport: 'static + Sized {
     /// field. No amount of client side typing helps when the peer was built from a different
     /// schema, because both sides are individually consistent and only their agreement is wrong.
     const SCHEMA_FINGERPRINT: u64;
+
+    /// A hash over the structure of this database's schema alone
+    ///
+    /// [`QuerySupport::SCHEMA_FINGERPRINT`] with the protocol version left out. A client and a
+    /// server compare the fingerprint, which moves when either the schema or the framing does,
+    /// and that stays as it is. Two *nodes* compare this beside the wire versions they read and
+    /// the capabilities they act on, so that a rolling upgrade can tell "different schema" from
+    /// "newer transport" ([F38](../../../docs/src/features/inter-node-transport.md), the Q10
+    /// contract). At M2 every one of the three has to match exactly.
+    const SCHEMA_ID: u64;
 
     /// The different tables or types of queries we will handle
     type QueryKinds: ShoalQuerySupport;
@@ -251,6 +272,40 @@ pub trait QuerySupport: 'static + Sized {
     ///
     /// * `query` - The query to get the table name for
     fn query_table_name(query: &Self::QueryKinds) -> Self::TableNames;
+
+    /// Get the table name from a query still in the buffer it arrived in
+    ///
+    /// A coordinator forwarding a query to another node never deserializes it, and needs the
+    /// table to answer a failure in the right variant if the peer never answers.
+    ///
+    /// # Arguments
+    ///
+    /// * `archived` - The archived query to get the table name for
+    fn archived_query_table(
+        archived: &<Self::QueryKinds as Archive>::Archived,
+    ) -> Self::TableNames;
+
+    /// Build the failure a query is answered with when nothing else can answer it
+    ///
+    /// A query that was forwarded to a node that went away is owed exactly one response, and the
+    /// only thing the origin knows about it is which table it named and where in the stream it
+    /// sat. This builds that response in the table's own variant, so the client reads it through
+    /// [`QuerySupport::error`] like any other failure.
+    ///
+    /// # Arguments
+    ///
+    /// * `table` - The table the query named
+    /// * `id` - The bundle the query arrived in
+    /// * `index` - The index the answer is owed under
+    /// * `end` - Whether the query was the last of its stream
+    /// * `error` - What to answer with
+    fn failed(
+        table: Self::TableNames,
+        id: Uuid,
+        index: usize,
+        end: bool,
+        error: ResponseError,
+    ) -> Self::ResponseKinds;
 
     /// Get the table name from an archived response
     ///

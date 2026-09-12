@@ -179,20 +179,25 @@ at the page that now carries the *how*. Nothing there is built either.
 
 ### Distribution
 
-`ShardContact` has one variant:
+~~`ShardContact` has one variant:~~ Since [F38](../features/inter-node-transport.md) it has two:
 
 ```rust
 pub enum ShardContact {
     /// This shard is on our current node
     Local(usize),
+    /// This shard is on another node, reached over a peer link
+    Remote { node: NodeId, shard: u16 },
 }
 ```
 
-`shoal-core/src/server/shard.rs:183-187`
+`shoal-core/src/server/shard.rs`
 
-The `match` in `Comms::send` (`comms.rs:46-58`) has one arm. Everything above it — the tablet
-map, `ShardInfo`, the `Join` broadcast — is already shaped for a multi-node cluster; the transport
-and membership are missing. Adding a `Remote` variant is the seam.
+~~The `match` in `Comms::send` (`comms.rs:46-58`) has one arm.~~ `Comms::send` refuses a remote
+contact as `NotLocal`, and the coordinator accumulates remote shares into one forward per node
+instead. Everything above it — the tablet map, `ShardInfo`, the `Join` broadcast — was already
+shaped for a multi-node cluster; ~~the transport and membership are missing. Adding a `Remote`
+variant is the seam.~~ the transport exists and membership is missing: a node's peers come from a
+static `placement` a test or the benchmark harness writes, not from anything the cluster agrees on.
 
 The tablet map ([items 11, 12, 37](resolved/tablet-ring.md)) changed what this costs. Ownership is
 now *stored* per tablet rather than derived from a hash, so the multi-node work is to make that
@@ -222,8 +227,8 @@ have grown a design rather than staying this sketch. That design is the
 [C2](../distributed/transport.md), the replica set per tablet is [C4](../distributed/tablet-map.md),
 the placement authority is [C3](../distributed/membership.md), and the "actual work" the
 tablet-ring page deferred is [C5](../distributed/replication.md) through
-[C7](../distributed/failover.md). This entry still records *that* it is unbuilt. Nothing there is
-built either. [C13](../distributed/protocol.md) adds the embedded control/data protocol contract
+[C7](../distributed/failover.md). This entry still records *that* it is unbuilt. ~~Nothing there is
+built either.~~ C2 is built ([F38](../features/inter-node-transport.md)); C3 onward are not. [C13](../distributed/protocol.md) adds the embedded control/data protocol contract
 and the questions that gate implementation; no external membership or failover service is required.
 That contract was agreed on 2026-09-11 as the gate before M0 ([P1–P6](../distributed/protocol.md#the-contract)),
 which settled the protocol and pinned candidate libraries without selecting one or building anything.
@@ -234,8 +239,39 @@ nothing that makes one node speak to another. M1 followed as
 `ClusterId` in a format 2 marker, the `cluster:` block, a control thread on its own core running
 an embedded `openraft` group of one on a glommio runtime — and the placement authority C3 asks
 for exists as a group with one member and a state machine that holds the cluster, its members
-and its policy. Still nothing that makes one node speak to another: the peer endpoints are
-advertised and bound by nothing, which is M2.
+and its policy. ~~Still nothing that makes one node speak to another: the peer endpoints are
+advertised and bound by nothing, which is M2.~~ M2 is delivered as
+[F38](../features/inter-node-transport.md): a node speaks to the nodes its placement names over
+three bounded lanes, forwards bundles as validated bytes, and carries its control group's RPCs and
+its traces across the hop.
+
+**What F38 left undone, deliberately.** Recorded here so the next milestone starts from the list
+rather than from the diff:
+
+- **A pure `local_shard` control.** The hop arm on a four-shard node is a stated 75/25 mixture,
+  because the kernel picks the accepting shard and nothing in a release build reports it to a
+  client. The per-query control needs a shard-addressable connection, which is
+  [D7](../direction/shard-aware-routing.md)'s design; when it exists the arm can become pure and
+  its `expected_mix` become `{same: 0, local: 100}`.
+- **`ShoalPool::transport()` across every shard**, not shard zero's view
+  ([item 95](known-issues.md#95-shoalpooltransport-reports-shard-zeros-links-and-calls-them-the-nodes)).
+- **A consumer for `transport.ping_interval`** - the failure detector, M3's
+  ([item 96](known-issues.md#96-clustertransportping_interval-is-parsed-documented-and-consumed-by-nothing)).
+- **Retrying a forward.** `attempt` is carried and always zero; a shed, a lost link and a
+  deadline are answered with a code and left to the client. M6's identity is what makes a
+  server-side retry safe.
+- **The certificate-to-node binding** the `shoal-node://<id>` SAN is written for, with the
+  joiner (Q11).
+- **Draining the serving node's stage records.** A query served for a peer is stamped
+  `served_for_peer` in the peer's process; the harness drains only its own. The origin's record
+  now carries the op and the hop, which is enough for the report; the serving side's stages are
+  a second population nobody has looked at.
+- **The `ClusterFactsLite` mirror carries `hop` and not the placement or the transport
+  counters.** The explorer has no axis for either; when it grows one, the mirror grows with it.
+- **The `serve --staged` shape as the separate driver.** C10 prefers node zero out of the
+  measured process; the harness keeps it in, recorded as `driver: "in-process"`. Moving it out
+  means every node a `serve` child and the driver on `--server --cluster-facts`, which is the
+  runner-side spawn path this feature chose not to build.
 
 **What F37 left undone, deliberately.** Three pieces of C1's design were not built and are
 recorded here rather than dropped:
@@ -252,9 +288,11 @@ recorded here rather than dropped:
   enforcement, and `active_rf` — the members that could hold a replica, capped at the desired
   factor — becomes a count of placed replicas when C4's tablet map has something to place.
 - **A page for the cluster benchmark family.** `macro/cluster/overhead/nodes/1` lives on
-  *Every workload* with its family's four blocks. A page that draws a series needs a series, which
-  is a `nodes/3` arm, which is M2's transport. The family and the group exist so the page has
-  somewhere to attach.
+  *Every workload* with its family's four blocks, and since [F38](../features/inter-node-transport.md)
+  so do the three hop arms, as the `cluster-hop` family. A page that draws a series needs a
+  series ~~, which is a `nodes/3` arm, which is M2's transport~~ - the hop arms are one, three
+  points wide - and a committed capture to draw it from, which is the benchmark host's to take.
+  The families and the group exist so the page has somewhere to attach.
 
 And two things the Q13 spike found that are design inputs rather than defects: **heartbeats do
 not coalesce across openraft groups**, so a tablet-per-group data plane at 4096 tablets on one

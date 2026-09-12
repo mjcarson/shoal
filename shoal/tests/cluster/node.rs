@@ -30,6 +30,9 @@ pub const READY_LINE: &str = "SHOAL_CLUSTER_READY";
 /// What a child prints, followed by the reason, if it cannot start or a shard dies
 pub const FAILED_LINE: &str = "SHOAL_CLUSTER_FAILED";
 
+/// The line a child prints to answer a command sent on its stdin
+pub const REPLY_LINE: &str = "SHOAL_CLUSTER_REPLY";
+
 /// How many of a child's other lines are kept as evidence
 const EVIDENCE_LINES: usize = 20;
 
@@ -74,22 +77,47 @@ pub struct ChildRequest {
     /// Which marker the child should find, if the test staged one: none stages nothing
     #[serde(default)]
     pub staged_marker: Option<String>,
+    /// The static cluster this node is part of, if the test built one
+    ///
+    /// Present, the child builds a `cluster:` block with this placement and these ports and
+    /// stages the marker naming this node ([F38](../../../docs/src/features/inter-node-transport.md)).
+    #[serde(default)]
+    pub cluster: Option<StagedCluster>,
+}
+
+/// A node's place in a statically placed cluster the fixture built
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StagedCluster {
+    /// The cluster's identity, as a string
+    pub cluster: String,
+    /// This node's identity, as a string
+    pub node: String,
+    /// The port this node's peer listener binds
+    pub data_port: u16,
+    /// The port this node's control listener binds
+    pub control_port: u16,
+    /// Every node of the cluster: (node id, data addr, control addr, shards)
+    pub placement: Vec<(String, String, String, u16)>,
+    /// A file the node writes its exported spans to, for the cross-node trace test
+    #[serde(default)]
+    pub trace_file: Option<String>,
 }
 
 /// The endpoints a child bound, and the identity it reported
 ///
-/// Only the client endpoint is bound. The other two are what M2 and M3 add, and are here so
-/// that the record has their shape before anything fills them. The identity fields are what M1
-/// added: a node id for every server, and a cluster id, a control core and a topology version
-/// for a cluster node.
+/// A standalone child binds the client endpoint alone. A placed cluster node binds all three
+/// ([F38](../../../docs/src/features/inter-node-transport.md)): the data port with every shard
+/// and the control port with its control thread. The identity fields are what M1 added: a node
+/// id for every server, and a cluster id, a control core and a topology version for a cluster
+/// node.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Endpoints {
     /// Where clients connect
     pub client: SocketAddr,
-    /// Where data peers would connect; none until M2
+    /// Where data peers connect; none for a standalone child or a mock peer
     #[serde(default)]
     pub data: Option<SocketAddr>,
-    /// Where control peers would connect; none until M3
+    /// Where control peers connect; none for a standalone child or a mock peer
     #[serde(default)]
     pub control: Option<SocketAddr>,
     /// The node's identity, as a string; none for a mock peer
@@ -134,6 +162,8 @@ impl Endpoints {
 enum ChildLine {
     /// The child is answering on these endpoints
     Ready(Endpoints),
+    /// The child answered a command with this json
+    Reply(String),
     /// The child failed
     Failed(String),
     /// The child's stdout closed: it exited
@@ -154,6 +184,8 @@ pub struct Node {
     pub allocation: Allocation,
     /// The process
     child: Child,
+    /// The child's stdin, for sending commands
+    stdin: Option<std::process::ChildStdin>,
     /// What the reader thread relays
     lines: Receiver<ChildLine>,
     /// The last lines the child printed that were not a report
@@ -179,7 +211,7 @@ impl Node {
         allocation: Allocation,
         dir: &Path,
     ) -> Result<Self, FixtureError> {
-        Self::spawn_with(id, kind, allocation, dir, None, None)
+        Self::spawn_with(id, kind, allocation, dir, None, None, None)
     }
 
     /// Start a child, narrowing the cpus it may run on and staging a marker for it to find
@@ -192,6 +224,7 @@ impl Node {
     /// * `dir` - Its storage directory
     /// * `affinity` - The cpus it may run on, applied before it starts; `None` inherits
     /// * `staged_marker` - A marker to write into its directory before it starts
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn_with(
         id: usize,
         kind: NodeKind,
@@ -199,6 +232,7 @@ impl Node {
         dir: &Path,
         affinity: Option<Vec<usize>>,
         staged_marker: Option<String>,
+        cluster: Option<StagedCluster>,
     ) -> Result<Self, FixtureError> {
         let topology = super::Topology::detect();
         // a cluster node's control thread runs on the first cpu of its control core, or shares
@@ -220,6 +254,7 @@ impl Node {
             control_shared,
             affinity: affinity.clone(),
             staged_marker,
+            cluster,
         };
         let request = serde_json::to_string(&request).expect("a request serializes");
         // the test binary again, running only the child function
@@ -227,6 +262,7 @@ impl Node {
         command
             .args(["--exact", kind.child_fn(), "--ignored", "--nocapture"])
             .env(CHILD_ENV, request)
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
         // the affinity is applied in the child between fork and exec, which is the one place a
@@ -256,6 +292,7 @@ impl Node {
         }
         let mut child = command.spawn()?;
         let pid = child.id();
+        let stdin = child.stdin.take();
         let stdout = child.stdout.take().expect("stdout was piped");
         // relay the child's reports, and keep the rest as evidence
         let (tx, lines) = mpsc::channel();
@@ -278,6 +315,8 @@ impl Node {
                     }
                 } else if let Some(reason) = line.strip_prefix(FAILED_LINE) {
                     let _ = tx.send(ChildLine::Failed(reason.trim().to_string()));
+                } else if let Some(json) = line.strip_prefix(REPLY_LINE) {
+                    let _ = tx.send(ChildLine::Reply(json.trim().to_string()));
                 } else {
                     let mut kept = kept.lock().unwrap();
                     if kept.len() == EVIDENCE_LINES {
@@ -295,6 +334,7 @@ impl Node {
             endpoints: Endpoints::unbound(),
             allocation,
             child,
+            stdin,
             lines,
             evidence,
             reader: Some(reader),
@@ -316,6 +356,8 @@ impl Node {
                     self.endpoints = endpoints;
                     return Ok(());
                 }
+                // a reply before ready is not expected, but is not a failure either
+                Ok(ChildLine::Reply(_)) => {}
                 Ok(ChildLine::Failed(reason)) => {
                     return Err(FixtureError::ChildFailed(format!(
                         "node {} ({:?}, pid {}) failed: {reason}",
@@ -332,6 +374,72 @@ impl Node {
                 }
             }
         }
+    }
+
+    /// Send the child a command on its stdin and read its reply
+    ///
+    /// The child answers a command with one `SHOAL_CLUSTER_REPLY <json>` line, which the reader
+    /// thread relays. This writes the command, then drains the relay until that reply arrives, a
+    /// failure is reported, or the wait times out.
+    ///
+    /// # Arguments
+    ///
+    /// * `command` - The command line, without its newline
+    pub fn command(&mut self, command: &str) -> Result<serde_json::Value, FixtureError> {
+        use std::io::Write as _;
+        let stdin = self.stdin.as_mut().ok_or_else(|| {
+            FixtureError::ChildFailed(format!("node {} has no stdin to command", self.id))
+        })?;
+        writeln!(stdin, "{command}").map_err(FixtureError::Io)?;
+        stdin.flush().map_err(FixtureError::Io)?;
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match self.lines.recv_timeout(remaining) {
+                Ok(ChildLine::Reply(json)) => {
+                    return serde_json::from_str(&json).map_err(|error| {
+                        FixtureError::ChildFailed(format!("unparseable reply {json:?}: {error}"))
+                    });
+                }
+                // a stray ready line after startup is ignored
+                Ok(ChildLine::Ready(_)) => {}
+                Ok(ChildLine::Failed(reason)) => {
+                    return Err(FixtureError::ChildFailed(format!(
+                        "node {} failed while answering {command:?}: {reason}",
+                        self.id
+                    )));
+                }
+                Ok(ChildLine::Closed) | Err(RecvTimeoutError::Disconnected) => {
+                    return Err(FixtureError::ChildFailed(format!(
+                        "node {} exited while answering {command:?}",
+                        self.id
+                    )));
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    return Err(FixtureError::NotReady(format!(
+                        "node {} did not answer {command:?} within 30s",
+                        self.id
+                    )));
+                }
+            }
+        }
+    }
+
+    /// This child's resident set size in kibibytes, from `/proc/<pid>/status`
+    ///
+    /// Zero if it cannot be read, which a caller treats as "no growth measured" rather than a
+    /// failure.
+    pub fn rss_kib(&self) -> u64 {
+        let status = match std::fs::read_to_string(format!("/proc/{}/status", self.pid)) {
+            Ok(status) => status,
+            Err(_) => return 0,
+        };
+        status
+            .lines()
+            .find_map(|line| line.strip_prefix("VmRSS:"))
+            .and_then(|rest| rest.trim().split_whitespace().next())
+            .and_then(|kib| kib.parse().ok())
+            .unwrap_or(0)
     }
 
     /// What is known about a child that did not come up

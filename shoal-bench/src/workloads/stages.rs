@@ -26,7 +26,7 @@
 //! which is the question.
 
 use crate::model::stages::{Bucket, JoinStats, OpReport, StageCost, StageReport};
-use shoal::server::stage_profile::{StageOp, StageRecord, Stamp};
+use shoal::server::stage_profile::{StageHop, StageOp, StageRecord, Stamp};
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use uuid::Uuid;
@@ -170,6 +170,8 @@ pub struct ClientRecord {
 struct Journey {
     /// The kind of query this was
     op: StageOp,
+    /// Where it ran, relative to the shard that accepted its connection
+    hop: StageHop,
     /// Whether this response came out on a rotation rather than on a watermark
     rotated: bool,
     /// The total nanoseconds from the client handing this query to `send` until its response
@@ -261,6 +263,9 @@ pub fn build_report(
     // break each kind of query down on its own, since pooling them makes a percentile report
     // where the boundary between two distributions landed
     let mut ops: BTreeMap<String, OpReport> = BTreeMap::new();
+    // and each kind of query by where it ran, since one arm's records are a mixture of hops
+    // and pooling them hides the hop ([F38](../../../docs/src/features/inter-node-transport.md))
+    let mut hops: BTreeMap<String, OpReport> = BTreeMap::new();
     for op in [
         StageOp::Insert,
         StageOp::Get,
@@ -270,28 +275,22 @@ pub fn build_report(
         StageOp::Other,
     ] {
         // gather every journey this operation produced
-        let mut mine: Vec<&Journey> = journeys.iter().filter(|entry| entry.op == op).collect();
+        let mine: Vec<&Journey> = journeys.iter().filter(|entry| entry.op == op).collect();
         // an operation a run never issued has nothing to report
         if mine.is_empty() {
             continue;
         }
-        // rank by total latency, which is what the buckets are windows into
-        mine.sort_unstable_by_key(|entry| entry.total_ns);
-        // count how many of these came out on a rotation and so have no durability stages
-        let rotated = mine.iter().filter(|entry| entry.rotated).count();
-        // build a bucket at each rank
-        let buckets = RANKS
-            .iter()
-            .filter_map(|(name, rank)| bucket(&mine, name, *rank, clock_overhead_ns))
-            .collect();
-        ops.insert(
-            op.as_str().to_string(),
-            OpReport {
-                count: mine.len(),
-                rotated,
-                buckets,
-            },
-        );
+        ops.insert(op.as_str().to_string(), op_report(mine.clone(), clock_overhead_ns));
+        for hop in [StageHop::Same, StageHop::LocalShard, StageHop::RemoteNode] {
+            let took: Vec<&Journey> = mine.iter().copied().filter(|entry| entry.hop == hop).collect();
+            if took.is_empty() {
+                continue;
+            }
+            hops.insert(
+                format!("{}/{}", op.as_str(), hop.as_str()),
+                op_report(took, clock_overhead_ns),
+            );
+        }
     }
     StageReport {
         version: REPORT_VERSION,
@@ -303,6 +302,30 @@ pub fn build_report(
         clock_overhead_ns,
         join,
         ops,
+        hops,
+    }
+}
+
+/// Summarize one population of journeys into the buckets the report stores
+///
+/// # Arguments
+///
+/// * `mine` - The journeys, which are ranked here
+/// * `clock_overhead_ns` - What one clock reading costs on this machine
+fn op_report(mut mine: Vec<&Journey>, clock_overhead_ns: u64) -> OpReport {
+    // rank by total latency, which is what the buckets are windows into
+    mine.sort_unstable_by_key(|entry| entry.total_ns);
+    // count how many of these came out on a rotation and so have no durability stages
+    let rotated = mine.iter().filter(|entry| entry.rotated).count();
+    // build a bucket at each rank
+    let buckets = RANKS
+        .iter()
+        .filter_map(|(name, rank)| bucket(&mine, name, *rank, clock_overhead_ns))
+        .collect();
+    OpReport {
+        count: mine.len(),
+        rotated,
+        buckets,
     }
 }
 
@@ -437,6 +460,7 @@ fn journey(server: &StageRecord, client: &ClientRecord) -> Option<Journey> {
     ];
     Some(Journey {
         op: stamps.flags.op,
+        hop: stamps.flags.hop,
         rotated: stamps.flags.rotated,
         // the total is what the client actually waited, end to end
         total_ns: client.arrived.since(client.submitted),
@@ -938,5 +962,44 @@ mod tests {
             read_report(&path).is_err(),
             "a report from another version was accepted"
         );
+    }
+
+    /// A run whose gets took different hops is reported per hop as well as pooled
+    ///
+    /// Three gets served where they landed, two over the mesh and one over a peer link: `ops`
+    /// pools the six, and `hops` holds `get/same`, `get/local` and `get/remote` with three, two
+    /// and one, so the hop an arm exists to measure is never hidden inside its own median
+    /// ([F38](../../../docs/src/features/inter-node-transport.md)).
+    #[test]
+    fn a_stage_report_splits_each_op_by_hop() {
+        use shoal::server::stage_profile::StageHop;
+        let (mut server, client) = run(6, StageOp::Get);
+        let hops = [
+            StageHop::Same,
+            StageHop::Same,
+            StageHop::Same,
+            StageHop::LocalShard,
+            StageHop::LocalShard,
+            StageHop::RemoteNode,
+        ];
+        for (record, hop) in server.iter_mut().zip(hops) {
+            record.stamps.set_hop(hop);
+        }
+        let report = build_report(&server, &client, None, None, 0);
+        // pooled as before
+        assert_eq!(report.ops["get"].count, 6);
+        assert!(!report.ops.contains_key("get/same"));
+        // and split by hop, with nothing invented for a hop nobody took
+        assert_eq!(report.hops["get/same"].count, 3);
+        assert_eq!(report.hops["get/local"].count, 2);
+        assert_eq!(report.hops["get/remote"].count, 1);
+        assert_eq!(report.hops.len(), 3);
+        assert!(!report.hops.contains_key("insert/same"));
+        // a report with the split serializes it, and one without it still parses
+        let text = serde_json::to_string(&report).expect("serializes");
+        assert!(text.contains("\"get/remote\""));
+        let stripped = text.replace(",\"hops\":", ",\"hops_was_here\":");
+        let old: super::StageReport = serde_json::from_str(&stripped).expect("an old report parses");
+        assert!(old.hops.is_empty());
     }
 }

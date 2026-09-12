@@ -30,9 +30,14 @@ codebase — which is periodically compacted into *archives* of partition data, 
 It is worth being blunt about the boundaries, because the crate descriptions ("a distributed
 database") oversell the current state:
 
-- **Not distributed.** `ShardContact` has exactly one variant, `Local(usize)`
+- **Not distributed.** ~~`ShardContact` has exactly one variant, `Local(usize)`
   (`shoal-core/src/server/shard.rs:169`). All routing is to shards on the current process.
-  There is no node discovery, no inter-node transport, and no cluster membership.
+  There is no node discovery, no inter-node transport, and no cluster membership.~~ Since
+  [F38](features/inter-node-transport.md) `ShardContact` has a `Remote { node, shard }` variant
+  and a node forwards queries to the nodes a **static placement** names, over bounded, optionally
+  encrypted lanes. There is still no node discovery, no cluster membership and no replication:
+  every node is a consensus group of one, and a placement is a file a test or a benchmark
+  writes, not something the cluster agrees on ([Distributed Shoal](distributed/overview.md)).
 - **No replication.** Every partition lives on exactly one shard, in one copy, on one disk.
 - **No transactions.** There is no atomicity across queries, no isolation between them, and
   no rollback. A bundle of queries is a batch, not a transaction.
@@ -56,7 +61,8 @@ its nine entries have since been built, in whole ([F10](features/framing-and-pro
 [F11](features/error-channel.md)) and in half ([F12](features/authentication.md)).
 
 Shoal is best understood as a fast single-node partitioned key-value store with a
-persistence layer, on top of which distribution has not yet been built. How it would be —
+persistence layer, on top of which distribution ~~has not yet been built~~ is being built a
+milestone at a time - the transport exists, membership and replication do not. How it would be —
 replication with a primary per tablet, membership under Raft, failover, rebalancing, and the
 tests and benchmarks that would prove each — is designed in
 [Distributed Shoal](distributed/overview.md), which is to the first five bullets above what

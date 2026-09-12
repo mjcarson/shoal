@@ -633,6 +633,413 @@ fn documented_cluster_defaults_match_policy_bootstrap() {
     assert_eq!(state.desired_rf(), 3);
 }
 
+/// A cross-node bundle preserves coverage, ordering and response identity (C2 M2)
+///
+/// Two nodes of one shard each, placed by name so tablet t is owned by node t % 2. A client on
+/// node 0 inserts a range of keys - roughly half owned by node 1 - reads each back, then sends
+/// one get naming keys on both nodes and asserts every index is answered exactly once with the
+/// row it named. The reads for node 1's keys can only be answered by forwarding to node 1 and
+/// relaying the answer back, so a correct read is a correct hop
+/// ([F38](../../docs/src/features/inter-node-transport.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn remote_query_returns_one_result_per_index() -> Result<(), FixtureError> {
+    // a placed cluster of two nodes, one shard each, plaintext lanes
+    let cluster = Cluster::builder().cluster(2, CoreClaim::Count(1)).start().await?;
+    // both nodes are in one cluster and each bound a data endpoint
+    assert!(cluster.node(0).endpoints.data.is_some(), "node 0 bound no peer endpoint");
+    assert!(cluster.node(1).endpoints.data.is_some(), "node 1 bound no peer endpoint");
+    assert_eq!(
+        cluster.node(0).endpoints.cluster, cluster.node(1).endpoints.cluster,
+        "the two nodes are in different clusters"
+    );
+    // a client talks to node 0, which is the coordinator for every query it sends
+    let addr = cluster.node(0).endpoints.client.to_string();
+    let client = Shoal::<TestDbClient>::new(&addr).await?;
+    // insert a range of keys; node 0 keeps its own and forwards node 1's
+    const KEYS: u64 = 200;
+    for key in 0..KEYS {
+        client
+            .send_one(Row {
+                key,
+                data: format!("row-{key}"),
+            })
+            .await?;
+    }
+    // read each back, whichever node owns it, and check it is the row we wrote
+    for key in 0..KEYS {
+        let response = client.send_one(RowGet::new(vec![key])).await?;
+        let rows = response.access::<Row>()?.expect("a get that found nothing");
+        let row = rows.first().expect("a get that returned no rows");
+        assert_eq!(row.key.to_native(), key);
+        assert_eq!(row.data.as_str(), format!("row-{key}"), "the row for {key} came back changed");
+    }
+    // one get naming keys on both nodes at once: a query split across a local and a remote shard,
+    // answered as one response per index in the order the keys were named
+    let named: Vec<u64> = (0..24).collect();
+    let response = client.send_one(RowGet::new(named.clone())).await?;
+    let rows = response.access::<Row>()?.expect("the split get found nothing");
+    let got: std::collections::BTreeSet<u64> = rows.iter().map(|row| row.key.to_native()).collect();
+    for key in &named {
+        assert!(got.contains(key), "the split get lost key {key}");
+    }
+    assert_eq!(got.len(), named.len(), "the split get answered a key more than once");
+    // nothing died on either node
+    assert_eq!(cluster.node(0).failure(), None);
+    assert_eq!(cluster.node(1).failure(), None);
+    drop(client);
+    Ok(())
+}
+
+/// A stalled bulk stream is bounded and does not block progress traffic (C2 M2)
+///
+/// Two nodes with a proxy on each lane. Node 0 streams far more bulk bytes at node 1 than the
+/// bulk queue holds, through a delayed data-and-bulk proxy: the queue plateaus at its bound and
+/// sheds the rest, and node 0's memory does not run away. While it is stalled, control pings to
+/// node 1 - a separate lane on a separate socket and thread - keep answering, which is the
+/// progress traffic C2 says a bulk transfer must never block. Then the data lane is cut and a
+/// forwarded query answers with a definite outcome inside its deadline rather than hanging, while
+/// pings still answer ([F38](../../docs/src/features/inter-node-transport.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn slow_peer_has_bounded_bytes_and_independent_lanes() -> Result<(), FixtureError> {
+    use cluster::LinkState;
+    let mut cluster = Cluster::builder()
+        .cluster(2, CoreClaim::Count(2))
+        .lane_links(true)
+        .start()
+        .await?;
+    // node 0's bulk link to node 1 shares node 1's data proxy; delay it so the stream stalls
+    cluster.data_link(1).delay(Duration::from_secs(60));
+    let before = cluster.node(0).rss_kib();
+    // stream far more than the 64 MiB bulk queue holds
+    let probe = cluster.node_mut(0).command("PROBE_BULK 1 536870912")?;
+    assert!(probe.get("ok").is_some(), "the bulk probe was refused: {probe}");
+    // poll the transport view until the bulk link's queued bytes plateau under the bound and it
+    // has started shedding
+    let bound: u64 = 64 * 1024 * 1024;
+    let mut shed = false;
+    let mut queued = 0u64;
+    for _ in 0..60 {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let view = cluster.node_mut(0).command("TRANSPORT")?;
+        if let Some(links) = view.get("ok").and_then(|v| v.as_array()).and_then(|shards| shards.first()).and_then(|shard| shard.get("links")).and_then(|l| l.as_array()) {
+            for link in links {
+                if link.get("lane").and_then(|l| l.as_str()) == Some("bulk") {
+                    queued = link.get("queued_bytes").and_then(serde_json::Value::as_u64).unwrap_or(0);
+                    let s = link.get("shed_frames").and_then(serde_json::Value::as_u64).unwrap_or(0);
+                    if s > 0 {
+                        shed = true;
+                    }
+                }
+            }
+        }
+        if shed && queued > 0 {
+            break;
+        }
+    }
+    assert!(shed, "the bulk lane never shed, so nothing bounded it (queued {queued})");
+    assert!(queued <= bound, "the bulk queue held {queued}, past its {bound} byte bound");
+    // memory did not run away with a stream eight times the bound
+    let grew = cluster.node(0).rss_kib().saturating_sub(before);
+    assert!(grew < (bound / 1024) * 3, "node 0 grew {grew} KiB, more than three bulk bounds");
+    // progress traffic survives: a control ping to node 1 still answers
+    let ping = cluster.node_mut(0).command("PING 1")?;
+    assert!(ping.get("ok").is_some(), "a control ping did not survive the bulk stall: {ping}");
+
+    // now cut the data lane to node 1: a forwarded query gets a definite outcome, not a hang
+    cluster.data_link(1).cut();
+    assert_eq!(cluster.data_link(1).state(), LinkState::Cut);
+    // a key owned by node 1: node 0 forwards it, the cut lane fails it definitely
+    let addr = cluster.node(0).endpoints.client.to_string();
+    let client = Shoal::<TestDbClient>::new(&addr).await?;
+    // find a key node 1 owns, so the query must cross the cut lane
+    let key = key_on_other_node(&cluster);
+    let answered = tokio::time::timeout(
+        Duration::from_secs(12),
+        client.send_one(RowGet::new(vec![key])),
+    )
+    .await;
+    match answered {
+        // a definite outcome, whichever it is: a Shedding/Unavailable/OutcomeUnknown error, or an
+        // empty read. What matters is that it answered at all rather than hanging on the cut lane
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => {
+            let text = format!("{error:?}");
+            assert!(
+                text.contains("Unavailable")
+                    || text.contains("OutcomeUnknown")
+                    || text.contains("Shedding"),
+                "the cut lane gave an unexpected error: {text}"
+            );
+        }
+        Err(_) => panic!("a forwarded query to a cut lane hung instead of failing definitely"),
+    }
+    // and control still answers through all of it
+    let ping = cluster.node_mut(0).command("PING 1")?;
+    assert!(ping.get("ok").is_some(), "a control ping did not survive the data cut: {ping}");
+    drop(client);
+    assert_eq!(cluster.node(0).failure(), None);
+    assert_eq!(cluster.node(1).failure(), None);
+    Ok(())
+}
+
+/// A partition key that a two-node placement owns on node 1 rather than node 0
+///
+/// Tablet `t` belongs to `nodes[t % 2]`, and the top twelve bits of the partition hash name the
+/// tablet, so a key whose hash puts it in an odd tablet is node 1's.
+fn key_on_other_node(_cluster: &Cluster) -> u64 {
+    use shoal::shared::traits::PartitionKeySupport;
+    // walk keys until one lands in an odd tablet (node 1 of two), the same hash and tablet split
+    // the ring uses ([F38](../../docs/src/features/inter-node-transport.md))
+    for candidate in 0..1_000_000u64 {
+        let hash = Row::get_partition_key_from_values(&candidate);
+        let tablet = (hash >> (u64::BITS - 12)) as usize;
+        if tablet % 2 == 1 {
+            return candidate;
+        }
+    }
+    panic!("no key landed on node 1");
+}
+
+/// A forwarded query's trace crosses the node boundary without a false batch parent (C2 M2)
+///
+/// A client sends node 0 a bundle of three queries, all owned by node 1. Node 0 opens one
+/// `Coordinator::route` span per query under the bundle's `Shoal::request`, and forwards each
+/// carrying that span's context; node 1 opens a `Shoal::forwarded` span that adopts it. Every
+/// node-1 forwarded span therefore hangs off node 0's per-query route span, in node 0's trace,
+/// and never off the bundle's request root - which is what "without a false batch parent" means
+/// ([F38](../../docs/src/features/inter-node-transport.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn trace_context_crosses_nodes_without_false_batch_parent() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder().cluster(2, CoreClaim::Count(2)).trace().start().await?;
+    // three keys all owned by node 1, so every one is forwarded and traced across the hop
+    let keys: Vec<u64> = {
+        use shoal::shared::traits::PartitionKeySupport;
+        let mut found = Vec::new();
+        for candidate in 0..1_000_000u64 {
+            let hash = Row::get_partition_key_from_values(&candidate);
+            if (hash >> (u64::BITS - 12)) as usize % 2 == 1 {
+                found.push(candidate);
+                if found.len() == 3 {
+                    break;
+                }
+            }
+        }
+        found
+    };
+    // send them in one bundle to node 0, then read them back so the spans are opened and closed
+    let addr = cluster.node(0).endpoints.client.to_string();
+    let client = Shoal::<TestDbClient>::new(&addr).await?;
+    for key in &keys {
+        client.send_one(Row { key: *key, data: format!("t-{key}") }).await?;
+    }
+    let mut bundle = client.query();
+    for key in &keys {
+        bundle = bundle.add(RowGet::new(vec![*key]));
+    }
+    let mut stream = client.send(bundle).await?;
+    while stream.next().await?.is_some() {}
+    drop(client);
+    // flush both nodes' spans, then read them back
+    let _ = cluster.node_mut(0).command("FLUSH")?;
+    let _ = cluster.node_mut(1).command("FLUSH")?;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let node0_spans = read_spans(cluster.dir(0).join("trace.jsonl"));
+    let node1_spans = read_spans(cluster.dir(1).join("trace.jsonl"));
+    assert!(!node0_spans.is_empty(), "node 0 exported no spans");
+    assert!(!node1_spans.is_empty(), "node 1 exported no spans");
+
+    // node 0's request roots and its per-query route spans
+    let request_ids: std::collections::BTreeSet<&str> = node0_spans
+        .iter()
+        .filter(|s| s.name == "Shoal::request")
+        .map(|s| s.span_id.as_str())
+        .collect();
+    let route: std::collections::BTreeMap<&str, &str> = node0_spans
+        .iter()
+        .filter(|s| s.name == "Coordinator::route")
+        .map(|s| (s.span_id.as_str(), s.trace_id.as_str()))
+        .collect();
+    assert!(route.len() >= 3, "node 0 opened {} route spans, expected at least 3", route.len());
+    // every forwarded span on node 1 hangs off a route span on node 0, in that span's trace, and
+    // none hangs off the request root
+    let forwarded: Vec<_> = node1_spans.iter().filter(|s| s.name == "Shoal::forwarded").collect();
+    assert!(forwarded.len() >= 3, "node 1 opened {} forwarded spans, expected at least 3", forwarded.len());
+    for span in &forwarded {
+        let parent_trace = route.get(span.parent_span_id.as_str());
+        assert!(
+            parent_trace.is_some(),
+            "a forwarded span's parent {} is not a route span on node 0",
+            span.parent_span_id
+        );
+        assert_eq!(
+            parent_trace.copied(),
+            Some(span.trace_id.as_str()),
+            "a forwarded span is in a different trace than its parent route span"
+        );
+    }
+    // no node-1 span is parented directly to node 0's request root (the false batch parent)
+    for span in &node1_spans {
+        assert!(
+            !request_ids.contains(span.parent_span_id.as_str()),
+            "node-1 span {} hangs off the bundle's request root rather than a query's route span",
+            span.name
+        );
+    }
+    assert_eq!(cluster.node(0).failure(), None);
+    assert_eq!(cluster.node(1).failure(), None);
+    Ok(())
+}
+
+/// One exported span, as the child wrote it
+struct TraceSpan {
+    /// The span's name
+    name: String,
+    /// The trace it belongs to
+    trace_id: String,
+    /// Its own id
+    span_id: String,
+    /// The span it hangs off, or all-zeroes if it is a root
+    parent_span_id: String,
+}
+
+/// Read a node's exported spans back from its trace file
+///
+/// # Arguments
+///
+/// * `path` - The trace file
+fn read_spans(path: std::path::PathBuf) -> Vec<TraceSpan> {
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    text.lines()
+        .filter_map(|line| {
+            let value: serde_json::Value = serde_json::from_str(line).ok()?;
+            Some(TraceSpan {
+                name: value.get("name")?.as_str()?.to_string(),
+                trace_id: value.get("trace_id")?.as_str()?.to_string(),
+                span_id: value.get("span_id")?.as_str()?.to_string(),
+                parent_span_id: value.get("parent_span_id")?.as_str()?.to_string(),
+            })
+        })
+        .collect()
+}
+
+/// The control lane reaches a placed peer's own Raft (C2 M2, control lane)
+///
+/// Two nodes, placed by name, plaintext control lanes. Node 0 sends node 1 a vote for a low term
+/// over the control lane; node 1, having elected itself and holding a newer term, does not grant
+/// it - and that it answered at all is the proof node 0's `RaftNetworkV2` reached node 1's own
+/// `Raft` end to end ([F38](../../docs/src/features/inter-node-transport.md)). A control ping
+/// proves the listener answers too. The full "control survives a stalled *data* lane" assertion
+/// needs the data-lane proxy and lands with the bounded-lanes test.
+#[tokio::test(flavor = "multi_thread")]
+async fn control_lane_answers_a_vote_from_a_placed_peer() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder().cluster(2, CoreClaim::Count(1)).start().await?;
+    // node 0 pings node 1 over the control lane: the listener answers
+    let ping = cluster.node_mut(0).command("PING 1")?;
+    assert!(
+        ping.get("ok").and_then(|ok| ok.get("micros")).is_some(),
+        "the control ping did not answer: {ping}"
+    );
+    // node 0 sends node 1 a vote: node 1's own Raft answers, and does not grant a stale vote
+    let probe = cluster.node_mut(0).command("VOTE_PROBE 1")?;
+    let granted = probe
+        .get("ok")
+        .and_then(|ok| ok.get("granted"))
+        .and_then(serde_json::Value::as_bool);
+    assert_eq!(
+        granted,
+        Some(false),
+        "node 1's Raft did not answer the vote, or granted a stale one: {probe}"
+    );
+    // and the reverse direction works too, proving both listeners
+    let back = cluster.node_mut(1).command("VOTE_PROBE 0")?;
+    assert_eq!(
+        back.get("ok").and_then(|ok| ok.get("granted")).and_then(serde_json::Value::as_bool),
+        Some(false),
+        "node 0's Raft did not answer node 1's vote: {back}"
+    );
+    assert_eq!(cluster.node(0).failure(), None);
+    assert_eq!(cluster.node(1).failure(), None);
+    Ok(())
+}
+
+/// Install an OpenTelemetry subscriber that appends every exported span to a file
+///
+/// Returns the provider, which the child holds so a `FLUSH` command can force it. `None` when no
+/// trace file was asked for, in which case the child installs no subscriber, exactly as it did
+/// before this test existed.
+///
+/// # Arguments
+///
+/// * `path` - Where to write the spans, if anywhere
+fn install_trace_exporter(path: Option<String>) -> Option<opentelemetry_sdk::trace::SdkTracerProvider> {
+    use tracing_subscriber::layer::SubscriberExt as _;
+    use tracing_subscriber::util::SubscriberInitExt as _;
+    let path = path?;
+    let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+        .with_simple_exporter(FileSpanExporter::new(path))
+        .build();
+    let tracer = opentelemetry::trace::TracerProvider::tracer(&provider, "cluster_child");
+    tracing_subscriber::registry()
+        .with(tracing_opentelemetry::layer().with_tracer(tracer))
+        .init();
+    Some(provider)
+}
+
+/// An exporter that appends each span to a file as one json line
+///
+/// The four fields the cross-node trace test asks about: the span's name, its trace, its own id
+/// and the id of the span it hangs off. Written as hex so a person can diff two nodes' files.
+#[derive(Debug)]
+struct FileSpanExporter {
+    /// The file every batch is appended to
+    file: std::sync::Arc<std::sync::Mutex<std::fs::File>>,
+}
+
+impl FileSpanExporter {
+    /// Open the file the spans go to
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Where to write
+    fn new(path: String) -> Self {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .expect("open a trace file");
+        FileSpanExporter {
+            file: std::sync::Arc::new(std::sync::Mutex::new(file)),
+        }
+    }
+}
+
+impl opentelemetry_sdk::trace::SpanExporter for FileSpanExporter {
+    /// Append every span in a batch as a json line
+    ///
+    /// # Arguments
+    ///
+    /// * `batch` - The spans being exported
+    fn export(
+        &mut self,
+        batch: Vec<opentelemetry_sdk::trace::SpanData>,
+    ) -> futures::future::BoxFuture<'static, opentelemetry_sdk::error::OTelSdkResult> {
+        use std::io::Write as _;
+        let file = self.file.clone();
+        let mut file = file.lock().expect("the trace file lock");
+        for span in batch {
+            let line = serde_json::json!({
+                "name": span.name.to_string(),
+                "trace_id": format!("{:032x}", u128::from_be_bytes(span.span_context.trace_id().to_bytes())),
+                "span_id": format!("{:016x}", u64::from_be_bytes(span.span_context.span_id().to_bytes())),
+                "parent_span_id": format!("{:016x}", u64::from_be_bytes(span.parent_span_id.to_bytes())),
+            });
+            let _ = writeln!(file, "{line}");
+        }
+        let _ = file.flush();
+        Box::pin(std::future::ready(Ok(())))
+    }
+}
+
 /// The request this process was started with, if it is a child
 fn child_request() -> ChildRequest {
     let json = std::env::var(cluster::CHILD_ENV).expect("a child is started with a request");
@@ -655,6 +1062,11 @@ fn report(line: &str) {
 #[ignore]
 async fn cluster_server_child() {
     let request = child_request();
+    // when the parent asked for a trace file, install an OpenTelemetry subscriber that writes
+    // every exported span to it as one json line, so the cross-node trace test can read both
+    // nodes' spans back and check the hop's parentage. The pool installs no subscriber, so this
+    // global default is uncontested ([F38](../../docs/src/features/inter-node-transport.md))
+    let trace_provider = install_trace_exporter(request.cluster.as_ref().and_then(|c| c.trace_file.clone()));
     // exactly the allocation the parent decided on, and any port at all
     let mut resources = Resources::default()
         .exclude_cores(request.exclude_cores.clone())
@@ -670,12 +1082,30 @@ async fn cluster_server_child() {
         .networking(Networking::default().port(0));
     // a cluster node bootstraps itself, with its control thread where the parent put it
     if request.kind == NodeKind::Server {
-        conf = conf.cluster(
-            ClusterConf::default()
-                .bootstrap(true)
-                .control_core(request.control_cpu.unwrap_or(0))
-                .control_core_shared(request.control_shared),
-        );
+        let mut block = ClusterConf::default()
+            .bootstrap(true)
+            .control_core(request.control_cpu.unwrap_or(0))
+            .control_core_shared(request.control_shared);
+        // a statically placed node also gets its ports and the placement every node shares
+        if let Some(staged) = &request.cluster {
+            use shoal::server::conf::cluster::{PlacedNode, Placement};
+            use shoal::shared::identity::NodeId;
+            let nodes = staged
+                .placement
+                .iter()
+                .map(|(node, data, control, shards)| PlacedNode {
+                    node: NodeId(node.parse().expect("a node id parses")),
+                    data: data.clone(),
+                    control: control.clone(),
+                    shards: *shards,
+                })
+                .collect();
+            block = block
+                .port(staged.data_port)
+                .control_port(staged.control_port)
+                .placement(Placement { nodes });
+        }
+        conf = conf.cluster(block);
     }
     // a marker the test staged, written before the server can claim the directory
     if let Some(marker) = &request.staged_marker {
@@ -702,10 +1132,18 @@ async fn cluster_server_child() {
     let identity = pool.identity().clone();
     let topology = pool.topology().ok();
     let shard_cpus = pool.shard_cpus().to_vec();
+    // the peer and control endpoints a cluster node bound, for the parent to record
+    let (data, control_ep) = match &request.cluster {
+        Some(staged) => (
+            Some(format!("127.0.0.1:{}", staged.data_port).parse().expect("a data addr")),
+            Some(format!("127.0.0.1:{}", staged.control_port).parse().expect("a control addr")),
+        ),
+        None => (None, None),
+    };
     let endpoints = Endpoints {
         client,
-        data: None,
-        control: None,
+        data,
+        control: control_ep,
         node: Some(identity.node.to_string()),
         cluster: identity.cluster.map(|cluster| cluster.to_string()),
         control_core: pool.control_placement().map(|placement| placement.cpu),
@@ -718,6 +1156,37 @@ async fn cluster_server_child() {
         cluster::READY_LINE,
         serde_json::to_string(&endpoints).expect("endpoints serialize")
     ));
+    // a cluster node answers commands on its stdin, for the tests to drive its peer lanes, while
+    // still watching for a shard death; a standalone node has no peers and just watches
+    if let Some(staged) = request.cluster.clone() {
+        use tokio::io::AsyncBufReadExt as _;
+        // resolve a node index in a command to the NodeId the placement staged
+        let placement: Vec<shoal::shared::identity::NodeId> = staged
+            .placement
+            .iter()
+            .map(|(node, ..)| shoal::shared::identity::NodeId(node.parse().expect("a node id")))
+            .collect();
+        let mut stdin = tokio::io::BufReader::new(tokio::io::stdin()).lines();
+        let mut watch = tokio::time::interval(Duration::from_millis(50));
+        loop {
+            tokio::select! {
+                // the next command line, or stdin closing
+                line = stdin.next_line() => match line {
+                    Ok(Some(line)) => report(&handle_command(&pool, &placement, trace_provider.as_ref(), line.trim())),
+                    // stdin closed: the parent is done with us, run until killed
+                    Ok(None) => break,
+                    Err(_) => break,
+                },
+                // watch for a shard death between commands
+                _ = watch.tick() => {
+                    if let Some((shard, error)) = pool.failure() {
+                        report(&format!("{} shard {shard} died: {error}", cluster::FAILED_LINE));
+                        std::process::exit(1);
+                    }
+                }
+            }
+        }
+    }
     // then relay a shard's death, should one happen, and otherwise run until killed
     loop {
         if let Some((shard, error)) = pool.failure() {
@@ -726,6 +1195,77 @@ async fn cluster_server_child() {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+/// Answer one command from a test, as a `SHOAL_CLUSTER_REPLY <json>` line
+///
+/// # Arguments
+///
+/// * `pool` - This node's pool
+/// * `placement` - The node ids a command's index resolves against
+/// * `line` - The command line
+fn handle_command(
+    pool: &ShoalPool<TestDb>,
+    placement: &[shoal::shared::identity::NodeId],
+    trace_provider: Option<&opentelemetry_sdk::trace::SdkTracerProvider>,
+    line: &str,
+) -> String {
+    let mut parts = line.split_whitespace();
+    let verb = parts.next().unwrap_or("");
+    // resolve the next token as a node index into the placement
+    let node_at = |parts: &mut std::str::SplitWhitespace| -> Option<shoal::shared::identity::NodeId> {
+        parts.next().and_then(|idx| idx.parse::<usize>().ok()).and_then(|idx| placement.get(idx).copied())
+    };
+    let result: Result<serde_json::Value, String> = match verb {
+        // ping a peer over the control lane; the reply is how many microseconds it took
+        "PING" => match node_at(&mut parts) {
+            Some(node) => pool
+                .control_ping(node)
+                .map(|elapsed| serde_json::json!({ "micros": elapsed.as_micros() as u64 }))
+                .map_err(|error| format!("{error:?}")),
+            None => Err("PING needs a node index".to_string()),
+        },
+        // send a peer a vote for a low term; the reply is whether it granted it
+        "VOTE_PROBE" => match node_at(&mut parts) {
+            Some(node) => pool
+                .control_vote_probe(node)
+                .map(|probe| serde_json::json!({ "granted": probe.granted }))
+                .map_err(|error| format!("{error:?}")),
+            None => Err("VOTE_PROBE needs a node index".to_string()),
+        },
+        // this node's peer links, for the bounded-lanes test
+        "TRANSPORT" => pool
+            .transport()
+            .map(|views| serde_json::to_value(views).expect("views serialize"))
+            .map_err(|error| format!("{error:?}")),
+        // stream bytes at a peer on the bulk lane, for the bounded-lanes test
+        "PROBE_BULK" => match node_at(&mut parts) {
+            Some(node) => parts
+                .next()
+                .and_then(|bytes| bytes.parse::<u64>().ok())
+                .ok_or_else(|| "PROBE_BULK needs a byte count".to_string())
+                .and_then(|bytes| {
+                    pool.probe_bulk(node, bytes)
+                        .map(|()| serde_json::json!({ "started": bytes }))
+                        .map_err(|error| format!("{error:?}"))
+                }),
+            None => Err("PROBE_BULK needs a node index".to_string()),
+        },
+        // flush this node's exported spans to its trace file
+        "FLUSH" => {
+            if let Some(provider) = trace_provider {
+                let _ = provider.force_flush();
+            }
+            Ok(serde_json::json!({ "flushed": true }))
+        }
+        other => Err(format!("unknown command {other:?}")),
+    };
+    // one reply line per command, an ok or an error object
+    let json = match result {
+        Ok(value) => serde_json::json!({ "ok": value }),
+        Err(error) => serde_json::json!({ "error": error }),
+    };
+    format!("{} {}", cluster::REPLY_LINE, json)
 }
 
 /// A mock peer child: a listener that echoes, so a link can be exercised with no peer protocol

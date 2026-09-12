@@ -1,6 +1,9 @@
 # Overview
 
-Shoal is a single process containing N independent shards, one per usable CPU core. A shard
+Shoal is a single process containing N independent shards, one per usable CPU core - or, since
+[F38](../features/inter-node-transport.md), one of several such processes that forward queries
+to each other over a static placement; this chapter describes one process, and the
+[distributed part](../distributed/overview.md) describes what is between them. A shard
 owns a slice of every table, its own write-ahead log, its own set of archive files, and its
 own background tasks. Nothing is shared between shards except channels.
 
@@ -35,7 +38,8 @@ Every shard is symmetric. There is no leader, no coordinator process, and no sha
 special. The word "coordinator" appears in the code (`Coordinator::send_to_shard`,
 `shoal-core/src/server/shard.rs:413`) but it names a *role a shard plays for one query*, not
 a distinct component: whichever shard accepted the client's TCP connection routes that
-client's queries to their owning shards.
+client's queries to their owning shards - over the mesh when the owner is on this node, and as
+a forwarded frame when it is on another ([F38](../features/inter-node-transport.md)).
 
 ## Layering
 

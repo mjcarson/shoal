@@ -168,6 +168,53 @@ pub enum Answer<R> {
 }
 
 
+/// Whether an answer is whole or one shard's share of a split query
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplyKind {
+    /// A whole answer, which a client relay frames as a response
+    Whole,
+    /// One shard's share of a query another node split, which a peer relay frames as a share
+    Share,
+}
+
+/// An answer on its way to the relay that writes it
+///
+/// Every shard holds a channel of these to every connection's write relay, and whichever shard
+/// answers a query hands its bytes down that channel. The index and the end flag travel beside
+/// the bytes rather than inside them: a client relay never needs them, since a response frame
+/// carries only the query id, but a peer relay frames an answer by bundle and index and cannot
+/// read the index out of an archive it did not write without validating it
+/// ([F38](../../../docs/src/features/inter-node-transport.md)).
+#[derive(Debug)]
+pub struct Reply {
+    /// The bundle the answered query arrived in
+    pub id: Uuid,
+    /// The index the answer is owed under
+    pub index: usize,
+    /// Whether the answered query was the last of its stream
+    pub end: bool,
+    /// Whether this is a whole answer or a share
+    pub kind: ReplyKind,
+    /// The span the answer is written under
+    pub span: Span,
+    /// When the query reached each stage, and its index
+    pub stamps: StageStamps,
+    /// The answer, sealed
+    pub archived: AlignedVec,
+}
+
+/// What a peer link learned, delivered into the shard that owns it
+///
+/// Built by the link task on the shard's own executor and sent over the shard's own channel,
+/// so the shard handles it between two of its other messages like anything else.
+#[derive(Debug)]
+pub enum PeerEvent {
+    /// A link event: up, down, or a frame the peer sent back
+    Link(crate::server::peer::LinkEvent),
+    /// The deadline sweep, run by a timer task on the shard
+    Tick,
+}
+
 /// The messages that can be sent over of node local mesh
 ///
 /// # Safety
@@ -186,8 +233,46 @@ where
         /// This clients id
         client: Uuid,
         /// The channel to send responses for this client on
-        client_tx: AsyncSender<(Uuid, Span, StageStamps, AlignedVec)>,
+        client_tx: AsyncSender<Reply>,
     },
+    /// Tell this shard a client has gone away, so its channel can be dropped
+    ///
+    /// Broadcast by the acceptor once a connection's read relay has ended, whether the client
+    /// closed cleanly or sent something the relay refused. Before this existed every shard held
+    /// every connection's channel for as long as the process ran
+    /// ([Resolved #32](../../../docs/src/appendix/resolved/disconnected-client-cleanup.md)).
+    ClientGone(Uuid),
+    /// A bundle forwarded by another node, still in the buffer it arrived in
+    ///
+    /// The peer listener read it in three pieces and judged every length; what it could not
+    /// judge - offsets against the bundle, the bundle's own bytes - the shard that receives this
+    /// validates before anything is routed, since a process boundary trusts nothing it did not
+    /// check itself ([F38](../../../docs/src/features/inter-node-transport.md)).
+    Forward {
+        /// The peer connection this arrived on, which is the client every answer goes to
+        conn: Uuid,
+        /// The node that forwarded it
+        origin: crate::shared::identity::NodeId,
+        /// The bundle's fixed fields
+        preamble: crate::shared::protocol::peer::ForwardPreamble,
+        /// Which queries of it this node answers, and on which shards
+        entries: Vec<crate::shared::protocol::peer::ForwardEntry>,
+        /// The bundle's bytes
+        data: RequestBody,
+        /// When the last byte of it came off the socket
+        base: Stamp,
+    },
+    /// Something a peer link owned by this shard learned
+    Peer(PeerEvent),
+    /// Drive a snapshot stream of this many bytes at a peer, for the bounded-bytes test
+    BulkProbe {
+        /// The peer to stream at
+        node: crate::shared::identity::NodeId,
+        /// How many payload bytes to stream
+        bytes: u64,
+    },
+    /// Report what this shard's peer links look like
+    Transport(std::sync::mpsc::Sender<crate::server::peer::ShardTransportView>),
     /// A message from a client
     Client {
         /// This peers id
@@ -331,6 +416,19 @@ impl<D: ShoalDatabase> Clone for ServerMsg<D> {
                 client: client.clone(),
                 client_tx: client_tx.clone(),
             },
+            ServerMsg::ClientGone(client) => ServerMsg::ClientGone(*client),
+            // a forward is handed to the shard that accepted it and is never broadcast
+            ServerMsg::Forward { .. } => {
+                panic!("A forwarded bundle is only ever handed to the shard that accepted it")
+            }
+            // a link's events go to the shard that owns the link and nowhere else
+            ServerMsg::Peer(_) => panic!("A peer event is only ever sent to the shard that owns the link"),
+            ServerMsg::BulkProbe { node, bytes } => ServerMsg::BulkProbe {
+                node: *node,
+                bytes: *bytes,
+            },
+            // a view is asked of one shard, on a channel that answers once
+            ServerMsg::Transport(_) => panic!("A transport view is asked of one shard"),
             ServerMsg::Query {
                 meta,
                 body,

@@ -462,6 +462,33 @@ pub fn shutdown(mut guard: TraceGuard) {
 ///
 /// * `span` - The span to reparent onto the peer's trace
 /// * `wire` - The trace context the peer sent
+/// Read the trace context a span would put on the wire, if it is part of a trace
+///
+/// The other half of [`adopt_remote_parent`], and the server side twin of what a client does
+/// before it writes a request frame: resolve the span through the OpenTelemetry layer and hand
+/// its ids to the codec, which refuses the invalid pair a span outside any trace resolves to. A
+/// node forwarding a query to a peer puts this on the entry, one per query rather than one per
+/// frame, so the remote work hangs off the query's own span
+/// ([F38](../../../docs/src/features/inter-node-transport.md)).
+///
+/// # Arguments
+///
+/// * `span` - The span whose context to read
+#[must_use]
+pub fn context_of(span: &Span) -> Option<TraceContext> {
+    // resolve what trace this span is in, which the OTLP layer answers and nothing else does
+    let context = span.context();
+    // bound rather than chained, since the span reference this resolves to is a temporary
+    let resolved = TraceContextExt::span(&context);
+    let span_context = resolved.span_context();
+    // and hand its ids to the codec, which refuses the invalid pair an untraced span resolves to
+    TraceContext::new(
+        span_context.trace_id().to_bytes(),
+        span_context.span_id().to_bytes(),
+        span_context.trace_flags().to_u8(),
+    )
+}
+
 pub fn adopt_remote_parent(span: &Span, wire: &TraceContext) {
     // rebuild the peer's span context out of the bytes it sent
     //
@@ -762,6 +789,43 @@ mod tests {
             // and the sender's sampling decision came with it, rather than being made again here
             assert!(resolved.is_sampled());
         });
+    }
+
+    #[test]
+    /// A span's context reads back as the context a peer adopting it would join
+    ///
+    /// The extraction half against the adoption half: a span that adopted a peer's trace, read
+    /// back with `context_of`, names that trace, a span id of its own and the sampling flag, and
+    /// a span outside any trace reads back as nothing at all rather than as an invalid pair.
+    fn extracting_a_context_is_the_inverse_of_adopting_one() {
+        use tracing_opentelemetry::OpenTelemetrySpanExt;
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let trace_id = [7u8; 16];
+        let span_id = [3u8; 8];
+        let wire = TraceContext::new(trace_id, span_id, 1).expect("a valid context was refused");
+        let (_exporter, provider) = provider();
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("context_of")));
+        tracing::subscriber::with_default(subscriber, || {
+            // a span that joined a peer's trace
+            let span = tracing::info_span!(parent: None, "Coordinator::route");
+            span.set_parent(opentelemetry::Context::new());
+            super::adopt_remote_parent(&span, &wire);
+            // reads back as that trace, with this span's own id, still sampled
+            let read = super::context_of(&span).expect("a joined span has a context");
+            assert_eq!(read.trace_id(), trace_id);
+            assert_ne!(read.span_id(), span_id);
+            assert!(read.is_sampled());
+            // and adopting what was read joins the same trace again
+            let child = tracing::info_span!(parent: None, "Shard::handle_query");
+            child.set_parent(opentelemetry::Context::new());
+            super::adopt_remote_parent(&child, &read);
+            assert_eq!(super::context_of(&child).unwrap().trace_id(), trace_id);
+        });
+        // a span with no layer behind it is in no trace, and says so
+        let span = tracing::info_span!(parent: None, "nowhere");
+        assert!(super::context_of(&span).is_none());
     }
 
     #[test]

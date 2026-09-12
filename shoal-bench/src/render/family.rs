@@ -558,8 +558,46 @@ pub const FAMILIES: &[Family] = &[
         what_it_cannot_say:
             "Anything about a cluster. One node replicates to nobody, acknowledges its own writes, \
              and serves every read locally exactly as a standalone node does. What replication \
-             costs is the `nodes/3` arm of this series, which exists once M2 has a transport for \
-             it to run over.",
+             costs is the `nodes/3` arm of this series, which needs the replication M4 delivers \
+             over the transport M2 did.",
+    },
+    Family {
+        name: "cluster-hop",
+        title: "What a hop costs a read",
+        surface: Surface::AllWorkloads,
+        what_it_measures:
+            "One read - a get of one 1024 byte row from the ephemeral unsorted table, one \
+             outstanding at a time - against one two-node static placement, three ways. \
+             `same_shard` reads keys node zero owns on a node zero with one shard, so the shard \
+             that accepted the connection is the one that answers. `local_shard` reads the same \
+             keys on a node zero with four shards, so three queries in four cross the kanal mesh \
+             to another shard. `remote_node` reads the other node's keys, so every query is \
+             forwarded over the data lane, served there and answered back. `remote_node` less \
+             `same_shard` is the peer hop, which is the M2 loopback budget's number.",
+        how_to_read_it:
+            "As three latency distributions of the same query, read against each other from one \
+             capture and never against the grid: they are depth one and read-only, and nothing \
+             else in the corpus is both. The medians and the tails together - the budget asks for \
+             a p50 and says to report the tails too. The `cluster` record says what ran: the \
+             placement, every node's cores, the `hop` the arm was built for with the mix its \
+             construction implies, and the `transport` counters - frames sent and shed, dials, \
+             queued bytes and the bounds they ran under.",
+        what_would_make_it_wrong:
+            "Taking `local_shard`'s median for a pure mesh hop. The kernel picks which shard a \
+             connection lands on and nothing tells the client which, so on a node with four shards \
+             a quarter of that arm's queries are served where they landed; its `hop.expected_mix` \
+             says 25/75, its p50 and above are mesh hops and its lower quarter is not. A \
+             `transport` record on `remote_node` with `shed_frames` above zero, or a data lane not \
+             `up`, means queries were refused or timed out rather than forwarded, and the samples \
+             are the failures' latencies. Two nodes that shared a physical core - the `cores` \
+             record would say so, and the harness refuses to stage it.",
+        what_it_cannot_say:
+            "What a hop costs over a network. Both nodes are processes on one machine talking over \
+             loopback, which has no bandwidth, no congestion and no independent failure; C10 says \
+             never to multiply a loopback number by an RTT and call it a forecast. Nor what a hop \
+             costs a write or a wide row: this is one narrow read, chosen so the hop is the \
+             largest share of what is left. A page of its own comes with the first committed \
+             capture on the benchmark host.",
     },
     Family {
         name: "retired",
@@ -618,6 +656,9 @@ pub fn family_for(id: &str) -> Option<&'static Family> {
         "conf-storage"
     } else if id.starts_with("macro/conf/resources/") {
         "conf-resources"
+    } else if id.starts_with("macro/cluster/hop/") {
+        // before the wider cluster prefix, which would otherwise take these
+        "cluster-hop"
     } else if id.starts_with("macro/cluster/") {
         "cluster-overhead"
     } else if id.starts_with("macro/fanout/") {

@@ -134,7 +134,9 @@ practical consequences:
 - A client connection lands on an arbitrary shard, and that shard becomes the *coordinator*
   for every query on that connection.
 - The coordinator is almost never the shard that owns the data. Most queries take one extra
-  channel hop.
+  channel hop - and on a placed cluster node, a query whose owner is on another node takes a
+  peer hop instead ([F38](../features/inter-node-transport.md)); the `macro/cluster/hop/` arms
+  price the two side by side.
 - Because the client keeps a pool of 10–50 connections
   ([The Client](../api/client.md)), a single client is spread across many coordinators.
 

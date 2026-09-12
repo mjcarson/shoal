@@ -51,6 +51,9 @@ fn a_grid_arm_joins_its_stage_records() {
             stage_json: Some(stages.clone()),
             // keep every query, so a smoke run has records to join rather than a handful
             stage_sample: 1,
+            // the arm starts its own server, as every capture does
+            server: shoal_bench::workloads::harness::ServerSource::InProcess,
+            cluster: None,
         },
     )
     .expect("the arm runs");

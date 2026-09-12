@@ -13,6 +13,7 @@
 //!   deliberately run with different shard counts.
 //! - A workload that panics or hangs costs its own run instead of the rest of the capture.
 
+pub mod cluster;
 pub mod conf;
 pub mod driver;
 pub mod keys;
@@ -107,12 +108,28 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
     }
     // resolve the configuration once, which also gives this workload its own storage directory.
     // a restart reuses it exactly, so the server that comes back up claims the same store.
-    let (conf_facts, addr, conf) = match plan.server.overrides() {
-        None => (None, String::new(), None),
+    //
+    // a workload that places peers gets its cluster staged here too: identities minted, markers
+    // written, cores and ports decided, and node zero's own configuration applied on top of the
+    // resolved one ([F38](../../../docs/src/features/inter-node-transport.md)). nothing is started
+    // yet - the peers come up below, before node zero does
+    let (conf_facts, addr, conf, staged) = match plan.server.overrides() {
+        None => (None, String::new(), None, None),
         Some(overrides) => {
-            let conf = conf::resolve(&request.conf, workload.id(), overrides, request.port)?;
+            let resolved = conf::resolve(&request.conf, workload.id(), overrides, request.port)?;
+            let (conf, staged) = match overrides.cluster.as_ref().filter(|c| !c.peers.is_empty()) {
+                Some(_) if request.server != ServerSource::InProcess => bail!(
+                    "{} places peers and has to start its own cluster; --server cannot drive it",
+                    workload.id()
+                ),
+                Some(_) => {
+                    let staged = cluster::stage(&resolved, workload.id(), overrides, request.port)?;
+                    (cluster::apply(resolved, &staged.nodes[0])?, Some(staged))
+                }
+                None => (resolved, None),
+            };
             let addr = format!("{}:{}", conf.networking.interface, conf.networking.port);
-            (Some(conf::facts(&conf)), addr, Some(conf))
+            (Some(conf::facts(&conf)), addr, Some(conf), staged)
         }
     };
     // an external server has to be one the workload could have started for itself, and one it
@@ -141,6 +158,17 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
         .thread_name("workload-client")
         .build()
         .context("failed to build the client runtime")?;
+    // start every placed peer first, so node zero's first forward has somewhere to dial. the
+    // children are killed when this vector drops, which is after the server below has stopped
+    let _peers = match &staged {
+        Some(staged) => cluster::spawn_peers(
+            staged,
+            workload.id(),
+            &request.conf,
+            request.scale.as_str(),
+        )?,
+        None => Vec::new(),
+    };
     // start the shards and wait until they answer - or, for a server somebody else started,
     // only wait until it answers
     let mut pool = match &request.server {
@@ -151,9 +179,16 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
         }
     };
     // a cluster node this process started records what its control plane committed; a server
-    // somebody else started carries whatever record they handed over, and a standalone one none
-    let cluster_facts = match (&pool, &conf) {
-        (Some(pool), Some(conf)) => conf::cluster_facts(conf, pool)?,
+    // somebody else started carries whatever record they handed over, and a standalone one none.
+    // the link counters are read again after the run, since they are what the run did
+    let mut cluster_facts = match (&pool, &conf) {
+        (Some(pool), Some(conf)) => match conf::cluster_facts(conf, pool)? {
+            Some(facts) => match &staged {
+                Some(staged) => Some(cluster::placed_facts(staged, pool, conf, facts)?),
+                None => Some(facts),
+            },
+            None => None,
+        },
         _ => None,
     };
     // put whatever this workload reads into the server. deliberately outside the timing below:
@@ -193,6 +228,12 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
             measured.map(|measured| (measured, wall_clock))
         })
     });
+    // what the links did during the run, read before the server that holds them stops
+    if let (Some(facts), Some(pool), Some(conf), true) =
+        (cluster_facts.as_mut(), pool.as_ref(), conf.as_ref(), staged.is_some())
+    {
+        facts.transport = Some(cluster::transport_facts(pool, conf)?);
+    }
     // stop the server whatever happened, so a failing run does not leave shards holding cores
     stop(pool)?;
     let (mut measured, wall_clock) = outcome?;

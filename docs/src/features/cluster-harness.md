@@ -146,15 +146,22 @@ which is [item 91](../appendix/known-issues.md#91-a-compaction-that-fails-ends-t
 
 **Frame-level faults in the fixture's proxy.** A byte proxy cannot see inside TLS, and the fault
 table wants frame-class manipulation before encryption. That is a fake transport for a later
-milestone; the proxy models what it can, which is a directed link.
+milestone; the proxy models what it can, which is a directed link - and since
+[F38](inter-node-transport.md) one per lane per node, which is enough to stall a bulk stream
+while the control lane pings.
 
 ## Limitations
 
-- **There is no peer transport, membership or node identity.** The children are isolated servers
-  and a mock peer that echoes; a directed link carries client traffic and echoes, nothing a node
-  says to a node. `Endpoints::data` and `Endpoints::control` are `None`, and stay so until M2 and
-  M3. A test of a distributed invariant cannot be written against this fixture yet, and C11 says
-  an empty mock test must not count as one.
+- ~~**There is no peer transport, membership or node identity.**~~ **There is no membership.**
+  Node identity came with [F37](node-identity-control-plane.md) and the peer transport with
+  [F38](inter-node-transport.md): the children are placed cluster nodes that forward to each
+  other, `Endpoints::data` and `Endpoints::control` are bound and reported, a byte proxy can sit
+  in front of each lane, and four distributed invariants are tested against this fixture. ~~The
+  children are isolated servers and a mock peer that echoes; a directed link carries client
+  traffic and echoes, nothing a node says to a node. `Endpoints::data` and `Endpoints::control`
+  are `None`, and stay so until M2 and M3. A test of a distributed invariant cannot be written
+  against this fixture yet~~ - and C11 still says an empty mock test must not count as one. What
+  is still missing is a node that joins: every placed node is a consensus group of one.
 - **The model is Raft-shaped, not a library.** Q1 is open. It has no configuration changes,
   learner promotion, snapshot transfer or compaction, and one voter configuration per run.
 - **The oracle's reads are `One` reads.** A read is satisfied by any committed prefix, which is

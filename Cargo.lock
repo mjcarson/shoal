@@ -5410,6 +5410,7 @@ dependencies = [
  "shoal-core",
  "shoal-derive",
  "shoal-proto",
+ "socket2",
  "tempfile",
  "tokio",
  "tracing",

@@ -71,12 +71,21 @@ struct ServeArgs {
     #[clap(long, value_enum, default_value_t = Scale::Full)]
     scale: Scale,
     /// The port to bind; zero lets the kernel choose and the printed line says which
-    #[clap(long, default_value_t = 0)]
+    #[clap(long, default_value_t = 0, conflicts_with = "staged")]
     port: u16,
+    /// Become one node of a cluster the measured process staged, described by this json file
+    ///
+    /// The other half of a multi-node arm ([F38](../../docs/src/features/inter-node-transport.md)):
+    /// `run` mints the identities, writes the markers and decides the cores and ports, then
+    /// starts every node but its own as this. The file is a `StagedNode` from
+    /// `shoal_bench::workloads::harness::cluster`, and it names the port, so `--port` is refused
+    /// beside it.
+    #[clap(long)]
+    staged: Option<PathBuf>,
 }
 
 /// The line `serve` prints once its shards answer, followed by the bound address
-const SERVE_READY_LINE: &str = "SHOAL_WORKLOAD_SERVING";
+const SERVE_READY_LINE: &str = harness::cluster::SERVE_READY_LINE;
 
 /// Starts a workload's server and holds it until killed
 ///
@@ -93,6 +102,12 @@ fn serve(args: &ServeArgs) -> Result<()> {
         bail!("{} drives engine internals in process and has no server to serve", args.id);
     };
     let conf = harness::conf::resolve(&args.conf, workload.id(), overrides, args.port)?;
+    // a staged node applies its own description on top: storage one level down, its ports, its
+    // cores and the placement every node shares
+    let conf = match &args.staged {
+        Some(path) => harness::cluster::apply(conf, &harness::cluster::load(path)?)?,
+        None => conf,
+    };
     let mut pool = shoal::ShoalPool::<shoal_bench::workloads::schema::Bench>::start(conf)
         .map_err(|error| anyhow::anyhow!("failed to start a server: {error:?}"))?;
     // answering, on the address the shards actually bound

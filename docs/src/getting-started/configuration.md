@@ -343,9 +343,10 @@ node is a member of a cluster ([Distributed Shoal](../distributed/overview.md)):
 node identity, bootstraps or joins a cluster, runs a control thread on its own core, and records
 the replication policy the cluster was created with. Delivered by
 [F37](../features/node-identity-control-plane.md), which built the identity, the bootstrap, the
-control thread and the policy record; joining, the peer transport and enforcement of the policy
-are later milestones and the settings that belong to them are **refused at startup by name**
-rather than accepted and ignored.
+control thread and the policy record, and by [F38](../features/inter-node-transport.md), which
+built the peer transport - the lanes, their bounds and their encryption - against a static
+placement; joining and enforcement of the policy are later milestones and the settings that
+belong to them are **refused at startup by name** rather than accepted and ignored.
 
 This is the block with every default written out. A file that says only `cluster:\n  bootstrap:
 true` gets exactly this, and `documented_cluster_defaults_match_policy_bootstrap` holds the
@@ -355,8 +356,8 @@ two to each other.
 cluster:
   bootstrap: true                 # create the cluster on an empty directory; keeps it on a claimed one
   seeds: []                       # addresses to join through. refused until M3 delivers joining
-  port: 12001                     # the data peer endpoint (unbound until M2)
-  control_port: 12002             # the control listener (unbound until M2)
+  port: 12001                     # the data and bulk lanes, bound by every shard with SO_REUSEPORT
+  control_port: 12002             # the control lane, bound by the control thread
   control_core: 0                 # the cpu the control thread is pinned to
   control_core_shared: false      # whether a shard may share that cpu's physical core
   control_voters: 3               # 1, 3 or 5
@@ -369,12 +370,38 @@ cluster:
   primary_failover_after: "5s"    # base data election timeout
   auto_remove_after: "30m"        # null disables automatic removal of a Down node
   admins: []
+  transport:                      # the peer lanes (F38); every bound is in bytes
+    data_queue_bytes: "64MiB"     # queued to one peer on the data lane; a forward past it is shed
+    control_queue_bytes: "8MiB"   # the control lane's queue to one peer
+    bulk_queue_bytes: "64MiB"     # the bulk lane's queue to one peer
+    inflight_bytes: "64MiB"       # forwarded bytes one accepted connection may hold unanswered
+    forward_timeout: "5s"         # after this a forwarded query is answered OutcomeUnknown
+    reconnect_min: "100ms"        # the first backoff after a lost link, with a quarter of jitter
+    reconnect_max: "5s"           # the longest
+    handshake_timeout: "10s"      # to dial and finish the hello
+    ping_interval: "1s"           # parsed and honored by nothing yet (item 96)
 ```
 
 Two settings have no default and are absent above: `advertise`, the address peers reach this
 node at, which defaults to `networking.interface` and **must be given** when that is `0.0.0.0`
 or `::`; and `client_advertise`, the client address the topology reports if it differs from the
-one bound. `tls` - `cert`, `key`, `ca` - is refused until M2.
+one bound. ~~`tls` - `cert`, `key`, `ca` - is refused until M2.~~ Two more are absent because
+they have no default that means anything:
+
+- `tls` - `cert`, `key`, `ca` - makes every peer lane mutual TLS 1.3 handed to the kernel,
+  exactly as `networking.tls` does for clients: the listener requires a certificate chained to
+  `ca`, the dialler presents its own. A file it names that cannot be read is refused at startup.
+  Absent, the lanes are plaintext and **peer identity is trusted inside whatever boundary the
+  deployment draws around them** - which is the honest statement of what a plaintext lane
+  proves, and why C2 asks for it to be written down. The binding of a certificate to one node's
+  identity is not checked yet ([F38, Limitations](../features/inter-node-transport.md#limitations)).
+- `placement` - a list of `{node, data, control, shards}` naming every node of the cluster by
+  the identity in its marker. **This is test-shaped on purpose**: only something that staged the
+  markers can write it, which is the cluster fixture and the benchmark harness, and it is
+  replaced - not extended - when M3's control plane commits membership. Tablet `t` belongs to
+  `nodes[t % N]` and, on that node, to shard `(t / N) % shards`. A placement must name this node
+  with its actual shard count, and every address must parse. Absent, the node routes against a
+  placement of itself alone, which is the standalone map with a name on it.
 
 **Two halves.** `advertise`, `port`, `control_port`, `client_advertise`, `control_core` and
 `control_core_shared` are this node's. `control_voters`, `replication_factor`, the two
