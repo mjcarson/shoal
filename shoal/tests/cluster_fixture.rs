@@ -690,6 +690,46 @@ async fn remote_query_returns_one_result_per_index() -> Result<(), FixtureError>
     Ok(())
 }
 
+/// The control lane reaches a placed peer's own Raft (C2 M2, control lane)
+///
+/// Two nodes, placed by name, plaintext control lanes. Node 0 sends node 1 a vote for a low term
+/// over the control lane; node 1, having elected itself and holding a newer term, does not grant
+/// it - and that it answered at all is the proof node 0's `RaftNetworkV2` reached node 1's own
+/// `Raft` end to end ([F38](../../docs/src/features/inter-node-transport.md)). A control ping
+/// proves the listener answers too. The full "control survives a stalled *data* lane" assertion
+/// needs the data-lane proxy and lands with the bounded-lanes test.
+#[tokio::test(flavor = "multi_thread")]
+async fn control_lane_answers_a_vote_from_a_placed_peer() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder().cluster(2, CoreClaim::Count(1)).start().await?;
+    // node 0 pings node 1 over the control lane: the listener answers
+    let ping = cluster.node_mut(0).command("PING 1")?;
+    assert!(
+        ping.get("ok").and_then(|ok| ok.get("micros")).is_some(),
+        "the control ping did not answer: {ping}"
+    );
+    // node 0 sends node 1 a vote: node 1's own Raft answers, and does not grant a stale vote
+    let probe = cluster.node_mut(0).command("VOTE_PROBE 1")?;
+    let granted = probe
+        .get("ok")
+        .and_then(|ok| ok.get("granted"))
+        .and_then(serde_json::Value::as_bool);
+    assert_eq!(
+        granted,
+        Some(false),
+        "node 1's Raft did not answer the vote, or granted a stale one: {probe}"
+    );
+    // and the reverse direction works too, proving both listeners
+    let back = cluster.node_mut(1).command("VOTE_PROBE 0")?;
+    assert_eq!(
+        back.get("ok").and_then(|ok| ok.get("granted")).and_then(serde_json::Value::as_bool),
+        Some(false),
+        "node 0's Raft did not answer node 1's vote: {back}"
+    );
+    assert_eq!(cluster.node(0).failure(), None);
+    assert_eq!(cluster.node(1).failure(), None);
+    Ok(())
+}
+
 /// The request this process was started with, if it is a child
 fn child_request() -> ChildRequest {
     let json = std::env::var(cluster::CHILD_ENV).expect("a child is started with a request");
@@ -801,6 +841,37 @@ async fn cluster_server_child() {
         cluster::READY_LINE,
         serde_json::to_string(&endpoints).expect("endpoints serialize")
     ));
+    // a cluster node answers commands on its stdin, for the tests to drive its peer lanes, while
+    // still watching for a shard death; a standalone node has no peers and just watches
+    if let Some(staged) = request.cluster.clone() {
+        use tokio::io::AsyncBufReadExt as _;
+        // resolve a node index in a command to the NodeId the placement staged
+        let placement: Vec<shoal::shared::identity::NodeId> = staged
+            .placement
+            .iter()
+            .map(|(node, ..)| shoal::shared::identity::NodeId(node.parse().expect("a node id")))
+            .collect();
+        let mut stdin = tokio::io::BufReader::new(tokio::io::stdin()).lines();
+        let mut watch = tokio::time::interval(Duration::from_millis(50));
+        loop {
+            tokio::select! {
+                // the next command line, or stdin closing
+                line = stdin.next_line() => match line {
+                    Ok(Some(line)) => report(&handle_command(&pool, &placement, line.trim())),
+                    // stdin closed: the parent is done with us, run until killed
+                    Ok(None) => break,
+                    Err(_) => break,
+                },
+                // watch for a shard death between commands
+                _ = watch.tick() => {
+                    if let Some((shard, error)) = pool.failure() {
+                        report(&format!("{} shard {shard} died: {error}", cluster::FAILED_LINE));
+                        std::process::exit(1);
+                    }
+                }
+            }
+        }
+    }
     // then relay a shard's death, should one happen, and otherwise run until killed
     loop {
         if let Some((shard, error)) = pool.failure() {
@@ -809,6 +880,69 @@ async fn cluster_server_child() {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+/// Answer one command from a test, as a `SHOAL_CLUSTER_REPLY <json>` line
+///
+/// # Arguments
+///
+/// * `pool` - This node's pool
+/// * `placement` - The node ids a command's index resolves against
+/// * `line` - The command line
+fn handle_command(
+    pool: &ShoalPool<TestDb>,
+    placement: &[shoal::shared::identity::NodeId],
+    line: &str,
+) -> String {
+    let mut parts = line.split_whitespace();
+    let verb = parts.next().unwrap_or("");
+    // resolve the next token as a node index into the placement
+    let node_at = |parts: &mut std::str::SplitWhitespace| -> Option<shoal::shared::identity::NodeId> {
+        parts.next().and_then(|idx| idx.parse::<usize>().ok()).and_then(|idx| placement.get(idx).copied())
+    };
+    let result: Result<serde_json::Value, String> = match verb {
+        // ping a peer over the control lane; the reply is how many microseconds it took
+        "PING" => match node_at(&mut parts) {
+            Some(node) => pool
+                .control_ping(node)
+                .map(|elapsed| serde_json::json!({ "micros": elapsed.as_micros() as u64 }))
+                .map_err(|error| format!("{error:?}")),
+            None => Err("PING needs a node index".to_string()),
+        },
+        // send a peer a vote for a low term; the reply is whether it granted it
+        "VOTE_PROBE" => match node_at(&mut parts) {
+            Some(node) => pool
+                .control_vote_probe(node)
+                .map(|probe| serde_json::json!({ "granted": probe.granted }))
+                .map_err(|error| format!("{error:?}")),
+            None => Err("VOTE_PROBE needs a node index".to_string()),
+        },
+        // this node's peer links, for the bounded-lanes test
+        "TRANSPORT" => pool
+            .transport()
+            .map(|views| serde_json::to_value(views).expect("views serialize"))
+            .map_err(|error| format!("{error:?}")),
+        // stream bytes at a peer on the bulk lane, for the bounded-lanes test
+        "PROBE_BULK" => match node_at(&mut parts) {
+            Some(node) => parts
+                .next()
+                .and_then(|bytes| bytes.parse::<u64>().ok())
+                .ok_or_else(|| "PROBE_BULK needs a byte count".to_string())
+                .and_then(|bytes| {
+                    pool.probe_bulk(node, bytes)
+                        .map(|()| serde_json::json!({ "started": bytes }))
+                        .map_err(|error| format!("{error:?}"))
+                }),
+            None => Err("PROBE_BULK needs a node index".to_string()),
+        },
+        other => Err(format!("unknown command {other:?}")),
+    };
+    // one reply line per command, an ok or an error object
+    let json = match result {
+        Ok(value) => serde_json::json!({ "ok": value }),
+        Err(error) => serde_json::json!({ "error": error }),
+    };
+    format!("{} {}", cluster::REPLY_LINE, json)
 }
 
 /// A mock peer child: a listener that echoes, so a link can be exercised with no peer protocol

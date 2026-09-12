@@ -30,6 +30,9 @@ pub const READY_LINE: &str = "SHOAL_CLUSTER_READY";
 /// What a child prints, followed by the reason, if it cannot start or a shard dies
 pub const FAILED_LINE: &str = "SHOAL_CLUSTER_FAILED";
 
+/// The line a child prints to answer a command sent on its stdin
+pub const REPLY_LINE: &str = "SHOAL_CLUSTER_REPLY";
+
 /// How many of a child's other lines are kept as evidence
 const EVIDENCE_LINES: usize = 20;
 
@@ -155,6 +158,8 @@ impl Endpoints {
 enum ChildLine {
     /// The child is answering on these endpoints
     Ready(Endpoints),
+    /// The child answered a command with this json
+    Reply(String),
     /// The child failed
     Failed(String),
     /// The child's stdout closed: it exited
@@ -175,6 +180,8 @@ pub struct Node {
     pub allocation: Allocation,
     /// The process
     child: Child,
+    /// The child's stdin, for sending commands
+    stdin: Option<std::process::ChildStdin>,
     /// What the reader thread relays
     lines: Receiver<ChildLine>,
     /// The last lines the child printed that were not a report
@@ -251,6 +258,7 @@ impl Node {
         command
             .args(["--exact", kind.child_fn(), "--ignored", "--nocapture"])
             .env(CHILD_ENV, request)
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
         // the affinity is applied in the child between fork and exec, which is the one place a
@@ -280,6 +288,7 @@ impl Node {
         }
         let mut child = command.spawn()?;
         let pid = child.id();
+        let stdin = child.stdin.take();
         let stdout = child.stdout.take().expect("stdout was piped");
         // relay the child's reports, and keep the rest as evidence
         let (tx, lines) = mpsc::channel();
@@ -302,6 +311,8 @@ impl Node {
                     }
                 } else if let Some(reason) = line.strip_prefix(FAILED_LINE) {
                     let _ = tx.send(ChildLine::Failed(reason.trim().to_string()));
+                } else if let Some(json) = line.strip_prefix(REPLY_LINE) {
+                    let _ = tx.send(ChildLine::Reply(json.trim().to_string()));
                 } else {
                     let mut kept = kept.lock().unwrap();
                     if kept.len() == EVIDENCE_LINES {
@@ -319,6 +330,7 @@ impl Node {
             endpoints: Endpoints::unbound(),
             allocation,
             child,
+            stdin,
             lines,
             evidence,
             reader: Some(reader),
@@ -340,6 +352,8 @@ impl Node {
                     self.endpoints = endpoints;
                     return Ok(());
                 }
+                // a reply before ready is not expected, but is not a failure either
+                Ok(ChildLine::Reply(_)) => {}
                 Ok(ChildLine::Failed(reason)) => {
                     return Err(FixtureError::ChildFailed(format!(
                         "node {} ({:?}, pid {}) failed: {reason}",
@@ -353,6 +367,55 @@ impl Node {
                     return Err(FixtureError::NotReady(
                         self.evidence_report(&format!("not ready after {timeout:?}")),
                     ));
+                }
+            }
+        }
+    }
+
+    /// Send the child a command on its stdin and read its reply
+    ///
+    /// The child answers a command with one `SHOAL_CLUSTER_REPLY <json>` line, which the reader
+    /// thread relays. This writes the command, then drains the relay until that reply arrives, a
+    /// failure is reported, or the wait times out.
+    ///
+    /// # Arguments
+    ///
+    /// * `command` - The command line, without its newline
+    pub fn command(&mut self, command: &str) -> Result<serde_json::Value, FixtureError> {
+        use std::io::Write as _;
+        let stdin = self.stdin.as_mut().ok_or_else(|| {
+            FixtureError::ChildFailed(format!("node {} has no stdin to command", self.id))
+        })?;
+        writeln!(stdin, "{command}").map_err(FixtureError::Io)?;
+        stdin.flush().map_err(FixtureError::Io)?;
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match self.lines.recv_timeout(remaining) {
+                Ok(ChildLine::Reply(json)) => {
+                    return serde_json::from_str(&json).map_err(|error| {
+                        FixtureError::ChildFailed(format!("unparseable reply {json:?}: {error}"))
+                    });
+                }
+                // a stray ready line after startup is ignored
+                Ok(ChildLine::Ready(_)) => {}
+                Ok(ChildLine::Failed(reason)) => {
+                    return Err(FixtureError::ChildFailed(format!(
+                        "node {} failed while answering {command:?}: {reason}",
+                        self.id
+                    )));
+                }
+                Ok(ChildLine::Closed) | Err(RecvTimeoutError::Disconnected) => {
+                    return Err(FixtureError::ChildFailed(format!(
+                        "node {} exited while answering {command:?}",
+                        self.id
+                    )));
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    return Err(FixtureError::NotReady(format!(
+                        "node {} did not answer {command:?} within 30s",
+                        self.id
+                    )));
                 }
             }
         }

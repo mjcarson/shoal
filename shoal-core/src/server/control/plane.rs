@@ -17,24 +17,30 @@
 //! control plane, and the control plane never touches a shard.
 
 use std::collections::BTreeMap;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use glommio::net::TcpListener;
 use glommio::{LocalExecutorBuilder, Placement};
-use openraft::{Config, Raft};
+use openraft::raft::VoteRequest;
+use openraft::{Config, Raft, RaftNetworkFactory, RaftNetworkV2};
 use serde::{Deserialize, Serialize};
 use tracing::{event, instrument, Level};
 
 use super::cores::ControlPlacement;
-use super::network::UnreachableNetwork;
+use super::listener::control_acceptor;
+use super::network::PeerNetwork;
 use super::store::{self, ControlStateMachine, CONTROL_DIR};
 use super::types::{ControlCommand, ControlConfig, ControlResponse, ControlState, MemberRecord};
-use crate::server::conf::cluster::BootstrapPolicy;
+use crate::server::conf::cluster::{BootstrapPolicy, PeerTls, Placement as StaticPlacement};
 use crate::server::conf::Conf;
 use crate::server::errors::ShoalError;
 use crate::server::meta::{Identity, StorageMeta};
+use crate::server::peer::Local;
 use crate::server::ServerError;
 use crate::shared::identity::{ClusterId, NodeId};
 
@@ -53,10 +59,38 @@ pub enum ControlEvent {
     Failed(String),
 }
 
+/// What one control node's probe learned about a peer
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VoteProbe {
+    /// Whether the peer granted the vote
+    ///
+    /// A peer that has elected itself does not grant a vote for a lower term, so this is false;
+    /// that the peer answered at all is the proof its `Raft` was reached over the control lane.
+    pub granted: bool,
+}
+
 /// What the pool asks the control plane
 enum ControlRequest {
     /// Describe the cluster as this node sees it
     Topology(mpsc::Sender<TopologyView>),
+    /// Ping a peer over the control lane and report the round trip
+    Ping {
+        /// The peer
+        node: NodeId,
+        /// Where to send how long it took
+        reply: mpsc::Sender<Result<Duration, String>>,
+    },
+    /// Send a peer a vote for a low term and report its answer
+    ///
+    /// A test seam: the peer, leader of its own newer term, does not grant it, which proves the
+    /// vote reached the peer's own `Raft` over the control lane
+    /// ([F38](../../../../docs/src/features/inter-node-transport.md)).
+    VoteProbe {
+        /// The peer
+        node: NodeId,
+        /// Where to send what it answered
+        reply: mpsc::Sender<Result<VoteProbe, String>>,
+    },
     /// Stop the group and exit the thread
     Shutdown,
 }
@@ -133,6 +167,18 @@ struct Startup {
     events: mpsc::Sender<ControlEvent>,
     /// Where requests come from
     requests: kanal::Receiver<ControlRequest>,
+    /// The static placement this node routes control traffic against
+    static_placement: StaticPlacement,
+    /// The structural fingerprint of the schema this node serves
+    schema_id: u64,
+    /// The largest frame the peer lanes accept
+    max_frame_bytes: u32,
+    /// The certificate and authority the peer lanes use, if encrypted
+    tls: Option<PeerTls>,
+    /// Where this node's control listener binds
+    bind: SocketAddr,
+    /// The bounds and timers the peer lanes use
+    transport: crate::server::conf::cluster::Transport,
 }
 
 /// The control plane, which is only a namespace for `start`
@@ -163,6 +209,7 @@ impl ControlPlane {
         conf: &Conf,
         client: String,
         shards: usize,
+        schema_id: u64,
     ) -> Result<ControlHandle, ServerError> {
         let cluster = conf
             .cluster
@@ -179,6 +226,17 @@ impl ControlPlane {
             control_shared: placement.shared,
             shards,
         };
+        // where the control listener binds, and the placement it accepts peers from
+        let bind: SocketAddr = format!("{advertise}:{}", cluster.control_port)
+            .parse()
+            .map_err(|_| {
+                ServerError::Shoal(ShoalError::InvalidConfig(format!(
+                    "the control listener address {advertise}:{} is not one",
+                    cluster.control_port
+                )))
+            })?;
+        let static_placement =
+            cluster.placement_for(identity.node, &conf.networking.interface, shards)?;
         let root = conf
             .storage
             .default
@@ -197,6 +255,12 @@ impl ControlPlane {
             policy: cluster.policy(),
             events: events_tx,
             requests: requests_rx,
+            static_placement,
+            schema_id,
+            max_frame_bytes: conf.networking.max_frame_bytes,
+            tls: cluster.tls.clone(),
+            bind,
+            transport: cluster.transport.clone(),
         };
         // the thread, pinned to its core, running the group until told to stop
         let thread = LocalExecutorBuilder::new(Placement::Fixed(placement.cpu))
@@ -271,6 +335,56 @@ impl ControlHandle {
         }
     }
 
+    /// Ping a peer over the control lane and report the round trip
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The peer to ping
+    ///
+    /// # Errors
+    ///
+    /// Fails if the control thread is gone or the peer did not answer.
+    pub fn ping(&self, node: NodeId) -> Result<Duration, ServerError> {
+        let (tx, rx) = mpsc::channel();
+        self.requests
+            .send(ControlRequest::Ping { node, reply: tx })
+            .map_err(|_| ServerError::ControlFailed {
+                error: "the control thread is not answering".to_string(),
+            })?;
+        match rx.recv_timeout(LEADER_TIMEOUT) {
+            Ok(Ok(elapsed)) => Ok(elapsed),
+            Ok(Err(error)) => Err(ServerError::ControlFailed { error }),
+            Err(_) => Err(ServerError::ControlFailed {
+                error: "the control thread did not answer a ping".to_string(),
+            }),
+        }
+    }
+
+    /// Send a peer a vote for a low term and report its answer
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The peer to probe
+    ///
+    /// # Errors
+    ///
+    /// Fails if the control thread is gone or the peer did not answer.
+    pub fn vote_probe(&self, node: NodeId) -> Result<VoteProbe, ServerError> {
+        let (tx, rx) = mpsc::channel();
+        self.requests
+            .send(ControlRequest::VoteProbe { node, reply: tx })
+            .map_err(|_| ServerError::ControlFailed {
+                error: "the control thread is not answering".to_string(),
+            })?;
+        match rx.recv_timeout(LEADER_TIMEOUT) {
+            Ok(Ok(probe)) => Ok(probe),
+            Ok(Err(error)) => Err(ServerError::ControlFailed { error }),
+            Err(_) => Err(ServerError::ControlFailed {
+                error: "the control thread did not answer a vote probe".to_string(),
+            }),
+        }
+    }
+
     /// The cluster as this node sees it
     ///
     /// # Errors
@@ -338,6 +452,12 @@ async fn serve(startup: Startup) -> Result<(), ServerError> {
         policy,
         events,
         requests,
+        static_placement,
+        schema_id,
+        max_frame_bytes,
+        tls,
+        bind,
+        transport,
     } = startup;
     let node = identity.node;
     // the store, recovered from whatever the directory holds
@@ -355,10 +475,39 @@ async fn serve(startup: Startup) -> Result<(), ServerError> {
     .map_err(|error| ServerError::ControlFailed {
         error: format!("openraft config: {error}"),
     })?;
+    // what this node says about itself on the control lane, and the rustls configs it uses
+    let local = Local::new(&identity, member.shards, schema_id, max_frame_bytes)?;
+    let (client_tls, server_tls) = match &tls {
+        Some(tls) => {
+            // a control node that asked for TLS refuses to start if the kernel cannot do kTLS,
+            // the same as a shard listener
+            if !crate::shared::tls::ktls::is_available() {
+                return Err(crate::shared::tls::TlsError::UlpUnavailable(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "the 'tls' kernel module is not loaded",
+                ))
+                .into());
+            }
+            (
+                Some(crate::shared::tls::peer_client_config(tls)?),
+                Some(crate::shared::tls::peer_server_config(tls)?),
+            )
+        }
+        None => (None, None),
+    };
+    let placement_rc = Rc::new(static_placement);
+    // the network the group drives its peers with
+    let network = PeerNetwork::new(
+        placement_rc.clone(),
+        local.clone(),
+        client_tls,
+        transport.clone(),
+    );
+    super::network::built(placement_rc.peers(node).count());
     let raft = Raft::<ControlConfig, ControlStateMachine>::new(
         node,
         Arc::new(config),
-        UnreachableNetwork,
+        network.clone(),
         log,
         machine.clone(),
     )
@@ -426,6 +575,21 @@ async fn serve(startup: Startup) -> Result<(), ServerError> {
         control_shared = placement.shared,
         topology_version = machine.state().topology_version,
     );
+    // bind the control listener and drive inbound RPCs into this node's group, on this executor
+    //
+    // this is after the leader wait, so a listener never answers before the group is up; it is
+    // held in a task cancelled before the group shuts down
+    let listener = TcpListener::bind(bind).map_err(|error| ServerError::ControlFailed {
+        error: format!("binding the control listener on {bind}: {error}"),
+    })?;
+    let acceptor = glommio::spawn_local(control_acceptor(
+        listener,
+        raft.clone(),
+        machine.clone(),
+        local.clone(),
+        placement_rc.clone(),
+        server_tls,
+    ));
     let _ = events.send(ControlEvent::Ready);
     // then answer the pool until it says stop
     let requests = requests.to_async();
@@ -435,14 +599,80 @@ async fn serve(startup: Startup) -> Result<(), ServerError> {
                 let view = TopologyView::from_state(&machine.state(), node, &placement);
                 let _ = reply.send(view);
             }
+            // ping a peer over the control lane and time the round trip
+            Ok(ControlRequest::Ping { node: target, reply }) => {
+                let outcome = ping_peer(&network, target).await;
+                let _ = reply.send(outcome);
+            }
+            // send a peer a vote for a low term and report what its Raft answered
+            Ok(ControlRequest::VoteProbe { node: target, reply }) => {
+                let outcome = vote_probe(&network, node, target).await;
+                let _ = reply.send(outcome);
+            }
             // a shutdown, or a pool that dropped its handle, which is the same thing
             Ok(ControlRequest::Shutdown) | Err(_) => break,
         }
     }
+    // stop answering peers before the group goes away
+    acceptor.cancel().await;
     raft.shutdown().await.map_err(|error| ServerError::ControlFailed {
         error: format!("stopping the group: {error}"),
     })?;
     Ok(())
+}
+
+/// Ping a peer over the control lane and time the round trip
+///
+/// # Arguments
+///
+/// * `network` - The control network
+/// * `target` - The peer to ping
+async fn ping_peer(network: &PeerNetwork, target: NodeId) -> Result<Duration, String> {
+    let mut peer = clone_factory(network).new_client(target, &MemberRecord::default()).await;
+    let started = Instant::now();
+    // a ping rides as an empty-bodied vote to a term this node holds; but simpler, the listener
+    // answers a dedicated Ping. We reuse the network's own append with an empty request is not
+    // possible without a real payload, so a ping is its own control kind sent directly.
+    match peer.ping().await {
+        Ok(()) => Ok(started.elapsed()),
+        Err(error) => Err(error),
+    }
+}
+
+/// Send a peer a vote for a low term and report its answer
+///
+/// # Arguments
+///
+/// * `network` - The control network
+/// * `me` - This node
+/// * `target` - The peer to probe
+async fn vote_probe(
+    network: &PeerNetwork,
+    me: NodeId,
+    target: NodeId,
+) -> Result<VoteProbe, String> {
+    let mut peer = clone_factory(network).new_client(target, &MemberRecord::default()).await;
+    // a vote for term 1 from this node: a peer that has elected itself holds a term at least this
+    // high and has already voted, so it does not grant it - and answering at all proves its Raft
+    // was reached over the control lane
+    let vote = openraft::vote::Vote::new(1, me);
+    let request = VoteRequest::<ControlConfig>::new(vote, None);
+    let option = openraft::network::RPCOption::new(Duration::from_secs(5));
+    match RaftNetworkV2::vote(&mut peer, request, option).await {
+        Ok(response) => Ok(VoteProbe {
+            granted: response.vote_granted,
+        }),
+        Err(error) => Err(format!("{error}")),
+    }
+}
+
+/// Clone the network factory so an RPC can be sent without holding the group's copy mutably
+///
+/// # Arguments
+///
+/// * `network` - The control network
+fn clone_factory(network: &PeerNetwork) -> PeerNetwork {
+    network.clone()
 }
 
 /// Write a command through the group and hand back what applying it produced

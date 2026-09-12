@@ -20,6 +20,7 @@
 //! opens no group and writes no file under `control/`, and the shard path is unchanged.
 
 pub mod cores;
+pub mod listener;
 pub mod network;
 pub mod plane;
 pub mod runtime;
@@ -27,4 +28,4 @@ pub mod store;
 pub mod types;
 
 pub use cores::ControlPlacement;
-pub use plane::{ControlEvent, ControlHandle, ControlPlane, TopologyView};
+pub use plane::{ControlEvent, ControlHandle, ControlPlane, TopologyView, VoteProbe};

@@ -202,6 +202,7 @@ where
                 &conf,
                 bound.to_string(),
                 shards,
+                <S::ClientType as QuerySupport>::SCHEMA_ID,
             )?),
             None => None,
         };
@@ -336,6 +337,36 @@ where
         self.control_tx
             .send(messages::ServerMsg::BulkProbe { node, bytes })
             .map_err(|_| ServerError::Shoal(ShoalError::NotClustered))
+    }
+
+    /// Ping a peer over the control lane, returning how long it took
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The peer to ping
+    pub fn control_ping(
+        &self,
+        node: shoal_proto::shared::identity::NodeId,
+    ) -> Result<Duration, ServerError> {
+        match &self.control {
+            Some(control) => control.ping(node),
+            None => Err(ServerError::Shoal(ShoalError::NotClustered)),
+        }
+    }
+
+    /// Send a peer a vote for a low term and report its answer, proving the control lane end to end
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The peer to probe
+    pub fn control_vote_probe(
+        &self,
+        node: shoal_proto::shared::identity::NodeId,
+    ) -> Result<control::VoteProbe, ServerError> {
+        match &self.control {
+            Some(control) => control.vote_probe(node),
+            None => Err(ServerError::Shoal(ShoalError::NotClustered)),
+        }
     }
 
     /// Wait until every shard is answering, or report the first one that is not

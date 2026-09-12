@@ -41,7 +41,7 @@ use tempfile::TempDir;
 
 pub use cores::{Allocation, ClusterPlan, CoreClaim, Topology};
 pub use link::{Link, LinkState};
-pub use node::{ChildRequest, Endpoints, Node, NodeKind, StagedCluster, CHILD_ENV, FAILED_LINE, READY_LINE};
+pub use node::{ChildRequest, Endpoints, Node, NodeKind, StagedCluster, CHILD_ENV, FAILED_LINE, READY_LINE, REPLY_LINE};
 
 /// What can go wrong starting or driving a cluster
 #[derive(Debug)]
