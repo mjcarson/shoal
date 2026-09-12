@@ -1,9 +1,10 @@
 # Distributed Shoal
 
-~~**Nothing in this part is built.**~~ **Nothing distributed in this part is built.** These pages
+~~**Nothing in this part is built.**~~ ~~**Nothing distributed in this part is built.**~~
+**Nodes speak to nodes; nothing is replicated yet.** These pages
 plan a highly available cluster of Shoal nodes. The `C` pages are design records;
 [milestones](milestones.md) name implementation gates, acceptance tests and benchmark evidence.
-Three gates are met: the protocol contract that precedes M0 was agreed on 2026-09-11 and is
+Four gates are met: the protocol contract that precedes M0 was agreed on 2026-09-11 and is
 numbered P1–P6 in [C13](protocol.md#the-contract);
 [M0](milestones.md#m0-step-0-the-harness-and-the-facts) — the executable model of that contract,
 the process fixture, and the benchmark's cluster record — was delivered the same day as
@@ -12,7 +13,13 @@ the process fixture, and the benchmark's cluster record — was delivered the sa
 a format 2 marker, the `cluster:` block, a control thread on its own core running an embedded
 `openraft` group of one on a glommio runtime, and the Q1/Q13 spike that chose the library and
 found that heartbeats do not coalesce across groups — as
-[F37](../features/node-identity-control-plane.md). No node speaks to a node yet. They extend the unbuilt
+[F37](../features/node-identity-control-plane.md); and
+[M2](milestones.md#m2-the-inter-node-transport) — the peer transport: three bounded lanes on
+three sockets, a pre-schema hello, bundles forwarded as validated bytes against a static
+placement, the control group's RPCs over the control lane, a trace that crosses the hop, mutual
+kTLS, and the hop arms that price it — as [F38](../features/inter-node-transport.md).
+~~No node speaks to a node yet.~~ A node speaks to a node it was placed beside; nothing joins,
+elects across nodes or replicates yet. They extend the unbuilt
 [Distribution](../appendix/todos.md#distribution) and
 [Rebalancing](../appendix/todos.md#rebalancing) entries.
 

@@ -105,18 +105,19 @@ pub struct StagedCluster {
 
 /// The endpoints a child bound, and the identity it reported
 ///
-/// Only the client endpoint is bound. The other two are what M2 and M3 add, and are here so
-/// that the record has their shape before anything fills them. The identity fields are what M1
-/// added: a node id for every server, and a cluster id, a control core and a topology version
-/// for a cluster node.
+/// A standalone child binds the client endpoint alone. A placed cluster node binds all three
+/// ([F38](../../../docs/src/features/inter-node-transport.md)): the data port with every shard
+/// and the control port with its control thread. The identity fields are what M1 added: a node
+/// id for every server, and a cluster id, a control core and a topology version for a cluster
+/// node.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Endpoints {
     /// Where clients connect
     pub client: SocketAddr,
-    /// Where data peers would connect; none until M2
+    /// Where data peers connect; none for a standalone child or a mock peer
     #[serde(default)]
     pub data: Option<SocketAddr>,
-    /// Where control peers would connect; none until M3
+    /// Where control peers connect; none for a standalone child or a mock peer
     #[serde(default)]
     pub control: Option<SocketAddr>,
     /// The node's identity, as a string; none for a mock peer

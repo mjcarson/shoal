@@ -95,9 +95,12 @@ be authoritative about the table; the benefit is everything in the previous para
 made this same move in 6.0, from a vnode token ring to per-table tablets whose assignments live
 in a system table.
 
-Shoal is node-local today, so there is no authority to speak of — every shard derives the same
-map from `cores`, and they agree because the derivation is identical rather than because anyone
-coordinated. What the shape buys now is exactness and speed; what it buys later is the ability to
+~~Shoal is node-local today, so there is no authority to speak of~~ Standalone, there is no
+authority to speak of — every shard derives the same map from `cores`, and they agree because the
+derivation is identical rather than because anyone coordinated. A placed cluster node
+([F38](../features/inter-node-transport.md)) derives it from the `placement` instead - tablet `t`
+to node `t % N`, then to a shard of that node - and the nodes agree for the same reason, because
+they read one file; the authority that could *change* the map is M3's. What the shape buys now is exactness and speed; what it buys later is the ability to
 move a tablet at all.
 
 ### Why the id comes from the high bits
@@ -129,7 +132,9 @@ never constructed.
 `ServerMsg::Join` still exists and is still broadcast. `Ring::add` ignores a shard it already
 knows — node-locally, every one of them — and warns about a shard it does not, since placing a
 new shard needs tablet migration and a rebalancer that do not exist. It is a seam for the
-multi-node case, not a working membership protocol.
+multi-node case, not a working membership protocol - and the multi-node case that exists,
+[F38](../features/inter-node-transport.md)'s static placement, does not use it: a remote shard is
+in the ring from the start, as `ShardContact::Remote`, and nothing joins.
 
 ## Load distribution
 

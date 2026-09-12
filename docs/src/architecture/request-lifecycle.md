@@ -257,6 +257,12 @@ sound: the coordinator validated this buffer once and `Bytes` is immutable, so r
 would mean each shard walking the *whole bundle* to reach one query in it. `unarchive_queries` is
 an `unsafe fn` so that precondition cannot be dropped silently.
 
+That precondition holds *within a node* and nowhere else. A bundle forwarded to another node
+([F38](../features/inter-node-transport.md)) arrives as bytes whose validation happened in a
+different process, and the receiving node runs `Queries::access` over the whole bundle again
+before any shard there does an unchecked read - once per node, not once per shard, which is the
+same shape at the process boundary that this is within it.
+
 A query that was parked on a partition read comes back as `ServerMsg::Released` instead, carrying
 the query itself — it was decoded and narrowed when it first arrived, and there is no bundle left
 to read it out of.
@@ -437,8 +443,11 @@ Finally, `ShoalResultStream::next` reorders by index, holding out-of-order respo
 are both expressed as "return `None`, resume later on a `ServerMsg`". Keeping them uniform is
 why the shard loop stays a flat `match`.
 
-**Responses bypass the coordinator.** Because `NewClient` is broadcast, the owning shard
-writes to the client's socket channel directly. The coordinator is on the request path only.
+**Responses bypass the coordinator, within a node.** Because `NewClient` is broadcast, the owning
+shard writes to the client's socket channel directly. The coordinator is on the request path only.
+Across nodes they do not ([F38](../features/inter-node-transport.md)): the serving node has no
+channel to the client, so a forwarded query's answer comes back over the peer connection to the
+coordinator, which relays a whole answer as sealed bytes and merges a share.
 
 **Tracing spans are threaded through by hand.** `QueryMetadata` carries a `Span`, `reply` takes
 one, and `client_tx_relay` opens a child of it around the socket write — so a trace spans the whole

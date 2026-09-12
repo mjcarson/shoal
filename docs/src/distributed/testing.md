@@ -18,7 +18,12 @@ a test binary and synchronize on a readiness line, and the cluster fixture below
 generalized. Since [F37](../features/node-identity-control-plane.md) its servers are cluster
 nodes of one, each with a control core the allocator owns; it can start a standalone child, stage
 a marker, narrow a child's affinity, and restart a node on its directory, and its `Endpoints`
-carry the identities and the control core a child reported. Benchmark readiness probes and tracing-based path assertions provide reusable
+carry the identities and the control core a child reported. Since
+[F38](../features/inter-node-transport.md) it places a cluster: one cluster id and a node id per
+child, a marker each, a data and a control port each, and one placement every child reads; a
+byte proxy can stand in front of each node's lanes so a test can cut, delay or heal one lane to
+one node, and a child answers `PING`, `VOTE_PROBE`, `TRANSPORT`, `PROBE_BULK` and `FLUSH` on
+stdin. Benchmark readiness probes and tracing-based path assertions provide reusable
 patterns. There is no whole-engine deterministic simulator; this proposal does not require
 building one before testing the new protocol state machine, and `shoal-model` is the pure model
 it asks for instead.
@@ -73,6 +78,8 @@ rewriting only seeds leaves post-join connections unpartitioned. With TLS, a byt
 or cut a stream but cannot safely parse/drop encrypted application frames. Use test-only hooks
 before encryption or a fake transport for frame-class manipulation, plus TLS process tests for
 the real channel. The model must not depend on silently disabling validation in production paths.
+*At M2 the fixture's link is that byte proxy - cut, delay, heal - and the frame-class fake
+transport is still to come; the real-TLS test is `a_peer_listener_requires_a_certificate_from_the_cluster_authority`.*
 
 SIGKILL does not model loss of OS/device caches. Durability tests need injected persistence
 completions and failure semantics, with controlled machine/power-loss experiments optional later.

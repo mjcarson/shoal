@@ -1,7 +1,7 @@
 # Milestones
 
 The Before-M0 gate is settled ([decision record](protocol.md#decision-record), 2026-09-11), and
-M0 and M1 are delivered. Keep M0–M10 as stable identifiers; M9a/b/c refine M9
+M0, M1 and M2 are delivered. Keep M0–M10 as stable identifiers; M9a/b/c refine M9
 without renumbering later work. Acceptance tests live in their owning C pages and are indexed
 by [C11](testing.md#the-acceptance-test-table). Each test names one gate below. This is an order
 with dependencies and measurable exit criteria, not dates.
@@ -92,6 +92,17 @@ with the real comparison waiting on the benchmark host.
 
 ### M2. The inter-node transport
 
+**Delivered** on 2026-09-12 as [F38](../features/inter-node-transport.md), which also closed
+[item 94](../appendix/resolved/disconnected-client-cleanup.md) on the way. The four C2 rows below
+are runnable as `cargo test -p shoal --test cluster_fixture` (three of them) and `cargo test -p
+shoal-core peer` (the malformed-peer one), the hop arms as `shoal-bench run --group cluster`.
+What was delivered, what was not, and the evidence are on the F page; the rest of this section
+is the gate as it was set. *Not done, on purpose:* no joiner - a static placement names the
+nodes and every node is still a group of one; no retry - `attempt` is always zero; snapshots are
+counted, checksummed and discarded; a peer's certificate is checked to the cluster's authority
+and not yet bound to its node identity, which is Q11's with the joiner; and the hop capture
+itself is the benchmark host's - the arms ran at smoke scale on the development host.
+
 **Delivers.** Remote contacts, validated forwarding/gathering, separate control/data/bulk lanes,
 bounded byte queues, identity/authentication handshake and trace propagation. Use static test
 placement before distributed membership. Define compatibility and certificate bootstrap contracts
@@ -104,6 +115,18 @@ before encryption where tests need individual frame manipulation, retaining real
 **Evidence/exit.** Local/local-shard/remote hop capture with actual affinity/queue facts. Initial
 loopback p50 added-hop budget 100 µs; report tails too. A slow snapshot stream cannot exhaust all
 memory or block progress traffic. Source links and chosen encodings are reviewable.
+*Met, with one deferral:* the three hop arms exist with every node's cores, the placement, the
+hop's expected mix and the data lane's frame and shed counters on the artifact, and ran at smoke
+scale on the development host ([F38, Performance](../features/inter-node-transport.md#performance))
+- the capture against the 100 µs budget waits on the benchmark host; a half-gigabyte snapshot
+stream stalled for a minute sheds at its 64 MiB bound, grows the process by under three bounds
+and leaves the control lane pinging and the data lane answering
+(`slow_peer_has_bounded_bytes_and_independent_lanes`); the encodings are in
+`shoal-proto/src/shared/protocol/peer/` with their layouts drawn in the module docs, and the F
+page names them. Q10 and Q11 have their contracts recorded at
+[C13](protocol.md#q10-and-q11-at-m2): schema identity, wire version and capabilities are three
+separately compared things, exact at M2; a peer certificate chains to `ca` and its binding to a
+node is the joiner's.
 
 ## Group A — Replicate a live system
 
