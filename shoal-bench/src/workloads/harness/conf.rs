@@ -202,6 +202,11 @@ pub fn cluster_facts(
         // a node alone has no placement to record; a staged cluster fills these in afterwards
         // ([F38](../../../../docs/src/features/inter-node-transport.md))
         placement: Vec::new(),
+        // a cluster of one still reports itself, at the version it bootstrapped to
+        members: crate::workloads::harness::cluster::member_facts(&view),
+        map_version: view.version,
+        voters: u32::try_from(view.voters.len()).unwrap_or(u32::MAX),
+        learners: u32::try_from(view.learners.len()).unwrap_or(u32::MAX),
         hop: None,
         transport: None,
     }))

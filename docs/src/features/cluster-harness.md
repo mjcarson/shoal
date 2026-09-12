@@ -160,8 +160,9 @@ while the control lane pings.
   children are isolated servers and a mock peer that echoes; a directed link carries client
   traffic and echoes, nothing a node says to a node. `Endpoints::data` and `Endpoints::control`
   are `None`, and stay so until M2 and M3. A test of a distributed invariant cannot be written
-  against this fixture yet~~ - and C11 still says an empty mock test must not count as one. What
-  is still missing is a node that joins: every placed node is a consensus group of one.
+  against this fixture yet~~ - and C11 still says an empty mock test must not count as one. ~~What
+  is still missing is a node that joins: every placed node is a consensus group of one.~~ Since
+  [F39](membership.md) the fixture stages a membership cluster and the thirteen M3 rows run on it.
 - **The model is Raft-shaped, not a library.** Q1 is open. It has no configuration changes,
   learner promotion, snapshot transfer or compaction, and one voter configuration per run.
 - **The oracle's reads are `One` reads.** A read is satisfied by any committed prefix, which is

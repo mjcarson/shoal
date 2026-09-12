@@ -458,6 +458,9 @@ pub fn cluster_facts(cluster: &ClusterFacts) -> ClusterFactsLite {
                 remote: hop.expected_mix.remote,
             },
         }),
+        map_version: cluster.map_version,
+        voters: cluster.voters,
+        learners: cluster.learners,
     }
 }
 

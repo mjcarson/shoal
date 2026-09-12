@@ -112,7 +112,11 @@ hash of the sources each layer measures, and the machine, governor and toolchain
 A full capture is now **three hundred and seventy eight workloads times five runs** (the
 three hundred and seventy fifth is `macro/cluster/overhead/nodes/1`, [F37](../features/node-identity-control-plane.md);
 the last three are the hop arms `macro/cluster/hop/{same_shard,local_shard,remote_node}`,
-[F38](../features/inter-node-transport.md), each of which is two server processes). At two hundred
+[F38](../features/inter-node-transport.md), each of which is two server processes - and since
+[F39](../features/membership.md) the second joins the first through its seed, the first waits
+for it to be promoted and initializes the placement, the one-node arm places itself, and
+every cluster record carries the committed members, the map version and the voter and
+learner counts). At two hundred
 and nine it ~~budget six to seven hours~~ **took seventy-five minutes** — one minute building,
 fourteen in the micro layer, sixty in the macro layer, and under a minute in the two instrumented
 ones. That is the first capture anybody put a clock on, `F20-conf` on 2026-08-22; every figure this

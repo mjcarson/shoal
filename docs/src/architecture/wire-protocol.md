@@ -52,10 +52,13 @@ able to carry a trace context ([F35](../features/wire-trace-context.md)).
 | `Response` | 6 | server → client | yes |
 | `Ping` | 7 | both | reserved — [D6](../direction/connection-pool.md) |
 | `Pong` | 8 | both | reserved — [D6](../direction/connection-pool.md) |
-| `Topology` | 9 | server → client | reserved — [D7](../direction/shard-aware-routing.md) |
+| `Topology` | 9 | both | yes — [F39](../features/membership.md): a client's subscription after the handshake, and every frame the server pushes under the nil id; [D7](../direction/shard-aware-routing.md) is the routing that would read it |
 | `Error` | 10 | server → client | yes — [F11](../features/error-channel.md) |
 | `GoAway` | 11 | server → client | reserved — [item 32](../appendix/known-issues.md#32-a-disconnected-client-is-never-cleaned-up-anywhere) |
 | `Cancel` | 12 | client → server | reserved — [item 60](../appendix/known-issues.md#60-a-result-stream-that-is-not-drained-to-the-end-leaks-its-slot-in-the-client) |
+| 13 – 22 | | node ↔ node | the peer protocol — [F38](../features/inter-node-transport.md) |
+| `Admin` | 23 | client → server | yes — [F39](../features/membership.md): an operation as JSON under a query id |
+| `AdminResponse` | 24 | server → client | yes — [F39](../features/membership.md): its answer under the same id |
 
 Starting at 1 rather than 0 is what stops a zeroed buffer decoding as a valid type. The five
 reserved entries exist so that the features that need them are a call site rather than a second
@@ -466,7 +469,8 @@ concatenated, on either direction of the connection. The encoders return stack a
   `Error` **frame** names a bundle rather than one query in it, because a query id is a bundle id —
   so an oversize response fails a whole result stream. The two reserved bytes after the code are
   where an index would go.
-- **Five message types are defined and unwired.** `Ping`/`Pong`, `Cancel`, `GoAway`, `Topology`.
+- **~~Five~~ Four message types are defined and unwired.** `Ping`/`Pong`, `Cancel`, `GoAway` ~~,
+  `Topology`~~ - `Topology` is wired since [F39](../features/membership.md).
   Each is now a call site rather than a flag day, which is what `Auth`/`AuthResponse` turned out
   to be.
 - **Little-endian assumed** for every field the protocol owns.

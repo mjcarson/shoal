@@ -45,7 +45,7 @@ use shoal::server::{AdminKind, AdminRequest};
 use shoal::shared::identity::{ClusterId, NodeId};
 
 use crate::model::macro_layer::{
-    ClusterFacts, HopFacts, LinkFacts, NodeCores, PlacedNodeFacts, TransportFacts,
+    ClusterFacts, HopFacts, LinkFacts, MemberFacts, NodeCores, PlacedNodeFacts, TransportFacts,
 };
 use crate::run::plan::cluster_ports;
 use crate::workloads::harness::ready;
@@ -315,18 +315,60 @@ pub fn initialize(staged: &Staged, pool: &shoal::ShoalPool<crate::workloads::sch
                 .with_context(|| format!("{} is not a node id", node.node))
         })
         .collect::<Result<Vec<NodeId>>>()?;
-    // every node up, which is every joiner admitted and observed
+    initialize_nodes(pool, ids)
+}
+
+/// Initializes a cluster of one on itself
+///
+/// The overhead arm's node bootstraps alone and nothing joins it, so nobody else would place
+/// it; before `Initialize` its map already routes every tablet to itself, which is the
+/// standalone ring, but the committed state records no placement and its record would say so.
+/// Placing it is what an operator does to a one node cluster, and it keeps `active_rf` on the
+/// artifact meaning the same thing on every cluster arm
+/// ([F39](../../../../docs/src/features/membership.md)).
+///
+/// # Arguments
+///
+/// * `pool` - The node's running pool
+pub fn initialize_alone(pool: &shoal::ShoalPool<crate::workloads::schema::Bench>) -> Result<()> {
+    // the one node is the one the pool reports itself as
+    let me = pool
+        .topology()
+        .map_err(|error| anyhow::anyhow!("the control plane did not answer: {error}"))?
+        .node;
+    initialize_nodes(pool, vec![me])
+}
+
+/// Initializes the placement over the nodes given, in that order, through node zero's pool
+///
+/// Waits first for every node to be up and for the leader to have promoted as many voters as
+/// the policy allows, so the record taken afterwards describes a settled group rather than
+/// whichever instant the promotion had reached; then proposes the one `Initialize`, retrying
+/// a stale version; then waits for node zero's shards to hold the map.
+///
+/// # Arguments
+///
+/// * `pool` - Node zero's running pool
+/// * `ids` - The nodes, in placement order
+fn initialize_nodes(pool: &shoal::ShoalPool<crate::workloads::schema::Bench>, ids: Vec<NodeId>) -> Result<()> {
+    // every node up, which is every joiner admitted and observed, and the voter policy met as
+    // far as the nodes allow with no membership change half way through
     let deadline = std::time::Instant::now() + ready::TIMEOUT;
     let version = loop {
         let view = pool.topology().map_err(|error| anyhow::anyhow!("the control plane did not answer: {error}"))?;
         let up = ids
             .iter()
             .all(|id| view.members.iter().any(|member| member.record.node == *id && member.health == shoal::server::control::types::MemberHealth::Up));
-        if up {
+        let wanted = view
+            .policy
+            .as_ref()
+            .map_or(1, |policy| usize::try_from(policy.control_voters).unwrap_or(usize::MAX))
+            .min(ids.len());
+        if up && !view.joint && view.voters.len() >= wanted {
             break view.version;
         }
         if std::time::Instant::now() > deadline {
-            bail!("not every node joined within {:?}: {view:?}", ready::TIMEOUT);
+            bail!("not every node joined and was promoted within {:?}: {view:?}", ready::TIMEOUT);
         }
         std::thread::sleep(Duration::from_millis(50));
     };
@@ -663,7 +705,35 @@ pub fn placed_facts(
     facts.placement = claimed.placement.clone();
     facts.hop = staged.hop.clone();
     facts.transport = Some(transport_facts(pool, conf)?);
+    // what the cluster committed, as node zero's control thread reports it
+    let view = pool
+        .topology()
+        .map_err(|error| anyhow::anyhow!("the control plane did not answer: {error}"))?;
+    facts.members = member_facts(&view);
+    facts.map_version = view.version;
+    facts.voters = u32::try_from(view.voters.len()).unwrap_or(u32::MAX);
+    facts.learners = u32::try_from(view.learners.len()).unwrap_or(u32::MAX);
     Ok(facts)
+}
+
+/// The members a topology view names, as the artifact records them
+///
+/// # Arguments
+///
+/// * `view` - The view a node's control thread answered
+pub fn member_facts(view: &shoal::server::TopologyView) -> Vec<MemberFacts> {
+    view.members
+        .iter()
+        .map(|member| MemberFacts {
+            node: member.record.node.to_string(),
+            role: member.role.name().to_string(),
+            health: member.health.name().to_string(),
+            shards: u16::try_from(member.record.shards).unwrap_or(u16::MAX),
+            client: member.record.client.clone(),
+            data: member.record.data.clone(),
+            control: member.record.control.clone(),
+        })
+        .collect()
 }
 
 /// The transport's bounds and what node zero's links did

@@ -9,14 +9,21 @@ configuration. No external membership, configuration or failover service is requ
 
 ## What exists today
 
-`Shard::join_cluster` broadcasts a local join and `Ring::add` ignores unknown shards. Reserved
-ping/pong frames have no implementation. ~~The pool lacks a dependable readiness/failure handle.~~
+**Delivered at M3 by [F39](../features/membership.md)**: one control group of nodes, joiners
+admitted as learners through seeds, voters promoted under the explicit policy and never past it,
+the member state machine's `Joining`, `Up` and `Down`, fencing by a persisted incarnation, the
+leader's phi-accrual detector over freshness-aware status reports committing `Down` and `Up`
+through the log, shard health committed beside it, and readiness that tells a joined control
+plane from data that can take default writes. `Leaving`, `Removing`, `Removed`, grace expiry
+and removal are M9b's. Before that: ~~`Shard::join_cluster` broadcasts a local join and `Ring::add`
+ignores unknown shards.~~ ~~Reserved
+ping/pong frames have no implementation.~~ ~~The pool lacks a dependable readiness/failure handle.~~
 `ShoalPool::ready` and `failure` are that handle since
 [F36](../features/cluster-harness.md), for the process's own shards. ~~No consensus library is
 currently in the workspace.~~ `openraft` is, since [F37](../features/node-identity-control-plane.md),
-running a group of one member per cluster node with a state machine that holds the cluster id,
-the member list and the bootstrap policy - the seed of the group of nodes this page describes,
-with no second node to admit yet. [C1](node-identity.md) ~~introduces~~ delivered identity and
+running ~~a group of one member per cluster node~~ the group of nodes this page describes, with a
+state machine that holds the cluster id, the members with their health, roles and incarnations,
+the placement, the tables and the bootstrap policy. [C1](node-identity.md) ~~introduces~~ delivered identity and
 the control-plane thread; ~~M0 first adds readiness and failure propagation~~ M0 added them.
 
 ## The design
@@ -79,7 +86,11 @@ Node reports include freshness/sequence and incarnation. Prefer a dedicated `Sta
 rather than assuming arbitrary application fields can be attached to OpenRaft heartbeat replies.
 Bound/coalesce per-tablet progress reports; they do not prove current durable state for promotion.
 A leader commits Down according to the configured fresh-evidence policy; M3 specifies the required
-reporter set and behavior when reports are missing. A metadata majority is required to commit
+reporter set and behavior when reports are missing. *At M3 the reporter set is every member but
+the leader, each reporting at `interval_ms`; a report is fresh by `(incarnation, seq)`; a member
+with fewer than `min_samples` fresh arrivals is not judged, and a new leader seeds every up
+member with the expected pace and a grace of five intervals so an election is not evidence
+([F39](../features/membership.md)).* A metadata majority is required to commit
 that decision regardless of the detector policy. Test partitions among control voters and data
 learners separately.
 
@@ -139,8 +150,14 @@ plane, with the runtime, storage and network seams built and the two conformance
 passing ([decision record](protocol.md#q1-and-q13-decided-at-m1)); ~~learner membership changes
 and network driving are M2/M3's and still unevidenced~~ network driving is evidenced at M2 -
 `PeerNetwork` carries `append_entries` and `vote` over the control lane and a placed peer answers
-a vote probe ([F38](../features/inter-node-transport.md)); learner membership changes are M3's
-and still unevidenced. Do not assume an alpha API or heartbeat
+a vote probe ([F38](../features/inter-node-transport.md)); ~~learner membership changes are M3's
+and still unevidenced~~ learner membership changes are evidenced at M3 - `add_learner` with
+catch-up and `change_membership` with the others retained, one change at a time, and a joint
+configuration never stacked on another ([F39](../features/membership.md)). Two things the
+library did that the feature had to answer: a leader answers a write with an empty forward hint
+until a quorum has acknowledged it, which read as "no leader" is a busy loop; and
+`enable_leader_restore` restores a stopped leader as the leader of its old term, which a copied
+directory turns into two, so it is off. Do not assume an alpha API or heartbeat
 extension is available. No handwritten-Raft fallback is planned.
 
 ## Alternatives rejected

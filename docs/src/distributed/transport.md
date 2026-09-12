@@ -10,7 +10,12 @@ explicit rather than assume reliable sockets eliminate distributed failures.
 ## What exists today
 
 **Delivered at M2 by [F38](../features/inter-node-transport.md)**, against a static placement
-rather than the membership M3 brings. `ShardContact` has `Local` and `Remote { node, shard }`;
+~~rather than the membership M3 brings~~ that [F39](../features/membership.md) then replaced
+with the committed map: a node's peers are the members the control group holds, the handshake
+judges by the committed incarnation and admits a joiner on the control lane alone, the control
+lane carries `Join`, `StatusReport` and `Propose` beside the group's RPCs, and a stalled data
+receiver leaves control elections working (`control_elections_do_not_depend_on_data_shard_relay`).
+`ShardContact` has `Local` and `Remote { node, shard }`;
 `mesh_id()` is gone and a remote contact cannot become a local index. Three lanes on three
 sockets - data and bulk owned by shards, control by the control thread - each with a byte bound
 that sheds before anything is recorded, and an in-flight bound per accepted connection. A 68
@@ -69,7 +74,8 @@ A seed address discovers the embedded cluster; it is not an external membership 
 
 Use mTLS and a defined certificate-to-node binding when configured; validate chain, expected
 identity and authorization to join. *At M2 the chain is validated to `ca` on every lane and the
-`shoal-node://<id>` SAN is written and not yet read; the binding lands with the joiner.* Q11 resolves first-boot certificate provisioning before a
+`shoal-node://<id>` SAN is written and not yet read; ~~the binding lands with the joiner~~ the
+joiner landed at M3 fencing by incarnation and the SAN is still unread.* Q11 resolves first-boot certificate provisioning before a
 random NodeId exists, SAN encoding, CA/certificate rotation and cloned-node fencing. TLS cannot
 be described as a complete identity design until that bootstrap path exists. When deployment
 policy allows plaintext, document that peer identity is trusted inside that explicit boundary.

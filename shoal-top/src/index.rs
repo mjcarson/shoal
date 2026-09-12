@@ -279,6 +279,15 @@ pub struct ClusterFactsLite {
     /// for every other arm
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hop: Option<HopFactsLite>,
+    /// The topology version the run ended at; zero before F39
+    #[serde(default)]
+    pub map_version: u64,
+    /// How many members were control voters at the end of the run
+    #[serde(default)]
+    pub voters: u32,
+    /// How many were learners
+    #[serde(default)]
+    pub learners: u32,
 }
 
 /// Which hop a hop arm was built to measure

@@ -179,9 +179,14 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
         }
     };
     // a placed cluster is initialized once every peer has joined, which is what an operator
-    // does and what the arm's keys assume ([F39](../../../docs/src/features/membership.md))
-    if let (Some(staged), Some(pool)) = (&staged, pool.as_ref()) {
-        cluster::initialize(staged, pool)?;
+    // does and what the arm's keys assume; a cluster of one is placed on itself for the same
+    // reason ([F39](../../../docs/src/features/membership.md))
+    match (&staged, pool.as_ref()) {
+        (Some(staged), Some(pool)) => cluster::initialize(staged, pool)?,
+        (None, Some(pool)) if conf.as_ref().is_some_and(|conf| conf.cluster.is_some()) => {
+            cluster::initialize_alone(pool)?;
+        }
+        _ => {}
     }
     // a cluster node this process started records what its control plane committed; a server
     // somebody else started carries whatever record they handed over, and a standalone one none.

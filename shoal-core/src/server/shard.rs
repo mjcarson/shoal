@@ -947,8 +947,9 @@ async fn client_acceptor<S: ShoalDatabase>(
                     return;
                 }
             };
-            // say who this connection belongs to, which is the only thing that consults a
-            // principal today - authorization is what it exists for and does not exist yet
+            // say who this connection belongs to; the cluster's admin operations are judged by
+            // it ([F39](../../../docs/src/features/membership.md)), per-table authorization is
+            // still what it exists for and does not exist yet
             match &principal {
                 Some(principal) => {
                     event!(Level::INFO, msg = "authenticated a client", %client, %principal);

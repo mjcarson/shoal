@@ -10,8 +10,15 @@ with the operations they expose, not only at the end of the feature.
 ## What exists today
 
 Shoal has authenticated client principals, TLS, a schema-specific `shoalctl` TUI and optional
-OTLP tracing/metrics. The pool lacks a reliable readiness/failure handle. It has no distributed
-repair, migration, backup/restore or cluster-admin API. Existing disk archives do not have the
+OTLP tracing/metrics. ~~The pool lacks a reliable readiness/failure handle.~~ Since
+[F39](../features/membership.md) it has the admin frame below for `Members`, `Readiness`,
+`Detector`, `Initialize` and `SetControlVoters` - over the authenticated client connection,
+authorized against `cluster.admins` by the connection's principal, versioned by expected topology
+version, idempotent by operation id and logged - and readiness in the three parts the design
+asks for: process, control and data, with default writes judged by the same map the shards
+admit against. It has no distributed
+repair, migration, backup/restore ~~or cluster-admin API~~ and the rest of the admin families are
+their milestones'. Existing disk archives do not have the
 end-to-end integrity metadata required by this design.
 
 ## The design

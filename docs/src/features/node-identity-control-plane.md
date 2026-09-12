@@ -208,16 +208,21 @@ A spike-only type configuration would have measured a harness.
   and listened on by nothing; `Endpoints.data` and `.control` stay `None`. M2.~~ Both are bound
   since [F38](inter-node-transport.md): the data port by every shard, the control port by the
   control thread, and the fixture reports both.
-- **No joiner.** `seeds` is refused naming M3. A second node cannot be admitted ~~, and the group's
-  network returns `Unreachable` for every peer it would ever be told about~~; since
+- ~~**No joiner.** `seeds` is refused naming M3. A second node cannot be admitted, and the group's
+  network returns `Unreachable` for every peer it would ever be told about; since
   [F38](inter-node-transport.md) the group's network reaches the peers a static placement names,
-  and every node is still a group of one.
-- **The replication policy is recorded and reported, never enforced.** A one node cluster serves
-  every read and write locally exactly as a standalone node does. `active_rf` is the members that
-  could hold a replica, not the replicas any tablet has.
+  and every node is still a group of one.~~ A node joins since [F39](membership.md): the group
+  is the cluster's membership.
+- **The replication policy is recorded and reported, ~~never~~ half enforced.** ~~A one node cluster serves
+  every read and write locally exactly as a standalone node does.~~ Since [F39](membership.md)
+  a write needs the members its consistency implies to be up; what it writes still lives in
+  one copy. `active_rf` is ~~the members that
+  could hold a replica~~ one wherever a node is placed, not the replicas any tablet has.
 - **The topology version is not proof of freshness.** C1 says so and the marker's docs repeat it:
   tablet term and vote live in the tablet's own manifest, which does not exist yet.
 - **Format 1 has no migration**, and neither does standalone-to-cluster. Both refusals name M10.
+  Format 2 is read and rewritten at format 3 since [F39](membership.md), which is the one
+  upgrade the marker has had.
 - **`verify_cluster` has no caller** outside its tests. The M2 handshake
   ([F38](inter-node-transport.md)) makes the same comparison against the same identity and
   refuses with the same `WrongCluster`, in its own judge, because the judge has to write the

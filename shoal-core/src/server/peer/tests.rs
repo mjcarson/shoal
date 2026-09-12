@@ -21,7 +21,7 @@ use crate::shared::protocol::peer::{
     decode_entries, encode_entries, ForwardEntry, ForwardPreamble, PeerHello, PeerHelloAck,
     PeerRefusal, FORWARD_PREAMBLE_LEN, PEER_HELLO_BODY_LEN, PEER_HELLO_FRAME_LEN,
 };
-use crate::shared::protocol::{Header, MessageType, HEADER_LEN, PROTOCOL_VERSION};
+use crate::shared::protocol::{HEADER_LEN, PROTOCOL_VERSION};
 use futures::AsyncWriteExt;
 
 /// An identity for a node in a placed cluster

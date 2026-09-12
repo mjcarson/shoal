@@ -17,7 +17,12 @@ found that heartbeats do not coalesce across groups — as
 [M2](milestones.md#m2-the-inter-node-transport) — the peer transport: three bounded lanes on
 three sockets, a pre-schema hello, bundles forwarded as validated bytes against a static
 placement, the control group's RPCs over the control lane, a trace that crosses the hop, mutual
-kTLS, and the hop arms that price it — as [F38](../features/inter-node-transport.md).
+kTLS, and the hop arms that price it — as [F38](../features/inter-node-transport.md); and
+[M3](milestones.md#m3-membership) — membership: a node joining through seeds as a learner, the
+voter policy enforced, a duplicate identity fenced by a persisted incarnation, the map committed
+and pushed to every shard and every subscribed client, admin operations over the client
+connection, writes admitted against their quorum, and the leader's phi-accrual detector — as
+[F39](../features/membership.md).
 ~~No node speaks to a node yet.~~ A node speaks to a node it was placed beside; nothing joins,
 elects across nodes or replicates yet. They extend the unbuilt
 [Distribution](../appendix/todos.md#distribution) and

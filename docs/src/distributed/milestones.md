@@ -132,6 +132,19 @@ node is the joiner's.
 
 ### M3. Membership
 
+**Delivered** on 2026-09-12 as [F39](../features/membership.md), which also closed
+[item 96](../appendix/resolved/ping-interval-consumer.md) on the way. All thirteen rows below
+are runnable as `cargo test -p shoal --test cluster_fixture`; the fanout measurement as `cargo
+run -p shoal-spike --release -- fanout`. What was delivered, what was not, and the evidence are
+on the F page; the rest of this section is the gate as it was set. *Not done, on purpose:* the
+map is an ordered node list pushed whole, not per-tablet records or deltas - those arrive when a
+tablet can move (M9a); `Initialize` is applied once and a second is refused naming M9a; `Down`
+moves nothing, and grace expiry, `Leaving`, `Removing` and removal are M9b's; a replication
+factor above one is desired and reported, with one copy served (M4); a certificate is still not
+bound to a node - Q11's identity half is the incarnation, and the SAN stays unread; the
+detector's grace on a leader change is a constant; and the capture of the arms over real
+membership is the benchmark host's - they ran at smoke scale on the development host.
+
 **Delivers.** Embedded control membership, explicit three/five-voter policy, learners, durable
 placement intent, stable table identity and replica readiness distinctions. Direct control traffic,
 freshness-aware status reports, shard health, duplicate-node fencing and authorized/versioned admin
@@ -144,6 +157,16 @@ identity; C2 independent-control-networking; C9 readiness/admin rows; C13 no-ext
 **Evidence/exit.** Healthy metadata agreement plus minority isolation and restart tests; topology
 fanout/group-scale budgets measured. Joining a fourth node leaves a three-voter policy at three.
 Membership evidence is not used as a substitute for safe data election.
+*Met:* three nodes agree on members, voters and leader and recover them after every node
+restarts (`three_nodes_bootstrap_without_external_membership`); a cut minority cannot commit a
+policy change or admit a joiner (`minority_cannot_commit_membership_changes`); a member restarted
+with dead seeds keeps its identity and log (`lost_seeds_do_not_rebootstrap_existing_directory`);
+a fourth node stays a learner under a three-voter policy
+(`fourth_data_node_does_not_change_control_voter_count`); the fanout budgets are the
+[Q13 record at M3](protocol.md#q11-and-q13-at-m3) - a frame under 16 KiB at sixty-four members
+and sixty-four tables, a thousand subscribers pushed in four milliseconds, 370 KiB a second of
+reports into the leader at sixty-four members; and no membership entry is data election - a
+`Down` verdict changes the up count and nothing about any tablet's quorum.
 
 ### M4. Replication and quorum writes
 

@@ -343,10 +343,14 @@ node is a member of a cluster ([Distributed Shoal](../distributed/overview.md)):
 node identity, bootstraps or joins a cluster, runs a control thread on its own core, and records
 the replication policy the cluster was created with. Delivered by
 [F37](../features/node-identity-control-plane.md), which built the identity, the bootstrap, the
-control thread and the policy record, and by [F38](../features/inter-node-transport.md), which
-built the peer transport - the lanes, their bounds and their encryption - against a static
-placement; joining and enforcement of the policy are later milestones and the settings that
-belong to them are **refused at startup by name** rather than accepted and ignored.
+control thread and the policy record, by [F38](../features/inter-node-transport.md), which
+built the peer transport - the lanes, their bounds and their encryption - ~~against a static
+placement~~, and by [F39](../features/membership.md), which built the membership: a node joins
+through `seeds`, the leader promotes voters to `control_voters` and fences a duplicate identity,
+the `failure_detector` calls a silent member down, writes are admitted against the write
+consistency, and `admins` names who may change the cluster. ~~joining and enforcement of the
+policy are later milestones and~~ Replication is a later milestone, and the settings that
+belong to it are **refused at startup by name** rather than accepted and ignored.
 
 This is the block with every default written out. A file that says only `cluster:\n  bootstrap:
 true` gets exactly this, and `documented_cluster_defaults_match_policy_bootstrap` holds the
@@ -397,22 +401,39 @@ they have no default that means anything:
   deployment draws around them** - which is the honest statement of what a plaintext lane
   proves, and why C2 asks for it to be written down. The binding of a certificate to one node's
   identity is not checked yet ([F38, Limitations](../features/inter-node-transport.md#limitations)).
-- `placement` - a list of `{node, data, control, shards}` naming every node of the cluster by
-  the identity in its marker. **This is test-shaped on purpose**: only something that staged the
-  markers can write it, which is the cluster fixture and the benchmark harness, and it is
-  replaced - not extended - when M3's control plane commits membership. Tablet `t` belongs to
-  `nodes[t % N]` and, on that node, to shard `(t / N) % shards`. A placement must name this node
-  with its actual shard count, and every address must parse. Absent, the node routes against a
-  placement of itself alone, which is the standalone map with a name on it.
+- ~~`placement` - a list of `{node, data, control, shards}` naming every node of the cluster by
+  the identity in its marker.~~ Gone since [F39](../features/membership.md): the cluster's
+  membership is what the control group commits, and a file that still carries the block is
+  refused as an unknown field. Tablet `t` still belongs to `nodes[t % N]` and, on that node, to
+  shard `(t / N) % shards` - over the nodes the one explicit `Initialize` admin operation named,
+  in that order. Before it, the bootstrapping node holds every tablet and a joiner holds none.
+- `dial` - a map from a member's node id to `{control, data}`, the addresses *this* node dials
+  that member at instead of the ones it advertises, for a network where a member is reached
+  through a different address from each side. Either half may be left out. The cluster fixture
+  uses it to put a fault proxy on each direction of each lane.
 
 **Two halves.** `advertise`, `port`, `control_port`, `client_advertise`, `control_core` and
 `control_core_shared` are this node's. `control_voters`, `replication_factor`, the two
 consistencies, `failure_detector`, `primary_failover_after`, `auto_remove_after` and `admins`
 are the cluster's: the bootstrapping node writes them into the control state as its
 `BootstrapPolicy`, and after that a change is an admin operation, not an edit to a file. A
-joiner's copy of them will be ignored ([C1](../distributed/node-identity.md)). **At M1 the policy is recorded and reported, not enforced**: a
+joiner's copy of them ~~will be~~ is ignored ([C1](../distributed/node-identity.md)). ~~**At M1 the policy is recorded and reported, not enforced**: a
 one node cluster serves every read and write locally, exactly as a standalone node does, and the
-topology view reports the desired replication factor beside the active one (which is 1).
+topology view reports the desired replication factor beside the active one (which is 1).~~
+**Since [F39](../features/membership.md) the policy is half enforced**: `control_voters` is
+the count the leader promotes learners to and never past; `write_consistency` and
+`replication_factor` decide how many members must be up before a write is admitted - one for
+`One`, `rf / 2 + 1` for `Quorum`, `rf` for `All` - and a write that falls short is refused
+`QuorumUnavailable` naming the shortfall, which readiness reports too. What is written still
+lives in one copy: the topology reports the desired factor beside the active one, which is 1
+wherever a node is placed, until M4 replicates. `admins` names the principals an
+authenticated client connection may change the cluster as; a mutation from anybody else is
+refused `Unauthorized`. `failure_detector` is the leader's: every member reports at
+`interval_ms`, the leader fits the last `window` arrivals once it has `min_samples`, and a
+member past `phi_threshold` is committed `Down` until it reports again. `seeds` are control
+addresses - `control_port`, not `port` - and a node names them or `bootstrap: true`, never
+both. A joiner's directory says so in its marker until a leader admits it, and is refused by
+`bootstrap: true` until then.
 
 Durations are written with a unit - `500ms`, `5s`, `30m`, `2h` - and a bare number is refused.
 

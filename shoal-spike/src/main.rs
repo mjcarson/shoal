@@ -25,6 +25,14 @@
 //! raft-rs was not measured. Its `RawNode` is a state machine driven by the caller with no
 //! runtime abstraction to adapt, so a comparison on this axis would be measuring the harness
 //! written around it rather than the library; the decision record says so.
+//!
+//! `shoal-spike fanout` is the second question Q13 asks, answered at M3
+//! ([F39](../../docs/src/features/membership.md)): what a topology push and the members' status
+//! reports cost as the cluster grows. It builds the tablet map a cluster of N members and T
+//! tables commits, encodes the frame every subscribed client is pushed, prices one version's
+//! push to S subscribers, and sizes the report every member sends the leader at the detector's
+//! interval. No executor, no network: the costs are the encoding's and the copy's, which is
+//! what a budget needs before a cluster of that size exists to measure.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, Bound};
@@ -47,7 +55,9 @@ use openraft::type_config::alias::{EntryOf, LogIdOf, SnapshotMetaOf, SnapshotOf,
 use openraft::{Config, EntryPayload, OptionalSend, Raft, RaftNetworkFactory, RaftNetworkV2, Snapshot, SnapshotMeta, StoredMembership};
 use shoal::server::control::store::{self as durable, SnapshotData};
 use shoal::server::control::types::{ControlCommand, ControlConfig, ControlResponse, ControlState, MemberRecord};
-use shoal::shared::identity::NodeId;
+use shoal::server::TabletMap;
+use shoal::shared::identity::{ClusterId, NodeId, TableId};
+use shoal::shared::protocol::peer::StatusReport;
 
 /// The group counts the idle cost is measured at
 const IDLE_COUNTS: &[usize] = &[1, 64, 1024, 4096];
@@ -779,7 +789,143 @@ async fn durable() -> Vec<String> {
 }
 
 /// Run the spike on a pinned executor and print the tables
+/// The member counts the fanout tables sweep
+const FANOUT_MEMBERS: &[usize] = &[3, 8, 16, 32, 64];
+
+/// The table counts the fanout tables sweep
+const FANOUT_TABLES: &[usize] = &[1, 4, 16, 64];
+
+/// The subscriber counts a push is priced at
+const FANOUT_SUBSCRIBERS: &[usize] = &[1, 100, 1000];
+
+/// The detector interval the report traffic is priced at, in milliseconds
+const REPORT_INTERVAL_MS: u64 = 500;
+
+/// How many times an encoding is repeated before its median is taken
+const FANOUT_ROUNDS: usize = 200;
+
+/// The tablet map a cluster of `members` nodes and `tables` tables commits once initialized
+///
+/// # Arguments
+///
+/// * `members` - How many members, the bootstrapper included
+/// * `tables` - How many tables the schema has
+fn map_for(members: usize, tables: usize) -> TabletMap {
+    let mut state = ControlState::default();
+    let ids: Vec<NodeId> = (0..members).map(|_| NodeId::mint()).collect();
+    // the bootstrapper, then every joiner admitted and observed
+    state.apply(&ControlCommand::Bootstrap {
+        cluster: ClusterId::mint(),
+        policy: shoal::server::conf::Cluster::default().policy(),
+        member: member(ids[0]),
+    });
+    for id in &ids[1..] {
+        state.apply(&ControlCommand::Admit(member(*id)));
+        state.apply(&ControlCommand::ObserveMember(member(*id)));
+    }
+    // then the one explicit placement over all of them, with the schema's tables
+    state.apply(&ControlCommand::Initialize {
+        op: shoal::uuid::Uuid::new_v4(),
+        principal: "spike".to_string(),
+        expected_version: state.topology_version,
+        nodes: ids.clone(),
+        tables: (0..tables)
+            .map(|index| {
+                let name = format!("table_{index}");
+                let id = TableId::of(&name);
+                (name, id)
+            })
+            .collect(),
+    });
+    TabletMap::from_state(&state, Some(ids[0]), &[])
+}
+
+/// The median of a run of timings
+///
+/// # Arguments
+///
+/// * `f` - What to time, run `FANOUT_ROUNDS` times
+fn median_of<F: FnMut()>(mut f: F) -> Duration {
+    let mut timings: Vec<Duration> = (0..FANOUT_ROUNDS)
+        .map(|_| {
+            let start = Instant::now();
+            f();
+            start.elapsed()
+        })
+        .collect();
+    timings.sort();
+    percentile(&timings, 0.5)
+}
+
+/// Price the topology push and the report traffic at every size the sweep names
+fn fanout() {
+    println!("shoal-spike fanout: topology fanout and report traffic, Q13 at M3");
+    println!("host {} · governor {} · json bodies as the wire carries them", hostname(), governor());
+    println!();
+    // the frame every subscribed client is pushed, per members and tables
+    println!("## Topology frame: encoded bytes and encode time per version (median of {FANOUT_ROUNDS})");
+    println!();
+    println!("| members | tables | frame bytes | encode µs |");
+    println!("| --- | --- | --- | --- |");
+    for members in FANOUT_MEMBERS {
+        for tables in FANOUT_TABLES {
+            let map = map_for(*members, *tables);
+            let frame = map.frame();
+            let bytes = shoal::serde_json::to_vec(&frame).expect("a frame encodes").len();
+            let encode = median_of(|| {
+                let _ = shoal::serde_json::to_vec(&frame).expect("a frame encodes");
+            });
+            println!("| {members} | {tables} | {bytes} | {} |", us(encode));
+        }
+    }
+    println!();
+    // one version's push to S subscribers: encoded once, copied once per subscriber
+    println!("## Push of one version, 64 members and 16 tables, per subscriber count");
+    println!();
+    println!("| subscribers | bytes written | µs per version (encode once, copy per subscriber) |");
+    println!("| --- | --- | --- |");
+    let map = map_for(64, 16);
+    let frame = map.frame();
+    for subscribers in FANOUT_SUBSCRIBERS {
+        let bytes = shoal::serde_json::to_vec(&frame).expect("a frame encodes").len() * subscribers;
+        let push = median_of(|| {
+            let json = shoal::serde_json::to_vec(&frame).expect("a frame encodes");
+            let copies: Vec<Vec<u8>> = (0..*subscribers).map(|_| json.clone()).collect();
+            std::hint::black_box(copies);
+        });
+        println!("| {subscribers} | {bytes} | {} |", us(push));
+    }
+    println!();
+    // the report every member sends the leader, and what the leader takes in per second
+    println!("## Status reports at a {REPORT_INTERVAL_MS} ms interval");
+    println!();
+    println!("| members | report bytes | reports/s at the leader | bytes/s in at the leader |");
+    println!("| --- | --- | --- | --- |");
+    for members in FANOUT_MEMBERS {
+        let report = StatusReport {
+            node: NodeId::mint(),
+            incarnation: 3,
+            seq: 100_000,
+            topology_version: 100,
+            applied_index: 100_000,
+            shards_failed: Vec::new(),
+            reachability: (0..members - 1).map(|_| (NodeId::mint(), 250)).collect(),
+        };
+        let bytes = shoal::serde_json::to_vec(&report).expect("a report encodes").len();
+        let per_second = (members - 1) as f64 * 1000.0 / REPORT_INTERVAL_MS as f64;
+        println!(
+            "| {members} | {bytes} | {per_second:.0} | {:.0} |",
+            per_second * bytes as f64
+        );
+    }
+}
+
 fn main() {
+    // the fanout tables stand alone: no executor, no groups
+    if std::env::args().nth(1).as_deref() == Some("fanout") {
+        fanout();
+        return;
+    }
     println!("shoal-spike: openraft {} on the glommio runtime", "0.10.0-alpha.34");
     println!("host {} · governor {} · pinned to cpu 1 · three members per group", hostname(), governor());
     println!();
