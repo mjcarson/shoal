@@ -35,6 +35,9 @@ pub mod listener;
 pub mod peers;
 pub mod tls;
 
+#[cfg(test)]
+mod tests;
+
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 

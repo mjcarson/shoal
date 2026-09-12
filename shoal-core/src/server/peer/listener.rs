@@ -169,10 +169,21 @@ pub async fn peer_acceptor<S: ShoalDatabase>(
     ctx: ListenerContext<S>,
 ) -> Result<(), ServerError> {
     loop {
-        let mut stream = listener.accept().await?;
-        stream.set_nodelay(true)?;
+        // a per-connection error must never close the listener: a peer that connects and
+        // immediately resets used to make `accept` or `set_nodelay` return an error the `?`
+        // propagated, dropping the listener and the port with it
+        // ([F38](../../../../docs/src/features/inter-node-transport.md))
+        let mut stream = match listener.accept().await {
+            Ok(stream) => stream,
+            Err(error) => {
+                event!(Level::WARN, msg = "a peer connection could not be accepted", ?error);
+                continue;
+            }
+        };
         let ctx = ctx.clone();
         glommio::spawn_local(async move {
+            // nodelay's error is this connection's alone, not the listener's
+            let _ = stream.set_nodelay(true);
             // take the wire and shake hands under one deadline
             let accepted = glommio::timer::timeout(ctx.handshake_timeout, async {
                 if let Some(config) = &ctx.tls {

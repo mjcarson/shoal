@@ -64,14 +64,23 @@ pub async fn control_acceptor(
     tls: Option<Arc<ServerConfig>>,
 ) -> Result<(), ServerError> {
     loop {
-        let mut stream = listener.accept().await?;
-        stream.set_nodelay(true)?;
+        // a per-connection error must never close the control listener, for the same reason the
+        // data listener survives one ([F38](../../../../docs/src/features/inter-node-transport.md))
+        let mut stream = match listener.accept().await {
+            Ok(stream) => stream,
+            Err(error) => {
+                event!(Level::WARN, msg = "a control connection could not be accepted", ?error);
+                continue;
+            }
+        };
         let raft = raft.clone();
         let machine = machine.clone();
         let local = local.clone();
         let placement = placement.clone();
         let tls = tls.clone();
         glommio::spawn_local(async move {
+            // nodelay's error is this connection's alone, not the listener's
+            let _ = stream.set_nodelay(true);
             // take the wire, then shake hands on the control lane
             if let Some(config) = &tls {
                 if let Err(error) = crate::server::tls::accept(&mut stream, config).await {
