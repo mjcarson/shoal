@@ -2223,3 +2223,113 @@ async fn admin_mutations_require_principal_and_operation_identity() -> Result<()
     assert!(error.msg.contains("initialized"), "{fresh:?}");
     Ok(())
 }
+
+/// Fresh failure reports do not mask shard failure (C3 M3)
+///
+/// A member whose shard died keeps reporting, so the cluster holds it up with that shard marked
+/// failed rather than calling it down; replayed reports are counted and change nothing; a member
+/// that stops reporting is called down by the leader within a bounded time, and a quorum write
+/// is still admitted with the two that remain; and it is called up again once it reports.
+#[tokio::test(flavor = "multi_thread")]
+async fn fresh_failure_reports_do_not_mask_shard_failure() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(2))
+        .detector_interval_ms(100)
+        .replication_factor(3)
+        .start()
+        .await?;
+    cluster.wait_voters(0, 3)?;
+    let leader = cluster.leader_index(0)?.expect("a leader");
+    let victim = (leader + 1) % 3;
+    let other = (leader + 2) % 3;
+    let victim_id = cluster.node_ids()[victim].clone();
+    // what one node's map says about the victim
+    let member_of = |cluster: &mut Cluster, at: usize| -> Result<serde_json::Value, FixtureError> {
+        let map = cluster.node_mut(at).command("MAP")?;
+        Ok(map["ok"]["members"][&victim_id].clone())
+    };
+    // wait until every node's map says something about the victim
+    let wait_for = |cluster: &mut Cluster, what: &str, within: Duration, check: &dyn Fn(&serde_json::Value) -> bool| -> Result<(), FixtureError> {
+        let deadline = std::time::Instant::now() + within;
+        loop {
+            let views: Vec<serde_json::Value> = (0..3).map(|at| member_of(cluster, at)).collect::<Result<_, _>>()?;
+            if views.iter().all(|view| check(view)) {
+                return Ok(());
+            }
+            if std::time::Instant::now() > deadline {
+                return Err(FixtureError::NotReady(format!("{what} never happened: {views:?}")));
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    // a shard dies on the victim: every node hears which, and the victim stays up
+    let failed = cluster.node_mut(victim).command("FAIL_SHARD 1")?;
+    assert!(failed.get("ok").is_some(), "{failed}");
+    wait_for(&mut cluster, "the shard failure", Duration::from_secs(5), &|view| {
+        view["shards_failed"] == serde_json::json!([1]) && view["health"] == "up"
+    })?;
+    let readiness = cluster.node_mut(victim).command("READINESS")?;
+    assert_eq!(readiness["ok"]["data"]["shards_failed"], serde_json::json!([1]), "{readiness}");
+    assert_eq!(readiness["ok"]["control"], "joined", "{readiness}");
+    let ping = cluster.node_mut(leader).command(&format!("PING {victim}"))?;
+    assert!(ping.get("ok").is_some(), "the victim stopped answering pings: {ping}");
+    // replayed reports are counted and change nothing
+    let version_before = cluster.members(leader)?["version"].as_u64().expect("a version");
+    for _ in 0..3 {
+        let sent = cluster.node_mut(victim).command("STALE_REPORT")?;
+        assert!(sent.get("ok").is_some(), "{sent}");
+    }
+    let detector_of = |cluster: &mut Cluster| -> Result<serde_json::Value, FixtureError> {
+        let request = serde_json::json!({ "op": uuid::Uuid::new_v4(), "expected_version": 0, "kind": "Detector" });
+        let reply = cluster.node_mut(leader).command(&format!("ADMIN {request}"))?;
+        Ok(reply["ok"]["outcome"]["Ok"]["Read"].clone())
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let detector = detector_of(&mut cluster)?;
+        if detector["stale_ignored"].as_u64().unwrap_or(0) >= 3 {
+            assert!(detector["is_leader"] == true, "{detector}");
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "the leader never counted the stale reports: {detector}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(cluster.members(leader)?["version"].as_u64(), Some(version_before), "a stale report moved the topology");
+    assert_eq!(member_of(&mut cluster, leader)?["health"], "up");
+    // the victim falls silent: the leader calls it down, and a quorum write is still admitted
+    let interval = Duration::from_millis(100);
+    cluster.node(victim).pause().map_err(|error| FixtureError::ChildFailed(format!("pausing: {error}")))?;
+    let deadline = std::time::Instant::now() + interval * 100;
+    loop {
+        let at_leader = member_of(&mut cluster, leader)?;
+        let at_other = member_of(&mut cluster, other)?;
+        if at_leader["health"] == "down" && at_other["health"] == "down" {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "the silent member was never called down: {at_leader} {at_other}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let readiness = cluster.node_mut(leader).command("READINESS")?;
+    assert_eq!(readiness["ok"]["data"]["members_up"], 2, "{readiness}");
+    assert_eq!(readiness["ok"]["data"]["default_writes"], serde_json::json!({ "Ok": null }), "{readiness}");
+    let client = Shoal::<TestDbClient>::new(&cluster.node(leader).endpoints.client.to_string()).await?;
+    client.send_one(Row { key: 7, data: "seven".to_string() }).await?;
+    // and back: its next fresh report brings it up again
+    cluster.node(victim).resume().map_err(|error| FixtureError::ChildFailed(format!("resuming: {error}")))?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let at_leader = member_of(&mut cluster, leader)?;
+        let at_other = member_of(&mut cluster, other)?;
+        if at_leader["health"] == "up" && at_other["health"] == "up" {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "the member was never called up again: {at_leader} {at_other}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(member_of(&mut cluster, leader)?["shards_failed"], serde_json::json!([1]));
+    for id in 0..3 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}

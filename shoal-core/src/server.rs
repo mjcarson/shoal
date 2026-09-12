@@ -391,7 +391,7 @@ where
         })
     }
 
-    /// Send the control leader one report at an incarnation below this node's, for a test
+    /// Send the control leader one report behind the last, as a replay would be, for a test
     ///
     /// # Errors
     ///

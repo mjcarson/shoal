@@ -45,8 +45,10 @@ use openraft::{ChangeMembers, Config, Raft, RaftNetworkV2};
 use openraft_rt::WatchReceiver as _;
 use serde::{Deserialize, Serialize};
 use tracing::{event, instrument, Level};
+use uuid::Uuid;
 
 use super::cores::ControlPlacement;
+use super::detector::Detector;
 use super::listener::{control_acceptor, err, ok, Inbound};
 use super::network::{PeerNetwork, RpcFailure};
 use super::store::{self, ControlStateMachine, CONTROL_DIR};
@@ -204,7 +206,7 @@ pub enum ControlRequest {
     AttachSink(MapSink, mpsc::Sender<()>),
     /// A shard died
     ShardHealth(ShardHealthEvent),
-    /// Send the leader one report at an incarnation below this node's, for a test
+    /// Send the leader one report behind the last, as a replay would be, for a test
     StaleReport(mpsc::Sender<Result<(), String>>),
     /// Stop the group and exit the thread
     Shutdown,
@@ -738,6 +740,8 @@ enum Event {
     Reported(Result<Vec<u8>, RpcFailure>),
     /// A ping was answered, or not
     Pinged(NodeId, Result<Duration, ()>),
+    /// A health verdict this leader proposed finished
+    HealthProposed(NodeId, Result<ControlResponse, ProposeError>),
 }
 
 /// What one ping learned about a member, this node's local view
@@ -814,6 +818,10 @@ struct Core {
     reachability: BTreeMap<NodeId, Reachability>,
     /// The shard health last proposed, so a change is proposed once
     reported_shards: Vec<u16>,
+    /// The failure detector, which only a leader feeds
+    detector: Detector,
+    /// The members whose health this leader is proposing, so one verdict is in flight per member
+    health_in_flight: BTreeSet<NodeId>,
 }
 
 impl Core {
@@ -1204,6 +1212,8 @@ async fn serve(startup: Startup) -> Result<(), ServerError> {
         report_seq: 0,
         reachability: BTreeMap::new(),
         reported_shards: Vec::new(),
+        detector: Detector::new(&policy.failure_detector),
+        health_in_flight: BTreeSet::new(),
     };
     core.publish();
     event!(
@@ -1281,10 +1291,12 @@ impl Core {
                 self.maybe_promote();
                 self.drain_joins();
                 self.report();
+                self.judge_members();
             }
             Event::PingTick => self.ping_members(),
             Event::Reported(outcome) => self.handle_reported(outcome)?,
             Event::Pinged(node, answered) => self.handle_pinged(node, answered),
+            Event::HealthProposed(node, outcome) => self.handle_health_proposed(node, outcome),
         }
         Ok(true)
     }
@@ -1363,7 +1375,8 @@ impl Core {
                 self.report();
             }
             ControlRequest::StaleReport(reply) => {
-                let _ = reply.send(self.send_report(self.member.incarnation.saturating_sub(1)));
+                // a report behind the last one, as a replay or a reordered delivery would be
+                let _ = reply.send(self.send_report(self.member.incarnation, Some(self.report_seq.saturating_sub(1))));
             }
             ControlRequest::Shutdown => return Ok(false),
         }
@@ -1598,6 +1611,18 @@ impl Core {
                 )));
                 return;
             }
+            // a replayed or reordered report is counted and changes nothing
+            if !self
+                .detector
+                .observe(report.node, report.incarnation, report.seq, Instant::now())
+            {
+                let _ = inbound.reply.send(ok(&serde_json::json!({ "seq": report.seq, "stale": true })));
+                return;
+            }
+            // a fresh report from a member the cluster holds down is the evidence it is back
+            if member.health == MemberHealth::Down {
+                self.propose_health(report.node, MemberHealth::Up, member.record.incarnation, None);
+            }
             // a change in shard health is committed, so every node sees it
             if member.shards_failed != report.shards_failed {
                 let raft = self.raft.clone();
@@ -1649,6 +1674,8 @@ impl Core {
                     "local": self.reachability,
                     "leader": self.leader,
                     "is_leader": self.is_leader,
+                    "stale_ignored": self.detector.stale_ignored,
+                    "members": self.detector.view(Instant::now()),
                 })))));
                 return;
             }
@@ -1817,8 +1844,17 @@ impl Core {
             self.publish();
         }
         if self.is_leader && !was_leader {
-            // a new leader starts with no evidence about anybody
+            // a new leader starts with no evidence about anybody: its detector is seeded with
+            // every up member and a grace period, so the election itself calls nobody down
             self.reachability.clear();
+            self.detector.reset();
+            self.health_in_flight.clear();
+            let now = Instant::now();
+            for (node, member) in &self.machine.state().members {
+                if *node != self.node && member.health == MemberHealth::Up {
+                    self.detector.seed(*node, member.record.incarnation, now);
+                }
+            }
         }
         self.metrics = Some(metrics);
         self.maybe_observe();
@@ -1992,23 +2028,103 @@ impl Core {
             }
             return;
         }
-        let _ = self.send_report(self.member.incarnation);
+        let _ = self.send_report(self.member.incarnation, None);
+    }
+
+    /// Call down every member the detector suspects, if this node leads
+    ///
+    /// One verdict per member is in flight at a time, the leader never judges itself, and a
+    /// member the cluster already holds down is not called down again.
+    fn judge_members(&mut self) {
+        if !self.is_leader {
+            return;
+        }
+        let now = Instant::now();
+        let state = self.machine.state();
+        for node in self.detector.suspects(now) {
+            if node == self.node {
+                continue;
+            }
+            let Some(member) = state.members.get(&node) else {
+                self.detector.forget(node);
+                continue;
+            };
+            if member.health != MemberHealth::Up {
+                continue;
+            }
+            let phi = self.detector.phi(node, now).unwrap_or(0.0);
+            event!(Level::WARN, msg = "a member fell silent", %node, phi);
+            self.propose_health(node, MemberHealth::Down, member.record.incarnation, Some(Uuid::new_v4()));
+        }
+    }
+
+    /// Propose a member's health through the group, once at a time per member
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The member
+    /// * `health` - What to set it to
+    /// * `incarnation` - The run the evidence is about
+    /// * `episode` - The down episode this opens, if it opens one
+    fn propose_health(&mut self, node: NodeId, health: MemberHealth, incarnation: u64, episode: Option<Uuid>) {
+        if !self.health_in_flight.insert(node) {
+            return;
+        }
+        let raft = self.raft.clone();
+        let network = self.network.clone();
+        let machine = self.machine.clone();
+        let tx = self.tx.clone();
+        let command = ControlCommand::SetHealth {
+            node,
+            health,
+            incarnation,
+            episode,
+        };
+        glommio::spawn_local(async move {
+            let outcome = propose(&raft, &network, &machine, command).await;
+            let _ = tx.send(Event::HealthProposed(node, outcome)).await;
+        })
+        .detach();
+    }
+
+    /// Act on a health verdict having finished
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The member
+    /// * `outcome` - What the group answered
+    fn handle_health_proposed(&mut self, node: NodeId, outcome: Result<ControlResponse, ProposeError>) {
+        self.health_in_flight.remove(&node);
+        match outcome {
+            Ok(ControlResponse::Applied { topology_version }) => {
+                event!(Level::INFO, msg = "a member's health was committed", %node, topology_version);
+            }
+            Ok(other) => event!(Level::DEBUG, msg = "a health verdict changed nothing", %node, ?other),
+            Err(error) => event!(Level::DEBUG, msg = "a health verdict did not commit", %node, %error),
+        }
     }
 
     /// Send one report at an incarnation
     ///
     /// # Arguments
     ///
-    /// * `incarnation` - The incarnation to report as, which a test may lower
-    fn send_report(&mut self, incarnation: u64) -> Result<(), String> {
+    /// * `incarnation` - The incarnation to report as
+    /// * `seq` - A sequence to send instead of the next one, which a test uses to replay
+    fn send_report(&mut self, incarnation: u64, seq: Option<u64>) -> Result<(), String> {
         let Some(leader) = self.leader_record() else {
             return Err("no leader to report to".to_string());
         };
-        self.report_seq += 1;
+        let seq = match seq {
+            Some(seq) => seq,
+            None => {
+                self.report_seq += 1;
+                self.report_seq
+            }
+        };
         let report = StatusReport {
             node: self.node,
             incarnation,
-            seq: self.report_seq,
+            seq,
             topology_version: self.machine.state().topology_version,
             applied_index: self.machine.applied_index(),
             shards_failed: self.shards_failed.clone(),

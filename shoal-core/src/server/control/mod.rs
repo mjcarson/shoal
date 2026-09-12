@@ -21,6 +21,7 @@
 //! opens no group and writes no file under `control/`, and the shard path is unchanged.
 
 pub mod cores;
+pub mod detector;
 pub mod listener;
 pub mod network;
 pub mod plane;
