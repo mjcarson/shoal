@@ -24,6 +24,7 @@ pub mod map;
 pub mod messages;
 pub mod peer;
 pub mod meta;
+pub mod replication;
 pub mod request_body;
 pub mod ring;
 pub mod routing;
@@ -32,6 +33,7 @@ pub mod stage_profile;
 pub mod tables;
 pub mod tls;
 pub mod trace;
+pub mod wal;
 
 use comms::Comms;
 pub use conf::Conf;
@@ -165,6 +167,25 @@ where
         let placement = match &conf.cluster {
             Some(cluster) => {
                 cluster.validate(&conf.networking.interface)?;
+                // a persistent table acknowledged before its fdatasync cannot be a voter in a
+                // durable quorum, and the durability is per table under `storage`, which the
+                // block's own validation cannot see (C5, F40)
+                for table in S::persistent_tables() {
+                    let settings = conf
+                        .storage
+                        .tables
+                        .get(table)
+                        .map(|settings| match settings {
+                            conf::TableSettings::FS(settings) => settings.clone(),
+                        })
+                        .unwrap_or_else(|| conf.storage.default.filesystem.clone());
+                    if settings.latency_sensitive.durability == tables::storage::fs::conf::Durability::Async {
+                        return Err(ServerError::Shoal(ShoalError::InvalidConfig(format!(
+                            "table {table} is configured with durability: Async on a cluster node; a durable \
+                             quorum cannot be built from an acknowledgement that precedes fdatasync (C5)"
+                        ))));
+                    }
+                }
                 Some(ControlPlacement::resolve(&conf)?)
             }
             None => None,
@@ -440,6 +461,53 @@ where
             }
         }
         Ok(views)
+    }
+
+    /// What every shard's tablet groups look like, folded over the node
+    ///
+    /// Asks each shard in turn over the mesh. A standalone node hosts no groups and reports
+    /// none ([F40](../../../docs/src/features/replication.md)).
+    pub fn replication(&self) -> Result<replication::NodeReplication, ServerError> {
+        let mut shards = Vec::with_capacity(self.shards);
+        for tx in &self.shard_txs {
+            let (reply, rx) = std::sync::mpsc::channel();
+            tx.send(messages::ServerMsg::ReplicationView(reply))
+                .map_err(|_| ServerError::Shoal(ShoalError::NotClustered))?;
+            match rx.recv_timeout(Duration::from_secs(5)) {
+                Ok(view) => shards.push(view),
+                Err(_) => return Err(ServerError::Shoal(ShoalError::NotClustered)),
+            }
+        }
+        Ok(replication::NodeReplication::fold(shards))
+    }
+
+    /// Drive a replication verb on every shard, for the fixture
+    ///
+    /// # Arguments
+    ///
+    /// * `verb` - What to do
+    ///
+    /// # Errors
+    ///
+    /// Fails if a shard is gone or does not answer; a shard's own refusal is in its answer.
+    pub fn replication_verb(
+        &self,
+        verb: replication::ReplicationVerb,
+    ) -> Result<Vec<Result<serde_json::Value, String>>, ServerError> {
+        let mut answers = Vec::with_capacity(self.shards);
+        for tx in &self.shard_txs {
+            let (reply, rx) = std::sync::mpsc::channel();
+            tx.send(messages::ServerMsg::ReplicationVerb {
+                verb: verb.clone(),
+                reply,
+            })
+            .map_err(|_| ServerError::Shoal(ShoalError::NotClustered))?;
+            match rx.recv_timeout(Duration::from_secs(30)) {
+                Ok(answer) => answers.push(answer),
+                Err(_) => return Err(ServerError::Shoal(ShoalError::NotClustered)),
+            }
+        }
+        Ok(answers)
     }
 
     /// Start a bulk probe of a given size at a peer, for the bounded-bytes test

@@ -192,7 +192,9 @@ A spike-only type configuration would have measured a harness.
   JSON costs nothing that matters and is legible. The frames' checksum is gxhash because gxhash is
   already what every intent log frame is checksummed with.
 - **Counting `active_rf` from placed tablets.** Nothing places tablets. The count of members
-  that could hold a replica, capped at the desired factor, is the honest number until M4.
+  that could hold a replica, capped at the desired factor, is the honest number until M4 -
+  and since [F40](replication.md) it is the count of placed nodes capped at the factor, which
+  is what every tablet is replicated at.
 - **Measuring raft-rs in the spike.** It has no runtime abstraction to adapt; a comparison on
   the runtime seam would measure the harness. Recorded on the decision record with the reason.
 - **A `nodes/3` benchmark arm or a replication-factor axis.** Three processes need M2's
@@ -215,9 +217,11 @@ A spike-only type configuration would have measured a harness.
   is the cluster's membership.
 - **The replication policy is recorded and reported, ~~never~~ half enforced.** ~~A one node cluster serves
   every read and write locally exactly as a standalone node does.~~ Since [F39](membership.md)
-  a write needs the members its consistency implies to be up; what it writes still lives in
+  a write needs the members its consistency implies to be up; ~~what it writes still lives in
   one copy. `active_rf` is ~~the members that
-  could hold a replica~~ one wherever a node is placed, not the replicas any tablet has.
+  could hold a replica~~ one wherever a node is placed, not the replicas any tablet has.~~
+  since [F40](replication.md) what it writes lives in `active_rf` copies, and the policy is
+  enforced whole.
 - **The topology version is not proof of freshness.** C1 says so and the marker's docs repeat it:
   tablet term and vote live in the tablet's own manifest, which does not exist yet.
 - **Format 1 has no migration**, and neither does standalone-to-cluster. Both refusals name M10.

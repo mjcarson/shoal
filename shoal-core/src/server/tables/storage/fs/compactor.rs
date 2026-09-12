@@ -2,7 +2,7 @@
 
 use byte_unit::Byte;
 use futures::AsyncWriteExt;
-use glommio::io::{DmaFile, DmaStreamWriter, OpenOptions};
+use glommio::io::{BufferedFile, DmaFile, DmaStreamWriter, OpenOptions};
 use gxhash::GxHasher;
 use kanal::{AsyncReceiver, AsyncSender};
 use std::hash::Hasher;
@@ -439,6 +439,80 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         Ok(())
     }
 
+    /// Merge this table's frames of a sealed WAL segment into its archives
+    ///
+    /// The cluster node's compaction ([F40](../../../../../docs/src/features/replication.md)):
+    /// the shard names exactly the frames that are this table's and still live, in log order per
+    /// group, and they are read at those offsets and nowhere else. The merge is the intent log's
+    /// unchanged. The file is left where it is - the shard deletes a segment once every group in
+    /// it has purged past it - and the shard is told the segment is compacted for this table, so
+    /// its groups' checkpoints can move.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The segment
+    /// * `generation` - Its generation
+    /// * `frames` - This table's frames in it, as (offset, length)
+    #[instrument(name = "FileSystemCompactor::compact_segment", skip_all, err(Debug))]
+    async fn compact_segment(
+        &mut self,
+        path: PathBuf,
+        generation: u64,
+        frames: Vec<(u64, u32)>,
+    ) -> Result<(), ServerError>
+    where
+        <T as Archive>::Archived: rkyv::Deserialize<T, Strategy<Pool, rkyv::rancor::Error>>,
+        for<'a> <T as Archive>::Archived: rkyv::bytecheck::CheckBytes<
+            Strategy<
+                rkyv::validation::Validator<
+                    rkyv::validation::archive::ArchiveValidator<'a>,
+                    rkyv::validation::shared::SharedValidator,
+                >,
+                rkyv::rancor::Error,
+            >,
+        >,
+        for<'a> <T::Intent as Archive>::Archived: CheckBytes<
+            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+        >,
+    {
+        // read every frame named, and sort its command's intent under its partition
+        if !frames.is_empty() {
+            let file = BufferedFile::open(&path).await?;
+            for (offset, len) in &frames {
+                let read = file.read_at(*offset, *len as usize).await?;
+                // a frame that is not a whole command is a shard bug, not a torn log: the shard
+                // named it from an index it built from whole frames
+                let Some(command) = crate::server::wal::frame::command_of(&read) else {
+                    return Err(ServerError::GlommioGeneric(format!(
+                        "the frame at {}:{offset} named for compaction is not a command",
+                        path.display()
+                    )));
+                };
+                let (partition_key, intent) = T::partition_key_and_intent_checked(&command.payload)?;
+                self.changes.entry(partition_key).or_default().push(intent);
+            }
+            file.close().await?;
+        }
+        // merge what was read the way an intent log is merged; a resolved segment is whole by
+        // construction, so nothing was lost reading it
+        let partitions = if self.changes.is_empty() {
+            Vec::default()
+        } else {
+            self.load_partitions_for_intents().await?;
+            self.apply_intents(TailLoss::None).await?;
+            self.write_partition().await?
+        };
+        // the table hears the generation is compacted, then the shard hears this table is done
+        self.send_mark_evictables(generation, partitions).await?;
+        self.shard_local_tx
+            .send(ServerMsg::SegmentCompacted {
+                table: self.table_name,
+                generation,
+            })
+            .await?;
+        Ok(())
+    }
+
     /// Compact archives with the least amount of active data
     #[instrument(name = "FileSystemCompactor::compact_archives", skip_all, err(Debug))]
     async fn compact_archives(&mut self) -> Result<(), ServerError> {
@@ -693,6 +767,11 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                 CompactionJob::IntentLog { path, generation } => {
                     self.compact_intent(path, generation).await?
                 }
+                CompactionJob::Segment {
+                    path,
+                    generation,
+                    frames,
+                } => self.compact_segment(path, generation, frames).await?,
                 CompactionJob::Archives => self.compact_archives().await?,
                 CompactionJob::Shutdown => {
                     // shutdown this compactor

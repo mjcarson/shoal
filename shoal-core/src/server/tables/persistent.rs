@@ -101,6 +101,24 @@ pub(crate) fn corrupt_archive<T: std::fmt::Display>(
     )
 }
 
+/// What applying a replicated command came to
+///
+/// A command is applied on the shard loop in committed order, so it cannot park the way a
+/// client's query does: a partition it needs that is not resident is asked for, the rest of the
+/// batch waits, and the command is applied again once the read lands
+/// ([F40](../../../docs/src/features/replication.md)).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApplyStep {
+    /// The command was applied, and this is its result
+    Done(crate::server::replication::CommandResult),
+    /// The command needs this partition read from disk before it can be applied
+    NeedsLoad(u64),
+    /// The command's payload does not decode as this table's intent, and this is why
+    ///
+    /// Applied as a refusal: the log moved, the table did not, and the client is told.
+    Refused(String),
+}
+
 /// What a partition read left behind for the queries that were parked on it
 ///
 /// A read has three outcomes and only two of them used to be expressible. Before this, a load

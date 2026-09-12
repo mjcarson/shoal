@@ -166,9 +166,11 @@ pub struct ConfOverrides {
 pub struct ClusterOverride {
     /// The replication factor the bootstrap records
     ///
-    /// Recorded, not enforced, at M1: a one node cluster serves everything locally whatever
-    /// this says. It is on the artifact so a later capture with a real factor is visibly a
-    /// different measurement.
+    /// ~~Recorded, not enforced, at M1: a one node cluster serves everything locally whatever
+    /// this says.~~ Since [F40](../../../docs/src/features/replication.md) it is the factor
+    /// the tablet groups replicate at, and an arm asking for more copies than it places nodes
+    /// is refused by [`ClusterOverride::feasibility`] rather than measured at the smaller factor
+    /// the map would settle on ([C10](../../../docs/src/distributed/performance.md)).
     pub replication_factor: u32,
     /// The shard count of every node placed beside this one, in placement order
     ///
@@ -200,10 +202,52 @@ impl ClusterOverride {
         }
     }
 
+    /// A placement of this many peers, each of the same shard count, at a factor
+    ///
+    /// # Arguments
+    ///
+    /// * `replication_factor` - The factor every tablet replicates at
+    /// * `peers` - How many nodes to place beside node zero
+    /// * `shards` - The shard count of each of them
+    #[must_use]
+    pub fn placed(replication_factor: u32, peers: usize, shards: u16) -> Self {
+        ClusterOverride {
+            replication_factor,
+            peers: vec![shards; peers],
+            hop: None,
+        }
+    }
+
     /// How many nodes this arm places, counting node zero
     #[must_use]
     pub fn nodes(&self) -> usize {
         self.peers.len() + 1
+    }
+
+    /// Whether the factor this arm asks for is one its placement can serve
+    ///
+    /// A cluster holds at most one copy of a tablet per node, so a factor past the node count
+    /// is served at the node count: the map's `active_rf` is the smaller of the two and the
+    /// write quorum stays the one the desired factor names, which on one node refuses every
+    /// default write. That is an availability test, and a throughput arm built on it would
+    /// measure a quorum nobody configured. The runner refuses the arm instead
+    /// ([C10](../../../docs/src/distributed/performance.md),
+    /// [F40](../../../docs/src/features/replication.md)).
+    ///
+    /// # Errors
+    ///
+    /// Says what the arm asked for and what it placed when the factor cannot be met.
+    pub fn feasibility(&self) -> Result<(), String> {
+        let nodes = self.nodes();
+        if usize::try_from(self.replication_factor).map_or(true, |factor| factor > nodes) {
+            return Err(format!(
+                "a replication factor of {} on {nodes} node(s) is served at {nodes} copies with a \
+                 quorum of {}: an availability test, not a throughput arm",
+                self.replication_factor,
+                self.replication_factor / 2 + 1
+            ));
+        }
+        Ok(())
     }
 }
 

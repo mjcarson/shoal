@@ -469,6 +469,11 @@ pub const IDS: &[&str] = &[
     "macro/cluster/hop/same_shard",
     "macro/cluster/hop/local_shard",
     "macro/cluster/hop/remote_node",
+    // the replication arms (F40): the reference mixture on three nodes at a factor of one, then
+    // at three durably, then at three in memory. appended after the hop arms
+    "macro/cluster/overhead/nodes/3",
+    "macro/cluster/replication/durable",
+    "macro/cluster/replication/volatile",
 ];
 
 /// Whether an id names a workload this build knows about

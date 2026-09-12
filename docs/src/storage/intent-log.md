@@ -1,11 +1,19 @@
 # The Intent Log
 
-The intent log is Shoal's write-ahead log. Every mutation is appended to it before it is
-acknowledged. There is one per shard per table:
+The intent log is ~~Shoal's write-ahead log~~ a standalone node's write-ahead log. Every mutation
+is appended to it before it is acknowledged. There is one per shard per table:
 
 ```
 <latency_sensitive.path>/<table>/intents/Shard-N-active
 ```
+
+A cluster node writes none of these: since [F40](../features/replication.md) its write-ahead
+log is the tablet groups' shared Raft log, one format 2 WAL per shard at
+`<latency_sensitive.path>/wal/Shard-N/`, whose frame is described in
+`shoal-core/src/server/wal/frame.rs` and whose group commit is described on the
+[storage overview](overview.md#on-a-cluster-node-the-raft-log-is-the-wal). The record below
+is format 1, which the compactor reads on a standalone node and a cluster node's compactor
+never sees.
 
 ## Record format
 

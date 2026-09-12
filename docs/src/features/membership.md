@@ -275,8 +275,10 @@ every shard; a stranger's first question belongs on the lane the control thread 
 
 ## Limitations
 
-- **A replication factor above one is a desired factor.** Placement is one owner per tablet;
-  `active_rf` is 1 wherever the node is placed and readiness says so. Replication is M4's.
+- ~~**A replication factor above one is a desired factor.** Placement is one owner per tablet;
+  `active_rf` is 1 wherever the node is placed and readiness says so. Replication is M4's.~~
+  Since [F40](replication.md) the factor is served: `active_rf` is the smaller of the desired
+  factor and the placement's size, and every tablet has that many copies on distinct nodes.
 - **Data loaded before `Initialize` on a cluster of more than one node stays where the
   bootstrapper's rule put it.** `Initialize` places the tablets over every node, and a tablet
   that moved to another node under the new rule is read there, where it has no data. Moving a
@@ -289,8 +291,10 @@ every shard; a stranger's first question belongs on the lane the control thread 
   incarnation; the `shoal-node://<id>` SAN is written and unread, and `IdentityMismatch` is
   defined and never produced.
 - **A partitioned leader keeps its map for one detection window** and admits writes it should
-  not, since its `up()` count is stale until the detector moves. M4's data quorum is what
-  refuses those writes.
+  not, since its `up()` count is stale until the detector moves. ~~M4's data quorum is what
+  refuses those writes.~~ Since [F40](replication.md) the data quorum refuses them: a write
+  admitted on a stale count is proposed to a group that cannot commit it, and is answered
+  `OutcomeUnknown` at the write deadline.
 - **Only the leader's detector view means anything.** The `Detector` admin read on a follower
   shows its local reachability and an empty table.
 - **The `All` consistency after a `Down` is not exercised.** A cluster's policy is fixed at

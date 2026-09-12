@@ -9,10 +9,21 @@ the failure assumptions.
 
 ## What exists today
 
-Local [recovery](../storage/recovery.md) replays per-shard/table logs and compacts them. Archives
+**The checkpoint and retention boundaries are designed and in place at M4**
+([F40](../features/replication.md)): a cluster node's recovery is openraft's, not the intent
+replay - a group starts at the checkpoint its table's archives are complete to
+(`wal/Shard-N/checkpoint.json`), re-applies the shared WAL from there to what was committed,
+and takes the rest from its leader; compaction is what moves the checkpoint, and a segment is
+handed to it only once every group applied past its frames and deleted only once every group
+purged past them, so an uncommitted suffix never reaches an archive and a lagging member's
+history stays until openraft says it is not needed. What is not there: a member behind the
+purge point cannot be fed a snapshot (M7), an isolated leader learns it is not one at its lease
+(M6), and leadership after a failover stays where the election put it (M5). Before that: local
+[recovery](../storage/recovery.md) replays per-shard/table logs and compacts them, which a
+standalone node still does. Archives
 hold current state, not historical versions. Once compaction merged an intent and deleted its
-log, rereading the archive cannot roll that mutation back. Recovery must change with replication,
-not simply acquire a peer request after today's replay finishes.
+log, rereading the archive cannot roll that mutation back. ~~Recovery must change with replication,
+not simply acquire a peer request after today's replay finishes.~~
 
 ## The design
 
@@ -166,7 +177,8 @@ persistent metadata beyond the existing storage marker.
 ## Prerequisites
 
 [C13](protocol.md), [C5](replication.md), [C2](transport.md), [C4](tablet-map.md).
-Design checkpoint/retention boundaries before M4; implement transfer at M7. C6 strong reads and
+~~Design checkpoint/retention boundaries before M4~~ The boundaries are designed at M4
+([Q3](protocol.md#q2-q3-and-q4-at-m4)); implement transfer at M7. C6 strong reads and
 M6 failover share an authority proof and must be validated together.
 
 ## How it would be measured

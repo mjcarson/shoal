@@ -45,7 +45,7 @@ use crate::shared::identity::NodeId;
 pub use crate::shared::protocol::peer::Lane;
 pub use handshake::Local;
 pub use link::{Frame, FrameKey, Link, LinkEvent, LinkView};
-pub use listener::{peer_acceptor, ListenerContext};
+pub use listener::{peer_acceptor, ListenerContext, ReplicateReply};
 pub use peers::{Peers, Pending};
 
 /// Everything a shard needs to talk to its peers, resolved once by the pool

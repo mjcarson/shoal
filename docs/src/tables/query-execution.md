@@ -352,6 +352,12 @@ delete landed.
 
 ## Writes
 
+**This is the standalone write path.** On a cluster node ([F40](../features/replication.md))
+the shard builds the same intent once with `build_intent`, wraps it as a `Command` and proposes
+it through the tablet's group; the table's `apply` - the replicated twin of the three methods
+below, mutating the same partition the same way with no storage commit - runs when the group
+commits it, in log order, on every replica, and the result is derived there rather than parked.
+
 ```rust
 let intent = SortedIntents::Insert(row);
 let pos = self.storage.commit(&intent).await.unwrap();

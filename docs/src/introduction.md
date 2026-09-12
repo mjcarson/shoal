@@ -40,9 +40,17 @@ database") oversell the current state:
   every node is a consensus group of one, and a placement is a file a test or a benchmark
   writes, not something the cluster agrees on~~ Since [F39](features/membership.md) a node joins
   a cluster through its seeds, the cluster agrees on its members, its placement and its tables,
-  fences a duplicate and calls a silent member down; there is still no replication - every
-  tablet has one home ([Distributed Shoal](distributed/overview.md)).
-- **No replication.** Every partition lives on exactly one shard, in one copy, on one disk.
+  fences a duplicate and calls a silent member down; ~~there is still no replication - every
+  tablet has one home~~ and since [F40](features/replication.md) every tablet is replicated
+  by a Raft group and a default write waits for a durable majority
+  ([Distributed Shoal](distributed/overview.md)).
+- ~~**No replication.** Every partition lives on exactly one shard, in one copy, on one disk.~~
+  **Replicated, on a cluster node.** Since [F40](features/replication.md) a tablet has
+  `min(replication_factor, nodes)` copies on distinct nodes, a write is acknowledged once a
+  majority has fsynced it, and a `One` read is served from the local copy's committed state.
+  A standalone node still holds one copy on one disk, and what is not built yet - strong
+  reads, failover that moves leadership, catch-up past the purge point, rebalancing - is the
+  rest of the [milestones](distributed/milestones.md).
 - **No transactions.** There is no atomicity across queries, no isolation between them, and
   no rollback. A bundle of queries is a batch, not a transaction.
 - **No secondary indexes.** A partition is only ever found by its partition key; there is no
@@ -66,7 +74,8 @@ its nine entries have since been built, in whole ([F10](features/framing-and-pro
 
 Shoal is best understood as a fast single-node partitioned key-value store with a
 persistence layer, on top of which distribution ~~has not yet been built~~ is being built a
-milestone at a time - the transport exists, membership and replication do not. How it would be —
+milestone at a time - the transport, membership and replication exist; failover and
+rebalancing do not. How it would be —
 replication with a primary per tablet, membership under Raft, failover, rebalancing, and the
 tests and benchmarks that would prove each — is designed in
 [Distributed Shoal](distributed/overview.md), which is to the first five bullets above what

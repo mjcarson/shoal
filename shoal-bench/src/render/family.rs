@@ -600,6 +600,46 @@ pub const FAMILIES: &[Family] = &[
              capture on the benchmark host.",
     },
     Family {
+        name: "cluster-replication",
+        title: "What a quorum write costs",
+        surface: Surface::AllWorkloads,
+        what_it_measures:
+            "The grid's reference mixture - half reads, the reference width, the reference depth \
+             - against one three-node placement of three shards a node, three ways. \
+             `overhead/nodes/3` replicates to nobody: every tablet has one copy, and a write is \
+             acknowledged by the shard's own WAL. `replication/durable` gives every tablet a copy \
+             on every node and acknowledges a write once a majority holds it in a WAL that was \
+             fsynced. `replication/volatile` does the same on the ephemeral table, where a \
+             majority holds it in memory. `durable` less `nodes/3` is the durable quorum; \
+             `durable` less `volatile` is the followers' fsync; `volatile` less `nodes/3` is the \
+             lane and the round trip.",
+        how_to_read_it:
+            "As three distributions of the same mixture from one capture, read against each \
+             other and against `overhead/nodes/3` alone - never against `overhead/nodes/1` or \
+             the grid, which run twelve shards on one node where these run nine over three. The \
+             `cluster` record says what ran: the desired factor beside the active one, every \
+             node's cores, the `offered_load` the arm scheduled, every replica's `lag_end`, \
+             `pending_bytes_end` and the writes it answered `unknown` or `rejected`, and the \
+             `outcomes` summed over the nodes. A throughput beside a nonzero `outcomes.unknown` \
+             is one the run could not stand behind.",
+        what_would_make_it_wrong:
+            "A run whose replicas ended behind. `lag_end` above a handful of entries on any \
+             replica means the followers were applying after the client stopped, and the \
+             latency the client saw was a leader ahead of its quorum's apply, not a quorum's \
+             cost. Nonzero `rejected` means the pending bound shed writes and the driver's \
+             closed loop measured refusals. Three nodes on one machine share a device, so \
+             `durable`'s followers fsync into the same queue the leader does - the followers' \
+             cost here is a lower bound on what separate devices would show for the fsync and \
+             an upper bound for the contention.",
+        what_it_cannot_say:
+            "What replication costs over a network: three processes on loopback have no \
+             bandwidth, no congestion and no independent failure, and C10 says never to multiply \
+             a loopback number by an RTT. What a sustained load does: these are closed-loop arms \
+             at one depth, which cannot expose an overload pause or a lag that grows; the \
+             open-loop schedule C10 asks for is filed, not built. What a failover costs, which \
+             is M6's capture.",
+    },
+    Family {
         name: "retired",
         title: "The retired blended workload",
         surface: Surface::AllWorkloads,
@@ -659,6 +699,10 @@ pub fn family_for(id: &str) -> Option<&'static Family> {
     } else if id.starts_with("macro/cluster/hop/") {
         // before the wider cluster prefix, which would otherwise take these
         "cluster-hop"
+    } else if id.starts_with("macro/cluster/replication/") || id == "macro/cluster/overhead/nodes/3" {
+        // the three node arms are read against each other and not against the one node one,
+        // whose shard count they do not share
+        "cluster-replication"
     } else if id.starts_with("macro/cluster/") {
         "cluster-overhead"
     } else if id.starts_with("macro/fanout/") {

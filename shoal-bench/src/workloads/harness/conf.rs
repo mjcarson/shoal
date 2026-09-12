@@ -209,6 +209,10 @@ pub fn cluster_facts(
         learners: u32::try_from(view.learners.len()).unwrap_or(u32::MAX),
         hop: None,
         transport: None,
+        // a node alone replicates to nobody; a staged cluster fills these in after the run
+        // ([F40](../../../../docs/src/features/replication.md))
+        replicas: Vec::new(),
+        outcomes: None,
     }))
 }
 

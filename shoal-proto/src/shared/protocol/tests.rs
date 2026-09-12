@@ -26,7 +26,7 @@ use super::{
 };
 
 /// Every message type this build knows, so a test can walk all of them
-const ALL_TYPES: [MessageType; 24] = [
+const ALL_TYPES: [MessageType; 26] = [
     MessageType::Hello,
     MessageType::HelloAck,
     MessageType::Auth,
@@ -51,6 +51,8 @@ const ALL_TYPES: [MessageType; 24] = [
     MessageType::SnapshotEnd,
     MessageType::Admin,
     MessageType::AdminResponse,
+    MessageType::Replicate,
+    MessageType::ReplicateResponse,
 ];
 
 /// Every error code this build knows, so a test can walk all of them
@@ -166,6 +168,8 @@ fn every_message_type_round_trips_through_its_discriminant() {
         (MessageType::SnapshotEnd, 22),
         (MessageType::Admin, 23),
         (MessageType::AdminResponse, 24),
+        (MessageType::Replicate, 25),
+        (MessageType::ReplicateResponse, 26),
     ];
     // check both directions for each one
     for (kind, byte) in pinned {
@@ -248,7 +252,7 @@ fn a_header_of_an_unknown_version_is_still_readable() {
 #[test]
 fn an_unknown_message_type_is_refused() {
     // zero in particular, so that a zeroed buffer is never mistaken for a hello
-    for kind in [0u8, 25, 255] {
+    for kind in [0u8, 27, 255] {
         let mut raw = Header::new(MessageType::Queries, Flags::NONE, 8, ROOMY)
             .unwrap()
             .encode();

@@ -249,7 +249,7 @@ pub const GROUPS: &[Group] = &[
     },
     Group {
         name: "cluster",
-        summary: "what being a cluster node costs, against the standalone reference cell, and what a hop costs a read",
+        summary: "what being a cluster node costs, against the standalone reference cell, what a hop costs a read, and what a durable or volatile quorum costs a write",
         members: Members {
             layers: &[Layer::Macro],
             prefixes: &["macro/cluster/"],

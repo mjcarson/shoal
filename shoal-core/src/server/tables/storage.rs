@@ -175,6 +175,21 @@ pub struct FlushProgress {
 pub enum CompactionJob {
     /// A path to an intent log to compact
     IntentLog { path: PathBuf, generation: u64 },
+    /// A sealed WAL segment on a cluster node, of which these frames are this table's
+    ///
+    /// The shard hands one of these to every table with frames in a segment once every
+    /// group's frames in it are applied or truncated
+    /// ([F40](../../../docs/src/features/replication.md)). The frames are read at the offsets
+    /// named and nothing else in the file is, so a truncated entry is never merged; they are
+    /// in log order per group. The file is the shard loop's to delete, never the compactor's.
+    Segment {
+        /// The segment
+        path: PathBuf,
+        /// Its generation
+        generation: u64,
+        /// This table's frames in it, as (offset, length), in log order per group
+        frames: Vec<(u64, u32)>,
+    },
     /// Compact this shards archive data
     Archives,
     /// Shutdown this compactor
@@ -287,6 +302,22 @@ pub trait IntentReadSupport<T: RkyvSupport>: Sized + RkyvSupport + PartitionSupp
 
     /// Get the partition key for a specific intent
     fn partition_key_and_intent(read: &ReadResult) -> Result<(u64, Self::Intent), ServerError>
+    where
+        for<'a> <Self::Intent as Archive>::Archived: CheckBytes<
+            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+        >;
+
+    /// Get the partition key for an intent that arrived as bytes, validating them first
+    ///
+    /// The compactor's reader of a replicated command's payload
+    /// ([F40](../../../docs/src/features/replication.md)): the bytes crossed a process
+    /// boundary, so they are checked rather than accessed in place, and copied into an aligned
+    /// buffer first because a command's payload is not aligned for an archive.
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - The intent's bytes
+    fn partition_key_and_intent_checked(bytes: &[u8]) -> Result<(u64, Self::Intent), ServerError>
     where
         for<'a> <Self::Intent as Archive>::Archived: CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
@@ -565,6 +596,29 @@ pub trait StorageSupport: Sized {
         &self,
         partition_id: u64,
     ) -> Result<Option<ReadResult>, ServerError>;
+
+    /// Note the WAL generation a replicated command is applied in
+    ///
+    /// On a cluster node the shard's shared WAL is the log and this engine writes none of its
+    /// own, so the generation a partition is stamped with is the WAL's and the engine has to be
+    /// told it ([F40](../../../docs/src/features/replication.md)). An engine with a log of its
+    /// own ignores this.
+    ///
+    /// # Arguments
+    ///
+    /// * `generation` - The WAL's active generation
+    fn observe_generation(&mut self, generation: u64) {
+        let _ = generation;
+    }
+
+    /// The channel this engine's compactor takes jobs on, if it has one
+    ///
+    /// The shard hands a sealed WAL segment to every table's compactor through this
+    /// ([F40](../../../docs/src/features/replication.md)); an engine that stores nothing has
+    /// nobody to hand it to.
+    fn compaction_sink(&self) -> Option<AsyncSender<CompactionJob>> {
+        None
+    }
 
     /// Shutdown this storage engine
     #[allow(async_fn_in_trait)]

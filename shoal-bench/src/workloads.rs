@@ -26,6 +26,7 @@
 
 pub mod cluster_hop;
 pub mod cluster_overhead;
+pub mod cluster_replication;
 pub mod conf_sweep;
 pub mod fanout;
 pub mod fanout_ephemeral;
@@ -136,6 +137,14 @@ pub fn all() -> Vec<Box<dyn Workload>> {
     // placement three ways - same shard, another local shard, the other node
     built.extend(
         cluster_hop::all()
+            .into_iter()
+            .map(|workload| Box::new(workload) as Box<dyn Workload>),
+    );
+    // the replication arms, appended after the hop arms: the reference mixture on a three node
+    // placement replicating to nobody, then to a durable majority, then to a volatile one
+    // ([F40](../../docs/src/features/replication.md))
+    built.extend(
+        cluster_replication::all()
             .into_iter()
             .map(|workload| Box::new(workload) as Box<dyn Workload>),
     );

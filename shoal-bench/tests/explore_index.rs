@@ -587,7 +587,9 @@ fn the_presets_pick_arms_that_answer_their_own_metric() {
 /// one field deliberately left out, and is named here as such.
 #[test]
 fn the_facts_mirrors_are_total() {
-    use shoal_bench::model::macro_layer::{ClusterFacts, ConfFacts, HopFacts, HopMix, NodeCores, ScaleFacts};
+    use shoal_bench::model::macro_layer::{
+        ClusterFacts, ConfFacts, HopFacts, HopMix, NodeCores, OfferedLoad, OutcomeFacts, ReplicaFacts, ScaleFacts,
+    };
     let keys = |value: serde_json::Value| -> Vec<String> {
         value
             .as_object()
@@ -646,7 +648,11 @@ fn the_facts_mirrors_are_total() {
         driver_cores: vec![2],
         tables: 1,
         tablets: 4096,
-        offered_load: Some(1),
+        offered_load: Some(OfferedLoad {
+            mode: "closed".to_string(),
+            outstanding: 8,
+            rate: None,
+        }),
         emulated: true,
         // the arm's hop record travels to the explorer; the placement and transport counters
         // are an environment record it has no axis for, and are absent here so the key sets
@@ -662,9 +668,32 @@ fn the_facts_mirrors_are_total() {
             expected_mix: HopMix { same: 0, local: 0, remote: 100 },
         }),
         transport: None,
+        // the replicas' debt and the outcomes travel whole (F40)
+        replicas: vec![ReplicaFacts {
+            node: "n0".to_string(),
+            groups: 6,
+            leading: 2,
+            lag_end: 0,
+            pending_bytes_end: 0,
+            volatile_bytes_end: 0,
+            unknown: 0,
+            rejected: 0,
+        }],
+        outcomes: Some(OutcomeFacts {
+            unknown: 0,
+            rejected: 0,
+        }),
     };
     let mirrored = explore::index::cluster_facts(&cluster);
     assert_eq!(keys(serde_json::to_value(&cluster).unwrap()), keys(serde_json::to_value(&mirrored).unwrap()));
+    assert_eq!(
+        keys(serde_json::to_value(&cluster.replicas[0]).unwrap()),
+        keys(serde_json::to_value(&mirrored.replicas[0]).unwrap())
+    );
+    assert_eq!(
+        keys(serde_json::to_value(&cluster.offered_load).unwrap()),
+        keys(serde_json::to_value(&mirrored.offered_load).unwrap())
+    );
     assert_eq!(
         keys(serde_json::to_value(&cluster.cores[0]).unwrap()),
         keys(serde_json::to_value(&mirrored.cores[0]).unwrap())

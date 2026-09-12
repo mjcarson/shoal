@@ -24,7 +24,9 @@ use tracing::{event, instrument, Level, Span};
 use uuid::Uuid;
 
 use crate::server::messages::{Answer, LoadedPartition, QueryMetadata, SealReply, ServerMsg};
-use crate::server::tables::persistent::{open, RowSink};
+use crate::server::replication::{CommandResult, ResultKind};
+use crate::server::tables::persistent::{open, ApplyStep, RowSink};
+use crate::shared::protocol::peer::Command;
 use crate::shared::protocol::error::ErrorCode;
 use crate::server::stage_profile::{StageOp, StageStamps};
 use crate::server::tables::partitions::SortedPartition;
@@ -168,6 +170,12 @@ where
     loader_tx: AsyncSender<LoaderMsg<N>>,
     /// A map of queries blocked on partitions being loaded from disk
     blocked: HashMap<u64, Vec<(QueryMetadata, SortedQuery<R>)>>,
+    /// The partitions a replicated apply asked to have read, and is waiting on
+    ///
+    /// Kept apart from `blocked`, which holds queries: an apply parks nothing here, the shard
+    /// loop holds its batch, and this only stops the same read being asked for twice
+    /// ([F40](../../../docs/src/features/replication.md)).
+    loading: HashSet<u64>,
     /// The total size of all data on this shard
     memory_usage: Arc<RefCell<usize>>,
     /// The most recently used tables/partitions on this shard
@@ -258,6 +266,7 @@ where
             flushed: Vec::with_capacity(1000),
             loader_tx: loader_tx.clone(),
             blocked: HashMap::with_capacity(1000),
+            loading: HashSet::new(),
             memory_usage: memory_usage.clone(),
             lru: lru.clone(),
             // nothing has been replayed yet so nothing has been discarded
@@ -291,6 +300,11 @@ where
         self.recovery
     }
 
+    /// The channel this table's compactor takes jobs on, if it has one
+    pub fn compaction_sink(&self) -> Option<AsyncSender<crate::storage::CompactionJob>> {
+        self.storage.compaction_sink()
+    }
+
     /// Spawn the loader for this storage engine type
     pub async fn spawn_loader(
         &self,
@@ -320,6 +334,8 @@ where
     ) -> Result<PartitionLoad<SortedQuery<R>>, ServerError> {
         // remember which partition this is, since the load is consumed below
         let partition_id = loaded.partition_id;
+        // a read an apply asked for has landed, whatever else was waiting on it
+        self.loading.remove(&partition_id);
         // and the span of the read that produced it, for the same reason
         let read_span = loaded.span.clone();
         // overlay any existing loaded partition data on this newly loaded partition
@@ -450,6 +466,8 @@ where
         read: &Span,
         error: Option<&ResponseError>,
     ) -> Option<Vec<(QueryMetadata, SortedQuery<R>)>> {
+        // a read an apply asked for gave up, whatever else was waiting on it
+        self.loading.remove(&partition_id);
         // take the queries that were parked on this partition
         let mut blocked = self.blocked.remove(&partition_id)?;
         // log how many queries this failure released
@@ -1343,6 +1361,236 @@ where
         }
     }
 
+    /// The intent a write proposes through its tablet group, serialized once
+    ///
+    /// A read has no intent and proposes nothing.
+    ///
+    /// # Arguments
+    ///
+    /// * `query` - The query
+    #[must_use]
+    pub fn build_intent(&self, query: &SortedQuery<R>) -> Option<(u64, Vec<u8>)> {
+        let (key, intent) = match query {
+            SortedQuery::Insert { row, .. } => (row.get_partition_key(), SortedIntents::Insert(row.clone())),
+            SortedQuery::Delete { key, sort_key } => (*key, SortedIntents::<R>::delete(*key, sort_key.clone())),
+            SortedQuery::Update(update) => (update.partition_key, SortedIntents::<R>::update(update.clone())),
+            SortedQuery::Get(_) | SortedQuery::Exists(_) => return None,
+        };
+        Some((key, RkyvSupport::serialize(&intent).to_vec()))
+    }
+
+    /// Apply a committed command to this table, deriving its result from the state it finds
+    ///
+    /// The replicated twin of `insert`, `delete` and `update`: the same mutation of the same
+    /// partition, the same `bool` computed the same way, with nothing committed to storage,
+    /// since the shard's WAL already holds the command and the group already committed it
+    /// ([F40](../../../docs/src/features/replication.md)). A partition a delete or an update
+    /// needs from disk is asked for through [`Self::request_load`] by the caller, which applies
+    /// again with `skip_disk` set once the read lands or turns out to have nothing.
+    ///
+    /// # Arguments
+    ///
+    /// * `command` - The command
+    /// * `generation` - The WAL generation the command's frame is in
+    /// * `skip_disk` - Whether to answer without reading, because a read was already tried
+    pub fn apply(&mut self, command: &Command, generation: u64, skip_disk: bool) -> ApplyStep {
+        // the generation the partition is stamped with is the WAL's
+        self.generation = generation;
+        self.storage.observe_generation(generation);
+        // an archive is accessed at its alignment, which a command's payload does not promise
+        let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(command.payload.len());
+        aligned.extend_from_slice(&command.payload);
+        // validated: the bytes crossed a process boundary
+        let intent = match SortedIntents::<R>::access(&aligned) {
+            Ok(intent) => intent,
+            Err(error) => return ApplyStep::Refused(format!("the command's payload is not a sorted intent: {error}")),
+        };
+        match intent {
+            ArchivedSortedIntents::Insert(archived) => {
+                let row: R = match RkyvSupport::deserialize(archived) {
+                    Ok(row) => row,
+                    Err(error) => return ApplyStep::Refused(format!("the command's row does not decode: {error}")),
+                };
+                let key = row.get_partition_key();
+                let entry = self.partitions.entry(key).or_insert_with(|| MaybeLoaded::Loaded {
+                    partition: SortedPartition::new(key),
+                    generation,
+                });
+                let (size_diff, _) = match entry {
+                    MaybeLoaded::Loaded { partition, generation: stamped } => {
+                        *stamped = generation;
+                        partition.insert(row)
+                    }
+                    MaybeLoaded::Accessible(read) => {
+                        let mut partition = match SortedPartition::<R>::deserialize(read.archived()) {
+                            Ok(partition) => partition,
+                            Err(error) => return ApplyStep::Refused(format!("the resident archive does not decode: {error}")),
+                        };
+                        partition.check_disk = false;
+                        let outcome = partition.insert(row);
+                        *entry = MaybeLoaded::Loaded { partition, generation };
+                        outcome
+                    }
+                };
+                adjust_memory_usage(&self.memory_usage, size_diff);
+                self.lru.borrow_mut().pop(&(self.table_name, key));
+                ApplyStep::Done(CommandResult {
+                    kind: ResultKind::Insert,
+                    ok: true,
+                })
+            }
+            ArchivedSortedIntents::Delete { partition_key, sort_key } => {
+                let key = partition_key.to_native();
+                let sort = match rkyv::deserialize::<R::Sort, rkyv::rancor::Error>(sort_key) {
+                    Ok(sort) => sort,
+                    Err(error) => return ApplyStep::Refused(format!("the command's sort key does not decode: {error}")),
+                };
+                let deleted = match self.partitions.get_mut(&key) {
+                    Some(MaybeLoaded::Loaded { partition, generation: stamped }) => {
+                        match partition.remove(&sort) {
+                            Some((size, _)) => {
+                                adjust_memory_usage(&self.memory_usage, -(size.cast_signed()));
+                                *stamped = generation;
+                                true
+                            }
+                            None if partition.check_disk && !skip_disk => return ApplyStep::NeedsLoad(key),
+                            None => false,
+                        }
+                    }
+                    Some(entry @ MaybeLoaded::Accessible(_)) => {
+                        let MaybeLoaded::Accessible(read) = &*entry else { unreachable!() };
+                        let mut partition = match SortedPartition::<R>::deserialize(read.archived()) {
+                            Ok(partition) => partition,
+                            Err(error) => return ApplyStep::Refused(format!("the resident archive does not decode: {error}")),
+                        };
+                        partition.check_disk = false;
+                        let removed = partition.remove(&sort);
+                        let before = entry.size();
+                        *entry = MaybeLoaded::Loaded { partition, generation };
+                        adjust_memory_usage(&self.memory_usage, entry.size().cast_signed() - before.cast_signed());
+                        removed.is_some()
+                    }
+                    None if !skip_disk => return ApplyStep::NeedsLoad(key),
+                    None => false,
+                };
+                if deleted {
+                    self.lru.borrow_mut().pop(&(self.table_name, key));
+                }
+                ApplyStep::Done(CommandResult {
+                    kind: ResultKind::Delete,
+                    ok: deleted,
+                })
+            }
+            ArchivedSortedIntents::Update(archived) => {
+                let update = match rkyv::deserialize::<SortedUpdate<R>, rkyv::rancor::Error>(archived) {
+                    Ok(update) => update,
+                    Err(error) => return ApplyStep::Refused(format!("the command's update does not decode: {error}")),
+                };
+                let key = update.partition_key;
+                let updated = match self.partitions.get_mut(&key) {
+                    Some(MaybeLoaded::Loaded { partition, generation: stamped }) => match partition.update(&update) {
+                        Some(diff) => {
+                            adjust_memory_usage(&self.memory_usage, diff);
+                            *stamped = generation;
+                            true
+                        }
+                        None if partition.check_disk && !skip_disk => return ApplyStep::NeedsLoad(key),
+                        None => false,
+                    },
+                    Some(entry @ MaybeLoaded::Accessible(_)) => {
+                        let MaybeLoaded::Accessible(read) = &*entry else { unreachable!() };
+                        let mut partition = match SortedPartition::<R>::deserialize(read.archived()) {
+                            Ok(partition) => partition,
+                            Err(error) => return ApplyStep::Refused(format!("the resident archive does not decode: {error}")),
+                        };
+                        partition.check_disk = false;
+                        let updated = partition.update(&update).is_some();
+                        let before = entry.size();
+                        *entry = MaybeLoaded::Loaded { partition, generation };
+                        adjust_memory_usage(&self.memory_usage, entry.size().cast_signed() - before.cast_signed());
+                        updated
+                    }
+                    None if !skip_disk => return ApplyStep::NeedsLoad(key),
+                    None => false,
+                };
+                if updated {
+                    self.lru.borrow_mut().pop(&(self.table_name, key));
+                }
+                ApplyStep::Done(CommandResult {
+                    kind: ResultKind::Update,
+                    ok: updated,
+                })
+            }
+        }
+    }
+
+    /// Ask for a partition a replicated apply needs, saying whether a read is coming
+    ///
+    /// Returns true if the partition is on disk and a read was requested, or is already in
+    /// flight; false if storage has nothing for it, in which case the partition is marked so
+    /// nothing asks again.
+    ///
+    /// # Arguments
+    ///
+    /// * `partition_key` - The partition
+    /// * `span` - The span the read hangs off
+    pub async fn request_load(&mut self, partition_key: u64, span: &Span) -> Result<bool, ServerError> {
+        // a read already asked for, by an apply or by a query, is one to wait on
+        if self.loading.contains(&partition_key) || self.blocked.contains_key(&partition_key) {
+            return Ok(true);
+        }
+        let will_load = self
+            .storage
+            .load_partition(self.table_name, partition_key, span, &self.loader_tx)
+            .await?;
+        if will_load {
+            self.loading.insert(partition_key);
+        } else {
+            self.mark_absent_from_disk(partition_key);
+        }
+        Ok(will_load)
+    }
+
+    /// Hash the applied state, for a fixture comparing replicas at a common boundary
+    ///
+    /// Every live row, in partition then sort order, hashed as its partition key and its
+    /// archived bytes; tombstones and archives alike are folded in as rows, so a resident copy
+    /// and one still in its archive hash the same. Returns how many rows there are and the hash.
+    #[must_use]
+    pub fn digest(&self) -> (u64, u64) {
+        let mut keys: Vec<u64> = self.partitions.keys().copied().collect();
+        keys.sort_unstable();
+        let mut rows = 0u64;
+        let mut acc = 0u64;
+        for key in keys {
+            let Some(entry) = self.partitions.get(&key) else { continue };
+            // a resident partition as it is, an archived one read back whole
+            let owned;
+            let partition: &SortedPartition<R> = match entry {
+                MaybeLoaded::Loaded { partition, .. } => partition,
+                MaybeLoaded::Accessible(read) => {
+                    owned = SortedPartition::<R>::deserialize(read.archived()).ok();
+                    match &owned {
+                        Some(partition) => partition,
+                        None => continue,
+                    }
+                }
+            };
+            for (_, row) in &partition.rows {
+                if let MaybeRow::Row(row) = row {
+                    rows += 1;
+                    let bytes = RkyvSupport::serialize(row);
+                    let mut fold = Vec::with_capacity(16 + bytes.len());
+                    fold.extend_from_slice(&acc.to_le_bytes());
+                    fold.extend_from_slice(&key.to_le_bytes());
+                    fold.extend_from_slice(&bytes);
+                    acc = gxhash::gxhash64(&fold, 0);
+                }
+            }
+        }
+        (rows, acc)
+    }
+
     /// Mark partitions as evictable if they are no longer in the intent log
     ///
     /// The generation we are given names an intent log that has been compacted into
@@ -1742,6 +1990,27 @@ where
         // deserialize this intent
         let intent = rkyv::deserialize::<SortedIntents<T>, rkyv::rancor::Error>(archived)?;
         // get this intent entries partition key
+        let partition_key = match &intent {
+            SortedIntents::Insert(row) => row.get_partition_key(),
+            SortedIntents::Delete { partition_key, .. } => *partition_key,
+            SortedIntents::Update(update) => update.partition_key,
+        };
+        Ok((partition_key, intent))
+    }
+
+    /// Get the partition key for an intent that arrived as bytes, validating them first
+    fn partition_key_and_intent_checked(bytes: &[u8]) -> Result<(u64, SortedIntents<T>), ServerError>
+    where
+        for<'a> ArchivedSortedIntents<T>: CheckBytes<
+            Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+        >,
+    {
+        // an archive is accessed at its alignment, which a command's payload does not promise
+        let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(bytes.len());
+        aligned.extend_from_slice(bytes);
+        // validated, since the bytes crossed a process boundary
+        let archived = <Self::Intent as RkyvSupport>::access(&aligned)?;
+        let intent = rkyv::deserialize::<SortedIntents<T>, rkyv::rancor::Error>(archived)?;
         let partition_key = match &intent {
             SortedIntents::Insert(row) => row.get_partition_key(),
             SortedIntents::Delete { partition_key, .. } => *partition_key,

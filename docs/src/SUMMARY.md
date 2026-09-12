@@ -101,6 +101,7 @@
   - [F37. Node identity and the control-plane thread](features/node-identity-control-plane.md)
   - [F38. The inter-node transport](features/inter-node-transport.md)
   - [F39. Membership](features/membership.md)
+  - [F40. Replication and quorum writes](features/replication.md)
 
 # Direction
 

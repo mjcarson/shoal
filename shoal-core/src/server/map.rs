@@ -28,9 +28,9 @@ use serde::{Deserialize, Serialize};
 use super::conf::cluster::{BootstrapPolicy, Consistency};
 use super::control::types::{ControlState, MemberHealth, MemberRole};
 use super::peer::handshake::{Admission, PeerAddr, Verdict};
-use super::ring::Ring;
+use super::ring::{Ring, TABLET_COUNT};
 use super::ServerError;
-use crate::shared::identity::{ClusterId, NodeId, TableId};
+use crate::shared::identity::{ClusterId, GroupId, NodeId, ShardAddr, TableId};
 use crate::shared::protocol::admin::{TopologyFrame, TopologyMember};
 
 /// One member of the cluster, as the map carries it
@@ -63,6 +63,41 @@ pub struct QuorumShortfall {
     pub have: u32,
     /// How many the write's consistency needs
     pub need: u32,
+}
+
+/// One tablet group a shard hosts: a table over an ordered replica set, and the tablets in it
+///
+/// Tablets whose replicas land on the same ordered list of shard addresses share one group
+/// ([F40](../../../docs/src/features/replication.md)), so at equal shard counts a node hosts
+/// `nodes × shards` groups per table rather than a group per tablet - the shape the Q13 spike
+/// pointed at, since per-group heartbeats do not coalesce. The leader is preferred on the
+/// placement primary, which is the first member.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupSpec {
+    /// The group's identity, the hash of the table and the members
+    pub id: GroupId,
+    /// The table it serves
+    pub table: TableId,
+    /// Its members, the placement primary first
+    pub members: Vec<ShardAddr>,
+    /// The tablets it serves, ascending
+    pub tablets: Vec<u16>,
+    /// Which of this node's shards hosts it
+    pub mine: u16,
+}
+
+impl GroupSpec {
+    /// The member on this node
+    #[must_use]
+    pub fn me(&self, node: NodeId) -> ShardAddr {
+        ShardAddr::new(node, self.mine)
+    }
+
+    /// Whether this node's member is the placement primary
+    #[must_use]
+    pub fn is_primary(&self, node: NodeId) -> bool {
+        self.members.first().is_some_and(|primary| primary.node == node && primary.shard == self.mine)
+    }
 }
 
 /// The cluster as every shard holds it
@@ -245,10 +280,104 @@ impl TabletMap {
         Ok(())
     }
 
-    /// How many replicas each tablet has: one under a placement, none before one
+    /// How many replicas each tablet has: the desired factor or the placement's size,
+    /// whichever is smaller; none before a placement
+    ///
+    /// ~~One under a placement~~ Since [F40](../../../docs/src/features/replication.md) a
+    /// placement gives every tablet as many copies as it can up to the policy: three nodes at
+    /// a factor of three hold every tablet everywhere, one node at the same factor holds one
+    /// copy and reports the gap.
     #[must_use]
     pub fn active_rf(&self) -> u32 {
-        u32::from(!self.placement.is_empty())
+        if self.placement.is_empty() {
+            return 0;
+        }
+        let nodes = u32::try_from(self.placement.len()).unwrap_or(u32::MAX);
+        self.desired_rf.max(1).min(nodes)
+    }
+
+    /// The replicas of a tablet, the placement primary first
+    ///
+    /// Tablet `t` lives on `placement[(t + k) % N]` for `k` below the active factor, and on
+    /// each of those nodes on shard `(t / N) % shards` - the same shard the primary rule picks,
+    /// so a node's replica of a tablet is on the shard that would own it were the node primary
+    /// ([F40](../../../docs/src/features/replication.md)). The nodes are distinct by
+    /// construction, since the factor never passes the placement's size
+    /// ([C4](../../../docs/src/distributed/tablet-map.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `tablet` - The tablet
+    #[must_use]
+    pub fn replicas_of(&self, tablet: usize) -> Vec<ShardAddr> {
+        let counts = self.placement_counts();
+        let nodes = counts.len();
+        if nodes == 0 {
+            return Vec::new();
+        }
+        let copies = self.active_rf() as usize;
+        (0..copies)
+            .map(|k| {
+                let (node, shards) = counts[(tablet + k) % nodes];
+                // truncation cannot happen: the modulus is a u16
+                #[allow(clippy::cast_possible_truncation)]
+                let shard = ((tablet / nodes) % usize::from(shards.max(1))) as u16;
+                ShardAddr::new(node, shard)
+            })
+            .collect()
+    }
+
+    /// The groups a node hosts, one per table and replica set it holds a member of
+    ///
+    /// Every node computes the same groups from the same map, and a shard builds only the ones
+    /// whose members name its own address. Sorted by identity, so two nodes' lists line up.
+    ///
+    /// # Arguments
+    ///
+    /// * `me` - This node
+    #[must_use]
+    pub fn replica_groups(&self, me: NodeId) -> Vec<GroupSpec> {
+        // every replica set this node is in, keyed by the set, with the tablets under it
+        let mut sets: BTreeMap<Vec<ShardAddr>, Vec<u16>> = BTreeMap::new();
+        for tablet in 0..TABLET_COUNT {
+            let members = self.replicas_of(tablet);
+            if members.iter().any(|member| member.node == me) {
+                // truncation cannot happen: a tablet id is twelve bits
+                #[allow(clippy::cast_possible_truncation)]
+                sets.entry(members).or_default().push(tablet as u16);
+            }
+        }
+        // one group per table per set
+        let mut groups = Vec::with_capacity(sets.len() * self.tables.len());
+        for (members, tablets) in sets {
+            let mine = members
+                .iter()
+                .find(|member| member.node == me)
+                .map(|member| member.shard)
+                .expect("the set names this node");
+            for (_, table) in &self.tables {
+                groups.push(GroupSpec {
+                    id: GroupId::of(*table, &members),
+                    table: *table,
+                    members: members.clone(),
+                    tablets: tablets.clone(),
+                    mine,
+                });
+            }
+        }
+        groups.sort_by_key(|group| group.id);
+        groups
+    }
+
+    /// Whether a node holds a replica of a tablet
+    ///
+    /// # Arguments
+    ///
+    /// * `me` - The node
+    /// * `tablet` - The tablet
+    #[must_use]
+    pub fn holds(&self, me: NodeId, tablet: usize) -> bool {
+        self.replicas_of(tablet).iter().any(|member| member.node == me)
     }
 
     /// Whether this node holds tablets under the placement
@@ -285,6 +414,42 @@ impl TabletMap {
             return Ok(None);
         }
         Ring::with_placement(shards, &self.placement_counts(), me).map(Some)
+    }
+
+    /// The ring this node serves queries with: a tablet it holds a replica of is served locally
+    ///
+    /// The placement ring routes every tablet to its primary; this one routes a tablet this
+    /// node holds a copy of to the shard holding it, and everything else to the primary. A
+    /// `One` read is answered from the local copy ([C6](../../../docs/src/distributed/reads.md))
+    /// and a write is proposed by it through the group's leader, which the replica knows
+    /// whatever the placement says - so an unreachable primary takes no tablet down with it
+    /// ([F40](../../../docs/src/features/replication.md)). At a placement of the desired size
+    /// every query is served by a local replica.
+    ///
+    /// # Arguments
+    ///
+    /// * `me` - This node
+    /// * `shards` - How many shards it runs
+    ///
+    /// # Errors
+    ///
+    /// Fails as [`TabletMap::ring_for`] does.
+    pub fn read_ring_for(&self, me: NodeId, shards: usize) -> Result<Option<Ring>, ServerError> {
+        if !self.places(me) {
+            return Ok(None);
+        }
+        let mut ring = Ring::with_placement(shards, &self.placement_counts(), me)?;
+        let counts = self.placement_counts();
+        let nodes = counts.len();
+        for tablet in 0..TABLET_COUNT {
+            if self.holds(me, tablet) {
+                // truncation cannot happen: the modulus is a u16
+                #[allow(clippy::cast_possible_truncation)]
+                let shard = ((tablet / nodes) % shards.max(1)) as u16;
+                ring.set_owner(tablet, shard);
+            }
+        }
+        Ok(Some(ring))
     }
 
     /// The frame a client is handed
@@ -546,5 +711,100 @@ mod tests {
             ..(*newer).clone()
         })));
         assert_eq!(cell.get().version, 2);
+    }
+
+    /// A placed cluster with nodes of the given shard counts, in placement order
+    ///
+    /// # Arguments
+    ///
+    /// * `shards` - Each node's shard count
+    /// * `rf` - The desired replication factor
+    fn placed(shards: &[usize], rf: u32) -> (TabletMap, Vec<NodeId>) {
+        let (mut state, node) = state_with(Cluster::default().replication_factor(rf).policy());
+        let mut nodes = vec![node];
+        for count in &shards[1..] {
+            let other = NodeId::mint();
+            state.apply(&ControlCommand::Admit(record(other, *count, 1)));
+            state.apply(&ControlCommand::ObserveMember(record(other, *count, 1)));
+            nodes.push(other);
+        }
+        state.apply(&ControlCommand::Initialize {
+            op: uuid::Uuid::new_v4(),
+            principal: String::new(),
+            expected_version: state.topology_version,
+            nodes: nodes.clone(),
+            tables: vec![("Row".to_string(), TableId::of("Row"))],
+        });
+        // the bootstrapper's record says two shards; make it what the caller asked
+        if let Some(member) = state.members.get_mut(&node) {
+            member.record.shards = shards[0];
+        }
+        (TabletMap::from_state(&state, Some(node), &[]), nodes)
+    }
+
+    /// Replicas land on distinct nodes, capacity follows shard counts, and the factor is feasible
+    ///
+    /// Three nodes at a factor of three hold every tablet each; four nodes at three hold three
+    /// quarters each, give or take one, on distinct nodes with the primary first; a node with
+    /// twice the shards holds every tablet across twice as many shards, each replica on the
+    /// shard the primary rule picks; and a factor past the placement's size is the placement's
+    /// size ([F40](../../../docs/src/features/replication.md)).
+    #[test]
+    fn placement_respects_distinct_nodes_and_feasible_capacity() {
+        // every node holds every tablet at n equals rf
+        let (map, nodes) = placed(&[1, 1, 1], 3);
+        assert_eq!(map.active_rf(), 3);
+        for tablet in 0..TABLET_COUNT {
+            let replicas = map.replicas_of(tablet);
+            let mut seen: Vec<NodeId> = replicas.iter().map(|addr| addr.node).collect();
+            seen.sort_unstable();
+            seen.dedup();
+            assert_eq!(seen.len(), 3, "tablet {tablet} repeats a node: {replicas:?}");
+            assert_eq!(replicas[0].node, nodes[tablet % 3], "tablet {tablet} has the wrong primary");
+        }
+        for node in &nodes {
+            assert_eq!((0..TABLET_COUNT).filter(|tablet| map.holds(*node, *tablet)).count(), TABLET_COUNT);
+        }
+        // four nodes at three: distinct nodes, and about three quarters of the tablets each
+        let (map, nodes) = placed(&[1, 1, 1, 1], 3);
+        for tablet in 0..TABLET_COUNT {
+            let replicas = map.replicas_of(tablet);
+            assert_eq!(replicas.len(), 3);
+            let mut seen: Vec<NodeId> = replicas.iter().map(|addr| addr.node).collect();
+            seen.sort_unstable();
+            seen.dedup();
+            assert_eq!(seen.len(), 3, "tablet {tablet} repeats a node: {replicas:?}");
+        }
+        for node in &nodes {
+            let held = (0..TABLET_COUNT).filter(|tablet| map.holds(*node, *tablet)).count();
+            let share = TABLET_COUNT * 3 / 4;
+            assert!(held.abs_diff(share) <= 1, "a node holds {held} tablets, not about {share}");
+        }
+        // a node with twice the shards spreads its replicas over twice as many shards, and a
+        // replica sits on the shard the primary rule would pick were the node primary
+        let (map, nodes) = placed(&[2, 1, 1], 3);
+        let mut on_shard = [0usize; 2];
+        for tablet in 0..TABLET_COUNT {
+            for replica in map.replicas_of(tablet) {
+                if replica.node == nodes[0] {
+                    on_shard[usize::from(replica.shard)] += 1;
+                    assert_eq!(usize::from(replica.shard), (tablet / 3) % 2);
+                } else {
+                    assert_eq!(replica.shard, 0);
+                }
+            }
+        }
+        assert_eq!(on_shard[0] + on_shard[1], TABLET_COUNT);
+        // three tablets in a row share a shard, so the split is even to within one such run
+        assert!(on_shard[0].abs_diff(on_shard[1]) <= 3, "shards hold {on_shard:?}");
+        // the groups a node hosts name its own shard as a member, tablets ascending
+        for group in map.replica_groups(nodes[0]) {
+            assert!(group.members.contains(&group.me(nodes[0])));
+            assert!(group.tablets.windows(2).all(|pair| pair[0] < pair[1]));
+        }
+        // a factor past the placement is the placement, not a node holding two copies
+        let (map, _) = placed(&[1, 1], 3);
+        assert_eq!(map.active_rf(), 2);
+        assert!((0..TABLET_COUNT).all(|tablet| map.replicas_of(tablet).len() == 2));
     }
 }

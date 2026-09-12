@@ -23,7 +23,7 @@ fn a_hello(lane: Lane) -> PeerHello {
 /// A hello and an ack each round trip through their bodies and their frames
 #[test]
 fn a_peer_hello_and_its_ack_round_trip() {
-    for lane in [Lane::Data, Lane::Control, Lane::Bulk] {
+    for lane in [Lane::Data, Lane::Control, Lane::Bulk, Lane::Replication] {
         let hello = a_hello(lane);
         assert_eq!(PeerHello::decode(&hello.encode()).unwrap(), hello);
         // the frame is a header naming the type and the body length, then the body
@@ -73,7 +73,7 @@ fn every_peer_refusal_round_trips_and_unknown_fails_closed() {
         assert_eq!(read, PeerRefusal::Unrecognized);
     }
     // an unknown lane byte is refused rather than defaulted, zero included
-    for raw in [0u8, 4, 255] {
+    for raw in [0u8, 5, 255] {
         assert_eq!(Lane::from_byte(raw), Err(ProtocolError::UnknownLane(raw)));
     }
     // and a hello naming one does not decode

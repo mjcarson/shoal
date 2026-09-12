@@ -9,6 +9,16 @@ This meets R4 and R6 without claiming cross-tablet transactions or a common quer
 
 ## What exists today
 
+**Delivered at M4 by [F40](../features/replication.md)** as far as `One` goes: a node routes a
+read to its own replica of the tablet when it holds one and to the placement primary when it
+does not (`TabletMap::read_ring_for`, `shoal-core/src/server/map.rs`), and what the replica
+answers from is its *applied* state - commands the group committed and the shard applied in
+log order, never an entry that was only appended. A follower cut off from its leader keeps
+answering with what was committed before the cut and converges when healed; an isolated
+leader that took a write it could not commit does not show it to a read through itself
+(`one_reads_converge_without_exposing_uncommitted_state`). A write proposed through a node is
+answered only once that node applied it, so a read through the same connection sees it. Not
+there yet: `Primary` and `Quorum` reads, the barrier, session tokens - all of M5. Before that:
 `route_archived` splits queries across owning shards. `Shard::handle_gathered` merges responses,
 restores partition order and applies the final limit. Local shares can carry open response
 objects; remote shares will need validated decoding. Bundles contain multiple independent

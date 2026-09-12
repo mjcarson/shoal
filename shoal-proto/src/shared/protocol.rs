@@ -112,7 +112,9 @@ pub const DEFAULT_MAX_FRAME_BYTES: u32 = 64 * 1024 * 1024;
 /// and a server exchange. Types 13 and above are the peer protocol
 /// ([F38](../../../docs/src/features/inter-node-transport.md)), spoken only between nodes of one
 /// cluster, and `Ping`/`Pong` gained a body there. `Topology` and the two `Admin` types are the
-/// membership milestone's ([F39](../../../docs/src/features/membership.md)); `GoAway`, `Cancel`
+/// membership milestone's ([F39](../../../docs/src/features/membership.md)); `Replicate` and its
+/// response are the replication milestone's ([F40](../../../docs/src/features/replication.md));
+/// `GoAway`, `Cancel`
 /// and `StatusReport` stay reserved so that the features that need them are a call site rather
 /// than another flag day.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -170,6 +172,14 @@ pub enum MessageType {
     Admin = 23,
     /// The answer to an `Admin` request, under the same id
     AdminResponse = 24,
+    /// A data-plane consensus RPC or a proposal, on the replication lane, with a correlation id
+    ///
+    /// The frames a tablet group's members exchange
+    /// ([F40](../../../docs/src/features/replication.md)): an append, a vote, a proposal to
+    /// the group's leader, each under a group identity and the shard on the peer that hosts it.
+    Replicate = 25,
+    /// The answer to a `Replicate` request, under the same correlation id
+    ReplicateResponse = 26,
 }
 
 impl MessageType {
@@ -212,6 +222,8 @@ impl MessageType {
             22 => Ok(MessageType::SnapshotEnd),
             23 => Ok(MessageType::Admin),
             24 => Ok(MessageType::AdminResponse),
+            25 => Ok(MessageType::Replicate),
+            26 => Ok(MessageType::ReplicateResponse),
             // anything else was written by a peer we do not understand, including a zeroed buffer
             unknown => Err(ProtocolError::UnknownMessageType(unknown)),
         }
@@ -245,6 +257,8 @@ impl MessageType {
             MessageType::SnapshotEnd => "SnapshotEnd",
             MessageType::Admin => "Admin",
             MessageType::AdminResponse => "AdminResponse",
+            MessageType::Replicate => "Replicate",
+            MessageType::ReplicateResponse => "ReplicateResponse",
         }
     }
 }
@@ -405,6 +419,13 @@ pub enum ProtocolError {
     UnknownControlKind(u8),
     /// A peer named a forwarded answer kind this build does not know
     UnknownForwardedKind(u8),
+    /// A peer named a replication request kind this build does not know
+    UnknownReplicateKind(u8),
+    /// A replicated command's fixed fields do not describe its bytes
+    ///
+    /// Like [`ProtocolError::MalformedForward`], a sentence for a person: a command that does
+    /// not decode is refused at the group and logged once.
+    MalformedCommand(&'static str),
     /// A forwarded bundle's fixed fields do not describe its bytes
     ///
     /// Carries what was wrong in a sentence rather than a code, because every one of these ends
@@ -477,6 +498,12 @@ impl std::fmt::Display for ProtocolError {
             }
             ProtocolError::UnknownForwardedKind(raw) => {
                 write!(f, "the peer named an unknown forwarded answer kind: {raw}")
+            }
+            ProtocolError::UnknownReplicateKind(raw) => {
+                write!(f, "the peer named an unknown replication request kind: {raw}")
+            }
+            ProtocolError::MalformedCommand(what) => {
+                write!(f, "a replicated command is malformed: {what}")
             }
             ProtocolError::MalformedForward(what) => {
                 write!(f, "the peer sent a malformed forward: {what}")

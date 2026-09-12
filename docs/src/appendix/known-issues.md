@@ -56,11 +56,13 @@ in the other direction — it had one row left open, that row was fixed, and the
 [moved](resolved/claude-md-drift.md).
 
 **Baseline as of writing:** `cargo check --workspace --all-targets` passes with warnings;
-`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ **1,320 tests**, four ignored, plus ~~13~~ 14
+`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ **1,342 tests**, four ignored, plus ~~13~~ 14
 more behind `--features stage-profile` that a default run does not reach ([Test Coverage](test-coverage.md)).
 [F37](../features/node-identity-control-plane.md) took the total to 1,265 and did not update this
 line; [F38](../features/inter-node-transport.md) added 24 more and did;
-[F39](../features/membership.md) added 31 and took it to 1,320.
+[F39](../features/membership.md) added 31 and took it to 1,320;
+[F40](../features/replication.md) added 22 and took it to 1,342, filing items 99 and 100 on
+the way - the second of which is why the fixture suite is run at `--test-threads 6`.
 [F36](../features/cluster-harness.md) added 40 — 28 of them in the new `shoal-model` crate, 4 in
 the new `cluster_fixture.rs` binary whose two ignored functions are the children it re-executes
 the binary as, and the rest over the pool's readiness handle, the frozen ports, the cluster record
@@ -1820,6 +1822,60 @@ parse, and a reason whose wording changes changes a code.
 up, duplicate, already initialized, stale version, bad voter count - and `handle_admin` maps
 the kind to a code, with `Internal` kept for a kind it does not know. The sentence stays for
 the log.
+
+### 99. A durable follower's log reversion stops the leader's whole process
+
+`shoal-core/src/server/shard/groups.rs`, `group_config`; openraft `progress/entry/update.rs`
+
+A tablet group of a persistent table runs with openraft's `allow_log_reversion` off, which is
+the library's default and the right verdict: a durable follower whose log is shorter than what
+it acknowledged has lost an entry the leader counted toward a quorum, and openraft treats that
+as a bug rather than a state to recover from. What it does about it is `panic!` on the
+**leader's** thread - which on a shard is the shard's executor, and takes the node down: every
+group on the shard, every table, every client. One follower with a wiped or corrupted WAL
+directory therefore stops the leader of every group it is in, and the next leader elected
+among the rest meets the same follower and stops too. A volatile group is exempt: its members
+lose their log on every restart by design, so its configuration allows the reversion and the
+leader feeds the follower from the start ([F40](../features/replication.md)).
+
+**Established by reproduction**, before the exemption existed: `uncommitted_suffix_never_enters_checkpoint`
+restarted a node whose ephemeral groups came back empty, and the leader of one of them died
+with `follower log reversion is not allowed without allow_log_reversion enabled; matching:
+T2-…/0.2; conflict: 2`, after which every test client got `ConnectionRefused`. The durable case
+is the same code path with a WAL directory removed by hand, which no test does.
+
+**Fix direction:** the follower is the one that is wrong, not the leader. Allow the reversion
+on durable groups too and have the leader log it at `ERROR` and reset that follower's progress,
+so a corrupted member is fed from the leader's log - or, past the purge point, from M7's
+snapshot - while the leader keeps serving; and report the member's `shards_failed` or a new
+health so an operator sees it. What must not happen is what happens now: a quorum that was
+correct when it was taken losing its leader because a member later lost its disk.
+
+### 100. `duplicate_node_identity_is_fenced` fails under the fixture suite at full parallelism
+
+`shoal/tests/cluster_fixture.rs`, `duplicate_node_identity_is_fenced`
+
+The M3 fencing test passes alone in under two seconds, passes beside the six M4 tests, and
+passes in the whole suite at `--test-threads 6`; run in the whole suite at the default thread
+count - thirty-seven tests, each staging a cluster and claiming whole cores on a thirty-two
+thread machine - it fails every time with `the clone kept running`: the clone started from the
+copied directory at the same incarnation is not refused within its sixty-second wait, and the
+test runs past its mark before the suite is done. Whether the clone never joins under that
+load or joins and is not fenced is not established; the child logs of a failing run were not
+kept.
+
+**Established by running it**, three times each way, on the development host while
+[F40](../features/replication.md) ran the suite - which added nine tests to it and may be what
+tipped the load. `CLAUDE.md` already says a fixture failure that passes alone was a timeout; this
+one is recorded because it is reproducible at one thread count and not at another, which a
+timeout usually is not.
+
+**Fix direction:** find out which. Keep `SHOAL_CHILD_LOG` for a failing run and read the
+clone's - it either never printed ready, never joined, or joined and was admitted. If the
+allocator makes the clone wait for cores, the fixture's `ready_timeout` is the bound to raise;
+if the leader admitted the same incarnation from a second address, that is a fencing defect
+and this item moves up. Until then the suite is run at a lower thread count, which the
+[test-coverage](test-coverage.md) runbook now says.
 
 ### 97. `stage_join.rs` had not compiled since F36, and needs `/opt/shoal` to run
 

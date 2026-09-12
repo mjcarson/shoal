@@ -87,6 +87,10 @@ pin-project-lite = "0.2"
 # the port-zero reservation `ShoalPool::start` holds while its shards bind (F36). the version
 # glommio already resolves, so the lockfile does not grow
 socket2 = "0.6"
+# the replication lane's bodies (F40): openraft's RPC types with a command's bytes inline. the
+# one new entry this feature puts in the lockfile, chosen over the control lane's JSON because
+# a command's payload would otherwise be an array of numbers on every append
+postcard = { version = "1", default-features = false, features = ["alloc"] }
 
 [dev-dependencies]
 tempfile = "3"

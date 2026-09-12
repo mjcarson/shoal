@@ -216,6 +216,20 @@ pub fn is_unsorted_table(ty: &syn::Type) -> bool {
     false
 }
 
+/// Determine if a field type is a persistent table, which has a storage engine to configure
+///
+/// Read off the type's name the way the rest of the macro reads its kind, and for the same
+/// reason: the struct is never emitted, so the name is all there is.
+pub fn is_persistent_table(ty: &syn::Type) -> bool {
+    if let syn::Type::Path(type_path) = ty {
+        if let Some(segment) = type_path.path.segments.first() {
+            let type_name = segment.ident.to_string();
+            return type_name.contains("Persistent");
+        }
+    }
+    false
+}
+
 /// Determine if a field type is a sorted table
 pub fn is_sorted_table(ty: &syn::Type) -> bool {
     if let syn::Type::Path(type_path) = ty {

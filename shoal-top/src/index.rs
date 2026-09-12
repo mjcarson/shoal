@@ -270,9 +270,9 @@ pub struct ClusterFactsLite {
     pub tables: u32,
     /// How many tablets those tables were split into
     pub tablets: u32,
-    /// The offered load, in queries per second, for an open-loop arm
+    /// How the arm scheduled its load; absent before F40
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub offered_load: Option<u64>,
+    pub offered_load: Option<OfferedLoadLite>,
     /// Whether the nodes shared one machine
     pub emulated: bool,
     /// The hop a hop arm was built to take, and the mix its construction implies; absent
@@ -288,6 +288,60 @@ pub struct ClusterFactsLite {
     /// How many were learners
     #[serde(default)]
     pub learners: u32,
+    /// Every node's replication debt when the run ended; empty before F40
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub replicas: Vec<ReplicaFactsLite>,
+    /// Writes the run could not answer definitely; absent before F40
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcomes: Option<OutcomeFactsLite>,
+}
+
+/// How an arm scheduled its load
+///
+/// A mirror of the artifact's `OfferedLoad`: a closed-loop arm names its depth, an open-loop
+/// arm its rate, so a capacity point can be labelled by what was asked of the cluster.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OfferedLoadLite {
+    /// `closed` or `open`
+    pub mode: String,
+    /// How many queries a closed-loop arm kept outstanding
+    pub outstanding: u32,
+    /// The rate an open-loop arm offered, in queries per second
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate: Option<u64>,
+}
+
+/// One node's replication state at the end of a run
+///
+/// A mirror of the artifact's `ReplicaFacts`, whole: every field is a number a chart can put on
+/// an axis, and a capacity point without its replicas' debt is a throughput with no envelope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplicaFactsLite {
+    /// The node's identity
+    pub node: String,
+    /// How many tablet groups it hosted
+    pub groups: u32,
+    /// How many of them it led
+    pub leading: u32,
+    /// The widest committed-to-applied gap when the run ended
+    pub lag_end: u64,
+    /// Bytes of proposals awaiting an outcome when the run ended
+    pub pending_bytes_end: u64,
+    /// Bytes its volatile groups held when the run ended
+    pub volatile_bytes_end: u64,
+    /// Writes it answered with an unknown outcome
+    pub unknown: u64,
+    /// Writes it shed or refused
+    pub rejected: u64,
+}
+
+/// What the run's writes came to that a latency does not say
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutcomeFactsLite {
+    /// Writes answered with an unknown outcome, over every node
+    pub unknown: u64,
+    /// Writes shed or refused, over every node
+    pub rejected: u64,
 }
 
 /// Which hop a hop arm was built to measure

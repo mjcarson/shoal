@@ -9,16 +9,39 @@ not establish this. [C13](protocol.md) is the protocol contract and decision gat
 
 ## What exists today
 
+**Delivered at M4 by [F40](../features/replication.md).** Every tablet has an `openraft` group -
+one per table and distinct replica set, hosted by the shard each member names - whose log is
+one shared format 2 WAL per shard (`shoal-core/src/server/wal/`), written in batches with one
+`fdatasync` each and every `IOFlushed` completed after it. A write is one `Command` - the
+table's intent serialized once, with the bundle and index as its identity - proposed through
+the group by the replica the accepting node holds, applied by every replica in committed order
+with no storage commit of its own, and its result derived there
+(`PersistentUnsortedTable::apply`, `PersistentSortedTable::apply`); a partition the apply
+needs from disk parks the batch behind a load. A `Quorum` write is answered once a majority
+has fsynced it and this shard applied it, `All` once every voter has it, a retry with the
+same identity as the first time from a per-group LRU with a payload digest, a proposal past
+its deadline `OutcomeUnknown`, one past the pending or volatile bound `Shedding` before
+anything is recorded; `One` writes are refused at validation and an `Async` persistent table
+on a cluster node at start. A group's checkpoint is the log id its table's archives are
+complete to, moved by the compactor from sealed segments every group applied past; the
+snapshot is that checkpoint, the purge follows it, and a segment goes once every group purged
+past it. Rotation advances nothing but the durable position. What is not there: catch-up past
+the purge point (M7), a durable low-water mark for the retry table and the leader's step-down
+at its lease (M6), leadership moved after a failover (M5). Every M4 row of the table below is
+a test. Before that, and still on a standalone node:
 `FileSystem::commit` (`shoal-core/src/server/tables/storage/fs.rs`) serializes an intent,
 checksums it and stages it into a per-shard, per-table WAL. The table applies a mutation in
 memory and parks its result in `PendingResponse`; local durability later releases it.
 `DataFlushed` wakes the sweep, and rotation currently drains the queue because the old WAL was
 fsynced. The [compactor](../storage/compaction.md) merges intents into archives and deletes logs.
 
-`NoStorage::commit` (`storage/none.rs`) only advances a watermark. It does not serialize an
+~~`NoStorage::commit` (`storage/none.rs`) only advances a watermark. It does not serialize an
 intent. The persistent and ephemeral tables share table implementations, but their storage
-hooks cannot already supply the same replication bytes. Updates carry changed fields and require
-an ordered base state; insert/delete results can also depend on existing state.
+hooks cannot already supply the same replication bytes.~~ Since M4 the bytes come from
+`build_intent`, one function on the one table type above both storage engines, and the
+command is applied by `apply`, which commits nothing to storage. Updates carry changed fields
+and require an ordered base state; insert/delete results can also depend on existing state -
+which is why both are derived on apply, in committed order.
 
 ## The design
 
@@ -29,7 +52,10 @@ the same order. Leaderless last-writer-wins partial updates would require a diff
 model and storage metadata; the user chose ordered primary replication.
 
 The implementation is an embedded Raft group per tablet, agreed at the Before-M0 gate
-([C13 P2 and P5](protocol.md#the-contract)), with library and runtime selection gated by C13 Q1. Cluster membership remains embedded `openraft`; it does not elect
+([C13 P2 and P5](protocol.md#the-contract)), with library and runtime selection gated by C13 Q1
+- *per tablet* in identity and progress, and at M4 one group serves every tablet of a table
+whose replicas are the same ordered set, which the map's rule makes `N × shards` groups a
+table rather than 4096 ([F40](../features/replication.md)). Cluster membership remains embedded `openraft`; it does not elect
 individual tablet leaders by comparing heartbeat reports. A consensus library defines the
 append, election and configuration rules, and Shoal's storage adapter must honor them.
 
@@ -48,7 +74,10 @@ permission to claim that all earlier data has been installed.
 ### The intent record, format 2
 
 The earlier fourteen-byte header is superseded by a versioned replication envelope. Its exact
-encoding is Q2, to be settled before M4. Required information includes table/range identity,
+encoding ~~is Q2, to be settled before M4~~ was Q2, settled at M4 as the format 2 frame
+([decision record](protocol.md#q2-q3-and-q4-at-m4)): `[len][gxhash32]` unhashed, then kind,
+version, flag, group, index, term and the leader's shard address hashed with the body.
+Required information includes table/range identity,
 term/index, entry kind, request identity where applicable, payload size and checksum. Configuration
 and snapshot-boundary records have typed payloads. Define byte order, length bounds, rkyv alignment
 and checked decoding; do not cast a payload at an arbitrary fourteen-byte offset into an archive.
@@ -100,6 +129,8 @@ the size of a quorum. Initial bootstrap does not serve default writes until the 
 configuration is ready. RF=3 subsequently tolerates one failed member without shrinking RF.
 
 **Rotation no longer drains responses.** It advances only the covered local durable positions.
+*At M4:* `ROTATE` on the leader releases nothing (`quorum_success_requires_distinct_durable_voters`);
+a batch's `IOFlushed` fires after its own segment's sync and never on a rotation.
 Keep pending requests keyed by logical tablet/index and their local WAL generation. Wake the
 response machinery after every relevant durability, commitment and application advance. Isolate
 pending queues by tablet so one stalled tablet does not block unrelated successful operations.
@@ -185,7 +216,8 @@ identities. The wire format and table identity must remain usable by client-only
 ## Prerequisites
 
 [C13](protocol.md) Q1–Q4, [C4](tablet-map.md), [C2](transport.md), and C7's checkpoint contract
-before M4. Basic application lands in M4; the full retry/failover release gate is M6.
+before M4 - all met ([Q2, Q3 and Q4 at M4](protocol.md#q2-q3-and-q4-at-m4)). Basic
+application ~~lands in~~ landed at M4; the full retry/failover release gate is M6.
 
 ## How it would be measured
 

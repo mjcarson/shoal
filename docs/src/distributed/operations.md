@@ -16,7 +16,12 @@ OTLP tracing/metrics. ~~The pool lacks a reliable readiness/failure handle.~~ Si
 authorized against `cluster.admins` by the connection's principal, versioned by expected topology
 version, idempotent by operation id and logged - and readiness in the three parts the design
 asks for: process, control and data, with default writes judged by the same map the shards
-admit against. It has no distributed
+admit against. Since [F40](../features/replication.md) it has `Replication` beside them - every
+tablet group a node hosts with its table, members, leader, applied, committed and checkpoint
+indexes, pending bytes and whether it is volatile and up, folded per node into groups hosted
+and led, the widest committed-to-applied gap, pending and volatile bytes and the writes
+answered unknown or rejected - which readiness carries too, and which is the replication debt
+this page asks an operator to see; `shoalctl` does not draw it yet. It has no distributed
 repair, migration, backup/restore ~~or cluster-admin API~~ and the rest of the admin families are
 their milestones'. Existing disk archives do not have the
 end-to-end integrity metadata required by this design.

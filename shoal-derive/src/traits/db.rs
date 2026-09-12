@@ -332,6 +332,82 @@ pub fn add(
             }
         }
     });
+    // build our write command arms: the table, the partition key and the serialized intent
+    let write_command_arms = fields.named.iter().zip(variants).map(|(field, variant_ident)| {
+        let field_ident = field.ident.as_ref().unwrap();
+        let row_ident = utils::extract_inner_table_ident(&field.ty)
+            .expect("Failed to extract inner table ident");
+        quote! {
+            #query_ident::#row_ident(query) => self
+                .#field_ident
+                .build_intent(query)
+                .map(|(key, payload)| (#table_names_ident::#variant_ident, key, payload)),
+        }
+    });
+    // build our apply command arms
+    let apply_command_arms = fields.named.iter().zip(variants).map(|(field, variant_ident)| {
+        let field_ident = field.ident.as_ref().unwrap();
+        quote! {
+            #table_names_ident::#variant_ident => self.#field_ident.apply(command, generation, skip_disk),
+        }
+    });
+    // build our write response arms, in each table's own variant
+    let write_response_arms = fields.named.iter().zip(variants).map(|(field, variant_ident)| {
+        let row_ident = utils::extract_inner_table_ident(&field.ty)
+            .expect("Failed to extract inner table ident");
+        quote! {
+            #table_names_ident::#variant_ident => {
+                let data = match result.kind {
+                    ::shoal::server::replication::ResultKind::Insert => ::shoal::shared::responses::ResponseAction::Insert(result.ok),
+                    ::shoal::server::replication::ResultKind::Delete => ::shoal::shared::responses::ResponseAction::Delete(result.ok),
+                    ::shoal::server::replication::ResultKind::Update => ::shoal::shared::responses::ResponseAction::Update(result.ok),
+                };
+                #response_ident::#row_ident(::shoal::shared::responses::Response::<#row_ident> { id, index, data, end })
+            }
+        }
+    });
+    // build our request load arms
+    let request_load_arms = fields.named.iter().zip(variants).map(|(field, variant_ident)| {
+        let field_ident = field.ident.as_ref().unwrap();
+        quote! {
+            #table_names_ident::#variant_ident => self.#field_ident.request_load(partition_key, span).await,
+        }
+    });
+    // build our compaction sink arms
+    let compaction_sink_arms = fields.named.iter().zip(variants).map(|(field, variant_ident)| {
+        let field_ident = field.ident.as_ref().unwrap();
+        quote! {
+            if let Some(sink) = self.#field_ident.compaction_sink() {
+                sinks.push((#table_names_ident::#variant_ident, sink));
+            }
+        }
+    });
+    // build our digest arms
+    let digest_arms = fields.named.iter().zip(variants).map(|(field, variant_ident)| {
+        let field_ident = field.ident.as_ref().unwrap();
+        quote! {
+            #table_names_ident::#variant_ident => self.#field_ident.digest(),
+        }
+    });
+    // build our table-of-id arms
+    let table_of_id_arms = variants.iter().map(|variant_ident| {
+        quote! {
+            if id == ::shoal::shared::traits::TableNameSupport::table_id(&#table_names_ident::#variant_ident) {
+                return Some(#table_names_ident::#variant_ident);
+            }
+        }
+    });
+    // the names of the persistent tables, read off the field types
+    let persistent_names: Vec<String> = fields
+        .named
+        .iter()
+        .filter(|field| utils::is_persistent_table(&field.ty))
+        .map(|field| {
+            utils::extract_inner_table_ident(&field.ty)
+                .expect("Failed to extract inner table ident")
+                .to_string()
+        })
+        .collect();
     // build our shutdown arms
     let shutdown_arms = fields.named.iter().map(|field| {
         // get our field ident and type
@@ -524,6 +600,79 @@ pub fn add(
                     #(#fail_partition_arms)*
                 };
                 Ok(())
+            }
+
+            /// The command a write proposes through its tablet group, or none for a read
+            fn write_command(
+                &self,
+                query: &<Self::ClientType as ::shoal::shared::traits::QuerySupport>::QueryKinds,
+            ) -> Option<(Self::TableNames, u64, Vec<u8>)> {
+                match query {
+                    #(#write_command_arms)*
+                }
+            }
+
+            /// Apply a committed command to the table it names
+            fn apply_command(
+                &mut self,
+                table: Self::TableNames,
+                command: &::shoal::shared::protocol::peer::Command,
+                generation: u64,
+                skip_disk: bool,
+            ) -> ::shoal::tables::ApplyStep {
+                match table {
+                    #(#apply_command_arms)*
+                }
+            }
+
+            /// The response a proposal's result is answered with
+            fn write_response(
+                table: Self::TableNames,
+                id: ::shoal::uuid::Uuid,
+                index: usize,
+                end: bool,
+                result: ::shoal::server::replication::CommandResult,
+            ) -> <Self::ClientType as ::shoal::shared::traits::QuerySupport>::ResponseKinds {
+                match table {
+                    #(#write_response_arms)*
+                }
+            }
+
+            /// Ask a table for a partition a replicated apply needs
+            async fn request_load(
+                &mut self,
+                table: Self::TableNames,
+                partition_key: u64,
+                span: &::shoal::tracing::Span,
+            ) -> Result<bool, ::shoal::server::ServerError> {
+                match table {
+                    #(#request_load_arms)*
+                }
+            }
+
+            /// Every table's compactor channel
+            fn compaction_sinks(&self) -> Vec<(Self::TableNames, ::shoal::kanal::AsyncSender<::shoal::storage::CompactionJob>)> {
+                let mut sinks = Vec::new();
+                #(#compaction_sink_arms)*
+                sinks
+            }
+
+            /// Hash a table's applied state
+            fn digest_table(&self, table: Self::TableNames) -> (u64, u64) {
+                match table {
+                    #(#digest_arms)*
+                }
+            }
+
+            /// The table a stable identity names
+            fn table_of_id(id: ::shoal::shared::identity::TableId) -> Option<Self::TableNames> {
+                #(#table_of_id_arms)*
+                None
+            }
+
+            /// The names of every persistent table
+            fn persistent_tables() -> Vec<&'static str> {
+                vec![#(#persistent_names),*]
             }
 
             /// Shutdown this table and flush any data to disk if needed

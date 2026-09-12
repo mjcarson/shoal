@@ -383,6 +383,16 @@ pub enum Sweep {
         /// How many nodes served it
         nodes: u32,
     },
+    /// The reference cell replicated three ways, at one durability
+    ///
+    /// Minted by [`cluster_replication`](super::cluster_replication): the three node overhead
+    /// arm with the factor raised to three, on the persistent table and on the ephemeral one,
+    /// which is what a durable quorum and a volatile one each cost
+    /// ([F40](../../../docs/src/features/replication.md)).
+    Replication {
+        /// `durable` for the persistent table, `volatile` for the ephemeral one
+        durability: &'static str,
+    },
 }
 
 /// One arm of the grid
@@ -1002,6 +1012,9 @@ mod tests {
                 }
                 Sweep::Cluster { nodes } => {
                     unreachable!("Grid::all minted a cluster arm for {nodes} nodes")
+                }
+                Sweep::Replication { durability } => {
+                    unreachable!("Grid::all minted a {durability} replication arm")
                 }
             };
             assert_eq!(arm.id(), expected);

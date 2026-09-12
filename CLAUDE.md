@@ -51,10 +51,16 @@ cargo run -p shoal-model --example regenerate_schedules   # after a model change
 # the cluster fixture (F36) re-executes this binary as its children, so it is its own test target.
 # since F37 its servers are cluster nodes: each child runs a control thread on a core the fixture
 # allocates; since F39 they join each other through node zero and the M1, M2 and M3 acceptance
-# tests live here. every test allocates whole cores, so the suite is what a loaded machine
-# makes it: a failure that passes alone was a timeout, and the child logs are under
-# SHOAL_CHILD_LOG=<dir> (one file per child, DEBUG, large)
-cargo test -p shoal --test cluster_fixture
+# tests live here; since F40 every tablet is replicated between them and the nine M4 tests too.
+# every test allocates whole cores, so the suite is what a loaded machine makes it: a failure
+# that passes alone was a timeout, and the child logs are under SHOAL_CHILD_LOG=<dir> (one file
+# per child, DEBUG, large). run it at six threads: at the default thirty-two the fencing test
+# fails every time (known issue 100)
+cargo test -p shoal --test cluster_fixture -- --test-threads 6
+
+# the tablet groups' WAL under openraft's storage suite, plus the rotation, stream and checkpoint
+# tests (F40). the memory log the ephemeral tables replicate through runs the same suite
+cargo test -p shoal-core wal
 
 # the control plane's two conformance suites and its crash test (F37): the glommio runtime under
 # openraft's own suite, the control store under openraft's storage suite, and a torn append
@@ -177,7 +183,7 @@ data and proves every workload still runs — which is what you want before spen
 real one. Budget twenty minutes for a macro-only smoke pass; the criterion layer is what makes a
 full smoke run take longer than you expect.
 
-The macro layer is three hundred and seventy five **workloads** living in `shoal-bench/src/workloads/`,
+The macro layer is three hundred and seventy eight **workloads** living in `shoal-bench/src/workloads/`,
 each generating its own rows from `--seed` — there is no dataset to fetch
 ([F8](docs/src/features/purpose-built-workloads.md)). They come in three kinds and the differences
 matter:
@@ -199,6 +205,12 @@ matter:
 - **The cluster overhead arm** is one workload, `macro/cluster/overhead/nodes/1`: the grid's
   reference cell served by a server with a `cluster:` block ([F37](docs/src/features/node-identity-control-plane.md)).
   It is read beside `macro/grid/unsorted/r50/1024` and nowhere else; `--group cluster` selects the pair.
+- **The replication arms** are three workloads ([F40](docs/src/features/replication.md)):
+  `macro/cluster/overhead/nodes/3`, the reference mixture on three nodes of three shards
+  replicating to nobody, and `macro/cluster/replication/{durable,volatile}`, the same placement
+  at a factor of three on the persistent and the ephemeral table. They are read against each
+  other and never against `nodes/1`, whose shard count they do not share. An arm asking for more
+  copies than it places nodes is refused before a server starts.
 - **The configuration sweep** is fifty-eight workloads under `macro/conf/`, each one the grid's
   reference cell `macro/grid/unsorted/r50/1024` with **exactly one field** of the server
   configuration moved ([F20](docs/src/features/configuration-sweeps.md)). It answers what a setting
@@ -403,6 +415,15 @@ go through `shoal`.**
   commits a silent member `Down`. Never hold a `RefCell` borrow across an `.await` on the control
   core, and never retry a proposal on a metrics change without a backoff - both starve the one
   executor RaftCore, the links and the loop share
+- Since [F40](docs/src/features/replication.md) every tablet is replicated: a shard hosts one
+  `openraft` group per table and replica set the map derives (`server/map.rs`, `GroupSpec`),
+  its log is the shard's shared format 2 WAL (`server/wal/`, one fsync per batch across groups),
+  a write is a `Command` proposed through the local replica and applied in committed order by
+  `apply` on every replica (`server/shard/groups.rs`), and a cluster node writes no intent log.
+  Never await a group's `apply` on the shard loop - `Raft::new` re-applies the checkpoint on the
+  caller's task, so groups start on spawned tasks and the loop only receives; only the placement
+  primary initializes a fresh group; and a sealed WAL segment is handed to a compactor only once
+  every group applied past it and deleted only once every group purged past it
 - Uses `glommio` LocalExecutor for thread-per-core async I/O
 - `kanal` channels for lock-free inter-shard communication
 - Consistent hash ring for partition routing
