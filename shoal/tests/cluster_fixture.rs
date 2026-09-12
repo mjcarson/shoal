@@ -690,6 +690,116 @@ async fn remote_query_returns_one_result_per_index() -> Result<(), FixtureError>
     Ok(())
 }
 
+/// A stalled bulk stream is bounded and does not block progress traffic (C2 M2)
+///
+/// Two nodes with a proxy on each lane. Node 0 streams far more bulk bytes at node 1 than the
+/// bulk queue holds, through a delayed data-and-bulk proxy: the queue plateaus at its bound and
+/// sheds the rest, and node 0's memory does not run away. While it is stalled, control pings to
+/// node 1 - a separate lane on a separate socket and thread - keep answering, which is the
+/// progress traffic C2 says a bulk transfer must never block. Then the data lane is cut and a
+/// forwarded query answers with a definite outcome inside its deadline rather than hanging, while
+/// pings still answer ([F38](../../docs/src/features/inter-node-transport.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn slow_peer_has_bounded_bytes_and_independent_lanes() -> Result<(), FixtureError> {
+    use cluster::LinkState;
+    let mut cluster = Cluster::builder()
+        .cluster(2, CoreClaim::Count(2))
+        .lane_links(true)
+        .start()
+        .await?;
+    // node 0's bulk link to node 1 shares node 1's data proxy; delay it so the stream stalls
+    cluster.data_link(1).delay(Duration::from_secs(60));
+    let before = cluster.node(0).rss_kib();
+    // stream far more than the 64 MiB bulk queue holds
+    let probe = cluster.node_mut(0).command("PROBE_BULK 1 536870912")?;
+    assert!(probe.get("ok").is_some(), "the bulk probe was refused: {probe}");
+    // poll the transport view until the bulk link's queued bytes plateau under the bound and it
+    // has started shedding
+    let bound: u64 = 64 * 1024 * 1024;
+    let mut shed = false;
+    let mut queued = 0u64;
+    for _ in 0..60 {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let view = cluster.node_mut(0).command("TRANSPORT")?;
+        if let Some(links) = view.get("ok").and_then(|v| v.as_array()).and_then(|shards| shards.first()).and_then(|shard| shard.get("links")).and_then(|l| l.as_array()) {
+            for link in links {
+                if link.get("lane").and_then(|l| l.as_str()) == Some("bulk") {
+                    queued = link.get("queued_bytes").and_then(serde_json::Value::as_u64).unwrap_or(0);
+                    let s = link.get("shed_frames").and_then(serde_json::Value::as_u64).unwrap_or(0);
+                    if s > 0 {
+                        shed = true;
+                    }
+                }
+            }
+        }
+        if shed && queued > 0 {
+            break;
+        }
+    }
+    assert!(shed, "the bulk lane never shed, so nothing bounded it (queued {queued})");
+    assert!(queued <= bound, "the bulk queue held {queued}, past its {bound} byte bound");
+    // memory did not run away with a stream eight times the bound
+    let grew = cluster.node(0).rss_kib().saturating_sub(before);
+    assert!(grew < (bound / 1024) * 3, "node 0 grew {grew} KiB, more than three bulk bounds");
+    // progress traffic survives: a control ping to node 1 still answers
+    let ping = cluster.node_mut(0).command("PING 1")?;
+    assert!(ping.get("ok").is_some(), "a control ping did not survive the bulk stall: {ping}");
+
+    // now cut the data lane to node 1: a forwarded query gets a definite outcome, not a hang
+    cluster.data_link(1).cut();
+    assert_eq!(cluster.data_link(1).state(), LinkState::Cut);
+    // a key owned by node 1: node 0 forwards it, the cut lane fails it definitely
+    let addr = cluster.node(0).endpoints.client.to_string();
+    let client = Shoal::<TestDbClient>::new(&addr).await?;
+    // find a key node 1 owns, so the query must cross the cut lane
+    let key = key_on_other_node(&cluster);
+    let answered = tokio::time::timeout(
+        Duration::from_secs(12),
+        client.send_one(RowGet::new(vec![key])),
+    )
+    .await;
+    match answered {
+        // a definite outcome, whichever it is: a Shedding/Unavailable/OutcomeUnknown error, or an
+        // empty read. What matters is that it answered at all rather than hanging on the cut lane
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => {
+            let text = format!("{error:?}");
+            assert!(
+                text.contains("Unavailable")
+                    || text.contains("OutcomeUnknown")
+                    || text.contains("Shedding"),
+                "the cut lane gave an unexpected error: {text}"
+            );
+        }
+        Err(_) => panic!("a forwarded query to a cut lane hung instead of failing definitely"),
+    }
+    // and control still answers through all of it
+    let ping = cluster.node_mut(0).command("PING 1")?;
+    assert!(ping.get("ok").is_some(), "a control ping did not survive the data cut: {ping}");
+    drop(client);
+    assert_eq!(cluster.node(0).failure(), None);
+    assert_eq!(cluster.node(1).failure(), None);
+    Ok(())
+}
+
+/// A partition key that a two-node placement owns on node 1 rather than node 0
+///
+/// Tablet `t` belongs to `nodes[t % 2]`, and the top twelve bits of the partition hash name the
+/// tablet, so a key whose hash puts it in an odd tablet is node 1's.
+fn key_on_other_node(_cluster: &Cluster) -> u64 {
+    use shoal::shared::traits::PartitionKeySupport;
+    // walk keys until one lands in an odd tablet (node 1 of two), the same hash and tablet split
+    // the ring uses ([F38](../../docs/src/features/inter-node-transport.md))
+    for candidate in 0..1_000_000u64 {
+        let hash = Row::get_partition_key_from_values(&candidate);
+        let tablet = (hash >> (u64::BITS - 12)) as usize;
+        if tablet % 2 == 1 {
+            return candidate;
+        }
+    }
+    panic!("no key landed on node 1");
+}
+
 /// The control lane reaches a placed peer's own Raft (C2 M2, control lane)
 ///
 /// Two nodes, placed by name, plaintext control lanes. Node 0 sends node 1 a vote for a low term

@@ -421,6 +421,23 @@ impl Node {
         }
     }
 
+    /// This child's resident set size in kibibytes, from `/proc/<pid>/status`
+    ///
+    /// Zero if it cannot be read, which a caller treats as "no growth measured" rather than a
+    /// failure.
+    pub fn rss_kib(&self) -> u64 {
+        let status = match std::fs::read_to_string(format!("/proc/{}/status", self.pid)) {
+            Ok(status) => status,
+            Err(_) => return 0,
+        };
+        status
+            .lines()
+            .find_map(|line| line.strip_prefix("VmRSS:"))
+            .and_then(|rest| rest.trim().split_whitespace().next())
+            .and_then(|kib| kib.parse().ok())
+            .unwrap_or(0)
+    }
+
     /// What is known about a child that did not come up
     fn evidence_report(&self, what: &str) -> String {
         let evidence = self.evidence.lock().unwrap();

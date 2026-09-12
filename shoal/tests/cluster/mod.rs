@@ -105,6 +105,12 @@ pub struct ClusterBuilder {
     /// id per server, reserves a peer and a control port for each, stages a marker naming it, and
     /// hands every server the same placement ([F38](../../../docs/src/features/inter-node-transport.md)).
     static_cluster: bool,
+    /// Whether to put a directed proxy in front of each node's data and control lane
+    ///
+    /// When set with [`ClusterBuilder::cluster`], the placement points every peer's data and
+    /// control endpoints at a proxy, so a test can delay or cut one lane to one node while the
+    /// others keep flowing ([F38](../../../docs/src/features/inter-node-transport.md)).
+    lane_links: bool,
 }
 
 impl ClusterBuilder {
@@ -120,6 +126,16 @@ impl ClusterBuilder {
             affinity: None,
             staged_marker: None,
         });
+        self
+    }
+
+    /// Put a directed proxy in front of each node's data and control lane
+    ///
+    /// # Arguments
+    ///
+    /// * `lane_links` - Yes or no
+    pub fn lane_links(mut self, lane_links: bool) -> Self {
+        self.lane_links = lane_links;
         self
     }
 
@@ -247,11 +263,41 @@ impl ClusterBuilder {
         // a static cluster needs its placement decided before any child starts: mint the
         // identities, reserve a peer and a control port for each node, and stage a marker naming
         // each one, so every child gets the same placement and finds its own id on disk
-        let staged = if self.static_cluster {
+        let mut staged = if self.static_cluster {
             Some(build_static_cluster(&self.nodes, &dirs, &plan)?)
         } else {
             None
         };
+        // when lane links are asked for, put a proxy in front of each node's data and control
+        // port and point every placement at the proxies, so a test can fault one lane to one node
+        let mut data_links: BTreeMap<usize, Link> = BTreeMap::new();
+        let mut control_links: BTreeMap<usize, Link> = BTreeMap::new();
+        if self.lane_links {
+            if let Some(staged) = staged.as_mut() {
+                let n = staged.per_node.len();
+                let mut proxy_data = Vec::with_capacity(n);
+                let mut proxy_control = Vec::with_capacity(n);
+                for id in 0..n {
+                    let real_data: SocketAddr =
+                        format!("127.0.0.1:{}", staged.per_node[id].data_port).parse().unwrap();
+                    let real_control: SocketAddr =
+                        format!("127.0.0.1:{}", staged.per_node[id].control_port).parse().unwrap();
+                    let dlink = Link::start(real_data).await?;
+                    let clink = Link::start(real_control).await?;
+                    proxy_data.push(dlink.addr());
+                    proxy_control.push(clink.addr());
+                    data_links.insert(id, dlink);
+                    control_links.insert(id, clink);
+                }
+                // rewrite every node's copy of the shared placement to name the proxies
+                for staged_node in &mut staged.per_node {
+                    for (idx, entry) in staged_node.placement.iter_mut().enumerate() {
+                        entry.1 = format!("127.0.0.1:{}", proxy_data[idx].port());
+                        entry.2 = format!("127.0.0.1:{}", proxy_control[idx].port());
+                    }
+                }
+            }
+        }
         // spawn everything, then wait for everything, so the children start in parallel
         let mut nodes = Vec::with_capacity(self.nodes.len());
         for (id, (spec, dir)) in self.nodes.iter().zip(&dirs).enumerate() {
@@ -291,6 +337,8 @@ impl ClusterBuilder {
         Ok(Cluster {
             nodes,
             links,
+            data_links,
+            control_links,
             plan,
             _dirs: dirs,
         })
@@ -306,6 +354,10 @@ pub struct Cluster {
     nodes: Vec<Node>,
     /// The directed links, by (from, to)
     links: BTreeMap<(usize, usize), Link>,
+    /// The proxy in front of each node's data lane, by node id
+    data_links: BTreeMap<usize, Link>,
+    /// The proxy in front of each node's control lane, by node id
+    control_links: BTreeMap<usize, Link>,
     /// What was allocated and bound
     plan: ClusterPlan,
     /// The storage directories, dropped last
@@ -321,6 +373,7 @@ impl Cluster {
             driver: CoreClaim::Shared,
             ready_timeout: DEFAULT_READY_TIMEOUT,
             static_cluster: false,
+            lane_links: false,
         }
     }
 
@@ -365,6 +418,24 @@ impl Cluster {
         self.links
             .get(&(from, to))
             .unwrap_or_else(|| panic!("no link from {from} to {to}; was the cluster built with links?"))
+    }
+
+    /// The proxy in front of a node's data lane, for a test to delay or cut
+    ///
+    /// # Arguments
+    ///
+    /// * `to` - The node whose data lane to fault
+    pub fn data_link(&self, to: usize) -> &Link {
+        self.data_links.get(&to).expect("this cluster was built without lane links")
+    }
+
+    /// The proxy in front of a node's control lane
+    ///
+    /// # Arguments
+    ///
+    /// * `to` - The node whose control lane to fault
+    pub fn control_link(&self, to: usize) -> &Link {
+        self.control_links.get(&to).expect("this cluster was built without lane links")
     }
 
     /// What was allocated and bound
