@@ -27,11 +27,18 @@
 //! node that never contacts them has lied to whoever wrote it.
 
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 use std::time::Duration;
 
 use super::super::errors::ShoalError;
 use super::super::ServerError;
+use crate::shared::identity::NodeId;
+use crate::utils;
+
+/// The certificate a node presents to its peers and the authority it checks theirs against
+///
+/// The proto crate's shape, re-exported so that a config names one type and the peer lanes build
+/// their TLS from the same struct they were configured with.
+pub use crate::shared::tls::PeerTlsOptions as PeerTls;
 
 /// The default data peer port
 fn default_peer_port() -> u16 {
@@ -216,19 +223,235 @@ impl Default for FailureDetector {
     }
 }
 
-/// The certificate a node presents to its peers and the authority it checks theirs against
+/// One node of a static placement
 ///
-/// Recorded at M1 and refused by [`Cluster::validate`], since the handshake it belongs to is
-/// M2's and Q11 settles what the certificate has to say.
+/// What a node has to know about a peer before it can route to it: who it is, where its two
+/// listeners are, and how many shards it runs - the last because a tablet's shard on that node
+/// is `tablet % shards`, the same rule the node itself uses, and the handshake refuses a peer
+/// whose count differs from this entry.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct PeerTls {
-    /// The PEM file holding this node's certificate chain
-    pub cert: PathBuf,
-    /// The PEM file holding the private key for that chain
-    pub key: PathBuf,
-    /// The PEM file holding the cluster's authority, which every peer's chain must lead to
-    pub ca: PathBuf,
+pub struct PlacedNode {
+    /// The node's identity, which its marker holds and its hello proves
+    pub node: NodeId,
+    /// Its data peer endpoint, `host:port`, which the bulk lane dials too
+    pub data: String,
+    /// Its control listener, `host:port`
+    pub control: String,
+    /// How many shards it runs
+    pub shards: u16,
+}
+
+/// A static placement of tablets over nodes
+///
+/// [F38](../../../../docs/src/features/inter-node-transport.md)'s stand-in for the membership M3
+/// commits: a list of every node in the cluster, this one included, in an order every node's
+/// file agrees on. Tablet `t` belongs to `nodes[t % N]`, and on that node to shard `t % shards`.
+/// A placement of one node is exactly the standalone tablet map, which is what keeps a one node
+/// cluster's routing byte for byte what it was.
+///
+/// This is test-shaped on purpose: it names node identities in a file, which only a fixture that
+/// staged the markers can do. It is replaced, not extended, when the control plane commits
+/// membership.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
+#[serde(deny_unknown_fields)]
+pub struct Placement {
+    /// Every node of the cluster, in placement order
+    #[serde(default)]
+    pub nodes: Vec<PlacedNode>,
+}
+
+impl Placement {
+    /// Find this node's own entry
+    ///
+    /// # Arguments
+    ///
+    /// * `me` - This node's identity
+    pub fn entry(&self, me: NodeId) -> Option<&PlacedNode> {
+        self.nodes.iter().find(|placed| placed.node == me)
+    }
+
+    /// Find a peer's entry
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The peer's identity
+    pub fn peer(&self, node: NodeId) -> Option<&PlacedNode> {
+        self.entry(node)
+    }
+
+    /// The nodes other than this one
+    ///
+    /// # Arguments
+    ///
+    /// * `me` - This node's identity
+    pub fn peers(&self, me: NodeId) -> impl Iterator<Item = &PlacedNode> {
+        self.nodes.iter().filter(move |placed| placed.node != me)
+    }
+
+    /// Check that this placement can be routed against by the node reading it
+    ///
+    /// # Arguments
+    ///
+    /// * `me` - This node's identity
+    /// * `my_shards` - How many shards this node runs
+    ///
+    /// # Errors
+    ///
+    /// Refuses a placement that does not name this node, names it with another shard count,
+    /// names a node twice, names a node with no shards, or names an address that is not one.
+    pub fn validate(&self, me: NodeId, my_shards: usize) -> Result<(), ServerError> {
+        // every node once
+        for (i, placed) in self.nodes.iter().enumerate() {
+            if self.nodes[..i].iter().any(|other| other.node == placed.node) {
+                return Err(ServerError::Shoal(ShoalError::PlacementDuplicateNode {
+                    node: placed.node,
+                }));
+            }
+            // a node with no shards owns no tablet
+            if placed.shards == 0 {
+                return Err(ServerError::Shoal(ShoalError::InvalidConfig(format!(
+                    "cluster.placement names {} with zero shards",
+                    placed.node
+                ))));
+            }
+            // both addresses have to be addresses
+            for (what, addr) in [("data", &placed.data), ("control", &placed.control)] {
+                if addr.parse::<std::net::SocketAddr>().is_err() {
+                    return Err(ServerError::Shoal(ShoalError::InvalidConfig(format!(
+                        "cluster.placement names {} with a {what} address that is not one: {addr}",
+                        placed.node
+                    ))));
+                }
+            }
+        }
+        // and this node among them, with the shard count it actually runs
+        let Some(mine) = self.entry(me) else {
+            return Err(ServerError::Shoal(ShoalError::PlacementMissingSelf { node: me }));
+        };
+        if usize::from(mine.shards) != my_shards {
+            return Err(ServerError::Shoal(ShoalError::PlacementShardCount {
+                node: me,
+                entry: mine.shards,
+                actual: my_shards,
+            }));
+        }
+        Ok(())
+    }
+}
+
+/// The byte bounds and timers of the peer lanes
+///
+/// Every queue between this node and a peer is bounded in bytes, and every wait has a deadline.
+/// The bounds are what make one slow peer's cost a number rather than the node's whole memory;
+/// the deadline is what turns a peer that never answers into an answer the client can act on.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Transport {
+    /// The most bytes queued to one peer on the data lane before forwards are shed
+    #[serde(
+        default = "default_data_queue_bytes",
+        deserialize_with = "utils::deserialize_byte_size"
+    )]
+    pub data_queue_bytes: usize,
+    /// The most bytes queued to one peer on the control lane before RPCs are refused
+    #[serde(
+        default = "default_control_queue_bytes",
+        deserialize_with = "utils::deserialize_byte_size"
+    )]
+    pub control_queue_bytes: usize,
+    /// The most bytes queued to one peer on the bulk lane before chunks are shed
+    #[serde(
+        default = "default_bulk_queue_bytes",
+        deserialize_with = "utils::deserialize_byte_size"
+    )]
+    pub bulk_queue_bytes: usize,
+    /// The most forwarded bytes one peer connection may have in hand, unanswered
+    ///
+    /// Past this the connection stops reading, so the peer's own queue fills and sheds rather
+    /// than this node's memory growing with what it has not answered yet.
+    #[serde(
+        default = "default_inflight_bytes",
+        deserialize_with = "utils::deserialize_byte_size"
+    )]
+    pub inflight_bytes: usize,
+    /// How long a forwarded query is waited on before its outcome is reported unknown
+    #[serde(default = "default_forward_timeout")]
+    pub forward_timeout: DurationSpec,
+    /// The shortest wait before a lost link is dialled again
+    #[serde(default = "default_reconnect_min")]
+    pub reconnect_min: DurationSpec,
+    /// The longest wait before a lost link is dialled again, which the backoff grows to
+    #[serde(default = "default_reconnect_max")]
+    pub reconnect_max: DurationSpec,
+    /// How long a peer has to finish its handshake
+    #[serde(default = "default_handshake_timeout")]
+    pub handshake_timeout: DurationSpec,
+    /// How often the control thread pings every placed peer
+    #[serde(default = "default_ping_interval")]
+    pub ping_interval: DurationSpec,
+}
+
+/// The default data lane queue bound
+fn default_data_queue_bytes() -> usize {
+    64 * 1024 * 1024
+}
+
+/// The default control lane queue bound
+fn default_control_queue_bytes() -> usize {
+    8 * 1024 * 1024
+}
+
+/// The default bulk lane queue bound
+fn default_bulk_queue_bytes() -> usize {
+    64 * 1024 * 1024
+}
+
+/// The default in-flight bound per accepted connection
+fn default_inflight_bytes() -> usize {
+    64 * 1024 * 1024
+}
+
+/// The default forward deadline
+fn default_forward_timeout() -> DurationSpec {
+    DurationSpec(Duration::from_secs(5))
+}
+
+/// The default shortest reconnect wait
+fn default_reconnect_min() -> DurationSpec {
+    DurationSpec(Duration::from_millis(100))
+}
+
+/// The default longest reconnect wait
+fn default_reconnect_max() -> DurationSpec {
+    DurationSpec(Duration::from_secs(5))
+}
+
+/// The default handshake deadline
+fn default_handshake_timeout() -> DurationSpec {
+    DurationSpec(Duration::from_secs(10))
+}
+
+/// The default ping interval
+fn default_ping_interval() -> DurationSpec {
+    DurationSpec(Duration::from_secs(1))
+}
+
+impl Default for Transport {
+    /// The bounds the configuration page writes down
+    fn default() -> Self {
+        Transport {
+            data_queue_bytes: default_data_queue_bytes(),
+            control_queue_bytes: default_control_queue_bytes(),
+            bulk_queue_bytes: default_bulk_queue_bytes(),
+            inflight_bytes: default_inflight_bytes(),
+            forward_timeout: default_forward_timeout(),
+            reconnect_min: default_reconnect_min(),
+            reconnect_max: default_reconnect_max(),
+            handshake_timeout: default_handshake_timeout(),
+            ping_interval: default_ping_interval(),
+        }
+    }
 }
 
 /// The replication policy a bootstrap seeds into the cluster
@@ -336,9 +559,22 @@ pub struct Cluster {
     /// The principals allowed to change the cluster's policy
     #[serde(default)]
     pub admins: Vec<String>,
-    /// The certificate this node presents to its peers
+    /// The certificate this node presents to its peers, and the authority it checks theirs against
+    ///
+    /// Present, every lane is mutual TLS 1.3 handed to the kernel, exactly as `networking.tls`
+    /// does for clients; absent, the lanes are plaintext and peer identity is trusted inside
+    /// whatever boundary the deployment draws around them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls: Option<PeerTls>,
+    /// The static placement of tablets over nodes
+    ///
+    /// Absent, this node is placed alone and its tablet map is the standalone one. Present, it
+    /// has to name this node, and every other node in it is a peer to dial.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<Placement>,
+    /// The byte bounds and timers of the peer lanes
+    #[serde(default)]
+    pub transport: Transport,
 }
 
 impl Default for Cluster {
@@ -362,6 +598,8 @@ impl Default for Cluster {
             auto_remove_after: default_auto_remove_after(),
             admins: Vec::new(),
             tls: None,
+            placement: None,
+            transport: Transport::default(),
         }
     }
 }
@@ -445,6 +683,55 @@ impl Cluster {
         self
     }
 
+    /// Set the certificate this node presents to its peers
+    pub fn tls(mut self, tls: PeerTls) -> Self {
+        self.tls = Some(tls);
+        self
+    }
+
+    /// Set the static placement of tablets over nodes
+    pub fn placement(mut self, placement: Placement) -> Self {
+        self.placement = Some(placement);
+        self
+    }
+
+    /// Set the byte bounds and timers of the peer lanes
+    pub fn transport(mut self, transport: Transport) -> Self {
+        self.transport = transport;
+        self
+    }
+
+    /// The placement this node routes against, which is itself alone when none was given
+    ///
+    /// # Arguments
+    ///
+    /// * `me` - This node's identity
+    /// * `interface` - The interface the client listener binds, for the advertised address
+    /// * `shards` - How many shards this node runs
+    pub fn placement_for(
+        &self,
+        me: NodeId,
+        interface: &str,
+        shards: usize,
+    ) -> Result<Placement, ServerError> {
+        // a placement that was written down is used as it is
+        if let Some(placement) = &self.placement {
+            return Ok(placement.clone());
+        }
+        // none is this node alone, which is the standalone map with a name on it
+        let advertise = self.advertised(interface)?;
+        // a node runs fewer shards than a u16 holds, which `Ring::new` refuses otherwise
+        #[allow(clippy::cast_possible_truncation)]
+        Ok(Placement {
+            nodes: vec![PlacedNode {
+                node: me,
+                data: format!("{advertise}:{}", self.port),
+                control: format!("{advertise}:{}", self.control_port),
+                shards: shards as u16,
+            }],
+        })
+    }
+
     /// The policy this configuration would seed into a cluster it bootstraps
     pub fn policy(&self) -> BootstrapPolicy {
         BootstrapPolicy {
@@ -510,12 +797,16 @@ impl Cluster {
                     .to_string(),
             )));
         }
-        // the peer handshake is M2's
-        if self.tls.is_some() {
-            return Err(ServerError::Shoal(ShoalError::NotImplemented {
-                setting: "cluster.tls".to_string(),
-                milestone: "M2",
-            }));
+        // a certificate that cannot be read is found now, before a peer dials in
+        if let Some(tls) = &self.tls {
+            crate::shared::tls::peer_server_config(tls)?;
+            crate::shared::tls::peer_client_config(tls)?;
+        }
+        // the reconnect backoff has to be a range
+        if self.transport.reconnect_min.duration() > self.transport.reconnect_max.duration() {
+            return Err(ServerError::Shoal(ShoalError::InvalidConfig(
+                "cluster.transport.reconnect_min is longer than reconnect_max".to_string(),
+            )));
         }
         // a control group votes with an odd, small number of members
         if !matches!(self.control_voters, 1 | 3 | 5) {
@@ -584,12 +875,20 @@ mod tests {
         assert_eq!(cluster.primary_failover_after.duration(), Duration::from_secs(5));
         assert_eq!(cluster.failure_detector.interval_ms, 500);
         assert!((cluster.failure_detector.phi_threshold - 8.0).abs() < f64::EPSILON);
+        // the transport bounds and timers are the ones the configuration page writes down
+        assert!(cluster.placement.is_none());
+        assert_eq!(cluster.transport.data_queue_bytes, 64 * 1024 * 1024);
+        assert_eq!(cluster.transport.control_queue_bytes, 8 * 1024 * 1024);
+        assert_eq!(cluster.transport.bulk_queue_bytes, 64 * 1024 * 1024);
+        assert_eq!(cluster.transport.forward_timeout.duration(), Duration::from_secs(5));
+        assert_eq!(cluster.transport.reconnect_min.duration(), Duration::from_millis(100));
+        assert_eq!(cluster.transport.reconnect_max.duration(), Duration::from_secs(5));
     }
 
-    /// What M1 does not implement is refused by name, and what it does is accepted
+    /// What this build does not implement is refused by name, and what it does is accepted
     #[test]
     fn validation_refuses_what_is_not_built() {
-        // a bootstrapping node on a real interface is what M1 runs
+        // a bootstrapping node on a real interface is what runs
         Cluster::default().bootstrap(true).validate("127.0.0.1").expect("a bootstrap was refused");
         // joining is M3
         let error = Cluster::default()
@@ -599,15 +898,17 @@ mod tests {
         assert!(format!("{error}").contains("M3"), "{error}");
         // a node that does neither is nothing
         assert!(Cluster::default().validate("127.0.0.1").is_err());
-        // the peer handshake is M2
-        let mut with_tls = Cluster::default().bootstrap(true);
-        with_tls.tls = Some(super::PeerTls {
-            cert: "a".into(),
-            key: "b".into(),
-            ca: "c".into(),
+        // peer tls is accepted now, but a certificate that cannot be read is refused as it is read
+        let mut with_missing_tls = Cluster::default().bootstrap(true);
+        with_missing_tls.tls = Some(super::PeerTls {
+            cert: "/does/not/exist/cert.pem".into(),
+            key: "/does/not/exist/key.pem".into(),
+            ca: "/does/not/exist/ca.pem".into(),
         });
-        let error = with_tls.validate("127.0.0.1").expect_err("peer tls started");
-        assert!(format!("{error}").contains("M2"), "{error}");
+        assert!(
+            with_missing_tls.validate("127.0.0.1").is_err(),
+            "an unreadable certificate was accepted"
+        );
         // an even voter count is not a quorum anyone wants
         assert!(Cluster::default().bootstrap(true).control_voters(2).validate("127.0.0.1").is_err());
         // an unspecified interface with nothing advertised is not an address

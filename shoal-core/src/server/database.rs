@@ -33,7 +33,29 @@ use crate::shared::traits::{QuerySupport, TableNameSupport};
 use crate::storage::{FullArchiveMap, LoaderMsg, Loaders, RecoveryStats};
 
 /// The core trait that all databases in shoal must support
-pub trait ShoalDatabase: 'static + Sized {
+pub trait ShoalDatabase: 'static + Sized
+where
+    // a share a peer forwards back is bytes on the wire, checked and deserialized where it is
+    // merged, so every database's response type has to round trip through rkyv the same way its
+    // queries do ([F38](../../../docs/src/features/inter-node-transport.md)). A `where` on the
+    // trait makes this an implied bound wherever `D: ShoalDatabase` appears, rather than one
+    // every caller of the pool has to repeat
+    for<'a> <<Self::ClientType as QuerySupport>::ResponseKinds as rkyv::Archive>::Archived:
+        rkyv::bytecheck::CheckBytes<
+            rkyv::rancor::Strategy<
+                rkyv::validation::Validator<
+                    rkyv::validation::archive::ArchiveValidator<'a>,
+                    rkyv::validation::shared::SharedValidator,
+                >,
+                rkyv::rancor::Error,
+            >,
+        >,
+    <<Self::ClientType as QuerySupport>::ResponseKinds as rkyv::Archive>::Archived:
+        rkyv::Deserialize<
+            <Self::ClientType as QuerySupport>::ResponseKinds,
+            rkyv::rancor::Strategy<rkyv::de::Pool, rkyv::rancor::Error>,
+        >,
+{
     /// This databases external client type
     ///
     /// Its queries have to be routable both ways, because only something that owns a ring

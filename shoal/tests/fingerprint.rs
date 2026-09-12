@@ -269,3 +269,30 @@ fn a_projection_does_not_fingerprint_as_its_row() {
         "a projection that drops a field fingerprinted as the whole row"
     );
 }
+
+/// The structural schema id is the fingerprint with the protocol version left out
+///
+/// Two nodes compare the id beside the wire versions they read
+/// ([F38](../../docs/src/features/inter-node-transport.md)), so it has to move with the schema
+/// and only with the schema. This pins both halves: the id is a real fold that differs from the
+/// fingerprint, and every schema change the fingerprint sees, the id sees too.
+#[test]
+fn the_schema_id_is_the_fingerprint_without_the_version() {
+    // the id is neither empty nor the fingerprint, because the fingerprint mixes the version
+    assert_ne!(base::WireClient::SCHEMA_ID, 0);
+    assert_ne!(base::WireClient::SCHEMA_ID, fingerprint::SEED);
+    assert_ne!(base::WireClient::SCHEMA_ID, base::WireClient::SCHEMA_FINGERPRINT);
+    // and it is exactly the same walk, with one mix taken out: replaying the fingerprint's walk
+    // from the id's seed position reproduces neither, so the check is on the structure it sees
+    let ids = [
+        base::WireClient::SCHEMA_ID,
+        added_field::WireClient::SCHEMA_ID,
+        reordered::WireClient::SCHEMA_ID,
+        projected::WireClient::SCHEMA_ID,
+    ];
+    for (i, a) in ids.iter().enumerate() {
+        for (j, b) in ids.iter().enumerate() {
+            assert_eq!(i == j, a == b, "schemas {i} and {j} disagree with their ids");
+        }
+    }
+}

@@ -41,7 +41,7 @@ use tempfile::TempDir;
 
 pub use cores::{Allocation, ClusterPlan, CoreClaim, Topology};
 pub use link::{Link, LinkState};
-pub use node::{ChildRequest, Endpoints, Node, NodeKind, CHILD_ENV, FAILED_LINE, READY_LINE};
+pub use node::{ChildRequest, Endpoints, Node, NodeKind, StagedCluster, CHILD_ENV, FAILED_LINE, READY_LINE};
 
 /// What can go wrong starting or driving a cluster
 #[derive(Debug)]
@@ -99,6 +99,12 @@ pub struct ClusterBuilder {
     driver: CoreClaim,
     /// How long to wait for readiness
     ready_timeout: Duration,
+    /// Whether the server nodes form one statically placed cluster
+    ///
+    /// Set by [`ClusterBuilder::cluster`]. At `start` the fixture mints one cluster id and a node
+    /// id per server, reserves a peer and a control port for each, stages a marker naming it, and
+    /// hands every server the same placement ([F38](../../../docs/src/features/inter-node-transport.md)).
+    static_cluster: bool,
 }
 
 impl ClusterBuilder {
@@ -114,6 +120,29 @@ impl ClusterBuilder {
             affinity: None,
             staged_marker: None,
         });
+        self
+    }
+
+    /// Add `n` servers that form one statically placed cluster of `n` nodes
+    ///
+    /// Each gets `cores` cores. A cluster of one is the same as a single `server`, but placed by
+    /// name rather than by the pool's default self-placement, which is what lets a test of two or
+    /// more nodes route a query from one to another.
+    ///
+    /// # Arguments
+    ///
+    /// * `n` - How many nodes
+    /// * `cores` - The cores each should own
+    pub fn cluster(mut self, n: usize, cores: CoreClaim) -> Self {
+        for _ in 0..n {
+            self.nodes.push(NodeSpec {
+                kind: NodeKind::Server,
+                cores: cores.clone(),
+                affinity: None,
+                staged_marker: None,
+            });
+        }
+        self.static_cluster = true;
         self
     }
 
@@ -215,10 +244,19 @@ impl ClusterBuilder {
         let mut plan = self.plan(&topology)?;
         // one directory per node, alive as long as the cluster
         let dirs: Vec<TempDir> = self.nodes.iter().map(|_| crate::utils::test_dir()).collect();
+        // a static cluster needs its placement decided before any child starts: mint the
+        // identities, reserve a peer and a control port for each node, and stage a marker naming
+        // each one, so every child gets the same placement and finds its own id on disk
+        let staged = if self.static_cluster {
+            Some(build_static_cluster(&self.nodes, &dirs, &plan)?)
+        } else {
+            None
+        };
         // spawn everything, then wait for everything, so the children start in parallel
         let mut nodes = Vec::with_capacity(self.nodes.len());
         for (id, (spec, dir)) in self.nodes.iter().zip(&dirs).enumerate() {
             let allocation = plan.nodes[id].1.clone();
+            let cluster = staged.as_ref().and_then(|staged| staged.per_node.get(id).cloned());
             nodes.push(Node::spawn_with(
                 id,
                 spec.kind,
@@ -226,8 +264,11 @@ impl ClusterBuilder {
                 dir.path(),
                 spec.affinity.clone(),
                 spec.staged_marker.clone(),
+                cluster,
             )?);
         }
+        // hold the port reservations until every child has bound, so nothing else takes them
+        let _reservations = staged.map(|staged| staged.reservations);
         for node in &mut nodes {
             // a node that never comes up takes the whole cluster down with it, and the
             // evidence: `Node`'s drop kills the rest
@@ -279,6 +320,7 @@ impl Cluster {
             links: false,
             driver: CoreClaim::Shared,
             ready_timeout: DEFAULT_READY_TIMEOUT,
+            static_cluster: false,
         }
     }
 
@@ -379,4 +421,97 @@ pub fn is_alive(pid: u32) -> bool {
     // zombie still answers, which is why the fixture reaps what it kills
     // SAFETY: `kill` with signal 0 has no effect on the target and is always sound to call
     unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+}
+
+
+/// The reserved ports and per-node placement of a static cluster, held until every child binds
+struct StagedPlan {
+    /// One `StagedCluster` per node, in node order
+    per_node: Vec<StagedCluster>,
+    /// The bound-not-listening reservations, dropped once the cluster is up
+    reservations: Vec<socket2::Socket>,
+}
+
+/// Reserve a port with `SO_REUSEPORT`, bound but never listening
+///
+/// The same trick the pool uses for the client port: a bound reuse-port socket keeps the port
+/// from everyone else, and the kernel routes no connection to it because it never listens, so a
+/// child can bind the same port with `SO_REUSEPORT` and take every connection.
+fn reserve_port() -> Result<(socket2::Socket, u16), FixtureError> {
+    let socket = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None)?;
+    socket.set_reuse_port(true)?;
+    socket.set_reuse_address(true)?;
+    let addr: SocketAddr = "127.0.0.1:0".parse().expect("a loopback address");
+    socket.bind(&addr.into())?;
+    let port = socket
+        .local_addr()?
+        .as_socket_ipv4()
+        .expect("an ipv4 socket")
+        .port();
+    Ok((socket, port))
+}
+
+/// Mint the identities, reserve the ports, stage the markers, and build the placement
+///
+/// # Arguments
+///
+/// * `specs` - The nodes, to know how many shards each runs
+/// * `dirs` - Their directories, to stage a marker into each
+/// * `plan` - The core allocation, to know each node's shard count
+fn build_static_cluster(
+    specs: &[NodeSpec],
+    dirs: &[TempDir],
+    plan: &ClusterPlan,
+) -> Result<StagedPlan, FixtureError> {
+    use shoal::server::StorageMeta;
+    use shoal::shared::identity::{ClusterId, NodeId};
+
+    // one cluster, and a node id per server
+    let cluster = ClusterId::mint();
+    let mut ids = Vec::with_capacity(specs.len());
+    let mut data_ports = Vec::with_capacity(specs.len());
+    let mut control_ports = Vec::with_capacity(specs.len());
+    let mut reservations = Vec::new();
+    let mut shard_counts = Vec::with_capacity(specs.len());
+    for (id, _spec) in specs.iter().enumerate() {
+        ids.push(NodeId::mint());
+        // the shard count is the data cores the allocator gave this node
+        let shards = plan.nodes[id].1.data.len().max(1);
+        shard_counts.push(shards as u16);
+        let (data_sock, data_port) = reserve_port()?;
+        let (control_sock, control_port) = reserve_port()?;
+        reservations.push(data_sock);
+        reservations.push(control_sock);
+        data_ports.push(data_port);
+        control_ports.push(control_port);
+    }
+    // the placement every node shares: (node id, data addr, control addr, shards)
+    let placement: Vec<(String, String, String, u16)> = (0..specs.len())
+        .map(|i| {
+            (
+                ids[i].to_string(),
+                format!("127.0.0.1:{}", data_ports[i]),
+                format!("127.0.0.1:{}", control_ports[i]),
+                shard_counts[i],
+            )
+        })
+        .collect();
+    // stage a marker naming each node, so the child claims an identity the placement knows
+    let mut per_node = Vec::with_capacity(specs.len());
+    for (id, dir) in dirs.iter().enumerate() {
+        let marker = StorageMeta::new(shard_counts[id] as usize, ids[id], Some(cluster));
+        std::fs::create_dir_all(dir.path())?;
+        std::fs::write(
+            StorageMeta::path(dir.path()),
+            serde_json::to_vec_pretty(&marker).expect("a marker serializes"),
+        )?;
+        per_node.push(StagedCluster {
+            cluster: cluster.to_string(),
+            node: ids[id].to_string(),
+            data_port: data_ports[id],
+            control_port: control_ports[id],
+            placement: placement.clone(),
+        });
+    }
+    Ok(StagedPlan { per_node, reservations })
 }

@@ -150,8 +150,11 @@ fn same_queries<Q: Archivable>(left: &[Q], right: &[Q]) -> bool {
 ///
 /// * `found` - The per shard shares a routing decision produced
 fn shards_of<T>(found: &[(&shoal::server::shard::ShardInfo, T)]) -> Vec<usize> {
-    // keep only which shard each share went to
-    found.iter().map(|(shard, _)| shard.mesh_id()).collect()
+    // keep only which shard each share went to; every shard of a standalone ring is local
+    found
+        .iter()
+        .map(|(shard, _)| shard.local_index().expect("a standalone ring has only local shards"))
+        .collect()
 }
 
 /// Route one unsorted query both ways and hand back what each said

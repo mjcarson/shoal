@@ -57,6 +57,35 @@ impl StageOp {
     }
 }
 
+/// Where a query was executed relative to the shard that accepted it
+///
+/// The kernel picks which shard's listener a connection lands on, so a query's hop is a property
+/// of the query and its connection rather than of a workload: the same arm produces records of
+/// two kinds and a report that pooled them would hide the hop it exists to measure
+/// ([F38](../../../docs/src/features/inter-node-transport.md)). A record carries which it was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StageHop {
+    /// Executed on the shard that accepted the connection
+    #[default]
+    Same,
+    /// Executed on another shard of the same node, over the kanal mesh
+    LocalShard,
+    /// Executed on another node, over a peer link
+    RemoteNode,
+}
+
+impl StageHop {
+    /// Get the name this hop is reported under
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StageHop::Same => "same",
+            StageHop::LocalShard => "local",
+            StageHop::RemoteNode => "remote",
+        }
+    }
+}
+
 /// How the intent log a query wrote to is made durable
 ///
 /// Under [`StageDurability::Async`] there is no fdatasync stage at all, so a report that
@@ -93,6 +122,13 @@ pub struct StageFlags {
     pub durability: StageDurability,
     /// The shard that executed this query
     pub shard: u16,
+    /// Where that shard was, relative to the one that accepted the connection
+    pub hop: StageHop,
+    /// Whether this record was made on a node that served the query for a peer
+    ///
+    /// The origin holds the client's half of the join, so a record made on the other node
+    /// has nothing to join to and is reported as its own population, never counted twice.
+    pub served_for_peer: bool,
     /// This query's position in the batch it arrived in
     ///
     /// Uninterpretable without [`StageFlags::batch_len`] beside it — position four means
@@ -126,6 +162,8 @@ impl Default for StageFlags {
             op: StageOp::Other,
             durability: StageDurability::None,
             shard: 0,
+            hop: StageHop::Same,
+            served_for_peer: false,
             batch_pos: 0,
             batch_len: 0,
             rotated: false,
@@ -413,6 +451,14 @@ impl StageStamps {
     stage_setter!(
         /// Record which shard executed this query
         set_shard(u16) => shard
+    );
+    stage_setter!(
+        /// Record where this query was executed relative to the shard that accepted it
+        set_hop(StageHop) => hop
+    );
+    stage_setter!(
+        /// Record that this node served the query for a peer, so the record has no client half
+        set_served_for_peer(bool) => served_for_peer
     );
     stage_setter!(
         /// Record that this response was released by a rotation, not by a watermark

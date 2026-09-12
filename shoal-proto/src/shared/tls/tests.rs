@@ -146,3 +146,97 @@ fn an_invalid_server_name_is_refused() {
         Err(TlsError::InvalidServerName(_))
     ));
 }
+
+/// A cluster authority and one node certificate it signed, written to a directory
+///
+/// The leaf carries the `shoal-node://<id>` URI SAN the Q11 contract names, which nothing checks
+/// at M2 - it is written so that the first build to check it has certificates to check.
+fn cluster_pki(dir: &std::path::Path, node: &str) -> PeerTlsOptions {
+    // the authority, self signed
+    let ca_key = rcgen::KeyPair::generate().expect("a ca key");
+    let mut ca_params = rcgen::CertificateParams::new(Vec::<String>::new()).expect("ca params");
+    ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    let ca = ca_params.self_signed(&ca_key).expect("a ca certificate");
+    // the node, signed by it, reachable at the loopback name and named as a node
+    let key = rcgen::KeyPair::generate().expect("a node key");
+    let mut params =
+        rcgen::CertificateParams::new(vec!["localhost".to_owned(), "127.0.0.1".to_owned()])
+            .expect("node params");
+    params.subject_alt_names.push(rcgen::SanType::URI(
+        format!("shoal-node://{node}").try_into().expect("a uri san"),
+    ));
+    let cert = params.signed_by(&key, &ca, &ca_key).expect("a node certificate");
+    let options = PeerTlsOptions {
+        cert: dir.join("node.pem"),
+        key: dir.join("node.key"),
+        ca: dir.join("ca.pem"),
+    };
+    std::fs::write(&options.cert, cert.pem()).expect("write the certificate");
+    std::fs::write(&options.key, key.serialize_pem()).expect("write the key");
+    std::fs::write(&options.ca, ca.pem()).expect("write the authority");
+    options
+}
+
+/// Drive a client and a server handshake against each other in memory until both are done
+///
+/// # Arguments
+///
+/// * `client` - The dialling half
+/// * `server` - The accepting half
+fn pump(client: &mut TlsClientHandshake, server: &mut TlsServerHandshake) -> Result<(), TlsError> {
+    let (mut client_done, mut server_done) = (false, false);
+    // a bounded loop, so a handshake that stalls fails rather than hangs
+    for _ in 0..32 {
+        if !client_done {
+            match client.step()? {
+                TlsStep::Done => client_done = true,
+                TlsStep::Transmit | TlsStep::NeedRead => {}
+            }
+            // whatever the client encoded goes to the server
+            let out = client.take_outgoing();
+            if !out.is_empty() {
+                server.feed(&out);
+            }
+        }
+        if !server_done {
+            match server.step()? {
+                TlsStep::Done => server_done = true,
+                TlsStep::Transmit | TlsStep::NeedRead => {}
+            }
+            let out = server.take_outgoing();
+            if !out.is_empty() {
+                client.feed(&out);
+            }
+        }
+        if client_done && server_done {
+            return Ok(());
+        }
+    }
+    panic!("the handshake did not finish in thirty two rounds");
+}
+
+#[test]
+/// A peer with a certificate from the cluster's authority is accepted, and one without is not
+///
+/// The first is the mutual handshake every lane runs; the second is a client config - the
+/// server-proves-itself shape a database client uses - offered to a peer listener, which is what
+/// a node without a certificate looks like on the wire.
+fn a_peer_listener_requires_a_certificate_from_the_cluster_authority() {
+    let dir = tempfile::tempdir().expect("failed to make a temporary directory");
+    let options = cluster_pki(dir.path(), "5f3c9a1e-0000-4000-8000-000000000001");
+    let server = peer_server_config(&options).unwrap();
+    assert!(server.enable_secret_extraction);
+    assert_eq!(server.send_tls13_tickets, 0);
+    let name = ServerName::try_from("localhost").unwrap();
+    // a node presenting its certificate completes the handshake at both ends
+    let peer = peer_client_config(&options).unwrap();
+    assert!(peer.enable_secret_extraction);
+    let mut client = TlsClientHandshake::client(peer, name.clone()).unwrap();
+    let mut accept = TlsServerHandshake::server(server.clone()).unwrap();
+    pump(&mut client, &mut accept).unwrap();
+    // a client with the right authority and no certificate of its own is refused
+    let anonymous = client_config(&TlsClientOptions::new(options.ca.clone())).unwrap();
+    let mut client = TlsClientHandshake::client(anonymous, name).unwrap();
+    let mut accept = TlsServerHandshake::server(server).unwrap();
+    assert!(pump(&mut client, &mut accept).is_err());
+}

@@ -2,6 +2,7 @@
 
 use kanal::{AsyncReceiver, AsyncSender};
 
+use crate::server::errors::ShoalError;
 use crate::server::messages::ServerMsg;
 use crate::server::shard::ShardContact;
 use crate::server::ServerError;
@@ -36,6 +37,10 @@ impl<S: ShoalDatabase> Comms<S> {
 
     /// Send a message to a shard on this node
     ///
+    /// The mesh reaches this node's shards and nothing else. A remote contact is refused rather
+    /// than reached: it goes through the shard's peer links, and a caller that handed one here
+    /// has a routing bug ([F38](../../../docs/src/features/inter-node-transport.md)).
+    ///
     /// * `shard` - The shard to send this message too
     pub async fn send(
         &mut self,
@@ -52,6 +57,13 @@ impl<S: ShoalDatabase> Comms<S> {
                     // this is not a known shard
                     None => panic!("Who is {contact:#?}"),
                 }
+            }
+            // a remote shard is not on the mesh
+            ShardContact::Remote { node, shard } => {
+                return Err(ServerError::Shoal(ShoalError::NotLocal {
+                    node: *node,
+                    shard: *shard,
+                }));
             }
         }
         Ok(())

@@ -74,6 +74,27 @@ pub struct ChildRequest {
     /// Which marker the child should find, if the test staged one: none stages nothing
     #[serde(default)]
     pub staged_marker: Option<String>,
+    /// The static cluster this node is part of, if the test built one
+    ///
+    /// Present, the child builds a `cluster:` block with this placement and these ports and
+    /// stages the marker naming this node ([F38](../../../docs/src/features/inter-node-transport.md)).
+    #[serde(default)]
+    pub cluster: Option<StagedCluster>,
+}
+
+/// A node's place in a statically placed cluster the fixture built
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StagedCluster {
+    /// The cluster's identity, as a string
+    pub cluster: String,
+    /// This node's identity, as a string
+    pub node: String,
+    /// The port this node's peer listener binds
+    pub data_port: u16,
+    /// The port this node's control listener binds
+    pub control_port: u16,
+    /// Every node of the cluster: (node id, data addr, control addr, shards)
+    pub placement: Vec<(String, String, String, u16)>,
 }
 
 /// The endpoints a child bound, and the identity it reported
@@ -179,7 +200,7 @@ impl Node {
         allocation: Allocation,
         dir: &Path,
     ) -> Result<Self, FixtureError> {
-        Self::spawn_with(id, kind, allocation, dir, None, None)
+        Self::spawn_with(id, kind, allocation, dir, None, None, None)
     }
 
     /// Start a child, narrowing the cpus it may run on and staging a marker for it to find
@@ -192,6 +213,7 @@ impl Node {
     /// * `dir` - Its storage directory
     /// * `affinity` - The cpus it may run on, applied before it starts; `None` inherits
     /// * `staged_marker` - A marker to write into its directory before it starts
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn_with(
         id: usize,
         kind: NodeKind,
@@ -199,6 +221,7 @@ impl Node {
         dir: &Path,
         affinity: Option<Vec<usize>>,
         staged_marker: Option<String>,
+        cluster: Option<StagedCluster>,
     ) -> Result<Self, FixtureError> {
         let topology = super::Topology::detect();
         // a cluster node's control thread runs on the first cpu of its control core, or shares
@@ -220,6 +243,7 @@ impl Node {
             control_shared,
             affinity: affinity.clone(),
             staged_marker,
+            cluster,
         };
         let request = serde_json::to_string(&request).expect("a request serializes");
         // the test binary again, running only the child function

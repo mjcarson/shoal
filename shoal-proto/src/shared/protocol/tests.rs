@@ -26,7 +26,7 @@ use super::{
 };
 
 /// Every message type this build knows, so a test can walk all of them
-const ALL_TYPES: [MessageType; 12] = [
+const ALL_TYPES: [MessageType; 22] = [
     MessageType::Hello,
     MessageType::HelloAck,
     MessageType::Auth,
@@ -39,10 +39,20 @@ const ALL_TYPES: [MessageType; 12] = [
     MessageType::Error,
     MessageType::GoAway,
     MessageType::Cancel,
+    MessageType::PeerHello,
+    MessageType::PeerHelloAck,
+    MessageType::Forward,
+    MessageType::Forwarded,
+    MessageType::ControlRequest,
+    MessageType::ControlResponse,
+    MessageType::StatusReport,
+    MessageType::SnapshotBegin,
+    MessageType::SnapshotChunk,
+    MessageType::SnapshotEnd,
 ];
 
 /// Every error code this build knows, so a test can walk all of them
-const ALL_CODES: [ErrorCode; 12] = [
+const ALL_CODES: [ErrorCode; 13] = [
     ErrorCode::Unknown,
     ErrorCode::Internal,
     ErrorCode::StorageRead,
@@ -52,6 +62,7 @@ const ALL_CODES: [ErrorCode; 12] = [
     ErrorCode::RequestTooLarge,
     ErrorCode::Shedding,
     ErrorCode::Timeout,
+    ErrorCode::OutcomeUnknown,
     ErrorCode::ConnectionLost,
     ErrorCode::GoingAway,
     ErrorCode::Unavailable,
@@ -136,6 +147,16 @@ fn every_message_type_round_trips_through_its_discriminant() {
         (MessageType::Error, 10),
         (MessageType::GoAway, 11),
         (MessageType::Cancel, 12),
+        (MessageType::PeerHello, 13),
+        (MessageType::PeerHelloAck, 14),
+        (MessageType::Forward, 15),
+        (MessageType::Forwarded, 16),
+        (MessageType::ControlRequest, 17),
+        (MessageType::ControlResponse, 18),
+        (MessageType::StatusReport, 19),
+        (MessageType::SnapshotBegin, 20),
+        (MessageType::SnapshotChunk, 21),
+        (MessageType::SnapshotEnd, 22),
     ];
     // check both directions for each one
     for (kind, byte) in pinned {
@@ -218,7 +239,7 @@ fn a_header_of_an_unknown_version_is_still_readable() {
 #[test]
 fn an_unknown_message_type_is_refused() {
     // zero in particular, so that a zeroed buffer is never mistaken for a hello
-    for kind in [0u8, 13, 255] {
+    for kind in [0u8, 23, 255] {
         let mut raw = Header::new(MessageType::Queries, Flags::NONE, 8, ROOMY)
             .unwrap()
             .encode();
@@ -465,6 +486,7 @@ fn every_error_code_round_trips_through_its_discriminant() {
         (ErrorCode::RequestTooLarge, 21),
         (ErrorCode::Shedding, 30),
         (ErrorCode::Timeout, 31),
+        (ErrorCode::OutcomeUnknown, 32),
         (ErrorCode::ConnectionLost, 40),
         (ErrorCode::GoingAway, 41),
         (ErrorCode::Unavailable, 50),

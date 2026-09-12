@@ -29,12 +29,16 @@ use std::sync::{
 use std::net::SocketAddr;
 use std::rc::Rc;
 use std::time::Duration;
-use std::{cell::RefCell, hash::BuildHasherDefault};
+use std::{cell::Cell, cell::RefCell, hash::BuildHasherDefault};
 use std::{collections::HashMap, io::IoSlice};
 use tracing::{event, info_span, instrument, Instrument, Level, Span};
 use uuid::Uuid;
 
-use super::messages::{Answer, QueryMetadata, ServerMsg};
+use super::messages::{Answer, PeerEvent, QueryMetadata, Reply, ReplyKind, ServerMsg};
+use super::peer::{
+    self, Frame, FrameKey, Lane, LinkEvent, ListenerContext, Local, PeerSetup, Peers, Pending,
+    ShardTransportView,
+};
 use super::request_body::RequestBody;
 use super::database::ShoalDatabase;
 use super::ring::Ring;
@@ -43,6 +47,7 @@ use super::stage_profile::{self, StageStamps, Stamp};
 use super::tls;
 use super::trace;
 use super::{Comms, Conf, ServerError};
+use crate::shared::identity::NodeId;
 use crate::{
     shared::{
         auth::{
@@ -55,7 +60,7 @@ use crate::{
             error::{self as proto_error, ErrorCode},
             handshake,
             trace::{TraceContext, TRACE_CONTEXT_LEN},
-            ProtocolError,
+            Header, MessageType, ProtocolError,
         },
         queries::{ArchivedQueries, Queries},
         traits::{QuerySupport, ShoalResponseSupport},
@@ -318,14 +323,20 @@ async fn write_error_frame(
 /// * `tcp_tx` - The write half of this client's connection
 /// * `peer_max_frame_bytes` - The largest frame this client said it would accept
 async fn client_tx_relay<S: ShoalDatabase>(
-    client_rx: AsyncReceiver<(Uuid, Span, StageStamps, AlignedVec)>,
+    client_rx: AsyncReceiver<Reply>,
     mut tcp_tx: WriteHalf<TcpStream>,
     peer_max_frame_bytes: u32,
 ) {
     // loop over messages to send back to our client
     loop {
         // try to get a message from our channel
-        let (query_id, span, mut stamps, archived) = match client_rx.recv().await {
+        let Reply {
+            id: query_id,
+            span,
+            mut stamps,
+            archived,
+            ..
+        } = match client_rx.recv().await {
             Ok(msg) => msg,
             // if this channel was closed then stop our task
             // this should only happen exit/shutdown or when our client shutsdown
@@ -821,10 +832,42 @@ async fn shutdown_watcher<S: ShoalDatabase>(
 }
 
 /// How to message a specific shard
-#[derive(Clone, Debug)]
+///
+/// A local contact is an index into the node's kanal mesh. A remote one names a node and a shard
+/// on it, and is never an index into anything here: it is reached through the shard's peer links
+/// ([F38](../../../docs/src/features/inter-node-transport.md)). `local_index` is the one way to
+/// turn a contact into a mesh index, and it says no for a remote one rather than guessing.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ShardContact {
     /// This shard is on our current node
     Local(usize),
+    /// This shard is on another node of the cluster
+    Remote {
+        /// The node it is on
+        node: NodeId,
+        /// Which of that node's shards it is
+        shard: u16,
+    },
+}
+
+impl ShardContact {
+    /// The mesh index this contact is, if it is on this node
+    #[must_use]
+    pub fn local_index(&self) -> Option<usize> {
+        match self {
+            ShardContact::Local(index) => Some(*index),
+            ShardContact::Remote { .. } => None,
+        }
+    }
+
+    /// The node this contact is on, if it is on another node
+    #[must_use]
+    pub fn remote_node(&self) -> Option<NodeId> {
+        match self {
+            ShardContact::Local(_) => None,
+            ShardContact::Remote { node, .. } => Some(*node),
+        }
+    }
 }
 
 /// What a shard tells the pool that started it
@@ -877,11 +920,13 @@ impl ShardInfo {
         }
     }
 
-    /// Get this shards mesh id
-    pub fn mesh_id(&self) -> usize {
-        match self.contact {
-            ShardContact::Local(mesh_id) => mesh_id,
-        }
+    /// Get this shards mesh id, if it is on this node
+    ///
+    /// A remote shard has no mesh id: it is reached through a peer link, never through the
+    /// local channels.
+    #[must_use]
+    pub fn local_index(&self) -> Option<usize> {
+        self.contact.local_index()
     }
 }
 
@@ -933,6 +978,8 @@ struct Gather<D: ShoalDatabase> {
 pub(super) struct Shard<D: ShoalDatabase> {
     /// This shards info
     info: ShardInfo,
+    /// This shards index on the node's mesh, which is also its position in every ring
+    shard_id: usize,
     /// The config for shoal
     conf: Conf,
     /// The token ring info for shoal
@@ -944,7 +991,7 @@ pub(super) struct Shard<D: ShoalDatabase> {
     /// The full archive map for all tables
     table_map: FullArchiveMap<D::TableNames>,
     /// A map of channels to send responses to our client relays over
-    client_map: HashMap<Uuid, AsyncSender<(Uuid, Span, StageStamps, AlignedVec)>>,
+    client_map: HashMap<Uuid, AsyncSender<Reply>>,
     /// The queries we split across several shards and are collecting the shares of
     ///
     /// Keyed by (query id, index), the pair that uniquely identifies one query within
@@ -991,6 +1038,18 @@ pub(super) struct Shard<D: ShoalDatabase> {
     /// The config says which port to ask for; this says which one the kernel gave, which
     /// differs when the config asked for zero.
     bound: Option<SocketAddr>,
+    /// What this shard needs to talk to peers, on a cluster node
+    ///
+    /// `None` on a standalone node, which builds no links and binds no peer listener. Present,
+    /// it carries the placement, the identity and the bounds every link shares.
+    peer_setup: Option<PeerSetup>,
+    /// The outbound peer links this shard owns, once it has forwarded anything
+    ///
+    /// `None` on a standalone node. Built lazily on a cluster node so a shard that never
+    /// forwards a query dials nothing ([F38](../../../docs/src/features/inter-node-transport.md)).
+    peers: Option<Peers<D>>,
+    /// Bytes this shard has received on bulk lanes, for the transport view
+    bulk_received: Rc<Cell<u64>>,
 }
 
 impl<D: ShoalDatabase> Shard<D>
@@ -1015,6 +1074,7 @@ where
         comms: Comms<D>,
         shard_id: usize,
         shard_count: usize,
+        peer_setup: Option<PeerSetup>,
     ) -> Result<Self, ServerError> {
         // get a handle to our current executor
         let executor = glommio::executor();
@@ -1045,10 +1105,8 @@ where
         let lru_hasher = BuildHasherDefault::<GxHasher>::default();
         // build our lru cache
         let lru = Arc::new(RefCell::new(LruCache::unbounded_with_hasher(lru_hasher)));
-        // get our own mesh id
-        let our_mesh_id = info.mesh_id();
         // get the channels for this shards channel on this node
-        let (shard_local_tx, shard_local_rx) = comms.get_shards_channels(our_mesh_id);
+        let (shard_local_tx, shard_local_rx) = comms.get_shards_channels(shard_id);
         // build our shards tables
         let tables = D::new(
             &info.name,
@@ -1061,13 +1119,19 @@ where
             &shard_local_tx,
         )
         .await?;
+        // build our tablet map: a standalone node's is its own shards, a cluster node's places
+        // those shards among the peers the placement names, so a remote key routes to a remote
+        // contact ([F38](../../../docs/src/features/inter-node-transport.md))
+        let ring = match &peer_setup {
+            Some(setup) => Ring::with_placement(shard_count, &setup.placement, setup.local.node)?,
+            None => Ring::new(shard_count)?,
+        };
         // build our shard
         let shard = Shard {
             info,
+            shard_id,
             conf: conf.clone(),
-            // built from the shard count rather than from joins, so it is already
-            // complete and this shard can never route against a partial map
-            ring: Ring::new(shard_count)?,
+            ring,
             comms,
             tables,
             table_map,
@@ -1084,6 +1148,9 @@ where
             memory_usage,
             lru,
             bound: None,
+            peer_setup,
+            peers: None,
+            bulk_received: Rc::new(Cell::new(0)),
         };
         Ok(shard)
     }
@@ -1163,6 +1230,8 @@ where
     async fn init(&mut self, should_shutdown: Arc<AtomicBool>) -> Result<(), ServerError> {
         // spawn our client listeners
         self.spawn_client_listener()?;
+        // stand up the peer listener and links, on a cluster node
+        self.spawn_peer_listener()?;
         // broadcast our join message
         self.join_cluster().await?;
         // start our loaders
@@ -1264,6 +1333,9 @@ where
         let base_index = queries.base_index.to_native() as usize;
         // initialize a vec to store the per shard shares we find
         let mut found = Vec::with_capacity(3);
+        // the remote shares of this bundle, gathered per node into one forward each
+        let mut remote: HashMap<NodeId, Vec<(crate::shared::protocol::peer::ForwardEntry, Pending<D>)>> =
+            HashMap::new();
         // get the absolute index for the last query in this bundle
         //
         // every index below is absolute, so this has to carry the base index too or a
@@ -1335,31 +1407,219 @@ where
             // count it. The copy we kept in the gather above is deliberately not flagged.
             let mut share_stamps = stamps;
             share_stamps.set_share_of_gathered(gather.is_some());
-            // send each shard the bundle and the keys of its own share of this query
+            // the table this query names, so a peer that never answers can be answered with a
+            // failure in the right variant
+            let table = <D::ClientType as QuerySupport>::archived_query_table(kind);
+            // the trace this query is part of, put on every remote entry so the remote work
+            // hangs off this span rather than off the bundle's root
+            let trace = trace::context_of(&query_span);
+            // send each share to its shard: a local one over the mesh, a remote one into a
+            // forward accumulated per node ([F38](../../../docs/src/features/inter-node-transport.md))
             for (shard_info, keys) in found.drain(..) {
-                // build the metadata for this query
-                let meta = QueryMetadata::new(
-                    client,
-                    bundle_id,
-                    index,
-                    end,
-                    gather.clone(),
-                    query_span.clone(),
-                    share_stamps,
-                );
-                // build the message to send, which is a refcount on the bundle rather than
-                // a copy of the query in it
-                let msg = ServerMsg::Query {
-                    meta,
-                    body: body.clone(),
-                    offset,
-                    keys,
-                };
-                // send this to correct shard
-                self.comms.send(&shard_info.contact, msg).await?;
+                match &shard_info.contact {
+                    ShardContact::Local(_) => {
+                        // where this share ran, relative to the shard that accepted the bundle
+                        let mut share_stamps = share_stamps;
+                        share_stamps.set_hop(if shard_info.contact == self.info.contact {
+                            stage_profile::StageHop::Same
+                        } else {
+                            stage_profile::StageHop::LocalShard
+                        });
+                        let meta = QueryMetadata::new(
+                            client,
+                            bundle_id,
+                            index,
+                            end,
+                            gather.clone(),
+                            query_span.clone(),
+                            share_stamps,
+                        );
+                        let msg = ServerMsg::Query {
+                            meta,
+                            body: body.clone(),
+                            offset,
+                            keys,
+                        };
+                        self.comms.send(&shard_info.contact, msg).await?;
+                    }
+                    ShardContact::Remote { node, shard } => {
+                        // one entry per remote share, gathered per node below
+                        // truncation cannot happen: a bundle holds far fewer than a u32 of queries
+                        #[allow(clippy::cast_possible_truncation)]
+                        let entry = crate::shared::protocol::peer::ForwardEntry {
+                            offset: offset as u32,
+                            index: index as u64,
+                            end,
+                            shard: *shard,
+                            origin_shard: self.shard_id as u16,
+                            gather: gather.is_some(),
+                            trace,
+                            keys: keys.unwrap_or_default(),
+                        };
+                        let slot = remote.entry(*node).or_insert_with(Vec::new);
+                        slot.push((
+                            entry,
+                            Pending {
+                                client,
+                                span: query_span.clone(),
+                                stamps: share_stamps,
+                                table,
+                                end,
+                                share: gather.is_some(),
+                                sent_at: Stamp::now(),
+                            },
+                        ));
+                    }
+                }
+            }
+        }
+        // flush one forward per node, and answer at once anything the queue could not take
+        self.flush_forwards(body, bundle_id, base_index, remote).await?;
+        Ok(())
+    }
+
+    /// Send the remote shares of a bundle as one forward per node, answering what is shed
+    ///
+    /// The queue to a peer is bounded in bytes; a forward that would pass the bound is a
+    /// definite refusal, since nothing was accepted, and every entry of it is answered
+    /// [`ErrorCode::Shedding`] on the spot. A forward that is queued is recorded as pending,
+    /// and its fate becomes the deadline sweep's or the link's to report
+    /// ([F38](../../../docs/src/features/inter-node-transport.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `body` - The bundle's bytes, shared into the forward without a copy
+    /// * `bundle_id` - The bundle these queries arrived in
+    /// * `base_index` - The bundle's base index
+    /// * `remote` - The remote shares, grouped by node
+    #[allow(clippy::future_not_send)]
+    async fn flush_forwards(
+        &mut self,
+        body: &Bytes,
+        bundle_id: Uuid,
+        base_index: usize,
+        remote: HashMap<NodeId, Vec<(crate::shared::protocol::peer::ForwardEntry, Pending<D>)>>,
+    ) -> Result<(), ServerError> {
+        for (node, shares) in remote {
+            let Some(peers) = self.peers.as_mut() else {
+                // a node routed to a remote contact without peers is a bug in setup, not a
+                // query; answer every share so no client waits forever
+                for (entry, pending) in shares {
+                    self.fail_forward(node, bundle_id, entry.index, pending, ErrorCode::Internal, "this node has no peers")
+                        .await?;
+                }
+                continue;
+            };
+            // the deadline the origin will wait, from now
+            let deadline = peers.transport().forward_timeout.duration();
+            // split the shares into the entries the frame carries and the pendings we record
+            let mut entries = Vec::with_capacity(shares.len());
+            let mut pendings = Vec::with_capacity(shares.len());
+            let mut keys = Vec::with_capacity(shares.len());
+            for (entry, pending) in shares {
+                keys.push((bundle_id, entry.index));
+                entries.push(entry);
+                pendings.push(pending);
+            }
+            // build the forward: preamble, entries, then the bundle bytes shared not copied
+            let entry_bytes = crate::shared::protocol::peer::encode_entries(&entries)?;
+            // truncation cannot happen: a bundle holds far fewer than a u32 of entries
+            #[allow(clippy::cast_possible_truncation)]
+            let preamble = crate::shared::protocol::peer::ForwardPreamble {
+                bundle: *bundle_id.as_bytes(),
+                attempt: 0,
+                base_index: base_index as u64,
+                hops: 0,
+                remaining_ms: deadline.as_millis().min(u128::from(u32::MAX)) as u32,
+                entries: entries.len() as u16,
+                entries_len: entry_bytes.len() as u32,
+            }
+            .encode();
+            let max = self.peer_setup.as_ref().map_or(u32::MAX, |setup| setup.local.max_frame_bytes);
+            let frame = Frame::new(
+                MessageType::Forward,
+                vec![
+                    Bytes::copy_from_slice(&preamble),
+                    Bytes::from(entry_bytes),
+                    body.clone(),
+                ],
+                FrameKey::Forward(keys),
+                max,
+            )?;
+            // try to queue it, answering every entry with a definite refusal if the queue is full
+            match self.peers.as_mut().expect("peers exist here").enqueue(node, Lane::Data, frame) {
+                Ok(()) => {
+                    // recorded as pending, one entry at a time
+                    for (entry, pending) in entries.into_iter().zip(pendings) {
+                        self.peers
+                            .as_mut()
+                            .expect("peers exist here")
+                            .expect(bundle_id, entry.index, node, pending);
+                    }
+                }
+                Err(_) => {
+                    // the queue is full, so nothing was accepted: a definite refusal
+                    for (entry, pending) in entries.into_iter().zip(pendings) {
+                        self.fail_forward(
+                            node,
+                            bundle_id,
+                            entry.index,
+                            pending,
+                            ErrorCode::Shedding,
+                            "the queue to this node is full",
+                        )
+                        .await?;
+                    }
+                }
             }
         }
         Ok(())
+    }
+
+    /// Answer one forwarded query with a failure this node produced
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The peer the query was for
+    /// * `bundle_id` - The bundle it arrived in
+    /// * `index` - The index it is owed under
+    /// * `pending` - What is owed
+    /// * `code` - The class of failure
+    /// * `msg` - What to say about it
+    #[allow(clippy::future_not_send)]
+    async fn fail_forward(
+        &mut self,
+        _node: NodeId,
+        bundle_id: Uuid,
+        index: u64,
+        pending: Pending<D>,
+        code: ErrorCode,
+        msg: &str,
+    ) -> Result<(), ServerError> {
+        // build the failure in the query's own table variant, so the client reads it as one
+        let error = crate::shared::responses::ResponseError::new(code, msg);
+        let response = <D::ClientType as QuerySupport>::failed(
+            pending.table,
+            bundle_id,
+            index as usize,
+            pending.end,
+            error,
+        );
+        // a share of a split query is merged like any other; a whole answer goes to the client
+        if pending.share {
+            let meta = QueryMetadata::untimed(
+                pending.client,
+                bundle_id,
+                index as usize,
+                pending.end,
+                Some(self.info.contact.clone()),
+                pending.span,
+            );
+            self.handle_gathered(meta, response).await
+        } else {
+            self.reply(pending.client, bundle_id, pending.span, pending.stamps, response)
+                .await
+        }
     }
 
     /// Handle a client messages
@@ -1442,6 +1702,13 @@ where
         mut stamps: StageStamps,
         response: <D::ClientType as QuerySupport>::ResponseKinds,
     ) -> Result<(), ServerError> {
+        // read the index and the end flag off the response before it is bytes
+        //
+        // a client relay never uses them, but a peer relay frames an answer by bundle and index,
+        // and reading the index back out of the archive it just sealed would mean validating
+        // what it wrote ([F38](../../../docs/src/features/inter-node-transport.md))
+        let index = <<D::ClientType as QuerySupport>::ResponseKinds as ShoalResponseSupport>::index(&response);
+        let end = <<D::ClientType as QuerySupport>::ResponseKinds as ShoalResponseSupport>::end(&response);
         // archive our response
         let archived = rkyv::to_bytes::<_>(&response)?;
         // record what serializing this response cost
@@ -1450,7 +1717,7 @@ where
         // stages on the get path large enough to be worth measuring on its own
         stamps.mark_replied();
         // and hand the bytes on the same way an answer serialized in the table is
-        self.reply_sealed(client, query_id, span, stamps, archived)
+        self.reply_sealed(client, query_id, index, end, ReplyKind::Whole, span, stamps, archived)
             .await
     }
 
@@ -1470,10 +1737,14 @@ where
     /// * `span` - The span to reply under
     /// * `stamps` - When this query reached each stage so far, and its index
     /// * `archived` - The serialized response
+    #[allow(clippy::too_many_arguments)]
     async fn reply_sealed(
         &mut self,
         client: Uuid,
         query_id: Uuid,
+        index: usize,
+        end: bool,
+        kind: ReplyKind,
         span: Span,
         mut stamps: StageStamps,
         archived: rkyv::util::AlignedVec<16>,
@@ -1483,9 +1754,43 @@ where
             Some(client_tx) => {
                 // note that this response is now the relays problem rather than ours
                 stamps.mark_queued_to_client();
-                client_tx.send((query_id, span, stamps, archived)).await?;
+                // a send that fails is a client whose relay has already ended - its socket
+                // closed with this answer still owed. That is not this shard's failure to
+                // report: it happens on every connection that leaves mid query, and a peer
+                // link that is cut and reconnects makes it happen often
+                // ([Resolved #32, #94](../../../docs/src/appendix/resolved/disconnected-client-cleanup.md)).
+                // The channel is dropped when the client's `ClientGone` arrives; until then a
+                // late answer is logged and let go
+                if client_tx
+                    .send(Reply {
+                        id: query_id,
+                        index,
+                        end,
+                        kind,
+                        span,
+                        stamps,
+                        archived,
+                    })
+                    .await
+                    .is_err()
+                {
+                    event!(
+                        Level::DEBUG,
+                        msg = "an answer was owed to a client that had left",
+                        %client,
+                        %query_id,
+                    );
+                }
             }
-            None => panic!("{} Missing client channel? {client}", self.info.name),
+            // a client with no channel is one that has already gone away and been retired; its
+            // answer has nowhere to go and is dropped, not panicked on. Panicking here ended
+            // the shard and every other client on it, which is the defect this closes
+            None => event!(
+                Level::DEBUG,
+                msg = "an answer was owed to a client that is gone",
+                %client,
+                %query_id,
+            ),
         }
         Ok(())
     }
@@ -1620,20 +1925,27 @@ where
         span: Span,
         gathered_meta: Option<QueryMetadata>,
     ) -> Result<(), ServerError> {
+        // remember the index and the end flag before `handle` consumes the metadata: a sealed
+        // answer owed to a peer needs them to be framed, and it cannot read them back out of
+        // the bytes it just sealed
+        let (m_index, m_end) = (meta.index, meta.end);
         // try to handle this query
         if let Some((addr, query_id, mut stamps, answer)) = self.tables.handle(meta, query).await {
             // an answer the table already serialized has nothing left to do here but be sent
             //
             // it stamped `exec_done` and `replied` itself, on either side of the serialize it
             // ran while the rows were still in the partitions holding them
-            // ([O2](../../../docs/src/features/grouped-responses.md)). And it can only be a
-            // whole answer owed to a client, never a share, because a share has to be merged
-            // somewhere else and bytes cannot be
+            // ([O2](../../../docs/src/features/grouped-responses.md)). It can only be a whole
+            // answer, never a share, because a share has to be merged somewhere else and bytes
+            // cannot be - but that whole answer may be owed to a client or to a peer that
+            // forwarded the query, which is why the kind is carried
             let Answer::Open(response) = answer else {
                 let Answer::Sealed(archived) = answer else {
                     unreachable!("an answer is either open or sealed")
                 };
-                return self.reply_sealed(addr, query_id, span, stamps, archived).await;
+                return self
+                    .reply_sealed(addr, query_id, m_index, m_end, ReplyKind::Whole, span, stamps, archived)
+                    .await;
             };
             // record that this queries synchronous work is finished
             //
@@ -1649,13 +1961,33 @@ where
                         .gather
                         .clone()
                         .expect("A gathered query always names the shard collecting it");
-                    // build the message carrying our share of this queries answer
-                    let msg = ServerMsg::Gathered {
-                        meta: gathered_meta,
-                        response,
-                    };
-                    // send our share to the shard collecting them
-                    self.comms.send(&contact, msg).await?;
+                    // a share collected on this node goes over the mesh; one collected on the
+                    // node that forwarded the query goes back down the peer connection it came
+                    // in on, as a share the origin merges
+                    // ([F38](../../../docs/src/features/inter-node-transport.md))
+                    if contact.remote_node().is_some() {
+                        let archived = rkyv::to_bytes::<_>(&response)?;
+                        stamps.mark_replied();
+                        self.reply_sealed(
+                            gathered_meta.client,
+                            gathered_meta.id,
+                            gathered_meta.index,
+                            gathered_meta.end,
+                            ReplyKind::Share,
+                            span,
+                            stamps,
+                            archived,
+                        )
+                        .await?;
+                    } else {
+                        // build the message carrying our share of this queries answer
+                        let msg = ServerMsg::Gathered {
+                            meta: gathered_meta,
+                            response,
+                        };
+                        // send our share to the shard collecting them
+                        self.comms.send(&contact, msg).await?;
+                    }
                 }
                 // this query was ours alone to answer
                 None => self.reply(addr, query_id, span, stamps, response).await?,
@@ -1761,6 +2093,395 @@ where
         Ok(())
     }
 
+    /// Route a bundle another node forwarded to this one
+    ///
+    /// This is the coordinator's job seen from the far side of a hop. The listener read the
+    /// frame and judged its lengths; this validates the bundle - a process boundary trusts
+    /// nothing it did not check - checks every offset against it, opens a span per entry that
+    /// hangs off the origin's own query span, and hands each entry to the shard it names as a
+    /// query whose "client" is the peer connection ([F38](../../../docs/src/features/inter-node-transport.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `conn` - The peer connection every answer goes back down
+    /// * `origin` - The node that forwarded this bundle
+    /// * `preamble` - The forward's fixed fields
+    /// * `entries` - Which queries this node answers, and on which shards
+    /// * `data` - The bundle's bytes
+    /// * `base` - When the last byte of it came off the socket
+    #[allow(clippy::future_not_send)]
+    async fn handle_forward(
+        &mut self,
+        conn: Uuid,
+        origin: NodeId,
+        preamble: crate::shared::protocol::peer::ForwardPreamble,
+        entries: Vec<crate::shared::protocol::peer::ForwardEntry>,
+        data: RequestBody,
+        base: Stamp,
+    ) -> Result<(), ServerError>
+    where
+        for<'a> <<<D as ShoalDatabase>::ClientType as QuerySupport>::QueryKinds as Archive>::Archived:
+            CheckBytes<
+                Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
+            >,
+    {
+        // hand the bundle over as a shared buffer, then validate it: this is the process
+        // boundary, so these bytes are checked here whatever a peer said about them
+        let body = data.freeze();
+        let archived = Queries::<D::ClientType>::access(&body)?;
+        let bundle = Uuid::from_bytes(preamble.bundle);
+        // route every entry the peer named to the shard it named
+        for entry in entries {
+            // an offset past the bundle is a peer out of step with us, and ends this bundle
+            if entry.offset as usize >= archived.queries.len() {
+                return Err(ProtocolError::MalformedForward("a forward names a query the bundle does not hold").into());
+            }
+            // the span this entry's work hangs off, joined to the origin's trace if it sent one
+            let span = info_span!(parent: None, "Shoal::forwarded", id = %bundle, index = entry.index);
+            if let Some(trace) = &entry.trace {
+                trace::adopt_remote_parent(&span, trace);
+            }
+            // stamps that start from when the frame arrived, marked as a peer's own record
+            let mut stamps = StageStamps::new(base);
+            stamps.set_index(entry.index as usize);
+            stamps.set_hop(stage_profile::StageHop::RemoteNode);
+            stamps.set_served_for_peer(true);
+            // a share goes back to the origin as a share; a whole answer as a whole answer. Both
+            // are answered to the peer connection, so both name it as the gather target when the
+            // origin split the query
+            let gather = if entry.gather {
+                Some(ShardContact::Remote {
+                    node: origin,
+                    shard: entry.origin_shard,
+                })
+            } else {
+                None
+            };
+            let meta = QueryMetadata::new(
+                conn,
+                bundle,
+                entry.index as usize,
+                entry.end,
+                gather,
+                span,
+                stamps,
+            );
+            let keys = if entry.keys.is_empty() {
+                None
+            } else {
+                Some(entry.keys)
+            };
+            // hand it to the shard that owns its partitions, over the mesh
+            self.comms
+                .send(&ShardContact::Local(usize::from(entry.shard)), ServerMsg::Query {
+                    meta,
+                    body: body.clone(),
+                    offset: entry.offset as usize,
+                    keys,
+                })
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Act on what one of this shard's peer links learned
+    ///
+    /// # Arguments
+    ///
+    /// * `event` - The link event, or the deadline tick
+    #[allow(clippy::future_not_send)]
+    async fn handle_peer_event(&mut self, event: PeerEvent) -> Result<(), ServerError> {
+        match event {
+            PeerEvent::Link(LinkEvent::Up { node, lane, incarnation }) => {
+                event!(Level::DEBUG, msg = "a peer link came up", %node, %lane, incarnation);
+            }
+            PeerEvent::Link(LinkEvent::Frame { node, header, head, payload, .. }) => {
+                self.handle_forwarded(node, header, &head, payload).await?;
+            }
+            PeerEvent::Link(LinkEvent::Down { node, unsent, reason, .. }) => {
+                event!(Level::WARN, msg = "a peer link went down", %node, reason);
+                self.resolve_lost_link(node, &unsent).await?;
+            }
+            PeerEvent::Tick => self.sweep_deadlines().await?,
+        }
+        Ok(())
+    }
+
+    /// Turn an answer a peer sent back into a reply, a share, or a failure
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The peer that answered
+    /// * `header` - The frame's header
+    /// * `head` - The forwarded preamble
+    /// * `payload` - The answer's bytes
+    #[allow(clippy::future_not_send)]
+    async fn handle_forwarded(
+        &mut self,
+        node: NodeId,
+        header: Header,
+        head: &[u8],
+        payload: AlignedVec,
+    ) -> Result<(), ServerError> {
+        // only a forwarded frame comes back on a data link
+        if header.kind != MessageType::Forwarded {
+            return Ok(());
+        }
+        let raw: [u8; crate::shared::protocol::peer::FORWARDED_PREAMBLE_LEN] =
+            head.try_into().map_err(|_| ProtocolError::MalformedForward("a forwarded head is the wrong size"))?;
+        let preamble = crate::shared::protocol::peer::ForwardedPreamble::decode(&raw)?;
+        let bundle = Uuid::from_bytes(preamble.bundle);
+        // find what we were owed; a frame with no pending entry is late or duplicate and dropped
+        let Some(pending) = self
+            .peers
+            .as_mut()
+            .and_then(|peers| peers.take(bundle, preamble.index, node))
+        else {
+            event!(Level::WARN, msg = "a peer answered a query we were not waiting for", %node, index = preamble.index);
+            return Ok(());
+        };
+        use crate::shared::protocol::peer::ForwardedKind;
+        match preamble.kind {
+            // a whole answer is bytes for the client, never re-validated on this node
+            ForwardedKind::Whole => {
+                self.reply_sealed(
+                    pending.client,
+                    bundle,
+                    preamble.index as usize,
+                    pending.end,
+                    ReplyKind::Whole,
+                    pending.span,
+                    pending.stamps,
+                    payload,
+                )
+                .await
+            }
+            // a share is merged here, so it is validated and turned back into a response
+            ForwardedKind::Share => {
+                let response = <<D::ClientType as QuerySupport>::ResponseKinds as crate::shared::traits::RkyvSupport>::deserialize(
+                    <<D::ClientType as QuerySupport>::ResponseKinds as crate::shared::traits::RkyvSupport>::access(&payload)?,
+                )?;
+                let meta = QueryMetadata::untimed(
+                    pending.client,
+                    bundle,
+                    preamble.index as usize,
+                    pending.end,
+                    Some(self.info.contact.clone()),
+                    pending.span,
+                );
+                self.handle_gathered(meta, response).await
+            }
+            // a failure the peer produced is answered in the query's own variant
+            ForwardedKind::Error => {
+                let (code, msg) = crate::shared::protocol::peer::decode_error_payload(&payload)?;
+                self.fail_forward(node, bundle, preamble.index, pending, ErrorCode::from_u16(code), &msg)
+                    .await
+            }
+        }
+    }
+
+    /// Answer everything a lost link owed: definite refusals and unknown outcomes
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The node whose link was lost
+    /// * `unsent` - The keys of frames the link never wrote
+    #[allow(clippy::future_not_send)]
+    async fn resolve_lost_link(&mut self, node: NodeId, unsent: &[FrameKey]) -> Result<(), ServerError> {
+        let Some(peers) = self.peers.as_mut() else {
+            return Ok(());
+        };
+        let (refused, unknown) = peers.drain_node(node, unsent);
+        // a frame the link never wrote is a query nothing accepted: a definite refusal
+        for ((bundle, index), pending) in refused {
+            self.fail_forward(node, bundle, index, pending, ErrorCode::Unavailable, "the link to this node went down before the query was sent")
+                .await?;
+        }
+        // a frame written but unanswered when the link dropped is an unknown outcome
+        for ((bundle, index), pending) in unknown {
+            self.fail_forward(node, bundle, index, pending, ErrorCode::OutcomeUnknown, "the link to this node went down after the query was sent")
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Answer every forwarded query that has waited longer than its deadline
+    #[allow(clippy::future_not_send)]
+    async fn sweep_deadlines(&mut self) -> Result<(), ServerError> {
+        let Some(peers) = self.peers.as_mut() else {
+            return Ok(());
+        };
+        let deadline = peers.transport().forward_timeout.duration();
+        let expired = peers.expired(Stamp::now(), deadline);
+        for ((bundle, index, node), pending) in expired {
+            self.fail_forward(node, bundle, index, pending, ErrorCode::OutcomeUnknown, "the peer did not answer within the deadline")
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Drive a snapshot stream of a given size at a peer, for the bounded-bytes test
+    ///
+    /// The one producer of bulk traffic at M2. It enqueues a begin, chunks of 64 KiB until the
+    /// requested bytes are accepted or the queue sheds, and an end. Nothing installs what it
+    /// sends; the receiver counts and checksums it, which is enough to prove the bulk lane is a
+    /// lane of its own that a stall bounds ([F38](../../../docs/src/features/inter-node-transport.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The peer to stream at
+    /// * `bytes` - How many payload bytes to stream
+    fn probe_bulk(&mut self, node: NodeId, bytes: u64) {
+        let Some(peers) = self.peers.as_mut() else {
+            return;
+        };
+        let max = self.peer_setup.as_ref().map_or(u32::MAX, |setup| setup.local.max_frame_bytes);
+        let stream = *Uuid::new_v4().as_bytes();
+        // one begin, with an empty manifest
+        let begin = crate::shared::protocol::peer::SnapshotBegin {
+            stream,
+            transition: [0u8; 16],
+            boundary: 0,
+            total: bytes,
+            manifest_len: 0,
+        }
+        .encode();
+        let _ = peers.enqueue(
+            node,
+            Lane::Bulk,
+            match Frame::new(MessageType::SnapshotBegin, vec![Bytes::copy_from_slice(&begin)], FrameKey::Bulk(0), max) {
+                Ok(frame) => frame,
+                Err(_) => return,
+            },
+        );
+        // chunks of 64 KiB until the queue sheds or the bytes are met
+        const CHUNK: usize = 64 * 1024;
+        let payload = vec![0xabu8; CHUNK];
+        let mut sent = 0u64;
+        let mut offset = 0u64;
+        while sent < bytes {
+            let len = CHUNK.min((bytes - sent) as usize);
+            let chunk = crate::shared::protocol::peer::SnapshotChunk {
+                stream,
+                offset,
+                len: len as u32,
+                checksum: crate::shared::protocol::peer::checksum(&payload[..len]),
+            }
+            .encode();
+            let frame = match Frame::new(
+                MessageType::SnapshotChunk,
+                vec![Bytes::copy_from_slice(&chunk), Bytes::copy_from_slice(&payload[..len])],
+                FrameKey::Bulk(len),
+                max,
+            ) {
+                Ok(frame) => frame,
+                Err(_) => break,
+            };
+            // a shed chunk ends the stream: the queue is full and the point is made
+            if peers.enqueue(node, Lane::Bulk, frame).is_err() {
+                break;
+            }
+            sent += len as u64;
+            offset += len as u64;
+        }
+        // and an end, best effort
+        let end = crate::shared::protocol::peer::SnapshotEnd {
+            stream,
+            total: sent,
+            checksum: 0,
+            status: if sent == bytes {
+                crate::shared::protocol::peer::SnapshotStatus::Complete
+            } else {
+                crate::shared::protocol::peer::SnapshotStatus::Aborted
+            },
+            resume_from: sent,
+        }
+        .encode();
+        if let Ok(frame) = Frame::new(MessageType::SnapshotEnd, vec![Bytes::copy_from_slice(&end)], FrameKey::Bulk(0), max) {
+            let _ = peers.enqueue(node, Lane::Bulk, frame);
+        }
+    }
+
+    /// What this shard's peer links look like, for the transport view
+    fn transport_view(&self) -> ShardTransportView {
+        ShardTransportView {
+            shard: self.shard_id,
+            links: self.peers.as_ref().map(Peers::views).unwrap_or_default(),
+            bulk_received: self.bulk_received.get(),
+        }
+    }
+
+    /// Bind the peer listener and build the peer links, on a cluster node
+    ///
+    /// A standalone node calls this and does nothing, since it has no setup. A cluster node
+    /// binds `advertise:port` beside its client listener with `SO_REUSEPORT`, builds the tls
+    /// configs on its own executor the way the client listener does, and stands up the `Peers`
+    /// its forwards go through.
+    fn spawn_peer_listener(&mut self) -> Result<(), ServerError> {
+        let Some(setup) = self.peer_setup.clone() else {
+            return Ok(());
+        };
+        // the configs are built here, per shard, on this shard's executor
+        let (client_tls, server_tls) = match &setup.tls {
+            Some(tls) => {
+                if !crate::shared::tls::ktls::is_available() {
+                    return Err(crate::shared::tls::TlsError::UlpUnavailable(std::io::Error::new(
+                        std::io::ErrorKind::Unsupported,
+                        "the 'tls' kernel module is not loaded",
+                    ))
+                    .into());
+                }
+                (
+                    Some(crate::shared::tls::peer_client_config(tls)?),
+                    Some(crate::shared::tls::peer_server_config(tls)?),
+                )
+            }
+            None => (None, None),
+        };
+        // the placement, shared by the listener and the links on this shard
+        let placement = Rc::new(setup.placement.clone());
+        // the links this shard forwards through, delivering what they learn onto this shard
+        self.peers = Some(Peers::new(
+            placement.clone(),
+            setup.local.clone(),
+            client_tls,
+            setup.transport.clone(),
+            self.shard_local_tx.clone_sync(),
+        ));
+        // bind the peer listener, every shard on the same port with SO_REUSEPORT
+        let listener = TcpListener::bind(setup.bind)?;
+        let ctx = ListenerContext {
+            comms: self.comms.clone(),
+            node_local_tx: self.shard_local_tx.clone(),
+            local: Rc::new(setup.local.clone()),
+            placement,
+            tls: server_tls,
+            handshake_timeout: setup.transport.handshake_timeout.duration(),
+            inflight_bound: setup.transport.inflight_bytes,
+            shard_count: self.ring.shards.iter().filter(|info| info.contact.local_index().is_some()).count(),
+            bulk_received: self.bulk_received.clone(),
+        };
+        let handle = glommio::spawn_local_into(peer::peer_acceptor(listener, ctx), self.high_priority)?;
+        self.tasks.push(handle);
+        // and a timer that sweeps forwarded queries whose deadline has passed
+        let tick_tx = self.shard_local_tx.clone_sync();
+        let interval = (setup.transport.forward_timeout.duration() / 10).max(Duration::from_millis(50));
+        let sweeper = glommio::spawn_local_into(
+            async move {
+                loop {
+                    glommio::timer::sleep(interval).await;
+                    if tick_tx.try_send(ServerMsg::Peer(PeerEvent::Tick)).is_err() {
+                        break;
+                    }
+                }
+                Ok(())
+            },
+            self._medium_priority,
+        )?;
+        self.tasks.push(sweeper);
+        Ok(())
+    }
+
     /// Find partitions to evict
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     async fn evict_data(&mut self) -> Result<(), ServerError> {
@@ -1832,7 +2553,7 @@ where
             .ok_or_else(|| ServerError::GlommioGeneric("shard ready without a listener".into()))?;
         // the pool may have stopped listening for events, which is not this shard's problem
         let _ = events.send(ShardEvent::Ready {
-            shard: self.info.mesh_id(),
+            shard: self.shard_id,
             addr,
         });
         // keep handling messages until we get a shutdown command
@@ -1850,6 +2571,13 @@ where
                         // panic if we had a client id collision
                         panic!("Client ID collision?");
                     }
+                }
+                // a client has gone away, so drop the channel every shard was holding for it
+                //
+                // without this every shard kept every connection's channel until the process
+                // ended ([Resolved #32](../../../docs/src/appendix/resolved/disconnected-client-cleanup.md))
+                ServerMsg::ClientGone(client) => {
+                    self.client_map.remove(&client);
                 }
                 // Handle this client query
                 ServerMsg::Client {
@@ -1907,6 +2635,23 @@ where
                     table,
                     partitions,
                 } => self.tables.mark_evictable(table, generation, partitions),
+                // a bundle forwarded by another node, which this shard accepted and now routes
+                ServerMsg::Forward {
+                    conn,
+                    origin,
+                    preamble,
+                    entries,
+                    data,
+                    base,
+                } => self.handle_forward(conn, origin, preamble, entries, data, base).await?,
+                // something a peer link this shard owns learned
+                ServerMsg::Peer(event) => self.handle_peer_event(event).await?,
+                // drive a snapshot stream at a peer, for the bounded-bytes test
+                ServerMsg::BulkProbe { node, bytes } => self.probe_bulk(node, bytes),
+                // report what this shard's peer links look like
+                ServerMsg::Transport(reply) => {
+                    let _ = reply.send(self.transport_view());
+                }
                 // shutdown this shard
                 ServerMsg::Shutdown => {
                     // signal all of our loaders to shutdown
@@ -1960,11 +2705,13 @@ where
 pub fn start<S: ShoalDatabase>(
     conf: Conf,
     cpus: CpuSet,
+    peer_setup: Option<PeerSetup>,
 ) -> Result<
     (
         PoolThreadHandles<Result<(), ServerError>>,
         Arc<AtomicBool>,
         std::sync::mpsc::Receiver<ShardEvent>,
+        kanal::Sender<ServerMsg<S>>,
     ),
     ServerError,
 >
@@ -1992,7 +2739,7 @@ where
         LocalExecutorPoolBuilder::new(PoolPlacement::MaxSpread(shard_count, Some(cpus)));
     // build and spawn our shards on all of remaining available cores
     let shards = executor_builder.on_all_shards(
-        enclose!((comms, should_shutdown, shard_counter, events) move || {
+        enclose!((comms, should_shutdown, shard_counter, events, peer_setup) move || {
             async move {
                 // mint this shards id here rather than in `Shard::new`, so that a failure in
                 // there can still be reported under the id it would have had
@@ -2000,7 +2747,8 @@ where
                 // build and run this shard, keeping the outcome so it can be reported first
                 let outcome = async {
                     // build an empty shard
-                    let shard: Shard<S> = Shard::new(&conf, comms, shard_id, shard_count).await?;
+                    let shard: Shard<S> =
+                        Shard::new(&conf, comms, shard_id, shard_count, peer_setup).await?;
                     // start this shard
                     shard.start(should_shutdown.clone(), &events).await
                 }
@@ -2018,5 +2766,8 @@ where
             }
         }),
     )?;
-    Ok((shards, should_shutdown, event_rx))
+    // a sync sender to shard 0's mesh channel, so the pool (which is on no executor) can ask it
+    // for the transport view or drive a bulk probe
+    let control_tx = comms.get_shards_channels(0).0.clone_sync();
+    Ok((shards, should_shutdown, event_rx, control_tx))
 }

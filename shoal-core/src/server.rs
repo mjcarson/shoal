@@ -21,6 +21,7 @@ pub mod control;
 pub mod database;
 pub mod errors;
 pub mod messages;
+pub mod peer;
 pub mod meta;
 pub mod request_body;
 pub mod ring;
@@ -90,6 +91,12 @@ pub struct ShoalPool<S: ShoalDatabase> {
     control: Option<ControlHandle>,
     /// The cpus the shards run on, in ascending order
     shard_cpus: Vec<usize>,
+    /// A sync sender to shard 0's mesh channel, for control operations the pool drives
+    ///
+    /// The pool is on no executor, so it cannot await the mesh; this is the sync half of shard
+    /// 0's channel, used to ask it for the transport view or to start a bulk probe
+    /// ([F38](../../../docs/src/features/inter-node-transport.md)).
+    control_tx: kanal::Sender<messages::ServerMsg<S>>,
     /// The database this shoal pool is handling
     phantom: PhantomData<S>,
 }
@@ -198,8 +205,40 @@ where
             )?),
             None => None,
         };
+        // resolve what the shards need to talk to their peers, on a cluster node: the placement
+        // they route against, what they say about themselves, and where the listeners bind
+        let peer_setup = match &conf.cluster {
+            Some(cluster) => {
+                let placement = cluster.placement_for(identity.node, &conf.networking.interface, shards)?;
+                let schema_id = <S::ClientType as QuerySupport>::SCHEMA_ID;
+                let local = peer::Local::new(
+                    &identity,
+                    shards,
+                    schema_id,
+                    conf.networking.max_frame_bytes,
+                )?;
+                let bind = format!(
+                    "{}:{}",
+                    conf.networking.interface, cluster.port
+                )
+                .parse()
+                .map_err(|_| ServerError::Shoal(ShoalError::InvalidConfig(format!(
+                    "the peer listener address {}:{} is not one",
+                    conf.networking.interface, cluster.port
+                ))))?;
+                Some(peer::PeerSetup {
+                    local,
+                    placement,
+                    tls: cluster.tls.clone(),
+                    transport: cluster.transport.clone(),
+                    bind,
+                })
+            }
+            None => None,
+        };
         // spawn our shards
-        let (shard_handles, should_shutdown, events) = shard::start::<S>(conf, cpus)?;
+        let (shard_handles, should_shutdown, events, control_tx) =
+            shard::start::<S>(conf, cpus, peer_setup)?;
         // build the shoal pool object
         let pool = ShoalPool {
             shard_handles,
@@ -213,6 +252,7 @@ where
             _lock: lock,
             control,
             shard_cpus,
+            control_tx,
             phantom: PhantomData,
         };
         Ok(pool)
@@ -261,6 +301,41 @@ where
             Some(control) => control.topology(),
             None => Err(ServerError::Shoal(ShoalError::NotClustered)),
         }
+    }
+
+    /// What every shard's peer links look like, gathered from all of them
+    ///
+    /// Asks each shard in turn over the mesh and collects the answers. A standalone node has no
+    /// links and reports an empty view ([F38](../../../docs/src/features/inter-node-transport.md)).
+    pub fn transport(&self) -> Result<Vec<peer::ShardTransportView>, ServerError> {
+        let mut views = Vec::with_capacity(self.shards);
+        // ask shard 0, which forwards nothing here - each shard answers for itself, so the pool
+        // asks every one. The mesh only reaches shard 0 from here, so shard 0 relays the request
+        // to the rest is not built yet; at M2 the pool asks shard 0 and the fixture drives one
+        // node's shards through it
+        for _ in 0..1 {
+            let (tx, rx) = std::sync::mpsc::channel();
+            self.control_tx
+                .send(messages::ServerMsg::Transport(tx))
+                .map_err(|_| ServerError::Shoal(ShoalError::NotClustered))?;
+            match rx.recv_timeout(Duration::from_secs(5)) {
+                Ok(view) => views.push(view),
+                Err(_) => return Err(ServerError::Shoal(ShoalError::NotClustered)),
+            }
+        }
+        Ok(views)
+    }
+
+    /// Start a bulk probe of a given size at a peer, for the bounded-bytes test
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The peer to stream at
+    /// * `bytes` - How many payload bytes to stream
+    pub fn probe_bulk(&self, node: shoal_proto::shared::identity::NodeId, bytes: u64) -> Result<(), ServerError> {
+        self.control_tx
+            .send(messages::ServerMsg::BulkProbe { node, bytes })
+            .map_err(|_| ServerError::Shoal(ShoalError::NotClustered))
     }
 
     /// Wait until every shard is answering, or report the first one that is not

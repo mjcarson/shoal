@@ -63,7 +63,7 @@ fn group_by_shard<'a>(ring: &'a Ring, partition_keys: &[u64]) -> Vec<(&'a ShardI
         // add this key to that shards group, or start a group for it
         match grouped
             .iter_mut()
-            .find(|(found, _)| found.mesh_id() == shard.mesh_id())
+            .find(|(found, _)| found.contact == shard.contact)
         {
             // this shard already owns one of our keys so add this one to it
             Some((_, keys)) => keys.push(*key),

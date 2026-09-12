@@ -633,6 +633,63 @@ fn documented_cluster_defaults_match_policy_bootstrap() {
     assert_eq!(state.desired_rf(), 3);
 }
 
+/// A cross-node bundle preserves coverage, ordering and response identity (C2 M2)
+///
+/// Two nodes of one shard each, placed by name so tablet t is owned by node t % 2. A client on
+/// node 0 inserts a range of keys - roughly half owned by node 1 - reads each back, then sends
+/// one get naming keys on both nodes and asserts every index is answered exactly once with the
+/// row it named. The reads for node 1's keys can only be answered by forwarding to node 1 and
+/// relaying the answer back, so a correct read is a correct hop
+/// ([F38](../../docs/src/features/inter-node-transport.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn remote_query_returns_one_result_per_index() -> Result<(), FixtureError> {
+    // a placed cluster of two nodes, one shard each, plaintext lanes
+    let cluster = Cluster::builder().cluster(2, CoreClaim::Count(1)).start().await?;
+    // both nodes are in one cluster and each bound a data endpoint
+    assert!(cluster.node(0).endpoints.data.is_some(), "node 0 bound no peer endpoint");
+    assert!(cluster.node(1).endpoints.data.is_some(), "node 1 bound no peer endpoint");
+    assert_eq!(
+        cluster.node(0).endpoints.cluster, cluster.node(1).endpoints.cluster,
+        "the two nodes are in different clusters"
+    );
+    // a client talks to node 0, which is the coordinator for every query it sends
+    let addr = cluster.node(0).endpoints.client.to_string();
+    let client = Shoal::<TestDbClient>::new(&addr).await?;
+    // insert a range of keys; node 0 keeps its own and forwards node 1's
+    const KEYS: u64 = 200;
+    for key in 0..KEYS {
+        client
+            .send_one(Row {
+                key,
+                data: format!("row-{key}"),
+            })
+            .await?;
+    }
+    // read each back, whichever node owns it, and check it is the row we wrote
+    for key in 0..KEYS {
+        let response = client.send_one(RowGet::new(vec![key])).await?;
+        let rows = response.access::<Row>()?.expect("a get that found nothing");
+        let row = rows.first().expect("a get that returned no rows");
+        assert_eq!(row.key.to_native(), key);
+        assert_eq!(row.data.as_str(), format!("row-{key}"), "the row for {key} came back changed");
+    }
+    // one get naming keys on both nodes at once: a query split across a local and a remote shard,
+    // answered as one response per index in the order the keys were named
+    let named: Vec<u64> = (0..24).collect();
+    let response = client.send_one(RowGet::new(named.clone())).await?;
+    let rows = response.access::<Row>()?.expect("the split get found nothing");
+    let got: std::collections::BTreeSet<u64> = rows.iter().map(|row| row.key.to_native()).collect();
+    for key in &named {
+        assert!(got.contains(key), "the split get lost key {key}");
+    }
+    assert_eq!(got.len(), named.len(), "the split get answered a key more than once");
+    // nothing died on either node
+    assert_eq!(cluster.node(0).failure(), None);
+    assert_eq!(cluster.node(1).failure(), None);
+    drop(client);
+    Ok(())
+}
+
 /// The request this process was started with, if it is a child
 fn child_request() -> ChildRequest {
     let json = std::env::var(cluster::CHILD_ENV).expect("a child is started with a request");
@@ -670,12 +727,30 @@ async fn cluster_server_child() {
         .networking(Networking::default().port(0));
     // a cluster node bootstraps itself, with its control thread where the parent put it
     if request.kind == NodeKind::Server {
-        conf = conf.cluster(
-            ClusterConf::default()
-                .bootstrap(true)
-                .control_core(request.control_cpu.unwrap_or(0))
-                .control_core_shared(request.control_shared),
-        );
+        let mut block = ClusterConf::default()
+            .bootstrap(true)
+            .control_core(request.control_cpu.unwrap_or(0))
+            .control_core_shared(request.control_shared);
+        // a statically placed node also gets its ports and the placement every node shares
+        if let Some(staged) = &request.cluster {
+            use shoal::server::conf::cluster::{PlacedNode, Placement};
+            use shoal::shared::identity::NodeId;
+            let nodes = staged
+                .placement
+                .iter()
+                .map(|(node, data, control, shards)| PlacedNode {
+                    node: NodeId(node.parse().expect("a node id parses")),
+                    data: data.clone(),
+                    control: control.clone(),
+                    shards: *shards,
+                })
+                .collect();
+            block = block
+                .port(staged.data_port)
+                .control_port(staged.control_port)
+                .placement(Placement { nodes });
+        }
+        conf = conf.cluster(block);
     }
     // a marker the test staged, written before the server can claim the directory
     if let Some(marker) = &request.staged_marker {
@@ -702,10 +777,18 @@ async fn cluster_server_child() {
     let identity = pool.identity().clone();
     let topology = pool.topology().ok();
     let shard_cpus = pool.shard_cpus().to_vec();
+    // the peer and control endpoints a cluster node bound, for the parent to record
+    let (data, control_ep) = match &request.cluster {
+        Some(staged) => (
+            Some(format!("127.0.0.1:{}", staged.data_port).parse().expect("a data addr")),
+            Some(format!("127.0.0.1:{}", staged.control_port).parse().expect("a control addr")),
+        ),
+        None => (None, None),
+    };
     let endpoints = Endpoints {
         client,
-        data: None,
-        control: None,
+        data,
+        control: control_ep,
         node: Some(identity.node.to_string()),
         cluster: identity.cluster.map(|cluster| cluster.to_string()),
         control_core: pool.control_placement().map(|placement| placement.cpu),
