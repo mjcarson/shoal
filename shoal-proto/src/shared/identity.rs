@@ -145,9 +145,146 @@ impl fmt::Display for TableId {
     }
 }
 
+/// One shard of one node: where a replica of a tablet lives
+///
+/// The member of a data-plane replication group ([F40](../../../docs/src/features/replication.md)).
+/// A node holds a tablet on exactly one of its shards, so the pair names a replica without
+/// ambiguity, and the pair rather than the node is what a group's log names as its voters:
+/// a shard is the unit that owns a WAL and applies a command, and a group's members are the
+/// shards that hold copies of its tablets. `Display` renders `node/shard`, which is what a
+/// consensus library's log lines and a fixture's digests print.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize)]
+pub struct ShardAddr {
+    /// The node
+    pub node: NodeId,
+    /// Which of that node's shards
+    pub shard: u16,
+}
+
+impl ShardAddr {
+    /// Name a shard of a node
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The node
+    /// * `shard` - Which of its shards
+    #[must_use]
+    pub const fn new(node: NodeId, shard: u16) -> Self {
+        ShardAddr { node, shard }
+    }
+
+    /// The eighteen bytes this address is written as in a frame: the node, then the shard
+    #[must_use]
+    pub fn to_bytes(&self) -> [u8; 18] {
+        let mut out = [0u8; 18];
+        out[..16].copy_from_slice(self.node.0.as_bytes());
+        out[16..].copy_from_slice(&self.shard.to_le_bytes());
+        out
+    }
+
+    /// Read an address back out of its eighteen bytes
+    ///
+    /// # Arguments
+    ///
+    /// * `raw` - The bytes `to_bytes` wrote
+    #[must_use]
+    pub fn from_bytes(raw: &[u8; 18]) -> Self {
+        let mut node = [0u8; 16];
+        node.copy_from_slice(&raw[..16]);
+        ShardAddr {
+            node: NodeId(Uuid::from_bytes(node)),
+            shard: u16::from_le_bytes([raw[16], raw[17]]),
+        }
+    }
+}
+
+impl fmt::Display for ShardAddr {
+    /// Render `node/shard`
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/{}", self.node, self.shard)
+    }
+}
+
+impl From<u64> for ShardAddr {
+    /// Build an address from a small integer, which is what a conformance suite hands out
+    ///
+    /// The integer names the node the way [`NodeId::from`] does, on shard zero.
+    ///
+    /// # Arguments
+    ///
+    /// * `raw` - The integer to build from
+    fn from(raw: u64) -> Self {
+        ShardAddr {
+            node: NodeId::from(raw),
+            shard: 0,
+        }
+    }
+}
+
+/// The seed every group identity is hashed under
+///
+/// Frozen for the same reason [`TABLE_ID_SEED`] is: a group's identity names its frames in every
+/// shard's WAL, and a changed seed would orphan every frame ever written.
+pub const GROUP_ID_SEED: i64 = 0;
+
+/// The identity of one replication group: a table and the ordered replica set it is served by
+///
+/// Tablets whose replicas land on the same ordered list of shard addresses share one group, so
+/// a group's log is the interleaved history of every tablet it serves and a tablet's history is
+/// the subsequence of it that names the tablet ([F40](../../../docs/src/features/replication.md)).
+/// The identity is the hash of the table and the address list, so every node computes the same
+/// one from the same map without agreeing about anything first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct GroupId(pub u64);
+
+impl GroupId {
+    /// Derive the identity of the group serving a table over an ordered replica set
+    ///
+    /// # Arguments
+    ///
+    /// * `table` - The table
+    /// * `members` - The replicas, primary first
+    #[must_use]
+    pub fn of(table: TableId, members: &[ShardAddr]) -> Self {
+        // the table, then every address in order, hashed under the frozen seed
+        let mut bytes = Vec::with_capacity(8 + members.len() * 18);
+        bytes.extend_from_slice(&table.0.to_le_bytes());
+        for member in members {
+            bytes.extend_from_slice(&member.to_bytes());
+        }
+        GroupId(gxhash::gxhash64(&bytes, GROUP_ID_SEED))
+    }
+}
+
+impl fmt::Display for GroupId {
+    /// Render the whole hash in hex, since a prefix is not a key
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:016x}", self.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ClusterId, NodeId, TableId};
+    use super::{ClusterId, GroupId, NodeId, ShardAddr, TableId};
+
+    /// A shard address round trips through its bytes and a group identity follows its members
+    #[test]
+    fn shard_addresses_and_group_ids_are_stable() {
+        let a = ShardAddr::new(NodeId::mint(), 3);
+        let b = ShardAddr::new(NodeId::mint(), 0);
+        assert_eq!(ShardAddr::from_bytes(&a.to_bytes()), a);
+        assert_eq!(a.to_string(), format!("{}/3", a.node));
+        // the same table over the same members in the same order is the same group
+        let table = TableId::of("Row");
+        assert_eq!(GroupId::of(table, &[a, b]), GroupId::of(table, &[a, b]));
+        // a different order, table or member is a different group
+        assert_ne!(GroupId::of(table, &[a, b]), GroupId::of(table, &[b, a]));
+        assert_ne!(GroupId::of(table, &[a, b]), GroupId::of(TableId::of("Note"), &[a, b]));
+        assert_ne!(GroupId::of(table, &[a, b]), GroupId::of(table, &[a]));
+        // an integer address is the integer node on shard zero
+        assert_eq!(ShardAddr::from(7), ShardAddr::new(NodeId::from(7), 0));
+    }
 
     /// A table identity is the hash of its name, distinct across names and stable across calls
     #[test]

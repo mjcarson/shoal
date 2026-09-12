@@ -43,7 +43,7 @@ use super::Lane;
 use crate::server::conf::cluster::Transport;
 use crate::server::ServerError;
 use crate::shared::identity::NodeId;
-use crate::shared::protocol::peer::{CONTROL_HEAD_LEN, FORWARDED_PREAMBLE_LEN};
+use crate::shared::protocol::peer::{CONTROL_HEAD_LEN, FORWARDED_PREAMBLE_LEN, REPLICATE_RESPONSE_HEAD_LEN};
 use crate::shared::protocol::{Header, MessageType, HEADER_LEN};
 
 /// What a queued frame carries, so the owner can answer for it if it is never written
@@ -55,6 +55,8 @@ pub enum FrameKey {
     Control(u64),
     /// A snapshot frame of this many payload bytes
     Bulk(usize),
+    /// A replication request with this correlation id
+    Replication(u64),
 }
 
 /// A frame waiting to be written
@@ -276,6 +278,7 @@ impl Link {
             Lane::Data => transport.data_queue_bytes,
             Lane::Control => transport.control_queue_bytes,
             Lane::Bulk => transport.bulk_queue_bytes,
+            Lane::Replication => transport.replication_queue_bytes,
         };
         let queue = Rc::new(RefCell::new(Queue {
             frames: VecDeque::new(),
@@ -572,7 +575,7 @@ async fn connect(settings: &Settings) -> Result<(TcpStream, u64), ServerError> {
     // the member's address for this lane, which the bulk lane shares with data
     let addr = match settings.lane {
         Lane::Control => &settings.entry.control,
-        Lane::Data | Lane::Bulk => &settings.entry.data,
+        Lane::Data | Lane::Bulk | Lane::Replication => &settings.entry.data,
     };
     let addr: SocketAddr = addr.parse().map_err(|_| {
         ServerError::Shoal(crate::server::errors::ShoalError::InvalidConfig(format!(
@@ -641,6 +644,7 @@ async fn carry<F: Fn(LinkEvent) + 'static>(
             let head_len = match header.kind {
                 MessageType::Forwarded => FORWARDED_PREAMBLE_LEN,
                 MessageType::ControlResponse => CONTROL_HEAD_LEN,
+                MessageType::ReplicateResponse => REPLICATE_RESPONSE_HEAD_LEN,
                 other => {
                     return Err(crate::shared::protocol::ProtocolError::UnexpectedMessageType {
                         expected: MessageType::Forwarded,

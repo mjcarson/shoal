@@ -34,6 +34,7 @@
 pub mod control;
 pub mod forward;
 pub mod hello;
+pub mod replicate;
 pub mod snapshot;
 
 #[cfg(test)]
@@ -50,7 +51,12 @@ pub use forward::{
 };
 pub use hello::{
     PeerHello, PeerHelloAck, CAPABILITIES, CAP_BULK_SNAPSHOT_V1, CAP_CONTROL_RAFT_V1,
-    CAP_FORWARD_V1, CAP_MEMBERSHIP_V1, PEER_HELLO_BODY_LEN, PEER_HELLO_FRAME_LEN,
+    CAP_FORWARD_V1, CAP_MEMBERSHIP_V1, CAP_REPLICATION_V1, PEER_HELLO_BODY_LEN,
+    PEER_HELLO_FRAME_LEN,
+};
+pub use replicate::{
+    Command, ReplicateKind, ReplicateRequestHead, ReplicateResponseHead, ReplicateStatus,
+    RequestId, COMMAND_HEAD_LEN, REPLICATE_HEAD_LEN, REPLICATE_RESPONSE_HEAD_LEN,
 };
 pub use snapshot::{
     checksum, SnapshotBegin, SnapshotChunk, SnapshotEnd, SnapshotStatus, SNAPSHOT_BEGIN_LEN,
@@ -59,13 +65,13 @@ pub use snapshot::{
 
 use super::ProtocolError;
 
-/// Which of the three lanes a peer connection carries
+/// Which of the four lanes a peer connection carries
 ///
 /// Each lane is a socket of its own, so that bytes queued on one can never sit ahead of bytes on
 /// another: a snapshot on the bulk lane cannot delay a vote on the control lane, and a stalled
 /// data peer cannot hold a heartbeat. The lane is named in the hello, and a listener refuses a
 /// lane it does not serve - the control listener takes only control, the shard listeners take
-/// data and bulk.
+/// data, bulk and replication.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum Lane {
@@ -75,6 +81,12 @@ pub enum Lane {
     Control = 2,
     /// Snapshot streams, owned by a shard, separate so they cannot block the other two
     Bulk = 3,
+    /// A tablet group's consensus RPCs and proposals, owned by the shard that hosts the group
+    ///
+    /// Served on the data port beside the data lane, a socket of its own so that a forwarded
+    /// bundle queued ahead of an append cannot delay a heartbeat
+    /// ([F40](../../../../../docs/src/features/replication.md)).
+    Replication = 4,
 }
 
 impl Lane {
@@ -95,6 +107,7 @@ impl Lane {
             1 => Ok(Lane::Data),
             2 => Ok(Lane::Control),
             3 => Ok(Lane::Bulk),
+            4 => Ok(Lane::Replication),
             // anything else, zero included, is a lane this build does not serve
             unknown => Err(ProtocolError::UnknownLane(unknown)),
         }
@@ -107,6 +120,7 @@ impl Lane {
             Lane::Data => "data",
             Lane::Control => "control",
             Lane::Bulk => "bulk",
+            Lane::Replication => "replication",
         }
     }
 }

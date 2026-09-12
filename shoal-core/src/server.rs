@@ -24,6 +24,7 @@ pub mod map;
 pub mod messages;
 pub mod peer;
 pub mod meta;
+pub mod replication;
 pub mod request_body;
 pub mod ring;
 pub mod routing;
@@ -32,6 +33,7 @@ pub mod stage_profile;
 pub mod tables;
 pub mod tls;
 pub mod trace;
+pub mod wal;
 
 use comms::Comms;
 pub use conf::Conf;

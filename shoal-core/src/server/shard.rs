@@ -3169,6 +3169,17 @@ where
                 ServerMsg::Transport(reply) => {
                     let _ = reply.send(self.transport_view());
                 }
+                // the tablet groups' messages, which the next step wires up
+                ServerMsg::Apply { .. }
+                | ServerMsg::Proposed { .. }
+                | ServerMsg::Replication { .. }
+                | ServerMsg::GroupUp { .. }
+                | ServerMsg::GroupsDown
+                | ServerMsg::WalSealed { .. }
+                | ServerMsg::SegmentCompacted { .. }
+                | ServerMsg::CheckpointWritten { .. }
+                | ServerMsg::Replication_(_)
+                | ServerMsg::ReplicationVerb { .. } => {}
                 // shutdown this shard
                 ServerMsg::Shutdown => {
                     // signal all of our loaders to shutdown

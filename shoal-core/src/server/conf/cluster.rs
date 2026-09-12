@@ -289,6 +289,15 @@ pub struct Transport {
         deserialize_with = "utils::deserialize_byte_size"
     )]
     pub bulk_queue_bytes: usize,
+    /// The most bytes queued to one peer on the replication lane before RPCs are refused
+    ///
+    /// A refused append is one openraft retries; the bound is what keeps a follower that is
+    /// not reading from holding a shard's memory ([F40](../../../../docs/src/features/replication.md)).
+    #[serde(
+        default = "default_replication_queue_bytes",
+        deserialize_with = "utils::deserialize_byte_size"
+    )]
+    pub replication_queue_bytes: usize,
     /// The most forwarded bytes one peer connection may have in hand, unanswered
     ///
     /// Past this the connection stops reading, so the peer's own queue fills and sheds rather
@@ -330,6 +339,11 @@ fn default_bulk_queue_bytes() -> usize {
     64 * 1024 * 1024
 }
 
+/// The default replication lane queue bound
+fn default_replication_queue_bytes() -> usize {
+    64 * 1024 * 1024
+}
+
 /// The default in-flight bound per accepted connection
 fn default_inflight_bytes() -> usize {
     64 * 1024 * 1024
@@ -367,6 +381,7 @@ impl Default for Transport {
             data_queue_bytes: default_data_queue_bytes(),
             control_queue_bytes: default_control_queue_bytes(),
             bulk_queue_bytes: default_bulk_queue_bytes(),
+            replication_queue_bytes: default_replication_queue_bytes(),
             inflight_bytes: default_inflight_bytes(),
             forward_timeout: default_forward_timeout(),
             reconnect_min: default_reconnect_min(),

@@ -235,6 +235,13 @@ pub enum PeerEvent {
 /// The Partition variant must never be sent across threads. In order to
 /// prevent that only loaders should ever create Partition variant. Loaders
 /// should also refrain from have any channel other then to their local shard.
+///
+/// The same holds for every variant a tablet group sends its own shard - `Apply`, `Proposed`,
+/// `Replication`, `GroupUp`, `GroupsDown`, `WalSealed`, `SegmentCompacted`,
+/// `CheckpointWritten`, `Replication_` and `ReplicationVerb`: they carry responders, oneshots
+/// and `Raft` handles that belong to one executor, and only a task on that shard's executor
+/// ever builds one ([F40](../../../docs/src/features/replication.md)). `Comms::broadcast`
+/// never sees them.
 pub enum ServerMsg<D: ShoalDatabase>
 where
     <D::ClientType as QuerySupport>::QueryKinds: Clone,
@@ -440,6 +447,95 @@ where
     /// The shard's loop returns an error, which the pool and the control plane both hear of
     /// exactly as they would for any other death ([F39](../../../docs/src/features/membership.md)).
     Fail,
+    /// A batch of committed entries a tablet group's state machine hands the loop to apply
+    ///
+    /// Sent by the group's `GroupMachine` from openraft's state machine worker and never by
+    /// anything else; the loop applies every entry in order to the table it names, answers its
+    /// responder, and fires `done` once the batch is through
+    /// ([F40](../../../docs/src/features/replication.md)). Never crosses a thread: it carries
+    /// responders and a oneshot that belong to this shard's executor.
+    Apply {
+        /// The group
+        group: crate::shared::identity::GroupId,
+        /// The entries, each with the responder a proposer is waiting on, if one is
+        entries: Vec<openraft::storage::EntryResponder<crate::server::replication::DataConfig>>,
+        /// Fired once the batch is through
+        done: futures_channel::oneshot::Sender<()>,
+    },
+    /// A proposal this shard made resolved, and this is what the group answered
+    ///
+    /// Posted by the task that awaited the group's `client_write`, so the loop answers the
+    /// client between two of its other messages ([F40](../../../docs/src/features/replication.md)).
+    Proposed {
+        /// The metadata of the write
+        meta: QueryMetadata,
+        /// The table it named
+        table: D::TableNames,
+        /// What the group answered, or why it could not
+        outcome: crate::server::replication::proposal::ProposalOutcome,
+    },
+    /// A replication request a peer sent this shard over the replication lane
+    ///
+    /// The listener read the frame and judged its lengths; the shard hands it to the group the
+    /// head names, or runs the proposal it carries, and writes the answer back through `reply`
+    /// ([F40](../../../docs/src/features/replication.md)).
+    Replication {
+        /// The peer that sent it
+        origin: crate::shared::identity::NodeId,
+        /// The request's fixed fields
+        head: crate::shared::protocol::peer::ReplicateRequestHead,
+        /// Its payload
+        payload: Vec<u8>,
+        /// Where the answer goes: the connection's write relay
+        reply: AsyncSender<crate::server::peer::ReplicateReply>,
+    },
+    /// A tablet group's `Raft` was built, from the task that built it
+    ///
+    /// Building one re-applies the checkpoint up to the committed log id on the building task,
+    /// which posts `Apply` batches to this loop; so it is built on a task of its own and handed
+    /// over here rather than awaited on the loop ([F40](../../../docs/src/features/replication.md)).
+    GroupUp {
+        /// The group
+        group: crate::shared::identity::GroupId,
+        /// Its handle, or why it could not be built
+        raft: Result<
+            openraft::Raft<
+                crate::server::replication::DataConfig,
+                crate::server::replication::GroupMachine<D>,
+            >,
+            String,
+        >,
+    },
+    /// Every tablet group this shard hosts has shut down, from the task that stopped them
+    GroupsDown,
+    /// The WAL sealed a segment, so the loop can judge whether it is resolved
+    WalSealed {
+        /// The segment's generation
+        generation: u64,
+    },
+    /// A table's compactor finished a WAL segment, so its groups' checkpoints can advance
+    SegmentCompacted {
+        /// The table
+        table: D::TableNames,
+        /// The segment's generation
+        generation: u64,
+    },
+    /// The checkpoint file was written, so the groups it covers may snapshot at it
+    CheckpointWritten {
+        /// Which write this was, so a stale completion is ignored
+        version: u64,
+        /// Whether it landed
+        outcome: Result<(), String>,
+    },
+    /// Report what this shard's tablet groups look like, for readiness and the fixture
+    Replication_(std::sync::mpsc::Sender<crate::server::replication::report::ShardReplication>),
+    /// Drive a replication verb, for the fixture
+    ReplicationVerb {
+        /// What to do
+        verb: crate::server::replication::report::ReplicationVerb,
+        /// Where the answer goes
+        reply: std::sync::mpsc::Sender<Result<serde_json::Value, String>>,
+    },
     /// Tell this shard to shutdown
     Shutdown,
 }
@@ -522,6 +618,17 @@ impl<D: ShoalDatabase> Clone for ServerMsg<D> {
             },
             // a failure is asked of one shard
             ServerMsg::Fail => panic!("A failure is asked of one shard"),
+            // everything a tablet group sends its own shard stays on that shard
+            ServerMsg::Apply { .. } => panic!("An apply batch is for the shard hosting the group"),
+            ServerMsg::Proposed { .. } => panic!("A proposal's outcome is for the shard that proposed it"),
+            ServerMsg::Replication { .. } => panic!("A replication request is for the shard the head names"),
+            ServerMsg::GroupUp { .. } => panic!("A group handle is for the shard that built it"),
+            ServerMsg::GroupsDown => panic!("A groups-down notice is for one shard"),
+            ServerMsg::WalSealed { .. } => panic!("A sealed segment is the writing shard's"),
+            ServerMsg::SegmentCompacted { .. } => panic!("A compacted segment is the writing shard's"),
+            ServerMsg::CheckpointWritten { .. } => panic!("A checkpoint write is the writing shard's"),
+            ServerMsg::Replication_(_) => panic!("A replication view is asked of one shard"),
+            ServerMsg::ReplicationVerb { .. } => panic!("A replication verb is for one shard"),
             // a subscription and an admin request go to the accepting shard alone
             ServerMsg::Subscribe { .. } => panic!("A subscription is for one shard"),
             ServerMsg::Admin { .. } => panic!("An admin request is for one shard"),
@@ -532,7 +639,8 @@ impl<D: ShoalDatabase> Clone for ServerMsg<D> {
 
 /// # Safety
 ///
-/// The Partition variant should not be sent across threads ever.
+/// The Partition variant should not be sent across threads ever, and neither should any of the
+/// tablet group variants named above; every one of them is built on the shard it is sent to.
 unsafe impl<D: ShoalDatabase> Send for ServerMsg<D>
 where
     D: Send,

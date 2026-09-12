@@ -46,8 +46,9 @@ use crate::server::stage_profile::{self, Stamp};
 use crate::server::ServerError;
 use crate::shared::identity::NodeId;
 use crate::shared::protocol::peer::{
-    self, ForwardPreamble, ForwardedKind, ForwardedPreamble, SnapshotBegin,
-    SnapshotChunk, SnapshotEnd, FORWARD_PREAMBLE_LEN, SNAPSHOT_BEGIN_LEN, SNAPSHOT_CHUNK_LEN,
+    self, ForwardPreamble, ForwardedKind, ForwardedPreamble, ReplicateRequestHead,
+    ReplicateResponseHead, ReplicateStatus, SnapshotBegin, SnapshotChunk, SnapshotEnd,
+    FORWARD_PREAMBLE_LEN, REPLICATE_HEAD_LEN, SNAPSHOT_BEGIN_LEN, SNAPSHOT_CHUNK_LEN,
     SNAPSHOT_END_LEN,
 };
 use crate::shared::protocol::{MessageType, ProtocolError};
@@ -192,7 +193,7 @@ pub async fn peer_acceptor<S: ShoalDatabase>(
                     }
                 }
                 let local = ctx.local.borrow().clone();
-                Ok(handshake::accept(&mut stream, &local, &[Lane::Data, Lane::Bulk], &ctx.map).await)
+                Ok(handshake::accept(&mut stream, &local, &[Lane::Data, Lane::Bulk, Lane::Replication], &ctx.map).await)
             })
             .await;
             let accepted = match accepted {
@@ -217,6 +218,9 @@ pub async fn peer_acceptor<S: ShoalDatabase>(
             match accepted.lane {
                 Lane::Data => serve_data(ctx, accepted.node, accepted.max_frame_bytes, rx, tx).await,
                 Lane::Bulk => serve_bulk(ctx, accepted.node, rx).await,
+                Lane::Replication => {
+                    serve_replication(ctx, accepted.node, accepted.max_frame_bytes, rx, tx).await
+                }
                 // the handshake refused it already
                 Lane::Control => (),
             }
@@ -448,6 +452,192 @@ async fn peer_tx_relay(
         stamps.mark_socket_written();
         stage_profile::emit(id, stamps);
         drop(guard);
+    }
+}
+
+/// The answer to one replication request, on its way to the connection's write relay
+#[derive(Debug)]
+pub struct ReplicateReply {
+    /// The request's correlation id
+    pub id: u64,
+    /// Whether the payload is an answer or a failure
+    pub status: ReplicateStatus,
+    /// The answer, or the failure's message
+    pub payload: Vec<u8>,
+}
+
+impl ReplicateReply {
+    /// An answer
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The request's correlation id
+    /// * `payload` - The answer
+    #[must_use]
+    pub fn ok(id: u64, payload: Vec<u8>) -> Self {
+        ReplicateReply {
+            id,
+            status: ReplicateStatus::Ok,
+            payload,
+        }
+    }
+
+    /// A failure
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The request's correlation id
+    /// * `msg` - What went wrong
+    #[must_use]
+    pub fn error(id: u64, msg: impl Into<String>) -> Self {
+        ReplicateReply {
+            id,
+            status: ReplicateStatus::Error,
+            payload: msg.into().into_bytes(),
+        }
+    }
+}
+
+/// Serve one replication lane: relay requests to the shards they name and answers back
+///
+/// Every request names the shard on this node that hosts its group, and is handed to that
+/// shard over the mesh; the shard answers into this connection's channel and the relay here
+/// frames the answer under the request's id. In-flight bytes are bounded the way a data lane's
+/// are: past the bound the connection stops reading until answers drain it.
+///
+/// # Arguments
+///
+/// * `ctx` - What every lane shares
+/// * `origin` - The peer this lane comes from
+/// * `peer_max_frame_bytes` - The largest frame the peer accepts
+/// * `rx` - The read half of the connection
+/// * `tx` - The write half of the connection
+async fn serve_replication<S: ShoalDatabase>(
+    mut ctx: ListenerContext<S>,
+    origin: NodeId,
+    peer_max_frame_bytes: u32,
+    mut rx: ReadHalf<TcpStream>,
+    tx: WriteHalf<TcpStream>,
+) {
+    let (reply_tx, reply_rx) = kanal::unbounded_async::<ReplicateReply>();
+    let inflight = Rc::new(RefCell::new(Inflight {
+        bytes: 0,
+        bound: ctx.inflight_bound,
+        bundles: HashMap::new(),
+        waker: None,
+    }));
+    // answers go out on their own task
+    let tx_task = glommio::spawn_local(replication_tx_relay(reply_rx, tx, peer_max_frame_bytes, inflight.clone()));
+    let outcome: Result<(), ServerError> = async {
+        loop {
+            let max_frame_bytes = ctx.local.borrow().max_frame_bytes;
+            let Some(header) = codec::read_header(&mut rx, max_frame_bytes).await? else {
+                return Ok(());
+            };
+            let header = codec::expect(header, MessageType::Replicate)?;
+            // the head, judged against the frame it came in
+            let Some(payload_len) = header.body_len().checked_sub(REPLICATE_HEAD_LEN) else {
+                return Err(ProtocolError::BodyTooShort {
+                    need: REPLICATE_HEAD_LEN,
+                    got: header.len,
+                }
+                .into());
+            };
+            let raw: [u8; REPLICATE_HEAD_LEN] = codec::read_array(&mut rx).await?;
+            let head = ReplicateRequestHead::decode(&raw)?;
+            // the shard named has to exist here, before the payload is read
+            if usize::from(head.target_shard) >= ctx.shard_count {
+                return Err(ProtocolError::MalformedForward("a replication request names a shard this node does not run").into());
+            }
+            // wait for room under the in-flight bound, then read the payload
+            Room {
+                inflight: inflight.clone(),
+                wanted: payload_len,
+            }
+            .await;
+            let payload = codec::read_vec(&mut rx, payload_len).await?;
+            inflight.borrow_mut().taken(Uuid::from_u64_pair(head.id, 0), 1, payload_len);
+            // hand it to the shard that hosts the group
+            let msg = ServerMsg::Replication {
+                origin,
+                head,
+                payload,
+                reply: reply_tx.clone(),
+            };
+            if ctx
+                .comms
+                .send(&crate::server::shard::ShardContact::Local(usize::from(head.target_shard)), msg)
+                .await
+                .is_err()
+            {
+                return Ok(());
+            }
+        }
+    }
+    .await;
+    if let Err(error) = outcome {
+        event!(Level::WARN, msg = "a replication lane ended", %origin, ?error);
+    }
+    tx_task.cancel().await;
+}
+
+/// Relay replication answers back to one peer
+///
+/// # Arguments
+///
+/// * `reply_rx` - The channel the shards hand answers over
+/// * `tx` - The write half of the connection
+/// * `peer_max_frame_bytes` - The largest frame the peer accepts
+/// * `inflight` - What this connection has taken in and not yet answered
+async fn replication_tx_relay(
+    reply_rx: AsyncReceiver<ReplicateReply>,
+    mut tx: WriteHalf<TcpStream>,
+    peer_max_frame_bytes: u32,
+    inflight: Rc<RefCell<Inflight>>,
+) {
+    loop {
+        let Ok(reply) = reply_rx.recv().await else {
+            break;
+        };
+        let head = ReplicateResponseHead {
+            id: reply.id,
+            status: reply.status,
+        }
+        .encode();
+        let header = match codec::header(
+            MessageType::ReplicateResponse,
+            head.len() + reply.payload.len(),
+            peer_max_frame_bytes,
+        ) {
+            Ok(header) => header,
+            Err(error) => {
+                // an answer too large for the peer is answered as a failure it can carry
+                event!(Level::ERROR, msg = "a replication answer is too large for the peer", id = reply.id, %error);
+                let failure = ReplicateReply::error(reply.id, "the answer is larger than the frame the peer accepts");
+                let head = ReplicateResponseHead {
+                    id: failure.id,
+                    status: failure.status,
+                }
+                .encode();
+                let Ok(header) = codec::header(
+                    MessageType::ReplicateResponse,
+                    head.len() + failure.payload.len(),
+                    peer_max_frame_bytes,
+                ) else {
+                    break;
+                };
+                if codec::write_frame(&mut tx, &header, &[&head, &failure.payload]).await.is_err() {
+                    break;
+                }
+                inflight.borrow_mut().answered(Uuid::from_u64_pair(reply.id, 0));
+                continue;
+            }
+        };
+        if let Err(error) = codec::write_frame(&mut tx, &header, &[&head, &reply.payload]).await {
+            event!(Level::WARN, msg = "failed to write a replication answer to a peer", id = reply.id, ?error);
+            break;
+        }
+        inflight.borrow_mut().answered(Uuid::from_u64_pair(reply.id, 0));
     }
 }
 
