@@ -800,6 +800,128 @@ fn key_on_other_node(_cluster: &Cluster) -> u64 {
     panic!("no key landed on node 1");
 }
 
+/// A forwarded query's trace crosses the node boundary without a false batch parent (C2 M2)
+///
+/// A client sends node 0 a bundle of three queries, all owned by node 1. Node 0 opens one
+/// `Coordinator::route` span per query under the bundle's `Shoal::request`, and forwards each
+/// carrying that span's context; node 1 opens a `Shoal::forwarded` span that adopts it. Every
+/// node-1 forwarded span therefore hangs off node 0's per-query route span, in node 0's trace,
+/// and never off the bundle's request root - which is what "without a false batch parent" means
+/// ([F38](../../docs/src/features/inter-node-transport.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn trace_context_crosses_nodes_without_false_batch_parent() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder().cluster(2, CoreClaim::Count(2)).trace().start().await?;
+    // three keys all owned by node 1, so every one is forwarded and traced across the hop
+    let keys: Vec<u64> = {
+        use shoal::shared::traits::PartitionKeySupport;
+        let mut found = Vec::new();
+        for candidate in 0..1_000_000u64 {
+            let hash = Row::get_partition_key_from_values(&candidate);
+            if (hash >> (u64::BITS - 12)) as usize % 2 == 1 {
+                found.push(candidate);
+                if found.len() == 3 {
+                    break;
+                }
+            }
+        }
+        found
+    };
+    // send them in one bundle to node 0, then read them back so the spans are opened and closed
+    let addr = cluster.node(0).endpoints.client.to_string();
+    let client = Shoal::<TestDbClient>::new(&addr).await?;
+    for key in &keys {
+        client.send_one(Row { key: *key, data: format!("t-{key}") }).await?;
+    }
+    let mut bundle = client.query();
+    for key in &keys {
+        bundle = bundle.add(RowGet::new(vec![*key]));
+    }
+    let mut stream = client.send(bundle).await?;
+    while stream.next().await?.is_some() {}
+    drop(client);
+    // flush both nodes' spans, then read them back
+    let _ = cluster.node_mut(0).command("FLUSH")?;
+    let _ = cluster.node_mut(1).command("FLUSH")?;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let node0_spans = read_spans(cluster.dir(0).join("trace.jsonl"));
+    let node1_spans = read_spans(cluster.dir(1).join("trace.jsonl"));
+    assert!(!node0_spans.is_empty(), "node 0 exported no spans");
+    assert!(!node1_spans.is_empty(), "node 1 exported no spans");
+
+    // node 0's request roots and its per-query route spans
+    let request_ids: std::collections::BTreeSet<&str> = node0_spans
+        .iter()
+        .filter(|s| s.name == "Shoal::request")
+        .map(|s| s.span_id.as_str())
+        .collect();
+    let route: std::collections::BTreeMap<&str, &str> = node0_spans
+        .iter()
+        .filter(|s| s.name == "Coordinator::route")
+        .map(|s| (s.span_id.as_str(), s.trace_id.as_str()))
+        .collect();
+    assert!(route.len() >= 3, "node 0 opened {} route spans, expected at least 3", route.len());
+    // every forwarded span on node 1 hangs off a route span on node 0, in that span's trace, and
+    // none hangs off the request root
+    let forwarded: Vec<_> = node1_spans.iter().filter(|s| s.name == "Shoal::forwarded").collect();
+    assert!(forwarded.len() >= 3, "node 1 opened {} forwarded spans, expected at least 3", forwarded.len());
+    for span in &forwarded {
+        let parent_trace = route.get(span.parent_span_id.as_str());
+        assert!(
+            parent_trace.is_some(),
+            "a forwarded span's parent {} is not a route span on node 0",
+            span.parent_span_id
+        );
+        assert_eq!(
+            parent_trace.copied(),
+            Some(span.trace_id.as_str()),
+            "a forwarded span is in a different trace than its parent route span"
+        );
+    }
+    // no node-1 span is parented directly to node 0's request root (the false batch parent)
+    for span in &node1_spans {
+        assert!(
+            !request_ids.contains(span.parent_span_id.as_str()),
+            "node-1 span {} hangs off the bundle's request root rather than a query's route span",
+            span.name
+        );
+    }
+    assert_eq!(cluster.node(0).failure(), None);
+    assert_eq!(cluster.node(1).failure(), None);
+    Ok(())
+}
+
+/// One exported span, as the child wrote it
+struct TraceSpan {
+    /// The span's name
+    name: String,
+    /// The trace it belongs to
+    trace_id: String,
+    /// Its own id
+    span_id: String,
+    /// The span it hangs off, or all-zeroes if it is a root
+    parent_span_id: String,
+}
+
+/// Read a node's exported spans back from its trace file
+///
+/// # Arguments
+///
+/// * `path` - The trace file
+fn read_spans(path: std::path::PathBuf) -> Vec<TraceSpan> {
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    text.lines()
+        .filter_map(|line| {
+            let value: serde_json::Value = serde_json::from_str(line).ok()?;
+            Some(TraceSpan {
+                name: value.get("name")?.as_str()?.to_string(),
+                trace_id: value.get("trace_id")?.as_str()?.to_string(),
+                span_id: value.get("span_id")?.as_str()?.to_string(),
+                parent_span_id: value.get("parent_span_id")?.as_str()?.to_string(),
+            })
+        })
+        .collect()
+}
+
 /// The control lane reaches a placed peer's own Raft (C2 M2, control lane)
 ///
 /// Two nodes, placed by name, plaintext control lanes. Node 0 sends node 1 a vote for a low term
@@ -840,6 +962,84 @@ async fn control_lane_answers_a_vote_from_a_placed_peer() -> Result<(), FixtureE
     Ok(())
 }
 
+/// Install an OpenTelemetry subscriber that appends every exported span to a file
+///
+/// Returns the provider, which the child holds so a `FLUSH` command can force it. `None` when no
+/// trace file was asked for, in which case the child installs no subscriber, exactly as it did
+/// before this test existed.
+///
+/// # Arguments
+///
+/// * `path` - Where to write the spans, if anywhere
+fn install_trace_exporter(path: Option<String>) -> Option<opentelemetry_sdk::trace::SdkTracerProvider> {
+    use tracing_subscriber::layer::SubscriberExt as _;
+    use tracing_subscriber::util::SubscriberInitExt as _;
+    let path = path?;
+    let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+        .with_simple_exporter(FileSpanExporter::new(path))
+        .build();
+    let tracer = opentelemetry::trace::TracerProvider::tracer(&provider, "cluster_child");
+    tracing_subscriber::registry()
+        .with(tracing_opentelemetry::layer().with_tracer(tracer))
+        .init();
+    Some(provider)
+}
+
+/// An exporter that appends each span to a file as one json line
+///
+/// The four fields the cross-node trace test asks about: the span's name, its trace, its own id
+/// and the id of the span it hangs off. Written as hex so a person can diff two nodes' files.
+#[derive(Debug)]
+struct FileSpanExporter {
+    /// The file every batch is appended to
+    file: std::sync::Arc<std::sync::Mutex<std::fs::File>>,
+}
+
+impl FileSpanExporter {
+    /// Open the file the spans go to
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Where to write
+    fn new(path: String) -> Self {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .expect("open a trace file");
+        FileSpanExporter {
+            file: std::sync::Arc::new(std::sync::Mutex::new(file)),
+        }
+    }
+}
+
+impl opentelemetry_sdk::trace::SpanExporter for FileSpanExporter {
+    /// Append every span in a batch as a json line
+    ///
+    /// # Arguments
+    ///
+    /// * `batch` - The spans being exported
+    fn export(
+        &mut self,
+        batch: Vec<opentelemetry_sdk::trace::SpanData>,
+    ) -> futures::future::BoxFuture<'static, opentelemetry_sdk::error::OTelSdkResult> {
+        use std::io::Write as _;
+        let file = self.file.clone();
+        let mut file = file.lock().expect("the trace file lock");
+        for span in batch {
+            let line = serde_json::json!({
+                "name": span.name.to_string(),
+                "trace_id": format!("{:032x}", u128::from_be_bytes(span.span_context.trace_id().to_bytes())),
+                "span_id": format!("{:016x}", u64::from_be_bytes(span.span_context.span_id().to_bytes())),
+                "parent_span_id": format!("{:016x}", u64::from_be_bytes(span.parent_span_id.to_bytes())),
+            });
+            let _ = writeln!(file, "{line}");
+        }
+        let _ = file.flush();
+        Box::pin(std::future::ready(Ok(())))
+    }
+}
+
 /// The request this process was started with, if it is a child
 fn child_request() -> ChildRequest {
     let json = std::env::var(cluster::CHILD_ENV).expect("a child is started with a request");
@@ -862,6 +1062,11 @@ fn report(line: &str) {
 #[ignore]
 async fn cluster_server_child() {
     let request = child_request();
+    // when the parent asked for a trace file, install an OpenTelemetry subscriber that writes
+    // every exported span to it as one json line, so the cross-node trace test can read both
+    // nodes' spans back and check the hop's parentage. The pool installs no subscriber, so this
+    // global default is uncontested ([F38](../../docs/src/features/inter-node-transport.md))
+    let trace_provider = install_trace_exporter(request.cluster.as_ref().and_then(|c| c.trace_file.clone()));
     // exactly the allocation the parent decided on, and any port at all
     let mut resources = Resources::default()
         .exclude_cores(request.exclude_cores.clone())
@@ -967,7 +1172,7 @@ async fn cluster_server_child() {
             tokio::select! {
                 // the next command line, or stdin closing
                 line = stdin.next_line() => match line {
-                    Ok(Some(line)) => report(&handle_command(&pool, &placement, line.trim())),
+                    Ok(Some(line)) => report(&handle_command(&pool, &placement, trace_provider.as_ref(), line.trim())),
                     // stdin closed: the parent is done with us, run until killed
                     Ok(None) => break,
                     Err(_) => break,
@@ -1002,6 +1207,7 @@ async fn cluster_server_child() {
 fn handle_command(
     pool: &ShoalPool<TestDb>,
     placement: &[shoal::shared::identity::NodeId],
+    trace_provider: Option<&opentelemetry_sdk::trace::SdkTracerProvider>,
     line: &str,
 ) -> String {
     let mut parts = line.split_whitespace();
@@ -1045,6 +1251,13 @@ fn handle_command(
                 }),
             None => Err("PROBE_BULK needs a node index".to_string()),
         },
+        // flush this node's exported spans to its trace file
+        "FLUSH" => {
+            if let Some(provider) = trace_provider {
+                let _ = provider.force_flush();
+            }
+            Ok(serde_json::json!({ "flushed": true }))
+        }
         other => Err(format!("unknown command {other:?}")),
     };
     // one reply line per command, an ok or an error object

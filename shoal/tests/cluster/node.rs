@@ -98,6 +98,9 @@ pub struct StagedCluster {
     pub control_port: u16,
     /// Every node of the cluster: (node id, data addr, control addr, shards)
     pub placement: Vec<(String, String, String, u16)>,
+    /// A file the node writes its exported spans to, for the cross-node trace test
+    #[serde(default)]
+    pub trace_file: Option<String>,
 }
 
 /// The endpoints a child bound, and the identity it reported

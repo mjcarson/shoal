@@ -111,6 +111,8 @@ pub struct ClusterBuilder {
     /// control endpoints at a proxy, so a test can delay or cut one lane to one node while the
     /// others keep flowing ([F38](../../../docs/src/features/inter-node-transport.md)).
     lane_links: bool,
+    /// Whether each node exports its spans to a file, for the cross-node trace test
+    trace: bool,
 }
 
 impl ClusterBuilder {
@@ -126,6 +128,12 @@ impl ClusterBuilder {
             affinity: None,
             staged_marker: None,
         });
+        self
+    }
+
+    /// Have each node export its spans to `<dir>/trace.jsonl`, for the cross-node trace test
+    pub fn trace(mut self) -> Self {
+        self.trace = true;
         self
     }
 
@@ -264,7 +272,7 @@ impl ClusterBuilder {
         // identities, reserve a peer and a control port for each node, and stage a marker naming
         // each one, so every child gets the same placement and finds its own id on disk
         let mut staged = if self.static_cluster {
-            Some(build_static_cluster(&self.nodes, &dirs, &plan)?)
+            Some(build_static_cluster(&self.nodes, &dirs, &plan, self.trace)?)
         } else {
             None
         };
@@ -374,6 +382,7 @@ impl Cluster {
             ready_timeout: DEFAULT_READY_TIMEOUT,
             static_cluster: false,
             lane_links: false,
+            trace: false,
         }
     }
 
@@ -533,6 +542,7 @@ fn build_static_cluster(
     specs: &[NodeSpec],
     dirs: &[TempDir],
     plan: &ClusterPlan,
+    trace: bool,
 ) -> Result<StagedPlan, FixtureError> {
     use shoal::server::StorageMeta;
     use shoal::shared::identity::{ClusterId, NodeId};
@@ -582,6 +592,7 @@ fn build_static_cluster(
             data_port: data_ports[id],
             control_port: control_ports[id],
             placement: placement.clone(),
+            trace_file: trace.then(|| dir.path().join("trace.jsonl").to_string_lossy().into_owned()),
         });
     }
     Ok(StagedPlan { per_node, reservations })
