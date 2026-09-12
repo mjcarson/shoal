@@ -10,15 +10,23 @@ the medium-priority task queue (`.../fs.rs:130-133`).
 ```rust
 pub enum CompactionJob {
     IntentLog { path: PathBuf, generation: u64 },
+    Segment { path: PathBuf, generation: u64, frames: Vec<(u64, u32)> },
     Archives,
     Shutdown,
 }
 ```
 
-`shoal-core/src/server/tables/storage.rs:104-112`
+`shoal-core/src/server/tables/storage.rs`
 
-The compactor loop is a `match` on these (`.../fs/compactor.rs:576-592`). Jobs arrive on an
-unbounded channel from the table's own `compact_if_needed`.
+The compactor loop is a `match` on these (`.../fs/compactor.rs`). `IntentLog` jobs arrive on
+an unbounded channel from the table's own `compact_if_needed` on a standalone node. `Segment`
+is the cluster node's ([F40](../features/replication.md)): the shard loop hands the compactor
+one sealed WAL segment and the offsets of this table's command frames in it, in log order per
+group, once every group with frames in the segment has applied past them - so nothing
+uncommitted is ever merged - and the compactor reads those frames, applies them exactly as it
+applies intents, and reports `SegmentCompacted` so the groups' checkpoints can move and the
+segment can go once every group has purged past it. `compact_if_needed` never fires on a
+cluster node; the sweep that resolves segments runs on the loop's tick.
 
 ## Triggering
 

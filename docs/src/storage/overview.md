@@ -60,6 +60,21 @@ This is recognisably an LSM shape, with two deliberate differences: there is exa
 the map from key to extent is an explicit index rather than an implicit consequence of sorted
 files.
 
+## On a cluster node, the Raft log is the WAL
+
+Everything above the archives is the standalone shape. A node with a `cluster:` block
+([F40](../features/replication.md)) writes no intent log: every mutation is a command
+proposed through the tablet group that owns its tablet, and the group's log - one shared
+format 2 WAL per shard under `<latency_sensitive.path>/wal/Shard-N/`, every group's entries
+multiplexed into it, one `fdatasync` per batch across groups - is what makes it durable. The
+table applies a command when the group commits it, with no storage commit of its own, and the
+compactor is handed a sealed WAL segment (`CompactionJob::Segment`) once every group in it
+applied past its frames; the archives and the archive map are the same structures, written the
+same way, and a `checkpoint.json` beside the segments records, per group, the log id they are
+complete to. A directory is claimed at layout 1 for the intent-log shape and layout 2 for the
+WAL shape, and a start the other way is refused by name. [Recovery](recovery.md) on such a node
+is openraft's: the checkpoint, then the WAL, then the leader.
+
 ## Intent logs
 
 One per shard per table, at

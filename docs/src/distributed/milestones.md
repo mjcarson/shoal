@@ -1,7 +1,7 @@
 # Milestones
 
 The Before-M0 gate is settled ([decision record](protocol.md#decision-record), 2026-09-11), and
-M0, M1 and M2 are delivered. Keep M0–M10 as stable identifiers; M9a/b/c refine M9
+~~M0, M1 and M2~~ M0 through M4 are delivered. Keep M0–M10 as stable identifiers; M9a/b/c refine M9
 without renumbering later work. Acceptance tests live in their owning C pages and are indexed
 by [C11](testing.md#the-acceptance-test-table). Each test names one gate below. This is an order
 with dependencies and measurable exit criteria, not dates.
@@ -170,6 +170,37 @@ reports into the leader at sixty-four members; and no membership entry is data e
 
 ### M4. Replication and quorum writes
 
+**Delivered** on 2026-09-12 as [F40](../features/replication.md). All fourteen rows below are
+runnable: the nine fixture rows as `cargo test -p shoal --test cluster_fixture`, the two WAL
+rows and the placement row as `cargo test -p shoal-core`, the two C10 rows as `cargo test -p
+shoal-bench`; openraft's storage conformance suite runs over the shared WAL and the memory log
+under `cargo test -p shoal-core wal`. What was delivered, what was not, and the evidence are on
+the F page; the rest of this section is the gate as it was set. *Not done, on purpose:* a
+member behind the purge point cannot catch up, since installing a snapshot is M7's; the retry
+table is a bounded in-memory LRU rebuilt from the log, and its durable low-water mark is M6's;
+an isolated leader learns it is not one at its lease and not before (M6); leadership after a
+failover stays where the election put it (M5); a node holding no replica of a tablet still
+routes its writes to the placement primary's node, which nothing moves before M6; the arms are
+closed-loop and the open-loop capacity schedule is filed; and the capture is the benchmark
+host's - the arms ran at smoke scale on the development host.
+
+| Test | Where | What it asserts |
+| --- | --- | --- |
+| `quorum_success_requires_distinct_durable_voters` | `shoal/tests/cluster_fixture.rs` ([C5](replication.md)) | The lane into both followers cut: a write through the leader is `OutcomeUnknown` at the deadline and three rotations and flushes of the leader's WAL release nothing; one follower healed, the write commits and reads back on both; the cut follower's digest differs |
+| `rotation_preserves_pending_replication_requirements` | `shoal-core/src/server/wal/tests.rs` ([C5](replication.md)) | Appends from three groups across four forced rotations: every `IOFlushed` completes exactly once, every location names its generation, entries read back from a sealed segment |
+| `bootstrap_does_not_reduce_configured_quorum` | `shoal/tests/cluster_fixture.rs` ([C5](replication.md)) | Factor three on one node: readiness reports `active_rf` 1 and short default writes, an insert refused `QuorumUnavailable`; two joiners and `Initialize`: groups of three, the write admitted, committed and read on every node, `active_rf` 3 |
+| `async_replica_cannot_weaken_durable_quorum` | `shoal/tests/cluster_fixture.rs` ([C5](replication.md)) | A cluster node whose persistent table is `Async` refuses to start naming C5; a standalone `Async` node starts; `write_consistency: One` is refused at validation |
+| `table_streams_recover_independently_without_holes` | `shoal-core/src/server/wal/tests.rs` ([C5](replication.md)) | Two groups interleaved with one's completions held, the tail dropped unflushed, reopened: each log a contiguous prefix ending at its last durable index, no frame of one in the other's index |
+| `duplicates_gaps_and_old_terms_do_not_reapply` | `shoal/tests/cluster_fixture.rs` ([C5](replication.md)) | One follower's lane delayed, cut and healed under writes led by node zero; a leader of other groups killed, writes through a survivor, the old one restarted at a stale term: every acknowledged key present exactly once on every node, digests equal |
+| `uncommitted_suffix_never_enters_checkpoint` | `shoal/tests/cluster_fixture.rs` ([C5](replication.md)) | The leader isolated and written through, its WAL rotated and compacted with nothing handed; the majority elects and writes; healed and restarted, the old leader holds the majority's value everywhere, digests equal, and only then does its segment resolve |
+| `conditional_results_follow_committed_order` | `shoal/tests/cluster_fixture.rs` ([C5](replication.md)) | Concurrent inserts, updates, deletes and no-ops through all three nodes, every answer in a ledger the `shoal-model` oracle accepts, the converged reads accepted too, three equal digests |
+| `slow_tablet_does_not_block_other_tablets` | `shoal/tests/cluster_fixture.rs` ([C5](replication.md)) | Both followers hold one group's flush completions: writes to it pend to `OutcomeUnknown` or are shed `Shedding` at the bound, writes to another group land at once, the leader's memory stays bounded; released, the pended writes commit and apply |
+| `volatile_replication_uses_common_encoding` | `shoal/tests/cluster_fixture.rs` ([C5](replication.md)) | Rows of the ephemeral table written through one node read from the other two, the groups reported `volatile`; every node restarted, the rows gone and the persistent rows not |
+| `placement_respects_distinct_nodes_and_feasible_capacity` | `shoal-core/src/server/map.rs` ([C4](tablet-map.md)) | Three nodes at three: every tablet on three distinct nodes and every node holding every tablet; four at three: distinct nodes, three quarters each within one; unequal shard counts spread on the shard the primary rule picks; a factor past the placement served at the placement |
+| `one_reads_converge_without_exposing_uncommitted_state` | `shoal/tests/cluster_fixture.rs` ([C6](reads.md)) | A cut follower serves the old committed value and converges when healed; the isolated leader takes a write it cannot commit and a read through it does not show it; healed, every node converges on the majority's value |
+| `infeasible_rf_policy_is_not_a_throughput_arm` | `shoal-bench/src/workloads/cluster_replication.rs` ([C10](performance.md)) | Three copies on one or two nodes refused as an availability test rather than run at a settled factor; every declared arm feasible |
+| `capacity_capture_records_lag_and_offered_load` | `shoal-bench/src/workloads/harness/cluster.rs` ([C10](performance.md)) | A cluster record round-trips the load it scheduled, every replica's lag, pending bytes and unknown and rejected writes, and the outcomes summed; a record from before them still loads |
+
 **Delivers.** Selected embedded data protocol, table-qualified logical histories over a specified
 WAL adapter, persisted term/vote and configuration, distinct durable/commit/apply/checkpoint
 positions, common command serialization, committed-order mutation/results, bounded pending state,
@@ -188,6 +219,17 @@ injected storage-order tests. Force compaction before commitment as a named regr
 before success, and bounded lag/queues under slow followers. Compare standalone, RF=1 and feasible
 RF=3 with matching semantics and resource budgets. No universal replication-latency multiplier;
 record curves and explain overhead. Default durability never changes to meet a target.
+*Met:* two tables converge across a delayed, cut and healed lane, a killed leader and a stale
+restart (`duplicates_gaps_and_old_terms_do_not_reapply`) and across every node restarting
+(`volatile_replication_uses_common_encoding`); a write succeeds only when a second distinct
+durable voter has it, and nothing the leader does alone releases it
+(`quorum_success_requires_distinct_durable_voters`); a group without a quorum sheds at its
+bound while another led by the same node is written at once
+(`slow_tablet_does_not_block_other_tablets`); the three arms - RF=1 on three nodes, RF=3
+durable, RF=3 volatile - run on one placement with the same cores and record every replica's
+debt, and their smoke numbers on the development host are on the
+[F40 page](../features/replication.md#performance) as what they are, not a capture; the
+default stayed a fsynced quorum, and `One` writes and `Async` replicas are refused by name.
 
 ### M5. Read consistency levels
 

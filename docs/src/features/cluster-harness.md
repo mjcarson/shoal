@@ -172,7 +172,9 @@ while the control lane pings.
   refuses a workload that restarts its server between phases, and records the configuration
   file's facts as the caller's claim rather than verifying the server was started from it.
 - **A kill is `SIGKILL` and proves nothing about durability.** The page cache and the device are
-  untouched; durability tests need injected storage completions, which are M4's.
+  untouched; durability tests need injected storage completions, ~~which are M4's~~ which
+  [F40](replication.md) added as `STALL_WAL` / `RELEASE_WAL` - a group's flush completions held
+  on one node, so a quorum can be made short by exactly one durable voter.
 - **Core allocation is by physical core from sysfs.** Nothing pins the driver or the children's
   client threads; the allocation is what the server is configured to, and is recorded, not
   enforced against a cpuset.

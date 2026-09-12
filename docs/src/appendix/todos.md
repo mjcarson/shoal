@@ -215,8 +215,9 @@ knowing before starting:
   under Raft. This is less additive than it sounds, since membership and failure detection need
   consensus anyway.
 
-Also needed for a real cluster: replication (there is exactly one copy of every partition),
-membership and failure detection, and rebalancing.
+Also needed for a real cluster: ~~replication (there is exactly one copy of every partition),
+membership and failure detection,~~ and rebalancing - replication and membership are built
+([F40](../features/replication.md), [F39](../features/membership.md)).
 
 The *client* half of this is now designed separately.
 [D7](../direction/shard-aware-routing.md) covers routing a query to the shard that owns its tablet
@@ -231,7 +232,9 @@ the placement authority is [C3](../distributed/membership.md), and the "actual w
 tablet-ring page deferred is [C5](../distributed/replication.md) through
 [C7](../distributed/failover.md). This entry still records *that* it is unbuilt. ~~Nothing there is
 built either.~~ C2 is built ([F38](../features/inter-node-transport.md)); ~~C3 onward are not~~
-C3's membership half and C4's map are built ([F39](../features/membership.md)); C5 onward are not. [C13](../distributed/protocol.md) adds the embedded control/data protocol contract
+C3's membership half and C4's map are built ([F39](../features/membership.md)); ~~C5 onward are not~~
+C5's write path, C4's replica sets and C6's `One` reads are built ([F40](../features/replication.md));
+C6's strong reads and C7 onward are not. [C13](../distributed/protocol.md) adds the embedded control/data protocol contract
 and the questions that gate implementation; no external membership or failover service is required.
 That contract was agreed on 2026-09-11 as the gate before M0 ([P1–P6](../distributed/protocol.md#the-contract)),
 which settled the protocol and pinned candidate libraries without selecting one or building anything.
@@ -250,7 +253,41 @@ its traces across the hop. M3 is delivered as [F39](../features/membership.md): 
 through seeds as a learner, the leader promotes voters under the policy and fences a duplicate
 by incarnation, the map is committed and pushed to every shard and every subscribed client,
 admin operations ride the client connection, writes need their quorum, and the leader's
-phi-accrual detector commits a silent member `Down`.
+phi-accrual detector commits a silent member `Down`. M4 is delivered as
+[F40](../features/replication.md): every tablet has a Raft group on every replica's shard, the
+group's log is one shared WAL per shard, a write is one command applied in committed order
+everywhere with its result derived there, a default write waits for a durable majority, and
+three arms price a durable and a volatile quorum against the same placement replicating to
+nobody.
+
+**What F40 left undone, deliberately.** Recorded here so the next milestone starts from the
+list rather than from the diff:
+
+- **Installing a snapshot.** A member behind its leader's purge point is refused by name over
+  the replication lane and in the state machine; M7 transfers the archives, and until then
+  `retained_entries` is the whole catch-up budget.
+- **A durable low-water mark for the retry table.** Dedup is a 4096-entry LRU per group, in
+  memory, rebuilt from the log on restart; an identity older than that is applied as new. M6.
+- **Stepping an isolated leader down at its lease.** It learns it is not one when its lease
+  expires and a write through it before then is `OutcomeUnknown` at the write deadline; M6 turns
+  that into `NotLeader` at the lease.
+- **Moving leadership back, or the write ring with it.** The placement primary is preferred
+  at first start by a head start and by nothing after; a node holding no replica of a tablet
+  routes its writes to the primary's node whoever leads. M5 and M6.
+- **An open-loop capacity arm.** The three arms are closed loops at one depth, which cannot
+  expose an overload pause or a lag that grows; the schedule C10 asks for, with completion
+  against scheduled issue times, is the arm that would.
+- **The one-node overhead series at matched shards.** `overhead/nodes/3` runs three shards a
+  node where `nodes/1` runs twelve, because the machine has eleven free cores; a `nodes/1`
+  twin at three shards would make the series a series.
+- **A live fold of the replication report.** A peer's control plane folds what its shards sent
+  on the last tick, so an admin read is a tick behind; the harness sleeps two ticks before it
+  reads. A read that asks the shards would be exact.
+- **`All` from a notification rather than a poll.** The proposer polls the group's metrics
+  until every voter's matched index covers the entry; correct, and a poll.
+- **A unit test of the command encoding across the two storage engines.** It holds by
+  construction - the ephemeral table is the persistent one with `NoStorage` - and the fixture's
+  `volatile_replication_uses_common_encoding` tests it on the wire.
 
 **What F39 left undone, deliberately.** Recorded here so the next milestone starts from the list
 rather than from the diff:
@@ -267,7 +304,9 @@ rather than from the diff:
   follower meaning more than its local table.
 - **A refusal kind beside a refusal's reason**, so an admin client gets a code rather than a
   sentence to parse ([item 98](known-issues.md#98-an-admin-refusals-error-code-is-derived-from-its-reason-text)).
-- **A data quorum that refuses writes a partitioned leader's stale map admits.** M4's.
+- ~~**A data quorum that refuses writes a partitioned leader's stale map admits.** M4's.~~
+  Built by [F40](../features/replication.md): the write is proposed to a group that cannot
+  commit it and is answered `OutcomeUnknown` at the deadline.
 
 **What F38 left undone, deliberately.** Recorded here so the next milestone starts from the list
 rather than from the diff:
@@ -315,10 +354,13 @@ recorded here rather than dropped:
 - **Enforcing the replication policy.** `write_consistency`, `read_consistency` and
   `replication_factor` are recorded in the control state and reported in the topology view;
   ~~nothing acts on them~~ since [F39](../features/membership.md) a write needs the members its
-  consistency implies to be up, and is refused `QuorumUnavailable` otherwise; what is written
-  still lives in one copy. ~~A one node cluster serves every read and write locally.~~ M4 and M5 own the
+  consistency implies to be up, and is refused `QuorumUnavailable` otherwise; ~~what is written
+  still lives in one copy.~~ ~~A one node cluster serves every read and write locally.~~ ~~M4 and M5 own the
   enforcement, and `active_rf` — the members that could hold a replica, capped at the desired
-  factor — becomes a count of placed replicas when C4's tablet map has something to place.
+  factor — becomes a count of placed replicas when C4's tablet map has something to place.~~
+  Since [F40](../features/replication.md) the write half is enforced whole - `Quorum` and
+  `All` by the group, `One` refused - and `active_rf` is the copies every tablet has; the read
+  half, `Primary` and `Quorum` reads, is M5's.
 - **A page for the cluster benchmark family.** `macro/cluster/overhead/nodes/1` lives on
   *Every workload* with its family's four blocks, and since [F38](../features/inter-node-transport.md)
   so do the three hop arms, as the `cluster-hop` family. A page that draws a series needs a

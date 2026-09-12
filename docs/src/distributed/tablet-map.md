@@ -15,9 +15,16 @@ admins - and pushed whole to every shard, which installs a newer version between
 and rebuilds its `Ring` from the order with one rule; a `TableId` that is the hash of the name;
 an explicit `Initialize` that places the tablets once, with the bootstrapper placed on itself
 before it and a joiner unplaced; and a `Topology` frame pushed to every subscribed client,
-folded to the newest per connection. What is not there yet: per-tablet records, replica sets,
-leader hints and deltas - the value has not widened, since nothing moves a tablet before M9a
-and nothing replicates one before M4. Before that: `Ring` (`shoal-core/src/server/ring.rs`) stores
+folded to the newest per connection. **And at M4 by [F40](../features/replication.md)** as far
+as replica sets go: the map derives a tablet's replicas by one rule - `placement[(t + k) % N]`
+for `k` below `min(rf, N)`, on shard `(t / N) % shards` of each - and a `GroupSpec` per table
+and distinct replica vector (`TabletMap::replica_groups`), which is what every shard builds its
+tablet groups from; `active_rf` is the smaller of the desired factor and the placement's size,
+so three copies on two nodes is two, reported as such, and the write quorum stays the one the
+desired factor names. `read_ring_for` routes a tablet this node holds a copy of to the shard
+holding it and everything else to the primary; reads and writes both use it. What is not there
+yet: per-tablet records, leader hints and deltas - the value has not widened, since nothing
+moves a tablet before M9a ~~and nothing replicates one before M4~~. Before that: `Ring` (`shoal-core/src/server/ring.rs`) stores
 4096 `u16` shard assignments, derived from shard
 count at startup. `tablet_of` uses the partition hash's high twelve bits. ~~`Topology` and
 `STALE_TOPOLOGY` are reserved protocol surfaces~~ `Topology` is wired and `STALE_TOPOLOGY` is
@@ -71,6 +78,11 @@ RF change is a configuration transition, never inferred from how many nodes curr
 Placement respects distinct nodes and capacity constraints. At N=RF every node necessarily holds
 every tablet: shard count cannot yield a 2:1 distribution of replica bytes across those nodes.
 Within a node distribute work among its shards; with N>RF use C8's capacity-aware assignment.
+*At M4:* the rule above places three copies on three distinct nodes by construction, since
+the window `(t + k) % N` never repeats a node while `k < N`; at N>RF each node holds `RF / N`
+of the tablets to within one, and a node's replica of a tablet sits on the shard the primary
+rule would pick, so a node with more shards spreads its copies over more of them
+(`placement_respects_distinct_nodes_and_feasible_capacity`). Capacity weights are still C8's.
 Per-table RF overrides are admitted only once their configuration transitions are supported;
 unimplemented overrides are rejected with an actionable message.
 

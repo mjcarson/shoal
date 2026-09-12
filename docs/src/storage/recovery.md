@@ -15,6 +15,16 @@ is written into archives and the logs can be discarded. `read_intents` returns a
 [`RecoveryStats`](#what-recovery-discards) recording anything it had to throw away, which the
 shard reports once it has finished starting.
 
+**On a cluster node this page is the archives' half only.** There is no intent log to replay
+([F40](../features/replication.md)): `read_intents` is skipped, and what brings a table's
+memory back is openraft. Each tablet group opens at the checkpoint its table's archives are
+complete to (`wal/Shard-N/checkpoint.json`), re-applies the shared WAL from there to the index
+it had committed - on a task of its own, never on the shard loop, since the apply is the
+loop's - and takes everything after that from its leader. A torn tail of the WAL is cut at
+open; an uncommitted suffix is truncated by the leader rather than replayed into anything;
+and a member behind its leader's purge point waits for M7. The rest of this page - the
+three-phase replay, what is discarded, forced compaction - describes the standalone node.
+
 ## Replay order
 
 Sealed logs first, oldest generation first, then the active log:

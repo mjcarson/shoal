@@ -30,8 +30,16 @@ others through its own set - initializes it once every child has joined, and can
 node on its directory or with other seeds, start a deferred node, kill, clone a directory and
 spawn the clone, isolate and heal; a child also answers `MEMBERS`, `READINESS`, `MAP`,
 `INITIALIZE`, `SET_VOTERS`, `ADMIN`, `INCARNATION`, `LOG_LEN`, `FAIL_SHARD` and `STALE_REPORT`,
-and `SHOAL_CHILD_LOG` keeps every child's log. Benchmark readiness probes and tracing-based path assertions provide reusable
-patterns. There is no whole-engine deterministic simulator; this proposal does not require
+and `SHOAL_CHILD_LOG` keeps every child's log. Since [F40](../features/replication.md) the
+fixture drives replication: a child answers `GROUPS` - every group a node hosts, with its
+members, leader, applied, committed and checkpoint indexes - `DIGEST <table>`, the rows and a
+hash over every shard's applied state that every convergence test compares across nodes,
+`ROTATE` and `COMPACT`, and `STALL_WAL <group>` / `RELEASE_WAL <group>`, which hold a group's
+flush completions on that node so a test can build a quorum short by exactly one durable
+voter; the builder sets `primary_failover_after` (a second by default in tests), the write
+deadline, the pending bound and one node's durability; and the write ledger below is what
+`conditional_results_follow_committed_order` feeds the `shoal-model` oracle. Benchmark
+readiness probes and tracing-based path assertions provide reusable patterns. There is no whole-engine deterministic simulator; this proposal does not require
 building one before testing the new protocol state machine, and `shoal-model` is the pure model
 it asks for instead.
 
@@ -113,6 +121,12 @@ Keep an independent expected-state oracle; tests and Admin::Repair sharing one d
 must not be the only source of truth. Add a separate digest self-test for equal logical content
 with different archive layouts and for corrupted/missing data. Quarantine/repair source selection
 is tested by corrupting the primary as well as followers.
+*At M4 the digest is `DIGEST <table>`: every shard folds its partitions' rows into a row count
+and a hash over their serialized bytes, the child sums the counts and folds the hashes, and a
+test compares nodes at a boundary it establishes itself - waiting on `wait_digests_equal`
+until every node agrees, which is what the applied indexes the same verb reports per group
+make legible when one does not. It is a digest of applied state, not of archives, so a layout
+self-test is still to come.*
 
 ### Assertions on the path
 

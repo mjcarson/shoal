@@ -348,9 +348,13 @@ built the peer transport - the lanes, their bounds and their encryption - ~~agai
 placement~~, and by [F39](../features/membership.md), which built the membership: a node joins
 through `seeds`, the leader promotes voters to `control_voters` and fences a duplicate identity,
 the `failure_detector` calls a silent member down, writes are admitted against the write
-consistency, and `admins` names who may change the cluster. ~~joining and enforcement of the
-policy are later milestones and~~ Replication is a later milestone, and the settings that
-belong to it are **refused at startup by name** rather than accepted and ignored.
+consistency, and `admins` names who may change the cluster; and by
+[F40](../features/replication.md), which built replication: every tablet has a Raft group
+whose log is a shared WAL per shard, a default write waits for a durable majority, and the
+`replication:` block below bounds what a proposal may hold and how long it may wait.
+~~joining and enforcement of the policy are later milestones and~~ ~~Replication is a later
+milestone, and~~ The settings that belong to a later milestone are **refused at startup by
+name** rather than accepted and ignored.
 
 This is the block with every default written out. A file that says only `cluster:\n  bootstrap:
 true` gets exactly this, and `documented_cluster_defaults_match_policy_bootstrap` holds the
@@ -386,6 +390,15 @@ cluster:
     reconnect_max: "5s"           # the longest
     handshake_timeout: "10s"      # to dial and finish the hello
     ping_interval: "1s"           # how often a node pings each member over its control lane
+    replication_queue_bytes: "64MiB" # queued to one peer on the replication lane; an append past it is refused and retried
+  replication:                    # the tablet groups (F40); every bound is in bytes, node-local
+    write_timeout: "5s"           # after this a proposal is answered OutcomeUnknown; no longer than forward_timeout
+    pending_bytes: "64MiB"        # proposed and unanswered bytes one shard holds per group; a write past it is shed
+    segment_bytes: "10MiB"        # a WAL segment is sealed once it grows past this
+    checkpoint_entries: 1024      # entries a group commits between snapshots at its checkpoint
+    retained_entries: 10000       # entries kept behind the snapshot for a slow member to catch up from
+    log_cache_bytes: "16MiB"      # entries the WAL keeps in memory past its durable tail
+    volatile_log_bytes: "256MiB"  # every ephemeral table's in-memory log together; a write past it is shed
 ```
 
 Two settings have no default and are absent above: `advertise`, the address peers reach this
@@ -424,9 +437,17 @@ topology view reports the desired replication factor beside the active one (whic
 the count the leader promotes learners to and never past; `write_consistency` and
 `replication_factor` decide how many members must be up before a write is admitted - one for
 `One`, `rf / 2 + 1` for `Quorum`, `rf` for `All` - and a write that falls short is refused
-`QuorumUnavailable` naming the shortfall, which readiness reports too. What is written still
+`QuorumUnavailable` naming the shortfall, which readiness reports too. ~~What is written still
 lives in one copy: the topology reports the desired factor beside the active one, which is 1
-wherever a node is placed, until M4 replicates. `admins` names the principals an
+wherever a node is placed, until M4 replicates.~~ **Since [F40](../features/replication.md)
+the factor is what a tablet is replicated at**: `min(replication_factor, nodes placed)`
+copies, on distinct nodes, and the topology reports the desired factor beside that active
+one; a `Quorum` write is acknowledged once a majority of the group has fsynced it and this
+node applied it, an `All` write once every voter has it, and `One` is refused at startup
+naming C5 - as is a persistent table configured `Async` on a cluster node, since a receipt
+that precedes an fsync cannot make a durable quorum. `primary_failover_after` is the base the
+groups' timers derive from: a heartbeat every tenth of it, an election between one and two of
+it, and under 100 ms it is refused. `admins` names the principals an
 authenticated client connection may change the cluster as; a mutation from anybody else is
 refused `Unauthorized`. `failure_detector` is the leader's: every member reports at
 `interval_ms`, the leader fits the last `window` arrivals once it has `min_samples`, and a

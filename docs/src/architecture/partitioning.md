@@ -245,5 +245,8 @@ starts earning its keep.
   ([TODOs](../appendix/todos.md#rebalancing)).
 - **There is no migration from the old ring.** This mapping is not the one the vnode ring
   produced, and nothing detects a directory written by it. Old data directories are removed.
-- **No replication.** One shard, one copy.
+- ~~**No replication.** One shard, one copy.~~ **On a standalone node, one shard, one copy.**
+  A cluster node replicates every tablet through a Raft group since
+  [F40](../features/replication.md); the partitioning below is unchanged by it, since a
+  tablet's replicas are derived from the same twelve bits.
 - Partition key collisions are undetected and, for unsorted tables, lossy.

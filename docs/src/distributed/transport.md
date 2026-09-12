@@ -25,7 +25,14 @@ are merged at the gather; `Shedding`, `Unavailable` and `OutcomeUnknown` keep a 
 apart from an unknown outcome. The control group's RPCs go over the control lane as JSON. A trace
 crosses the hop from each query's own span. Every lane is mutual kTLS when `cluster.tls` is set.
 The four M2 rows of the table below exist as tests, and the hop arms of
-[C10](performance.md#the-workloads) exist as workloads.
+[C10](performance.md#the-workloads) exist as workloads. **At M4** ([F40](../features/replication.md))
+a fourth lane, `Lane::Replication`, on the data port and owned by every shard, carries the
+data consensus family: `Replicate` (type 25) and `ReplicateResponse` (26), a 24 byte head
+naming the correlation id, the group, the target shard, the kind - `AppendEntries`, `Vote`,
+`Propose`, `Snapshot` - and the deadline, and a postcard body; one link per peer node per
+shard with its own correlation table and its own bound, `transport.replication_queue_bytes`,
+so a follower that stops reading holds nothing but its queue. `Propose` is the one hop a write
+takes from a replica to its leader; `Snapshot` is answered by name until M7.
 
 Before that: ~~`ShardContact::Local`, `Comms::send` and the kanal mesh route queries within a
 process.~~ `ServerMsg::Partition` still carries a Glommio read result with a restricted Send
@@ -87,8 +94,8 @@ Client encryption requires equivalent protection on both control and data peer l
 | --- | --- |
 | Peer hello/ack | Identity, incarnation, capabilities, schema identity, refusal reason |
 | Forward / Forwarded | Original operation/query and attempt ids, destination, coverage, resolved policy, remaining deadline, bounded hop count and return address |
-| Data consensus | Tablet/group identity plus selected library's election, append, configuration and read-barrier payloads |
-| Replication receipts | Matching term/history, replica/configuration and durable completion evidence; duplicate-safe |
+| Data consensus | Tablet/group identity plus selected library's election, append, configuration and read-barrier payloads. *At M4:* `Replicate`/`ReplicateResponse` on the replication lane, openraft's `AppendEntries` and `Vote` as postcard, the read barrier M5's |
+| Replication receipts | Matching term/history, replica/configuration and durable completion evidence; duplicate-safe. *At M4:* openraft's append response, sent after the follower's `fdatasync` |
 | Catch-up | Tablet/group, matching term/index boundary and snapshot fallback negotiation |
 | Snapshot begin/chunk/end | Snapshot/transition identity, manifest, boundary, offset, length, checksum and resume metadata |
 | Control Raft | Typed request/response identity and embedded OpenRaft payload |

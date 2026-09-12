@@ -1,10 +1,11 @@
 # Distributed Shoal
 
 ~~**Nothing in this part is built.**~~ ~~**Nothing distributed in this part is built.**~~
-**Nodes speak to nodes; nothing is replicated yet.** These pages
+~~**Nodes speak to nodes; nothing is replicated yet.**~~ **Every tablet is replicated, and a
+default write waits for a durable quorum.** These pages
 plan a highly available cluster of Shoal nodes. The `C` pages are design records;
 [milestones](milestones.md) name implementation gates, acceptance tests and benchmark evidence.
-Four gates are met: the protocol contract that precedes M0 was agreed on 2026-09-11 and is
+~~Four~~ Five gates are met: the protocol contract that precedes M0 was agreed on 2026-09-11 and is
 numbered P1–P6 in [C13](protocol.md#the-contract);
 [M0](milestones.md#m0-step-0-the-harness-and-the-facts) — the executable model of that contract,
 the process fixture, and the benchmark's cluster record — was delivered the same day as
@@ -22,9 +23,18 @@ kTLS, and the hop arms that price it — as [F38](../features/inter-node-transpo
 voter policy enforced, a duplicate identity fenced by a persisted incarnation, the map committed
 and pushed to every shard and every subscribed client, admin operations over the client
 connection, writes admitted against their quorum, and the leader's phi-accrual detector — as
-[F39](../features/membership.md).
-~~No node speaks to a node yet.~~ A node speaks to a node it was placed beside; nothing joins,
-elects across nodes or replicates yet. They extend the unbuilt
+[F39](../features/membership.md); and
+[M4](milestones.md#m4-replication-and-quorum-writes) — replication: a Raft group per table and
+replica set on every shard, one shared WAL per shard with one fsync per batch across groups,
+one command applied once in committed order on every replica with its result derived there,
+a write answered by a durable majority's evidence or by a definite refusal or an unknown
+outcome, `One` reads from the local replica's committed state, checkpoints the compactor
+moves, and three arms that price a durable and a volatile quorum against the same placement
+replicating to nobody — as [F40](../features/replication.md).
+~~No node speaks to a node yet.~~ ~~A node speaks to a node it was placed beside; nothing joins,
+elects across nodes or replicates yet.~~ What is not there: strong reads (M5), failover that
+moves leadership and the retry table's durable mark (M6), a member behind the purge point
+catching up (M7), and everything from rebalancing on. They extend the unbuilt
 [Distribution](../appendix/todos.md#distribution) and
 [Rebalancing](../appendix/todos.md#rebalancing) entries.
 

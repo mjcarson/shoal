@@ -230,7 +230,8 @@ process keeps both true: a multi-node arm is one `run` command, and the children
   with a code; M6 owns the identity that makes a retry safe.
 - **Snapshots are counted, checksummed and discarded.** The bulk lane has a probe for a producer
   and a receiver that installs nothing; `full_snapshot` over the control lane is written and
-  unexercised until M4 and M7.
+  unexercised until ~~M4 and~~ M7 - [F40](replication.md)'s tablet groups refuse a snapshot by
+  name over their own lane, the fourth one on the data port.
 - **`ShoalPool::transport()` reaches shard zero.** The pool asks one shard for its links; the
   relay that would gather every shard's view is not built. A four-shard node's artifact shows
   shard zero's links, which for the hop arms is the whole story on one-shard node zero and an

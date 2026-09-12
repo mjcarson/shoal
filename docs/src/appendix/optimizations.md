@@ -184,6 +184,9 @@ so they get worse by existing longer rather than under load.
 | **B2** | [**O4**](#o4-deep_size_of-is-a-recursive-walk-called-on-every-mutation) — carry a row's measured size | Argued | M | — | Contained | no — and it settles [item 22](known-issues.md#22-size-accounting-inconsistencies) either way |
 | **B3** | [**O10**](#o10-serializedmapsave-snapshots-by-cloning), [**O15**](#o15-one-partition-load-costs-a-dup-and-a-close), [**O21**](#o21-a-forced-rotation-of-an-empty-intent-log-does-the-whole-rotation-anyway) — contained cleanups | Argued | S–M | — | Contained | no |
 | **B4** | [**O11**](#o11-a-fresh-alignedvec-per-write-and-per-response) — reuse the serialization buffer. ~~[**O29**](#o29-a-request-body-is-zeroed-and-then-immediately-overwritten) and [**O37**](#o37-the-client-zeroes-a-response-buffer-and-immediately-overwrites-it) beside it — a buffer zeroed and overwritten, on each end of the same round trip~~ — **both done**, by [F25](../features/read-buffers-are-filled-not-zeroed.md), which built the benchmark this row said neither had | Argued; ~~O37 **asymptotic** in the row width~~ measured, both ends | M | a storage write-path bench (O11); ~~nothing (O29, O37)~~ `wire_codec/width/{request,response}/body` | None | no |
+| **B5** | [**O46**](#o46-the-shared-wal-is-a-buffered-file-where-the-intent-log-was-direct-io) — the shared WAL is a buffered file where the intent log was direct I/O | Argued — a kernel copy per batch, on a path waiting on the sync | M | a capture of the replication arms on the benchmark host | Contained | no |
+| **B6** | [**O47**](#o47-a-followers-fsync-may-be-waiting-for-the-leaders-rather-than-running-beside-it) — a follower's fsync may wait for the leader's rather than run beside it | Indicated — 2.1× the single-copy median at smoke scale on a shared device | S to establish | the same capture, on separate devices | Not yet known | no — one host, one device |
+| **B7** | [**O48**](#o48-resolving-a-segment-scans-every-groups-whole-index) — resolving a segment scans every group's whole index | Argued — `groups × retained_entries` comparisons per handoff, off every query path | S | — | Contained | no |
 
 **Tier C — blocked on a design pass, not on effort.**
 
@@ -2517,3 +2520,73 @@ reading a trace is looking for, and a leaf nobody can see is not worth a callsit
 `shoal.yml` names `Warn`, at which neither callsite is enabled and both cost a filter check. This
 entry is about what a deployment at `Info` pays, which is the level
 [F34](../features/benchmark-tracing.md) made a capture honor.
+
+### O46. The shared WAL is a buffered file, where the intent log was direct I/O
+
+| | |
+| --- | --- |
+| **Rank** | **B5** — argued and contained, waiting on the replication arms' capture |
+| **Impact** | Argued — a page-cache copy per batch on the write path and a page-cache read per segment scan, on a node whose quorum cost is the fsync those pages precede |
+| **Difficulty** | M — the frame format is fixed, but a batch of frames from many groups is not block aligned, and a DMA writer needs padding the reader has to skip |
+| **Depends on** | a capture of `macro/cluster/replication/durable` on the benchmark host |
+| **Blocks** | nothing |
+| **Tradeoff** | Contained — the frame and the store's contract do not move; the alignment does |
+| **Benchmark** | `macro/cluster/overhead/nodes/3` against `macro/grid/unsorted/r50/1024` at matched shards, which does not exist yet ([todos](todos.md#distribution)) |
+
+Filed by [F40](../features/replication.md) against itself. The standalone intent log writes
+O_DIRECT through a `DmaStreamWriter` that rounds every buffer up to the device's alignment
+([F23](../features/self-sizing-staging-buffer.md)); the shared WAL writes a batch of frames from
+every group a shard hosts with one `write_at` on a `BufferedFile` and one `fdatasync`, and reads a
+sealed segment for compaction and for openraft's replication below the durable watermark with
+`read_at` on the same file. The choice was made for the sync: what a quorum counts is the
+`fdatasync`, a batch is whatever appended while the last one was in flight, and padding every
+batch to an alignment so that DMA could take it would spend the bytes the batch was meant to save.
+What it costs is a kernel copy per batch and a page-cache read the archive reader avoids -
+neither is measured, and the write path this sits on is
+[waiting on the device](../performance/baseline.md#profile--where-the-time-goes) by thirty
+milliseconds a call on the benchmark host, which is why this is Tier B and not Tier A.
+
+### O47. A follower's fsync may be waiting for the leader's rather than running beside it
+
+| | |
+| --- | --- |
+| **Rank** | **B6** — argued from one smoke run, waiting on the capture that would show it |
+| **Impact** | Indicated — the durable quorum's median was 2.1× the single-copy median on the development host, which is what two syncs in series cost and not what two in parallel do |
+| **Difficulty** | S to establish, unknown to change — the order is openraft's, and the shared device is the host's |
+| **Depends on** | a capture of the three replication arms on the benchmark host, and a per-shard stage record of the append path |
+| **Blocks** | nothing |
+| **Tradeoff** | Not yet known — the question is whether the leader replicates an entry before or after its own `IOFlushed`, and whether three processes fsyncing one device serialize in the device rather than in the code |
+| **Benchmark** | `macro/cluster/replication/durable` against `macro/cluster/overhead/nodes/3`, the F40 smoke numbers on the [F page](../features/replication.md#performance) |
+
+Filed by [F40](../features/replication.md). The [C5](../distributed/replication.md#what-it-costs)
+model of a healthy write is `max(local_sync, min(follower_B, follower_C))` - a leader that sends
+the entry to its followers and syncs its own copy at the same time pays one sync's latency plus a
+round trip. The smoke run paid two: 52.3 ms at the median against 24.8 ms for the same write
+replicated to nobody, on the same three nodes with the same cores. Two explanations fit, and the
+entry exists to name both rather than pick one: openraft's leader may append locally and replicate
+only once its own flush completes, in which case the fix is in how the store signals; or the three
+processes' `fdatasync`s queue in the one device the host has, in which case there is nothing to fix
+on one machine and the benchmark host's capture on separate devices is the measurement. The volatile
+arm, which pays the round trip and no sync, came in at 1.7 ms - so whichever it is, the second sync
+is what the durable quorum costs here, and the lane is not.
+
+### O48. Resolving a segment scans every group's whole index
+
+| | |
+| --- | --- |
+| **Rank** | **B7** — argued, contained |
+| **Impact** | Argued — `frames_in` walks every entry of every group named in a segment to find the ones in it, on every sweep that hands a segment over; the index is bounded by `retained_entries` per group, so the walk is `groups × retained` per handoff |
+| **Difficulty** | S — a per-segment list of the frames it holds, built as they are staged and pruned as they are truncated or purged |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | Contained — the list is the index's mirror, and the invariant is that the two agree |
+| **Benchmark** | none that exercises it: a sweep runs every ten deadline ticks and hands over at most a few segments, so the walk is off every query path |
+
+Filed by [F40](../features/replication.md). The store keeps one `BTreeMap` of index to location per
+group and a per-segment record of each group's last log id in it; resolving a segment for the
+compactor asks for the frames of some groups that lie in one generation, which the store answers by
+walking each group's map and keeping the entries whose location names it. At ten thousand retained
+entries and thirty-six groups a node that is a third of a million comparisons per handoff, on the
+shard loop, between two messages. It is off every query path and it is bounded, which is why it is
+filed and not fixed; a per-segment frame list is the fix when a sweep shows up on a profile.
+

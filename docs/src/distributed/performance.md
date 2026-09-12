@@ -28,8 +28,19 @@ initialization order, the committed members, the map version, the voter and lear
 every node's cores, the
 hop the arm was built for with the mix its construction implies, and the data lane's frame and
 shed counters on `ClusterFacts`. The driver is still in process with node zero, recorded as such.
-`NoStorage::commit` does no serialization; its replication benchmark needs C5's common command
-path.
+~~`NoStorage::commit` does no serialization; its replication benchmark needs C5's common command
+path.~~ Since [F40](../features/replication.md) three more arms run against a three-node
+cluster of three shards a node: `macro/cluster/overhead/nodes/3` at a factor of one, and
+`macro/cluster/replication/{durable,volatile}` at three on the persistent and the ephemeral
+table, which share the command encoding C5 asked for. Every cluster record now carries
+`offered_load` - the closed-loop depth the arm scheduled - `replicas`, every node's groups,
+groups led, lag, pending and volatile bytes and unknown and rejected writes at the end of the
+run, read from each node's own report, and `outcomes` summed; all three are mirrored into the
+explorer with defaults, so every committed artifact still loads. An arm asking for more copies
+than it places nodes is refused before a server starts
+(`ClusterOverride::feasibility`), which is what "not a Cartesian product that silently lowers
+RF" means in code. The open-loop schedule is not built; the arms are closed loops at one
+depth.
 
 ## The design
 
@@ -111,8 +122,8 @@ expanded only into feasible combinations, not a Cartesian product that silently 
 | --- | --- |
 | `macro/cluster/hop/{same_shard,local_shard,remote_node}` | Read-only transport and ownership control |
 | `macro/cluster/groups/{idle,active}` | Table/tablet count and batching/library spike |
-| `macro/cluster/overhead/nodes/{1,2,3}` | Fixed total resource budget; explicit feasible RF/policy |
-| `macro/cluster/replication/{durable,volatile}` | Same command encoding and workload with distinct durability contracts |
+| `macro/cluster/overhead/nodes/{1,2,3}` | Fixed total resource budget; explicit feasible RF/policy. `1` since F37, `3` since [F40](../features/replication.md) at three shards a node - not the one-node arm's twelve, which is why the three-node arms are read against each other |
+| `macro/cluster/replication/{durable,volatile}` | Same command encoding and workload with distinct durability contracts. Both since [F40](../features/replication.md), on the `nodes/3` placement at a factor of three |
 | `macro/cluster/scaleout/nodes/{3,4,6}` | RF=3, resources per node fixed; emulated cases explicitly identified |
 | `macro/cluster/reads/{one,barrier,session}` | Read-only and write-background consistency costs |
 | `macro/cluster/fanout/{get,filter,limit,empty}` | Remote gathering, decoding, coverage and ordering |
@@ -164,6 +175,11 @@ capturing each milestone and revise them only with recorded causes and tradeoffs
 
 RF=3 on one initialized replica is an unavailable-policy test, not a throughput arm claiming a
 quorum. An optional `One` accepted-only result is never plotted as equivalent to committed success.
+*At M4:* the durable replication gate has its first numbers, at smoke scale on the development
+host and recorded on the [F40 page](../features/replication.md#performance) as not a capture -
+a durable quorum at about twice a single fsync's median on a shared device, a volatile one
+under two milliseconds; the curve, and whether the leader's flush overlaps its followers', is
+the benchmark host's to draw ([O47](../appendix/optimizations.md)).
 
 ## Alternatives rejected
 
