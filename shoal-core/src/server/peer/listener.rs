@@ -393,6 +393,8 @@ async fn peer_tx_relay(
                 ReplyKind::Whole => ForwardedKind::Whole,
                 ReplyKind::Share => ForwardedKind::Share,
             },
+            // what this node learned running it, for the origin's record of the same query
+            served: stamps.served_byte(),
         }
         .encode();
         let header = match codec::header(
@@ -412,6 +414,7 @@ async fn peer_tx_relay(
                     bundle: *id.as_bytes(),
                     index: index as u64,
                     kind: ForwardedKind::Error,
+                    served: stamps.served_byte(),
                 }
                 .encode();
                 let Ok(header) = codec::header(

@@ -587,7 +587,7 @@ fn the_presets_pick_arms_that_answer_their_own_metric() {
 /// one field deliberately left out, and is named here as such.
 #[test]
 fn the_facts_mirrors_are_total() {
-    use shoal_bench::model::macro_layer::{ClusterFacts, ConfFacts, NodeCores, ScaleFacts};
+    use shoal_bench::model::macro_layer::{ClusterFacts, ConfFacts, HopFacts, HopMix, NodeCores, ScaleFacts};
     let keys = |value: serde_json::Value| -> Vec<String> {
         value
             .as_object()
@@ -648,6 +648,16 @@ fn the_facts_mirrors_are_total() {
         tablets: 4096,
         offered_load: Some(1),
         emulated: true,
+        // the arm's hop record travels to the explorer; the placement and transport counters
+        // are an environment record it has no axis for, and are absent here so the key sets
+        // below agree on what does travel
+        placement: Vec::new(),
+        hop: Some(HopFacts {
+            target: "remote".to_string(),
+            owner_node: 1,
+            expected_mix: HopMix { same: 0, local: 0, remote: 100 },
+        }),
+        transport: None,
     };
     let mirrored = explore::index::cluster_facts(&cluster);
     assert_eq!(keys(serde_json::to_value(&cluster).unwrap()), keys(serde_json::to_value(&mirrored).unwrap()));

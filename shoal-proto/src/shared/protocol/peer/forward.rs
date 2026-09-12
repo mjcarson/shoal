@@ -349,6 +349,10 @@ impl ForwardedKind {
 }
 
 /// What is fixed about an answer coming back, ahead of its payload
+///
+/// ```text
+///  bundle 16 | index u64 | kind u8 | served u8 | reserved 6
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ForwardedPreamble {
     /// The bundle the answered query arrived in
@@ -357,6 +361,14 @@ pub struct ForwardedPreamble {
     pub index: u64,
     /// What follows
     pub kind: ForwardedKind,
+    /// How the serving node classified the query as it ran it, for the origin's stage record
+    ///
+    /// Opaque to the protocol: the serving node's profiling stamps know what kind of query it
+    /// was and what durability it waited on, and the origin - which forwarded bytes it never
+    /// decoded - does not. A build that records no stages sends zero, and zero is read as
+    /// "unclassified" rather than as any kind of query. Nothing about the answer's meaning
+    /// depends on it.
+    pub served: u8,
 }
 
 impl ForwardedPreamble {
@@ -367,6 +379,7 @@ impl ForwardedPreamble {
         body[..16].copy_from_slice(&self.bundle);
         body[16..24].copy_from_slice(&self.index.to_le_bytes());
         body[24] = self.kind.as_byte();
+        body[25] = self.served;
         body
     }
 
@@ -380,6 +393,7 @@ impl ForwardedPreamble {
             bundle: bytes16_at(raw, 0),
             index: u64_at(raw, 16),
             kind: ForwardedKind::from_byte(raw[24])?,
+            served: raw[25],
         })
     }
 }

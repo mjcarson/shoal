@@ -375,6 +375,9 @@
     "macro/conf/storage/latency_buffer/r50/w65536/16Ki": 12371,
     "macro/conf/storage/latency_buffer/r50/w65536/64Ki": 12372,
     "macro/conf/storage/latency_buffer/r50/w65536/256Ki": 12373,
-    "macro/cluster/overhead/nodes/1": 12374
+    "macro/cluster/overhead/nodes/1": 12374,
+    "macro/cluster/hop/same_shard": 12375,
+    "macro/cluster/hop/local_shard": 12376,
+    "macro/cluster/hop/remote_node": 12377
   }
 }

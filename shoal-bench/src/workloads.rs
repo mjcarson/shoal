@@ -24,6 +24,7 @@
 //! A test asserts those two agree, so forgetting the second is a test failure rather than a
 //! workload that is never run.
 
+pub mod cluster_hop;
 pub mod cluster_overhead;
 pub mod conf_sweep;
 pub mod fanout;
@@ -127,6 +128,14 @@ pub fn all() -> Vec<Box<dyn Workload>> {
     // that grows a node at a time as the milestones land
     built.extend(
         cluster_overhead::all()
+            .into_iter()
+            .map(|workload| Box::new(workload) as Box<dyn Workload>),
+    );
+    // the hop arms, appended after the overhead arm: the first arms served by more than one node
+    // ([F38](../../docs/src/features/inter-node-transport.md)), one read against a two node
+    // placement three ways - same shard, another local shard, the other node
+    built.extend(
+        cluster_hop::all()
             .into_iter()
             .map(|workload| Box::new(workload) as Box<dyn Workload>),
     );

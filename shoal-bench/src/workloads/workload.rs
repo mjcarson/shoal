@@ -170,6 +170,41 @@ pub struct ClusterOverride {
     /// this says. It is on the artifact so a later capture with a real factor is visibly a
     /// different measurement.
     pub replication_factor: u32,
+    /// The shard count of every node placed beside this one, in placement order
+    ///
+    /// Empty is the cluster of one the overhead arm runs. Anything else is a static placement
+    /// ([F38](../../../docs/src/features/inter-node-transport.md)): the harness mints the
+    /// identities, stages a marker per node, and starts each peer as a `shoal-workload serve`
+    /// child of the measured process, with node zero - this one - in process. Node zero's own
+    /// shard count is [`ConfOverrides::shards`], which has to be set when this is not empty.
+    pub peers: Vec<u16>,
+    /// The hop this arm was built to take, recorded on the artifact
+    ///
+    /// A fact about the arm's construction and nothing the server reads, carried here because
+    /// the override is the one thing a workload states about its server and the harness records.
+    pub hop: Option<crate::model::macro_layer::HopFacts>,
+}
+
+impl ClusterOverride {
+    /// The cluster of one the overhead arm runs
+    ///
+    /// # Arguments
+    ///
+    /// * `replication_factor` - The factor the bootstrap records
+    #[must_use]
+    pub fn alone(replication_factor: u32) -> Self {
+        ClusterOverride {
+            replication_factor,
+            peers: Vec::new(),
+            hop: None,
+        }
+    }
+
+    /// How many nodes this arm places, counting node zero
+    #[must_use]
+    pub fn nodes(&self) -> usize {
+        self.peers.len() + 1
+    }
 }
 
 /// Everything a workload produced

@@ -1443,6 +1443,10 @@ where
                         self.comms.send(&shard_info.contact, msg).await?;
                     }
                     ShardContact::Remote { node, shard } => {
+                        // this share crosses a node; the op it turns out to be comes back with
+                        // the answer, since nothing here decodes the query
+                        let mut share_stamps = share_stamps;
+                        share_stamps.set_hop(stage_profile::StageHop::RemoteNode);
                         // one entry per remote share, gathered per node below
                         // truncation cannot happen: a bundle holds far fewer than a u32 of queries
                         #[allow(clippy::cast_possible_truncation)]
@@ -2232,7 +2236,7 @@ where
         let preamble = crate::shared::protocol::peer::ForwardedPreamble::decode(&raw)?;
         let bundle = Uuid::from_bytes(preamble.bundle);
         // find what we were owed; a frame with no pending entry is late or duplicate and dropped
-        let Some(pending) = self
+        let Some(mut pending) = self
             .peers
             .as_mut()
             .and_then(|peers| peers.take(bundle, preamble.index, node))
@@ -2240,6 +2244,8 @@ where
             event!(Level::WARN, msg = "a peer answered a query we were not waiting for", %node, index = preamble.index);
             return Ok(());
         };
+        // the peer ran the query, so it knows what kind it was; this record did not until now
+        pending.stamps.adopt_served(preamble.served);
         use crate::shared::protocol::peer::ForwardedKind;
         match preamble.kind {
             // a whole answer is bytes for the client, never re-validated on this node

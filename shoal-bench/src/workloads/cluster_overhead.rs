@@ -54,9 +54,7 @@ pub fn all() -> Vec<Grid> {
         distribution: KeyDistribution::Uniform,
         depth: DEPTH,
         conf: ConfOverrides {
-            cluster: Some(ClusterOverride {
-                replication_factor: 1,
-            }),
+            cluster: Some(ClusterOverride::alone(1)),
             ..ConfOverrides::default()
         },
         id: ID,

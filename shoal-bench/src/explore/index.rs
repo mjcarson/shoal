@@ -25,7 +25,7 @@ use std::collections::BTreeMap;
 
 use shoal_top::index::{
     Capture, ClusterFactsLite, ConfFactsLite, FamilyText, INDEX_VERSION, Index, Layer as IndexLayer,
-    MacroPoint, NodeCoresLite, OpStats, ScaleFactsLite, Timing, Verdict, Workload,
+    HopFactsLite, HopMixLite, MacroPoint, NodeCoresLite, OpStats, ScaleFactsLite, Timing, Verdict, Workload,
 };
 
 use crate::model::macro_layer::{
@@ -447,6 +447,17 @@ pub fn cluster_facts(cluster: &ClusterFacts) -> ClusterFactsLite {
         tablets: cluster.tablets,
         offered_load: cluster.offered_load,
         emulated: cluster.emulated,
+        // the hop record travels; the placement and the transport counters are an environment
+        // record the explorer has no axis for, and stay on the artifact
+        hop: cluster.hop.as_ref().map(|hop| HopFactsLite {
+            target: hop.target.clone(),
+            owner_node: hop.owner_node,
+            expected_mix: HopMixLite {
+                same: hop.expected_mix.same,
+                local: hop.expected_mix.local,
+                remote: hop.expected_mix.remote,
+            },
+        }),
     }
 }
 

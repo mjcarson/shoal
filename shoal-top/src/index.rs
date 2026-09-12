@@ -275,6 +275,35 @@ pub struct ClusterFactsLite {
     pub offered_load: Option<u64>,
     /// Whether the nodes shared one machine
     pub emulated: bool,
+    /// The hop a hop arm was built to take, and the mix its construction implies; absent
+    /// for every other arm
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hop: Option<HopFactsLite>,
+}
+
+/// Which hop a hop arm was built to measure
+///
+/// A trimmed `HopFacts`. The mix is in whole percentages, as the artifact records it, so a
+/// chart can label `local_shard` as the three-quarters mixture it is rather than a pure hop.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HopFactsLite {
+    /// `same`, `local` or `remote`
+    pub target: String,
+    /// The node, by placement position, that owns every key the arm reads
+    pub owner_node: u32,
+    /// The expected share of queries taking each hop: same, local, remote
+    pub expected_mix: HopMixLite,
+}
+
+/// A share of queries per hop, in whole percentages
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HopMixLite {
+    /// Served by the shard that accepted the connection
+    pub same: u32,
+    /// Served by another shard of the same node
+    pub local: u32,
+    /// Served by another node
+    pub remote: u32,
 }
 
 /// The cores one node was given

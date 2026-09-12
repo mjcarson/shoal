@@ -199,6 +199,11 @@ pub fn cluster_facts(
         offered_load: None,
         // one process on one machine is the emulated case by definition
         emulated: true,
+        // a node alone has no placement to record; a staged cluster fills these in afterwards
+        // ([F38](../../../../docs/src/features/inter-node-transport.md))
+        placement: Vec::new(),
+        hop: None,
+        transport: None,
     }))
 }
 

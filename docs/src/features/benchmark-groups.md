@@ -36,8 +36,9 @@ alone, and "a filter excluding it" runs everything else, which is not a thing th
 ## What it does
 
 **Twelve named groups** — thirteen since [F37](node-identity-control-plane.md) added `cluster`,
-the overhead arm and the standalone reference cell it is read against — declared in
-`shoal-bench/src/groups.rs`, each answering one question:
+the overhead arm and the standalone reference cell it is read against, and since
+[F38](inter-node-transport.md) that group also holds the three hop arms under `macro/cluster/hop/`
+— declared in `shoal-bench/src/groups.rs`, each answering one question:
 
 ```
 $ shoal-bench list --groups

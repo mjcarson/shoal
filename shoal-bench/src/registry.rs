@@ -171,7 +171,9 @@ pub const PROFILED_WORKLOADS: &[&str] = &["macro/insert_unsorted"];
 ///
 /// Three points on the width axis: the reference cell, the first width above the intent log's 4096
 /// byte staging buffer, and one well past the knee. Every one of them is an arm the grid already
-/// mints, so this costs three instrumented runs and no new workload.
+/// mints, so this costs three instrumented runs and no new workload. Then the three hop arms
+/// ([F38](../../docs/src/features/inter-node-transport.md)), whose question - where did each query
+/// run, relative to the shard that accepted it - is one only a per-query record can answer.
 ///
 /// This is the runner's copy of `Workload::stage_profiles`, for the same reason
 /// [`crate::workload_ids::IDS`] exists: the runner has to know it without the engine linked. A test
@@ -181,6 +183,11 @@ pub const STAGED_WORKLOADS: &[&str] = &[
     "macro/grid/unsorted/r50/1024",
     "macro/grid/unsorted/r50/8192",
     "macro/grid/unsorted/r50/524288",
+    // the hop arms (F38): the stage report splits their records by the hop each query took,
+    // which is the attribution `local_shard`'s mixture needs and the other two confirm
+    "macro/cluster/hop/same_shard",
+    "macro/cluster/hop/local_shard",
+    "macro/cluster/hop/remote_node",
 ];
 
 /// Which workloads an instrumented layer runs

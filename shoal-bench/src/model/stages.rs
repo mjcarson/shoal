@@ -124,6 +124,16 @@ pub struct StageReport {
     pub join: JoinStats,
     /// The breakdown for each kind of query, keyed by `insert` or `get`
     pub ops: BTreeMap<String, OpReport>,
+    /// The same breakdown split by where each query ran, keyed by `<op>/<hop>`
+    ///
+    /// `get/same`, `get/local` and `get/remote`: served by the shard that accepted the
+    /// connection, by another shard of the node over the mesh, or by another node over a peer
+    /// link. The kernel picks the accepting shard, so one arm's records are a mixture of hops and
+    /// a report that pooled them would hide the hop it exists to measure
+    /// ([F38](../../../docs/src/features/inter-node-transport.md)). Additive: a report written
+    /// before this existed parses with it empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub hops: BTreeMap<String, OpReport>,
 }
 
 impl StageReport {
@@ -292,6 +302,7 @@ mod tests {
                 ..JoinStats::default()
             },
             ops: BTreeMap::new(),
+            hops: BTreeMap::new(),
         }
     }
 

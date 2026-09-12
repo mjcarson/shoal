@@ -109,8 +109,10 @@ Alongside them it writes `<label>.meta.json`, which is what lets a committed num
 whether it still describes the current code: the commit, whether the tree was dirty, a content
 hash of the sources each layer measures, and the machine, governor and toolchain it ran on.
 
-A full capture is now **three hundred and seventy five workloads times five runs** (the
-three hundred and seventy fifth is `macro/cluster/overhead/nodes/1`, [F37](../features/node-identity-control-plane.md)). At two hundred
+A full capture is now **three hundred and seventy eight workloads times five runs** (the
+three hundred and seventy fifth is `macro/cluster/overhead/nodes/1`, [F37](../features/node-identity-control-plane.md);
+the last three are the hop arms `macro/cluster/hop/{same_shard,local_shard,remote_node}`,
+[F38](../features/inter-node-transport.md), each of which is two server processes). At two hundred
 and nine it ~~budget six to seven hours~~ **took seventy-five minutes** — one minute building,
 fourteen in the micro layer, sixty in the macro layer, and under a minute in the two instrumented
 ones. That is the first capture anybody put a clock on, `F20-conf` on 2026-08-22; every figure this
@@ -167,7 +169,12 @@ prefixes this replaces had, and it costs a whole capture to notice.
 
 **A group selects; it never schedules.** A capture runs one `shoal-workload` process at a time
 whatever is selected, and must: two servers at once would share a page cache, a device queue and a
-set of cores, and each one's numbers would be a measurement of the other.
+set of cores, and each one's numbers would be a measurement of the other. The one thing that looks
+like an exception is not one: a multi-node arm ([F38](../features/inter-node-transport.md)) is
+still one `run` command and one process the runner waits on, and that process starts the arm's
+other nodes as `serve --staged` children of itself on cores it took from nobody else, and kills
+them before it exits. That is [C10](../distributed/performance.md)'s "simultaneous processes
+inside that arm are intentional, independent benchmark arms remain serialized".
 
 ~~thirty-one workloads~~, ~~eighty-seven workloads~~ and ~~a hundred and sixty one workloads~~ were
 the counts before F13, F14, F17 and F20 landed, and each stayed on this page for at least one feature after it stopped being true. If a
@@ -275,9 +282,15 @@ saying what each one isolates.
 
 The other half of `--server` is `shoal-workload serve --id <ID> [--conf] [--scale] [--port 0]`,
 which starts the named workload's server — resolved exactly as `run` would resolve it — and prints
-`SHOAL_WORKLOAD_SERVING <addr>` once every shard answers, then holds it until killed. A workload's
-port is its position in `workload_ids::IDS` counting up from 12000, frozen in `docs/perf/ports.json`
-and held there by a test; cluster arms, when they exist, take a block each from 20000.
+`SHOAL_WORKLOAD_SERVING <addr>` once every shard answers, then holds it until killed. `serve
+--staged <PATH>` is the same server become one node of a placement: the file is a `StagedNode` the
+measured process wrote — its identity, ports, cores, exclusions and the placement every node
+shares — and `run` starts one of these per placed peer before its own node comes up
+([F38](../features/inter-node-transport.md)). A workload's client port is its position in
+`workload_ids::IDS` counting up from 12000, frozen in `docs/perf/ports.json` and held there by a
+test; a multi-node arm's other endpoints come from a block of its own at `20000 + 64 × position`,
+eight ports per node, so node zero's client port is the one every other arm's rule gives it and
+nothing else it binds can collide with a single-node arm's.
 
 There is no `--dataset` and no `--limit`: a workload builds its own rows. There is no `--no-wait`
 either, because nothing blocks on stdin any more.

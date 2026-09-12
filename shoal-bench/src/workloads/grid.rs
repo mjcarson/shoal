@@ -291,7 +291,7 @@ impl Table {
     /// # Arguments
     ///
     /// * `key` - The partition to read
-    fn get(self, key: u64) -> BenchQueryKinds {
+    pub(crate) fn get(self, key: u64) -> BenchQueryKinds {
         match self {
             Table::Unsorted => ItemGet::new(vec![key]).into(),
             Table::Sorted => EventGet::new(vec![key]).sort_keys(vec![sort_key(0)]).into(),
@@ -309,7 +309,7 @@ impl Table {
     /// * `key` - The partition to write into
     /// * `filter` - The value of the filterable field, which no grid arm queries on
     /// * `payload` - The row's payload, already built
-    fn insert(self, key: u64, filter: u64, payload: String) -> BenchQueryKinds {
+    pub(crate) fn insert(self, key: u64, filter: u64, payload: String) -> BenchQueryKinds {
         match self {
             Table::Unsorted => Item {
                 id: key,
@@ -683,7 +683,7 @@ fn is_read(seed: u64, index: u64, read_pct: u32) -> bool {
 /// The payloads one arm writes, built before anything is timed
 ///
 /// Keyed by width, because a mixture writes rows of several widths and each needs its own set.
-struct Payloads {
+pub(crate) struct Payloads {
     /// The built payloads, keyed by their width
     by_width: BTreeMap<u64, Vec<String>>,
 }
@@ -695,7 +695,7 @@ impl Payloads {
     ///
     /// * `profile` - The width distribution the arm writes
     /// * `seed` - The seed the whole run derives from
-    fn build(profile: RowProfile, seed: u64) -> Self {
+    pub(crate) fn build(profile: RowProfile, seed: u64) -> Self {
         let mut payloads = Seeded::stream(seed, "grid/payloads");
         let mut by_width = BTreeMap::new();
         // every width the profile can produce needs its own set, since a payload of the wrong
@@ -719,7 +719,7 @@ impl Payloads {
     ///
     /// * `width` - How wide this row is
     /// * `index` - Which row is being built
-    fn at(&self, width: u64, index: u64) -> String {
+    pub(crate) fn at(&self, width: u64, index: u64) -> String {
         // a width the arm never declared is a bug in the caller rather than something to invent a
         // payload for
         let built = self
@@ -915,7 +915,7 @@ impl Workload for Grid {
 ///
 /// * `row_bytes` - How wide one row is
 /// * `frame_bytes` - The largest frame the server will accept
-fn seed_batch(row_bytes: u64, frame_bytes: u64) -> usize {
+pub(crate) fn seed_batch(row_bytes: u64, frame_bytes: u64) -> usize {
     // what a quarter of a frame holds at this width, and never fewer than one row
     let budget = frame_bytes / SEED_FRAME_SHARE / row_bytes.max(1);
     (budget.max(1) as usize).min(driver::BATCH)
@@ -929,7 +929,7 @@ fn seed_batch(row_bytes: u64, frame_bytes: u64) -> usize {
 /// # Arguments
 ///
 /// * `ctx` - The run this workload was given
-fn frame_bytes(ctx: &Context) -> u64 {
+pub(crate) fn frame_bytes(ctx: &Context) -> u64 {
     // the resolved configuration records it, so this is reading back what the server was started
     // with rather than assuming what it was started with
     ctx.conf

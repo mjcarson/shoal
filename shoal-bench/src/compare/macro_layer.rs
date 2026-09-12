@@ -805,6 +805,9 @@ mod tests {
                 tablets: 4096,
                 offered_load: None,
                 emulated: true,
+                placement: Vec::new(),
+                hop: None,
+                transport: None,
             });
         }
         capture

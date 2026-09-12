@@ -17,9 +17,16 @@ and cluster arms get a block of their own above that range. Core selection is co
 logical CPU 0 is excluded and the driver is not universally pinned. F36 added the
 `ClusterFacts` record this page asks for below, absent from every single-node capture and named by
 `compare` rather than compared across, and the separate load driver: `shoal-workload serve` starts
-a workload's server and `run --server` drives it from another process. No workload runs against a
-cluster yet. `NoStorage::commit` does no serialization; its replication benchmark needs C5's
-common command path.
+a workload's server and `run --server` drives it from another process. ~~No workload runs against a
+cluster yet.~~ Since [F37](../features/node-identity-control-plane.md) the overhead arm runs
+against a cluster of one, and since [F38](../features/inter-node-transport.md) the three hop arms
+of the table below run against a two-node static placement: the measured process stages the
+identities, markers, disjoint physical cores and a port block, starts the peer as a `serve
+--staged` child, hosts node zero in process, and records the placement, every node's cores, the
+hop the arm was built for with the mix its construction implies, and the data lane's frame and
+shed counters on `ClusterFacts`. The driver is still in process with node zero, recorded as such.
+`NoStorage::commit` does no serialization; its replication benchmark needs C5's common command
+path.
 
 ## The design
 

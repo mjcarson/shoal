@@ -191,6 +191,8 @@ fn a_forwarded_answer_round_trips() {
             bundle: [4; 16],
             index: u64::MAX - 1,
             kind,
+            // an opaque classification byte travels as it is
+            served: 0x21,
         };
         assert_eq!(ForwardedPreamble::decode(&preamble.encode()).unwrap(), preamble);
     }
@@ -198,6 +200,7 @@ fn a_forwarded_answer_round_trips() {
         bundle: [0; 16],
         index: 0,
         kind: ForwardedKind::Whole,
+        served: 0,
     }
     .encode();
     raw[24] = 4;

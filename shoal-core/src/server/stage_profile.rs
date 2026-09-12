@@ -43,6 +43,38 @@ pub enum StageOp {
 }
 
 impl StageOp {
+    /// The byte this op travels as when a peer reports what it served
+    ///
+    /// Zero is [`StageOp::Other`], so a peer that recorded nothing reads as unclassified.
+    #[must_use]
+    pub fn as_byte(self) -> u8 {
+        match self {
+            StageOp::Other => 0,
+            StageOp::Insert => 1,
+            StageOp::Get => 2,
+            StageOp::Exists => 3,
+            StageOp::Delete => 4,
+            StageOp::Update => 5,
+        }
+    }
+
+    /// The op a byte names; anything unknown is [`StageOp::Other`]
+    ///
+    /// # Arguments
+    ///
+    /// * `raw` - The byte a peer sent
+    #[must_use]
+    pub fn from_byte(raw: u8) -> Self {
+        match raw {
+            1 => StageOp::Insert,
+            2 => StageOp::Get,
+            3 => StageOp::Exists,
+            4 => StageOp::Delete,
+            5 => StageOp::Update,
+            _ => StageOp::Other,
+        }
+    }
+
     /// Get the name this op is reported under
     #[must_use]
     pub fn as_str(self) -> &'static str {
@@ -102,6 +134,30 @@ pub enum StageDurability {
 }
 
 impl StageDurability {
+    /// The code this mode travels as when a peer reports what it served
+    #[must_use]
+    pub fn as_byte(self) -> u8 {
+        match self {
+            StageDurability::None => 0,
+            StageDurability::Fsync => 1,
+            StageDurability::Async => 2,
+        }
+    }
+
+    /// The mode a code names; anything unknown is [`StageDurability::None`]
+    ///
+    /// # Arguments
+    ///
+    /// * `raw` - The code a peer sent
+    #[must_use]
+    pub fn from_byte(raw: u8) -> Self {
+        match raw {
+            1 => StageDurability::Fsync,
+            2 => StageDurability::Async,
+            _ => StageDurability::None,
+        }
+    }
+
     /// Get the name this durability mode is reported under
     #[must_use]
     pub fn as_str(self) -> &'static str {
@@ -460,6 +516,45 @@ impl StageStamps {
         /// Record that this node served the query for a peer, so the record has no client half
         set_served_for_peer(bool) => served_for_peer
     );
+
+    /// What this node knows about a query it served for a peer, as one byte for the answer
+    ///
+    /// The op in the low nibble and the durability in the high one. The origin forwarded bytes
+    /// it never decoded, so its own record of the query knows neither until the answer says
+    /// ([F38](../../../docs/src/features/inter-node-transport.md)).
+    #[cfg(feature = "stage-profile")]
+    #[must_use]
+    pub fn served_byte(&self) -> u8 {
+        self.flags.op.as_byte() | (self.flags.durability.as_byte() << 4)
+    }
+
+    /// What this node knows about a query it served, which in this build is nothing
+    #[cfg(not(feature = "stage-profile"))]
+    #[inline(always)]
+    #[must_use]
+    pub fn served_byte(&self) -> u8 {
+        0
+    }
+
+    /// Take a peer's classification of a query this node forwarded onto this record
+    ///
+    /// # Arguments
+    ///
+    /// * `served` - The byte the peer's [`StageStamps::served_byte`] produced
+    #[cfg(feature = "stage-profile")]
+    pub fn adopt_served(&mut self, served: u8) {
+        self.flags.op = StageOp::from_byte(served & 0x0f);
+        self.flags.durability = StageDurability::from_byte(served >> 4);
+    }
+
+    /// Take a peer's classification, which does nothing in this build
+    ///
+    /// # Arguments
+    ///
+    /// * `served` - Ignored, since there is nothing to record it on
+    #[cfg(not(feature = "stage-profile"))]
+    #[inline(always)]
+    pub fn adopt_served(&mut self, _served: u8) {}
     stage_setter!(
         /// Record that this response was released by a rotation, not by a watermark
         set_rotated(bool) => rotated
