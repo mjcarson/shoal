@@ -768,19 +768,64 @@ pub fn response_preamble(
     payload_len: usize,
     max_frame_bytes: u32,
 ) -> Result<[u8; RESPONSE_PREAMBLE_LEN], ProtocolError> {
+    server_preamble(MessageType::Response, query_id, payload_len, max_frame_bytes)
+}
+
+/// Build the header and query id that go ahead of any frame a server writes under a query id
+///
+/// A response, a topology push and an admin answer share one shape on the wire: the header,
+/// sixteen bytes of id, then the payload. Only the kind differs, so the three are one function
+/// ([F39](../../../../docs/src/features/membership.md)).
+///
+/// # Arguments
+///
+/// * `kind` - What kind of frame this is
+/// * `query_id` - The query this frame answers, or the nil id for a push nobody asked for
+/// * `payload_len` - How many bytes follow the id
+/// * `max_frame_bytes` - The largest frame the receiver will accept
+///
+/// # Errors
+///
+/// Fails if the frame would be larger than the receiver accepts.
+pub fn server_preamble(
+    kind: MessageType,
+    query_id: &Uuid,
+    payload_len: usize,
+    max_frame_bytes: u32,
+) -> Result<[u8; RESPONSE_PREAMBLE_LEN], ProtocolError> {
     // the query id is part of the frame body, so it counts towards the length
     let body_len = QUERY_ID_LEN.saturating_add(payload_len);
-    let header = Header::new(
-        MessageType::Response,
-        Flags::NONE,
-        body_len,
-        max_frame_bytes,
-    )?;
+    let header = Header::new(kind, Flags::NONE, body_len, max_frame_bytes)?;
     // lay the header down first and the query id after it
     let mut preamble = [0u8; RESPONSE_PREAMBLE_LEN];
     preamble[..HEADER_LEN].copy_from_slice(&header.encode());
     preamble[HEADER_LEN..].copy_from_slice(query_id.as_bytes());
     Ok(preamble)
+}
+
+/// Build the header that goes ahead of a client's topology subscription or admin request
+///
+/// The body it announces is a query id followed by the request's JSON, which
+/// [`admin::encode_body`] produces.
+///
+/// # Arguments
+///
+/// * `kind` - `Topology` for a subscription, `Admin` for an operation
+/// * `body_len` - How many bytes follow the header, id included
+/// * `max_frame_bytes` - The largest frame the server will accept
+///
+/// # Errors
+///
+/// Fails if the frame would be larger than the server accepts.
+pub const fn client_preamble(
+    kind: MessageType,
+    body_len: usize,
+    max_frame_bytes: u32,
+) -> Result<[u8; REQUEST_PREAMBLE_LEN], ProtocolError> {
+    match Header::new(kind, Flags::NONE, body_len, max_frame_bytes) {
+        Ok(header) => Ok(header.encode()),
+        Err(error) => Err(error),
+    }
 }
 
 /// The bytes that go ahead of a bundle of queries, however many of them there are
@@ -923,6 +968,34 @@ pub const fn decode_request(
     // check the header, then check that this frame is a bundle of queries and not something else
     match Header::decode(raw, max_frame_bytes) {
         Ok(header) => header.expect(MessageType::Queries),
+        Err(error) => Err(error),
+    }
+}
+
+/// Decode the header of any frame a client may send once it is connected
+///
+/// A bundle of queries, a topology subscription or an admin request; anything else is refused
+/// naming `Queries`, since that is what a connection is for
+/// ([F39](../../../../docs/src/features/membership.md)).
+///
+/// # Arguments
+///
+/// * `raw` - The header bytes
+/// * `max_frame_bytes` - The largest frame this server accepts
+///
+/// # Errors
+///
+/// Fails if the header is malformed, the frame too large, or the kind not one a client sends.
+pub const fn decode_client_request(
+    raw: &[u8; REQUEST_PREAMBLE_LEN],
+    max_frame_bytes: u32,
+) -> Result<Header, ProtocolError> {
+    // check the header, then that the kind is one of the three a client sends
+    match Header::decode(raw, max_frame_bytes) {
+        Ok(header) => match header.kind {
+            MessageType::Queries | MessageType::Topology | MessageType::Admin => Ok(header),
+            _ => header.expect(MessageType::Queries),
+        },
         Err(error) => Err(error),
     }
 }

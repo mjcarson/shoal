@@ -175,6 +175,19 @@ pub enum ReplyKind {
     Whole,
     /// One shard's share of a query another node split, which a peer relay frames as a share
     Share,
+    /// A topology frame for a subscribed client, at this map version
+    ///
+    /// The bytes are the frame's JSON and the id is nil, since a push answers no query. A client
+    /// relay writes only the newest of the ones queued to it, since an older topology is worth
+    /// nothing once a newer one exists ([F39](../../../docs/src/features/membership.md)).
+    Topology {
+        /// The map version the frame carries
+        version: u64,
+    },
+    /// The answer to an admin request, under the id the client sent it with
+    ///
+    /// The bytes are the response's JSON.
+    Admin,
 }
 
 /// An answer on its way to the relay that writes it
@@ -246,6 +259,31 @@ where
     /// every connection's channel for as long as the process ran
     /// ([Resolved #32](../../../docs/src/appendix/resolved/disconnected-client-cleanup.md)).
     ClientGone(Uuid),
+    /// A client asked for the topology and every change to it
+    ///
+    /// Sent to the shard that accepted the connection alone, which answers with the current map's
+    /// frame and pushes every newer one it installs. A peer relay never sends this, so a peer
+    /// connection is never subscribed ([F39](../../../docs/src/features/membership.md)).
+    Subscribe {
+        /// The client
+        client: Uuid,
+    },
+    /// A client sent an admin request over its connection
+    ///
+    /// Sent to the shard that accepted the connection alone. A read is answered by the control
+    /// thread's applied state; a mutation is refused here unless the principal is one the
+    /// committed policy names, and proposed through the control thread otherwise
+    /// ([F39](../../../docs/src/features/membership.md)).
+    Admin {
+        /// The client
+        client: Uuid,
+        /// The id the client sent it under, which its answer carries
+        id: Uuid,
+        /// Who the connection authenticated as, if it did
+        principal: Option<String>,
+        /// What is asked
+        request: crate::shared::protocol::admin::AdminRequest,
+    },
     /// A bundle forwarded by another node, still in the buffer it arrived in
     ///
     /// The peer listener read it in three pieces and judged every length; what it could not
@@ -484,6 +522,9 @@ impl<D: ShoalDatabase> Clone for ServerMsg<D> {
             },
             // a failure is asked of one shard
             ServerMsg::Fail => panic!("A failure is asked of one shard"),
+            // a subscription and an admin request go to the accepting shard alone
+            ServerMsg::Subscribe { .. } => panic!("A subscription is for one shard"),
+            ServerMsg::Admin { .. } => panic!("An admin request is for one shard"),
             ServerMsg::Shutdown => ServerMsg::Shutdown,
         }
     }

@@ -724,8 +724,8 @@ enum Event {
     PingTick,
     /// The group's metrics changed
     Metrics(Box<RaftMetrics<ControlConfig>>),
-    /// The state machine applied up to this index
-    Applied(u64),
+    /// The state machine applied more of the log
+    Applied,
     /// A joiner's admission finished
     Joined(Result<(ClusterId, NodeId), String>),
     /// This node's own observation finished
@@ -974,8 +974,14 @@ async fn serve(startup: Startup) -> Result<(), ServerError> {
         .cluster
         .or(recovered.cluster)
         .map_or_else(|| "joining".to_string(), |cluster| cluster.to_string());
+    // a node that was leading when it stopped comes back as a follower and stands for election
+    // like anybody else: openraft would otherwise restore it as the leader of its old term, with
+    // no lease until a quorum answers, and a directory copied from a leader would come back as a
+    // second leader of that term. A member whose peers are all gone then writes nothing to its
+    // log until a majority elects somebody, which is what C1's restart rule asks for
     let config = Config {
         cluster_name,
+        enable_leader_restore: Some(false),
         ..Config::default()
     }
     .validate()
@@ -1081,8 +1087,8 @@ async fn serve(startup: Startup) -> Result<(), ServerError> {
     // the store tells the loop about every apply from here on
     {
         let hook_tx = tx.clone_sync();
-        machine.on_applied(Rc::new(move |index| {
-            let _ = hook_tx.try_send(Event::Applied(index));
+        machine.on_applied(Rc::new(move |_index| {
+            let _ = hook_tx.try_send(Event::Applied);
         }));
     }
     // bind the control listener and drive inbound RPCs into this node's group, on this executor
@@ -1252,7 +1258,7 @@ impl Core {
         match event {
             Event::Pool(request) => return self.handle_request(request),
             Event::Rpc(inbound) => self.handle_rpc(inbound),
-            Event::Applied(_) => self.handle_applied()?,
+            Event::Applied => self.handle_applied()?,
             Event::Metrics(metrics) => self.handle_metrics(metrics),
             Event::Joined(outcome) => self.handle_joined(outcome).await?,
             Event::Observed(outcome) => self.handle_observed(outcome)?,
@@ -1677,6 +1683,20 @@ impl Core {
                 ))));
                 return;
             }
+        }
+        // an operation seen before is answered as it was the first time, before the version
+        // is judged: the version moved when it applied, so an identical retry would otherwise
+        // be refused as stale, and proposing it again would cost a log entry to learn what the
+        // applied state already knows
+        if let Some(seen) = state.operations.get(&call.request.op) {
+            let outcome = match &seen.outcome {
+                ControlResponse::Applied { topology_version } => Ok(AdminOutcome::Repeated {
+                    version: *topology_version,
+                }),
+                other => Err(AdminError::new(ErrorCode::Internal, format!("repeated: {other:?}"))),
+            };
+            let _ = call.reply.send(answer(outcome));
+            return;
         }
         // a stale version is refused before anything is proposed
         if call.request.expected_version != version {

@@ -381,14 +381,22 @@ async fn peer_tx_relay(
             ..
         } = reply;
         let guard = span.enter();
+        // a peer connection is never subscribed and never sends admin requests, so neither
+        // kind can be queued to it; one that is would be a bug in the shard, not a frame
+        let forwarded = match kind {
+            ReplyKind::Whole => ForwardedKind::Whole,
+            ReplyKind::Share => ForwardedKind::Share,
+            ReplyKind::Topology { .. } | ReplyKind::Admin => {
+                event!(Level::ERROR, msg = "a control reply was queued to a peer relay", %id);
+                drop(guard);
+                continue;
+            }
+        };
         // frame the answer for the origin: which bundle, which index, whole or share
         let preamble = ForwardedPreamble {
             bundle: *id.as_bytes(),
             index: index as u64,
-            kind: match kind {
-                ReplyKind::Whole => ForwardedKind::Whole,
-                ReplyKind::Share => ForwardedKind::Share,
-            },
+            kind: forwarded,
             // what this node learned running it, for the origin's record of the same query
             served: stamps.served_byte(),
         }

@@ -162,6 +162,9 @@ pub enum ClientMsg {
     /// and a query id names a whole bundle rather than one query in it, so there is no position
     /// in the stream to place it at — it ends the stream wherever it lands.
     ServerError(ErrorCode, String, ClientStamps),
+    /// The answer to an admin request, as the JSON the server wrote
+    /// ([F39](../../../../docs/src/features/membership.md))
+    Admin(Vec<u8>),
     /// A client side message to mark the end of a stream
     End(usize),
 }

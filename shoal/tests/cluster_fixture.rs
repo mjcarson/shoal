@@ -27,7 +27,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 mod cluster;
 mod utils;
 
-use cluster::schema::{Row, RowGet, TestDb, TestDbClient};
+use cluster::schema::{Note, NoteGet, Row, RowGet, TestDb, TestDbClient};
 use cluster::{ChildRequest, Cluster, CoreClaim, Endpoints, FixtureError, NodeKind, Topology};
 
 /// Write a row through a node and read it back, so an endpoint is shown to be a server's
@@ -1424,8 +1424,12 @@ async fn three_nodes_bootstrap_without_external_membership() -> Result<(), Fixtu
     let mut cluster = Cluster::builder().cluster(3, CoreClaim::Count(1)).start().await?;
     cluster.wait_voters(0, 3)?;
     // every node agrees on the cluster, its members, its voters and its leader
-    let views: Vec<serde_json::Value> = (0..3).map(|id| cluster.members(id)).collect::<Result<_, _>>()?;
     let ids = cluster.node_ids();
+    // a follower applies the last membership entry a moment after the leader commits it
+    for id in 0..3 {
+        cluster.wait_voters(id, 3)?;
+    }
+    let views: Vec<serde_json::Value> = (0..3).map(|id| cluster.members(id)).collect::<Result<_, _>>()?;
     for (id, view) in views.iter().enumerate() {
         assert_eq!(view["cluster"], views[0]["cluster"], "node {id} is in another cluster");
         assert_eq!(view["members"].as_array().map(Vec::len), Some(3), "node {id} sees {}", view["members"]);
@@ -1836,4 +1840,386 @@ fn every_child_kind_has_a_child_function() {
     for kind in [NodeKind::Server, NodeKind::Standalone, NodeKind::MockPeer] {
         assert!(!kind.child_fn().is_empty());
     }
+}
+
+/// A get that found nothing, however the client reports it
+///
+/// A row that is not there comes back either as a response with no rows or as
+/// `QueryDidNotSucceed`; a failure of any other kind is not "nothing".
+fn found_nothing(result: Result<shoal::client::ShoalResponse<TestDbClient>, shoal::client::Errors>) -> bool {
+    match result {
+        Ok(response) => response.access::<Row>().map(|rows| rows.is_none_or(|rows| rows.is_empty())).unwrap_or(false),
+        Err(shoal::client::Errors::QueryDidNotSucceed { .. }) => true,
+        Err(_) => false,
+    }
+}
+
+/// The error code a query came back with, if it came back as a server failure
+fn failure_code<T>(result: &Result<T, shoal::client::Errors>) -> Option<shoal::shared::protocol::error::ErrorCode> {
+    match result {
+        Err(shoal::client::Errors::Server { code, .. }) => Some(*code),
+        _ => None,
+    }
+}
+
+/// Map versions install atomically and clients resync (C4 M3)
+///
+/// Five rapid restarts of one node while another's control lanes are slowed: every node ends
+/// on the newest version with three members, a client through the slowed node only ever moves
+/// forward and reaches that version, and a client that connects after the burst is handed the
+/// newest map on subscribing rather than any of the ones it missed.
+#[tokio::test(flavor = "multi_thread")]
+async fn map_versions_install_atomically_and_resync() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .lane_links(true)
+        .start()
+        .await?;
+    cluster.wait_voters(0, 3)?;
+    // a client through node 2, which subscribes as it connects
+    let slow = Shoal::<TestDbClient>::new(&cluster.node(2).endpoints.client.to_string()).await?;
+    let first = slow.topology_changed(0).await?;
+    assert!(first >= 1, "the first frame carried version {first}");
+    assert_eq!(slow.topology().expect("a frame").members.len(), 3);
+    // slow every control lane into node 2 from here on
+    for link in cluster.control_links_into(2) {
+        link.delay(Duration::from_millis(200));
+    }
+    // five rapid restarts of node 1, each a new incarnation and at least one new version
+    for _ in 0..5 {
+        cluster.kill(1)?;
+        cluster.restart(1, NodeKind::Server)?;
+    }
+    cluster.wait_joined(&[1])?;
+    // everybody converges on the newest version node 0 knows, with three members and no more
+    let newest = cluster.members(0)?["version"].as_u64().expect("a version");
+    assert!(newest > first, "five restarts moved the version from {first} to {newest}");
+    cluster.wait_map_version(&[0, 1, 2], newest)?;
+    for id in 0..3 {
+        let map = cluster.node_mut(id).command("MAP")?;
+        assert_eq!(map["ok"]["version"], newest, "node {id} holds {}", map["ok"]);
+        assert_eq!(map["ok"]["members"].as_object().map(serde_json::Map::len), Some(3), "node {id} holds {}", map["ok"]);
+    }
+    // the slowed client only ever moves forward, and gets there
+    let mut seen = first;
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while seen < newest {
+        let reached = tokio::time::timeout(Duration::from_secs(30), slow.topology_changed(seen))
+            .await
+            .map_err(|_| FixtureError::NotReady(format!("the slowed client stopped at version {seen}")))??;
+        assert!(reached > seen, "the topology went backwards from {seen} to {reached}");
+        seen = reached;
+        assert!(std::time::Instant::now() < deadline, "the slowed client never reached {newest}");
+    }
+    let frame = slow.topology().expect("a frame");
+    assert_eq!(frame.version, newest);
+    assert_eq!(frame.members.len(), 3, "a frame with another member count was installed: {frame:?}");
+    // a client that connects after the burst is handed the newest map on subscribing
+    let late = Shoal::<TestDbClient>::new(&cluster.node(0).endpoints.client.to_string()).await?;
+    let version = late.topology_changed(0).await?;
+    assert_eq!(version, newest, "a late client was handed an old map");
+    for id in 0..3 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
+
+/// Table ids and streams are stable across restart (C4 M3)
+///
+/// The committed tables carry one id per table, distinct and equal to what the schema derives;
+/// rows written to the persistent table before every node restarts are read back after, under
+/// the same ids, and the ephemeral table's rows are gone, which is what ephemeral means.
+#[tokio::test(flavor = "multi_thread")]
+async fn table_ids_and_streams_are_stable_across_restart() -> Result<(), FixtureError> {
+    use shoal::shared::traits::QuerySupport;
+    let mut cluster = Cluster::builder().cluster(3, CoreClaim::Count(1)).start().await?;
+    cluster.wait_voters(0, 3)?;
+    // the ids the schema derives, and the ids the cluster committed at initialization
+    let derived: Vec<(String, u64)> = <TestDbClient as QuerySupport>::table_ids()
+        .into_iter()
+        .map(|(name, id)| (name.to_string(), id.0))
+        .collect();
+    assert_eq!(derived.len(), 2);
+    assert_ne!(derived[0].1, derived[1].1, "two tables share an id: {derived:?}");
+    let committed = |cluster: &mut Cluster, id: usize| -> Result<Vec<(String, u64)>, FixtureError> {
+        let map = cluster.node_mut(id).command("MAP")?;
+        Ok(map["ok"]["tables"]
+            .as_array()
+            .expect("tables")
+            .iter()
+            .map(|pair| (pair[0].as_str().expect("a name").to_string(), pair[1].as_u64().expect("an id")))
+            .collect())
+    };
+    for id in 0..3 {
+        assert_eq!(committed(&mut cluster, id)?, derived, "node {id} committed other ids");
+    }
+    // rows in both tables, through node 0
+    let client = Shoal::<TestDbClient>::new(&cluster.node(0).endpoints.client.to_string()).await?;
+    for key in 0..10u64 {
+        client.send_one(Row { key, data: format!("row-{key}") }).await?;
+        client.send_one(Note { key, text: format!("note-{key}") }).await?;
+    }
+    drop(client);
+    // every node restarts
+    for id in 0..3 {
+        cluster.kill(id)?;
+    }
+    for id in 0..3 {
+        cluster.restart(id, NodeKind::Server)?;
+    }
+    cluster.wait_joined(&[0, 1, 2])?;
+    cluster.wait_leader_among(0, &[0, 1, 2], Duration::from_secs(30))?;
+    // the ids did not move
+    for id in 0..3 {
+        assert_eq!(committed(&mut cluster, id)?, derived, "node {id} came back with other ids");
+    }
+    // the persistent rows are still there, through another node; the ephemeral ones are not
+    let client = Shoal::<TestDbClient>::new(&cluster.node(1).endpoints.client.to_string()).await?;
+    for key in 0..10u64 {
+        let response = client.send_one(NoteGet::new(vec![key])).await?;
+        let notes = response.access::<Note>()?.expect("a note that was not found");
+        assert_eq!(notes.first().expect("a note").text.as_str(), format!("note-{key}"));
+        assert!(found_nothing(client.send_one(RowGet::new(vec![key])).await), "an ephemeral row survived a restart");
+    }
+    Ok(())
+}
+
+/// A client receives the topology with client endpoints (C9 M3)
+///
+/// The frame a client is handed names every member's client endpoint, each of which serves a
+/// round trip; a fourth node joining moves the frame once it is a member; and a burst of
+/// restarts leaves the client on the version the cluster is on.
+#[tokio::test(flavor = "multi_thread")]
+async fn client_receives_topology_with_client_endpoints() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .cluster(4, CoreClaim::Count(1))
+        .deferred_from(3)
+        .start()
+        .await?;
+    cluster.wait_voters(0, 3)?;
+    let client = Shoal::<TestDbClient>::new(&cluster.node(0).endpoints.client.to_string()).await?;
+    let version = client.topology_changed(0).await?;
+    let frame = client.topology().expect("a frame");
+    assert_eq!(frame.version, version);
+    assert_eq!(frame.members.len(), 3);
+    assert_eq!(frame.placement.len(), 3, "the placement was not initialized: {frame:?}");
+    // every member's client endpoint is one of the fixture's, and answers a round trip
+    let known: Vec<String> = (0..3).map(|id| cluster.node(id).endpoints.client.to_string()).collect();
+    for (at, member) in frame.members.iter().enumerate() {
+        assert!(known.contains(&member.client), "{} is not a fixture endpoint", member.client);
+        round_trip(&member.client, 1_000 + at as u64).await?;
+    }
+    // a fourth node joining moves the frame, and the frame then names it
+    cluster.start_deferred(3)?;
+    cluster.wait_joined(&[3])?;
+    let fourth = cluster.node_ids()[3].clone();
+    let mut seen = version;
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        seen = tokio::time::timeout(Duration::from_secs(30), client.topology_changed(seen))
+            .await
+            .map_err(|_| FixtureError::NotReady(format!("the client never heard of the join past {seen}")))??;
+        let frame = client.topology().expect("a frame");
+        if frame.members.iter().any(|member| member.node.to_string() == fourth) {
+            assert_eq!(frame.members.len(), 4);
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "the client never saw the fourth member");
+    }
+    // a burst of restarts of the fourth node, after which the client is where the cluster is
+    for _ in 0..3 {
+        cluster.kill(3)?;
+        cluster.restart(3, NodeKind::Server)?;
+    }
+    cluster.wait_joined(&[3])?;
+    let newest = cluster.members(0)?["version"].as_u64().expect("a version");
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while seen < newest {
+        seen = tokio::time::timeout(Duration::from_secs(30), client.topology_changed(seen))
+            .await
+            .map_err(|_| FixtureError::NotReady(format!("the client stopped at version {seen} of {newest}")))??;
+        assert!(std::time::Instant::now() < deadline);
+    }
+    assert_eq!(client.topology().expect("a frame").version, newest);
+    Ok(())
+}
+
+/// Readiness distinguishes process, control and data (C9 M3)
+///
+/// One node at a replication factor of three is up, joined and placed, and says its default
+/// writes are short a node: an insert is refused naming the shortfall and a get is served. Two
+/// more nodes joining lifts the shortfall before the placement is initialized, while a joiner
+/// says it is unplaced and answers a get by saying so; initialization places it. A cluster at
+/// a replication factor of one admits writes from the start.
+#[tokio::test(flavor = "multi_thread")]
+async fn readiness_distinguishes_process_control_and_data() -> Result<(), FixtureError> {
+    use shoal::shared::protocol::error::ErrorCode;
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .deferred_from(1)
+        .replication_factor(3)
+        .initialize(false)
+        .start()
+        .await?;
+    // one node: process and control ready, placed on itself, short of a write quorum
+    let readiness = cluster.node_mut(0).command("READINESS")?;
+    let view = &readiness["ok"];
+    assert_eq!(view["process"], true, "{view}");
+    assert_eq!(view["control"], "joined", "{view}");
+    assert_eq!(view["is_leader"], true, "{view}");
+    assert_eq!(view["data"]["initialized"], false, "{view}");
+    assert_eq!(view["data"]["placed"], true, "{view}");
+    assert_eq!(view["data"]["members_up"], 1, "{view}");
+    assert_eq!(view["data"]["desired_rf"], 3, "{view}");
+    assert_eq!(view["data"]["active_rf"], 1, "{view}");
+    assert_eq!(view["data"]["default_writes"], serde_json::json!({ "Err": { "have": 1, "need": 2 } }), "{view}");
+    // a write is refused naming the shortfall; a read is served
+    let zero = Shoal::<TestDbClient>::new(&cluster.node(0).endpoints.client.to_string()).await?;
+    let refused = zero.send_one(Row { key: 1, data: "one".to_string() }).await;
+    assert_eq!(failure_code(&refused), Some(ErrorCode::QuorumUnavailable), "{refused:?}");
+    let msg = match &refused {
+        Err(shoal::client::Errors::Server { msg, .. }) => msg.clone(),
+        other => panic!("{other:?}"),
+    };
+    assert!(msg.contains("have 1") && msg.contains("need 2"), "{msg}");
+    assert!(found_nothing(zero.send_one(RowGet::new(vec![1])).await));
+    // two more nodes join: the shortfall lifts before the placement is initialized
+    cluster.start_deferred(1)?;
+    cluster.start_deferred(2)?;
+    cluster.wait_joined(&[1, 2])?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let readiness = cluster.node_mut(0).command("READINESS")?;
+        if readiness["ok"]["data"]["members_up"] == 3 {
+            assert_eq!(readiness["ok"]["data"]["default_writes"], serde_json::json!({ "Ok": null }), "{readiness}");
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "node 0 never saw three up: {readiness}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    // the shards judge writes by the same map, once it reaches them
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let written = zero.send_one(Row { key: 2, data: "two".to_string() }).await;
+        if written.is_ok() {
+            break;
+        }
+        assert_eq!(failure_code(&written), Some(ErrorCode::QuorumUnavailable), "{written:?}");
+        assert!(std::time::Instant::now() < deadline, "the shards never admitted a write: {written:?}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    // a joiner before initialization is joined and unplaced, and says so to a query
+    let readiness = cluster.node_mut(1).command("READINESS")?;
+    let view = &readiness["ok"];
+    assert_eq!(view["control"], "joined", "{view}");
+    assert_eq!(view["data"]["placed"], false, "{view}");
+    assert_eq!(view["data"]["initialized"], false, "{view}");
+    let one = Shoal::<TestDbClient>::new(&cluster.node(1).endpoints.client.to_string()).await?;
+    let unplaced = one.send_one(RowGet::new(vec![2])).await;
+    assert_eq!(failure_code(&unplaced), Some(ErrorCode::NotInitialized), "{unplaced:?}");
+    assert_eq!(cluster.members(1)?["members"].as_array().map(Vec::len), Some(3));
+    // initialization places it
+    cluster.initialize(&[0, 1, 2])?;
+    let readiness = cluster.node_mut(1).command("READINESS")?;
+    assert_eq!(readiness["ok"]["data"]["placed"], true, "{readiness}");
+    assert_eq!(readiness["ok"]["data"]["initialized"], true, "{readiness}");
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let written = one.send_one(Row { key: 3, data: "three".to_string() }).await;
+        if written.is_ok() {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "the joiner never served a write: {written:?}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let response = one.send_one(RowGet::new(vec![3])).await?;
+    assert!(response.access::<Row>()?.is_some_and(|rows| rows.len() == 1));
+    // a replication factor of one admits writes from the start
+    let mut single = Cluster::builder().cluster(1, CoreClaim::Count(1)).start().await?;
+    let readiness = single.node_mut(0).command("READINESS")?;
+    assert_eq!(readiness["ok"]["data"]["default_writes"], serde_json::json!({ "Ok": null }), "{readiness}");
+    assert_eq!(readiness["ok"]["data"]["desired_rf"], 1, "{readiness}");
+    round_trip(&single.node(0).endpoints.client.to_string(), 4).await?;
+    Ok(())
+}
+
+/// Admin mutations require a principal and operation identity (C9 M3)
+///
+/// With authentication required and one admin named, an unauthenticated connection is refused
+/// before it can ask anything, a user who is not an admin may read but not change, and the
+/// admin's change is refused against a stale version, applied against the right one, answered
+/// the same way for the same operation id without a second log entry, and refused for a fresh
+/// operation once the placement is initialized.
+#[tokio::test(flavor = "multi_thread")]
+async fn admin_mutations_require_principal_and_operation_identity() -> Result<(), FixtureError> {
+    use shoal::server::{AdminKind, AdminRequest};
+    use shoal::shared::auth::Credentials;
+    use shoal::shared::identity::NodeId;
+    use shoal::shared::protocol::admin::AdminOutcome;
+    use shoal::shared::protocol::error::ErrorCode;
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .auth("alice", "alpha")
+        .auth("bob", "bravo")
+        .admins(vec!["alice".to_string()])
+        .initialize(false)
+        .start()
+        .await?;
+    cluster.wait_voters(0, 3)?;
+    let addr = cluster.node(0).endpoints.client.to_string();
+    // an unauthenticated connection never gets as far as a request
+    assert!(Shoal::<TestDbClient>::new(&addr).await.is_err(), "an anonymous client was accepted");
+    let bob = Shoal::<TestDbClient>::with_credentials(&addr, Credentials::scram("bob", "bravo")).await?;
+    let alice = Shoal::<TestDbClient>::with_credentials(&addr, Credentials::scram("alice", "alpha")).await?;
+    let nodes: Vec<NodeId> = cluster.node_ids().iter().map(|id| NodeId(id.parse().expect("a node id"))).collect();
+    let version = cluster.members(0)?["version"].as_u64().expect("a version");
+    let op = uuid::Uuid::new_v4();
+    let initialize = |expected_version: u64, op: uuid::Uuid| AdminRequest {
+        op,
+        expected_version,
+        kind: AdminKind::Initialize { nodes: nodes.clone() },
+    };
+    // a user who is not an admin may read, but not change
+    let read = bob
+        .admin(&AdminRequest { op: uuid::Uuid::new_v4(), expected_version: 0, kind: AdminKind::Members })
+        .await?;
+    assert!(matches!(read.outcome, Ok(AdminOutcome::Read(_))), "{read:?}");
+    let refused = bob.admin(&initialize(version, op)).await?;
+    assert_eq!(refused.outcome.as_ref().expect_err("bob was allowed").code(), ErrorCode::Unauthorized, "{refused:?}");
+    // the admin against a stale version
+    let stale = alice.admin(&initialize(version + 7, op)).await?;
+    assert_eq!(stale.outcome.as_ref().expect_err("a stale version was applied").code(), ErrorCode::StaleVersion, "{stale:?}");
+    // against the right one, retried only if the cluster moved underneath
+    let mut applied = None;
+    let mut sent_against = version;
+    for _ in 0..8 {
+        sent_against = cluster.members(0)?["version"].as_u64().expect("a version");
+        let answer = alice.admin(&initialize(sent_against, op)).await?;
+        match answer.outcome {
+            Ok(AdminOutcome::Applied { version }) => {
+                applied = Some(version);
+                break;
+            }
+            Err(error) if error.code() == ErrorCode::StaleVersion => std::thread::sleep(Duration::from_millis(100)),
+            other => panic!("the initialization was not applied: {other:?}"),
+        }
+    }
+    let applied = applied.expect("the initialization never applied");
+    assert!(applied > version);
+    cluster.wait_map_version(&[0, 1, 2], applied)?;
+    // the very same request again - the retry a client that lost the answer would send - is
+    // answered the same way, is not refused as stale, and writes nothing
+    std::thread::sleep(Duration::from_millis(500));
+    let leader = cluster.leader_index(0)?.expect("a leader");
+    let before = cluster.node_mut(leader).command("LOG_LEN")?["ok"]["bytes"].as_u64().expect("a length");
+    let repeated = alice.admin(&initialize(sent_against, op)).await?;
+    assert_eq!(repeated.outcome, Ok(AdminOutcome::Repeated { version: applied }), "{repeated:?}");
+    std::thread::sleep(Duration::from_millis(500));
+    let after = cluster.node_mut(leader).command("LOG_LEN")?["ok"]["bytes"].as_u64().expect("a length");
+    assert_eq!(before, after, "a repeated operation wrote to the log");
+    // a fresh operation is refused, since the placement is initialized
+    let fresh = alice.admin(&initialize(applied, uuid::Uuid::new_v4())).await?;
+    let error = fresh.outcome.as_ref().expect_err("a second initialization was applied");
+    assert!(error.msg.contains("initialized"), "{fresh:?}");
+    Ok(())
 }

@@ -318,6 +318,10 @@ fn table_ids_are_stable_across_a_reorder_and_distinct_by_name() {
     assert_eq!(base::WireTableNames::Row.table_id(), TableId::of("Row"));
     // and a different name is a different identity, while the schema id still moved
     assert_ne!(TableId::of("Row"), TableId::of("Rows"));
+    // the ids are frozen: a stream on disk is named by one, so a change to the hash or its seed
+    // is a change to what every persisted table is called (F39)
+    assert_eq!(TableId::of("Row").0, 9_298_178_980_900_292_585, "TableId::of(\"Row\") moved");
+    assert_eq!(TableId::of("Note").0, 5_620_453_994_926_889_807, "TableId::of(\"Note\") moved");
     assert_ne!(
         <base::WireClient as QuerySupport>::SCHEMA_ID,
         <reordered::WireClient as QuerySupport>::SCHEMA_ID
