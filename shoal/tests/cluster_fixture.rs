@@ -1614,6 +1614,54 @@ fn handle_command(
             }
             None => Err("SNAPSHOT needs a group id in hex".to_string()),
         },
+        // propose a scrub of a group through this node, which has to lead it, and poll every
+        // member's digest ([F44](../../docs/src/features/repair.md))
+        "SCRUB" => match parts.next().and_then(|hex| u64::from_str_radix(hex, 16).ok()) {
+            Some(group) => {
+                let group = shoal::shared::identity::GroupId(group);
+                pool.replication_verb(shoal::server::replication::ReplicationVerb::Scrub { group })
+                    .map_err(|error| format!("{error:?}"))
+                    .and_then(|answers| {
+                        // the shard that leads the group answers the reports; the rest refuse by name
+                        let mut refusals = Vec::new();
+                        for answer in answers {
+                            match answer {
+                                Ok(value) => return Ok(value),
+                                Err(error) => refusals.push(error),
+                            }
+                        }
+                        Err(format!("no shard scrubbed group {group}: {refusals:?}"))
+                    })
+            }
+            None => Err("SCRUB needs a group id in hex".to_string()),
+        },
+        // fault one partition's archived copy on this node: CORRUPT, FORGET or ERASE <table> <key-hex>
+        "CORRUPT" | "FORGET" | "ERASE" => {
+            let fault = match verb {
+                "CORRUPT" => shoal::storage::ArchiveFault::Corrupt,
+                "FORGET" => shoal::storage::ArchiveFault::Forget,
+                _ => shoal::storage::ArchiveFault::Erase,
+            };
+            match (parts.next(), parts.next().and_then(|hex| u64::from_str_radix(hex, 16).ok())) {
+                (Some(table), Some(key)) => {
+                    let table = shoal::shared::identity::TableId::of(table);
+                    pool.replication_verb(shoal::server::replication::ReplicationVerb::Fault { table, fault, key })
+                        .map_err(|error| format!("{error:?}"))
+                        .and_then(|answers| {
+                            // the shard whose archives hold the partition answers; the rest refuse by name
+                            let mut refusals = Vec::new();
+                            for answer in answers {
+                                match answer {
+                                    Ok(value) => return Ok(value),
+                                    Err(error) => refusals.push(error),
+                                }
+                            }
+                            Err(format!("no shard faulted partition {key:016x}: {refusals:?}"))
+                        })
+                }
+                _ => Err(format!("{verb} needs a table and a partition key in hex")),
+            }
+        }
         // drop the next committed write replies every shard of this node would send
         "DROP_REPLIES" => match parts.next().and_then(|n| n.parse::<u64>().ok()) {
             Some(n) => pool
@@ -4217,6 +4265,179 @@ async fn durable_log_reversion_is_fed_not_fatal() -> Result<(), FixtureError> {
         let expected = read_note(&addr0, key).await.map_err(ok)?.expect("the note is there");
         wait_note(&addr2, key, Some(&expected), Duration::from_secs(10)).await?;
     }
+    for id in 0..3 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
+
+/// The `SCRUB` of a group through the node that leads it: every member's report
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `node` - The node, which has to lead the group
+/// * `group` - The group, in hex
+fn scrub_of(cluster: &mut Cluster, node: usize, group: &str) -> Result<serde_json::Value, FixtureError> {
+    Ok(cluster.node_mut(node).command(&format!("SCRUB {group}"))?["ok"].clone())
+}
+
+/// Every member's report of a scrub, by the node index that holds it, in node order
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `scrub` - What `SCRUB` answered
+fn reports_by_node(cluster: &Cluster, scrub: &serde_json::Value) -> Vec<(usize, serde_json::Value)> {
+    let ids = cluster.node_ids();
+    let mut reports: Vec<(usize, serde_json::Value)> = scrub["reports"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter_map(|(member, report)| {
+            // a member is `node/shard`
+            let node = member.split('/').next()?;
+            let index = ids.iter().position(|id| id == node)?;
+            Some((index, report.clone()))
+        })
+        .collect();
+    reports.sort_by_key(|(index, _)| *index);
+    reports
+}
+
+/// Compact everything a node holds of a table into its archives, now
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `node` - The node
+/// * `table` - The table
+fn compact_now(cluster: &mut Cluster, node: usize, table: &str) -> Result<(), FixtureError> {
+    let _ = table;
+    let _ = cluster.node_mut(node).command("ROTATE")?;
+    let _ = cluster.node_mut(node).command("COMPACT")?;
+    // a compaction is a job on another task; give it a moment to merge and sync
+    std::thread::sleep(Duration::from_millis(500));
+    Ok(())
+}
+
+/// The canonical digest depends on the rows and not on how the archives lie (C9 M8)
+///
+/// Three replicas of one group hold the same rows three ways: node zero merged them into its
+/// archives in three rounds with deletes and updates between, node one in one round, node two
+/// never - its rows are resident, its tombstones too. A scrub proposed through the leader is
+/// applied at one committed index on all three, and every report is verified, at that index,
+/// and equal. Then a partition forgotten on one node, a partition erased on another and a
+/// record corrupted on a third are three reports the scrub tells apart: a verified digest
+/// that differs, a verified digest that differs, and an invalid copy. The fixture's own fold
+/// of applied state - a different function, on purpose - agrees with each verdict
+/// ([F44](../../docs/src/features/repair.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn canonical_digest_ignores_archive_layout_at_same_boundary() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lane_links(true)
+        .checkpoint_entries(8)
+        .retained_entries(64)
+        .write_timeout(Duration::from_secs(3))
+        .query_deadline(Duration::from_secs(3))
+        .start()
+        .await?;
+    let ok = |error: shoal::client::Errors| FixtureError::NotReady(format!("{error:?}"));
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    let client = Shoal::<TestDbClient>::new(&addr0).await.map_err(ok)?;
+    let hashed = |key: u64| <Note as shoal::shared::traits::PartitionKeySupport>::get_partition_key_from_values(&key);
+    // three rounds of writes; node zero merges each into its archives as it lands, with
+    // deletes and updates between so its archives hold superseded and pruned copies
+    for round in 0..3u64 {
+        let base = 23_000 + round * 100;
+        for key in base..base + 40 {
+            client.send_one(Note { key, text: format!("note-{key}") }).await.map_err(ok)?;
+        }
+        for key in base..base + 10 {
+            delete_note(&addr0, key).await.map_err(ok)?;
+        }
+        for key in base + 10..base + 20 {
+            client.send_one(Note { key, text: format!("note-{key}-again") }).await.map_err(ok)?;
+        }
+        wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+        compact_now(&mut cluster, 0, "Note")?;
+    }
+    // node one merges everything in one round; node two never does
+    compact_now(&mut cluster, 1, "Note")?;
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    let independent = digest_of(&mut cluster, 0, "Note")?;
+    // one group of the table, and the node that leads it
+    let probe = 23_015u64;
+    let (group, leader) = group_of(&mut cluster, 0, "Note", probe)?;
+    let leader = leader.expect("the group has a leader");
+    // a scrub through the leader: one boundary, three verified reports, one digest
+    let scrub = scrub_of(&mut cluster, leader, &group)?;
+    let boundary = scrub["boundary"].as_u64().expect("the scrub committed at an index");
+    let reports = reports_by_node(&cluster, &scrub);
+    assert_eq!(reports.len(), 3, "{scrub}");
+    for (node, report) in &reports {
+        assert_eq!(report["boundary"], boundary, "node {node} reported at another boundary: {report}");
+        assert_eq!(report["integrity"], "Verified", "node {node} is not verified: {report}");
+        assert_eq!(report["digest"], reports[0].1["digest"], "node {node} disagrees on a clean group: {scrub}");
+        assert_eq!(report["rows"], reports[0].1["rows"], "node {node} counts differently: {scrub}");
+    }
+    let clean = reports[0].1["digest"].clone();
+    let rows = reports[0].1["rows"].as_u64().unwrap_or(0);
+    assert!(rows > 0, "the group holds rows: {scrub}");
+    // three live keys of the group: the first twenty of every round were deleted or rewritten,
+    // so the live ones are chosen from past them
+    let live: Vec<u64> = keys_in_group(&mut cluster, "Note", &group, 23_020, 12)?
+        .into_iter()
+        .filter(|key| key % 100 >= 20 && key % 100 < 40)
+        .collect();
+    assert!(live.len() >= 3, "fewer than three live keys fall in group {group}: {live:?}");
+    let (forgotten, erased, corrupted) = (live[0], live[1], live[2]);
+    // forget a partition of the group on node one: its verified digest differs by a row
+    let answer = cluster.node_mut(1).command(&format!("FORGET Note {:016x}", hashed(forgotten)))?;
+    assert_eq!(answer["ok"]["fault"], "forget", "{answer}");
+    let scrub = scrub_of(&mut cluster, leader, &group)?;
+    let reports = reports_by_node(&cluster, &scrub);
+    assert_eq!(reports[1].1["integrity"], "Verified", "{scrub}");
+    assert_ne!(reports[1].1["digest"], clean, "a forgotten partition was not seen: {scrub}");
+    assert_eq!(reports[1].1["rows"].as_u64(), Some(rows - 1), "{scrub}");
+    for node in [0usize, 2] {
+        assert_eq!(reports[node].1["digest"], clean, "node {node} changed without cause: {scrub}");
+    }
+    // the fixture's own fold sees it too, and it is not the scrub's function
+    let after_forget = digest_of(&mut cluster, 1, "Note")?;
+    assert_ne!(after_forget["hash"], independent["hash"]);
+    assert_eq!(digest_of(&mut cluster, 0, "Note")?["hash"], independent["hash"]);
+    // erase a partition on node zero: a valid record whose content changed
+    let answer = cluster.node_mut(0).command(&format!("ERASE Note {:016x}", hashed(erased)))?;
+    assert_eq!(answer["ok"]["fault"], "erase", "{answer}");
+    let scrub = scrub_of(&mut cluster, leader, &group)?;
+    let reports = reports_by_node(&cluster, &scrub);
+    assert_eq!(reports[0].1["integrity"], "Verified", "{scrub}");
+    assert_ne!(reports[0].1["digest"], clean, "an erased partition was not seen: {scrub}");
+    assert_eq!(reports[0].1["rows"].as_u64(), Some(rows - 1), "{scrub}");
+    assert_eq!(reports[2].1["digest"], clean, "node two changed without cause: {scrub}");
+    assert_ne!(digest_of(&mut cluster, 0, "Note")?["hash"], independent["hash"]);
+    // corrupt a record on node one: an invalid copy, which its digest says by name
+    let answer = cluster.node_mut(1).command(&format!("CORRUPT Note {:016x}", hashed(corrupted)))?;
+    assert_eq!(answer["ok"]["fault"], "corrupt", "{answer}");
+    let scrub = scrub_of(&mut cluster, leader, &group)?;
+    let reports = reports_by_node(&cluster, &scrub);
+    assert_eq!(reports[1].1["integrity"]["Invalid"]["checksum_failures"], 1, "the corrupt record was not found: {scrub}");
+    assert_eq!(reports[2].1["digest"], clean, "node two changed without cause: {scrub}");
+    // and a read of that key through node one is refused by name, not answered from bad bytes
+    let addr1 = cluster.node(1).endpoints.client.to_string();
+    let read = read_note(&addr1, corrupted).await;
+    assert_eq!(
+        failure_code(&read),
+        Some(shoal::shared::protocol::error::ErrorCode::CorruptArchive),
+        "the corrupt record was served: {read:?}"
+    );
+    // the integrity counters say what happened on each node
+    let one = groups_of(&mut cluster, 1)?;
+    assert!(one["integrity"]["checksum_failures"].as_u64().unwrap_or(0) >= 1, "{}", one["integrity"]);
+    assert!(one["integrity"]["scrubs"].as_u64().unwrap_or(0) >= 4, "{}", one["integrity"]);
     for id in 0..3 {
         assert_eq!(cluster.node(id).failure(), None, "node {id} died");
     }

@@ -3,7 +3,7 @@
 use conf::{Durability, FileSystemTableConf};
 use futures::stream::FuturesUnordered;
 use futures::{AsyncWriteExt, StreamExt};
-use glommio::io::{DmaStreamWriter, DmaStreamWriterBuilder, OpenOptions, ReadResult};
+use glommio::io::{DmaFile, DmaStreamWriter, DmaStreamWriterBuilder, OpenOptions, ReadResult};
 use glommio::{Task, TaskQueueHandle};
 use gxhash::GxHasher;
 use kanal::{AsyncReceiver, AsyncSender};
@@ -39,6 +39,9 @@ use reader::IntentLogReader;
 use stream::StreamWriter;
 
 use super::{CompactionJob, FlushProgress, IntentReadSupport, RecoveryStats, StorageSupport};
+use crate::server::replication::ArchivedCut;
+use crate::storage::fs::map::ArchiveEntry;
+use uuid::Uuid;
 use crate::server::conf::TableSettings;
 use crate::server::messages::ServerMsg;
 use crate::server::stage_profile::StageDurability;
@@ -717,6 +720,35 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
     /// Every partition key the archive map holds a copy of
     fn archived_keys(&self) -> Vec<u64> {
         self.map.to_archive.borrow().keys().copied().collect()
+    }
+
+    /// Where every archived partition of some tablets lives, with a handle per archive
+    async fn archived_cut(&self, tablets: &[u16], resident: &HashSet<u64>) -> Result<ArchivedCut, ServerError> {
+        // every entry of the tablets the map names that is not resident, in key order; the
+        // borrow ends before any handle is opened
+        let mut entries: Vec<ArchiveEntry> = self
+            .map
+            .to_archive
+            .borrow()
+            .iter()
+            .filter(|(key, _)| {
+                // truncation cannot happen: a tablet id is twelve bits
+                #[allow(clippy::cast_possible_truncation)]
+                let tablet = crate::server::ring::Ring::tablet_of(**key) as u16;
+                tablets.contains(&tablet) && !resident.contains(key)
+            })
+            .map(|(_, entry)| *entry)
+            .collect();
+        entries.sort_unstable_by_key(|entry| entry.key);
+        // a duplicated handle per distinct archive, which outlives the archive's unlink
+        let mut handles: HashMap<Uuid, DmaFile> = HashMap::new();
+        for entry in &entries {
+            if !handles.contains_key(&entry.archive) {
+                let handle = self.map.get_archive(&entry.archive).await?;
+                handles.insert(entry.archive, handle);
+            }
+        }
+        Ok(ArchivedCut::new(self.map.clone(), entries, handles))
     }
 
     /// Note the WAL generation a replicated command is applied in

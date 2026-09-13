@@ -721,6 +721,16 @@ where
             String,
         >,
     },
+    /// A scrub's cut was read and hashed off the loop, or could not be
+    /// ([F44](../../../docs/src/features/repair.md))
+    Digested {
+        /// The group
+        group: crate::shared::identity::GroupId,
+        /// The operation
+        op: Uuid,
+        /// The report, or why there is none
+        outcome: Result<crate::server::replication::DigestReport, String>,
+    },
     /// A snapshot install's marker and file are gone, so the install is complete
     SnapshotCleaned {
         /// The group
@@ -855,6 +865,7 @@ impl<D: ShoalDatabase> Clone for ServerMsg<D> {
             ServerMsg::SnapshotInstalled { .. } => panic!("An installed snapshot is the installing shard's"),
             ServerMsg::SnapshotRecords { .. } => panic!("A snapshot's records are the installing shard's"),
             ServerMsg::SnapshotCleaned { .. } => panic!("A cleaned install is the installing shard's"),
+            ServerMsg::Digested { .. } => panic!("A digest is the scrubbing shard's"),
             ServerMsg::SnapshotBuilt { .. } => panic!("A built snapshot is the cutting shard's"),
             ServerMsg::ReplicationView(_) => panic!("A replication view is asked of one shard"),
             ServerMsg::ReplicationVerb { .. } => panic!("A replication verb is for one shard"),

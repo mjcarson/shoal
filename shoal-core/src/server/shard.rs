@@ -3,6 +3,7 @@
 mod gather;
 mod groups;
 mod reads;
+pub mod repair;
 mod snapshots;
 
 use bytes::Bytes;
@@ -3642,6 +3643,7 @@ where
                 }
                 ServerMsg::SnapshotRecords { group, outcome } => self.handle_snapshot_records(group, outcome).await?,
                 ServerMsg::SnapshotCleaned { group, outcome } => self.handle_snapshot_cleaned(group, outcome),
+                ServerMsg::Digested { group, op, outcome } => self.handle_digested(group, op, outcome),
                 ServerMsg::SnapshotBytes { node, stream, offset, bytes } => {
                     self.handle_snapshot_bytes(node, stream, offset, bytes);
                 }

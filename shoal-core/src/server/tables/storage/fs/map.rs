@@ -694,11 +694,15 @@ impl ArchiveMap {
 
     /// The read and the check, apart from the handle's lifetime
     ///
+    /// Public for a canonical cut, which reads through handles it collected on the loop rather
+    /// than through the cache, so an archive unlinked after the cut still reads
+    /// ([F44](../../../../../../docs/src/features/repair.md)).
+    ///
     /// # Arguments
     ///
     /// * `archive` - The open archive
     /// * `entry` - Where the partition's record is
-    async fn read_record_from(&self, archive: &DmaFile, entry: &ArchiveEntry) -> Result<ReadResult, ServerError> {
+    pub async fn read_record_from(&self, archive: &DmaFile, entry: &ArchiveEntry) -> Result<ReadResult, ServerError> {
         // a format 1 record has nothing to verify against, so read it as it is and count it
         if self.format_of(&entry.archive) == ArchiveFormat::Unverified {
             self.integrity.unverified_reads.set(self.integrity.unverified_reads.get() + 1);

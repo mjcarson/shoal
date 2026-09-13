@@ -25,6 +25,7 @@ use uuid::Uuid;
 use tracing::Span;
 
 use crate::server::messages::{Answer, LoadedPartitionKinds, QueryMetadata, ServerMsg};
+use crate::server::replication::PendingDigest;
 use crate::server::replication::CommandResult;
 use crate::server::routing::{ArchivedShardRouting, ShardRouting};
 use crate::server::tables::ApplyStep;
@@ -349,6 +350,18 @@ where
     /// * `table` - The table
     #[allow(async_fn_in_trait)]
     async fn digest_table(&self, table: Self::TableNames) -> Result<(u64, u64), ServerError>;
+
+    /// Take a canonical cut of some tablets of a table, for a scrub
+    ///
+    /// Hashes the resident partitions on the loop and collects the archived ones to be read
+    /// off it ([F44](../../../docs/src/features/repair.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `table` - The table
+    /// * `tablets` - The tablets
+    #[allow(async_fn_in_trait)]
+    async fn canonical_cut(&self, table: Self::TableNames, tablets: &[u16]) -> Result<PendingDigest, ServerError>;
 
     /// Every resident partition of some tablets of a table, as its key and archived bytes
     ///

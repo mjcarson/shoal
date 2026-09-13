@@ -22,6 +22,7 @@
 //! checkpoint and carries no rows, since the archives are the rows. Installing one is M7's.
 
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::io;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
@@ -35,6 +36,7 @@ use openraft::storage::{EntryResponder, RaftSnapshotBuilder, RaftStateMachine};
 use openraft::type_config::alias::{SnapshotMetaOf, SnapshotOf, StoredMembershipOf};
 use openraft::{OptionalSend, Snapshot, SnapshotMeta, StoredMembership};
 
+use super::digest::{DigestAnswer, KEPT_REPORTS};
 use super::snapshot::SnapshotManifest;
 use super::types::{DataConfig, Remembered};
 use crate::server::database::ShoalDatabase;
@@ -42,6 +44,7 @@ use crate::server::messages::ServerMsg;
 use crate::server::wal::WalLogId;
 use crate::shared::identity::GroupId;
 use crate::shared::protocol::peer::RequestId;
+use uuid::Uuid;
 
 /// How many request identities a group remembers the result of
 ///
@@ -96,6 +99,11 @@ pub struct MachineState {
     /// A received snapshot verified at open and not yet installed, which openraft installs
     /// when it builds the group and finds it past the checkpoint
     pub pending_install: Option<(PathBuf, SnapshotManifest)>,
+    /// The last few scrubs this replica applied, by operation, and what each came to
+    ///
+    /// `Pending` from the apply until the cut's task posts, then the report; the leader polls
+    /// these over the lane ([F44](../../../../docs/src/features/repair.md)).
+    pub digests: VecDeque<(Uuid, DigestAnswer)>,
 }
 
 impl MachineState {
@@ -128,7 +136,55 @@ impl MachineState {
             checkpoint_durable: true,
             installing: false,
             pending_install: None,
+            digests: VecDeque::new(),
         }
+    }
+
+    /// Note that a scrub was applied and its digest is on its way
+    ///
+    /// # Arguments
+    ///
+    /// * `op` - The operation
+    pub fn note_scrub(&mut self, op: Uuid) {
+        // the newest goes last, and only so many are kept
+        self.digests.retain(|(known, _)| *known != op);
+        self.digests.push_back((op, DigestAnswer::Pending));
+        while self.digests.len() > KEPT_REPORTS {
+            self.digests.pop_front();
+        }
+    }
+
+    /// Record what a scrub's cut came to
+    ///
+    /// # Arguments
+    ///
+    /// * `op` - The operation
+    /// * `answer` - The report, or that the cut failed
+    pub fn record_digest(&mut self, op: Uuid, answer: DigestAnswer) {
+        // replace the pending entry, or add one for a report that outlived it
+        match self.digests.iter_mut().find(|(known, _)| *known == op) {
+            Some((_, slot)) => *slot = answer,
+            None => {
+                self.digests.push_back((op, answer));
+                while self.digests.len() > KEPT_REPORTS {
+                    self.digests.pop_front();
+                }
+            }
+        }
+    }
+
+    /// What this replica has for a scrub
+    ///
+    /// # Arguments
+    ///
+    /// * `op` - The operation
+    #[must_use]
+    pub fn digest_of(&self, op: Uuid) -> DigestAnswer {
+        // a scrub this replica never applied, or forgot, is unknown
+        self.digests
+            .iter()
+            .find(|(known, _)| *known == op)
+            .map_or(DigestAnswer::Unknown, |(_, answer)| *answer)
     }
 
     /// The remembered requests applied at or below an index, oldest first

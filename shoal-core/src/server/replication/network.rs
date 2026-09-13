@@ -536,6 +536,24 @@ impl ShardPeer {
         self.rpc(ReplicateKind::ReadBarrier, group, Vec::new(), deadline).await
     }
 
+    /// Ask the member for its canonical digest of the group at a scrub
+    ///
+    /// The answer is a `DigestAnswer`: pending until the member's cut has been read, then the
+    /// report ([F44](../../../../docs/src/features/repair.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group
+    /// * `op` - The operation whose scrub the digest is of
+    /// * `deadline` - How long to wait
+    ///
+    /// # Errors
+    ///
+    /// Says whether the peer refused it or could not be reached.
+    pub async fn digest(&self, group: GroupId, op: uuid::Uuid, deadline: Duration) -> Result<Vec<u8>, RpcFailure> {
+        self.rpc(ReplicateKind::Digest, group, op.into_bytes().to_vec(), deadline).await
+    }
+
     /// Turn a link error into openraft's retriable unreachable
     ///
     /// # Arguments

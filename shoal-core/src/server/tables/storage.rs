@@ -23,7 +23,7 @@ pub use fs::FileSystem;
 pub use none::NoStorage;
 
 use crate::server::messages::{QueryMetadata, ServerMsg};
-use crate::server::replication::IntegrityStats;
+use crate::server::replication::{ArchivedCut, IntegrityStats};
 use crate::server::stage_profile::{StageDurability, StageStamps};
 use crate::server::{Conf, ServerError};
 use crate::shared::responses::{Response, ResponseAction};
@@ -171,6 +171,23 @@ pub struct FlushProgress {
     pub rotated: bool,
 }
 
+/// A fault the fixture injects into one partition's archived copy, for the repair tests
+///
+/// Each is a state a scrub has to tell apart ([F44](../../../docs/src/features/repair.md)):
+/// bytes that no longer hash to their checksum, a partition the map no longer names though
+/// every checksum is whole, and a record with a valid checksum whose content changed. Only a
+/// compacted partition can be faulted, since the fault is in the archives, and the resident
+/// copy is evicted so the next read meets it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ArchiveFault {
+    /// Flip one byte of the partition's record in place
+    Corrupt,
+    /// Drop the partition's map entry, as though it had been pruned
+    Forget,
+    /// Rewrite the partition as one with no live row, under a valid checksum
+    Erase,
+}
+
 /// A compaction job
 #[derive(Debug, Clone)]
 pub enum CompactionJob {
@@ -234,6 +251,16 @@ pub enum CompactionJob {
         tablets: Vec<u16>,
         /// The verified file
         path: PathBuf,
+    },
+    /// Inject a fault into one partition's archived copy, for the fixture
+    /// ([F44](../../../docs/src/features/repair.md))
+    Fault {
+        /// The fault
+        fault: ArchiveFault,
+        /// The partition
+        key: u64,
+        /// Where what was done is answered
+        reply: std::sync::mpsc::Sender<Result<serde_json::Value, String>>,
     },
     /// Compact this shards archive data
     Archives,
@@ -344,6 +371,13 @@ pub trait IntentReadSupport<T: RkyvSupport>: Sized + RkyvSupport + PartitionSupp
         intents: Vec<Self::Intent>,
         stats: &mut RecoveryStats,
     ) -> ShouldPrune;
+
+    /// A partition of this type with no live row, for the fixture's erase fault
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The partition key
+    fn erased(key: u64) -> Self;
 
     /// Get the partition key for a specific intent
     fn partition_key_and_intent(read: &ReadResult) -> Result<(u64, Self::Intent), ServerError>
@@ -692,6 +726,23 @@ pub trait StorageSupport: Sized {
     /// An engine that stores nothing has none.
     fn archived_keys(&self) -> Vec<u64> {
         Vec::new()
+    }
+
+    /// Collect where every archived partition of some tablets lives, apart from the resident ones
+    ///
+    /// The archived half of a canonical cut ([F44](../../../docs/src/features/repair.md)):
+    /// taken on the loop while the map is what it is at the boundary, with a duplicated handle
+    /// per distinct archive, so the task that reads it afterwards reads the state at the
+    /// boundary however the map moves. An engine that stores nothing collects nothing.
+    ///
+    /// # Arguments
+    ///
+    /// * `tablets` - The tablets
+    /// * `resident` - The keys the table already hashed from memory
+    #[allow(async_fn_in_trait)]
+    async fn archived_cut(&self, tablets: &[u16], resident: &HashSet<u64>) -> Result<ArchivedCut, ServerError> {
+        let _ = (tablets, resident);
+        Ok(ArchivedCut::empty())
     }
 
     /// Note the WAL generation a replicated command is applied in

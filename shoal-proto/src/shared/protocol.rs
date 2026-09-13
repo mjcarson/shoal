@@ -78,7 +78,14 @@ use trace::{TraceContext, TRACE_CONTEXT_LEN};
 /// the first 26 bytes of an rkyv archive. The flag bit is what makes every change **after** this
 /// one cheaper - a peer that does not know a bit still round trips it - but the bit itself had to
 /// be introduced to a peer that would understand a frame carrying it.
-pub const PROTOCOL_VERSION: u8 = 3;
+///
+/// Went to 4 when a tablet group's log gained the scrub entry and the replication lane the
+/// digest request ([F44](../../../docs/src/features/repair.md)). Neither is a framing change -
+/// a scrub is a command whose tablet is the one no tablet can be, and a digest is a new
+/// request kind - but a peer built before it would apply the entry as a write with no payload
+/// and refuse the request as unknown, and the hello's exact match is what keeps such a peer
+/// out of a group rather than in it, half understanding what it is sent.
+pub const PROTOCOL_VERSION: u8 = 4;
 
 /// The size of the frame header in bytes
 pub const HEADER_LEN: usize = 8;

@@ -45,9 +45,9 @@ use crate::server::messages::{QueryMetadata, ServerMsg};
 use crate::server::peer::{LinkEvent, ReplicateReply};
 use crate::server::replication::snapshot::{self, BuiltSnapshot, SnapshotHeader, SnapshotManifest, SnapshotWriter, SNAPSHOTS_DIR};
 use crate::server::replication::{
-    ApplyOutcome, BarrierAnswer, DataConfig, GroupMachine, GroupNetwork, GroupReport, IntegrityStats, Lease,
-    MachineState, ProposalOutcome, Remembered, ReplicationVerb, RpcFailure, ShardNetwork, ShardPeer, ShardReplication,
-    SnapshotStats,
+    ApplyOutcome, BarrierAnswer, CommandResult, DataConfig, GroupMachine, GroupNetwork, GroupReport, IntegrityStats,
+    Lease, MachineState, ProposalOutcome, Remembered, ReplicationVerb, ResultKind, RpcFailure, ShardNetwork, ShardPeer,
+    ShardReplication, SnapshotStats,
 };
 use crate::server::ring::Ring;
 use crate::server::stage_profile::{StageDurability, StageOp, Stamp};
@@ -539,6 +539,16 @@ where
                     state.borrow_mut().membership = StoredMembership::new(Some(log_id.clone()), membership.clone());
                     None
                 }
+                EntryPayload::Normal(command) if command.scrub_op().is_some() => {
+                    // a scrub: take the canonical cut at this index, and write nothing
+                    // ([F44](../../../../docs/src/features/repair.md))
+                    let op = command.scrub_op().expect("a scrub names its operation");
+                    self.apply_scrub(group, table, op, log_id.index, &state).await;
+                    Some(ApplyOutcome::Applied(CommandResult {
+                        kind: ResultKind::Scrub,
+                        ok: true,
+                    }))
+                }
                 EntryPayload::Normal(command) => {
                     // a repeat of a remembered identity is answered as the first was
                     let remembered = state.borrow_mut().dedup.get(&command.request).copied();
@@ -630,6 +640,79 @@ where
         Some((slot.table, generation, slot.state.clone(), slot.store.is_volatile()))
     }
 
+    /// Apply a scrub: hash the resident half on the loop, and read the archived half on a task
+    ///
+    /// The applied position moves past the scrub as soon as this returns; the task posts
+    /// `ServerMsg::Digested` when it has read, verified and hashed every archived record of
+    /// the group's tablets as the map stood here ([F44](../../../../docs/src/features/repair.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group
+    /// * `table` - Its table
+    /// * `op` - The operation
+    /// * `index` - The index the scrub was applied at
+    /// * `state` - The group's machine state
+    async fn apply_scrub(&mut self, group: GroupId, table: D::TableNames, op: Uuid, index: u64, state: &Rc<RefCell<MachineState>>) {
+        let schema_id = <D::ClientType as QuerySupport>::SCHEMA_ID;
+        // the tablets the group serves, as the map placed them
+        let tablets: Vec<u16> = self
+            .replication
+            .as_ref()
+            .and_then(|replication| replication.groups.get(&group))
+            .map(|slot| slot.spec.tablets.clone())
+            .unwrap_or_default();
+        state.borrow_mut().note_scrub(op);
+        if let Some(replication) = self.replication.as_mut() {
+            replication.integrity.scrubs += 1;
+        }
+        // the resident pass is the pause; the rest is the task's
+        let cut = match self.tables.canonical_cut(table, &tablets).await {
+            Ok(cut) => cut,
+            Err(error) => {
+                event!(Level::ERROR, msg = "a scrub could not take its cut", group = %group, op = %op, error = ?error);
+                state.borrow_mut().record_digest(op, crate::server::replication::DigestAnswer::Unknown);
+                return;
+            }
+        };
+        event!(Level::INFO, msg = "applied a scrub", group = %group, op = %op, index, resident = cut.resident.len(), archived = cut.archived.len());
+        let tx = self.shard_local_tx.clone();
+        glommio::spawn_local(async move {
+            let outcome = cut.finish(schema_id, &tablets, index).await.map_err(|error| format!("{error:?}"));
+            let _ = tx.send(ServerMsg::Digested { group, op, outcome }).await;
+        })
+        .detach();
+    }
+
+    /// Record what a scrub's task came to
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group
+    /// * `op` - The operation
+    /// * `outcome` - The report, or why there is none
+    pub(super) fn handle_digested(&mut self, group: GroupId, op: Uuid, outcome: Result<crate::server::replication::DigestReport, String>) {
+        let Some(replication) = self.replication.as_mut() else {
+            return;
+        };
+        let Some(slot) = replication.groups.get(&group) else {
+            return;
+        };
+        match outcome {
+            Ok(report) => {
+                event!(Level::INFO, msg = "a scrub's digest is in", group = %group, op = %op, boundary = report.boundary, digest = format!("{:016x}", report.digest), partitions = report.partitions, rows = report.rows, integrity = ?report.integrity, unverified = report.unverified);
+                replication.integrity.scrub_bytes += report.bytes;
+                replication.integrity.scrub_partitions += report.partitions;
+                slot.state.borrow_mut().record_digest(op, crate::server::replication::DigestAnswer::Report(report));
+            }
+            Err(error) => {
+                event!(Level::ERROR, msg = "a scrub's cut could not be read", group = %group, op = %op, error);
+                slot.state.borrow_mut().record_digest(op, crate::server::replication::DigestAnswer::Unknown);
+            }
+        }
+    }
+
+    /// Resume every apply batch parked on a partition, now that its read has landed or failed
     /// Resume every apply batch parked on a partition, now that its read has landed or failed
     ///
     /// # Arguments
@@ -903,6 +986,16 @@ where
             self.handle_snapshot_rpc(origin, head, payload, reply);
             return;
         }
+        // a digest is answered from what the loop holds
+        // ([F44](../../../../docs/src/features/repair.md))
+        if head.kind == ReplicateKind::Digest {
+            let answer = match <[u8; 16]>::try_from(payload.as_slice()) {
+                Ok(bytes) => encode_reply(head.id, &slot.state.borrow().digest_of(Uuid::from_bytes(bytes))),
+                Err(_) => ReplicateReply::error(head.id, "a digest request names no operation".to_string()),
+            };
+            let _ = reply.try_send(answer);
+            return;
+        }
         let network = replication.network.clone();
         let me = self.my_addr();
         let deadline = Duration::from_millis(u64::from(head.deadline_ms.max(1)));
@@ -932,8 +1025,8 @@ where
                     }
                     Err(error) => ReplicateReply::error(head.id, format!("decoding a proposal: {error}")),
                 },
-                // a snapshot rpc is judged on the loop, so it is answered before this task
-                ReplicateKind::Snapshot => unreachable!("a snapshot rpc is answered on the loop"),
+                // a snapshot rpc and a digest are judged on the loop, so they are answered before this task
+                ReplicateKind::Snapshot | ReplicateKind::Digest => unreachable!("answered on the loop"),
                 // a read barrier: confirm leadership with a heartbeat round and answer the
                 // read log id, or say who leads instead. A lapsed lease is answered by name
                 // rather than waited out, since its heartbeat round cannot complete
@@ -1489,6 +1582,65 @@ where
                 replication.drop_replies = n;
                 Ok(serde_json::json!({ "dropping": n }))
             }
+            ReplicationVerb::Scrub { group } => {
+                // the scrub runs on a task: the loop has to apply the entry it proposes
+                let Some(slot) = replication.groups.get(&group) else {
+                    return Some(Err(format!("group {group} is not hosted on this shard")));
+                };
+                let Some(raft) = slot.raft.clone() else {
+                    return Some(Err(format!("group {group} is still starting")));
+                };
+                let network = replication.network.clone();
+                let state = slot.state.clone();
+                let members = slot.spec.members.clone();
+                let table = slot.spec.table;
+                let me = self.my_addr();
+                let op = Uuid::new_v4();
+                glommio::spawn_local(async move {
+                    let outcome = super::repair::scrub_group(&raft, &network, me, state, table, group, &members, op, FIXTURE_SCRUB_TIMEOUT).await;
+                    let answer = outcome.map(|scrub| {
+                        let reports: serde_json::Map<String, serde_json::Value> = scrub
+                            .reports
+                            .iter()
+                            .map(|(member, report)| {
+                                let value = match report {
+                                    Ok(report) => serde_json::to_value(report).unwrap_or_default(),
+                                    Err(error) => serde_json::json!({ "error": error }),
+                                };
+                                (member.to_string(), value)
+                            })
+                            .collect();
+                        serde_json::json!({ "op": scrub.op.to_string(), "boundary": scrub.boundary, "reports": reports })
+                    });
+                    let _ = reply.send(answer);
+                })
+                .detach();
+                return None;
+            }
+            ReplicationVerb::Fault { table, fault, key } => {
+                // the compactor owns the archives, so it does the fault and answers from there;
+                // the resident copy goes first, so the next read meets the archive
+                let Some(name) = D::table_of_id(table) else {
+                    return Some(Err(format!("no table has identity {table}")));
+                };
+                // truncation cannot happen: a tablet id is twelve bits
+                #[allow(clippy::cast_possible_truncation)]
+                let tablet = Ring::tablet_of(key) as u16;
+                self.tables.evict_tablets(name, &[tablet]);
+                let sink = self
+                    .tables
+                    .compaction_sinks()
+                    .into_iter()
+                    .find(|(sink_name, _)| *sink_name == name)
+                    .map(|(_, sink)| sink);
+                let Some(sink) = sink else {
+                    return Some(Err(format!("{name} has no archives to fault")));
+                };
+                if let Err(error) = sink.send(CompactionJob::Fault { fault, key, reply }).await {
+                    return Some(Err(format!("{error:?}")));
+                }
+                return None;
+            }
             ReplicationVerb::Snapshot { group } => {
                 // cut now, on the loop's own request; the manifest is answered from a task once
                 // the cut lands, since the loop hears about it as a message
@@ -1815,6 +1967,9 @@ fn group_config(cluster: &crate::server::conf::Cluster, failover_ms: u64, group:
     // the defaults validate, and every field set above is within what validate accepts
     Arc::new(config.validate().unwrap_or_default())
 }
+
+/// How long the fixture's scrub verb waits for every member's report
+const FIXTURE_SCRUB_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The group a start outcome is for
 ///

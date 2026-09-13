@@ -20,6 +20,12 @@
 //! re-serialized"). Its encoding is fixed and checked, so a peer's command is validated before
 //! anything is sized by it; the payload inside is validated again by the table that applies it,
 //! since it is an rkyv archive that crossed a process boundary.
+//!
+//! A **scrub** is a command too ([F44](../../../../../docs/src/features/repair.md)): one whose
+//! tablet is [`SCRUB_TABLET`], which no tablet can be since a tablet id is twelve bits, whose
+//! request bundle is the repair operation's id and whose payload is empty. It rides the log in
+//! the command's encoding so the WAL's frame format is unchanged; every replica that applies it
+//! takes its canonical digest at that index rather than writing anything.
 
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -46,6 +52,12 @@ pub const MAX_COMMAND_PAYLOAD: usize = 256 * 1024 * 1024;
 /// The seed a command's digest is hashed under, frozen like every other persisted hash
 const DIGEST_SEED: i64 = 0;
 
+/// The tablet a scrub names, which no write can: a tablet id is twelve bits
+///
+/// A command whose tablet is this is a scrub, and its request bundle is the repair operation
+/// ([F44](../../../../../docs/src/features/repair.md)).
+pub const SCRUB_TABLET: u16 = u16::MAX;
+
 /// What a replication request asks for
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
@@ -64,6 +76,12 @@ pub enum ReplicateKind {
     /// confirmed its term, and the asking replica waits until it has applied that far
     /// ([F41](../../../../../docs/src/features/read-consistency.md)).
     ReadBarrier = 5,
+    /// Ask a member for its canonical digest of the group at a scrub
+    ///
+    /// The payload is the operation's id, sixteen bytes. The member answers `Pending` until the
+    /// task its apply of the scrub spawned has posted, then the report, and `Unknown` for a
+    /// scrub it never applied ([F44](../../../../../docs/src/features/repair.md)).
+    Digest = 6,
 }
 
 impl ReplicateKind {
@@ -86,6 +104,7 @@ impl ReplicateKind {
             3 => Ok(ReplicateKind::Propose),
             4 => Ok(ReplicateKind::Snapshot),
             5 => Ok(ReplicateKind::ReadBarrier),
+            6 => Ok(ReplicateKind::Digest),
             unknown => Err(ProtocolError::UnknownReplicateKind(unknown)),
         }
     }
@@ -99,6 +118,7 @@ impl ReplicateKind {
             ReplicateKind::Propose => "propose",
             ReplicateKind::Snapshot => "snapshot",
             ReplicateKind::ReadBarrier => "read_barrier",
+            ReplicateKind::Digest => "digest",
         }
     }
 }
@@ -242,6 +262,37 @@ pub struct Command {
 }
 
 impl Command {
+    /// The scrub entry of a repair operation on a table
+    ///
+    /// # Arguments
+    ///
+    /// * `table` - The table
+    /// * `op` - The operation
+    #[must_use]
+    pub fn scrub(table: TableId, op: uuid::Uuid) -> Self {
+        // a scrub is the command no write can be: the tablet no tablet is, and no payload
+        Command {
+            table,
+            tablet: SCRUB_TABLET,
+            request: RequestId {
+                bundle: op.into_bytes(),
+                index: 0,
+            },
+            payload: Vec::new(),
+        }
+    }
+
+    /// The repair operation this command is the scrub of, if it is one
+    #[must_use]
+    pub fn scrub_op(&self) -> Option<uuid::Uuid> {
+        // a scrub names the tablet no write can
+        if self.tablet == SCRUB_TABLET {
+            Some(uuid::Uuid::from_bytes(self.request.bundle))
+        } else {
+            None
+        }
+    }
+
     /// Write this command as bytes
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {

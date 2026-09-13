@@ -133,6 +133,15 @@ pub struct IntegrityStats {
     /// it again from its log or a snapshot rather than stopping
     /// ([Resolved #99](../../../../docs/src/appendix/resolved/durable-log-reversion.md)).
     pub log_lost: u64,
+    /// Scrubs applied on this shard: canonical cuts taken at a committed boundary
+    #[serde(default)]
+    pub scrubs: u64,
+    /// Bytes the scrubs' tasks read from the archives
+    #[serde(default)]
+    pub scrub_bytes: u64,
+    /// Partitions the scrubs hashed, resident and archived
+    #[serde(default)]
+    pub scrub_partitions: u64,
 }
 
 impl IntegrityStats {
@@ -145,6 +154,9 @@ impl IntegrityStats {
         self.checksum_failures += other.checksum_failures;
         self.unverified_reads += other.unverified_reads;
         self.log_lost += other.log_lost;
+        self.scrubs += other.scrubs;
+        self.scrub_bytes += other.scrub_bytes;
+        self.scrub_partitions += other.scrub_partitions;
     }
 }
 
@@ -420,5 +432,21 @@ pub enum ReplicationVerb {
     DropReplies {
         /// How many replies to drop
         n: u64,
+    },
+    /// Propose a scrub of a group through this shard, which has to lead it, and poll every
+    /// member's digest ([F44](../../../../docs/src/features/repair.md))
+    Scrub {
+        /// The group
+        group: GroupId,
+    },
+    /// Inject a fault into one partition's archived copy, and evict its resident one
+    /// ([F44](../../../../docs/src/features/repair.md))
+    Fault {
+        /// The table
+        table: TableId,
+        /// The fault
+        fault: crate::storage::ArchiveFault,
+        /// The partition
+        key: u64,
     },
 }

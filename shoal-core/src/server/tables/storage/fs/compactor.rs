@@ -29,6 +29,7 @@ use crate::server::ring::Ring;
 use crate::server::wal::WalLogId;
 use crate::server::ServerError;
 use crate::server::database::ShoalDatabase;
+use crate::storage::ArchiveFault;
 use crate::shared::identity::GroupId;
 use crate::shared::traits::{PartitionKeySupport, RkyvSupport, TableNameSupport as _};
 use crate::storage::{CompactionJob, IntentReadSupport, RecoveryStats, ShouldPrune};
@@ -799,6 +800,74 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         Ok(trailer)
     }
 
+    /// Inject a fault into one partition's archived copy, for the fixture
+    ///
+    /// The compactor owns the archives, so the fault is done here, between two jobs, where
+    /// the map is consistent ([F44](../../../../../docs/src/features/repair.md)). A corruption
+    /// is written through a buffered handle and synced; Linux flushes the range before the next
+    /// direct read, so the loader meets the flipped byte. A forget logs the removal the way a
+    /// prune would; an erase writes a record with no live row under a valid checksum.
+    ///
+    /// # Arguments
+    ///
+    /// * `fault` - The fault
+    /// * `key` - The partition
+    async fn inject_fault(&mut self, fault: ArchiveFault, key: u64) -> Result<serde_json::Value, String> {
+        self.inject_fault_inner(fault, key).await.map_err(|error| format!("{error:?}"))
+    }
+
+    /// The fault itself, with the engine's own errors
+    ///
+    /// # Arguments
+    ///
+    /// * `fault` - The fault
+    /// * `key` - The partition
+    async fn inject_fault_inner(&mut self, fault: ArchiveFault, key: u64) -> Result<serde_json::Value, ServerError> {
+        // only a compacted partition has an archived copy to fault
+        let Some(entry) = self.map.find_partition(key) else {
+            return Err(ServerError::GlommioGeneric(format!("no archive of {} holds partition {key:016x}", self.table_name)));
+        };
+        match fault {
+            ArchiveFault::Corrupt => {
+                // flip one byte in the middle of the record's payload, in place
+                let path = self.archive_path.join(entry.archive.to_string());
+                let file = OpenOptions::new().read(true).write(true).buffered_open(&path).await?;
+                let at = entry.offset + (entry.size as u64) / 2;
+                let read = file.read_at(at, 1).await?;
+                let Some(byte) = read.first().copied() else {
+                    return Err(ServerError::GlommioGeneric(format!("archive {} is shorter than the record it should hold", entry.archive)));
+                };
+                file.write_at(vec![byte ^ 0x40], at).await?;
+                file.fdatasync().await?;
+                file.close().await?;
+                event!(Level::WARN, msg = "corrupted a record, as the fixture asked", table = %self.table_name, partition = format!("{key:016x}"), archive = %entry.archive, at);
+                Ok(serde_json::json!({ "fault": "corrupt", "archive": entry.archive.to_string(), "offset": at, "was": byte }))
+            }
+            ArchiveFault::Forget => {
+                // log the removal the way a prune does, then drop the entry
+                write_map_intent!(self.map_writer, MapIntent::Remove(key), Remove);
+                self.map_writer.sync().await?;
+                self.map.remove_partition(key);
+                event!(Level::WARN, msg = "forgot a partition, as the fixture asked", table = %self.table_name, partition = format!("{key:016x}"));
+                Ok(serde_json::json!({ "fault": "forget", "archive": entry.archive.to_string() }))
+            }
+            ArchiveFault::Erase => {
+                // a record with no live row, written and pointed at like any compaction's
+                let erased = T::erased(key);
+                let archived = rkyv::to_bytes::<Error>(&erased)?;
+                let active_id = *self.map.active.borrow();
+                let offset = write_record(&mut self.writer, archived.as_slice()).await?;
+                let intent = MapIntent::entry(key, active_id, offset, archived.len());
+                let entry = write_map_intent!(self.map_writer, intent, Entry);
+                self.writer.sync().await?;
+                self.map_writer.sync().await?;
+                self.map.set_partition(key, entry);
+                event!(Level::WARN, msg = "erased a partition, as the fixture asked", table = %self.table_name, partition = format!("{key:016x}"));
+                Ok(serde_json::json!({ "fault": "erase", "archive": active_id.to_string(), "offset": offset }))
+            }
+        }
+    }
+
     /// Compact archives with the least amount of active data
     #[instrument(name = "FileSystemCompactor::compact_archives", skip_all, err(Debug))]
     async fn compact_archives(&mut self) -> Result<(), ServerError> {
@@ -1075,6 +1144,11 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                         .await?;
                 }
                 CompactionJob::Install { group, tablets, path } => self.install_snapshot(group, tablets, path).await?,
+                CompactionJob::Fault { fault, key, reply } => {
+                    // a fault the fixture asked for, answered with what was done
+                    let outcome = self.inject_fault(fault, key).await;
+                    let _ = reply.send(outcome);
+                }
                 CompactionJob::Archives => self.compact_archives().await?,
                 CompactionJob::Shutdown => {
                     // shutdown this compactor
