@@ -337,7 +337,10 @@ turns on, and the reason recovery is phased rather than per-log.
 
 - Mid-log corruption discards the remainder of the log. It is now counted and reported, but the
   data is still discarded.
-- No checksum on archive data, so archive corruption is not detected at all.
+- ~~No checksum on archive data, so archive corruption is not detected at all.~~ A format 2
+  record is verified on every read and a mismatch is `CorruptArchive` by name
+  ([F44](../features/repair.md)); detection is at the read, not at recovery, so a corrupt
+  record nobody reads is found by a scrub and nothing else.
 - `MapCorruption` is fatal with no rebuild-by-scan path, even though archives carry size
   prefixes specifically to enable one.
 - Every log is buffered in memory until the replay phase, so peak recovery memory is the total

@@ -1701,10 +1701,17 @@ the same allocations — and because measuring it needs a workload that fans one
 across many shards, which none does. If the capture shows fan-out arms regressing, this is the
 first place to look.
 
-### Archive checksums
+### ~~Archive checksums~~
 
-Intent log records and the map snapshot are checksummed; archive payloads are not. Corruption
-there is caught only if rkyv validation happens to reject it.
+**Done**, by [F44](../features/repair.md): a format 2 archive begins with a header and every
+record in it is `[size][gxhash64][payload]`, verified once at the one read path
+(`ArchiveMap::read_record`), and the checkpoint file and the retry sidecar carry one too. What
+is left of this entry is the format 1 tail - an archive written before F44 is read unverified
+and counted until an archive compaction rewrites it - and the rebuild-by-scan path, which is
+still not there. The rest of the entry is kept as it was, for the reasoning.
+
+~~Intent log records and the map snapshot are checksummed; archive payloads are not. Corruption
+there is caught only if rkyv validation happens to reject it.~~
 
 One class of thing that used to arrive here is no longer corruption at all. An archive that was
 not on disk was created empty and read short, so validation was where "this file is missing"

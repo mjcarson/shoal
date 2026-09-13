@@ -252,7 +252,7 @@ come out as a code block.
 | **O18 → F2** | A projection is [required to carry its table's partition key](../features/projections.md#limitations) only so that O18's rehash can work. Taking O18 lifts that |
 | **O4 → item 22** | The mismatched size bases exist *because* the size is re-derived at each site. One edit closes both |
 | **O16 raises O8, O9** | Compaction shares the query executor, so their cost is not background cost |
-| **O3 → archive checksums** | Only for the *drop validation outright* form, which [F4](../features/validated-archives.md) did **not** take. Still unpaid: validation, now once per read rather than once per query, is still the only thing between a corrupt archive and a bad pointer |
+| **O3 → archive checksums** | Only for the *drop validation outright* form, which [F4](../features/validated-archives.md) did **not** take. ~~Still unpaid: validation, now once per read rather than once per query, is still the only thing between a corrupt archive and a bad pointer~~ **Paid** by [F44](../features/repair.md): a format 2 record is verified against its checksum before rkyv sees it. The unchecked form is now *possible*, and still not taken - a checksum catches a flipped byte, not a compactor that wrote a well formed archive of the wrong type, and a format 1 archive is unverified until it is rewritten |
 | ~~**`wire_codec` bench → O1, O2, O18**~~ | ~~Unbuilt~~ **Discharged for O1 and O2** — built by [F10](../features/framing-and-protocol-evolution.md) and captured in `f22-row-size`. O1 has since been [done](#o1-queries-are-fully-deserialized-on-arrival). **O18 was never really on this edge**: it is *uncovered* rather than unbuilt, because no arm of `wire_codec` varies the thing it is about |
 | **table-layer bench → O5, O12, O13** | Unbuilt, and until recently believed to exist — see below. [F4](../features/validated-archives.md) closed half the gap by making `MaybeLoaded` constructible, but all three of these live a layer above it in `PersistentSortedTable` |
 | **write-path bench → O11, O21** | Unbuilt, and it is the layer that dominates the profile |
@@ -580,8 +580,13 @@ The original entry read:
 > This is the entry with the best ratio of cost removed to code changed.
 
 It was right about the ranking, right that the narrow form was the one to take, and right that
-`access_unchecked` everywhere is a separate decision — which is **still not taken**, and still
-depends on [archive checksums](todos.md#archive-checksums).
+`access_unchecked` everywhere is a separate decision — which is **still not taken**. It ~~still
+depends on~~ no longer waits on [archive checksums](todos.md#archive-checksums), which
+[F44](../features/repair.md) delivered: a format 2 record is verified against its checksum
+before rkyv sees it, so the validation is now the *second* check on the bytes rather than the
+only one. What still argues against dropping it is that a checksum proves the bytes are the
+ones the compactor wrote, not that the compactor wrote a valid archive of this row type, and
+that every format 1 archive is unverified until archive compaction rewrites it.
 
 **It was wrong about `unsafe`, and that is the part worth keeping.** ~~"without a single
 `unsafe`"~~ — there is no such form. `rkyv::access` returns a reference *into* the buffer, so

@@ -303,6 +303,15 @@ pub enum ShoalError {
     /// the archive is the whole point of this variant: creating the file instead makes
     /// the failure surface much later, as a validation error on bytes nobody wrote.
     ArchiveMissing { archive: Uuid, path: PathBuf },
+    /// A partition's record did not hash to the checksum written beside it
+    ///
+    /// Every record of a format 2 archive carries a checksum over its payload, and this is
+    /// the read that found one that does not match: the bytes on disk are not the bytes the
+    /// compactor wrote ([F44](../../../docs/src/features/repair.md)). Both hashes are zero
+    /// for a record the read came back short on, which is a torn record rather than a
+    /// flipped byte. Named by archive and partition so an operator can find the copy and
+    /// the repair can quarantine the group holding it.
+    CorruptArchive { archive: Uuid, partition_id: u64, expected: u64, found: u64 },
     /// A table was not found in the archive map (corrupt or missing map)
     TableMapMissing,
     /// This node has no shards, so nothing could own any data

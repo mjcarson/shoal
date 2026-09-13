@@ -706,10 +706,8 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
         match self.map.find_partition(partition_id) {
             // this partition exists
             Some(entry) => {
-                // get this archives dma file
-                let handle = self.map.get_archive(&entry.archive).await?;
-                // read this partitions data from disk
-                let read = loader::read_partition_helper(handle, entry).await?;
+                // read this partitions record from disk, verified against its checksum
+                let read = self.map.read_record(&entry).await?;
                 Ok(Some(read))
             }
             None => Ok(None),

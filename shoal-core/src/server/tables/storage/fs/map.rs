@@ -1,18 +1,18 @@
 //! A map of archives for the file system storage engine
 
 use futures::AsyncWriteExt;
-use glommio::io::{DmaFile, DmaStreamWriter, DmaStreamWriterBuilder, OpenOptions};
+use glommio::io::{DmaFile, DmaStreamWriter, DmaStreamWriterBuilder, OpenOptions, ReadResult};
 use glommio::GlommioError;
 use gxhash::GxHasher;
 use rkyv::rancor::Error;
 use rkyv::{Archive, Deserialize, Serialize};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::collections::{BTreeMap, HashSet};
 use std::hash::Hasher;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tracing::instrument;
+use tracing::{event, instrument, Level};
 use uuid::Uuid;
 
 use crate::server::errors::ShoalError;
@@ -22,6 +22,128 @@ use crate::storage::{ArchiveMapKinds, FilteredFullArchiveMap, FullArchiveMap};
 
 use super::conf::FileSystemTableConf;
 use super::reader::IntentLogReader;
+
+
+/// The magic a checksummed archive begins with
+///
+/// A format 1 archive begins with the size of its first record, and no partition is
+/// `0x4352414c414f4853` bytes long, so the first eight bytes of a file say which format it is.
+pub const ARCHIVE_MAGIC: &[u8; 8] = b"SHOALARC";
+
+/// The archive format this build writes
+pub const ARCHIVE_FORMAT: u32 = 2;
+
+/// The length of a format 2 archive's header: the magic, the version and a reserved word
+pub const ARCHIVE_HEADER_LEN: usize = 16;
+
+/// The length of a format 2 record's prefix: the size and the checksum
+pub const RECORD_PREFIX_LEN: u64 = 16;
+
+/// What the records of an archive look like, and whether a read of one can be verified
+///
+/// An archive's format is fixed when it is created and never changes: a format 1 archive is
+/// never written to again, since a restart mints a new active archive, and it is retired by
+/// ordinary archive compaction, which rewrites what is still live in it into a format 2 one
+/// ([F44](../../../../../../docs/src/features/repair.md)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArchiveFormat {
+    /// Format 1: `[size][payload]` records with nothing to verify a read against
+    ///
+    /// Written before F44. Corruption in one is caught only if rkyv's validation happens to
+    /// reject it, and every read of one is counted as unverified.
+    Unverified,
+    /// Format 2: a header, then `[size][checksum][payload]` records
+    ///
+    /// The checksum is gxhash64 over the payload, seeded like the intent log's, and a read
+    /// that does not hash to it is refused as [`ShoalError::CorruptArchive`].
+    Checksummed,
+}
+
+impl ArchiveFormat {
+    /// Decide an archive's format from its first bytes
+    ///
+    /// A file too short to hold the header is a format 1 archive that nothing was ever
+    /// written to, or the active archive before its first sync: either way nothing points
+    /// into it yet, and reading it as unverified is harmless.
+    ///
+    /// # Arguments
+    ///
+    /// * `head` - The first bytes of the archive, at least the header's length if it has one
+    #[must_use]
+    pub fn detect(head: &[u8]) -> Self {
+        // a header is the magic, then the version this build knows
+        if head.len() >= ARCHIVE_HEADER_LEN && &head[..8] == ARCHIVE_MAGIC {
+            // the version follows the magic
+            let version = u32::from_le_bytes([head[8], head[9], head[10], head[11]]);
+            // this build writes format 2 and reads nothing newer
+            if version == ARCHIVE_FORMAT {
+                return ArchiveFormat::Checksummed;
+            }
+        }
+        // no header, so this archive's records carry no checksum
+        ArchiveFormat::Unverified
+    }
+
+    /// The header a new archive of this build begins with
+    #[must_use]
+    pub fn header() -> [u8; ARCHIVE_HEADER_LEN] {
+        // the magic, the version and a reserved word
+        let mut header = [0u8; ARCHIVE_HEADER_LEN];
+        header[..8].copy_from_slice(ARCHIVE_MAGIC);
+        header[8..12].copy_from_slice(&ARCHIVE_FORMAT.to_le_bytes());
+        header
+    }
+}
+
+/// The checksum a format 2 record carries for its payload
+///
+/// Seeded like the intent log's, so one hasher describes every checksummed record on disk.
+///
+/// # Arguments
+///
+/// * `payload` - The archived partition
+#[must_use]
+pub fn record_checksum(payload: &[u8]) -> u64 {
+    // hash the payload with the same hasher the intent log uses
+    let mut hasher = GxHasher::default();
+    hasher.write(payload);
+    hasher.finish()
+}
+
+/// Write one record into an archive: the size, the checksum, then the payload
+///
+/// This is the one place a record is written, whether by a compaction, an archive
+/// compaction or a snapshot install, so every record a format 2 archive holds carries a
+/// checksum. Returns the offset of the payload, which is what the map entry points at.
+///
+/// # Arguments
+///
+/// * `writer` - The active archive's writer
+/// * `payload` - The archived partition
+pub async fn write_record(writer: &mut DmaStreamWriter, payload: &[u8]) -> Result<u64, ServerError> {
+    // write the size of this record's payload
+    writer.write_all(&payload.len().to_le_bytes()).await?;
+    // then the checksum a read verifies it against
+    writer.write_all(&record_checksum(payload).to_le_bytes()).await?;
+    // the map entry points at the payload, not at the prefix
+    let offset = writer.current_pos();
+    // then the payload itself
+    writer.write_all(payload).await?;
+    Ok(offset)
+}
+
+/// What the archives of one table have seen of their own integrity
+///
+/// Counted on the map because it is the one thing every reader of a table's archives on a
+/// shard shares - the loader, the compactor and the direct reads - and reported through the
+/// shard's replication report ([F44](../../../../../../docs/src/features/repair.md)).
+#[derive(Debug, Default)]
+pub struct IntegrityCounters {
+    /// Reads of format 1 records, which nothing could verify
+    pub unverified_reads: Cell<u64>,
+    /// Reads whose payload did not hash to its checksum
+    pub checksum_failures: Cell<u64>,
+}
 
 /// An entry for a partitions data in an archive
 #[derive(Debug, Archive, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
@@ -336,6 +458,10 @@ pub struct ArchiveMap {
     pub to_archive: RefCell<HashMap<u64, ArchiveEntry>>,
     /// A map of loaded archives
     pub loaded_archives: RefCell<HashMap<Uuid, DmaFile>>,
+    /// The format of every loaded archive, decided once when its handle was opened
+    formats: RefCell<HashMap<Uuid, ArchiveFormat>>,
+    /// What this table's archives have seen of their own integrity
+    pub integrity: IntegrityCounters,
     /// All archives this shard knows about
     pub all_archives: RefCell<HashSet<Uuid>>,
     /// The path to this shards compacted and comitted archive map data
@@ -380,6 +506,8 @@ impl ArchiveMap {
             active: RefCell::new(Uuid::new_v4()),
             to_archive,
             loaded_archives: RefCell::new(HashMap::with_capacity(1000)),
+            formats: RefCell::new(HashMap::with_capacity(1000)),
+            integrity: IntegrityCounters::default(),
             all_archives: RefCell::new(serializable.all_archives),
             map_path,
             temp_map_path,
@@ -429,8 +557,13 @@ impl ArchiveMap {
             .await?;
         // clone this file handle and place it in our archive map
         self.add_archive(*self.active.borrow(), file.dup()?);
+        // a new archive is this build's format, and begins with the header that says so
+        self.formats.borrow_mut().insert(*self.active.borrow(), ArchiveFormat::Checksummed);
         // build a stream writer for this file
-        Ok(DmaStreamWriterBuilder::new(file).build())
+        let mut writer = DmaStreamWriterBuilder::new(file).build();
+        // write the header, so a reader can tell this archive's records carry checksums
+        writer.write_all(&ArchiveFormat::header()).await?;
+        Ok(writer)
     }
 
     /// Update the location for a partition
@@ -505,9 +638,105 @@ impl ArchiveMap {
             // any other failure to open is reported as the IO error it is
             Err(error) => return Err(error.into()),
         };
+        // decide this archive's format from its first bytes, once for the life of the handle
+        let head = file.read_at(0, ARCHIVE_HEADER_LEN).await?;
+        let format = ArchiveFormat::detect(&head);
+        // say so when an archive from before checksums is opened, since every read of it
+        // is one nothing can verify
+        if format == ArchiveFormat::Unverified {
+            event!(Level::WARN, msg = "Opened an archive with no checksums", table = %self.table_name, archive = %archive_id);
+        }
+        self.formats.borrow_mut().insert(*archive_id, format);
         // clone this file handle and place it in our archive map
         self.add_archive(*archive_id, file.dup()?);
         Ok(file)
+    }
+
+    /// The format of an archive whose handle is open
+    ///
+    /// Every handle comes from [`ArchiveMap::get_archive`] or [`ArchiveMap::get_active_writer`],
+    /// which both record the format before handing one out, so an archive with no recorded
+    /// format is one that was never opened here. It is read as unverified rather than trusted,
+    /// so the miss shows in the counters instead of being silent.
+    ///
+    /// # Arguments
+    ///
+    /// * `archive_id` - The archive
+    #[must_use]
+    pub fn format_of(&self, archive_id: &Uuid) -> ArchiveFormat {
+        // an archive nobody opened through this map has no format we can vouch for
+        self.formats.borrow().get(archive_id).copied().unwrap_or(ArchiveFormat::Unverified)
+    }
+
+    /// Read one partition's record out of its archive and verify it
+    ///
+    /// This is the one place a partition's bytes leave an archive - the loader, the compactor's
+    /// merge, an archive compaction, a snapshot cut and a direct read all come through here -
+    /// so a format 2 record is verified against its checksum once per read, and a format 1
+    /// record is counted as a read nothing could verify. A record that does not hash to its
+    /// checksum is [`ShoalError::CorruptArchive`], which names the archive and the partition,
+    /// and is counted ([F44](../../../../../../docs/src/features/repair.md)).
+    ///
+    /// The handle is closed whether or not the read succeeded.
+    ///
+    /// # Arguments
+    ///
+    /// * `entry` - Where the partition's record is
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    pub async fn read_record(&self, entry: &ArchiveEntry) -> Result<ReadResult, ServerError> {
+        // get a handle to the archive holding this record
+        let archive = self.get_archive(&entry.archive).await?;
+        // read the record, then close the handle whether or not that worked
+        let read = self.read_record_from(&archive, entry).await;
+        archive.close().await?;
+        read
+    }
+
+    /// The read and the check, apart from the handle's lifetime
+    ///
+    /// # Arguments
+    ///
+    /// * `archive` - The open archive
+    /// * `entry` - Where the partition's record is
+    async fn read_record_from(&self, archive: &DmaFile, entry: &ArchiveEntry) -> Result<ReadResult, ServerError> {
+        // a format 1 record has nothing to verify against, so read it as it is and count it
+        if self.format_of(&entry.archive) == ArchiveFormat::Unverified {
+            self.integrity.unverified_reads.set(self.integrity.unverified_reads.get() + 1);
+            return Ok(archive.read_at(entry.offset, entry.size).await?);
+        }
+        // read the checksum ahead of the payload and the payload in one read
+        let read = archive.read_at(entry.offset - 8, entry.size + 8).await?;
+        // a short read is a torn record, which is corruption of a different shape
+        if read.len() < entry.size + 8 {
+            self.integrity.checksum_failures.set(self.integrity.checksum_failures.get() + 1);
+            return Err(ServerError::Shoal(ShoalError::CorruptArchive {
+                archive: entry.archive,
+                partition_id: entry.key,
+                expected: 0,
+                found: 0,
+            }));
+        }
+        // the payload has to hash to the checksum written beside it
+        let expected = u64::from_le_bytes(read[..8].try_into()?);
+        let found = record_checksum(&read[8..]);
+        if expected != found {
+            self.integrity.checksum_failures.set(self.integrity.checksum_failures.get() + 1);
+            return Err(ServerError::Shoal(ShoalError::CorruptArchive {
+                archive: entry.archive,
+                partition_id: entry.key,
+                expected,
+                found,
+            }));
+        }
+        // hand back the payload alone, which is what the map entry describes
+        match ReadResult::slice(&read, 8, entry.size) {
+            Some(payload) => Ok(payload),
+            // the slice is inside a read we just measured, so this cannot happen
+            None => Err(ServerError::GlommioGeneric(format!(
+                "the record of partition {:016x} in archive {} could not be sliced",
+                entry.key, entry.archive
+            ))),
+        }
     }
 
     /// Find the location for a partition
@@ -540,6 +769,8 @@ impl ArchiveMap {
         if let Some(removed) = self.loaded_archives.borrow_mut().remove(id) {
             removed.close().await?;
         }
+        // its format goes with its handle
+        self.formats.borrow_mut().remove(id);
         // remove this archive from our map of all archives
         self.all_archives.borrow_mut().remove(id);
         Ok(())

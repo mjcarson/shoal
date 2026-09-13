@@ -84,6 +84,26 @@ pub const CHECKPOINT_FILE: &str = "checkpoint.json";
 /// checkpoint that names them ([F42](../../../../docs/src/features/primary-failover.md)).
 pub const RETRIES_FILE: &str = "retries.bin";
 
+/// The magic a checksummed retry sidecar begins with
+///
+/// A sidecar from before [F44](../../../../docs/src/features/repair.md) begins with postcard's
+/// count of its groups, which is never these eight bytes, so the first bytes of the file say
+/// whether a checksum follows them.
+pub const RETRIES_MAGIC: &[u8; 8] = b"SHOALRTY";
+
+/// Hash bytes the way every checksummed file on this node does
+///
+/// # Arguments
+///
+/// * `bytes` - The bytes to hash
+#[must_use]
+pub fn checksum_of(bytes: &[u8]) -> u64 {
+    // one hasher describes every checksum on disk
+    let mut hasher = gxhash::GxHasher::default();
+    std::hash::Hasher::write(&mut hasher, bytes);
+    std::hash::Hasher::finish(&hasher)
+}
+
 /// Turn a glommio error into the io error openraft wants
 ///
 /// # Arguments
@@ -706,7 +726,29 @@ pub struct Checkpoint {
     pub groups: BTreeMap<String, GroupCheckpoint>,
 }
 
+/// The checkpoint file as it lies on disk: the groups and a checksum over them
+///
+/// The checksum is gxhash64 over the compact JSON of `groups`, which is canonical because the
+/// map is ordered and nothing in it is skipped. Zero is a file from before
+/// [F44](../../../../docs/src/features/repair.md), which is read unchecked; any other value has
+/// to match, since a checkpoint that cannot be trusted is not a state to start a group from.
+#[derive(Debug, Serialize, Deserialize)]
+struct CheckpointFile {
+    /// The checkpoint itself
+    #[serde(flatten)]
+    checkpoint: Checkpoint,
+    /// The checksum over the groups, or zero
+    #[serde(default)]
+    checksum: u64,
+}
+
 impl Checkpoint {
+    /// The checksum a checkpoint file carries for these groups
+    fn checksum(&self) -> io::Result<u64> {
+        // the compact JSON of the ordered map is the canonical form
+        Ok(checksum_of(&serde_json::to_vec(&self.groups)?))
+    }
+
     /// Read the checkpoint file, or an empty one if there is none
     ///
     /// # Arguments
@@ -718,16 +760,37 @@ impl Checkpoint {
             return Ok(Checkpoint::default());
         }
         let bytes = read_whole(&path).await?;
-        Ok(serde_json::from_slice(&bytes)?)
+        let file: CheckpointFile = serde_json::from_slice(&bytes)?;
+        // a file with a checksum has to hash to it; one without is from before there was one
+        if file.checksum != 0 {
+            let found = file.checkpoint.checksum()?;
+            if found != file.checksum {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "{} does not hash to its checksum: expected {:016x}, found {found:016x}",
+                        path.display(),
+                        file.checksum
+                    ),
+                ));
+            }
+        } else {
+            event!(Level::WARN, msg = "read a checkpoint file with no checksum", path = %path.display());
+        }
+        Ok(file.checkpoint)
     }
 
-    /// Write the checkpoint file atomically
+    /// Write the checkpoint file atomically, with a checksum over its groups
     ///
     /// # Arguments
     ///
     /// * `dir` - The WAL directory
     pub async fn write(&self, dir: &Path) -> io::Result<()> {
-        write_atomic(dir, CHECKPOINT_FILE, serde_json::to_vec_pretty(self)?).await
+        let file = CheckpointFile {
+            checksum: self.checksum()?,
+            checkpoint: self.clone(),
+        };
+        write_atomic(dir, CHECKPOINT_FILE, serde_json::to_vec_pretty(&file)?).await
     }
 
     /// One group's boundary, if it has one
@@ -774,16 +837,38 @@ impl Retries {
             return Ok(Retries::default());
         }
         let bytes = read_whole(&path).await?;
-        postcard::from_bytes(&bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+        // a sidecar from before F44 has no magic and no checksum, and is read as it was
+        let Some(rest) = bytes.strip_prefix(RETRIES_MAGIC) else {
+            event!(Level::WARN, msg = "read a retry sidecar with no checksum", path = %path.display());
+            return postcard::from_bytes(&bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error));
+        };
+        // the checksum follows the magic, and the payload has to hash to it
+        if rest.len() < 8 {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, format!("{} is too short to hold its checksum", path.display())));
+        }
+        let expected = u64::from_le_bytes(rest[..8].try_into().expect("eight bytes"));
+        let found = checksum_of(&rest[8..]);
+        if expected != found {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{} does not hash to its checksum: expected {expected:016x}, found {found:016x}", path.display()),
+            ));
+        }
+        postcard::from_bytes(&rest[8..]).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
     }
 
-    /// Write the retry sidecar atomically
+    /// Write the retry sidecar atomically: the magic, a checksum, then the entries
     ///
     /// # Arguments
     ///
     /// * `dir` - The WAL directory
     pub async fn write(&self, dir: &Path) -> io::Result<()> {
-        let bytes = postcard::to_allocvec(self).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        let payload = postcard::to_allocvec(self).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        // the magic says a checksum follows, and the checksum says what the payload has to be
+        let mut bytes = Vec::with_capacity(16 + payload.len());
+        bytes.extend_from_slice(RETRIES_MAGIC);
+        bytes.extend_from_slice(&checksum_of(&payload).to_le_bytes());
+        bytes.extend_from_slice(&payload);
         write_atomic(dir, RETRIES_FILE, bytes).await
     }
 

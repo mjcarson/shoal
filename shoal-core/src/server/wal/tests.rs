@@ -15,7 +15,7 @@ use openraft::type_config::TypeConfigExt as _;
 use openraft::{AsyncRuntime as _, EntryPayload, LogId, OptionalSend, Snapshot, SnapshotMeta, StorageError, StoredMembership};
 
 use super::frame::{Entry, LeaderId, WalLogId};
-use super::{Checkpoint, GroupCheckpoint, GroupRetries, GroupStore, MemoryWal, Retries, ShardWal};
+use super::{Checkpoint, GroupCheckpoint, GroupRetries, GroupStore, MemoryWal, Retries, ShardWal, CHECKPOINT_FILE, RETRIES_FILE, RETRIES_MAGIC};
 use crate::server::control::runtime::GlommioRuntime;
 use crate::server::replication::{ApplyOutcome, CommandResult, DataConfig, MachineState, Remembered, ResultKind};
 use crate::shared::identity::{GroupId, ShardAddr, TableId};
@@ -583,4 +583,80 @@ impl PayloadCommand for Entry {
             other => panic!("not a normal entry: {other:?}"),
         }
     }
+}
+
+/// The checkpoint file and the retry sidecar carry checksums, and a corrupt one fails the open by name
+///
+/// A checkpoint is where a group starts from, so one that cannot be trusted is not a state to
+/// guess at ([F44](../../../../docs/src/features/repair.md)): a flipped byte in either file is
+/// refused at `read`, and a file from before there were checksums is read as it was.
+#[test]
+fn checkpoint_and_retries_are_checksummed() {
+    let mut runtime = GlommioRuntime::new(1);
+    runtime.block_on(async {
+        let dir = tempfile::tempdir().expect("failed to build a temp dir");
+        let membership = StoredMembership::new(
+            Some(log_id(1, 0)),
+            openraft::Membership::new(
+                vec![members(&[1, 2, 3])],
+                members(&[1, 2, 3]).into_iter().map(|addr| (addr, addr)).collect::<std::collections::BTreeMap<_, _>>(),
+            )
+            .expect("a valid membership"),
+        );
+        // a checkpoint written by this build carries a checksum and reads back
+        let mut file = Checkpoint::default();
+        file.groups.insert(GroupId(7).to_string(), GroupCheckpoint::new(Some(log_id(2, 9)), &membership));
+        file.write(dir.path()).await.expect("failed to write the checkpoint");
+        let text = std::fs::read_to_string(dir.path().join(CHECKPOINT_FILE)).expect("the file");
+        assert!(text.contains("\"checksum\""), "{text}");
+        assert_eq!(Checkpoint::read(dir.path()).await.expect("failed to read"), file);
+        // a flipped digit in the index it names is refused by name
+        let torn = text.replacen("\"index\": 9", "\"index\": 8", 1);
+        assert_ne!(torn, text);
+        std::fs::write(dir.path().join(CHECKPOINT_FILE), torn).expect("failed to rewrite");
+        let error = Checkpoint::read(dir.path()).await.expect_err("a torn checkpoint was read");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("does not hash to its checksum"), "{error}");
+        // a file from before checksums has none and is read as it was
+        let legacy = serde_json::to_vec_pretty(&file).expect("json");
+        std::fs::write(dir.path().join(CHECKPOINT_FILE), legacy).expect("failed to rewrite");
+        assert_eq!(Checkpoint::read(dir.path()).await.expect("failed to read"), file);
+        // the sidecar the same way
+        let mut retries = Retries::default();
+        retries.groups.insert(
+            GroupId(7).to_string(),
+            GroupRetries {
+                retries_at: 9,
+                entries: vec![(
+                    RequestId {
+                        bundle: [3; 16],
+                        index: 1,
+                    },
+                    Remembered {
+                        digest: 0xfeed,
+                        result: CommandResult {
+                            kind: ResultKind::Delete,
+                            ok: true,
+                        },
+                        applied: 5,
+                    },
+                )],
+            },
+        );
+        retries.write(dir.path()).await.expect("failed to write the sidecar");
+        let bytes = std::fs::read(dir.path().join(RETRIES_FILE)).expect("the file");
+        assert!(bytes.starts_with(RETRIES_MAGIC));
+        assert_eq!(Retries::read(dir.path()).await.expect("failed to read"), retries);
+        // a flipped byte in its payload is refused
+        let mut torn = bytes.clone();
+        let last = torn.len() - 1;
+        torn[last] ^= 0x01;
+        std::fs::write(dir.path().join(RETRIES_FILE), torn).expect("failed to rewrite");
+        let error = Retries::read(dir.path()).await.expect_err("a torn sidecar was read");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("does not hash to its checksum"), "{error}");
+        // and a sidecar from before checksums is the bare postcard, read as it was
+        std::fs::write(dir.path().join(RETRIES_FILE), &bytes[16..]).expect("failed to rewrite");
+        assert_eq!(Retries::read(dir.path()).await.expect("failed to read"), retries);
+    });
 }

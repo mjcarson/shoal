@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use futures::select;
 use futures::stream::{FuturesUnordered, StreamExt};
-use glommio::io::{DmaFile, ReadResult};
-use glommio::{GlommioError, Task, TaskQueueHandle};
+use glommio::io::ReadResult;
+use glommio::{Task, TaskQueueHandle};
 use kanal::{AsyncReceiver, AsyncSender};
 use tracing::{event, instrument, Level, Span};
 
@@ -15,7 +15,6 @@ use crate::server::{ServerError, ShoalError};
 use crate::shared::protocol::error::ErrorCode;
 use crate::shared::responses::ResponseError;
 use crate::server::database::ShoalDatabase;
-use crate::storage::fs::map::ArchiveEntry;
 use crate::storage::fs::ArchiveMap;
 use crate::storage::{FilteredFullArchiveMap, LoaderMsg};
 
@@ -73,6 +72,9 @@ pub(super) fn classify(error: &ServerError) -> LoadFailure {
         // because falling into the `IO` arm above instead would stall every query parked
         // behind this read for three attempts to arrive at the same answer
         ServerError::Shoal(ShoalError::ArchiveMissing { .. }) => LoadFailure::Fatal,
+        // a record that does not hash to its checksum is the same bytes on the next attempt,
+        // and the queries parked behind it have to hear that the copy is bad rather than wait
+        ServerError::Shoal(ShoalError::CorruptArchive { .. }) => LoadFailure::Fatal,
         // an archive that could not be opened may open next time, since the realistic cause
         // is a shortage of file descriptors that other reads will give back
         ServerError::IO(_) | ServerError::GlommioIO { .. } => LoadFailure::Retryable,
@@ -112,6 +114,7 @@ pub(super) fn client_error<T: std::fmt::Display>(
     // say which class of failure this was, in terms a client can act on
     let code = match error {
         ServerError::Shoal(ShoalError::ArchiveMissing { .. }) => ErrorCode::ArchiveMissing,
+        ServerError::Shoal(ShoalError::CorruptArchive { .. }) => ErrorCode::CorruptArchive,
         ServerError::IO(_) | ServerError::GlommioIO { .. } => ErrorCode::StorageRead,
         // everything else is structural, and a client can do nothing but report it
         _ => ErrorCode::Internal,
@@ -120,20 +123,6 @@ pub(super) fn client_error<T: std::fmt::Display>(
         code,
         format!("partition {partition_id} of {table} could not be read"),
     ))
-}
-
-/// Help read a partition from disk
-#[instrument(name = "loader::read_partition_helper", skip_all, err(Debug))]
-#[cfg_attr(feature = "hotpath", hotpath::measure)]
-pub async fn read_partition_helper(
-    archive: DmaFile,
-    entry: ArchiveEntry,
-) -> Result<ReadResult, GlommioError<()>> {
-    // read our partition from disk
-    let read_result = archive.read_at(entry.offset, entry.size).await;
-    // close our archive regardless of whether the read failed or not
-    archive.close().await?;
-    read_result
 }
 
 /// Read a partition from disk, retrying a failure that might not hold
@@ -199,10 +188,8 @@ async fn read_partition_once(
             partition_id,
         }));
     };
-    // get a handle to the archive holding it
-    let archive = table_map.get_archive(&entry.archive).await?;
-    // read this partition out of that archive
-    let read = read_partition_helper(archive, entry).await?;
+    // read this partition's record out of its archive, verified against its checksum
+    let read = table_map.read_record(&entry).await?;
     Ok(read)
 }
 

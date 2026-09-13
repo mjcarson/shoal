@@ -5,27 +5,52 @@ are per shard, per table.
 
 ## Archives
 
-Uuid-named files under `<throughput_sensitive.path>/<table>/archives/`. Partitions are packed
-back to back, each preceded by its size:
+Uuid-named files under `<throughput_sensitive.path>/<table>/archives/`. Since
+[F44](../features/repair.md) an archive is **format 2**: a sixteen byte header, then partitions
+packed back to back, each preceded by its size and a checksum over its bytes:
+
+```text
+[b"SHOALARC"][version u32 = 2][reserved u32]        the header, once
+[size u64][gxhash64 u64][rkyv payload]              per record
+[size u64][gxhash64 u64][rkyv payload]
+…
+```
 
 ```rust
 let archived = rkyv::to_bytes::<_>(partition)?;
-let size = archived.len();
-self.writer.write_all(&size.to_le_bytes()).await?;
-let offset = self.writer.current_pos();          // AFTER the size prefix
-self.writer.write_all(archived.as_slice()).await?;
-let intent = MapIntent::entry(*key, active_id, offset, size);
+let offset = write_record(&mut self.writer, archived.as_slice()).await?;   // AFTER the prefix
+let intent = MapIntent::entry(*key, active_id, offset, archived.len());
 ```
 
-`shoal-core/src/server/tables/storage/fs/compactor.rs:216-231`
+`shoal-core/src/server/tables/storage/fs/compactor.rs` (`write_partition`), `fs/map.rs`
+(`write_record`)
 
-`offset` is captured after the size is written, so `ArchiveEntry.offset` points at the rkyv
-payload directly and a read is a single `read_at(offset, size)` with no header parsing.
+`offset` is the payload's, so `ArchiveEntry.offset` points at the rkyv bytes directly and the
+checksum sits at `offset - 8`. A read of a format 2 record is one `read_at(offset - 8, size + 8)`,
+a hash of the payload compared with the eight bytes ahead of it, and a slice of the same buffer
+handed on - the checksum costs no second read. `write_record` is the one place a record is
+written - a compaction, an archive compaction and a snapshot install all go through it - and
+`ArchiveMap::read_record` is the one place a record is read - the loader, the compactor's
+merge, an archive compaction, a snapshot cut and a direct read - so every record a format 2
+archive holds carries a checksum and every read of one is verified once.
 
-The size prefix is redundant for normal reads. Its stated purpose is recovery — "this size is
-only used in recovery operations of archive files"
-(`.../fs/compactor.rs:220-221`) — i.e. rebuilding a lost map by scanning an archive. **No such
-recovery path exists.** The prefixes are written and never read.
+~~The size prefix is redundant for normal reads. Its stated purpose is recovery — "this size is
+only used in recovery operations of archive files" — i.e. rebuilding a lost map by scanning an
+archive. **No such recovery path exists.** The prefixes are written and never read.~~ The size
+prefix is still never read by a normal read, and there is still no rebuild-by-scan path; but
+it now sits beside the checksum a read *does* use, and the header makes an archive
+self-describing, which a scan would need.
+
+**Format 1** is what every archive written before F44 is: no header, `[size][payload]` records,
+nothing to verify. `ArchiveMap::get_archive` reads the first sixteen bytes of an archive when
+it opens it and records the format for the life of the handle (`format_of`); a format 1 record
+is read as it always was and counted as an *unverified read* in the map's `IntegrityCounters`,
+which the replication report carries. An archive's format never changes: a restart mints a new
+active archive, so a format 1 one is never written to again, and archive compaction rewrites
+what is still live in it into the format 2 active archive **whatever its utilization** - the
+fifty percent rule that leaves a well used archive alone is waived for one with no checksums,
+since rewriting is how its records come to have them. That is a one-time cost on the first
+archive compaction after the upgrade, proportional to the live bytes of the old archives.
 
 Archives are append-only and immutable. Updating a partition writes a new copy into the
 active archive and repoints the map; the old copy becomes garbage, reclaimed later by archive
@@ -35,10 +60,15 @@ There is exactly one active archive at a time, in `ArchiveMap::active`
 (`.../fs/map.rs:334`). It is created lazily by `get_active_writer` (`.../fs/map.rs:411-433`),
 which also registers the new archive in `all_archives`.
 
-Archive payloads carry **no checksum**. Intent log records do, and the map snapshot does, but
+~~Archive payloads carry **no checksum**. Intent log records do, and the map snapshot does, but
 a partition read out of an archive is trusted. Corruption surfaces only if rkyv's `access`
-validation happens to reject it — and several call sites `.unwrap()` that result
-(`.../persistent/sorted.rs:245`, `:355`, `:453`).
+validation happens to reject it.~~ A format 2 record that does not hash to its checksum is
+`ShoalError::CorruptArchive`, naming the archive and the partition, before a byte of it reaches
+rkyv; the loader classes it `Fatal` (the bytes will not change on a retry), the queries parked
+on it hear `ErrorCode::CorruptArchive`, and the map counts a *checksum failure*. A snapshot cut
+that meets one fails rather than sending the record on, so a corrupt copy is never a source,
+and an archive compaction that meets one fails rather than rewriting it under a fresh checksum,
+so corruption is never laundered ([F44](../features/repair.md)).
 
 ## The archive map
 
@@ -92,8 +122,8 @@ other side: it is filed as an optimization because no `EMFILE` has been observed
 argument rather than a symptom.
 
 Handles are handed out with `dup()` (`.../fs/map.rs:418`, `:430`, `:484`) so a caller can
-`close()` its copy without disturbing the cached one — `read_partition_helper` relies on exactly
-that (`.../fs/loader.rs:92-94`).
+`close()` its copy without disturbing the cached one — `ArchiveMap::read_record` relies on
+exactly that.
 
 **Two functions fill that cache, and only one of them creates.** `get_active_writer` creates the
 active archive, which is the only archive that is ever created. `get_archive` opens an archive
@@ -294,7 +324,9 @@ between the compactor and the loader.
 
 ## Limitations
 
-- No checksums on archive payloads.
+- ~~No checksums on archive payloads.~~ Format 2 records carry one
+  ([F44](../features/repair.md)); a format 1 archive is unverified until archive compaction
+  rewrites it, and the count of unverified reads is what says whether any are left.
 - No way to rebuild a lost map; `MapCorruption` is unrecoverable despite the data being
   intact.
 - `loaded_archives` is an unbounded fd cache.
