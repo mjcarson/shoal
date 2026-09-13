@@ -16,6 +16,7 @@
 pub mod cluster;
 pub mod conf;
 pub mod driver;
+pub mod fault;
 pub mod keys;
 pub mod metrics;
 pub mod ready;
@@ -167,8 +168,10 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
         .build()
         .context("failed to build the client runtime")?;
     // start every placed peer first, so node zero's first forward has somewhere to dial. the
-    // children are killed when this vector drops, which is after the server below has stopped
-    let _peers = match &staged {
+    // children are killed when this drops, which is after the server below has stopped; it is
+    // shared because a fault arm's thread kills one and starts it again mid-run
+    // ([F42](../../../docs/src/features/primary-failover.md))
+    let peers = std::sync::Arc::new(std::sync::Mutex::new(match &staged {
         Some(staged) => cluster::spawn_peers(
             staged,
             workload.id(),
@@ -176,7 +179,13 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
             request.scale.as_str(),
         )?,
         None => Vec::new(),
-    };
+    }));
+    // a fault is done to a placed peer, so an arm asking for one without peers is refused
+    // before its server starts
+    let fault = workload.fault(request.scale);
+    if fault.is_some() && staged.is_none() {
+        bail!("{} asks for a fault and places no peers to inject it into", workload.id());
+    }
     // start the shards and wait until they answer - or, for a server somebody else started,
     // only wait until it answers
     let mut pool = match &request.server {
@@ -251,6 +260,21 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
     // restart above, or it throws away the phase it was meant to keep.
     #[cfg(feature = "stage-profile")]
     shoal::server::stage_profile::reset();
+    // a fault arm's schedule starts with the measured phase: the thread counts from here, and
+    // is joined after the run whatever the run did, so a child is never left half restarted
+    let run_started = std::time::Instant::now();
+    let injected = match (&fault, &staged, seeded.is_ok()) {
+        (Some(spec), Some(staged), true) => Some(fault::inject(
+            spec,
+            peers.clone(),
+            staged,
+            workload.id(),
+            &request.conf,
+            request.scale.as_str(),
+            run_started,
+        )?),
+        _ => None,
+    };
     // drive the workload, keeping the result rather than unwrapping it, so the server is stopped
     // on the failing path as well as the succeeding one
     let outcome = seeded.and_then(|()| {
@@ -259,6 +283,9 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
             measured.map(|measured| (measured, wall_clock))
         })
     });
+    // the fault's marks, waited for before the servers are read so the restarted peer is in
+    // the reports
+    let marks = injected.map(fault::Injected::finish).transpose();
     // what the links did during the run, and where every replica ended, read before the
     // servers that hold them stop
     if let (Some(facts), Some(pool), Some(conf), Some(staged)) =
@@ -275,6 +302,22 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
     // stop the server whatever happened, so a failing run does not leave shards holding cores
     stop(pool)?;
     let (mut measured, wall_clock) = outcome?;
+    // a fault arm cuts what its client saw at the marks, on the driver's own clock
+    // ([F42](../../docs/src/features/primary-failover.md))
+    if let (Some(spec), Some(facts)) = (&fault, cluster_facts.as_mut()) {
+        let marks = marks?.context("the fault arm ran without its fault")?;
+        let started = measured
+            .started
+            .with_context(|| format!("{} injects a fault but its driver keeps no timeline", workload.id()))?;
+        facts.fault = Some(fault::facts(
+            "kill",
+            spec.node,
+            started,
+            &marks,
+            &measured.timeline,
+            wall_clock,
+        ));
+    }
     // build the stage report now that every shard has handed its records over
     //
     // this has to come after the server has stopped. shards flush their buffered records in

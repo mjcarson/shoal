@@ -894,7 +894,7 @@ where
             LinkEvent::Frame { node, head, payload, .. } => {
                 replication.network.answered(node, &head, payload.to_vec());
             }
-            LinkEvent::Down { node, reason, .. } => replication.network.down(node, &reason),
+            LinkEvent::Down { node, reason, unsent, .. } => replication.network.down(node, &reason, &unsent),
             LinkEvent::Up { .. } => {}
         }
     }

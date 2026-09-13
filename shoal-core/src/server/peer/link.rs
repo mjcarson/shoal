@@ -15,6 +15,16 @@
 //! judge as unknown. The queue is emptied on a drop: a reconnect starts clean, because a frame
 //! queued before a drop may carry a deadline that passed while the link was down, and the owner
 //! knows that and the link does not.
+//!
+//! # A wanted link redials at the floor, an idle one backs off
+//!
+//! The backoff after a failed dial grows from `reconnect_min` toward `reconnect_max`, but only
+//! an idle link waits it out: a frame queued while the link is backing off cuts the wait short
+//! at `reconnect_min`, so the link dials again, fails again if the peer is still gone, and
+//! reports the frame unsent within the floor rather than the whole backoff. A write hopping to
+//! a dead leader is refused in a hundred milliseconds that way instead of waiting five seconds
+//! for a dial nobody asked for ([F42](../../../../docs/src/features/primary-failover.md)). The
+//! dials a wanted link makes at a dead peer are bounded by the floor, one per `reconnect_min`.
 
 use bytes::Bytes;
 use futures::future::{select, Either};
@@ -514,11 +524,19 @@ async fn run<F: Fn(LinkEvent) + 'static>(
                     unsent,
                     reason: format!("{error:?}"),
                 });
-                // wait out the backoff, growing it with jitter, and try again if still wanted
+                // wait out the backoff, growing it with jitter, and try again if still wanted:
+                // never sooner than the floor, and no later than the first frame that wants
+                // to go, since a frame waiting out a backoff is a caller waiting out a backoff
                 let wait = jittered(backoff, attempt, settings.local.borrow().incarnation);
                 attempt = attempt.wrapping_add(1);
                 backoff = (backoff * 2).min(settings.reconnect_max);
-                glommio::timer::sleep(wait).await;
+                let floor = wait.min(settings.reconnect_min);
+                glommio::timer::sleep(floor).await;
+                let rest = wait.saturating_sub(floor);
+                if !rest.is_zero() {
+                    let wanted = Wanted { queue: queue.clone() };
+                    let _ = glommio::timer::timeout(rest, async { Ok(wanted.await) }).await;
+                }
                 if queue.borrow().closed {
                     return;
                 }

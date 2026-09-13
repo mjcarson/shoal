@@ -215,6 +215,7 @@ pub fn cluster_facts(
         outcomes: None,
         // and a read arm's counters are read the same way, after the run
         reads: None,
+        fault: None,
     }))
 }
 

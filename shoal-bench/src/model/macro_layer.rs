@@ -336,6 +336,87 @@ pub struct ClusterFacts {
     /// ([C10](../../../docs/src/distributed/performance.md)).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reads: Option<ReadFacts>,
+    /// The fault the arm injected and what the client saw across it, if it is a fault arm
+    ///
+    /// Only the failover arm carries one; absent before
+    /// [F42](../../../docs/src/features/primary-failover.md). The kind, the node and the
+    /// schedule are how the arm was built; the marks, the windows and the series are what the
+    /// client measured, kept apart so the outage is never averaged into the run
+    /// ([C10](../../../docs/src/distributed/performance.md)).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fault: Option<FaultFacts>,
+}
+
+/// A fault an arm injected, and what its client saw before, during and after it
+///
+/// Every time here is milliseconds from the start of the measured phase, on the driver's own
+/// clock, so the marks and the samples are on one axis. The windows are cut at what the client
+/// saw - its first failed operation after the fault, and the first operation after which a
+/// sustained run succeeded - and not at the schedule, since the schedule says when the
+/// process died and the client is what says when the cluster stopped answering
+/// ([C7](../../../docs/src/distributed/failover.md)).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FaultFacts {
+    /// What was done: `kill` for a process killed and started again
+    pub kind: String,
+    /// The placement position of the node it was done to; never zero, which is the driver's
+    pub node: u32,
+    /// When the fault was injected, in milliseconds from the start of the measured phase
+    pub at_ms: u64,
+    /// When the node was serving and placed again, if the arm brought it back
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restarted_at_ms: Option<u64>,
+    /// When the client's first operation failed after the fault, if one did
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_failure_ms: Option<u64>,
+    /// When the client's operations succeeded for a sustained run again, if they did
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovered_ms: Option<u64>,
+    /// The outage the client saw, from its first failure to its recovery
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outage_ms: Option<u64>,
+    /// How long a run of successes has to last before the client counts itself recovered
+    pub sustained_ms: u64,
+    /// The three windows: `before`, `during` and `after`, each with its own distribution
+    pub windows: Vec<WindowFacts>,
+    /// One bucket per second of the measured phase, so the outage stays visible as a series
+    pub series: Vec<SecondFacts>,
+}
+
+/// One window of a fault arm's run, with its own distribution
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowFacts {
+    /// `before`, `during` or `after`
+    pub name: String,
+    /// Where the window starts, in milliseconds from the start of the measured phase
+    pub from_ms: u64,
+    /// Where it ends
+    pub to_ms: u64,
+    /// Operations the client completed or failed in it
+    pub ops: u64,
+    /// Operations that failed in it
+    pub errors: u64,
+    /// The median service time of the operations that succeeded, in microseconds
+    pub p50_us: u64,
+    /// The 99th percentile of the same
+    pub p99_us: u64,
+    /// The slowest of the same
+    pub max_us: u64,
+}
+
+/// One second of a fault arm's run
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecondFacts {
+    /// Which second of the measured phase, from zero
+    pub second: u64,
+    /// Operations completed or failed in it
+    pub ops: u64,
+    /// Operations that failed in it
+    pub errors: u64,
+    /// The median service time of the successes, in microseconds; zero when none succeeded
+    pub p50_us: u64,
+    /// The 99th percentile of the same
+    pub p99_us: u64,
 }
 
 /// How a read arm was built and what its reads waited on

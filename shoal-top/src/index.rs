@@ -297,6 +297,80 @@ pub struct ClusterFactsLite {
     /// What a read arm's reads waited on; absent for every other arm and before F41
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reads: Option<ReadFactsLite>,
+    /// The fault a fault arm injected and what its client saw; absent for every other arm and
+    /// before F42
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fault: Option<FaultFactsLite>,
+}
+
+/// A fault an arm injected, and what its client saw before, during and after it
+///
+/// A mirror of the artifact's `FaultFacts`, whole: the marks say when the process died and
+/// came back, the cuts say when the client noticed and when it stopped noticing, the windows
+/// each carry their own distribution and the series is one bucket per second, so the outage
+/// can be drawn rather than averaged into the run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FaultFactsLite {
+    /// What was done: `kill`
+    pub kind: String,
+    /// The placement position of the node it was done to
+    pub node: u32,
+    /// When, in milliseconds from the start of the measured phase
+    pub at_ms: u64,
+    /// When the node was serving and placed again, if it came back
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restarted_at_ms: Option<u64>,
+    /// When the client's first operation failed after the fault
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_failure_ms: Option<u64>,
+    /// When the client's operations succeeded for a sustained run again
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovered_ms: Option<u64>,
+    /// The outage the client saw
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outage_ms: Option<u64>,
+    /// How long a run of successes has to last to count as recovered
+    pub sustained_ms: u64,
+    /// The three windows: `before`, `during` and `after`
+    pub windows: Vec<WindowFactsLite>,
+    /// One bucket per second of the measured phase
+    pub series: Vec<SecondFactsLite>,
+}
+
+/// One window of a fault arm's run
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowFactsLite {
+    /// `before`, `during` or `after`
+    pub name: String,
+    /// Where the window starts, in milliseconds from the start of the measured phase
+    pub from_ms: u64,
+    /// Where it ends
+    pub to_ms: u64,
+    /// Operations completed or failed in it
+    pub ops: u64,
+    /// Operations that failed in it
+    pub errors: u64,
+    /// The median service time of the successes, in microseconds
+    pub p50_us: u64,
+    /// The 99th percentile of the same
+    pub p99_us: u64,
+    /// The slowest of the same
+    pub max_us: u64,
+}
+
+/// One second of a fault arm's run
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecondFactsLite {
+    /// Which second of the measured phase, from zero
+    pub second: u64,
+    /// Operations completed or failed in it
+    pub ops: u64,
+    /// Operations that failed in it
+    pub errors: u64,
+    /// The median service time of the successes, in microseconds
+    pub p50_us: u64,
+    /// The 99th percentile of the same
+    pub p99_us: u64,
 }
 
 /// What a read arm's reads waited on

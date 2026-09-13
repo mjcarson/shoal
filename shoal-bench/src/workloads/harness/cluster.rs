@@ -588,6 +588,28 @@ pub struct PeerChild {
     child: Child,
 }
 
+impl PeerChild {
+    /// Kills the peer and reaps it, which is the fault the failover arm injects
+    ///
+    /// The process is gone when this returns: its sockets are closed, so every link into it
+    /// drops at once, and its cores and its port block are free for the same identity to take
+    /// again ([F42](../../../../docs/src/features/primary-failover.md)).
+    ///
+    /// # Errors
+    ///
+    /// The kill or the reap failed.
+    pub fn kill(&mut self) -> Result<()> {
+        // kill, then wait, so the port block is released before anything is started on it
+        self.child
+            .kill()
+            .with_context(|| format!("failed to kill node {}", self.index))?;
+        self.child
+            .wait()
+            .with_context(|| format!("failed to reap node {}", self.index))?;
+        Ok(())
+    }
+}
+
 impl Drop for PeerChild {
     fn drop(&mut self) {
         // a child that already exited is reaped; one still serving is killed first
@@ -608,60 +630,83 @@ impl Drop for PeerChild {
 /// * `conf` - The base configuration file the children resolve from
 /// * `scale` - The scale they resolve at, which decides the overrides
 pub fn spawn_peers(staged: &Staged, id: &str, conf: &Path, scale: &str) -> Result<Vec<PeerChild>> {
-    // the binary this process is, which carries the same workloads
-    let exe = std::env::current_exe().context("failed to find this binary")?;
     let mut children = Vec::with_capacity(staged.nodes.len().saturating_sub(1));
-    for (node, file) in staged.nodes.iter().zip(&staged.files).skip(1) {
-        let mut child = Command::new(&exe)
-            .arg("serve")
-            .arg("--id")
-            .arg(id)
-            .arg("--conf")
-            .arg(conf)
-            .arg("--scale")
-            .arg(scale)
-            .arg("--staged")
-            .arg(file)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()
-            .with_context(|| format!("failed to start node {} of {id}", node.index))?;
-        let stdout = child.stdout.take().context("a child's stdout was not piped")?;
-        // a thread reads the child's stdout for the ready line, then keeps draining it so the
-        // pipe can never fill and stall the child
-        let (tx, rx) = mpsc::channel::<Option<String>>();
-        std::thread::spawn(move || {
-            let mut ready_sent = false;
-            for line in BufReader::new(stdout).lines() {
-                let Ok(line) = line else { break };
-                if !ready_sent && line.starts_with(SERVE_READY_LINE) {
-                    ready_sent = true;
-                    let _ = tx.send(Some(line));
-                }
-            }
-            // end of stream, which before the ready line means the child gave up
-            if !ready_sent {
-                let _ = tx.send(None);
-            }
-        });
-        let index = node.index;
-        let mut peer = PeerChild { index, child };
-        // wait for it to answer, and say which node it was if it does not
-        match rx.recv_timeout(ready::TIMEOUT + Duration::from_secs(5)) {
-            Ok(Some(_)) => {}
-            Ok(None) => {
-                let status = peer.child.try_wait().ok().flatten();
-                bail!("node {index} of {id} exited before it was serving: {status:?}");
-            }
-            Err(_) => bail!(
-                "node {index} of {id} did not report serving within {:?}",
-                ready::TIMEOUT
-            ),
-        }
-        children.push(peer);
+    for node in staged.nodes.iter().skip(1) {
+        children.push(spawn_peer(staged, node.index, id, conf, scale)?);
     }
     Ok(children)
+}
+
+/// Starts one node as a `serve --staged` child of this process, and waits until it serves
+///
+/// The same call the first start makes and a restart makes: the staged file names the
+/// identity, the ports and the directory, so a node started from it again is the member it
+/// was, with the marker, the log and the checkpoint it left, and catches up rather than joins
+/// ([F42](../../../../docs/src/features/primary-failover.md)).
+///
+/// # Arguments
+///
+/// * `staged` - The cluster
+/// * `index` - The node to start, by placement position; never zero
+/// * `id` - The workload
+/// * `conf` - The base configuration file the child resolves from
+/// * `scale` - The scale it resolves at
+pub fn spawn_peer(staged: &Staged, index: u32, id: &str, conf: &Path, scale: &str) -> Result<PeerChild> {
+    // the binary this process is, which carries the same workloads
+    let exe = std::env::current_exe().context("failed to find this binary")?;
+    let position = usize::try_from(index).unwrap_or(usize::MAX);
+    let (node, file) = match staged.nodes.get(position).zip(staged.files.get(position)) {
+        Some(found) if index != 0 => found,
+        _ => bail!("node {index} of {id} is not a peer this process can start"),
+    };
+    let mut child = Command::new(&exe)
+        .arg("serve")
+        .arg("--id")
+        .arg(id)
+        .arg("--conf")
+        .arg(conf)
+        .arg("--scale")
+        .arg(scale)
+        .arg("--staged")
+        .arg(file)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .with_context(|| format!("failed to start node {} of {id}", node.index))?;
+    let stdout = child.stdout.take().context("a child's stdout was not piped")?;
+    // a thread reads the child's stdout for the ready line, then keeps draining it so the
+    // pipe can never fill and stall the child
+    let (tx, rx) = mpsc::channel::<Option<String>>();
+    std::thread::spawn(move || {
+        let mut ready_sent = false;
+        for line in BufReader::new(stdout).lines() {
+            let Ok(line) = line else { break };
+            if !ready_sent && line.starts_with(SERVE_READY_LINE) {
+                ready_sent = true;
+                let _ = tx.send(Some(line));
+            }
+        }
+        // end of stream, which before the ready line means the child gave up
+        if !ready_sent {
+            let _ = tx.send(None);
+        }
+    });
+    let index = node.index;
+    let mut peer = PeerChild { index, child };
+    // wait for it to answer, and say which node it was if it does not
+    match rx.recv_timeout(ready::TIMEOUT + Duration::from_secs(5)) {
+        Ok(Some(_)) => {}
+        Ok(None) => {
+            let status = peer.child.try_wait().ok().flatten();
+            bail!("node {index} of {id} exited before it was serving: {status:?}");
+        }
+        Err(_) => bail!(
+            "node {index} of {id} did not report serving within {:?}",
+            ready::TIMEOUT
+        ),
+    }
+    Ok(peer)
 }
 
 /// The cluster record for a staged placement, from what node zero's pool reports
@@ -733,51 +778,69 @@ pub fn placed_facts(
 /// * `staged` - The cluster
 /// * `runtime` - The client runtime the peers are asked on
 pub fn wait_peers_placed(staged: &Staged, runtime: &tokio::runtime::Runtime) -> Result<()> {
-    let deadline = std::time::Instant::now() + ready::TIMEOUT;
     for node in staged.nodes.iter().filter(|node| node.index != 0) {
-        let addr = format!("127.0.0.1:{}", node.client_port);
-        loop {
-            // the peer's own readiness, over its client endpoint
-            let value = runtime.block_on(async {
-                let client = shoal::Shoal::<crate::workloads::schema::BenchClient>::new(&addr)
-                    .await
-                    .with_context(|| format!("failed to reach node {} at {addr}", node.index))?;
-                let response = client
-                    .admin(&AdminRequest {
-                        op: uuid::Uuid::new_v4(),
-                        expected_version: 0,
-                        kind: AdminKind::Readiness,
-                    })
-                    .await
-                    .with_context(|| format!("node {} did not answer a readiness read", node.index))?;
-                match response.outcome {
-                    Ok(shoal::shared::protocol::admin::AdminOutcome::Read(value)) => Ok(value),
-                    other => bail!("node {} refused a readiness read: {other:?}", node.index),
-                }
-            })?;
-            // placed, and every group its shards host built
-            let placed = value["data"]["placed"].as_bool().unwrap_or(false)
-                && value["data"]["initialized"].as_bool().unwrap_or(false);
-            let groups = value["data"]["replication"]["groups"].as_u64().unwrap_or(0);
-            let all_up = value["data"]["replication"]["shards"]
-                .as_array()
-                .is_some_and(|shards| {
-                    shards.iter().all(|shard| {
-                        shard["groups"]
-                            .as_array()
-                            .is_some_and(|groups| groups.iter().all(|group| group["up"].as_bool().unwrap_or(false)))
-                    })
-                });
-            if placed && groups > 0 && all_up {
-                break;
-            }
-            if std::time::Instant::now() > deadline {
-                bail!("node {} did not hold the placement within {:?}: {value}", node.index, ready::TIMEOUT);
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
+        wait_peer_placed(staged, node.index, runtime)?;
     }
     Ok(())
+}
+
+/// Waits until one peer holds the placement and every group its shards host is up
+///
+/// What [`wait_peers_placed`] does for each peer, on its own so a peer started again after a
+/// fault can be waited for alone ([F42](../../../../docs/src/features/primary-failover.md)).
+///
+/// # Arguments
+///
+/// * `staged` - The cluster
+/// * `index` - The peer, by placement position
+/// * `runtime` - The client runtime it is asked on
+pub fn wait_peer_placed(staged: &Staged, index: u32, runtime: &tokio::runtime::Runtime) -> Result<()> {
+    let deadline = std::time::Instant::now() + ready::TIMEOUT;
+    let position = usize::try_from(index).unwrap_or(usize::MAX);
+    let Some(node) = staged.nodes.get(position) else {
+        bail!("node {index} is not in the placement");
+    };
+    let addr = format!("127.0.0.1:{}", node.client_port);
+    loop {
+        // the peer's own readiness, over its client endpoint
+        let value = runtime.block_on(async {
+            let client = shoal::Shoal::<crate::workloads::schema::BenchClient>::new(&addr)
+                .await
+                .with_context(|| format!("failed to reach node {} at {addr}", node.index))?;
+            let response = client
+                .admin(&AdminRequest {
+                    op: uuid::Uuid::new_v4(),
+                    expected_version: 0,
+                    kind: AdminKind::Readiness,
+                })
+                .await
+                .with_context(|| format!("node {} did not answer a readiness read", node.index))?;
+            match response.outcome {
+                Ok(shoal::shared::protocol::admin::AdminOutcome::Read(value)) => Ok(value),
+                other => bail!("node {} refused a readiness read: {other:?}", node.index),
+            }
+        })?;
+        // placed, and every group its shards host built
+        let placed = value["data"]["placed"].as_bool().unwrap_or(false)
+            && value["data"]["initialized"].as_bool().unwrap_or(false);
+        let groups = value["data"]["replication"]["groups"].as_u64().unwrap_or(0);
+        let all_up = value["data"]["replication"]["shards"]
+            .as_array()
+            .is_some_and(|shards| {
+                shards.iter().all(|shard| {
+                    shard["groups"]
+                        .as_array()
+                        .is_some_and(|groups| groups.iter().all(|group| group["up"].as_bool().unwrap_or(false)))
+                })
+            });
+        if placed && groups > 0 && all_up {
+            return Ok(());
+        }
+        if std::time::Instant::now() > deadline {
+            bail!("node {} did not hold the placement within {:?}: {value}", node.index, ready::TIMEOUT);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 /// Every node's replication report at the end of a run, node zero first
@@ -1121,6 +1184,7 @@ mod tests {
             replicas: Vec::new(),
             outcomes: None,
             reads: Some(facts),
+            fault: None,
         };
         let text = serde_json::to_string(&cluster).expect("serializes");
         let back: ClusterFacts = serde_json::from_str(&text).expect("parses");
@@ -1211,6 +1275,7 @@ mod tests {
             outcomes: Some(outcome_facts(&replicas)),
             replicas,
             reads: None,
+            fault: None,
         };
         // the record round trips with every replica's debt and the schedule on it
         let text = serde_json::to_string(&facts).expect("serializes");

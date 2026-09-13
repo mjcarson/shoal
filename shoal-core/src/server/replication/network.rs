@@ -52,7 +52,9 @@ enum Outcome {
     Ok(Vec<u8>),
     /// The peer answered with a failure, and this is what it said
     Remote(String),
-    /// The link went down, or the queue was full, before an answer arrived
+    /// The link went down before the request was written: a definite non-answer
+    NotSent(String),
+    /// The link went down after the request was written, before an answer arrived
     Unreachable(String),
 }
 
@@ -142,12 +144,25 @@ impl ReplicationLink {
 
     /// Fail every RPC in flight, because the link dropped
     ///
+    /// A request whose frame the link still held is a definite non-answer - nothing was
+    /// written, so the peer never saw it - and is failed as [`RpcFailure::NotSent`], which a
+    /// proposal answers `NotLeader` at once rather than `OutcomeUnknown` at its deadline. One
+    /// the link had written may have been acted on and stays unknown
+    /// ([F42](../../../../docs/src/features/primary-failover.md)).
+    ///
     /// # Arguments
     ///
     /// * `reason` - Why
-    fn down(&self, reason: &str) {
-        for (_, tx) in self.pending.borrow_mut().drain() {
-            let _ = tx.send(Outcome::Unreachable(reason.to_string()));
+    /// * `unsent` - Every frame the link never wrote
+    fn down(&self, reason: &str, unsent: &[FrameKey]) {
+        for (id, tx) in self.pending.borrow_mut().drain() {
+            // never written is never seen, which is the one thing a caller can act on at once
+            let outcome = if unsent.contains(&FrameKey::Replication(id)) {
+                Outcome::NotSent(format!("the replication link went down before the request was written: {reason}"))
+            } else {
+                Outcome::Unreachable(reason.to_string())
+            };
+            let _ = tx.send(outcome);
         }
     }
 
@@ -202,6 +217,7 @@ impl ReplicationLink {
         match glommio::timer::timeout(deadline, async { Ok(rx.await) }).await {
             Ok(Ok(Outcome::Ok(payload))) => Ok(payload),
             Ok(Ok(Outcome::Remote(msg))) => Err(RpcFailure::Remote(msg)),
+            Ok(Ok(Outcome::NotSent(msg))) => Err(RpcFailure::NotSent(msg)),
             Ok(Ok(Outcome::Unreachable(msg))) => Err(RpcFailure::Unreachable(msg)),
             Ok(Err(_)) => {
                 self.pending.borrow_mut().remove(&id);
@@ -346,9 +362,10 @@ impl ShardNetwork {
     ///
     /// * `node` - The peer
     /// * `reason` - Why
-    pub fn down(&self, node: NodeId, reason: &str) {
+    /// * `unsent` - Every frame the link never wrote, which are failed as definite non-answers
+    pub fn down(&self, node: NodeId, reason: &str, unsent: &[FrameKey]) {
         if let Some(link) = self.shared.links.borrow().get(&node) {
-            link.down(reason);
+            link.down(reason, unsent);
         }
     }
 

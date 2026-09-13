@@ -267,6 +267,36 @@ impl ClusterOverride {
     }
 }
 
+/// A fault an arm asks the harness to inject while it runs
+///
+/// The harness does it, not the workload: the peers are the harness's children and the
+/// workload holds a client and nothing else. The schedule is measured from the start of the
+/// measured phase, on the harness's clock ([F42](../../../docs/src/features/primary-failover.md)).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FaultSpec {
+    /// The placement position of the node to kill, which is never zero: node zero is this process
+    pub node: u32,
+    /// How long after the measured phase starts to kill it
+    pub at: std::time::Duration,
+    /// How long after the kill to start it again, from the same staged identity
+    pub restart_after: std::time::Duration,
+}
+
+/// One operation of a timed run, as the client saw it
+///
+/// What a fault arm keeps beside its distribution: every operation stamped by when it started
+/// and whether it was answered, so the outage can be cut out of the run afterwards rather than
+/// averaged into it ([C10](../../../docs/src/distributed/performance.md)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimelineSample {
+    /// When the operation was sent, from the start of the run
+    pub at: std::time::Duration,
+    /// How long it took to be answered, or to fail
+    pub elapsed: std::time::Duration,
+    /// Whether it was answered
+    pub ok: bool,
+}
+
 /// Everything a workload produced
 #[derive(Debug, Default)]
 pub struct Measurement {
@@ -274,6 +304,13 @@ pub struct Measurement {
     pub ops: BTreeMap<String, Samples>,
     /// How many rows moved, keyed by what they were
     pub counters: BTreeMap<String, u64>,
+    /// When the run started, on the driver's clock, if the driver keeps a timeline
+    ///
+    /// The instant every [`TimelineSample::at`] and every fault mark is measured from. Absent
+    /// from every driver but the timed one, whose samples are the only ones that need an axis.
+    pub started: Option<std::time::Instant>,
+    /// Every operation of a timed run in the order it was sent; empty for every other driver
+    pub timeline: Vec<TimelineSample>,
     /// The client half of each query's stage record, when this build records them
     ///
     /// Handed back with the measurement rather than pushed to a global, so a workload that fails
@@ -331,6 +368,12 @@ impl Measurement {
         }
         // and keep every stage record both sides gathered
         self.stages.absorb(other.stages);
+        // the timeline is one axis, so the earlier start is the start and the samples pool
+        self.started = match (self.started, other.started) {
+            (Some(mine), Some(theirs)) => Some(mine.min(theirs)),
+            (mine, theirs) => mine.or(theirs),
+        };
+        self.timeline.append(&mut other.timeline);
     }
 }
 
@@ -454,6 +497,22 @@ pub trait Workload: Send + Sync {
     ///
     /// * `ctx` - The server, seed and scale this run was given
     fn run<'a>(&'a self, ctx: &'a Context) -> BoxFuture<'a, Result<Measurement>>;
+
+    /// The fault this workload asks the harness to inject while it runs, if any
+    ///
+    /// Only an arm that places peers can ask for one, since the fault is done to a peer the
+    /// harness started; the harness refuses one on any other arm. The default asks for none,
+    /// which is every arm but the failover one
+    /// ([F42](../../../docs/src/features/primary-failover.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `scale` - How large a run was asked for, which decides the schedule
+    fn fault(&self, scale: Scale) -> Option<FaultSpec> {
+        // an ordinary arm runs against a cluster nothing happens to
+        let _ = scale;
+        None
+    }
 }
 
 #[cfg(test)]

@@ -637,7 +637,7 @@ pub const FAMILIES: &[Family] = &[
              a loopback number by an RTT. What a sustained load does: these are closed-loop arms \
              at one depth, which cannot expose an overload pause or a lag that grows; the \
              open-loop schedule C10 asks for is filed, not built. What a failover costs, which \
-             is M6's capture.",
+             is the `cluster-failover` family's arm.",
     },
     Family {
         name: "cluster-reads",
@@ -676,7 +676,50 @@ pub const FAMILIES: &[Family] = &[
              number by an RTT. What a strong read costs under writes: these arms carry no write \
              background, on purpose, so the barrier's own cost is not inside a difference that \
              also holds follower lag; the read-under-writes arm is filed with the open-loop \
-             schedule. What a strong read costs through a leader change, which is M6's capture.",
+             schedule. What a strong read costs through a leader change: the failover arm drives \
+             `One` reads, and the strong read through an election is the fixture's to test.",
+    },
+    Family {
+        name: "cluster-failover",
+        title: "What a client sees when a primary dies",
+        surface: Surface::AllWorkloads,
+        what_it_measures:
+            "One arm, `failover/kill`: the durable replication arm's placement and mixture - three \
+             nodes of three shards, every tablet on every node, half reads at the reference width \
+             and depth - driven for a fixed time with a client that does not retry, with node one, \
+             which leads a third of the groups, killed a third of the way through and started again \
+             from the same identity two thirds through. Every operation is stamped on a timeline, \
+             and the `cluster.fault` record cuts it at what the client saw: `before`, up to its \
+             first failed operation after the kill; `during`, until a sustained run of successes; \
+             `after`, the rest, which holds the returning node's catch-up. The record carries each \
+             window's own distribution, the outage between them in milliseconds, and a per second \
+             series of operations, errors and percentiles.",
+        how_to_read_it:
+            "`outage_ms` is the number: from the client's first failure to the first operation \
+             after which two seconds succeeded, which at the default failover base of five seconds \
+             is the election and little else. Read `during` for what the outage looked like - how \
+             many operations failed, and the service time of the ones that did not, which are the \
+             reads and the writes to groups the dead node did not lead - and `after` against \
+             `before` for what the returning node's catch-up cost the survivors. The series is \
+             where the dip is; a `p99_us` that climbs in the seconds after `restarted_at_ms` is the \
+             catch-up, and one that never comes back down is a run to read the replicas' `lag_end` \
+             on. The distribution under `read` and `write` for the whole run holds successes \
+             alone, so it is the three windows pooled and says nothing the windows do not.",
+        what_would_make_it_wrong:
+            "A `first_failure_ms` before `at_ms`, which means the run was failing before the fault \
+             and the windows are cut at the wrong thing. A `recovered_ms` that is absent, which \
+             means the run ended inside the outage and the `after` window is empty. A `failed` \
+             count in the thousands, which means the client's pause after a failure was too short \
+             for the machine and the error count is a count of refusals rather than attempts. \
+             Comparing the outage between hosts whose failover base differs: it is the policy's \
+             number before it is the code's.",
+        what_it_cannot_say:
+            "What a client with a retry sees: this client has none, on purpose, so the outage is \
+             the cluster's and not the retry's. What the outage is over a network, where a kill is \
+             a link that drops and not a process a kernel reaps at once. What a kill costs on a node \
+             that is not node one, whose share of the primaries is what decides the size of the \
+             outage. What a pause or a partition costs rather than a kill, which are the fixture's \
+             to test and the open-loop schedule's to measure.",
     },
     Family {
         name: "retired",
@@ -741,6 +784,9 @@ pub fn family_for(id: &str) -> Option<&'static Family> {
     } else if id.starts_with("macro/cluster/reads/") || id.starts_with("macro/cluster/fanout/") {
         // the read arms, before the wider cluster prefix for the same reason
         "cluster-reads"
+    } else if id.starts_with("macro/cluster/failover/") {
+        // the fault arms, before the wider cluster prefix for the same reason
+        "cluster-failover"
     } else if id.starts_with("macro/cluster/replication/") || id == "macro/cluster/overhead/nodes/3" {
         // the three node arms are read against each other and not against the one node one,
         // whose shard count they do not share

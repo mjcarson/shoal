@@ -616,7 +616,7 @@ impl Grid {
     /// # Arguments
     ///
     /// * `ctx` - The run this workload was given
-    fn scale_of(ctx: &Context) -> Scale {
+    pub(crate) fn scale_of(ctx: &Context) -> Scale {
         // anything that is not a smoke run is a full one, which is what every other workload does
         if ctx.scale.scale == "smoke" {
             Scale::Smoke
@@ -680,7 +680,7 @@ pub fn rows_for(row_bytes: u64, scale: Scale) -> u64 {
 /// * `seed` - The mixture stream's seed
 /// * `index` - Which query is being decided
 /// * `read_pct` - What share of queries should be reads
-fn is_read(seed: u64, index: u64, read_pct: u32) -> bool {
+pub(crate) fn is_read(seed: u64, index: u64, read_pct: u32) -> bool {
     // the two ends are exact rather than probabilistic: an `r100` arm must issue no writes at all,
     // or its read latencies are contaminated by the handful a draw happened to produce
     match read_pct {
