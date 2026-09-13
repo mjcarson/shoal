@@ -137,7 +137,7 @@ current group before enabling replication acknowledgements or reads.
 | Local condition | Recovery | Delivered |
 | --- | --- | --- |
 | Matching retained history, behind | Fetch missing entries and commit/application progress | M4: openraft's replication from the retained log (`returning_node_catches_up_by_log_or_snapshot`, first half) |
-| Conflicting uncommitted suffix | Locate common history with the protocol and durably truncate WAL only; never roll authoritative archives backward | M4 for a volatile group; a durable group's reversion is [item 99](../appendix/known-issues.md), M8's |
+| Conflicting uncommitted suffix | Locate common history with the protocol and durably truncate WAL only; never roll authoritative archives backward | M4 for a volatile group; M8 for a durable one: a member whose log is shorter than it acknowledged is fed from the leader's log or a snapshot, counts `log_lost` and never stops the leader ([Resolved #99](../appendix/resolved/durable-log-reversion.md), `durable_log_reversion_is_fed_not_fatal`) |
 | Required history no longer retained | Install a complete checkpoint, then its subsequent log tail | M7: a snapshot per group at its checkpoint, the log strictly after it from the leader (`returning_node_catches_up_by_log_or_snapshot`, second half) |
 | Same index, mismatched checksums/state | Quarantine and use verified repair, not a claim that equal stamps imply equal data | M8 |
 | Obsolete configuration or removed identity | No autonomous voting/serving; follow C8/C9 replacement and orphan rules | M9 |

@@ -45,8 +45,9 @@ use crate::server::messages::{QueryMetadata, ServerMsg};
 use crate::server::peer::{LinkEvent, ReplicateReply};
 use crate::server::replication::snapshot::{self, BuiltSnapshot, SnapshotHeader, SnapshotManifest, SnapshotWriter, SNAPSHOTS_DIR};
 use crate::server::replication::{
-    ApplyOutcome, BarrierAnswer, DataConfig, GroupMachine, GroupNetwork, GroupReport, Lease, MachineState,
-    ProposalOutcome, Remembered, ReplicationVerb, RpcFailure, ShardNetwork, ShardPeer, ShardReplication, SnapshotStats,
+    ApplyOutcome, BarrierAnswer, DataConfig, GroupMachine, GroupNetwork, GroupReport, IntegrityStats, Lease,
+    MachineState, ProposalOutcome, Remembered, ReplicationVerb, RpcFailure, ShardNetwork, ShardPeer, ShardReplication,
+    SnapshotStats,
 };
 use crate::server::ring::Ring;
 use crate::server::stage_profile::{StageDurability, StageOp, Stamp};
@@ -148,6 +149,9 @@ pub(super) struct Replication<D: ShoalDatabase> {
     pub(super) stats: ProposalStats,
     /// What snapshots have done ([F43](../../../../docs/src/features/node-recovery.md))
     pub(super) snapshots: SnapshotStats,
+    /// What the loop found of its storage's integrity: the counters the archive maps do not
+    /// keep ([F44](../../../../docs/src/features/repair.md))
+    pub(super) integrity: IntegrityStats,
     /// The snapshots being received, one partial per group at most
     pub(super) installs: super::snapshots::Installs,
     /// The installs in progress, one per group at most
@@ -250,6 +254,7 @@ where
             compacting: HashMap::new(),
             stats: ProposalStats::default(),
             snapshots: SnapshotStats::default(),
+            integrity: IntegrityStats::default(),
             installs,
             active_installs: HashMap::new(),
             pending_installs,
@@ -287,6 +292,7 @@ where
         let placed = self.placed;
         let tx = self.shard_local_tx.clone();
         let map = self.map.get();
+        let table_map = &self.table_map;
         let Some(replication) = self.replication.as_mut() else {
             return Ok(());
         };
@@ -369,6 +375,28 @@ where
                 ),
                 None => (None, StoredMembership::default(), Vec::new()),
             };
+            // a durable group whose checkpoint or archives say this shard held it, with no
+            // log behind them, lost its WAL: what it acknowledged is gone, and the leader
+            // feeds it again rather than stopping - said here, once, by name, since the
+            // leader's side of a reversion is a library log line
+            // ([Resolved #99](../../../../docs/src/appendix/resolved/durable-log-reversion.md))
+            if !store.is_volatile() && replication.wal.last_log_id_of(spec.id).is_none() {
+                let held = match &checkpoint {
+                    Some(point) => Some(format!("checkpoint {}", point.index)),
+                    None if table_map.holds_any(table, &spec.tablets) => Some("archives".to_string()),
+                    None => None,
+                };
+                if let Some(held) = held {
+                    replication.integrity.log_lost += 1;
+                    event!(
+                        Level::ERROR,
+                        msg = "a durable group has no log behind what this shard holds of it: its WAL was lost, and its leader will feed it again",
+                        group = %spec.id,
+                        table = %table,
+                        held,
+                    );
+                }
+            }
             if !seed.is_empty() {
                 event!(Level::DEBUG, msg = "seeded a group's retry table from its sidecar", group = %spec.id, entries = seed.len());
             }
@@ -397,7 +425,7 @@ where
                 group: spec.id,
                 network: replication.network.clone(),
             };
-            let config = group_config(&cluster, failover_ms, spec.id, store.is_volatile());
+            let config = group_config(&cluster, failover_ms, spec.id);
             let tx = tx.clone();
             let addr = ShardAddr::new(me, spec.mine);
             let primary = spec.is_primary(me);
@@ -1348,6 +1376,12 @@ where
                 stats.absorb(&replication.network.snapshot_stats());
                 stats
             },
+            integrity: {
+                // what the loop found at open, and what the archive maps counted since
+                let mut stats = replication.integrity;
+                stats.absorb(&self.table_map.integrity());
+                stats
+            },
             groups,
         }
     }
@@ -1754,8 +1788,7 @@ async fn write_volatile_snapshot(
 /// * `cluster` - The cluster block
 /// * `failover_ms` - The failover base, in milliseconds: the map's, or the block's until a map carries one
 /// * `group` - The group
-/// * `volatile` - Whether the group's log lives in memory alone
-fn group_config(cluster: &crate::server::conf::Cluster, failover_ms: u64, group: GroupId, volatile: bool) -> Arc<Config> {
+fn group_config(cluster: &crate::server::conf::Cluster, failover_ms: u64, group: GroupId) -> Arc<Config> {
     let base = failover_ms.max(100);
     let config = Config {
         cluster_name: format!("group-{group}"),
@@ -1770,7 +1803,13 @@ fn group_config(cluster: &crate::server::conf::Cluster, failover_ms: u64, group:
         // truncation cannot happen: a transfer's budget is minutes, not weeks
         #[allow(clippy::cast_possible_truncation)]
         install_snapshot_timeout: cluster.replication.snapshot_timeout.duration().as_millis() as u64,
-        allow_log_reversion: Some(volatile),
+        // a follower whose log is shorter than what it acknowledged lost its disk: the
+        // follower is the one that is wrong, and the leader resets its progress and feeds it
+        // again - from the log, or past the purge point from a snapshot - rather than stopping
+        // the process every group on this shard shares
+        // ([Resolved #99](../../../../docs/src/appendix/resolved/durable-log-reversion.md)).
+        // a volatile group's members lose their log on every restart by design
+        allow_log_reversion: Some(true),
         ..Config::default()
     };
     // the defaults validate, and every field set above is within what validate accepts

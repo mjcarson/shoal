@@ -115,6 +115,39 @@ impl SnapshotStats {
     }
 }
 
+/// What a shard's storage has seen of its own integrity
+///
+/// Counted on the shard - the archive maps count the reads, the loop counts what it found at
+/// open - and folded over the node into [`NodeReplication::integrity`], which the `Replication`
+/// admin read reports and the fixture's `GROUPS` view carries
+/// ([F44](../../../../docs/src/features/repair.md)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct IntegrityStats {
+    /// Archive records read whose payload did not hash to its checksum
+    pub checksum_failures: u64,
+    /// Archive records read from an archive with no checksums, which nothing could verify
+    pub unverified_reads: u64,
+    /// Groups built at open whose checkpoint or archives had no log behind them
+    ///
+    /// A durable member that lost its WAL: what it acknowledged is gone, and the leader feeds
+    /// it again from its log or a snapshot rather than stopping
+    /// ([Resolved #99](../../../../docs/src/appendix/resolved/durable-log-reversion.md)).
+    pub log_lost: u64,
+}
+
+impl IntegrityStats {
+    /// Fold another shard's counters into these
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The counters to add
+    pub fn absorb(&mut self, other: &IntegrityStats) {
+        self.checksum_failures += other.checksum_failures;
+        self.unverified_reads += other.unverified_reads;
+        self.log_lost += other.log_lost;
+    }
+}
+
 /// What one shard reports about every group it hosts
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ShardReplication {
@@ -145,6 +178,9 @@ pub struct ShardReplication {
     /// What the shard's snapshots have done ([F43](../../../../docs/src/features/node-recovery.md))
     #[serde(default)]
     pub snapshots: SnapshotStats,
+    /// What the shard's storage has seen of its own integrity ([F44](../../../../docs/src/features/repair.md))
+    #[serde(default)]
+    pub integrity: IntegrityStats,
 }
 
 /// What a shard's reads have cost and dropped since it started
@@ -301,6 +337,10 @@ pub struct NodeReplication {
     /// How many groups are installing a snapshot right now
     #[serde(default)]
     pub installing: usize,
+    /// What the node's storage has seen of its own integrity, folded over its shards
+    /// ([F44](../../../../docs/src/features/repair.md))
+    #[serde(default)]
+    pub integrity: IntegrityStats,
     /// Every shard's report, in shard order
     pub shards: Vec<ShardReplication>,
 }
@@ -333,6 +373,10 @@ impl NodeReplication {
                 .iter()
                 .map(|shard| shard.groups.iter().filter(|group| group.installing).count())
                 .sum(),
+            integrity: shards.iter().fold(IntegrityStats::default(), |mut folded, shard| {
+                folded.absorb(&shard.integrity);
+                folded
+            }),
             shards,
         }
     }

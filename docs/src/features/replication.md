@@ -192,12 +192,16 @@ the largest id. Now only the placement primary initializes a fresh group, and a 
 primary never did initializes it itself after two election timeouts, so a group whose primary
 is absent at first start still comes up.
 
-**A volatile follower may come back empty; a durable one may not.** openraft treats a follower
-whose log shrank as a bug and stops the leader on it. That is the right verdict for a durable
-group, where a shorter log means an acknowledgement was lost, and the wrong one for an
-ephemeral table, whose members lose their log on every restart by design; a volatile group's
-configuration allows the reversion and a durable one's does not. What the leader does with a
-durable reversion is [item 99](../appendix/known-issues.md#99-a-durable-followers-log-reversion-stops-the-leaders-whole-process).
+**A volatile follower may come back empty; ~~a durable one may not~~ and since M8 so may a
+durable one.** openraft treats a follower whose log shrank as a bug and stops the leader on it
+unless its configuration allows the reversion. ~~That is the right verdict for a durable group,
+where a shorter log means an acknowledgement was lost, and the wrong one for an ephemeral
+table, whose members lose their log on every restart by design; a volatile group's
+configuration allows the reversion and a durable one's does not.~~ A shorter log on a durable
+member does mean an acknowledgement was lost - but the member is the one that is wrong, not the
+leader, so every group's configuration now allows the reversion and the leader feeds the member
+again from its log or a snapshot while the member counts `log_lost`
+([Resolved #99](../appendix/resolved/durable-log-reversion.md)).
 
 **Bounds are per group and definite.** `pending_bytes` is counted per group on the proposing
 shard and a write past it is shed before it is recorded, so a stalled group holds a bounded

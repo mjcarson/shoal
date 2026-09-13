@@ -23,6 +23,7 @@ pub use fs::FileSystem;
 pub use none::NoStorage;
 
 use crate::server::messages::{QueryMetadata, ServerMsg};
+use crate::server::replication::IntegrityStats;
 use crate::server::stage_profile::{StageDurability, StageStamps};
 use crate::server::{Conf, ServerError};
 use crate::shared::responses::{Response, ResponseAction};
@@ -387,6 +388,48 @@ impl<N: TableNameSupport> FullArchiveMap<N> {
     /// Insert a new archive map into our full archive map
     pub fn insert(&self, table_name: N, map: ArchiveMapKinds) {
         self.map.borrow_mut().insert(table_name, map);
+    }
+
+    /// What every table's archives have seen of their own integrity, folded
+    ///
+    /// The reads are counted on each table's map, since that is what every reader of a
+    /// table's archives shares ([F44](../../../docs/src/features/repair.md)).
+    #[must_use]
+    pub fn integrity(&self) -> IntegrityStats {
+        // fold every filesystem map's counters
+        let mut folded = IntegrityStats::default();
+        for map in self.map.borrow().values() {
+            let ArchiveMapKinds::FileSystem(fs_map) = map;
+            folded.checksum_failures += fs_map.integrity.checksum_failures.get();
+            folded.unverified_reads += fs_map.integrity.unverified_reads.get();
+        }
+        folded
+    }
+
+    /// Whether a table's archives hold any partition of some tablets
+    ///
+    /// What says a shard once held a group when its checkpoint is gone with its log
+    /// ([Resolved #99](../../../docs/src/appendix/resolved/durable-log-reversion.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `table_name` - The table
+    /// * `tablets` - The tablets
+    #[must_use]
+    pub fn holds_any(&self, table_name: N, tablets: &[u16]) -> bool {
+        // a table with no map holds nothing
+        let map = self.map.borrow();
+        let Some(ArchiveMapKinds::FileSystem(fs_map)) = map.get(&table_name) else {
+            return false;
+        };
+        // any partition of the named tablets
+        let held = fs_map.to_archive.borrow().keys().any(|key| {
+            // truncation cannot happen: a tablet id is twelve bits
+            #[allow(clippy::cast_possible_truncation)]
+            let tablet = crate::server::ring::Ring::tablet_of(*key) as u16;
+            tablets.contains(&tablet)
+        });
+        held
     }
 }
 

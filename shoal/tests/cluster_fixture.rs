@@ -2964,6 +2964,38 @@ fn wait_purged_past(
     }
 }
 
+/// Wait until every group of a table on a node has a checkpoint, driving compaction
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `node` - The node
+/// * `table` - The table's name
+/// * `within` - How long to keep trying
+fn wait_checkpointed(cluster: &mut Cluster, node: usize, table: &str, within: Duration) -> Result<(), FixtureError> {
+    let deadline = std::time::Instant::now() + within;
+    loop {
+        let _ = cluster.node_mut(node).command("ROTATE")?;
+        let _ = cluster.node_mut(node).command("COMPACT")?;
+        let view = groups_of(cluster, node)?;
+        let behind: Vec<serde_json::Value> = view["shards"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .flat_map(|shard| shard["groups"].as_array().into_iter().flatten())
+            .filter(|group| group["table_name"] == table && group["checkpoint"].as_u64().unwrap_or(0) == 0)
+            .cloned()
+            .collect();
+        if behind.is_empty() {
+            return Ok(());
+        }
+        if std::time::Instant::now() > deadline {
+            return Err(FixtureError::NotReady(format!("{table}'s groups on node {node} never checkpointed: {behind:?}")));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
 /// What each group of a table had applied on a node, by the group's id as the report carries it
 ///
 /// # Arguments
@@ -4098,6 +4130,93 @@ async fn returning_node_catches_up_by_log_or_snapshot() -> Result<(), FixtureErr
     let token = again.session_token().expect("a duplicate answers with a token");
     assert_eq!(token.group, original_token.group);
     assert!(token.index >= original_token.index);
+    for id in 0..3 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
+
+/// A durable follower that lost its log is fed by the leader, not fatal to it (C7, item 99)
+///
+/// Node two is killed and its WAL segments removed, then killed again and its whole WAL
+/// directory removed - a member whose disk lost what it acknowledged. Both times the leader's
+/// process is the one it was, writes through it keep committing, the member is fed by log or
+/// by snapshot until every digest agrees, and it reports that it lost its log
+/// ([Resolved #99](../../docs/src/appendix/resolved/durable-log-reversion.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn durable_log_reversion_is_fed_not_fatal() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lane_links(true)
+        .checkpoint_entries(8)
+        .retained_entries(16)
+        .write_timeout(Duration::from_secs(3))
+        .query_deadline(Duration::from_secs(3))
+        .start()
+        .await?;
+    let ok = |error: shoal::client::Errors| FixtureError::NotReady(format!("{error:?}"));
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    let client = Shoal::<TestDbClient>::new(&addr0).await.map_err(ok)?;
+    // a base every node holds, checkpointed on node two so its checkpoint and its archives
+    // both say it held every group of the table
+    for key in 21_000..21_060u64 {
+        client.send_one(Note { key, text: format!("base-{key}") }).await.map_err(ok)?;
+    }
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    wait_checkpointed(&mut cluster, 2, "Note", Duration::from_secs(60))?;
+    let survivors = [cluster.node(0).pid, cluster.node(1).pid];
+    let wal_dir = cluster.dir(2).join("wal").join("Shard-0");
+    // variant A: the segments alone, so the checkpoint and the archives outlive the log
+    cluster.kill(2)?;
+    let mut removed = 0;
+    for entry in std::fs::read_dir(&wal_dir).map_err(|error| FixtureError::NotReady(format!("{error:?}")))? {
+        let path = entry.map_err(|error| FixtureError::NotReady(format!("{error:?}")))?.path();
+        if path.extension().is_some_and(|ext| ext == "wal") {
+            std::fs::remove_file(&path).map_err(|error| FixtureError::NotReady(format!("{error:?}")))?;
+            removed += 1;
+        }
+    }
+    assert!(removed > 0, "node two had no segments to lose under {}", wal_dir.display());
+    cluster.restart(2, NodeKind::Server)?;
+    cluster.wait_joined(&[2])?;
+    // the leader lives and writes through it keep committing
+    for key in 21_020..21_030u64 {
+        write_note_eventually(&addr0, key, &format!("after-segments-{key}"), Duration::from_secs(15)).await?;
+    }
+    for id in 0..2 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died after node two lost its segments");
+        assert_eq!(cluster.node(id).pid, survivors[id], "node {id} is not the process it was");
+    }
+    // the member is fed until it agrees, and says what it lost
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(60))?;
+    let view = groups_of(&mut cluster, 2)?;
+    let lost = view["integrity"]["log_lost"].as_u64().unwrap_or(0);
+    assert!(lost > 0, "node two did not report a lost log: {}", view["integrity"]);
+    // variant B: the whole directory, so the checkpoint and the sidecar go with the log and
+    // the archives alone say the node once held the group
+    wait_checkpointed(&mut cluster, 2, "Note", Duration::from_secs(60))?;
+    cluster.kill(2)?;
+    std::fs::remove_dir_all(&wal_dir).map_err(|error| FixtureError::NotReady(format!("{error:?}")))?;
+    cluster.restart(2, NodeKind::Server)?;
+    cluster.wait_joined(&[2])?;
+    for key in 21_030..21_040u64 {
+        write_note_eventually(&addr0, key, &format!("after-dir-{key}"), Duration::from_secs(15)).await?;
+    }
+    for id in 0..2 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died after node two lost its WAL directory");
+        assert_eq!(cluster.node(id).pid, survivors[id], "node {id} is not the process it was");
+    }
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(90))?;
+    let view = groups_of(&mut cluster, 2)?;
+    let lost = view["integrity"]["log_lost"].as_u64().unwrap_or(0);
+    assert!(lost > 0, "node two did not report a lost log after losing its directory: {}", view["integrity"]);
+    // every key is the leader's value through the member that lost everything
+    let addr2 = cluster.node(2).endpoints.client.to_string();
+    for key in [21_000u64, 21_025, 21_035] {
+        let expected = read_note(&addr0, key).await.map_err(ok)?.expect("the note is there");
+        wait_note(&addr2, key, Some(&expected), Duration::from_secs(10)).await?;
+    }
     for id in 0..3 {
         assert_eq!(cluster.node(id).failure(), None, "node {id} died");
     }

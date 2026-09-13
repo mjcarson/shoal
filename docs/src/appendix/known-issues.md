@@ -32,9 +32,11 @@ Defects that have been fixed move to [Resolved Issues](resolved-issues.md), one 
 carrying the reasoning and the invariants the fix depends on. Item numbers are shared between
 the two pages and never reused, so a number appears on exactly one of them — which is why this
 list starts at 15 and skips 17, 25, 26, 31, 33, 34, 38, 39, 44, 45, 48, 51, 56, 57, 58, 61, 67, 68, 74,
-76, 78, 79, 80, 82, 83, 84, 85, 86, 88, 89, 90, 94, 101, 104 and 105, and
+76, 78, 79, 80, 82, 83, 84, 85, 86, 88, 89, 90, 94, 99, 101, 104 and 105, and
 why ~~item 91~~ ~~item 97~~ ~~item 100~~ ~~item 103~~ item 107 is the newest entry here and the newest number, and why 17, 33, 78, 79, 80, 82,
-83, 84, 85, 86, 88, 89, 90, 94, 101, 104 and 105 are on the resolved page. **101 never appeared here
+83, 84, 85, 86, 88, 89, 90, 94, 99, 101, 104 and 105 are on the resolved page. **99 moved at M8**
+([Resolved #99](resolved/durable-log-reversion.md)): it was filed at M6, left for M8 by M7 on
+purpose, and reproduced before it was fixed. **101 never appeared here
 either**: it was found by an M6 test and fixed in the same change
 ([Resolved #101](resolved/short-lived-member-detection.md)), reproduced first. **104 and 105
 never appeared here either**: both were found by reading the code for M7, reproduced by a
@@ -1819,36 +1821,6 @@ parse, and a reason whose wording changes changes a code.
 up, duplicate, already initialized, stale version, bad voter count - and `handle_admin` maps
 the kind to a code, with `Internal` kept for a kind it does not know. The sentence stays for
 the log.
-
-### 99. A durable follower's log reversion stops the leader's whole process
-
-`shoal-core/src/server/shard/groups.rs`, `group_config`; openraft `progress/entry/update.rs`
-
-A tablet group of a persistent table runs with openraft's `allow_log_reversion` off, which is
-the library's default and the right verdict: a durable follower whose log is shorter than what
-it acknowledged has lost an entry the leader counted toward a quorum, and openraft treats that
-as a bug rather than a state to recover from. What it does about it is `panic!` on the
-**leader's** thread - which on a shard is the shard's executor, and takes the node down: every
-group on the shard, every table, every client. One follower with a wiped or corrupted WAL
-directory therefore stops the leader of every group it is in, and the next leader elected
-among the rest meets the same follower and stops too. A volatile group is exempt: its members
-lose their log on every restart by design, so its configuration allows the reversion and the
-leader feeds the follower from the start ([F40](../features/replication.md)).
-
-**Established by reproduction**, before the exemption existed: `uncommitted_suffix_never_enters_checkpoint`
-restarted a node whose ephemeral groups came back empty, and the leader of one of them died
-with `follower log reversion is not allowed without allow_log_reversion enabled; matching:
-T2-…/0.2; conflict: 2`, after which every test client got `ConnectionRefused`. The durable case
-is the same code path with a WAL directory removed by hand, which no test does.
-
-**Fix direction:** the follower is the one that is wrong, not the leader. Allow the reversion
-on durable groups too and have the leader log it at `ERROR` and reset that follower's progress,
-so a corrupted member is fed from the leader's log - or, past the purge point, from ~~M7's
-snapshot~~ the snapshot [F43](../features/node-recovery.md) delivered, which is what a
-follower reset behind the purge point would now receive - while the leader keeps serving; and
-report the member's `shards_failed` or a new
-health so an operator sees it. What must not happen is what happens now: a quorum that was
-correct when it was taken losing its leader because a member later lost its disk.
 
 ### 100. `duplicate_node_identity_is_fenced` fails under the fixture suite at full parallelism
 

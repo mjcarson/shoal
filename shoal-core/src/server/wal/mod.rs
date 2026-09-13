@@ -1384,6 +1384,20 @@ impl ShardWal {
     /// # Arguments
     ///
     /// * `group` - The group
+    /// The last log id this WAL holds for a group, from its index or from what was purged
+    ///
+    /// None is a group the WAL has no frame of at all - not an entry, not a purge, not a
+    /// vote's log - which for a group whose checkpoint names an applied index is a log that
+    /// was lost ([Resolved #99](../../../../docs/src/appendix/resolved/durable-log-reversion.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group
+    #[must_use]
+    pub fn last_log_id_of(&self, group: GroupId) -> Option<WalLogId> {
+        self.inner.borrow().groups.get(&group).and_then(GroupLog::last_log_id)
+    }
+
     #[must_use]
     pub fn store(&self, group: GroupId) -> GroupStore {
         GroupStore {
