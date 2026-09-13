@@ -102,6 +102,10 @@ pub struct ReadStats {
     pub late_shares: u64,
     /// Shares that arrived for a slot already covered
     pub duplicate_shares: u64,
+    /// Forwards a link never wrote that were sent again to another holder
+    /// ([F42](../../../../docs/src/features/primary-failover.md))
+    #[serde(default)]
+    pub reroutes: u64,
 }
 
 impl ReadStats {
@@ -122,6 +126,7 @@ impl ReadStats {
         self.timeouts += other.timeouts;
         self.late_shares += other.late_shares;
         self.duplicate_shares += other.duplicate_shares;
+        self.reroutes += other.reroutes;
     }
 
     /// Record one barrier, and whether it hopped

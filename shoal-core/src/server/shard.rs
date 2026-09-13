@@ -1996,6 +1996,9 @@ where
             // the table this query names, so a peer that never answers can be answered with a
             // failure in the right variant, and so can a gather that expires
             let table = <D::ClientType as QuerySupport>::archived_query_table(kind);
+            // the partitions this query names, in its own order: a gather merges in it, and a
+            // forward keeps its share of them so it can be sent to another holder
+            let partitions = <<D::ClientType as QuerySupport>::QueryKinds as ArchivedShardRouting>::archived_partition_keys(kind);
             // a query answered by one shard alone is replied to directly, so only a
             // query we actually split needs its shares collected back here
             let gather = if found.len() > 1 {
@@ -2013,7 +2016,7 @@ where
                     limit: <<D::ClientType as QuerySupport>::QueryKinds as ArchivedShardRouting>::archived_limit(kind),
                     // remember the order this query named its partitions in, since the
                     // narrowed queries only carry each shards own share of them
-                    partition_order: <<D::ClientType as QuerySupport>::QueryKinds as ArchivedShardRouting>::archived_partition_keys(kind),
+                    partition_order: partitions.clone(),
                     slots: found
                         .iter()
                         .map(|(shard_info, _)| gather::Slot {
@@ -2094,6 +2097,9 @@ where
                         // the answer, since nothing here decodes the query
                         let mut share_stamps = share_stamps;
                         share_stamps.set_hop(stage_profile::StageHop::RemoteNode);
+                        // the partitions this share covers: the keys the ring put on that
+                        // shard, or the query's own for a write, which the router keys by nothing
+                        let share_partitions = keys.clone().unwrap_or_else(|| partitions.clone());
                         // one entry per remote share, gathered per node below
                         // truncation cannot happen: a bundle holds far fewer than a u32 of queries
                         #[allow(clippy::cast_possible_truncation)]
@@ -2115,21 +2121,25 @@ where
                             keys: keys.unwrap_or_default(),
                         };
                         let shares = remote.entry(*node).or_insert_with(Vec::new);
-                        shares.push((
-                            entry,
-                            Pending {
-                                client,
-                                span: query_span.clone(),
-                                stamps: share_stamps,
-                                table,
-                                end,
-                                share: gather.is_some(),
-                                sent_at: Stamp::now(),
-                                deadline,
-                                attempt,
-                                slot,
-                            },
-                        ));
+                        let pending = Pending {
+                            client,
+                            span: query_span.clone(),
+                            stamps: share_stamps,
+                            table,
+                            end,
+                            share: gather.is_some(),
+                            sent_at: Stamp::now(),
+                            deadline,
+                            attempt,
+                            slot,
+                            entry: entry.clone(),
+                            body: body.clone(),
+                            partitions: share_partitions,
+                            base_index: base_index as u64,
+                            bundle_deadline: deadline,
+                            rerouted: false,
+                        };
+                        shares.push((entry, pending));
                     }
                 }
             }
@@ -3097,8 +3107,42 @@ where
             return Ok(());
         };
         let (refused, unknown) = peers.drain_node(node, unsent);
-        // a frame the link never wrote is a query nothing accepted: a definite refusal
+        let me = self.node_id();
+        let map = self.map.get();
+        // a frame the link never wrote is a query nothing accepted: sent again, once, to
+        // another holder of its partitions that is up, within the bundle's budget - under the
+        // same attempt and slot, since nothing under them was accepted and the gather's slot
+        // still waits for exactly that share - else a definite refusal
+        // ([F42](../../../docs/src/features/primary-failover.md))
         for ((bundle, index), pending) in refused {
+            if !pending.rerouted && Stamp::now() < pending.bundle_deadline {
+                if let Some(holder) = map.alternate_holder(&pending.partitions, me, node) {
+                    event!(
+                        Level::INFO,
+                        msg = "sending a forward the link never wrote to another holder",
+                        id = %bundle,
+                        index,
+                        from = %node,
+                        to = %holder,
+                    );
+                    self.read_stats.reroutes += 1;
+                    let mut entry = pending.entry.clone();
+                    entry.shard = holder.shard;
+                    let again = Pending {
+                        rerouted: true,
+                        sent_at: Stamp::now(),
+                        ..pending
+                    };
+                    let attempt = again.attempt;
+                    let base_index = usize::try_from(again.base_index).unwrap_or_default();
+                    let bundle_deadline = again.bundle_deadline;
+                    let body = again.body.clone();
+                    let mut remote = HashMap::new();
+                    remote.insert(holder.node, vec![(entry, again)]);
+                    self.flush_forwards(&body, bundle, base_index, attempt, bundle_deadline, remote).await?;
+                    continue;
+                }
+            }
             self.fail_forward(node, bundle, index, pending, ErrorCode::Unavailable, "the link to this node went down before the query was sent")
                 .await?;
         }

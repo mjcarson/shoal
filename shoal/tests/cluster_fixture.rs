@@ -4566,3 +4566,259 @@ async fn read_barrier_survives_leader_change_and_delayed_messages() -> Result<()
     }
     Ok(())
 }
+
+/// A member called `Down` keeps its placement and its group memberships through the grace (C3 M6, F42)
+///
+/// Three nodes at a factor of three. Node two is killed and the leader's detector calls it
+/// `Down` with an episode: the placement and every group's members are exactly what they
+/// were, on every survivor - an election may move a tablet's leader, and nothing moves a
+/// replica before the removal M9b delivers. A key node two led is written through node zero
+/// once its group elected. Restarted, node two is `Up` again in the same placement and
+/// converges.
+#[tokio::test(flavor = "multi_thread")]
+async fn down_retains_placement_during_grace() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lane_links(true)
+        .detector_interval_ms(200)
+        .write_timeout(Duration::from_secs(3))
+        .query_deadline(Duration::from_secs(3))
+        .start()
+        .await?;
+    let (key, group) = key_led_by(&mut cluster, "Note", 2, 1000)?;
+    let addrs: Vec<String> = (0..3).map(|id| cluster.node(id).endpoints.client.to_string()).collect();
+    write_note(&addrs[2], key, "v1").await?;
+    for addr in &addrs {
+        wait_note(addr, key, Some("v1"), Duration::from_secs(10)).await?;
+    }
+    // what the placement and every group's members are, as nodes zero and one see them
+    let placement_of = |cluster: &mut Cluster, at: usize| -> Result<serde_json::Value, FixtureError> {
+        Ok(cluster.node_mut(at).command("MAP")?["ok"]["placement"].clone())
+    };
+    let members_of = |cluster: &mut Cluster, at: usize| -> Result<std::collections::BTreeMap<u64, serde_json::Value>, FixtureError> {
+        let view = groups_of(cluster, at)?;
+        let mut members = std::collections::BTreeMap::new();
+        for shard in view["shards"].as_array().into_iter().flatten() {
+            for group in shard["groups"].as_array().into_iter().flatten() {
+                members.insert(group["group"].as_u64().unwrap_or_default(), group["members"].clone());
+            }
+        }
+        Ok(members)
+    };
+    let placement_before = placement_of(&mut cluster, 0)?;
+    assert_eq!(placement_before.as_array().map(Vec::len), Some(3), "{placement_before}");
+    let members_before: Vec<_> = (0..2).map(|at| members_of(&mut cluster, at)).collect::<Result<_, _>>()?;
+    assert!(!members_before[0].is_empty());
+    // node two dies, and the leader calls it down with an episode
+    cluster.kill(2)?;
+    let victim = cluster.node_ids()[2].clone();
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let members = cluster.members(0)?;
+        let member = members["members"]
+            .as_array()
+            .and_then(|members| members.iter().find(|m| m["record"]["node"] == victim).cloned())
+            .unwrap_or_default();
+        if member["health"] == "down" {
+            assert!(!member["episode"].is_null(), "a down verdict without an episode: {member}");
+            break;
+        }
+        if std::time::Instant::now() > deadline {
+            let request = serde_json::json!({ "op": uuid::Uuid::new_v4(), "expected_version": 0, "kind": "Detector" });
+            let detector = cluster.node_mut(0).command(&format!("ADMIN {request}"))?;
+            panic!("the dead member was never called down: {members}\ndetector: {detector}");
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    // nothing moved: the placement and every group's members are what they were
+    assert_eq!(placement_of(&mut cluster, 0)?, placement_before);
+    assert_eq!(placement_of(&mut cluster, 1)?, placement_before);
+    for at in 0..2 {
+        assert_eq!(members_of(&mut cluster, at)?, members_before[at], "node {at}'s groups moved");
+    }
+    // the key's group elected another leader, and a write through zero lands
+    let (elected, leader) = wait_group_leader_change(&mut cluster, 0, "Note", key, 2)?;
+    assert_eq!(elected, group);
+    assert_ne!(leader, 2);
+    write_note_eventually(&addrs[0], key, "v2", Duration::from_secs(30)).await?;
+    // back: up again, in the same placement, converged
+    cluster.restart(2, NodeKind::Server)?;
+    cluster.wait_joined(&[2])?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        if health_of(&mut cluster, 0, 2)? == "up" && health_of(&mut cluster, 1, 2)? == "up" {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "the restarted member was never called up");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(placement_of(&mut cluster, 2)?, placement_before);
+    assert_eq!(members_of(&mut cluster, 2)?, members_before[0]);
+    let addr2 = cluster.node(2).endpoints.client.to_string();
+    wait_note(&addr2, key, Some("v2"), Duration::from_secs(30)).await?;
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    for id in 0..3 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
+
+/// A control majority cannot activate a tablet minority (C13 M6, F42)
+///
+/// Node zero leads a key's group. Its data lanes are cut both ways while every control lane
+/// stays up, so the control plane - all three voters, node zero among them - keeps committing:
+/// a table policy change moves the map's version on every node, node zero included. That
+/// commit authorizes nothing: past its lease a write through node zero is `NotLeader`, a
+/// strong read through it is refused, and the survivors elect and commit through the new
+/// leader. Healed, node zero holds the majority's history and the write it refused is
+/// nowhere ([P5](../../docs/src/distributed/protocol.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn metadata_quorum_cannot_replace_a_missing_data_quorum() -> Result<(), FixtureError> {
+    use shoal::client::{ReadLevel, SendOptions};
+    use shoal::shared::protocol::error::ErrorCode;
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lane_links(true)
+        .write_timeout(Duration::from_secs(3))
+        .query_deadline(Duration::from_secs(3))
+        .start()
+        .await?;
+    let keys = keys_led_by(&mut cluster, "Note", 0, 1000, 2)?;
+    let (key, other) = (keys[0], keys[1]);
+    let addrs: Vec<String> = (0..3).map(|id| cluster.node(id).endpoints.client.to_string()).collect();
+    let quorum = SendOptions::new().read(ReadLevel::Quorum);
+    write_note(&addrs[0], key, "v1").await?;
+    for addr in &addrs {
+        wait_note(addr, key, Some("v1"), Duration::from_secs(10)).await?;
+    }
+    // the data lanes round node zero go; the control lanes stay
+    for (from, to) in [(0, 1), (1, 0), (0, 2), (2, 0)] {
+        cluster.data_link(from, to).cut();
+    }
+    let cut_at = std::time::Instant::now();
+    // the control plane commits a change and every node installs it, node zero included
+    let set = cluster.node_mut(1).command("SET_TABLE_READ_POLICY Note quorum")?;
+    let version = set["ok"]["version"].as_u64().unwrap_or_else(|| panic!("{set}"));
+    cluster.wait_map_version(&[0, 1, 2], version)?;
+    assert_eq!(health_of(&mut cluster, 1, 0)?, "up");
+    // the survivors elect and commit
+    let (_, leader) = wait_group_leader_change(&mut cluster, 1, "Note", key, 0)?;
+    write_note_eventually(&addrs[leader], key, "v2", Duration::from_secs(30)).await?;
+    write_note_eventually(&addrs[3 - leader], key, "v3", Duration::from_secs(30)).await?;
+    // the committed map moved node zero's authority not at all
+    if let Some(left) = Duration::from_millis(2500).checked_sub(cut_at.elapsed()) {
+        tokio::time::sleep(left).await;
+    }
+    let refused = write_note(&addrs[0], other, "v4").await;
+    assert_eq!(failure_code(&refused), Some(ErrorCode::NotLeader), "the cut primary answered {refused:?}");
+    let stale = read_note_with(&addrs[0], key, &quorum).await;
+    assert!(
+        matches!(failure_code(&stale), Some(ErrorCode::QuorumUnavailable | ErrorCode::Timeout | ErrorCode::NotLeader)),
+        "a strong read through the cut primary answered {stale:?}"
+    );
+    // healed: the majority's history everywhere, the refused write nowhere
+    for (from, to) in [(0, 1), (1, 0), (0, 2), (2, 0)] {
+        cluster.data_link(from, to).heal();
+    }
+    let cleared = cluster.node_mut(1).command("SET_TABLE_READ_POLICY Note clear")?;
+    let version = cleared["ok"]["version"].as_u64().unwrap_or_else(|| panic!("{cleared}"));
+    cluster.wait_map_version(&[0, 1, 2], version)?;
+    for addr in &addrs {
+        wait_note(addr, key, Some("v3"), Duration::from_secs(30)).await?;
+        wait_note(addr, other, None, Duration::from_secs(10)).await?;
+    }
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    for id in 0..3 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
+
+/// Established tablet groups progress without a control quorum, and metadata stops (C13 M6, F42)
+///
+/// Every control lane is cut, so the control group has no quorum: an admin mutation through a
+/// follower is refused by name. The data lanes are whole, so writes and strong reads through
+/// every node still commit - a tablet's authority is its own group's, and the map each shard
+/// holds is a perfectly good map while it is frozen. Healed, a control leader is elected and
+/// the same mutation commits ([P5](../../docs/src/distributed/protocol.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn established_tablets_survive_control_quorum_loss() -> Result<(), FixtureError> {
+    use shoal::client::{ReadLevel, SendOptions};
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lane_links(true)
+        .write_timeout(Duration::from_secs(3))
+        .query_deadline(Duration::from_secs(3))
+        .start()
+        .await?;
+    let keys = keys_led_by(&mut cluster, "Note", 0, 1000, 3)?;
+    let addrs: Vec<String> = (0..3).map(|id| cluster.node(id).endpoints.client.to_string()).collect();
+    let quorum = SendOptions::new().read(ReadLevel::Quorum);
+    for key in &keys {
+        write_note(&addrs[0], *key, "v1").await?;
+    }
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    let control_leader = cluster.wait_leader_among(0, &[0, 1, 2], Duration::from_secs(30))?;
+    let follower = (control_leader + 1) % 3;
+    // every control lane goes
+    for from in 0..3 {
+        for to in 0..3 {
+            if from != to {
+                cluster.control_link(from, to).cut();
+            }
+        }
+    }
+    // the control group's lease runs out, and a mutation through a follower is refused
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let refused = cluster.node_mut(follower).command("SET_TABLE_READ_POLICY Note quorum")?;
+    let error = refused["error"].as_str().unwrap_or_default().to_string();
+    assert!(
+        error.contains("NotLeader") || error.contains("leader") || error.contains("quorum"),
+        "the mutation without a control quorum answered {refused}"
+    );
+    // the data plane is whole: writes and strong reads through every node
+    for (node, key) in keys.iter().enumerate() {
+        write_note_eventually(&addrs[node], *key, "v2", Duration::from_secs(30)).await?;
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            match read_note_with(&addrs[(node + 1) % 3], *key, &quorum).await {
+                Ok(seen) => {
+                    assert_eq!(seen.as_deref(), Some("v2"), "a strong read without a control quorum was stale");
+                    break;
+                }
+                Err(error) => {
+                    assert!(failure_code::<()>(&Err(error)).is_some(), "a strong read failed off the wire");
+                    assert!(std::time::Instant::now() < deadline, "a strong read never succeeded without a control quorum");
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+            }
+        }
+    }
+    // healed: a control leader, and the mutation commits
+    for from in 0..3 {
+        for to in 0..3 {
+            if from != to {
+                cluster.control_link(from, to).heal();
+            }
+        }
+    }
+    cluster.wait_leader_among(0, &[0, 1, 2], Duration::from_secs(30))?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let version = loop {
+        let set = cluster.node_mut(0).command("SET_TABLE_READ_POLICY Note quorum")?;
+        if let Some(version) = set["ok"]["version"].as_u64() {
+            break version;
+        }
+        assert!(std::time::Instant::now() < deadline, "the mutation never committed after the heal: {set}");
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    cluster.wait_map_version(&[0, 1, 2], version)?;
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    for id in 0..3 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}

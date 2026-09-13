@@ -219,6 +219,23 @@ impl Ring {
         self.tablets[tablet]
     }
 
+    /// The index in `shards` of a contact, if the ring knows it
+    ///
+    /// For the read ring, which points a tablet this node holds no copy of at a holder that
+    /// is up rather than at a primary that is down
+    /// ([F42](../../../docs/src/features/primary-failover.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `contact` - The shard to find
+    #[must_use]
+    pub fn index_of(&self, contact: &ShardContact) -> Option<u16> {
+        self.shards
+            .iter()
+            .position(|info| info.contact == *contact)
+            .and_then(|index| u16::try_from(index).ok())
+    }
+
     /// Get the tablet a partition key belongs to
     ///
     /// # Arguments

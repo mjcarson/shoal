@@ -22,13 +22,15 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use super::conf::cluster::{BootstrapPolicy, Consistency};
+use super::conf::cluster::{BootstrapPolicy, Consistency, DurationSpec};
 use super::control::types::{ControlState, MemberHealth, MemberRole};
 use super::peer::handshake::{Admission, PeerAddr, Verdict};
 use super::ring::{Ring, TABLET_COUNT};
+use super::shard::ShardContact;
 use super::ServerError;
 use crate::shared::identity::{ClusterId, GroupId, NodeId, ShardAddr, TableId};
 use crate::shared::protocol::admin::{TopologyFrame, TopologyMember};
@@ -126,6 +128,14 @@ pub struct TabletMap {
     pub table_read_policy: BTreeMap<TableId, Consistency>,
     /// The principals allowed to change the cluster
     pub admins: Vec<String>,
+    /// The failover base every tablet group derives its timers from, in milliseconds
+    ///
+    /// The policy's `primary_failover_after`, carried so every node's groups miss a leader at
+    /// the pace the cluster agreed rather than the pace its own file says; zero from a map
+    /// built before the field existed, which leaves the node's own setting in force
+    /// ([F42](../../../docs/src/features/primary-failover.md)).
+    #[serde(default)]
+    pub primary_failover_ms: u64,
 }
 
 impl Default for TabletMap {
@@ -143,6 +153,7 @@ impl Default for TabletMap {
             read_consistency: Consistency::One,
             table_read_policy: BTreeMap::new(),
             admins: Vec::new(),
+            primary_failover_ms: 0,
         }
     }
 }
@@ -211,7 +222,78 @@ impl TabletMap {
             read_consistency: policy.map_or(Consistency::One, |policy| policy.read_consistency),
             table_read_policy: state.table_read_policy.clone(),
             admins: policy.map_or_else(Vec::new, |policy| policy.admins.clone()),
+            // truncation cannot happen: a failover base is seconds, not weeks
+            #[allow(clippy::cast_possible_truncation)]
+            primary_failover_ms: policy.map_or(0, |policy| policy.primary_failover_after.duration().as_millis() as u64),
         }
+    }
+
+    /// Whether a member is up, as this map has it
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The member
+    #[must_use]
+    pub fn is_up(&self, node: NodeId) -> bool {
+        self.members.get(&node).is_some_and(|member| member.health == MemberHealth::Up)
+    }
+
+    /// The replica a node holding no copy of a tablet sends to: the first holder that is up
+    ///
+    /// The primary when it is up, else the next replica that is, else the primary anyway -
+    /// health is routing advice, never authority, and a holder that is down gets the query
+    /// refused where the link is rather than here. With `avoid` set the answer never names
+    /// that node and is none rather than the primary when nobody else is up
+    /// ([F42](../../../docs/src/features/primary-failover.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `tablet` - The tablet
+    /// * `avoid` - A holder not to name: the one whose link just went down
+    #[must_use]
+    pub fn preferred_holder(&self, tablet: usize, avoid: Option<NodeId>) -> Option<ShardAddr> {
+        let replicas = self.replicas_of(tablet);
+        let up = replicas
+            .iter()
+            .find(|replica| Some(replica.node) != avoid && self.is_up(replica.node))
+            .copied();
+        match (up, avoid) {
+            (Some(holder), _) => Some(holder),
+            (None, None) => replicas.first().copied(),
+            (None, Some(_)) => None,
+        }
+    }
+
+    /// Another holder for every partition of a share, when one node holds them all and is up
+    ///
+    /// For a forward the link never wrote: the share can go to another replica of its
+    /// tablets under the same attempt and slot, since nothing was accepted, but only to one
+    /// node and one shard that every partition of it lives on. A share whose partitions have
+    /// no such holder in common is refused as before
+    /// ([F42](../../../docs/src/features/primary-failover.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `partitions` - The partition keys the share covers, as their hashes
+    /// * `me` - This node, which holds none of them or the share would not have been forwarded
+    /// * `avoid` - The node the share was forwarded to
+    #[must_use]
+    pub fn alternate_holder(&self, partitions: &[u64], me: NodeId, avoid: NodeId) -> Option<ShardAddr> {
+        let mut common: Option<Vec<ShardAddr>> = None;
+        for partition in partitions {
+            let tablet = Ring::tablet_of(*partition);
+            // the holders of this tablet that are up and are neither the one that failed nor us
+            let holders: Vec<ShardAddr> = self
+                .replicas_of(tablet)
+                .into_iter()
+                .filter(|replica| replica.node != avoid && replica.node != me && self.is_up(replica.node))
+                .collect();
+            common = Some(match common {
+                None => holders,
+                Some(so_far) => so_far.into_iter().filter(|addr| holders.contains(addr)).collect(),
+            });
+        }
+        common.and_then(|holders| holders.first().copied())
     }
 
     /// The level a table's reads are served at when a bundle does not say
@@ -465,6 +547,16 @@ impl TabletMap {
                 #[allow(clippy::cast_possible_truncation)]
                 let shard = ((tablet / nodes) % shards.max(1)) as u16;
                 ring.set_owner(tablet, shard);
+            } else if let Some(holder) = self.preferred_holder(tablet, None) {
+                // a tablet this node holds no copy of goes to a holder that is up, which is
+                // the primary until the primary is called down
+                let contact = ShardContact::Remote {
+                    node: holder.node,
+                    shard: holder.shard,
+                };
+                if let Some(index) = ring.index_of(&contact) {
+                    ring.set_owner(tablet, index);
+                }
             }
         }
         Ok(Some(ring))
@@ -523,6 +615,11 @@ impl TabletMap {
             write_consistency: self.write_consistency,
             read_consistency: self.read_consistency,
             admins: self.admins.clone(),
+            primary_failover_after: if self.primary_failover_ms > 0 {
+                DurationSpec::from(Duration::from_millis(self.primary_failover_ms))
+            } else {
+                base.primary_failover_after.clone()
+            },
             ..base.clone()
         }
     }
@@ -768,6 +865,70 @@ mod tests {
             member.record.shards = shards[0];
         }
         (TabletMap::from_state(&state, Some(node), &[]), nodes)
+    }
+
+    /// A node holding no copy sends to a holder that is up, a never-sent share finds another
+    /// holder, and the map carries the failover base
+    ///
+    /// Four nodes at a factor of three: the fourth holds three quarters of the tablets, and a
+    /// tablet it does not hold is routed to that tablet's primary while the primary is up, to
+    /// the next replica once the primary is `Down`, and to the primary again when nobody is
+    /// up, since health is advice and not authority. A share the link to the primary never
+    /// wrote finds the next replica that is up and neither the failed node nor this one, and
+    /// none when nobody qualifies. The policy overlay carries the map's failover base and
+    /// leaves the file's in force when the map has none
+    /// ([F42](../../../docs/src/features/primary-failover.md)).
+    #[test]
+    fn routing_prefers_holders_that_are_up_and_reroutes_a_never_sent_share() {
+        let (mut map, nodes) = placed(&[1, 1, 1, 1], 3);
+        let me = nodes[3];
+        // a tablet the fourth node holds no copy of, and the key that hashes to it
+        let tablet = (0..TABLET_COUNT).find(|tablet| !map.holds(me, *tablet)).expect("a tablet not held");
+        let key = (tablet as u64) << (u64::BITS - super::super::ring::TABLET_BITS);
+        assert_eq!(Ring::tablet_of(key), tablet);
+        let replicas = map.replicas_of(tablet);
+        let primary = replicas[0];
+        // everybody up: the primary, on the ring too
+        assert_eq!(map.preferred_holder(tablet, None), Some(primary));
+        let ring = map.read_ring_for(me, 1).expect("a ring").expect("placed");
+        assert_eq!(
+            ring.find_shard(key).contact,
+            ShardContact::Remote {
+                node: primary.node,
+                shard: primary.shard
+            }
+        );
+        // the primary down: the next replica, on the ring too, and as the alternate for a share
+        map.members.get_mut(&primary.node).expect("a member").health = MemberHealth::Down;
+        assert_eq!(map.preferred_holder(tablet, None), Some(replicas[1]));
+        let ring = map.read_ring_for(me, 1).expect("a ring").expect("placed");
+        assert_eq!(
+            ring.find_shard(key).contact,
+            ShardContact::Remote {
+                node: replicas[1].node,
+                shard: replicas[1].shard
+            }
+        );
+        assert_eq!(map.alternate_holder(&[key], me, primary.node), Some(replicas[1]));
+        // the failed node is never named even while the map still calls it up
+        map.members.get_mut(&primary.node).expect("a member").health = MemberHealth::Up;
+        assert_eq!(map.alternate_holder(&[key], me, primary.node), Some(replicas[1]));
+        assert_eq!(map.preferred_holder(tablet, Some(primary.node)), Some(replicas[1]));
+        // nobody up: the primary anyway for routing, nobody for a reroute
+        for replica in &replicas {
+            map.members.get_mut(&replica.node).expect("a member").health = MemberHealth::Down;
+        }
+        assert_eq!(map.preferred_holder(tablet, None), Some(primary));
+        assert_eq!(map.preferred_holder(tablet, Some(primary.node)), None);
+        assert_eq!(map.alternate_holder(&[key], me, primary.node), None);
+        // a tablet this node holds is never rerouted elsewhere by this rule
+        assert!(map.alternate_holder(&[], me, primary.node).is_none());
+        // the failover base rides the map, and an absent one leaves the file's
+        let base = Cluster::default().policy();
+        map.primary_failover_ms = 750;
+        assert_eq!(map.policy_with(&base).primary_failover_after.duration(), Duration::from_millis(750));
+        map.primary_failover_ms = 0;
+        assert_eq!(map.policy_with(&base).primary_failover_after, base.primary_failover_after);
     }
 
     /// Replicas land on distinct nodes, capacity follows shard counts, and the factor is feasible

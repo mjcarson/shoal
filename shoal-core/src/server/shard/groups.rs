@@ -158,7 +158,7 @@ where
         >,
 {
     /// This node's identity, on a cluster node
-    fn node_id(&self) -> NodeId {
+    pub(super) fn node_id(&self) -> NodeId {
         self.local
             .as_ref()
             .map_or(NodeId::default(), |local| local.borrow().node)
@@ -274,6 +274,14 @@ where
             Vec::new()
         };
         let wanted: HashSet<GroupId> = specs.iter().map(|spec| spec.id).collect();
+        // the failover base the cluster agreed, or this node's own until a map carries one
+        // truncation cannot happen: a failover base is seconds, not weeks
+        #[allow(clippy::cast_possible_truncation)]
+        let failover_ms = if map.primary_failover_ms > 0 {
+            map.primary_failover_ms
+        } else {
+            cluster.primary_failover_after.duration().as_millis() as u64
+        };
         // stop what the map no longer names
         let gone: Vec<GroupId> = replication
             .groups
@@ -351,7 +359,7 @@ where
                 group: spec.id,
                 network: replication.network.clone(),
             };
-            let config = group_config(&cluster, spec.id, store.is_volatile());
+            let config = group_config(&cluster, failover_ms, spec.id, store.is_volatile());
             let tx = tx.clone();
             let addr = ShardAddr::new(me, spec.mine);
             let primary = spec.is_primary(me);
@@ -1304,13 +1312,11 @@ where
 /// # Arguments
 ///
 /// * `cluster` - The cluster block
+/// * `failover_ms` - The failover base, in milliseconds: the map's, or the block's until a map carries one
 /// * `group` - The group
 /// * `volatile` - Whether the group's log lives in memory alone
-fn group_config(cluster: &crate::server::conf::Cluster, group: GroupId, volatile: bool) -> Arc<Config> {
-    let base = cluster.primary_failover_after.duration().as_millis();
-    // truncation cannot happen: a failover base is seconds, not weeks
-    #[allow(clippy::cast_possible_truncation)]
-    let base = (base as u64).max(100);
+fn group_config(cluster: &crate::server::conf::Cluster, failover_ms: u64, group: GroupId, volatile: bool) -> Arc<Config> {
+    let base = failover_ms.max(100);
     let config = Config {
         cluster_name: format!("group-{group}"),
         heartbeat_interval: (base / 10).max(10),
