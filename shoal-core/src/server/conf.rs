@@ -17,7 +17,7 @@ use crate::shared::protocol::auth::AuthMechanism;
 use crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES;
 use crate::shared::tls::TlsServerOptions;
 use crate::utils::{self, IntoStorageSize};
-pub use cluster::Cluster;
+pub use cluster::{Cluster, DurationSpec};
 
 /// The resource settings to use
 ///
@@ -153,6 +153,11 @@ fn default_port() -> u16 {
     12000
 }
 
+/// The default budget a bundle has to complete in
+fn default_query_deadline() -> DurationSpec {
+    DurationSpec::from(std::time::Duration::from_secs(10))
+}
+
 /// Help serde default the largest frame this server will accept
 fn default_max_frame_bytes() -> u32 {
     DEFAULT_MAX_FRAME_BYTES
@@ -193,6 +198,15 @@ pub struct Networking {
     /// would be rejected rather than discovering it as a closed socket.
     #[serde(default = "default_max_frame_bytes")]
     pub max_frame_bytes: u32,
+    /// How long a bundle may take in all before every query still owed in it is answered `Timeout`
+    ///
+    /// The budget a split query's gather, a forward and a strong read's waits all share, on a
+    /// standalone node as on a cluster one; a bundle may name a shorter one of its own and
+    /// never a longer one ([F41](../../../docs/src/features/read-consistency.md)). Before this
+    /// existed a share that never arrived held its client forever
+    /// ([Resolved #33](../../../docs/src/appendix/resolved/gather-expiry.md)).
+    #[serde(default = "default_query_deadline")]
+    pub query_deadline: DurationSpec,
 }
 
 impl Default for Networking {
@@ -203,6 +217,7 @@ impl Default for Networking {
             port: default_port(),
             tls: None,
             max_frame_bytes: default_max_frame_bytes(),
+            query_deadline: default_query_deadline(),
         }
     }
 }
@@ -211,6 +226,16 @@ impl Networking {
     /// Set the interface to bind to
     pub fn interface(mut self, interface: impl Into<String>) -> Self {
         self.interface = interface.into();
+        self
+    }
+
+    /// Set how long a bundle may take in all
+    ///
+    /// # Arguments
+    ///
+    /// * `deadline` - The budget
+    pub fn query_deadline(mut self, deadline: std::time::Duration) -> Self {
+        self.query_deadline = DurationSpec::from(deadline);
         self
     }
 

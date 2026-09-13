@@ -40,8 +40,15 @@ pub struct Pending<D: ShoalDatabase> {
     pub end: bool,
     /// Whether the answer is a share to be merged rather than a whole answer
     pub share: bool,
-    /// When it was forwarded, so the deadline sweep can find the ones that have waited too long
+    /// When it was forwarded
     pub sent_at: Stamp,
+    /// When the origin stops waiting: the forward timeout from `sent_at`, or the bundle's
+    /// deadline if that is sooner ([F41](../../../../docs/src/features/read-consistency.md))
+    pub deadline: Stamp,
+    /// The attempt at the bundle it was forwarded under
+    pub attempt: u64,
+    /// The slot of the origin's gather it fills, if it is a share
+    pub slot: u16,
 }
 
 /// The links to every peer this shard forwards to
@@ -227,28 +234,38 @@ impl<D: ShoalDatabase> Peers<D> {
         (refused, unknown)
     }
 
-    /// Take everything that has waited longer than the deadline
+    /// Take everything that has waited past its own deadline
     ///
     /// # Arguments
     ///
     /// * `now` - The current stamp
-    /// * `deadline` - The most a forward may wait
-    pub fn expired(
-        &mut self,
-        now: Stamp,
-        deadline: std::time::Duration,
-    ) -> Vec<((Uuid, u64, NodeId), Pending<D>)> {
-        let deadline_ns = deadline.as_nanos() as u64;
+    pub fn expired(&mut self, now: Stamp) -> Vec<((Uuid, u64, NodeId), Pending<D>)> {
         let stale: Vec<_> = self
             .pending
             .iter()
-            .filter(|(_, pending)| now.since(pending.sent_at) >= deadline_ns)
+            .filter(|(_, pending)| now.since(pending.deadline) > 0)
             .map(|(key, _)| *key)
             .collect();
         stale
             .into_iter()
             .map(|key| (key, self.pending.remove(&key).expect("just listed")))
             .collect()
+    }
+
+    /// Forget everything owed for one query, whichever nodes it went to
+    ///
+    /// A gather that expired has answered its query; the shares still owed for it must not be
+    /// answered a second time when their forward deadline passes.
+    ///
+    /// # Arguments
+    ///
+    /// * `bundle` - The bundle the query arrived in
+    /// * `index` - The index the answer was owed under
+    pub fn forget(&mut self, bundle: Uuid, index: u64) -> usize {
+        let before = self.pending.len();
+        self.pending
+            .retain(|(owed_bundle, owed_index, _), _| !(*owed_bundle == bundle && *owed_index == index));
+        before - self.pending.len()
     }
 
     /// What every link this shard owns looks like from outside

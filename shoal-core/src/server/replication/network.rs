@@ -406,6 +406,23 @@ impl ShardPeer {
         self.rpc(ReplicateKind::Propose, group, payload, deadline).await
     }
 
+    /// Ask the member, which should be the group's leader, for a read barrier
+    ///
+    /// The answer is the leader's read log id once a heartbeat round has confirmed its term,
+    /// or a hint at who leads instead ([F41](../../../../docs/src/features/read-consistency.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group
+    /// * `deadline` - How long to wait
+    ///
+    /// # Errors
+    ///
+    /// Says whether the peer refused it or could not be reached.
+    pub async fn read_barrier(&self, group: GroupId, deadline: Duration) -> Result<Vec<u8>, RpcFailure> {
+        self.rpc(ReplicateKind::ReadBarrier, group, Vec::new(), deadline).await
+    }
+
     /// Turn a link error into openraft's retriable unreachable
     ///
     /// # Arguments

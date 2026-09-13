@@ -663,6 +663,8 @@ mod tests {
                 // this metadata is built for a durable write that already ran, so there is no
                 // failed read behind it
                 failed: None,
+                // and a write waits on nothing a read does
+                read: crate::server::messages::ReadPlan::one(Stamp::now()),
             };
             pending.add(meta, *pos, ResponseAction::Insert(true));
         }
@@ -834,6 +836,8 @@ mod tests {
                 // this metadata is built for a durable write that already ran, so there is no
                 // failed read behind it
                 failed: None,
+                // and a write waits on nothing a read does
+                read: crate::server::messages::ReadPlan::one(Stamp::now()),
             };
             pending.add(meta, pos, ResponseAction::Insert(true));
             // the watermark has not moved, so neither has what is releasable

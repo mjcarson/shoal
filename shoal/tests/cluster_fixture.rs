@@ -27,7 +27,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 mod cluster;
 mod utils;
 
-use cluster::schema::{Note, NoteGet, Row, RowGet, TestDb, TestDbClient};
+use cluster::schema::{Note, NoteDelete, NoteGet, Row, RowGet, TestDb, TestDbClient};
 use cluster::{ChildRequest, Cluster, CoreClaim, Endpoints, FixtureError, NodeKind, Topology};
 
 /// Write a row through a node and read it back, so an endpoint is shown to be a server's
@@ -1144,6 +1144,20 @@ async fn cluster_server_child() {
                 replication.pending_bytes = bytes;
             }
             block = block.replication(replication);
+            // the default read level, which every bundle without an override inherits
+            // ([F41](../../docs/src/features/read-consistency.md))
+            if let Some(level) = &staged.read_consistency {
+                let level = match level.as_str() {
+                    "quorum" => shoal::server::conf::cluster::Consistency::Quorum,
+                    "all" => shoal::server::conf::cluster::Consistency::All,
+                    _ => shoal::server::conf::cluster::Consistency::One,
+                };
+                block = block.read_consistency(level);
+            }
+            // and the bundle deadline, on the networking block every node has
+            if let Some(ms) = staged.query_deadline_ms {
+                conf.networking.query_deadline = Duration::from_millis(ms).into();
+            }
             for (node, control, data) in &staged.dial {
                 let node = NodeId(node.parse().expect("a node id parses"));
                 block = block.dial(node, Some(control.clone()), Some(data.clone()));
@@ -1487,6 +1501,42 @@ fn handle_command(
             }
             None => Err(format!("{verb} needs a group id in hex")),
         },
+        // hold one shard's shares for a while, sending each twice on release if asked
+        // ([F41](../../docs/src/features/read-consistency.md))
+        "HOLD_SHARES" => {
+            let shard = parts.next().and_then(|idx| idx.parse::<usize>().ok());
+            let ms = parts.next().and_then(|ms| ms.parse::<u64>().ok());
+            let dup = parts.next() == Some("dup");
+            match (shard, ms) {
+                (Some(shard), Some(ms)) => pool
+                    .read_verb(Some(shard), shoal::server::replication::ReadVerb::HoldShares { ms, dup })
+                    .map_err(|error| format!("{error:?}"))
+                    .and_then(|answers| answers.into_iter().next().unwrap_or_else(|| Err("no shard answered".to_string()))),
+                _ => Err("HOLD_SHARES needs a shard index and a hold in milliseconds".to_string()),
+            }
+        }
+        // the resident gathers and the read counters, folded over every shard
+        "GATHERS" => pool
+            .read_verb(None, shoal::server::replication::ReadVerb::Gathers)
+            .map_err(|error| format!("{error:?}"))
+            .and_then(|answers| {
+                let mut resident = 0u64;
+                let mut held = 0u64;
+                let mut stats = shoal::server::replication::ReadStats::default();
+                for answer in answers {
+                    let view = answer?;
+                    resident += view["resident"].as_u64().unwrap_or(0);
+                    held += view["held"].as_u64().unwrap_or(0);
+                    if let Ok(shard) = serde_json::from_value::<shoal::server::replication::ReadStats>(view["stats"].clone()) {
+                        stats.absorb(&shard);
+                    }
+                }
+                Ok(serde_json::json!({
+                    "resident": resident,
+                    "held": held,
+                    "stats": serde_json::to_value(stats).expect("stats serialize"),
+                }))
+            }),
         // flush this node's exported spans to its trace file
         "FLUSH" => {
             if let Some(provider) = trace_provider {
@@ -2632,6 +2682,157 @@ async fn wait_note(addr: &str, key: u64, expected: Option<&str>, within: Duratio
     }
 }
 
+/// Read one note through a node, saying how the read is served
+///
+/// A note the server could not serve is an error; one that is not there is `None`
+/// ([F41](../../docs/src/features/read-consistency.md)).
+///
+/// # Arguments
+///
+/// * `addr` - The endpoint
+/// * `key` - The key
+/// * `options` - How the read is served
+async fn read_note_with(
+    addr: &str,
+    key: u64,
+    options: &shoal::client::SendOptions,
+) -> Result<Option<String>, shoal::client::Errors> {
+    let client = Shoal::<TestDbClient>::new(addr).await?;
+    match client.send_one_with(NoteGet::new(vec![key]), options).await {
+        Ok(response) => Ok(response
+            .access::<Note>()?
+            .and_then(|notes| notes.into_iter().next())
+            .map(|note| note.text.to_string())),
+        Err(shoal::client::Errors::QueryDidNotSucceed { .. }) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// Write one note through a node and keep the session token its answer carried
+///
+/// # Arguments
+///
+/// * `addr` - The endpoint
+/// * `key` - The key
+/// * `text` - The text
+async fn write_note_token(
+    addr: &str,
+    key: u64,
+    text: &str,
+) -> Result<Option<shoal::shared::protocol::read::SessionToken>, shoal::client::Errors> {
+    let client = Shoal::<TestDbClient>::new(addr).await?;
+    let response = client
+        .send_one(Note {
+            key,
+            text: text.to_string(),
+        })
+        .await?;
+    Ok(response.session_token())
+}
+
+/// Delete one note through a node
+///
+/// # Arguments
+///
+/// * `addr` - The endpoint
+/// * `key` - The key
+async fn delete_note(addr: &str, key: u64) -> Result<(), shoal::client::Errors> {
+    let client = Shoal::<TestDbClient>::new(addr).await?;
+    client.send_one(NoteDelete::new(key)).await?;
+    Ok(())
+}
+
+/// Read several notes through a node in one get, in the order the server returned them
+///
+/// A get that found nothing is an empty list; one the server could not serve is an error.
+///
+/// # Arguments
+///
+/// * `addr` - The endpoint
+/// * `keys` - The keys, in the order the get names them
+/// * `limit` - The most rows to ask for, if any
+/// * `options` - How the read is served
+async fn read_notes(
+    addr: &str,
+    keys: &[u64],
+    limit: Option<usize>,
+    options: &shoal::client::SendOptions,
+) -> Result<Vec<(u64, String)>, shoal::client::Errors> {
+    let client = Shoal::<TestDbClient>::new(addr).await?;
+    let mut get = NoteGet::new(keys.to_vec());
+    if let Some(limit) = limit {
+        get = get.limit(limit);
+    }
+    match client.send_one_with(get, options).await {
+        Ok(response) => Ok(response
+            .access::<Note>()?
+            .map(|notes| notes.into_iter().map(|note| (note.key.to_native(), note.text.to_string())).collect())
+            .unwrap_or_default()),
+        Err(shoal::client::Errors::QueryDidNotSucceed { .. }) => Ok(Vec::new()),
+        Err(error) => Err(error),
+    }
+}
+
+/// Read a row and a note in one bundle through a node, and say how each half was answered
+///
+/// The two halves are independent: one may fail while the other succeeds, which is what a
+/// mixed bundle promises ([C6](../../docs/src/distributed/reads.md)).
+///
+/// # Arguments
+///
+/// * `addr` - The endpoint
+/// * `row_key` - The row's key
+/// * `note_key` - The note's key
+/// * `options` - How the bundle's reads are served
+async fn read_mixed(
+    addr: &str,
+    row_key: u64,
+    note_key: u64,
+    options: &shoal::client::SendOptions,
+) -> Result<(Result<Option<String>, shoal::client::Errors>, Result<Option<String>, shoal::client::Errors>), shoal::client::Errors> {
+    use shoal::client::QuerySuceededOpts;
+    let client = Shoal::<TestDbClient>::new(addr).await?;
+    let queries = client.query().add(RowGet::new(vec![row_key])).add(NoteGet::new(vec![note_key]));
+    let mut stream = client.send_with(queries, options).await?;
+    // the row's half, at index zero
+    let row = match stream.next().await? {
+        Some(response) => match response.suceeded(QuerySuceededOpts::default()) {
+            Ok(()) => Ok(response
+                .access::<Row>()?
+                .and_then(|rows| rows.into_iter().next())
+                .map(|row| row.data.to_string())),
+            Err(shoal::client::Errors::QueryDidNotSucceed { .. }) => Ok(None),
+            Err(error) => Err(error),
+        },
+        None => Err(shoal::client::Errors::StreamAlreadyTerminated),
+    };
+    // the note's half, at index one; a failure at either index is that index's alone
+    let note = match stream.next().await {
+        Ok(Some(response)) => match response.suceeded(QuerySuceededOpts::default()) {
+            Ok(()) => Ok(response
+                .access::<Note>()?
+                .and_then(|notes| notes.into_iter().next())
+                .map(|note| note.text.to_string())),
+            Err(shoal::client::Errors::QueryDidNotSucceed { .. }) => Ok(None),
+            Err(error) => Err(error),
+        },
+        Ok(None) => Err(shoal::client::Errors::StreamAlreadyTerminated),
+        Err(error) => Err(error),
+    };
+    Ok((row, note))
+}
+
+/// The read counters a node's shards report, folded
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `node` - The node
+fn read_stats(cluster: &mut Cluster, node: usize) -> Result<serde_json::Value, FixtureError> {
+    let view = cluster.node_mut(node).command("GATHERS")?;
+    Ok(view["ok"].clone())
+}
+
 /// Some keys served by one group, found by trying keys in turn
 ///
 /// # Arguments
@@ -3318,3 +3519,195 @@ async fn one_reads_converge_without_exposing_uncommitted_state() -> Result<(), F
     Ok(())
 }
 
+
+/// A strong read through another coordinator sees a committed write, and never a stale value;
+/// a session token is served past the write or not at all (C6 M5, F41)
+///
+/// Three nodes at a factor of three. Twenty keys led by node zero are written through it and
+/// read at `Quorum` through the other two at once: every read sees the write. The lane between
+/// node zero and node one is cut both ways and a second value is written through zero, which
+/// commits on zero and two. A `One` read through one is the old value, which is what `One`
+/// promises. Node one is then cut from node two as well, so no election can bring it the new
+/// value: a `Quorum` read through one cannot obtain a barrier and is answered `Timeout`, never
+/// the old value, and a session read through one carrying the write's token waits and times
+/// out. Healed, the `Quorum` read and the session read through one both see the new value, and
+/// node one's counters show the barrier hopped to the leader and the replica waited to apply.
+#[tokio::test(flavor = "multi_thread")]
+async fn barrier_read_observes_prior_quorum_write() -> Result<(), FixtureError> {
+    use shoal::client::{ReadLevel, SendOptions};
+    use shoal::shared::protocol::error::ErrorCode;
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lane_links(true)
+        .write_timeout(Duration::from_millis(500))
+        .query_deadline(Duration::from_secs(2))
+        .start()
+        .await?;
+    let keys = keys_led_by(&mut cluster, "Note", 0, 2000, 20)?;
+    let addrs: Vec<String> = (0..3).map(|id| cluster.node(id).endpoints.client.to_string()).collect();
+    let quorum = SendOptions::new().read(ReadLevel::Quorum);
+    let one = SendOptions::new().read(ReadLevel::One);
+    // every write through zero is seen at once by a strong read through one and two
+    for (round, key) in keys.iter().enumerate() {
+        let text = format!("round {round}");
+        write_note(&addrs[0], *key, &text).await?;
+        for reader in 1..3 {
+            let seen = read_note_with(&addrs[reader], *key, &quorum).await?;
+            assert_eq!(seen.as_deref(), Some(text.as_str()), "a strong read through node {reader} was stale for key {key}");
+        }
+    }
+    let key = keys[0];
+    write_note(&addrs[0], key, "one").await?;
+    // seen at Quorum through node one, which is what makes it applied there
+    assert_eq!(read_note_with(&addrs[1], key, &quorum).await?.as_deref(), Some("one"));
+    // cut node one off from the leader, both ways
+    cluster.data_link(0, 1).cut();
+    cluster.data_link(1, 0).cut();
+    // a second value commits on zero and two, and hands back a token
+    let token = write_note_token(&addrs[0], key, "two").await?.expect("a committed write mints a token");
+    assert!(token.index > 0, "the token names no index");
+    // a One read through the cut node is the old committed value, which is what One promises
+    assert_eq!(read_note_with(&addrs[1], key, &one).await?.as_deref(), Some("one"));
+    // cut it from node two as well, so no election can bring it the new value
+    cluster.data_link(1, 2).cut();
+    cluster.data_link(2, 1).cut();
+    // a strong read through it cannot confirm a leader: timeout, never "one"
+    let stale = read_note_with(&addrs[1], key, &quorum).await;
+    assert_eq!(failure_code(&stale), Some(ErrorCode::Timeout), "a strong read through the cut node answered {stale:?}");
+    // and a session read past the token waits for an apply that cannot come, and times out
+    let session = SendOptions::new().read(ReadLevel::One).token(token);
+    let behind = read_note_with(&addrs[1], key, &session).await;
+    assert_eq!(failure_code(&behind), Some(ErrorCode::Timeout), "a session read through the cut node answered {behind:?}");
+    // healed, the strong read sees the write; a group mid-election may time out once or twice
+    for (from, to) in [(0, 1), (1, 0), (1, 2), (2, 1)] {
+        cluster.data_link(from, to).heal();
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        match read_note_with(&addrs[1], key, &quorum).await {
+            Ok(Some(text)) if text == "two" => break,
+            Ok(other) => panic!("a strong read through the healed node was stale: {other:?}"),
+            Err(error) => {
+                assert_eq!(failure_code::<()>(&Err(error)), Some(ErrorCode::Timeout));
+                assert!(std::time::Instant::now() < deadline, "a strong read never succeeded after the heal");
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        }
+    }
+    // and so does the session read, without a barrier
+    let hops_before = read_stats(&mut cluster, 1)?["stats"]["barrier_hops"].as_u64().unwrap_or(0);
+    assert_eq!(read_note_with(&addrs[1], key, &session).await?.as_deref(), Some("two"));
+    let stats = read_stats(&mut cluster, 1)?;
+    assert_eq!(stats["stats"]["barrier_hops"].as_u64().unwrap_or(0), hops_before, "a session read hopped: {stats}");
+    assert!(stats["stats"]["barriers"].as_u64().unwrap_or(0) >= 1, "{stats}");
+    assert!(hops_before >= 1, "the strong reads through a follower never hopped: {stats}");
+    assert!(stats["stats"]["apply_wait_ns_max"].as_u64().unwrap_or(0) > 0, "no apply wait was recorded: {stats}");
+    assert!(stats["stats"]["session_waits"].as_u64().unwrap_or(0) >= 1, "no session wait was recorded: {stats}");
+    assert!(stats["stats"]["timeouts"].as_u64().unwrap_or(0) >= 2, "the timeouts were not counted: {stats}");
+    Ok(())
+}
+
+/// A session token is judged by name: another cluster, another lineage, no cluster at all, and
+/// a client that did not ask for tokens is sent none (F41)
+///
+/// A real token from a committed write is forged three ways. Naming another cluster it is
+/// refused `WrongCluster`; naming another group for its tablet it is refused `UnknownLineage`;
+/// sent to a standalone node it is refused `WrongCluster`, since that node is in no cluster. A
+/// raw connection that does not ask for the token section gets an answer with no token on it,
+/// and one that does gets the token.
+#[tokio::test(flavor = "multi_thread")]
+async fn session_token_lineage_is_checked_by_name() -> Result<(), FixtureError> {
+    use shoal::client::SendOptions;
+    use shoal::shared::identity::{ClusterId, GroupId};
+    use shoal::shared::protocol::error::ErrorCode;
+    use shoal::shared::protocol::{self, handshake, read};
+    use shoal::shared::protocol::auth::AuthMechanisms;
+    use shoal::shared::queries::Queries;
+    use shoal::shared::traits::QuerySupport;
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .query_deadline(Duration::from_secs(2))
+        .start()
+        .await?;
+    let addr = cluster.node(0).endpoints.client.to_string();
+    let key = 4242;
+    let token = write_note_token(&addr, key, "minted").await?.expect("a committed write mints a token");
+    // the token as minted is honoured
+    let honest = SendOptions::new().token(token);
+    assert_eq!(read_note_with(&addr, key, &honest).await?.as_deref(), Some("minted"));
+    // another cluster is refused by name
+    let mut foreign = token;
+    foreign.cluster = ClusterId::mint();
+    let refused = read_note_with(&addr, key, &SendOptions::new().token(foreign)).await;
+    assert_eq!(failure_code(&refused), Some(ErrorCode::WrongCluster), "{refused:?}");
+    // another group for the same tablet is another lineage
+    let mut moved = token;
+    moved.group = GroupId(token.group.0 ^ 0xdead_beef);
+    let refused = read_note_with(&addr, key, &SendOptions::new().token(moved)).await;
+    assert_eq!(failure_code(&refused), Some(ErrorCode::UnknownLineage), "{refused:?}");
+    let stats = read_stats(&mut cluster, 0)?;
+    assert!(stats["stats"]["lineage_refusals"].as_u64().unwrap_or(0) >= 1, "{stats}");
+    // a standalone node is in no cluster, so any token is the wrong cluster; one is started
+    // in this process, since the fixture's directories all belong to the cluster
+    let temp_dir = utils::test_dir();
+    let (_client, standalone) = utils::start_with_conf::<TestDb>(utils::build_config(&temp_dir))
+        .await
+        .map_err(|error| FixtureError::NotReady(format!("{error:?}")))?;
+    let standalone_addr = standalone.bound_addr().to_string();
+    write_note(&standalone_addr, key, "alone").await?;
+    let refused = read_note_with(&standalone_addr, key, &honest).await;
+    assert_eq!(failure_code(&refused), Some(ErrorCode::WrongCluster), "{refused:?}");
+    standalone.exit().map_err(|error| FixtureError::NotReady(format!("{error:?}")))?;
+    // a raw connection that asks for nothing gets no token section, and one that asks does
+    for (caps, expect_token) in [(0u8, false), (read::CLIENT_CAP_READ_OPTIONS, true)] {
+        let mut sock = tokio::net::TcpStream::connect(&addr).await.map_err(FixtureError::Io)?;
+        let hello = handshake::Hello {
+            schema_fingerprint: TestDbClient::SCHEMA_FINGERPRINT,
+            max_frame_bytes: protocol::DEFAULT_MAX_FRAME_BYTES,
+            mechanisms: AuthMechanisms::NONE,
+            caps,
+        };
+        sock.write_all(&hello.frame(protocol::DEFAULT_MAX_FRAME_BYTES).expect("a hello frames")).await.map_err(FixtureError::Io)?;
+        let mut ack = [0u8; handshake::HANDSHAKE_FRAME_LEN];
+        sock.read_exact(&mut ack).await.map_err(FixtureError::Io)?;
+        let mut body = [0u8; handshake::HANDSHAKE_BODY_LEN];
+        body.copy_from_slice(&ack[protocol::HEADER_LEN..]);
+        let granted = handshake::HelloAck::decode(&body);
+        assert!(granted.reason.is_accepted());
+        assert_eq!(granted.caps, caps, "the server granted other than what was asked");
+        // a write, framed the way the client frames one
+        let queries = Queries::<TestDbClient> {
+            id: uuid::Uuid::new_v4(),
+            queries: vec![Note { key: key + 1, text: "raw".to_string() }.into()],
+            base_index: 0,
+        };
+        let archived = rkyv::to_bytes::<rkyv::rancor::Error>(&queries).expect("a bundle archives");
+        let preamble = protocol::request_preamble(archived.len(), protocol::DEFAULT_MAX_FRAME_BYTES).expect("a preamble");
+        sock.write_all(&preamble).await.map_err(FixtureError::Io)?;
+        sock.write_all(&archived).await.map_err(FixtureError::Io)?;
+        // the answer's frame says whether a token sits ahead of its payload
+        loop {
+            let mut raw = [0u8; protocol::RESPONSE_PREAMBLE_LEN];
+            sock.read_exact(&mut raw).await.map_err(FixtureError::Io)?;
+            let frame = protocol::decode_server_frame(&raw, protocol::DEFAULT_MAX_FRAME_BYTES).expect("a server frame");
+            let mut rest = vec![0u8; frame.rest_len];
+            sock.read_exact(&mut rest).await.map_err(FixtureError::Io)?;
+            // the topology push a connection is handed first is skipped
+            if frame.header.kind != protocol::MessageType::Response {
+                continue;
+            }
+            assert_eq!(frame.token_len() == read::SESSION_TOKEN_LEN, expect_token, "caps {caps}: token {} bytes", frame.token_len());
+            if expect_token {
+                let mut raw_token = [0u8; read::SESSION_TOKEN_LEN];
+                raw_token.copy_from_slice(&rest[..read::SESSION_TOKEN_LEN]);
+                let minted = read::SessionToken::decode(&raw_token).expect("a token decodes");
+                assert_eq!(minted.cluster, token.cluster);
+                assert_eq!(minted.table, token.table);
+            }
+            break;
+        }
+    }
+    Ok(())
+}

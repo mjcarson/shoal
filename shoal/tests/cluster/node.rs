@@ -149,6 +149,13 @@ pub struct StagedCluster {
     /// The bound on bytes proposed and unanswered per group, if the test lowered it
     #[serde(default)]
     pub pending_bytes: Option<usize>,
+    /// The read level the bootstrapper seeds as the cluster's default, if the test set one
+    /// ([F41](../../../docs/src/features/read-consistency.md))
+    #[serde(default)]
+    pub read_consistency: Option<String>,
+    /// The bundle deadline in milliseconds, if the test shortened it
+    #[serde(default)]
+    pub query_deadline_ms: Option<u64>,
 }
 
 /// The endpoints a child bound, and the identity it reported

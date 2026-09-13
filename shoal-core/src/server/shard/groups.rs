@@ -31,9 +31,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures_channel::oneshot;
-use openraft::error::{ClientWriteError, RaftError};
+use openraft::error::{ClientWriteError, LinearizableReadError, RaftError};
 use openraft::storage::EntryResponder;
-use openraft::{Config, EntryPayload, Raft, SnapshotPolicy, StoredMembership};
+use openraft::{Config, EntryPayload, Raft, ReadPolicy, SnapshotPolicy, StoredMembership};
 use openraft_rt::WatchReceiver as _;
 use tracing::{event, Level, Span};
 use uuid::Uuid;
@@ -44,7 +44,7 @@ use crate::server::map::GroupSpec;
 use crate::server::messages::{QueryMetadata, ServerMsg};
 use crate::server::peer::{LinkEvent, ReplicateReply};
 use crate::server::replication::{
-    ApplyOutcome, DataConfig, GroupMachine, GroupNetwork, GroupReport, MachineState,
+    ApplyOutcome, BarrierAnswer, DataConfig, GroupMachine, GroupNetwork, GroupReport, MachineState,
     ProposalOutcome, ReplicationVerb, RpcFailure, ShardNetwork, ShardPeer, ShardReplication,
 };
 use crate::server::ring::Ring;
@@ -55,6 +55,7 @@ use crate::server::ServerError;
 use crate::shared::identity::{GroupId, NodeId, ShardAddr, TableId};
 use crate::shared::protocol::error::ErrorCode;
 use crate::shared::protocol::peer::{Command, ReplicateKind, ReplicateRequestHead, RequestId};
+use crate::shared::protocol::read::SessionToken;
 use crate::shared::responses::ResponseError;
 use crate::shared::traits::{QuerySupport, TableNameSupport};
 use crate::storage::CompactionJob;
@@ -160,7 +161,7 @@ where
     }
 
     /// This shard's address
-    fn my_addr(&self) -> ShardAddr {
+    pub(super) fn my_addr(&self) -> ShardAddr {
         // a node runs fewer shards than a u16 holds; the ring refuses more
         #[allow(clippy::cast_possible_truncation)]
         ShardAddr::new(self.node_id(), self.shard_id as u16)
@@ -350,9 +351,12 @@ where
             .detach();
         }
         // the writes that waited on a group this node no longer hosts are refused by name
-        for (id, (meta, table, _, _)) in orphaned {
+        for (id, (meta, table, key, _)) in orphaned {
             let outcome = ProposalOutcome::NotLeader(format!("group {id} left this node before it was up"));
-            self.answer_proposal(meta, table, None, outcome, 0).await?;
+            // truncation cannot happen: a tablet id is twelve bits
+            #[allow(clippy::cast_possible_truncation)]
+            let tablet = Ring::tablet_of(key) as u16;
+            self.answer_proposal(meta, table, tablet, None, outcome, 0).await?;
         }
         Ok(())
     }
@@ -581,16 +585,16 @@ where
         let cluster = self.conf.cluster.clone().unwrap_or_default();
         let Some(replication) = self.replication.as_mut() else {
             return self
-                .answer_proposal(meta, table, None, ProposalOutcome::Failed("this node hosts no tablet groups".to_string()), 0)
+                .answer_proposal(meta, table, tablet, None, ProposalOutcome::Failed("this node hosts no tablet groups".to_string()), 0)
                 .await;
         };
         let Some(id) = replication.tablets.get(&(table.table_id(), tablet)).copied() else {
             let outcome = ProposalOutcome::NotLeader(format!("no group serves tablet {tablet} of {table} on this node"));
-            return self.answer_proposal(meta, table, None, outcome, 0).await;
+            return self.answer_proposal(meta, table, tablet, None, outcome, 0).await;
         };
         let Some(group) = replication.groups.get_mut(&id) else {
             let outcome = ProposalOutcome::NotLeader(format!("group {id} is not hosted here"));
-            return self.answer_proposal(meta, table, None, outcome, 0).await;
+            return self.answer_proposal(meta, table, tablet, None, outcome, 0).await;
         };
         // a group whose handle is still being built takes the write once it is up
         if group.raft.is_none() {
@@ -604,7 +608,7 @@ where
                 "{} bytes are proposed and unanswered for group {id}, past the {} byte bound",
                 group.pending_bytes, cluster.replication.pending_bytes
             ));
-            return self.answer_proposal(meta, table, None, outcome, 0).await;
+            return self.answer_proposal(meta, table, tablet, None, outcome, 0).await;
         }
         if group.store.is_volatile() && group.store.bytes() + bytes > cluster.replication.volatile_log_bytes {
             let outcome = ProposalOutcome::Shed(format!(
@@ -612,7 +616,7 @@ where
                 group.store.bytes(),
                 cluster.replication.volatile_log_bytes
             ));
-            return self.answer_proposal(meta, table, None, outcome, 0).await;
+            return self.answer_proposal(meta, table, tablet, None, outcome, 0).await;
         }
         group.pending_bytes += bytes;
         let command = Command {
@@ -636,6 +640,7 @@ where
                 .send(ServerMsg::Proposed {
                     meta,
                     table,
+                    tablet,
                     group: Some(id),
                     outcome,
                     bytes,
@@ -646,12 +651,19 @@ where
         Ok(())
     }
 
-    /// Answer a client whose proposal resolved
+    /// Answer a client whose proposal resolved, with the session token it minted if it committed
+    ///
+    /// A committed write's answer carries the cluster, the table, the tablet, the group and the
+    /// index it committed at, so a later read can be served past it on any replica. A
+    /// duplicate carries the index its repeat committed at rather than the original's: a bound
+    /// past the repeat is past the original too, so it is never wrong, only later than it need
+    /// be ([F41](../../../../docs/src/features/read-consistency.md)).
     ///
     /// # Arguments
     ///
     /// * `meta` - The write's metadata
     /// * `table` - The table it named
+    /// * `tablet` - The tablet its key hashed to
     /// * `group` - The group it went through, if admission let it that far
     /// * `outcome` - What the proposal came to
     /// * `bytes` - How many bytes were held pending for it
@@ -659,6 +671,7 @@ where
         &mut self,
         mut meta: QueryMetadata,
         table: D::TableNames,
+        tablet: u16,
         group: Option<GroupId>,
         outcome: ProposalOutcome,
         bytes: usize,
@@ -681,6 +694,23 @@ where
             }
         }
         let (client, id, index, end) = (meta.client, meta.id, meta.index, meta.end);
+        // a committed write mints a token naming where it committed
+        let token = match (&outcome, group) {
+            (
+                ProposalOutcome::Answered {
+                    outcome: ApplyOutcome::Applied(_) | ApplyOutcome::Duplicate(_),
+                    index: committed,
+                },
+                Some(group),
+            ) => Some(SessionToken {
+                cluster: self.map.get().cluster.unwrap_or_default(),
+                table: table.table_id(),
+                tablet,
+                group,
+                index: *committed,
+            }),
+            _ => None,
+        };
         let response = match outcome {
             ProposalOutcome::Answered {
                 outcome: ApplyOutcome::Applied(result) | ApplyOutcome::Duplicate(result),
@@ -705,7 +735,9 @@ where
         };
         meta.stamps.mark_exec_done();
         let span = meta.span.clone();
-        self.reply(client, id, span, meta.stamps, response).await
+        // the token rides the answer to a client that asked for one, and the answer head to a
+        // peer that forwarded the write
+        self.reply_with_token(client, id, span, meta.stamps, response, token).await
     }
 
     /// Answer a replication request a peer sent this shard
@@ -769,8 +801,24 @@ where
                     head.id,
                     "installing a tablet group snapshot is M7's; this replica cannot catch up past the purge point",
                 ),
-                // the barrier arm lands with the strong read path
-                ReplicateKind::ReadBarrier => ReplicateReply::error(head.id, "read barriers are not served yet"),
+                // a read barrier: confirm leadership with a heartbeat round and answer the
+                // read log id, or say who leads instead
+                ReplicateKind::ReadBarrier => {
+                    let answer = match raft.get_read_linearizer(ReadPolicy::ReadIndex).await {
+                        Ok(linearizer) => BarrierAnswer::Ready(linearizer.read_log_id().clone()),
+                        Err(RaftError::APIError(LinearizableReadError::ForwardToLeader(forward))) => {
+                            BarrierAnswer::NotLeader(forward.leader_node.or(forward.leader_id))
+                        }
+                        Err(RaftError::APIError(LinearizableReadError::QuorumNotEnough(short))) => {
+                            BarrierAnswer::NoQuorum(short.to_string())
+                        }
+                        Err(RaftError::Fatal(fatal)) => {
+                            ReplicateReply::error(head.id, format!("read_barrier: {fatal}"));
+                            BarrierAnswer::NoQuorum(format!("the group is stopped: {fatal}"))
+                        }
+                    };
+                    encode_reply(head.id, &answer)
+                }
             };
             let _ = reply.send(answer).await;
         })
@@ -1016,6 +1064,7 @@ where
         let Some(replication) = self.replication.as_ref() else {
             return ShardReplication {
                 shard: self.shard_id,
+                reads: self.read_stats,
                 ..ShardReplication::default()
             };
         };
@@ -1060,6 +1109,7 @@ where
             segments: replication.wal.segments().len(),
             unknown_outcomes: replication.stats.unknown,
             rejected: replication.stats.rejected,
+            reads: self.read_stats,
             groups,
         }
     }

@@ -2,8 +2,95 @@
 
 use rkyv::util::AlignedVec;
 
+use std::time::Duration;
+
 use shoal_proto::shared::protocol::error::ErrorCode;
-use shoal_proto::shared::protocol::read::SessionToken;
+use shoal_proto::shared::protocol::read::{ReadLevel, ReadOptions, SessionToken};
+
+/// What a caller says about how the reads in a bundle are served
+///
+/// Every field is optional and the default says nothing: a bundle sent with the default is
+/// framed exactly as one sent before options existed, and inherits each table's policy and
+/// the server's deadline. Set on one send with [`Shoal::send_with`], or on every send with
+/// [`ShoalBuilder::read_options`] ([F41](../../../../docs/src/features/read-consistency.md)).
+///
+/// [`Shoal::send_with`]: crate::client::Shoal::send_with
+/// [`ShoalBuilder::read_options`]: crate::client::ShoalBuilder::read_options
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SendOptions {
+    /// The level every read in the bundle is served at, or none to inherit each table's policy
+    pub read: Option<ReadLevel>,
+    /// How long the whole bundle may take, if shorter than the server's own budget
+    ///
+    /// A server never grants a longer budget than its `networking.query_deadline`, and the
+    /// wire carries whole milliseconds, so anything finer is rounded down.
+    pub deadline: Option<Duration>,
+    /// The tokens earlier writes handed back, so these reads are served past them
+    ///
+    /// At most sixteen; a send with more is refused before anything is written.
+    pub tokens: Vec<SessionToken>,
+}
+
+impl SendOptions {
+    /// Options that say nothing, which is what every send without them uses
+    #[must_use]
+    pub fn new() -> Self {
+        SendOptions::default()
+    }
+
+    /// Serve every read in the bundle at this level
+    ///
+    /// # Arguments
+    ///
+    /// * `level` - The level
+    #[must_use]
+    pub fn read(mut self, level: ReadLevel) -> Self {
+        self.read = Some(level);
+        self
+    }
+
+    /// Give the whole bundle this long
+    ///
+    /// # Arguments
+    ///
+    /// * `deadline` - The budget
+    #[must_use]
+    pub fn deadline(mut self, deadline: Duration) -> Self {
+        self.deadline = Some(deadline);
+        self
+    }
+
+    /// Serve the reads past this token's lower bound
+    ///
+    /// # Arguments
+    ///
+    /// * `token` - The token an earlier write handed back
+    #[must_use]
+    pub fn token(mut self, token: SessionToken) -> Self {
+        self.tokens.push(token);
+        self
+    }
+
+    /// Whether these options say anything at all
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.read.is_none() && self.deadline.is_none() && self.tokens.is_empty()
+    }
+
+    /// The section these options go on the wire as
+    #[must_use]
+    pub fn to_wire(&self) -> ReadOptions {
+        ReadOptions {
+            level: self.read,
+            // the wire carries milliseconds; a deadline under one is sent as one rather than
+            // as zero, which would mean the server's default
+            deadline_ms: self
+                .deadline
+                .map_or(0, |deadline| u32::try_from(deadline.as_millis()).unwrap_or(u32::MAX).max(1)),
+            tokens: self.tokens.clone(),
+        }
+    }
+}
 
 #[cfg(feature = "stage-profile")]
 use shoal_proto::stamps::Stamp;

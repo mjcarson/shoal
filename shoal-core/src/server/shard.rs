@@ -1,6 +1,8 @@
 //! A single shard in Shoal
 
+mod gather;
 mod groups;
+mod reads;
 
 use bytes::Bytes;
 use futures::{
@@ -37,7 +39,7 @@ use tracing::{event, info_span, instrument, Instrument, Level, Span};
 use uuid::Uuid;
 
 use super::control::{AdminCall, ControlRequest};
-use super::messages::{Answer, PeerEvent, QueryMetadata, Reply, ReplyKind, ServerMsg};
+use super::messages::{Answer, PeerEvent, QueryMetadata, ReadPlan, Reply, ReplyKind, ServerMsg};
 use super::replication::ShardNetwork;
 use super::peer::{
     self, Frame, FrameKey, Lane, LinkEvent, ListenerContext, Local, PeerSetup, Peers, Pending,
@@ -672,6 +674,8 @@ fn control_reply(id: Uuid, kind: ReplyKind, json: &[u8]) -> Reply {
         span: Span::none(),
         stamps: StageStamps::new(Stamp::now()),
         archived,
+        attempt: 0,
+        slot: 0,
         token: None,
     }
 }
@@ -1202,37 +1206,6 @@ async fn shutdown_tasks(tasks: Vec<Task<Result<(), ServerError>>>) -> Result<(),
     Ok(())
 }
 
-/// The shares of one query that was split across several shards
-///
-/// A query naming partitions on several shards is answered in pieces, but the client
-/// is owed exactly one response for it. The shard that split the query keeps one of
-/// these until every shard it sent a piece to has answered, then merges the pieces,
-/// puts their rows back into the order the query named its partitions in, applies the
-/// queries limit to their union, and replies once.
-struct Gather<D: ShoalDatabase> {
-    /// The id of the client waiting on this query
-    client: Uuid,
-    /// The span context for this query
-    span: Span,
-    /// When this query reached each stage on the shard that split it
-    ///
-    /// The shares each carry their own stamps and each become their own record, flagged as
-    /// shares. This is the one the client actually waited on, so it is the one whose stages
-    /// describe the latency the client saw.
-    stamps: StageStamps,
-    /// How many shards have not yet sent us their share
-    outstanding: usize,
-    /// The most rows this query asked for, if it set a limit
-    limit: Option<usize>,
-    /// The partitions this query named, in the order it named them
-    ///
-    /// Shares arrive in whatever order the shards answer in, so this is what the merged
-    /// rows are put back into before the limit is applied to them.
-    partition_order: Vec<u64>,
-    /// The shares we have merged so far
-    merged: Option<<D::ClientType as QuerySupport>::ResponseKinds>,
-}
-
 pub(super) struct Shard<D: ShoalDatabase> {
     /// This shards info
     info: ShardInfo,
@@ -1253,8 +1226,21 @@ pub(super) struct Shard<D: ShoalDatabase> {
     /// The queries we split across several shards and are collecting the shares of
     ///
     /// Keyed by (query id, index), the pair that uniquely identifies one query within
-    /// one bundle - the same key the tables use for their own partial results.
-    gathering: HashMap<(Uuid, usize), Gather<D>>,
+    /// one bundle - the same key the tables use for their own partial results. Every one
+    /// expires at its bundle's deadline ([F41](../../../docs/src/features/read-consistency.md)).
+    gathering: gather::Gathers<D::TableNames, <D::ClientType as QuerySupport>::ResponseKinds>,
+    /// The attempt the next bundle this shard coordinates is minted with
+    ///
+    /// Per shard rather than per node: a bundle's attempt only has to be unique among the
+    /// attempts at that bundle, and one shard coordinates every attempt at it.
+    next_attempt: u64,
+    /// What this shard's reads have waited on and dropped
+    read_stats: crate::server::replication::ReadStats,
+    /// The shares this shard is holding back rather than sending, for the fixture
+    ///
+    /// `None` unless a `HoldShares` verb is in force
+    /// ([F41](../../../docs/src/features/read-consistency.md)).
+    held: Option<reads::HeldShares<D>>,
     /// The channel to send shard local messages on
     shard_local_tx: AsyncSender<ServerMsg<D>>,
     /// The channel to Receive shard local messages on
@@ -1455,7 +1441,10 @@ where
             tables,
             table_map,
             client_map: HashMap::with_capacity(500),
-            gathering: HashMap::with_capacity(100),
+            gathering: gather::Gathers::default(),
+            next_attempt: 1,
+            read_stats: crate::server::replication::ReadStats::default(),
+            held: None,
             shard_local_tx,
             shard_local_rx,
             loader_channels,
@@ -1768,6 +1757,8 @@ where
         if let Some(network) = self.spawn_peer_listener()? {
             self.open_replication(network).await?;
         }
+        // and the timer that expires what waits too long, on every node
+        self.spawn_sweeper()?;
         // start our loaders
         self.tables
             .init_storage_loaders(
@@ -1834,6 +1825,8 @@ where
     /// * `body` - The buffer the bundle arrived in, shared with every shard it routes to
     /// * `queries` - The bundle, read out of that buffer
     /// * `stamps` - When this bundle reached each stage so far
+    /// * `base` - When the bundle's last byte came off the socket, which its deadline counts from
+    /// * `options` - What the bundle said about its reads, if anything
     ///
     /// This is deliberately **not** instrumented as a whole. The span it used to open was one
     /// per bundle and was what every query in that bundle took as its parent, so a batch of a
@@ -1847,15 +1840,20 @@ where
         body: &Bytes,
         queries: &ArchivedQueries<D::ClientType>,
         stamps: StageStamps,
+        base: Stamp,
         options: Option<&ReadOptions>,
     ) -> Result<(), ServerError> {
-        // the options are acted on once reads have a plan; until then a bundle that sent
-        // them is routed as one that did not
-        let _ = options;
         // an empty bundle has no last query, and nothing to send either way
         let Some(last_offset) = queries.queries.len().checked_sub(1) else {
             return Ok(());
         };
+        // this attempt at the bundle, so a share of an earlier one is told apart by identity
+        let attempt = self.next_attempt;
+        self.next_attempt += 1;
+        // the budget every query in the bundle shares: the server's, or a shorter one the
+        // bundle named, measured from when its last byte came off the socket
+        // ([F41](../../../docs/src/features/read-consistency.md))
+        let deadline = self.bundle_deadline(base, options);
         // remember how many queries this bundle held
         //
         // a queries position in its batch is uninterpretable without this beside it, since
@@ -1940,6 +1938,8 @@ where
         }
         // initialize a vec to store the per shard shares we find
         let mut found = Vec::with_capacity(3);
+        // the reads refused by name while routing, answered once the ring borrow is over
+        let mut refused_reads = Vec::new();
         // the remote shares of this bundle, gathered per node into one forward each
         let mut remote: HashMap<NodeId, Vec<(crate::shared::protocol::peer::ForwardEntry, Pending<D>)>> =
             HashMap::new();
@@ -1987,20 +1987,34 @@ where
             );
             // record that this query is leaving us for the shards that own its partitions
             stamps.mark_routed();
+            // the table this query names, so a peer that never answers can be answered with a
+            // failure in the right variant, and so can a gather that expires
+            let table = <D::ClientType as QuerySupport>::archived_query_table(kind);
             // a query answered by one shard alone is replied to directly, so only a
             // query we actually split needs its shares collected back here
             let gather = if found.len() > 1 {
                 // remember what we are owed before we send anything, so a share that
-                // comes straight back to us still finds somewhere to land
-                let gather = Gather {
+                // comes straight back to us still finds somewhere to land: one slot per
+                // shard, filled by the share that names it
+                let gather = gather::Gather {
                     client,
                     span: query_span.clone(),
                     stamps,
-                    outstanding: found.len(),
+                    table,
+                    end,
+                    attempt,
+                    deadline,
                     limit: <<D::ClientType as QuerySupport>::QueryKinds as ArchivedShardRouting>::archived_limit(kind),
                     // remember the order this query named its partitions in, since the
                     // narrowed queries only carry each shards own share of them
                     partition_order: <<D::ClientType as QuerySupport>::QueryKinds as ArchivedShardRouting>::archived_partition_keys(kind),
+                    slots: found
+                        .iter()
+                        .map(|(shard_info, _)| gather::Slot {
+                            contact: shard_info.contact.clone(),
+                            state: gather::SlotState::Outstanding,
+                        })
+                        .collect(),
                     merged: None,
                 };
                 self.gathering.insert((bundle_id, index), gather);
@@ -2009,6 +2023,19 @@ where
             } else {
                 None
             };
+            // how every share of this query is served: at what level, past which tokens, and
+            // under which attempt and deadline; the slot is set per share below. A token
+            // from another cluster refuses the read by name before anything is sent
+            let plan = match self.read_plan(table, kind, deadline, attempt, options) {
+                Ok(plan) => plan,
+                Err(error) => {
+                    // nothing was sent, so the gather that was just recorded is withdrawn
+                    self.gathering.forget_query((bundle_id, index));
+                    found.clear();
+                    refused_reads.push((table, index, end, query_span, stamps, error));
+                    continue;
+                }
+            };
             // note whether the share each shard carries is a share of a query we split
             //
             // a split query produces one of these per shard plus the one client visible
@@ -2016,15 +2043,16 @@ where
             // count it. The copy we kept in the gather above is deliberately not flagged.
             let mut share_stamps = stamps;
             share_stamps.set_share_of_gathered(gather.is_some());
-            // the table this query names, so a peer that never answers can be answered with a
-            // failure in the right variant
-            let table = <D::ClientType as QuerySupport>::archived_query_table(kind);
             // the trace this query is part of, put on every remote entry so the remote work
             // hangs off this span rather than off the bundle's root
             let trace = trace::context_of(&query_span);
             // send each share to its shard: a local one over the mesh, a remote one into a
             // forward accumulated per node ([F38](../../../docs/src/features/inter-node-transport.md))
-            for (shard_info, keys) in found.drain(..) {
+            for (slot, (shard_info, keys)) in found.drain(..).enumerate() {
+                // the slot this share fills, which is its position among the pieces
+                // truncation cannot happen: a query is split to at most one slot per shard
+                #[allow(clippy::cast_possible_truncation)]
+                let slot = slot as u16;
                 match &shard_info.contact {
                     ShardContact::Local(_) => {
                         // where this share ran, relative to the shard that accepted the bundle
@@ -2034,7 +2062,7 @@ where
                         } else {
                             stage_profile::StageHop::LocalShard
                         });
-                        let meta = QueryMetadata::new(
+                        let mut meta = QueryMetadata::new(
                             client,
                             bundle_id,
                             index,
@@ -2043,6 +2071,10 @@ where
                             query_span.clone(),
                             share_stamps,
                         );
+                        meta.read = ReadPlan {
+                            slot,
+                            ..plan.clone()
+                        };
                         let msg = ServerMsg::Query {
                             meta,
                             body: body.clone(),
@@ -2067,11 +2099,17 @@ where
                             origin_shard: self.shard_id as u16,
                             gather: gather.is_some(),
                             trace,
-                            read: None,
+                            // the plan travels resolved: the serving node validates the
+                            // level and never re-resolves it
+                            read: Some(crate::shared::protocol::peer::EntryRead {
+                                level: plan.level,
+                                slot,
+                                tokens: plan.tokens.to_vec(),
+                            }),
                             keys: keys.unwrap_or_default(),
                         };
-                        let slot = remote.entry(*node).or_insert_with(Vec::new);
-                        slot.push((
+                        let shares = remote.entry(*node).or_insert_with(Vec::new);
+                        shares.push((
                             entry,
                             Pending {
                                 client,
@@ -2081,14 +2119,22 @@ where
                                 end,
                                 share: gather.is_some(),
                                 sent_at: Stamp::now(),
+                                deadline,
+                                attempt,
+                                slot,
                             },
                         ));
                     }
                 }
             }
         }
+        // answer every read refused while routing, in its own table variant
+        for (table, index, end, query_span, stamps, error) in refused_reads {
+            let response = <D::ClientType as QuerySupport>::failed(table, bundle_id, index, end, error);
+            self.reply(client, bundle_id, query_span, stamps, response).await?;
+        }
         // flush one forward per node, and answer at once anything the queue could not take
-        self.flush_forwards(body, bundle_id, base_index, remote).await?;
+        self.flush_forwards(body, bundle_id, base_index, attempt, deadline, remote).await?;
         Ok(())
     }
 
@@ -2105,6 +2151,8 @@ where
     /// * `body` - The bundle's bytes, shared into the forward without a copy
     /// * `bundle_id` - The bundle these queries arrived in
     /// * `base_index` - The bundle's base index
+    /// * `attempt` - This attempt at the bundle
+    /// * `deadline` - When the bundle stops waiting
     /// * `remote` - The remote shares, grouped by node
     #[allow(clippy::future_not_send)]
     async fn flush_forwards(
@@ -2112,6 +2160,8 @@ where
         body: &Bytes,
         bundle_id: Uuid,
         base_index: usize,
+        attempt: u64,
+        deadline: Stamp,
         remote: HashMap<NodeId, Vec<(crate::shared::protocol::peer::ForwardEntry, Pending<D>)>>,
     ) -> Result<(), ServerError> {
         for (node, shares) in remote {
@@ -2124,15 +2174,23 @@ where
                 }
                 continue;
             };
-            // the deadline the origin will wait, from now
-            let deadline = peers.transport().forward_timeout.duration();
+            // the budget the origin will still wait, from now: the bundle's, which the
+            // serving node counts down from rather than re-minting
+            let now = Stamp::now();
+            let remaining = Duration::from_nanos(deadline.since(now));
+            // and what this shard waits for the peer: the forward timeout from now, or the
+            // bundle's deadline if that comes first
+            let forward_timeout = peers.transport().forward_timeout.duration();
+            let forward_deadline = now.plus_nanos(forward_timeout.as_nanos().min(u128::from(u64::MAX)) as u64);
+            let pending_deadline = if deadline.since(forward_deadline) > 0 { forward_deadline } else { deadline };
             // split the shares into the entries the frame carries and the pendings we record
             let mut entries = Vec::with_capacity(shares.len());
             let mut pendings = Vec::with_capacity(shares.len());
             let mut keys = Vec::with_capacity(shares.len());
-            for (entry, pending) in shares {
+            for (entry, mut pending) in shares {
                 keys.push((bundle_id, entry.index));
                 entries.push(entry);
+                pending.deadline = pending_deadline;
                 pendings.push(pending);
             }
             // build the forward: preamble, entries, then the bundle bytes shared not copied
@@ -2141,10 +2199,10 @@ where
             #[allow(clippy::cast_possible_truncation)]
             let preamble = crate::shared::protocol::peer::ForwardPreamble {
                 bundle: *bundle_id.as_bytes(),
-                attempt: 0,
+                attempt,
                 base_index: base_index as u64,
                 hops: 0,
-                remaining_ms: deadline.as_millis().min(u128::from(u32::MAX)) as u32,
+                remaining_ms: remaining.as_millis().min(u128::from(u32::MAX)) as u32,
                 entries: entries.len() as u16,
                 entries_len: entry_bytes.len() as u32,
             }
@@ -2219,9 +2277,10 @@ where
             pending.end,
             error,
         );
-        // a share of a split query is merged like any other; a whole answer goes to the client
+        // a share of a split query fails its slot, which fails the whole answer; a whole
+        // answer goes to the client
         if pending.share {
-            let meta = QueryMetadata::untimed(
+            let mut meta = QueryMetadata::untimed(
                 pending.client,
                 bundle_id,
                 index as usize,
@@ -2229,7 +2288,9 @@ where
                 Some(self.info.contact.clone()),
                 pending.span,
             );
-            self.handle_gathered(meta, response).await
+            meta.read.attempt = pending.attempt;
+            meta.read.slot = pending.slot;
+            self.handle_gathered(meta, response, true).await
         } else {
             self.reply(pending.client, bundle_id, pending.span, pending.stamps, response)
                 .await
@@ -2291,7 +2352,7 @@ where
         // label it as a batch level cost rather than a per query one
         stamps.mark_decoded();
         // route every query in the bundle to the shards that answer it
-        self.send_to_shard(peer, &span, &body, archived, stamps, options.as_ref())
+        self.send_to_shard(peer, &span, &body, archived, stamps, base, options.as_ref())
             .await
     }
 
@@ -2360,7 +2421,7 @@ where
         // stages on the get path large enough to be worth measuring on its own
         stamps.mark_replied();
         // and hand the bytes on the same way an answer serialized in the table is
-        self.reply_sealed(client, query_id, index, end, ReplyKind::Whole, span, stamps, archived, token)
+        self.reply_sealed(client, query_id, index, end, ReplyKind::Whole, span, stamps, archived, token, (0, 0))
             .await
     }
 
@@ -2381,6 +2442,7 @@ where
     /// * `stamps` - When this query reached each stage so far, and its index
     /// * `archived` - The serialized response
     /// * `token` - The session token a committed write minted, if this answers one
+    /// * `route` - The attempt and slot a peer relay echoes on the answer head
     #[allow(clippy::too_many_arguments)]
     async fn reply_sealed(
         &mut self,
@@ -2393,6 +2455,7 @@ where
         mut stamps: StageStamps,
         archived: rkyv::util::AlignedVec<16>,
         token: Option<SessionToken>,
+        route: (u64, u16),
     ) -> Result<(), ServerError> {
         // get this clients channel to send replies over
         match self.client_map.get(&client) {
@@ -2415,6 +2478,8 @@ where
                         span,
                         stamps,
                         archived,
+                        attempt: route.0,
+                        slot: route.1,
                         token,
                     })
                     .await
@@ -2571,16 +2636,22 @@ where
         span: Span,
         gathered_meta: Option<QueryMetadata>,
     ) -> Result<(), ServerError> {
-        // remember the index and the end flag before `handle` consumes the metadata: a sealed
-        // answer owed to a peer needs them to be framed, and it cannot read them back out of
-        // the bytes it just sealed
-        let (m_index, m_end) = (meta.index, meta.end);
+        // remember the index, the end flag and the attempt before `handle` consumes the
+        // metadata: a sealed answer owed to a peer needs them to be framed, and it cannot read
+        // them back out of the bytes it just sealed
+        let (m_index, m_end, m_attempt) = (meta.index, meta.end, meta.read.attempt);
         // on a cluster node a write is a command its tablet group commits before anything
         // applies it, so it never reaches the table from here
         // ([F40](../../../docs/src/features/replication.md))
         if self.replication.is_some() {
             if let Some((table, key, payload)) = self.tables.write_command(&query) {
                 return self.propose_write(meta, table, key, payload).await;
+            }
+            // a strong or session read waits for its barrier and its lower bounds first, on a
+            // task of its own; it comes back here as `ReadReady` with its plan marked ready
+            // ([F41](../../../docs/src/features/read-consistency.md))
+            if !meta.read.ready && meta.read.needs_wait() {
+                return self.await_read_barrier(meta, query, span, gathered_meta);
             }
         }
         // try to handle this query
@@ -2598,7 +2669,7 @@ where
                     unreachable!("an answer is either open or sealed")
                 };
                 return self
-                    .reply_sealed(addr, query_id, m_index, m_end, ReplyKind::Whole, span, stamps, archived, None)
+                    .reply_sealed(addr, query_id, m_index, m_end, ReplyKind::Whole, span, stamps, archived, None, (m_attempt, 0))
                     .await;
             };
             // record that this queries synchronous work is finished
@@ -2618,30 +2689,31 @@ where
                     // a share collected on this node goes over the mesh; one collected on the
                     // node that forwarded the query goes back down the peer connection it came
                     // in on, as a share the origin merges
-                    // ([F38](../../../docs/src/features/inter-node-transport.md))
+                    // ([F38](../../../docs/src/features/inter-node-transport.md)). A fixture
+                    // holding this shard's shares keeps it instead
                     if contact.remote_node().is_some() {
                         let archived = rkyv::to_bytes::<_>(&response)?;
                         stamps.mark_replied();
-                        self.reply_sealed(
-                            gathered_meta.client,
-                            gathered_meta.id,
-                            gathered_meta.index,
-                            gathered_meta.end,
-                            ReplyKind::Share,
+                        let share = reads::HeldShare::Remote {
+                            client: gathered_meta.client,
+                            id: gathered_meta.id,
+                            index: gathered_meta.index,
+                            end: gathered_meta.end,
                             span,
                             stamps,
                             archived,
-                            None,
-                        )
-                        .await?;
+                            route: (gathered_meta.read.attempt, gathered_meta.read.slot),
+                        };
+                        self.send_share(share).await?;
                     } else {
                         // build the message carrying our share of this queries answer
-                        let msg = ServerMsg::Gathered {
+                        let share = reads::HeldShare::Local {
+                            contact,
                             meta: gathered_meta,
                             response,
+                            failed: false,
                         };
-                        // send our share to the shard collecting them
-                        self.comms.send(&contact, msg).await?;
+                        self.send_share(share).await?;
                     }
                 }
                 // this query was ours alone to answer
@@ -2654,17 +2726,21 @@ where
     /// Collect one shards share of a query we split across several shards
     ///
     /// The client is owed exactly one response per query, so the shares are merged
-    /// here and answered once, after the last shard we are waiting on has reported.
+    /// here and answered once, after the last slot we are waiting on has reported. A
+    /// share for a query already answered or expired, or for an attempt we have moved past,
+    /// is late; one for a slot already covered is a duplicate. Both are counted and dropped
+    /// ([F41](../../../docs/src/features/read-consistency.md)).
     ///
     /// # Arguments
     ///
     /// * `meta` - The metadata for the query this is part of the answer to
     /// * `response` - This shards share of the answer
+    /// * `failed` - Whether the share is a failure rather than rows
     #[allow(clippy::future_not_send)]
     #[instrument(
         name = "Shard::handle_gathered",
         parent = &meta.span,
-        skip(self, response),
+        skip(self, response, failed),
         fields(index = meta.index, id = meta.id.to_string()),
         err(Debug)
     )]
@@ -2672,34 +2748,40 @@ where
         &mut self,
         meta: QueryMetadata,
         response: <D::ClientType as QuerySupport>::ResponseKinds,
+        failed: bool,
     ) -> Result<(), ServerError> {
-        // find the query this share belongs to
-        let Some(gather) = self.gathering.get_mut(&(meta.id, meta.index)) else {
-            // we already answered this query, so this share arrived after we stopped
-            // waiting for it and there is nothing left to merge it into
-            event!(
-                Level::WARN,
-                msg = "A share arrived for a query we already answered",
-                id = meta.id.to_string(),
-                index = meta.index
-            );
-            return Ok(());
-        };
-        // merge this share into what we have collected so far
-        match &mut gather.merged {
-            Some(merged) => merged.merge(response),
-            // this is the first share we have seen for this query
-            None => gather.merged = Some(response),
-        }
-        // we are waiting on one fewer shard than we were
-        gather.outstanding -= 1;
-        // wait for the rest of our shares if any are still outstanding
-        if gather.outstanding > 0 {
-            return Ok(());
-        }
-        // every shard has reported, so this query is ours to answer now
-        let Some(gather) = self.gathering.remove(&(meta.id, meta.index)) else {
-            return Ok(());
+        // take this share into the gather it names, if it names one we are still waiting on
+        let key = (meta.id, meta.index);
+        let gather = match self.gathering.arrive(key, meta.read.attempt, meta.read.slot, response, failed) {
+            // more shares are still owed
+            gather::Arrival::Merged => return Ok(()),
+            // every slot has reported, so this query is ours to answer now
+            gather::Arrival::Complete(gather) => gather,
+            // we already answered this query, or it expired, or this is an older attempt at
+            // it: there is nothing left to merge it into
+            gather::Arrival::Late => {
+                self.read_stats.late_shares += 1;
+                event!(
+                    Level::DEBUG,
+                    msg = "a share arrived for a query we already answered",
+                    id = meta.id.to_string(),
+                    index = meta.index,
+                    attempt = meta.read.attempt,
+                );
+                return Ok(());
+            }
+            // this slot was already filled, so the share is a repeat
+            gather::Arrival::Duplicate => {
+                self.read_stats.duplicate_shares += 1;
+                event!(
+                    Level::DEBUG,
+                    msg = "a share arrived for a slot already covered",
+                    id = meta.id.to_string(),
+                    index = meta.index,
+                    slot = meta.read.slot,
+                );
+                return Ok(());
+            }
         };
         // a query with no shares at all has nothing to answer with
         let Some(mut merged) = gather.merged else {
@@ -2785,6 +2867,10 @@ where
         let body = data.freeze();
         let archived = Queries::<D::ClientType>::access(&body)?;
         let bundle = Uuid::from_bytes(preamble.bundle);
+        // the origin's budget, counted down from here rather than re-minted: a whole
+        // forwarded query never outlives the client's deadline
+        // ([F41](../../../docs/src/features/read-consistency.md))
+        let deadline = base.plus_nanos(u64::from(preamble.remaining_ms) * 1_000_000);
         // route every entry the peer named to the shard it named
         for entry in entries {
             // an offset past the bundle is a peer out of step with us, and ends this bundle
@@ -2812,7 +2898,7 @@ where
             } else {
                 None
             };
-            let meta = QueryMetadata::new(
+            let mut meta = QueryMetadata::new(
                 conn,
                 bundle,
                 entry.index as usize,
@@ -2821,6 +2907,22 @@ where
                 span,
                 stamps,
             );
+            // the plan the coordinator resolved, or a `One` read with nothing to wait on for
+            // an entry that carries none
+            meta.read = match entry.read {
+                Some(read) => ReadPlan {
+                    level: read.level,
+                    deadline,
+                    tokens: Rc::from(read.tokens),
+                    slot: read.slot,
+                    attempt: preamble.attempt,
+                    ready: false,
+                },
+                None => ReadPlan {
+                    attempt: preamble.attempt,
+                    ..ReadPlan::one(deadline)
+                },
+            };
             let keys = if entry.keys.is_empty() {
                 None
             } else {
@@ -2866,6 +2968,9 @@ where
                 self.resolve_lost_link(node, &unsent).await?;
             }
             PeerEvent::Tick => {
+                // gathers first, so an expired one forgets its pendings before the forward
+                // sweep could answer them a second time
+                self.sweep_gathers().await?;
                 self.sweep_deadlines().await?;
                 self.maybe_report_replication();
             }
@@ -2922,6 +3027,7 @@ where
                     pending.stamps,
                     payload,
                     preamble.token,
+                    (preamble.attempt, 0),
                 )
                 .await
             }
@@ -2930,7 +3036,7 @@ where
                 let response = <<D::ClientType as QuerySupport>::ResponseKinds as crate::shared::traits::RkyvSupport>::deserialize(
                     <<D::ClientType as QuerySupport>::ResponseKinds as crate::shared::traits::RkyvSupport>::access(&payload)?,
                 )?;
-                let meta = QueryMetadata::untimed(
+                let mut meta = QueryMetadata::untimed(
                     pending.client,
                     bundle,
                     preamble.index as usize,
@@ -2938,7 +3044,10 @@ where
                     Some(self.info.contact.clone()),
                     pending.span,
                 );
-                self.handle_gathered(meta, response).await
+                // the attempt and slot the answer echoes are what the gather judges it by
+                meta.read.attempt = preamble.attempt;
+                meta.read.slot = preamble.slot;
+                self.handle_gathered(meta, response, false).await
             }
             // a failure the peer produced is answered in the query's own variant
             ForwardedKind::Error => {
@@ -2980,8 +3089,7 @@ where
         let Some(peers) = self.peers.as_mut() else {
             return Ok(());
         };
-        let deadline = peers.transport().forward_timeout.duration();
-        let expired = peers.expired(Stamp::now(), deadline);
+        let expired = peers.expired(Stamp::now());
         for ((bundle, index, node), pending) in expired {
             self.fail_forward(node, bundle, index, pending, ErrorCode::OutcomeUnknown, "the peer did not answer within the deadline")
                 .await?;
@@ -3148,9 +3256,24 @@ where
         };
         let handle = glommio::spawn_local_into(peer::peer_acceptor(listener, ctx), self.high_priority)?;
         self.tasks.push(handle);
-        // and a timer that sweeps forwarded queries whose deadline has passed
+        Ok(Some(network))
+    }
+
+    /// Start the timer that sweeps gathers and forwards whose deadline has passed
+    ///
+    /// On every node, not only a cluster one: a standalone node splits queries across its
+    /// shards and its gathers expire the same way
+    /// ([Resolved #33](../../../docs/src/appendix/resolved/gather-expiry.md)). The interval is
+    /// a tenth of the shortest deadline in play, with a floor so a short deadline does not turn
+    /// into a busy timer.
+    fn spawn_sweeper(&mut self) -> Result<(), ServerError> {
+        // the shortest budget anything on this shard waits under
+        let mut shortest = self.conf.networking.query_deadline.duration();
+        if let Some(setup) = &self.peer_setup {
+            shortest = shortest.min(setup.transport.forward_timeout.duration());
+        }
+        let interval = (shortest / 10).max(Duration::from_millis(50));
         let tick_tx = self.shard_local_tx.clone_sync();
-        let interval = (setup.transport.forward_timeout.duration() / 10).max(Duration::from_millis(50));
         let sweeper = glommio::spawn_local_into(
             async move {
                 loop {
@@ -3164,7 +3287,7 @@ where
             self._medium_priority,
         )?;
         self.tasks.push(sweeper);
-        Ok(Some(network))
+        Ok(())
     }
 
     /// Find partitions to evict
@@ -3271,6 +3394,8 @@ where
                 ServerMsg::ClientGone(client) => {
                     self.client_map.remove(&client);
                     self.subscribed.remove(&client);
+                    // and the gathers it was waiting on, which nobody will read now
+                    self.gathering.forget_client(client);
                 }
                 // a client asked for the topology and every change to it
                 ServerMsg::Subscribe { client } => self.subscribe(client),
@@ -3301,8 +3426,8 @@ where
                     self.handle_released(meta, query).await?
                 }
                 // collect this shards share of a query we split across shards
-                ServerMsg::Gathered { meta, response } => {
-                    self.handle_gathered(meta, response).await?
+                ServerMsg::Gathered { meta, response, failed } => {
+                    self.handle_gathered(meta, response, failed).await?
                 }
                 // load this partition from disk
                 ServerMsg::Partition(loaded) => {
@@ -3369,10 +3494,19 @@ where
                 ServerMsg::Proposed {
                     meta,
                     table,
+                    tablet,
                     group,
                     outcome,
                     bytes,
-                } => self.answer_proposal(meta, table, group, outcome, bytes).await?,
+                } => self.answer_proposal(meta, table, tablet, group, outcome, bytes).await?,
+                // a read's waits are done, so it runs now
+                ServerMsg::ReadReady {
+                    meta,
+                    query,
+                    span,
+                    gathered_meta,
+                    outcome,
+                } => self.handle_read_ready(meta, query, span, gathered_meta, outcome).await?,
                 // a peer's replication request for a group this shard hosts
                 ServerMsg::Replication {
                     origin,
@@ -3406,6 +3540,13 @@ where
                     let answer = self.handle_replication_verb(verb).await;
                     let _ = reply.send(answer);
                 }
+                // drive a read verb, for the fixture
+                ServerMsg::ReadVerb { verb, reply } => {
+                    let answer = self.handle_read_verb(verb);
+                    let _ = reply.send(answer);
+                }
+                // the hold on this shard's shares ran out
+                ServerMsg::ReleaseHeld => self.release_held().await?,
                 // shutdown this shard
                 ServerMsg::Shutdown => {
                     // signal all of our loaders to shutdown

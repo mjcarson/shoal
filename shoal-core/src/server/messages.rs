@@ -7,13 +7,69 @@ use rkyv::util::AlignedVec;
 use tracing::Span;
 use uuid::Uuid;
 
+use std::rc::Rc;
+
 use super::request_body::RequestBody;
 use super::shard::ShardContact;
 use super::stage_profile::{StageStamps, Stamp};
+use crate::shared::protocol::read::{ReadLevel, SessionToken};
 use crate::shared::responses::{Response, ResponseError};
 use crate::shared::row_ref::RowRef;
 use crate::server::database::ShoalDatabase;
 use crate::shared::traits::{QuerySupport};
+
+/// How one query, or one share of it, is to be served as a read
+///
+/// Resolved once on the coordinator and carried unchanged to the shard that executes the
+/// query, whether over the mesh or over a forward
+/// ([F41](../../../docs/src/features/read-consistency.md)). A write carries one too, since the
+/// deadline, the attempt and the slot are the bundle's and not the read's; its level and tokens
+/// are ignored.
+#[derive(Debug, Clone)]
+pub struct ReadPlan {
+    /// The level this read is served at
+    pub level: ReadLevel,
+    /// When the bundle stops waiting for an answer
+    pub deadline: Stamp,
+    /// The committed lower bounds this read has to be served past, on the tablets it names
+    ///
+    /// Shared rather than cloned: every share of a bundle's query holds the same tokens.
+    pub tokens: Rc<[SessionToken]>,
+    /// Which slot of the coordinator's gather this share fills, if the query was split
+    pub slot: u16,
+    /// Which attempt at the bundle this is, so a late share is told apart by identity
+    pub attempt: u64,
+    /// Whether the barrier and the token waits have already been served for this read
+    ///
+    /// Set once the wait task has posted its outcome, so a read parked on a disk load after
+    /// its barrier never waits twice.
+    pub ready: bool,
+}
+
+impl ReadPlan {
+    /// A plan that waits on nothing: a `One` read with no tokens, at a deadline
+    ///
+    /// # Arguments
+    ///
+    /// * `deadline` - When the bundle stops waiting
+    #[must_use]
+    pub fn one(deadline: Stamp) -> Self {
+        ReadPlan {
+            level: ReadLevel::One,
+            deadline,
+            tokens: Rc::from(Vec::new()),
+            slot: 0,
+            attempt: 0,
+            ready: false,
+        }
+    }
+
+    /// Whether this read has a barrier or a token wait ahead of it
+    #[must_use]
+    pub fn needs_wait(&self) -> bool {
+        self.level == ReadLevel::Quorum || !self.tokens.is_empty()
+    }
+}
 
 /// The metadata about a query from a client
 #[derive(Debug, Clone)]
@@ -63,6 +119,8 @@ pub struct QueryMetadata {
     /// answering here would put a second response at an index that already has one. It is
     /// applied where this query finally produces a response, which happens exactly once.
     pub failed: Option<ResponseError>,
+    /// How this query is served as a read, and which attempt and slot it answers under
+    pub read: ReadPlan,
 }
 
 impl QueryMetadata {
@@ -99,6 +157,8 @@ impl QueryMetadata {
             skip_disk: None,
             // and with nothing to report, since nothing has failed yet
             failed: None,
+            // a plan that waits on nothing and never expires, until the coordinator sets one
+            read: ReadPlan::one(Stamp::now().plus_nanos(u64::MAX / 4)),
         }
     }
 
@@ -136,6 +196,21 @@ impl QueryMetadata {
         )
     }
 }
+/// What a strong or session read waited on, for the shard's counters and the read's stamps
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ReadWaits {
+    /// How many barriers were obtained, one per group the read touched
+    pub barriers: u64,
+    /// How many of them were asked of a leader elsewhere
+    pub barrier_hops: u64,
+    /// Nanoseconds spent obtaining barriers
+    pub barrier_ns: u64,
+    /// Nanoseconds spent waiting for this replica to apply through them, or past a token
+    pub apply_ns: u64,
+    /// Whether a token's lower bound was waited past
+    pub session: bool,
+}
+
 /// How to turn a borrowed reply into the bytes a client is sent
 ///
 /// A reply built out of rows the table is still holding has to be serialized before that borrow
@@ -214,6 +289,10 @@ pub struct Reply {
     pub stamps: StageStamps,
     /// The answer, sealed
     pub archived: AlignedVec,
+    /// The attempt at the bundle this answers, which a peer relay echoes on the answer head
+    pub attempt: u64,
+    /// The slot of the origin's gather a share fills, echoed the same way
+    pub slot: u16,
     /// The session token a committed write minted, for a client that asked for one
     ///
     /// Written ahead of the payload by a relay whose connection negotiated the section, and
@@ -404,6 +483,9 @@ where
         meta: QueryMetadata,
         /// This shards share of the answer
         response: <D::ClientType as QuerySupport>::ResponseKinds,
+        /// Whether the share is a failure, which fails its slot at once
+        /// ([F41](../../../docs/src/features/read-consistency.md))
+        failed: bool,
     },
     /// A partition loaded from disk. This can never be sent across threads!
     Partition(LoadedPartitionKinds<D>),
@@ -479,6 +561,8 @@ where
         meta: QueryMetadata,
         /// The table it named
         table: D::TableNames,
+        /// The tablet its key hashed to, which its token names
+        tablet: u16,
         /// The group it went through, if admission let it that far
         group: Option<crate::shared::identity::GroupId>,
         /// What the group answered, or why it could not
@@ -518,6 +602,23 @@ where
             String,
         >,
     },
+    /// A read's barrier and token waits are done, from the task that waited on them
+    ///
+    /// Posted by the task `await_read_barrier` spawned, so the loop runs the read between two
+    /// of its other messages and never awaits a `Raft` method itself
+    /// ([F41](../../../docs/src/features/read-consistency.md)). Never crosses a thread.
+    ReadReady {
+        /// The read's metadata, its plan now marked ready
+        meta: QueryMetadata,
+        /// The read
+        query: <D::ClientType as QuerySupport>::QueryKinds,
+        /// The span to reply under
+        span: Span,
+        /// The metadata to answer with, if this is a share of a split query
+        gathered_meta: Option<QueryMetadata>,
+        /// What the waits came to: how long they took, or why the read cannot be served
+        outcome: Result<ReadWaits, ResponseError>,
+    },
     /// Every tablet group this shard hosts has shut down, from the task that stopped them
     GroupsDown,
     /// The WAL sealed a segment, so the loop can judge whether it is resolved
@@ -548,6 +649,16 @@ where
         /// Where the answer goes
         reply: std::sync::mpsc::Sender<Result<serde_json::Value, String>>,
     },
+    /// Drive a read verb, for the fixture, on a standalone node or a cluster one
+    /// ([F41](../../../docs/src/features/read-consistency.md))
+    ReadVerb {
+        /// What to do
+        verb: crate::server::replication::report::ReadVerb,
+        /// Where the answer goes
+        reply: std::sync::mpsc::Sender<Result<serde_json::Value, String>>,
+    },
+    /// The hold on this shard's shares has run out, so send what it kept
+    ReleaseHeld,
     /// Tell this shard to shutdown
     Shutdown,
 }
@@ -637,12 +748,15 @@ impl<D: ShoalDatabase> Clone for ServerMsg<D> {
             ServerMsg::Proposed { .. } => panic!("A proposal's outcome is for the shard that proposed it"),
             ServerMsg::Replication { .. } => panic!("A replication request is for the shard the head names"),
             ServerMsg::GroupUp { .. } => panic!("A group handle is for the shard that built it"),
+            ServerMsg::ReadReady { .. } => panic!("A ready read is for the shard that waited on it"),
             ServerMsg::GroupsDown => panic!("A groups-down notice is for one shard"),
             ServerMsg::WalSealed { .. } => panic!("A sealed segment is the writing shard's"),
             ServerMsg::SegmentCompacted { .. } => panic!("A compacted segment is the writing shard's"),
             ServerMsg::CheckpointWritten { .. } => panic!("A checkpoint write is the writing shard's"),
             ServerMsg::ReplicationView(_) => panic!("A replication view is asked of one shard"),
             ServerMsg::ReplicationVerb { .. } => panic!("A replication verb is for one shard"),
+            ServerMsg::ReadVerb { .. } => panic!("A read verb is for one shard"),
+            ServerMsg::ReleaseHeld => panic!("A release is for the shard that held"),
             // a subscription and an admin request go to the accepting shard alone
             ServerMsg::Subscribe { .. } => panic!("A subscription is for one shard"),
             ServerMsg::Admin { .. } => panic!("An admin request is for one shard"),
