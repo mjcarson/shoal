@@ -1545,6 +1545,27 @@ fn handle_command(
                     "stats": serde_json::to_value(stats).expect("stats serialize"),
                 }))
             }),
+        // block one shard's executor for a while, so every group on it falls silent while the
+        // control thread keeps reporting ([F42](../../docs/src/features/primary-failover.md))
+        "STALL_SHARD" => {
+            let shard = parts.next().and_then(|idx| idx.parse::<usize>().ok());
+            let ms = parts.next().and_then(|ms| ms.parse::<u64>().ok());
+            match (shard, ms) {
+                (Some(shard), Some(ms)) => pool
+                    .read_verb(Some(shard), shoal::server::replication::ReadVerb::StallShard { ms })
+                    .map_err(|error| format!("{error:?}"))
+                    .and_then(|answers| answers.into_iter().next().unwrap_or_else(|| Err("no shard answered".to_string()))),
+                _ => Err("STALL_SHARD needs a shard index and a stall in milliseconds".to_string()),
+            }
+        }
+        // drop the next committed write replies every shard of this node would send
+        "DROP_REPLIES" => match parts.next().and_then(|n| n.parse::<u64>().ok()) {
+            Some(n) => pool
+                .replication_verb(shoal::server::replication::ReplicationVerb::DropReplies { n })
+                .map_err(|error| format!("{error:?}"))
+                .and_then(|answers| answers.into_iter().collect::<Result<Vec<_>, _>>().map(serde_json::Value::Array)),
+            None => Err("DROP_REPLIES needs a count".to_string()),
+        },
         // flush this node's exported spans to its trace file
         "FLUSH" => {
             if let Some(provider) = trace_provider {
@@ -2566,7 +2587,7 @@ fn group_of(
     Err(FixtureError::NotReady(format!("node {node} hosts no group for key {key} of {table}: {view}")))
 }
 
-/// Wait until a key's group has a leader, and say which node it is
+/// Wait until a key's group has a leader, as node zero sees it, and say which node it is
 ///
 /// # Arguments
 ///
@@ -2574,9 +2595,21 @@ fn group_of(
 /// * `table` - The table's name
 /// * `key` - The partition key
 fn wait_group_leader(cluster: &mut Cluster, table: &str, key: u64) -> Result<(String, usize), FixtureError> {
+    wait_group_leader_via(cluster, 0, table, key)
+}
+
+/// Wait until a key's group has a leader, as one node sees it, and say which node it is
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `via` - The node to ask, which a test that killed node zero cannot leave at zero
+/// * `table` - The table's name
+/// * `key` - The partition key
+fn wait_group_leader_via(cluster: &mut Cluster, via: usize, table: &str, key: u64) -> Result<(String, usize), FixtureError> {
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     loop {
-        let (group, leader) = group_of(cluster, 0, table, key)?;
+        let (group, leader) = group_of(cluster, via, table, key)?;
         if let Some(leader) = leader {
             return Ok((group, leader));
         }
@@ -2584,6 +2617,86 @@ fn wait_group_leader(cluster: &mut Cluster, table: &str, key: u64) -> Result<(St
             return Err(FixtureError::NotReady(format!("group {group} never elected a leader")));
         }
         std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Wait until a key's group is led by somebody other than a given node, as one node sees it
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `via` - The node to ask
+/// * `table` - The table's name
+/// * `key` - The partition key
+/// * `not` - The node that must not lead: the one that was killed, paused, stalled or cut off
+fn wait_group_leader_change(
+    cluster: &mut Cluster,
+    via: usize,
+    table: &str,
+    key: u64,
+    not: usize,
+) -> Result<(String, usize), FixtureError> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let (group, leader) = group_of(cluster, via, table, key)?;
+        if let Some(leader) = leader {
+            if leader != not {
+                return Ok((group, leader));
+            }
+        }
+        if std::time::Instant::now() > deadline {
+            return Err(FixtureError::NotReady(format!("group {group} was never led by anybody but node {not}")));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// The health one node's map gives a member
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `at` - The node whose map to read
+/// * `member` - The member
+fn health_of(cluster: &mut Cluster, at: usize, member: usize) -> Result<String, FixtureError> {
+    let id = cluster.node_ids()[member].clone();
+    let map = cluster.node_mut(at).command("MAP")?;
+    Ok(map["ok"]["members"][&id]["health"].as_str().unwrap_or_default().to_string())
+}
+
+/// Write one note through a node, trying again by name while its group is between leaders
+///
+/// A write proposed in the middle of an election is refused `NotLeader`, one proposed to a
+/// leader that lost its quorum is `OutcomeUnknown` at its deadline, and one the coordinator
+/// cannot admit is `QuorumUnavailable`; a test that just killed, paused or cut off a leader
+/// tolerates those and nothing else until the write lands.
+///
+/// # Arguments
+///
+/// * `addr` - The endpoint
+/// * `key` - The key
+/// * `text` - The text
+/// * `within` - How long to keep trying
+async fn write_note_eventually(addr: &str, key: u64, text: &str, within: Duration) -> Result<(), FixtureError> {
+    use shoal::shared::protocol::error::ErrorCode;
+    let deadline = std::time::Instant::now() + within;
+    loop {
+        let written = write_note(addr, key, text).await;
+        if written.is_ok() {
+            return Ok(());
+        }
+        let code = failure_code(&written);
+        assert!(
+            matches!(
+                code,
+                Some(ErrorCode::NotLeader | ErrorCode::OutcomeUnknown | ErrorCode::QuorumUnavailable | ErrorCode::Unavailable | ErrorCode::Timeout)
+            ),
+            "a write through {addr} was refused for another reason: {written:?}"
+        );
+        if std::time::Instant::now() > deadline {
+            return Err(FixtureError::NotReady(format!("note {key} never landed through {addr}: {written:?}")));
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
     }
 }
 
@@ -4027,5 +4140,429 @@ async fn mixed_table_bundle_resolves_each_table_policy() -> Result<(), FixtureEr
     assert_eq!(row?.as_deref(), Some("a row"));
     assert_eq!(note?.as_deref(), Some("a note"));
     assert_eq!(barriers(&mut cluster)? - before, 0, "a cleared policy still paid a barrier");
+    Ok(())
+}
+
+/// Cached reports cannot choose a history that loses an acknowledged write (C7 M6, F42)
+///
+/// The B=100/C=101/A+B=102 schedule from [C7](../../docs/src/distributed/failover.md), on real
+/// nodes: node zero leads a key's group; 100 reaches everybody; node one is cut off and 101
+/// commits on zero and two; node one is healed and catches up; node two is cut off and 102
+/// commits on zero and one; node zero is killed. A rule that promoted the freshest report
+/// would pick node two, whose last report was 101, and lose 102. Raft's election restriction
+/// cannot: node two's log is shorter, so node one refuses it a vote and is the only member that
+/// can win, and 102 is on both survivors before node zero comes back and converges too.
+#[tokio::test(flavor = "multi_thread")]
+async fn stale_heartbeat_reports_cannot_lose_acked_write() -> Result<(), FixtureError> {
+    use shoal::client::{ReadLevel, SendOptions};
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lane_links(true)
+        .write_timeout(Duration::from_secs(3))
+        .query_deadline(Duration::from_secs(3))
+        .start()
+        .await?;
+    let (key, group) = key_led_by(&mut cluster, "Note", 0, 1000)?;
+    let addrs: Vec<String> = (0..3).map(|id| cluster.node(id).endpoints.client.to_string()).collect();
+    let quorum = SendOptions::new().read(ReadLevel::Quorum);
+    // 100 everywhere
+    write_note(&addrs[0], key, "100").await?;
+    for addr in &addrs {
+        wait_note(addr, key, Some("100"), Duration::from_secs(10)).await?;
+    }
+    // 101 on zero and two: node one is cut off from the leader
+    cluster.data_link(0, 1).cut();
+    cluster.data_link(1, 0).cut();
+    write_note(&addrs[0], key, "101").await?;
+    wait_note(&addrs[2], key, Some("101"), Duration::from_secs(10)).await?;
+    assert_eq!(read_note(&addrs[1], key).await?.as_deref(), Some("100"), "the cut member saw 101");
+    // node one is healed and catches up to 101
+    cluster.data_link(0, 1).heal();
+    cluster.data_link(1, 0).heal();
+    wait_note(&addrs[1], key, Some("101"), Duration::from_secs(10)).await?;
+    // 102 on zero and one: node two is cut off, and its last word is 101
+    cluster.data_link(0, 2).cut();
+    cluster.data_link(2, 0).cut();
+    write_note(&addrs[0], key, "102").await?;
+    wait_note(&addrs[1], key, Some("102"), Duration::from_secs(10)).await?;
+    assert_eq!(read_note(&addrs[2], key).await?.as_deref(), Some("101"), "the cut member saw 102");
+    // the leader dies: only node one's log holds 102, so only node one can win
+    cluster.kill(0)?;
+    let (elected_group, leader) = wait_group_leader_change(&mut cluster, 1, "Note", key, 0)?;
+    assert_eq!(elected_group, group);
+    assert_eq!(leader, 1, "a member whose log lacks the acknowledged write was elected");
+    // and 102 is on both survivors, strongly
+    for reader in 1..3 {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            match read_note_with(&addrs[reader], key, &quorum).await {
+                Ok(Some(text)) if text == "102" => break,
+                Ok(other) => panic!("node {reader} lost the acknowledged write: {other:?}"),
+                Err(error) => {
+                    assert!(std::time::Instant::now() < deadline, "node {reader} never served 102: {error:?}");
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+            }
+        }
+    }
+    wait_digests_equal(&mut cluster, &[1, 2], "Note", Duration::from_secs(30))?;
+    // node zero comes back and converges on the same history
+    cluster.data_link(0, 2).heal();
+    cluster.data_link(2, 0).heal();
+    cluster.restart(0, NodeKind::Server)?;
+    cluster.wait_joined(&[0])?;
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    wait_note(&addr0, key, Some("102"), Duration::from_secs(30)).await?;
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    for id in 0..3 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
+
+/// A delayed map and a delayed term cannot make an old primary authoritative (C7 M6, F42)
+///
+/// Node zero leads a key's group. Its data lanes are cut both ways while its control lanes
+/// stay up, and what control traffic reaches it is delayed: the control plane keeps calling it
+/// `Up`, the map does not move, and nothing it hears says it lost the lead. The survivors
+/// elect and commit through the new leader. Once its lease lapses a write through node zero
+/// is `NotLeader` - refused before anything is appended, not `OutcomeUnknown` at a deadline -
+/// and a strong read through it is refused too, never the stale value. With the data lanes
+/// healed and the control lanes cut instead, writes through every node still commit, since a
+/// tablet's authority is its own group's. Healed, everybody holds the survivors' history and
+/// the write the old primary refused is nowhere.
+#[tokio::test(flavor = "multi_thread")]
+async fn delayed_topology_cannot_authorize_old_primary() -> Result<(), FixtureError> {
+    use shoal::client::{ReadLevel, SendOptions};
+    use shoal::shared::protocol::error::ErrorCode;
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lane_links(true)
+        .write_timeout(Duration::from_secs(3))
+        .query_deadline(Duration::from_secs(3))
+        .start()
+        .await?;
+    let keys = keys_led_by(&mut cluster, "Note", 0, 1000, 2)?;
+    let (key, other) = (keys[0], keys[1]);
+    let addrs: Vec<String> = (0..3).map(|id| cluster.node(id).endpoints.client.to_string()).collect();
+    let quorum = SendOptions::new().read(ReadLevel::Quorum);
+    write_note(&addrs[0], key, "v1").await?;
+    for addr in &addrs {
+        wait_note(addr, key, Some("v1"), Duration::from_secs(10)).await?;
+    }
+    // the data lanes round node zero go, the control lanes stay and slow down
+    for (from, to) in [(0, 1), (1, 0), (0, 2), (2, 0)] {
+        cluster.data_link(from, to).cut();
+    }
+    for link in cluster.control_links_into(0) {
+        link.delay(Duration::from_millis(1500));
+    }
+    let cut_at = std::time::Instant::now();
+    let (_, leader) = wait_group_leader_change(&mut cluster, 1, "Note", key, 0)?;
+    write_note_eventually(&addrs[leader], key, "v2", Duration::from_secs(30)).await?;
+    // the control plane still calls node zero up: nothing it commits is a data election
+    assert_eq!(health_of(&mut cluster, 1, 0)?, "up");
+    // past its lease - two failover bases - the old primary refuses a write by name, before
+    // appending anything
+    let lease = Duration::from_millis(2500);
+    if let Some(left) = lease.checked_sub(cut_at.elapsed()) {
+        tokio::time::sleep(left).await;
+    }
+    let refused = write_note(&addrs[0], other, "v3").await;
+    assert_eq!(failure_code(&refused), Some(ErrorCode::NotLeader), "the old primary answered {refused:?}");
+    // and cannot pass a fresh read barrier
+    let stale = read_note_with(&addrs[0], key, &quorum).await;
+    assert!(
+        matches!(failure_code(&stale), Some(ErrorCode::QuorumUnavailable | ErrorCode::Timeout | ErrorCode::NotLeader)),
+        "a strong read through the old primary answered {stale:?}"
+    );
+    // the data lanes back, the control lanes cut instead: writes still commit through everybody
+    for (from, to) in [(0, 1), (1, 0), (0, 2), (2, 0)] {
+        cluster.data_link(from, to).heal();
+    }
+    wait_note(&addrs[0], key, Some("v2"), Duration::from_secs(30)).await?;
+    for (from, to) in [(0, 1), (1, 0), (0, 2), (2, 0)] {
+        cluster.control_link(from, to).cut();
+    }
+    write_note_eventually(&addrs[0], key, "v4", Duration::from_secs(30)).await?;
+    write_note_eventually(&addrs[1], key, "v5", Duration::from_secs(30)).await?;
+    for (from, to) in [(0, 1), (1, 0), (0, 2), (2, 0)] {
+        cluster.control_link(from, to).heal();
+    }
+    for link in cluster.control_links_into(0) {
+        link.heal();
+    }
+    // everybody holds the survivors' history, and the refused write is nowhere
+    for addr in &addrs {
+        wait_note(addr, key, Some("v5"), Duration::from_secs(30)).await?;
+        wait_note(addr, other, None, Duration::from_secs(10)).await?;
+    }
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    for id in 0..3 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
+
+/// A stalled data shard fails over while its control thread stays alive (C7 M6, F42)
+///
+/// Node zero leads a key's group. Its one shard's executor is blocked for six seconds, so
+/// every group on it stops heartbeating while the control thread keeps reporting and the
+/// control plane keeps calling the node `Up`: `Down` is not what an election waits for. The
+/// survivors elect within the stall and a write through the new leader commits. When the
+/// shard runs again it hears the higher term, follows, and converges.
+#[tokio::test(flavor = "multi_thread")]
+async fn shard_stall_with_live_control_plane_can_fail_over() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lane_links(true)
+        .write_timeout(Duration::from_secs(3))
+        .query_deadline(Duration::from_secs(3))
+        .start()
+        .await?;
+    let (key, _) = key_led_by(&mut cluster, "Note", 0, 1000)?;
+    let addrs: Vec<String> = (0..3).map(|id| cluster.node(id).endpoints.client.to_string()).collect();
+    write_note(&addrs[0], key, "v1").await?;
+    for addr in &addrs {
+        wait_note(addr, key, Some("v1"), Duration::from_secs(10)).await?;
+    }
+    // the leader's shard stops running; its control thread does not
+    let stalled = cluster.node_mut(0).command("STALL_SHARD 0 6000")?;
+    assert_eq!(stalled["ok"]["stalling"], true, "{stalled}");
+    let stalled_at = std::time::Instant::now();
+    let (_, leader) = wait_group_leader_change(&mut cluster, 1, "Note", key, 0)?;
+    assert!(stalled_at.elapsed() < Duration::from_secs(6), "the election waited for the stall to end");
+    write_note_eventually(&addrs[leader], key, "v2", Duration::from_secs(30)).await?;
+    // the node was never called down: the shard's silence is not the node's
+    assert_eq!(health_of(&mut cluster, 1, 0)?, "up");
+    assert_eq!(health_of(&mut cluster, leader, 0)?, "up");
+    // the shard runs again, follows, and converges
+    if let Some(left) = Duration::from_millis(6500).checked_sub(stalled_at.elapsed()) {
+        tokio::time::sleep(left).await;
+    }
+    wait_note(&addrs[0], key, Some("v2"), Duration::from_secs(30)).await?;
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    let (_, led) = wait_group_leader_via(&mut cluster, 1, "Note", key)?;
+    assert_ne!(led, 0, "leadership went back to the stalled shard on its own");
+    for id in 0..3 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
+
+/// An isolated old primary cannot pass a fresh read barrier, and refuses writes at its lease (C7 M6, F42)
+///
+/// Node zero leads a key's group and is isolated on every lane. The survivors elect and
+/// commit a new value. A strong read through node zero is refused - `QuorumUnavailable` once
+/// its lease lapsed, `Timeout` before - and never the old value; a `One` read through it is
+/// the old value, which is what `One` promises; past the lease a write through it is
+/// `NotLeader`. Healed, it hears the higher term and a strong read through it hops to the new
+/// leader and sees the new value.
+#[tokio::test(flavor = "multi_thread")]
+async fn strong_read_refuses_isolated_old_primary() -> Result<(), FixtureError> {
+    use shoal::client::{ReadLevel, SendOptions};
+    use shoal::shared::protocol::error::ErrorCode;
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lane_links(true)
+        .write_timeout(Duration::from_secs(3))
+        .query_deadline(Duration::from_secs(3))
+        .start()
+        .await?;
+    let keys = keys_led_by(&mut cluster, "Note", 0, 1000, 2)?;
+    let (key, other) = (keys[0], keys[1]);
+    let addrs: Vec<String> = (0..3).map(|id| cluster.node(id).endpoints.client.to_string()).collect();
+    let quorum = SendOptions::new().read(ReadLevel::Quorum);
+    let one = SendOptions::new().read(ReadLevel::One);
+    write_note(&addrs[0], key, "v1").await?;
+    for addr in &addrs {
+        wait_note(addr, key, Some("v1"), Duration::from_secs(10)).await?;
+    }
+    cluster.isolate(0);
+    let isolated_at = std::time::Instant::now();
+    let (_, leader) = wait_group_leader_change(&mut cluster, 1, "Note", key, 0)?;
+    write_note_eventually(&addrs[leader], key, "v2", Duration::from_secs(30)).await?;
+    // a strong read through the old primary is refused, never stale
+    let stale = read_note_with(&addrs[0], key, &quorum).await;
+    assert!(
+        matches!(failure_code(&stale), Some(ErrorCode::QuorumUnavailable | ErrorCode::Timeout | ErrorCode::NotLeader)),
+        "a strong read through the isolated primary answered {stale:?}"
+    );
+    // a One read through it is the old committed value
+    assert_eq!(read_note_with(&addrs[0], key, &one).await?.as_deref(), Some("v1"));
+    // past its lease: a write is refused by name, and a strong read at once
+    if let Some(left) = Duration::from_millis(2500).checked_sub(isolated_at.elapsed()) {
+        tokio::time::sleep(left).await;
+    }
+    let refused = write_note(&addrs[0], other, "v3").await;
+    assert_eq!(failure_code(&refused), Some(ErrorCode::NotLeader), "the isolated primary answered {refused:?}");
+    let started = std::time::Instant::now();
+    let lapsed = read_note_with(&addrs[0], key, &quorum).await;
+    assert_eq!(failure_code(&lapsed), Some(ErrorCode::QuorumUnavailable), "{lapsed:?}");
+    assert!(started.elapsed() < Duration::from_millis(1500), "a lapsed lease was waited out rather than answered");
+    // healed, the old primary hears the term and a strong read through it hops
+    cluster.heal(0);
+    let hops_before = read_stats(&mut cluster, 0)?["stats"]["barrier_hops"].as_u64().unwrap_or(0);
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        match read_note_with(&addrs[0], key, &quorum).await {
+            Ok(Some(text)) if text == "v2" => break,
+            Ok(other) => panic!("a strong read through the healed primary was stale: {other:?}"),
+            Err(error) => {
+                assert!(std::time::Instant::now() < deadline, "a strong read never succeeded after the heal: {error:?}");
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        }
+    }
+    let hops = read_stats(&mut cluster, 0)?["stats"]["barrier_hops"].as_u64().unwrap_or(0);
+    assert!(hops > hops_before, "the strong read through the old primary did not hop to the leader");
+    wait_note(&addrs[0], other, None, Duration::from_secs(10)).await?;
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    for id in 0..3 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
+
+/// A minority never commits, and healing restores progress with the acknowledged history intact (C7 M6, F42)
+///
+/// Eight keys are written and converge. Two of three nodes are killed. A write through the
+/// survivor is not acknowledged - `OutcomeUnknown` at its deadline while its lease lasts,
+/// `NotLeader` after - and a strong read through it is refused; the control plane has no
+/// quorum either, so nobody is called `Down` and admission is not what refuses the write. Both
+/// nodes restarted, a new write commits, every acknowledged key is on every node, and the key
+/// the unknown write named holds the same value everywhere.
+#[tokio::test(flavor = "multi_thread")]
+async fn quorum_loss_is_unavailable_without_data_loss() -> Result<(), FixtureError> {
+    use shoal::client::{ReadLevel, SendOptions};
+    use shoal::shared::protocol::error::ErrorCode;
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lane_links(true)
+        .write_timeout(Duration::from_secs(3))
+        .query_deadline(Duration::from_secs(3))
+        .start()
+        .await?;
+    let keys = keys_led_by(&mut cluster, "Note", 0, 1000, 8)?;
+    let addrs: Vec<String> = (0..3).map(|id| cluster.node(id).endpoints.client.to_string()).collect();
+    let quorum = SendOptions::new().read(ReadLevel::Quorum);
+    for key in &keys {
+        write_note(&addrs[0], *key, "v1").await?;
+    }
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    // the majority dies
+    cluster.kill(1)?;
+    cluster.kill(2)?;
+    // a write through the survivor is never acknowledged
+    let unknown = write_note(&addrs[0], keys[0], "v2").await;
+    assert!(
+        matches!(failure_code(&unknown), Some(ErrorCode::OutcomeUnknown | ErrorCode::NotLeader | ErrorCode::QuorumUnavailable)),
+        "a write with the majority dead answered {unknown:?}"
+    );
+    // and a strong read through it cannot be served
+    let refused = read_note_with(&addrs[0], keys[1], &quorum).await;
+    assert!(
+        matches!(failure_code(&refused), Some(ErrorCode::QuorumUnavailable | ErrorCode::Timeout | ErrorCode::NotLeader)),
+        "a strong read with the majority dead answered {refused:?}"
+    );
+    // nobody was called down: a minority commits nothing, on either plane
+    assert_eq!(health_of(&mut cluster, 0, 1)?, "up");
+    assert_eq!(health_of(&mut cluster, 0, 2)?, "up");
+    // the majority comes back, and progress with it
+    cluster.restart(1, NodeKind::Server)?;
+    cluster.restart(2, NodeKind::Server)?;
+    cluster.wait_joined(&[1, 2])?;
+    let addrs: Vec<String> = (0..3).map(|id| cluster.node(id).endpoints.client.to_string()).collect();
+    write_note_eventually(&addrs[0], keys[1], "v3", Duration::from_secs(30)).await?;
+    for addr in &addrs {
+        wait_note(addr, keys[1], Some("v3"), Duration::from_secs(30)).await?;
+        for key in &keys[2..] {
+            wait_note(addr, *key, Some("v1"), Duration::from_secs(30)).await?;
+        }
+    }
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    // the unknown write is everywhere or nowhere, never somewhere
+    let mut seen = Vec::new();
+    for addr in &addrs {
+        seen.push(read_note_with(addr, keys[0], &quorum).await?);
+    }
+    assert!(seen.iter().all(|value| *value == seen[0]), "the unknown write diverged: {seen:?}");
+    assert!(matches!(seen[0].as_deref(), Some("v1" | "v2")), "{seen:?}");
+    for id in 0..3 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
+
+/// A paused leader that resumes cannot authorize a stale strong read (C6 M6, F42)
+///
+/// Node zero leads a key's group and is paused with SIGSTOP. The survivors elect and commit a
+/// new value; the control lanes into node zero are slowed so what it hears about the world is
+/// late. Resumed, node zero still believes it leads: its lease lapsed while it slept, so its
+/// own barrier is refused at once, and once the new leader's higher term reaches it the
+/// barrier hops and sees the new value. No strong read through it is ever the old value.
+#[tokio::test(flavor = "multi_thread")]
+async fn read_barrier_survives_leader_change_and_delayed_messages() -> Result<(), FixtureError> {
+    use shoal::client::{ReadLevel, SendOptions};
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lane_links(true)
+        .write_timeout(Duration::from_secs(3))
+        .query_deadline(Duration::from_secs(3))
+        .start()
+        .await?;
+    let (key, _) = key_led_by(&mut cluster, "Note", 0, 1000)?;
+    let addrs: Vec<String> = (0..3).map(|id| cluster.node(id).endpoints.client.to_string()).collect();
+    let quorum = SendOptions::new().read(ReadLevel::Quorum);
+    write_note(&addrs[0], key, "v1").await?;
+    for addr in &addrs {
+        wait_note(addr, key, Some("v1"), Duration::from_secs(10)).await?;
+    }
+    assert_eq!(read_note_with(&addrs[0], key, &quorum).await?.as_deref(), Some("v1"));
+    let hops_before = read_stats(&mut cluster, 0)?["stats"]["barrier_hops"].as_u64().unwrap_or(0);
+    // the leader sleeps; the others elect and move on
+    cluster.node(0).pause().map_err(|error| FixtureError::ChildFailed(format!("pausing: {error}")))?;
+    let (_, leader) = wait_group_leader_change(&mut cluster, 1, "Note", key, 0)?;
+    write_note_eventually(&addrs[leader], key, "v2", Duration::from_secs(30)).await?;
+    for link in cluster.control_links_into(0) {
+        link.delay(Duration::from_secs(1));
+    }
+    cluster.node(0).resume().map_err(|error| FixtureError::ChildFailed(format!("resuming: {error}")))?;
+    // every strong read through the old leader is the new value or a refusal, never the old
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let mut refusals = 0;
+    loop {
+        match read_note_with(&addrs[0], key, &quorum).await {
+            Ok(Some(text)) if text == "v2" => break,
+            Ok(other) => panic!("a strong read through the resumed leader was stale: {other:?}"),
+            Err(error) => {
+                refusals += 1;
+                assert!(std::time::Instant::now() < deadline, "a strong read never succeeded after the resume: {error:?}");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+    }
+    // and a few more, now that it knows: the new value or a refusal under load, never the old
+    for _ in 0..5 {
+        match read_note_with(&addrs[0], key, &quorum).await {
+            Ok(seen) => assert_eq!(seen.as_deref(), Some("v2")),
+            Err(error) => assert!(failure_code::<()>(&Err(error)).is_some(), "a strong read failed off the wire"),
+        }
+    }
+    let hops = read_stats(&mut cluster, 0)?["stats"]["barrier_hops"].as_u64().unwrap_or(0);
+    assert!(hops > hops_before, "the strong reads through the old leader never hopped ({refusals} refusals)");
+    for link in cluster.control_links_into(0) {
+        link.heal();
+    }
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    for id in 0..3 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
     Ok(())
 }

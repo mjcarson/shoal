@@ -164,6 +164,15 @@ pub enum ReadVerb {
     ReleaseShares,
     /// How many gathers are resident, and the read counters
     Gathers,
+    /// Block this shard's executor for a while, so every group on it falls silent
+    ///
+    /// The control thread keeps reporting, so the node stays `Up` while its tablets miss their
+    /// heartbeats: the shard stall of [C7](../../../../docs/src/distributed/failover.md)
+    /// ([F42](../../../../docs/src/features/primary-failover.md)).
+    StallShard {
+        /// How many milliseconds to block for
+        ms: u64,
+    },
 }
 
 impl ShardReplication {
@@ -254,5 +263,14 @@ pub enum ReplicationVerb {
     Release {
         /// The group
         group: GroupId,
+    },
+    /// Drop the next committed write replies this shard would send, so a client's answer is lost
+    ///
+    /// The proposal commits and applies as ever; only the reply to the client is dropped, which
+    /// is the lost response a retry under the same identity has to recover from
+    /// ([F42](../../../../docs/src/features/primary-failover.md)).
+    DropReplies {
+        /// How many replies to drop
+        n: u64,
     },
 }

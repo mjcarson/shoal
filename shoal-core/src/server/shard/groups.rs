@@ -44,11 +44,11 @@ use crate::server::map::GroupSpec;
 use crate::server::messages::{QueryMetadata, ServerMsg};
 use crate::server::peer::{LinkEvent, ReplicateReply};
 use crate::server::replication::{
-    ApplyOutcome, BarrierAnswer, DataConfig, GroupMachine, GroupNetwork, GroupReport, MachineState,
+    ApplyOutcome, BarrierAnswer, DataConfig, GroupMachine, GroupNetwork, GroupReport, Lease, MachineState,
     ProposalOutcome, Remembered, ReplicationVerb, RpcFailure, ShardNetwork, ShardPeer, ShardReplication,
 };
 use crate::server::ring::Ring;
-use crate::server::stage_profile::{StageDurability, StageOp};
+use crate::server::stage_profile::{StageDurability, StageOp, Stamp};
 use crate::server::tables::ApplyStep;
 use crate::server::wal::{Checkpoint, GroupCheckpoint, GroupRetries, GroupStore, MemoryWal, Retries, ShardWal};
 use crate::server::ServerError;
@@ -135,6 +135,8 @@ pub(super) struct Replication<D: ShoalDatabase> {
     pub(super) compacting: HashMap<u64, HashSet<D::TableNames>>,
     /// What proposals have come to
     pub(super) stats: ProposalStats,
+    /// How many committed write replies to drop before answering clients again, for the fixture
+    pub(super) drop_replies: u64,
     /// How many rebuilds of the groups there have been
     pub(super) epoch: u64,
     /// Deadline ticks since the last segment sweep
@@ -221,6 +223,7 @@ where
             checkpoint_dirty: false,
             compacting: HashMap::new(),
             stats: ProposalStats::default(),
+            drop_replies: 0,
             epoch: 0,
             ticks: 0,
             last_report: None,
@@ -649,7 +652,11 @@ where
         let raft = group.raft.clone();
         let network = replication.network.clone();
         let me = self.my_addr();
-        let deadline = cluster.replication.write_timeout.duration();
+        // the write's budget: the proposal deadline, or what is left of the bundle's if that is
+        // shorter - a forwarded write counts down from the origin's budget, never up from a
+        // fresh one ([C2](../../../../docs/src/distributed/transport.md))
+        let bundle_left = Duration::from_nanos(meta.read.deadline.since(Stamp::now()));
+        let deadline = cluster.replication.write_timeout.duration().min(bundle_left);
         let all = self.map.get().write_consistency == crate::server::conf::cluster::Consistency::All;
         let tx = self.shard_local_tx.clone();
         glommio::spawn_local(async move {
@@ -712,6 +719,13 @@ where
             }
         }
         let (client, id, index, end) = (meta.client, meta.id, meta.index, meta.end);
+        let committed = matches!(
+            &outcome,
+            ProposalOutcome::Answered {
+                outcome: ApplyOutcome::Applied(_) | ApplyOutcome::Duplicate(_),
+                ..
+            }
+        );
         // a committed write mints a token naming where it committed
         let token = match (&outcome, group) {
             (
@@ -753,6 +767,17 @@ where
         };
         meta.stamps.mark_exec_done();
         let span = meta.span.clone();
+        // the fixture's lost response: the write committed and applied, and its answer goes
+        // nowhere, which is what a retry under the same identity has to recover from
+        if committed {
+            if let Some(replication) = self.replication.as_mut() {
+                if replication.drop_replies > 0 {
+                    replication.drop_replies -= 1;
+                    event!(Level::WARN, msg = "dropping a committed write's reply, as the fixture asked", id = %id, index);
+                    return Ok(());
+                }
+            }
+        }
         // the token rides the answer to a client that asked for one, and the answer head to a
         // peer that forwarded the write
         self.reply_with_token(client, id, span, meta.stamps, response, token).await
@@ -820,22 +845,27 @@ where
                     "installing a tablet group snapshot is M7's; this replica cannot catch up past the purge point",
                 ),
                 // a read barrier: confirm leadership with a heartbeat round and answer the
-                // read log id, or say who leads instead
+                // read log id, or say who leads instead. A lapsed lease is answered by name
+                // rather than waited out, since its heartbeat round cannot complete
                 ReplicateKind::ReadBarrier => {
-                    let answer = match raft.get_read_linearizer(ReadPolicy::ReadIndex).await {
-                        Ok(linearizer) => BarrierAnswer::Ready(linearizer.read_log_id().clone()),
-                        Err(RaftError::APIError(LinearizableReadError::ForwardToLeader(forward))) => {
-                            BarrierAnswer::NotLeader(forward.leader_node.or(forward.leader_id))
+                    if Lease::of(&raft, me) == Lease::Lapsed {
+                        let answer = BarrierAnswer::NoQuorum(format!(
+                            "the lease of {me} on the group lapsed: no quorum acknowledged it within {:?}",
+                            Lease::length(&raft)
+                        ));
+                        encode_reply(head.id, &answer)
+                    } else {
+                        match raft.get_read_linearizer(ReadPolicy::ReadIndex).await {
+                            Ok(linearizer) => encode_reply(head.id, &BarrierAnswer::Ready(linearizer.read_log_id().clone())),
+                            Err(RaftError::APIError(LinearizableReadError::ForwardToLeader(forward))) => {
+                                encode_reply(head.id, &BarrierAnswer::NotLeader(forward.leader_node.or(forward.leader_id)))
+                            }
+                            Err(RaftError::APIError(LinearizableReadError::QuorumNotEnough(short))) => {
+                                encode_reply(head.id, &BarrierAnswer::NoQuorum(short.to_string()))
+                            }
+                            Err(RaftError::Fatal(fatal)) => ReplicateReply::error(head.id, format!("read_barrier: {fatal}")),
                         }
-                        Err(RaftError::APIError(LinearizableReadError::QuorumNotEnough(short))) => {
-                            BarrierAnswer::NoQuorum(short.to_string())
-                        }
-                        Err(RaftError::Fatal(fatal)) => {
-                            ReplicateReply::error(head.id, format!("read_barrier: {fatal}"));
-                            BarrierAnswer::NoQuorum(format!("the group is stopped: {fatal}"))
-                        }
-                    };
-                    encode_reply(head.id, &answer)
+                    }
                 }
             };
             let _ = reply.send(answer).await;
@@ -1219,6 +1249,10 @@ where
                 replication.wal.release(group);
                 Ok(serde_json::json!({ "released": group.to_string() }))
             }
+            ReplicationVerb::DropReplies { n } => {
+                replication.drop_replies = n;
+                Ok(serde_json::json!({ "dropping": n }))
+            }
         }
     }
 
@@ -1399,6 +1433,15 @@ async fn propose_through<D: ShoalDatabase>(
         if remaining.is_zero() {
             return ProposalOutcome::NotLeader(format!("no leader of group {group} took the write within the deadline"));
         }
+        // a lease that lapsed is a definite refusal before anything is appended: openraft would
+        // refuse the write with an empty hint, and waiting for "a leader" on a handle that
+        // names itself is satisfied at once ([F42](../../../../docs/src/features/primary-failover.md))
+        if Lease::of(raft, me) == Lease::Lapsed {
+            return ProposalOutcome::NotLeader(format!(
+                "the lease of {me} on group {group} lapsed: no quorum acknowledged it within {:?}",
+                Lease::length(raft)
+            ));
+        }
         let written = glommio::timer::timeout(remaining, async { Ok(raft.client_write(command.clone()).await) }).await;
         match written {
             // the leader took it and did not commit it in time: it may yet
@@ -1462,17 +1505,28 @@ async fn propose_through<D: ShoalDatabase>(
                             Err(RpcFailure::Unreachable(msg)) => ProposalOutcome::Unknown(msg),
                         };
                     }
-                    // no leader known: wait for one, then ask again
-                    None => {
-                        let remaining = deadline.saturating_sub(started.elapsed());
-                        let elected = raft
-                            .wait(Some(remaining))
-                            .metrics(|metrics| metrics.current_leader.is_some(), "a leader")
-                            .await;
-                        if elected.is_err() {
-                            return ProposalOutcome::NotLeader(format!("group {group} elected no leader within the deadline"));
+                    // an empty hint: this shard's own lease has not started or has lapsed, or
+                    // nobody leads - judged from the handle rather than waited on, since a
+                    // wait for "a leader" on a handle that names itself returns at once
+                    None => match Lease::of(raft, me) {
+                        Lease::Lapsed => {
+                            return ProposalOutcome::NotLeader(format!(
+                                "the lease of {me} on group {group} lapsed: no quorum acknowledged it within {:?}",
+                                Lease::length(raft)
+                            ));
                         }
-                    }
+                        Lease::NotStarted | Lease::Leads | Lease::Elsewhere(_) => glommio::timer::sleep(LEASE_POLL).await,
+                        Lease::Electing => {
+                            let remaining = deadline.saturating_sub(started.elapsed());
+                            let elected = raft
+                                .wait(Some(remaining))
+                                .metrics(|metrics| metrics.current_leader.is_some(), "a leader")
+                                .await;
+                            if elected.is_err() {
+                                return ProposalOutcome::NotLeader(format!("group {group} elected no leader within the deadline"));
+                            }
+                        }
+                    },
                 }
             }
             Ok(Err(error)) => return ProposalOutcome::Failed(format!("writing to group {group}: {error}")),

@@ -8,12 +8,14 @@
 //! the groups run under, the state machine that hands committed entries to the shard loop, and
 //! the network that carries the group's RPCs over the replication lane.
 
+pub mod lease;
 pub mod machine;
 pub mod network;
 pub mod proposal;
 pub mod report;
 pub mod types;
 
+pub use lease::Lease;
 pub use machine::{GroupMachine, MachineState, SnapshotData};
 pub use network::{GroupNetwork, GroupPeer, ReplicationLink, RpcFailure, ShardNetwork, ShardPeer};
 pub use proposal::{BarrierAnswer, ProposalOutcome};
