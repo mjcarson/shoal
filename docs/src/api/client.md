@@ -211,6 +211,15 @@ Convenience wrappers:
 | `send_one(query)` | One query, one response, checks success |
 | `exec(queries)` | Drains the stream, collects failures into `Errors::BulkError` |
 | `exists(query)` | Returns `bool`; missing data is not an error |
+| `send_with(queries, &options)`, `send_one_with(query, &options)`, `stream_with(options)` | The same, saying how the bundle's reads are served ([F41](../features/read-consistency.md)) |
+
+`SendOptions` names a read level - `ReadLevel::One`, the local replica's applied state, or
+`ReadLevel::Quorum`, a barrier from the tablet's leader and an application wait through it - a
+deadline shorter than the server's `networking.query_deadline`, and up to sixteen session tokens
+that earlier writes handed back, so the reads are served past them. `ShoalBuilder::read_options`
+sets a default for every send. A server that does not read the section is sent none and serves
+the bundle as it always has; `ShoalResponse::session_token()` is the token a committed write's
+answer carried, if the server sent one.
 
 `send` and `send_one` each have a `_stamped` twin returning `(…, BatchStamps)` — when the bundle
 entered, when it finished serializing, when a pooled connection was acquired, and when its last

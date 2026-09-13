@@ -218,8 +218,10 @@ log is what stops it being silent.
 
 - [Item 15](../known-issues.md#15-no-backpressure-anywhere) — no timeouts, which is why a
   stranded query is stranded permanently rather than briefly.
-- [Item 33](../known-issues.md#33-collected-split-query-state-has-no-expiry) — this was the
-  concrete route by which a `Gather` leaked. That route is closed; the general defect is not.
+- [~~Item 33~~ Resolved #33](gather-expiry.md) — this was the
+  concrete route by which a `Gather` leaked. That route is closed, ~~the general defect is not~~
+  and since [F41](../../features/read-consistency.md) the general defect is too: a gather
+  expires at its bundle's deadline.
 - [F4](../../features/validated-archives.md) — added the first failure in `load_partition` that
   returns rather than panics, which is what made item 51 worth filing.
 - [F9](../../features/ephemeral-tables.md) — ephemeral tables are the same tables over `NoStorage`,

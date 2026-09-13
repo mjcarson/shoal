@@ -38,6 +38,7 @@ networking:
   interface: "127.0.0.1"             # default
   port: 12000                        # default
   max_frame_bytes: 67108864          # default; 64 MiB
+  query_deadline: 10s                # default; how long a bundle may take in all
   tls:                               # optional; omitting it serves plaintext
     cert: "/etc/shoal/server.pem"    # certificate chain, leaf first
     key: "/etc/shoal/server.key"     # the private key for that chain
@@ -140,6 +141,18 @@ and `ShoalPool::bound_addr` return ([F36](../features/cluster-harness.md)).
 section: a misspelled `tls:` key under a block that ignored it would produce a server that starts,
 listens, and serves every query in clear, with nothing anywhere saying so
 ([F14](../features/encryption-in-transit.md)).
+
+#### networking.query_deadline
+
+**How long a bundle may take in all**, ten seconds by default, on a standalone node as on a
+cluster one ([F41](../features/read-consistency.md)). The budget a split query's gather, a
+forward to another node and a strong read's barrier and application waits all share, measured
+from the moment the bundle's last byte came off the socket. A query still owed an answer when it
+runs out is answered `Timeout` once, in its own table variant, and the state waiting for it is
+released; before this existed a share that never arrived held its client forever
+([Resolved #33](../appendix/resolved/gather-expiry.md)). A bundle may name a shorter budget of
+its own through the client's `SendOptions::deadline` and never a longer one. Written the way
+`cluster.primary_failover_after` is: `500ms`, `2s`, `1m`.
 
 #### networking.tls
 
@@ -445,7 +458,14 @@ copies, on distinct nodes, and the topology reports the desired factor beside th
 one; a `Quorum` write is acknowledged once a majority of the group has fsynced it and this
 node applied it, an `All` write once every voter has it, and `One` is refused at startup
 naming C5 - as is a persistent table configured `Async` on a cluster node, since a receipt
-that precedes an fsync cannot make a durable quorum. `primary_failover_after` is the base the
+that precedes an fsync cannot make a durable quorum. **Since [F41](../features/read-consistency.md)
+`read_consistency` is read**: it is the level a read is served at when neither the bundle nor
+the table says - `One`, the local replica's applied state, or `Quorum`, a read barrier from the
+group's leader and an application wait through it; `All` is refused at validation naming C6,
+since the strong read level is `Quorum` and nothing waits on every replica. A table's own level
+is versioned control state set by the `SetTableReadPolicy` admin operation - `one`, `quorum`,
+or nothing to clear it - and never a YAML setting, so every coordinator resolves a table the
+same way. `primary_failover_after` is the base the
 groups' timers derive from: a heartbeat every tenth of it, an election between one and two of
 it, and under 100 ms it is refused. `admins` names the principals an
 authenticated client connection may change the cluster as; a mutation from anybody else is

@@ -102,6 +102,7 @@
   - [F38. The inter-node transport](features/inter-node-transport.md)
   - [F39. Membership](features/membership.md)
   - [F40. Replication and quorum writes](features/replication.md)
+  - [F41. Read consistency levels](features/read-consistency.md)
 
 # Direction
 
@@ -159,6 +160,7 @@
   - [25. `CLAUDE.md` described a Shoal that no longer existed](appendix/resolved/claude-md-drift.md)
   - [26, 39. A multi-partition get answered in an arbitrary order](appendix/resolved/partition-order.md)
   - [31. Multi-log recovery discarded already-replayed intents](appendix/resolved/multi-log-recovery.md)
+  - [33. Collected split-query state had no expiry](appendix/resolved/gather-expiry.md)
   - [34. The request length prefix is unvalidated](appendix/resolved/unvalidated-length-prefix.md)
   - [38, 58, 88. The pool returned before its shards had bound](appendix/resolved/pool-readiness.md)
   - [44. A compaction discarded a damaged log's tail in silence](appendix/resolved/compaction-tail-loss.md)

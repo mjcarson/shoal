@@ -193,6 +193,24 @@ only way to tell a kTLS socket from a plaintext one from outside the kernel.
 `stored_key`, `server_key`. None of them is a password and none can be turned back into one.
 `stored_key` **is** still a secret: anything that can read it can replay it as a login.
 
+**Read barrier** — What a `Quorum` read obtains before it reads anything: a read index from the
+tablet's group leader, whose term a heartbeat round a majority answered has just confirmed, and
+which the reading replica then applies through. The proof that the value returned is at least
+as new as every write acknowledged before the read began. openraft's `ReadIndex`; on the
+executing shard's own handle when it leads, asked of the leader over the replication lane
+otherwise. See [F41](../features/read-consistency.md).
+
+**Session token** — Forty-eight bytes a committed write hands back naming the cluster, table,
+tablet, group and log index it committed at. A read carrying one is served by any replica of
+that lineage only once it has applied at least that index, which is read-your-writes without a
+barrier; a replica of another lineage or another cluster refuses it by name. An index and never
+a term, and it does not expire. See [F41](../features/read-consistency.md).
+
+**Slot** — One shard's place in a split query's gather. A share arrives naming its slot and the
+attempt at the bundle it was sent under; a slot is covered by a share with rows or without, so
+an empty partition and a missing share are told apart by the slot and never by the rows, and a
+share for a covered slot is a duplicate. See [F41](../features/read-consistency.md).
+
 **Ring** — The tablet map, still named `Ring` in the source. Maps a partition key to the tablet
 holding it, and that tablet to the shard that owns it. Built whole from the shard count before
 any shard starts. See [Partitioning](../architecture/partitioning.md).

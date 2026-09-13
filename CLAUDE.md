@@ -58,6 +58,10 @@ cargo run -p shoal-model --example regenerate_schedules   # after a model change
 # fails every time (known issue 100)
 cargo test -p shoal --test cluster_fixture -- --test-threads 6
 
+# item 33's reproduction (F41): a standalone two shard get whose shares are held expires at the
+# bundle deadline. run against the tree with the gather sweep disabled it never returns
+cargo test -p shoal --test gather_expiry
+
 # the tablet groups' WAL under openraft's storage suite, plus the rotation, stream and checkpoint
 # tests (F40). the memory log the ephemeral tables replicate through runs the same suite
 cargo test -p shoal-core wal
@@ -183,7 +187,7 @@ data and proves every workload still runs — which is what you want before spen
 real one. Budget twenty minutes for a macro-only smoke pass; the criterion layer is what makes a
 full smoke run take longer than you expect.
 
-The macro layer is three hundred and seventy eight **workloads** living in `shoal-bench/src/workloads/`,
+The macro layer is three hundred and eighty five **workloads** living in `shoal-bench/src/workloads/`,
 each generating its own rows from `--seed` — there is no dataset to fetch
 ([F8](docs/src/features/purpose-built-workloads.md)). They come in three kinds and the differences
 matter:
@@ -211,6 +215,15 @@ matter:
   at a factor of three on the persistent and the ephemeral table. They are read against each
   other and never against `nodes/1`, whose shard count they do not share. An arm asking for more
   copies than it places nodes is refused before a server starts.
+- **The read arms** are seven workloads ([F41](docs/src/features/read-consistency.md)):
+  `macro/cluster/reads/{one,barrier,session}`, one get at the reference depth on the replication
+  arms' placement differing only in what the read asks for, and
+  `macro/cluster/fanout/{get,filter,limit,empty}`, a six key get split over the same three nodes
+  at a factor of one in four shapes. Every read arm's capture carries `cluster.reads` - the
+  barrier and application waits apart from the round trip - and `empty` reads keys it never
+  wrote on purpose (`Workload::expects_rows`). The cluster arms' port blocks are numbered among
+  the cluster arms and stay under 32768; one numbered among every workload sat in the ephemeral
+  range and lost its control port to a `TIME_WAIT`.
 - **The configuration sweep** is fifty-eight workloads under `macro/conf/`, each one the grid's
   reference cell `macro/grid/unsorted/r50/1024` with **exactly one field** of the server
   configuration moved ([F20](docs/src/features/configuration-sweeps.md)). It answers what a setting
@@ -415,6 +428,15 @@ go through `shoal`.**
   commits a silent member `Down`. Never hold a `RefCell` borrow across an `.await` on the control
   core, and never retry a proposal on a metrics change without a backoff - both starve the one
   executor RaftCore, the links and the loop share
+- Since [F41](docs/src/features/read-consistency.md) a read is served at `One` or `Quorum`: a
+  `Quorum` read obtains a `ReadIndex` barrier from its group's leader - its own handle when it
+  leads, `ReplicateKind::ReadBarrier` over the lane when not - and waits for its own apply
+  through it on a spawned task that posts `ServerMsg::ReadReady`; a committed write's answer
+  carries a `SessionToken` a later read is served past. Every gather (`server/shard/gather.rs`)
+  has a slot per share, an attempt per bundle and a deadline (`networking.query_deadline`), the
+  sweeper runs on every node, and a read refusal is answered as a response, never through the
+  metadata's carried failure, which cannot reach a sealed answer. The read options and token
+  sections ride the wire only between peers that granted `CLIENT_CAP_READ_OPTIONS` at the hello
 - Since [F40](docs/src/features/replication.md) every tablet is replicated: a shard hosts one
   `openraft` group per table and replica set the map derives (`server/map.rs`, `GroupSpec`),
   its log is the shard's shared format 2 WAL (`server/wal/`, one fsync per batch across groups),

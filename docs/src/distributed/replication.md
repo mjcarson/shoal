@@ -27,7 +27,7 @@ complete to, moved by the compactor from sealed segments every group applied pas
 snapshot is that checkpoint, the purge follows it, and a segment goes once every group purged
 past it. Rotation advances nothing but the durable position. What is not there: catch-up past
 the purge point (M7), a durable low-water mark for the retry table and the leader's step-down
-at its lease (M6), leadership moved after a failover (M5). Every M4 row of the table below is
+at its lease (M6), leadership moved after a failover (~~M5~~ M6). Every M4 row of the table below is
 a test. Before that, and still on a standalone node:
 `FileSystem::commit` (`shoal-core/src/server/tables/storage/fs.rs`) serializes an intent,
 checksums it and stages it into a per-shard, per-table WAL. The table applies a mutation in

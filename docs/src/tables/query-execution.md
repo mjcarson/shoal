@@ -459,15 +459,19 @@ synchronisation mechanism. Simple, and dependent on nothing reordering that queu
 - Rows are grouped by partition rather than merged by sort key, so a get spanning partitions is
   not globally sorted. Interleaving them would mean reading every named partition even under a
   small limit.
-- A gather entry for a query split across shards is only released when every shard has reported.
-  A shard that dies mid-query leaks it and the client waits forever, since there are no timeouts.
+- ~~A gather entry for a query split across shards is only released when every shard has reported.
+  A shard that dies mid-query leaks it and the client waits forever, since there are no timeouts.~~
+  Since [F41](../features/read-consistency.md) it is released at the bundle's deadline too, and
+  the query answered `Timeout` ([Resolved #33](../appendix/resolved/gather-expiry.md)).
 - Rows are cloned into responses; no zero-copy read path server-side. A projection narrows what is
   cloned or deserialized to the fields it names, but it is still a copy
   ([F2](../features/projections.md#performance)).
 - A projection changes what is deserialized, not what is read: a cold partition is read whole
   either way, the same caveat a range carries
   ([F2](../features/projections.md#limitations)).
-- No timeout on blocked queries. A read that *fails* releases the queries parked on it
+- No timeout on blocked queries - a gather's deadline ([F41](../features/read-consistency.md))
+  answers a *split* query whose share never comes, and does not reach a query parked on a
+  partition load on one shard. A read that *fails* releases the queries parked on it
   ([Resolved #16, 51](../appendix/resolved/partition-load-failure.md)), and since
   [F11](../features/error-channel.md) it releases them carrying the failure — including the failures
   *inside* `load_partition`, which used to return an error that ended the shard and left them parked

@@ -3258,7 +3258,7 @@ async fn uncommitted_suffix_never_enters_checkpoint() -> Result<(), FixtureError
 /// three digests agree.
 #[tokio::test(flavor = "multi_thread")]
 async fn conditional_results_follow_committed_order() -> Result<(), FixtureError> {
-    use shoal_model::event::{ClientOp, MutationOp, OpResult};
+    use shoal_model::event::{ClientOp, MutationOp, OpResult, ReadLevel};
     use shoal_model::ids::{Attempt, Key, OpId, TabletId, Value};
     use shoal_model::oracle::{Ledger, Outcome};
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -3352,7 +3352,15 @@ async fn conditional_results_follow_committed_order() -> Result<(), FixtureError
             let id = OpId(next_id.fetch_add(1, Ordering::SeqCst) as u32);
             let attempt = Attempt { id, retry: 0 };
             let invoke = clock.fetch_add(1, Ordering::SeqCst);
-            ledger.lock().unwrap().invoke(attempt, tablet_id(*key), ClientOp::Read { key: Key(*key as u8) }, invoke);
+            ledger.lock().unwrap().invoke(
+                attempt,
+                tablet_id(*key),
+                ClientOp::Read {
+                    key: Key(*key as u8),
+                    level: ReadLevel::One,
+                },
+                invoke,
+            );
             let seen = read_note(addr, *key).await?.map(|text| Value(text.parse().expect("a value")));
             let complete = clock.fetch_add(1, Ordering::SeqCst);
             ledger.lock().unwrap().complete(attempt, complete, Outcome::Ok(OpResult::Value(seen)));

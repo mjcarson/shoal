@@ -32,7 +32,16 @@ naming the correlation id, the group, the target shard, the kind - `AppendEntrie
 `Propose`, `Snapshot` - and the deadline, and a postcard body; one link per peer node per
 shard with its own correlation table and its own bound, `transport.replication_queue_bytes`,
 so a follower that stops reading holds nothing but its queue. `Propose` is the one hop a write
-takes from a replica to its leader; `Snapshot` is answered by name until M7.
+takes from a replica to its leader; `Snapshot` is answered by name until M7. **At M5**
+([F41](../features/read-consistency.md)) the lane gains `ReadBarrier`, the one hop a strong read
+takes from a replica to its leader for a read index; a forward entry carries a read plan - the
+resolved level, the gather slot it fills and its tokens - under `FLAG_READ`; the `Forwarded`
+head widens from thirty-two bytes to ninety-six for the attempt, the slot and a token; and all
+three sit behind `CAP_READ_CONSISTENCY_V1`, which the M2 exact-match rule refuses an M4 peer
+by. Between a client and a node the same milestone spends the hello's reserved byte fourteen on
+a capability set, and only a granted bit puts a read options section behind a bundle's trace
+context or a session token ahead of a response's payload - the selected-version contract, with
+no version bump.
 
 Before that: ~~`ShardContact::Local`, `Comms::send` and the kanal mesh route queries within a
 process.~~ `ServerMsg::Partition` still carries a Glommio read result with a restricted Send
@@ -93,8 +102,8 @@ Client encryption requires equivalent protection on both control and data peer l
 | Family | Required information |
 | --- | --- |
 | Peer hello/ack | Identity, incarnation, capabilities, schema identity, refusal reason |
-| Forward / Forwarded | Original operation/query and attempt ids, destination, coverage, resolved policy, remaining deadline, bounded hop count and return address |
-| Data consensus | Tablet/group identity plus selected library's election, append, configuration and read-barrier payloads. *At M4:* `Replicate`/`ReplicateResponse` on the replication lane, openraft's `AppendEntries` and `Vote` as postcard, the read barrier M5's |
+| Forward / Forwarded | Original operation/query and attempt ids, destination, coverage, resolved policy, remaining deadline, bounded hop count and return address. *At M5:* the attempt minted per bundle and echoed, the resolved level and the slot per entry, the budget remaining rather than a fresh one, and a token on a write's answer |
+| Data consensus | Tablet/group identity plus selected library's election, append, configuration and read-barrier payloads. *At M4:* `Replicate`/`ReplicateResponse` on the replication lane, openraft's `AppendEntries` and `Vote` as postcard. *At M5:* `ReadBarrier`, answered with the leader's `ReadLogId` or a leader hint |
 | Replication receipts | Matching term/history, replica/configuration and durable completion evidence; duplicate-safe. *At M4:* openraft's append response, sent after the follower's `fdatasync` |
 | Catch-up | Tablet/group, matching term/index boundary and snapshot fallback negotiation |
 | Snapshot begin/chunk/end | Snapshot/transition identity, manifest, boundary, offset, length, checksum and resume metadata |

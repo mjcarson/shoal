@@ -22,7 +22,12 @@ and distinct replica vector (`TabletMap::replica_groups`), which is what every s
 tablet groups from; `active_rf` is the smaller of the desired factor and the placement's size,
 so three copies on two nodes is two, reported as such, and the write quorum stays the one the
 desired factor names. `read_ring_for` routes a tablet this node holds a copy of to the shard
-holding it and everything else to the primary; reads and writes both use it. What is not there
+holding it and everything else to the primary; reads and writes both use it. **And at M5 by
+[F41](../features/read-consistency.md)** the map carries `table_read_policy`, the level each
+table's reads are served at when a bundle does not say, from the control state's
+`SetTableReadPolicy` command (`TabletMap::read_level_of` falls back to `read_consistency`), and
+the topology frame names it by table name; a coordinator resolves a query's level from it
+once and forwards it resolved. What is not there
 yet: per-tablet records, leader hints and deltas - the value has not widened, since nothing
 moves a tablet before M9a ~~and nothing replicates one before M4~~. Before that: `Ring` (`shoal-core/src/server/ring.rs`) stores
 4096 `u16` shard assignments, derived from shard

@@ -187,6 +187,8 @@ so they get worse by existing longer rather than under load.
 | **B5** | [**O46**](#o46-the-shared-wal-is-a-buffered-file-where-the-intent-log-was-direct-io) — the shared WAL is a buffered file where the intent log was direct I/O | Argued — a kernel copy per batch, on a path waiting on the sync | M | a capture of the replication arms on the benchmark host | Contained | no |
 | **B6** | [**O47**](#o47-a-followers-fsync-may-be-waiting-for-the-leaders-rather-than-running-beside-it) — a follower's fsync may wait for the leader's rather than run beside it | Indicated — 2.1× the single-copy median at smoke scale on a shared device | S to establish | the same capture, on separate devices | Not yet known | no — one host, one device |
 | **B7** | [**O48**](#o48-resolving-a-segment-scans-every-groups-whole-index) — resolving a segment scans every group's whole index | Argued — `groups × retained_entries` comparisons per handoff, off every query path | S | — | Contained | no |
+| **B8** | [**O49**](#o49-one-barrier-per-group-per-bundle-rather-than-per-read) — one barrier per group per bundle rather than per read | Indicated — 590 µs a barrier at smoke scale, paid once per `Quorum` read whatever the bundle | M | `macro/cluster/reads/barrier` at a depth above one query a bundle, which no arm sends yet | Contained | no |
+| **B9** | [**O50**](#o50-a-read-plan-is-built-and-cloned-per-share), [**O51**](#o51-every-committed-write-answers-with-a-forty-eight-byte-token) — a plan per share, a token per write | Argued — a clone of an `Rc` and a `Copy` per share; forty-eight bytes and one more `IoSlice` per committed write down a capable connection | S | `macro/cluster/replication/durable` for O51 | Contained | no |
 
 **Tier C — blocked on a design pass, not on effort.**
 
@@ -2590,3 +2592,61 @@ entries and thirty-six groups a node that is a third of a million comparisons pe
 shard loop, between two messages. It is off every query path and it is bounded, which is why it is
 filed and not fixed; a per-segment frame list is the fix when a sweep shows up on a profile.
 
+### O49. One barrier per group per bundle rather than per read
+
+| | |
+| --- | --- |
+| **Rank** | **B8** — indicated, contained |
+| **Impact** | Indicated — the smoke run of `macro/cluster/reads/barrier` paid a barrier of 590 µs on average per read, 147 of 200 of them a hop to the leader; a bundle of many `Quorum` reads over one group pays it once per read |
+| **Difficulty** | M — the barrier's read index is a bound for every read of that group issued after it was obtained, so one per group per bundle serves them all; the plan travels per share and would have to say which barrier it may share |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | Contained — the reads in a bundle already promise no common snapshot, so a shared barrier promises nothing less than a barrier each |
+| **Benchmark** | `macro/cluster/reads/barrier`, once an arm sends more than one read a bundle; the current arm sends one |
+
+Filed by [F41](../features/read-consistency.md). `await_read_barrier` obtains a read index per
+group per read, on a task per read, because a read is the unit that reaches it. A ReadIndex
+barrier is a bound on everything acknowledged before it was asked, so every strong read of the
+same group in the same bundle - issued after the barrier - may apply through the same index; the
+heartbeat round is the cost, and one round covers them. The saving is the round and the hop,
+which is most of what a strong read costs over a `One` read at smoke scale. Not taken because no
+arm and no fixture test sends a bundle of strong reads over one group, so nothing would show it,
+and because the plan is per share: a shared barrier needs an identity on the plan and a table of
+barriers in flight per group on the shard, which is a design pass.
+
+### O50. A read plan is built and cloned per share
+
+| | |
+| --- | --- |
+| **Rank** | **B9** — argued, contained |
+| **Impact** | Argued — `read_plan` builds a `ReadPlan` per query on the coordinator and every local share clones it for its slot; the tokens are an `Rc<[SessionToken]>` so the clone is a count and two words, and a remote share copies the tokens into its entry |
+| **Difficulty** | S — a plan per query held once and a slot beside the metadata, or the tokens filtered once per bundle rather than once per query |
+| **Depends on** | nothing |
+| **Blocks** | nothing |
+| **Tradeoff** | Contained |
+| **Benchmark** | none that would show it: the clone is one `Rc` increment on a path that then sends over a channel |
+
+Filed by [F41](../features/read-consistency.md). Every query in a bundle filters the bundle's
+tokens to its table and builds a plan, and every share of it takes a clone; a bundle of a hundred
+gets over one table with sixteen tokens filters sixteen tokens a hundred times. It is a few
+hundred nanoseconds on the coordinator, which the `grid` arms did not move at smoke scale, and it
+is filed because the number of tokens is the one thing here a client controls.
+
+### O51. Every committed write answers with a forty-eight byte token
+
+| | |
+| --- | --- |
+| **Rank** | **B9** — argued, contained |
+| **Impact** | Argued — a committed write's answer down a connection that granted `CLIENT_CAP_READ_OPTIONS` carries a 48 byte token and a third `IoSlice`, whether or not the caller will read it; every client this repository builds asks for the capability |
+| **Difficulty** | S — a per-connection or per-send opt-in for the token, or a client that asks only when a `SendOptions` will use one |
+| **Blocks** | nothing |
+| **Tradeoff** | Contained — a client that never reads tokens loses nothing but the bytes |
+| **Benchmark** | `macro/cluster/replication/durable`, whose every write now carries the token, against the F40 capture of the same arm |
+
+Filed by [F41](../features/read-consistency.md). The token is minted in `answer_proposal` for
+every `Applied` and `Duplicate` outcome and framed by the relay whenever the connection's hello
+asked for the section, which the client always does. Forty-eight bytes against a response of a
+few hundred, and one more slice in a vectored write that was already two. Filed rather than
+gated because the alternative - a client that decides per send whether it will want the token of
+a write it has not yet seen the answer to - is a worse API than the bytes are a cost, until a
+capture says otherwise.

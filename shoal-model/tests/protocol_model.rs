@@ -181,6 +181,41 @@ fn saved_protocol_schedule_reproduces_failure() {
     }
 }
 
+/// A strong read observes every write acknowledged before it began, and the cached-leader
+/// knob is caught on its saved schedule (C6 M5, F41)
+///
+/// Under the safe barrier rule the thirty-two seeded schedules complete strong reads - the
+/// coverage says how many - and none of them observes a stale value. Under the knob a leader
+/// that was deposed and has not heard of it answers from its own commit index, the checker
+/// names `Linearizable`, and the saved schedule replays to exactly that.
+#[test]
+fn strong_reads_are_linearizable_and_the_cached_leader_knob_is_not() {
+    let params = ScheduleParams::default_small();
+    let mut strong_reads = 0;
+    for seed in 0..SAFE_SEEDS {
+        let outcome = World::replay(&generate("strong", seed, &params, Policy::safe()));
+        assert!(outcome.violation.is_none(), "seed {seed}: {}", outcome.violation.unwrap());
+        strong_reads += outcome.coverage.strong_reads;
+    }
+    assert!(strong_reads > 0, "no strong read completed under the safe rule");
+    // the knob is named, deviates in its own name, and breaks the property it is filed under
+    let (name, policy, property) = Policy::unsafe_knobs()
+        .into_iter()
+        .find(|(name, _, _)| *name == "strong_read_from_cached_leader")
+        .expect("the barrier knob");
+    assert_eq!(policy.deviations(), vec![name]);
+    assert_eq!(property, Property::Linearizable);
+    // its saved schedule replays to that violation
+    let saved = Schedule::load_all();
+    let (path, schedule) = saved
+        .iter()
+        .find(|(_, schedule)| schedule.policy.deviations() == vec![name])
+        .expect("a saved schedule for the barrier knob");
+    let found = World::replay(schedule).violation.unwrap_or_else(|| panic!("{} found nothing", path.display()));
+    assert_eq!(found.property, Property::Linearizable, "{found}");
+    assert_eq!(Some(found), schedule.expected);
+}
+
 /// Whether one list is the other with events left out
 fn is_subsequence<T: PartialEq>(small: &[T], big: &[T]) -> bool {
     let mut position = 0;
