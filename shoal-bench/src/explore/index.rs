@@ -24,7 +24,7 @@
 use std::collections::BTreeMap;
 
 use shoal_top::index::{
-    BackgroundFactsLite, Capture, CatchupFactsLite, CatchupSecondFactsLite, ClusterFactsLite, ConfFactsLite, FamilyText, FanoutFactsLite, FaultFactsLite,
+    BackgroundFactsLite, Capture, CatchupFactsLite, CatchupSecondFactsLite, ClusterFactsLite, ConfFactsLite, FamilyText, FanoutFactsLite, FaultFactsLite, MigrationFactsLite,
     INDEX_VERSION, Index, Layer as IndexLayer, HopFactsLite, HopMixLite, MacroPoint, NodeCoresLite,
     NodeReadFactsLite, OfferedLoadLite, OpStats, OutcomeFactsLite, ReadFactsLite, ReplicaFactsLite,
     ScaleFactsLite, SecondFactsLite, Timing, Verdict, WindowFactsLite, Workload,
@@ -610,6 +610,43 @@ pub fn cluster_facts(cluster: &ClusterFacts) -> ClusterFactsLite {
                 })
                 .collect(),
             series: background
+                .series
+                .iter()
+                .map(|second| SecondFactsLite {
+                    second: second.second,
+                    ops: second.ops,
+                    errors: second.errors,
+                    p50_us: second.p50_us,
+                    p99_us: second.p99_us,
+                })
+                .collect(),
+        }),
+        // the migration arm's record travels whole, phases, windows and series
+        // ([F45](../../../docs/src/features/replica-migration.md))
+        migration: cluster.migration.as_ref().map(|migration| MigrationFactsLite {
+            started_ms: migration.started_ms,
+            finished_ms: migration.finished_ms,
+            seconds: migration.seconds,
+            groups: migration.groups,
+            outcome: migration.outcome.clone(),
+            phase_ms: migration.phase_ms.clone(),
+            bytes: migration.bytes,
+            entries: migration.entries,
+            windows: migration
+                .windows
+                .iter()
+                .map(|window| WindowFactsLite {
+                    name: window.name.clone(),
+                    from_ms: window.from_ms,
+                    to_ms: window.to_ms,
+                    ops: window.ops,
+                    errors: window.errors,
+                    p50_us: window.p50_us,
+                    p99_us: window.p99_us,
+                    max_us: window.max_us,
+                })
+                .collect(),
+            series: migration
                 .series
                 .iter()
                 .map(|second| SecondFactsLite {

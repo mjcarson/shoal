@@ -105,6 +105,10 @@ pub struct StagedNode {
     /// The control addresses a peer joins through, which is node zero's; empty for node zero
     #[serde(default)]
     pub seeds: Vec<String>,
+    /// Whether this node joins and is placed on by nothing until a move brings it in
+    /// ([F45](../../../../docs/src/features/replica-migration.md))
+    #[serde(default)]
+    pub spare: bool,
 }
 
 /// A staged cluster, ready to start
@@ -171,9 +175,11 @@ pub fn stage(base: &Conf, id: &str, overrides: &ConfOverrides, port: u16) -> Res
         bail!("{id} places peers without naming its own shard count in `shards`");
     };
     let shards = u16::try_from(shards).context("a node runs fewer shards than a u16 holds")?;
-    // every node's shard count, node zero first
+    // every node's shard count, node zero first, the placed peers, then the spares
     let mut counts = vec![shards];
     counts.extend(cluster.peers.iter().copied());
+    let placed_nodes = counts.len();
+    counts.extend(cluster.spares.iter().copied());
     let nodes = counts.len();
     // the cores, decided once here
     let claims = allocate(&candidates(base)?, &counts)?;
@@ -184,7 +190,7 @@ pub fn stage(base: &Conf, id: &str, overrides: &ConfOverrides, port: u16) -> Res
     let cluster_id = ClusterId::mint();
     let ids: Vec<NodeId> = (0..nodes).map(|_| NodeId::mint()).collect();
     let interface = base.networking.interface.clone();
-    let placement: Vec<PlacedNodeFacts> = (0..nodes)
+    let placement: Vec<PlacedNodeFacts> = (0..placed_nodes)
         .map(|index| PlacedNodeFacts {
             node: ids[index].to_string(),
             shards: counts[index],
@@ -229,6 +235,7 @@ pub fn stage(base: &Conf, id: &str, overrides: &ConfOverrides, port: u16) -> Res
             } else {
                 vec![format!("{interface}:{}", ports[0].control)]
             },
+            spare: index >= placed_nodes,
         };
         // the marker, written before the node can claim the directory for itself: node zero's
         // names the cluster it creates, a peer's names only itself and joins
@@ -285,9 +292,13 @@ pub fn apply(mut conf: Conf, node: &StagedNode) -> Result<Conf> {
     conf.resources.exclude_cores = node.exclude_cores.clone();
     // its client port
     conf.networking.port = node.client_port;
-    // and its own lanes and control core: node zero creates the cluster, a peer joins through it
+    // and its own lanes and control core: node zero creates the cluster, a peer joins through
+    // it. The block `conf::resolve` built is kept and only the node's own identity moved: the
+    // arm's replication, repair and migration settings ride it to every node
+    // ([Resolved #108](../../../../docs/src/appendix/resolved/cluster-arm-overrides-dropped.md))
+    let block = conf.cluster.take().unwrap_or_default();
     conf.cluster = Some(
-        Cluster::default()
+        block
             .bootstrap(node.index == 0)
             .seeds(node.seeds.clone())
             .control_core(node.control_cpu)
@@ -309,9 +320,11 @@ pub fn apply(mut conf: Conf, node: &StagedNode) -> Result<Conf> {
 /// * `staged` - The cluster
 /// * `pool` - Node zero's running pool
 pub fn initialize(staged: &Staged, pool: &shoal::ShoalPool<crate::workloads::schema::Bench>) -> Result<()> {
+    // a spare joins and is placed on by nothing
     let ids = staged
         .nodes
         .iter()
+        .filter(|node| !node.spare)
         .map(|node| {
             node.node
                 .parse()
@@ -820,8 +833,9 @@ pub fn wait_peer_placed(staged: &Staged, index: u32, runtime: &tokio::runtime::R
                 other => bail!("node {} refused a readiness read: {other:?}", node.index),
             }
         })?;
-        // placed, and every group its shards host built
-        let placed = value["data"]["placed"].as_bool().unwrap_or(false)
+        // placed, and every group its shards host built; a spare is placed on by nothing and
+        // waits only for the placement to exist ([F45](../../../../docs/src/features/replica-migration.md))
+        let placed = (node.spare || value["data"]["placed"].as_bool().unwrap_or(false))
             && value["data"]["initialized"].as_bool().unwrap_or(false);
         let groups = value["data"]["replication"]["groups"].as_u64().unwrap_or(0);
         let all_up = value["data"]["replication"]["shards"]
@@ -833,7 +847,7 @@ pub fn wait_peer_placed(staged: &Staged, index: u32, runtime: &tokio::runtime::R
                         .is_some_and(|groups| groups.iter().all(|group| group["up"].as_bool().unwrap_or(false)))
                 })
             });
-        if placed && groups > 0 && all_up {
+        if placed && (groups > 0 || node.spare) && all_up {
             return Ok(());
         }
         if std::time::Instant::now() > deadline {
@@ -1204,6 +1218,7 @@ mod tests {
             fault: None,
             catchup: None,
             background: None,
+            migration: None,
         };
         let text = serde_json::to_string(&cluster).expect("serializes");
         let back: ClusterFacts = serde_json::from_str(&text).expect("parses");
@@ -1225,6 +1240,7 @@ mod tests {
             node: "00000000-0000-0000-0000-000000000001".to_string(),
             cluster: "00000000-0000-0000-0000-000000000002".to_string(),
             seeds: vec!["127.0.0.1:44070".to_string()],
+            spare: false,
             client_port: 44_072,
             data_port: 44_073,
             control_port: 44_074,
@@ -1297,6 +1313,7 @@ mod tests {
             fault: None,
             catchup: None,
             background: None,
+            migration: None,
         };
         // the record round trips with every replica's debt and the schedule on it
         let text = serde_json::to_string(&facts).expect("serializes");

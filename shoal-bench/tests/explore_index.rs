@@ -789,6 +789,7 @@ fn the_facts_mirrors_are_total() {
                 p99_us: 1_200,
             }],
         }),
+        migration: None,
     };
     let mirrored = explore::index::cluster_facts(&cluster);
     assert_eq!(

@@ -431,7 +431,6 @@ async fn add_learner<D: ShoalDatabase>(context: &MoveContext<D>) -> Result<(), S
 /// * `progress` - The progress, charged as the catch-up goes
 async fn catch_up<D: ShoalDatabase>(context: &MoveContext<D>, progress: &mut GroupMove) -> Result<(), String> {
     let started = Instant::now();
-    let mut first: Option<u64> = None;
     loop {
         if !context.leads() {
             return Err(format!("{NOT_LEADER}group {}: the lead was lost while the destination caught up", context.group));
@@ -442,8 +441,9 @@ async fn catch_up<D: ShoalDatabase>(context: &MoveContext<D>, progress: &mut Gro
         let (matched, last) = context.destination_lag();
         progress.stats.bytes = context.network.bytes_sent_to(context.group, context.to);
         if let Some(matched) = matched {
-            let base = *first.get_or_insert(matched);
-            progress.stats.entries = matched.saturating_sub(base);
+            // the destination's log position once it is caught up: everything it was fed, by
+            // snapshot and by log together, since a learner starts from nothing
+            progress.stats.entries = matched;
             if progress.phase.rank() < MovePhase::CatchingUp.rank() {
                 step(progress, MovePhase::CatchingUp);
                 context.commit(progress).await?;

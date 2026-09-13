@@ -296,8 +296,20 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
         (Some(spec), Some(pool), true) => {
             let admin = pool
                 .admin_sender()
-                .with_context(|| format!("{} asks for a background repair on a node with no control plane", workload.id()))?;
-            Some(background::inject(spec, admin, run_started)?)
+                .with_context(|| format!("{} asks for a background operation on a node with no control plane", workload.id()))?;
+            let nodes = staged
+                .as_ref()
+                .map(|staged| {
+                    staged
+                        .nodes
+                        .iter()
+                        .map(|node| node.node.parse().map(shoal::shared::identity::NodeId))
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .transpose()
+                .context("a staged node's identity does not parse")?
+                .unwrap_or_default();
+            Some(background::inject(spec, admin, run_started, nodes)?)
         }
         _ => None,
     };
@@ -357,15 +369,24 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
     // a background arm cuts what its client saw at the repair's marks
     // ([F44](../../docs/src/features/repair.md))
     if let (Some(spec), Some(facts)) = (&background_spec, cluster_facts.as_mut()) {
-        let marks = background_marks?.context("the background arm ran without its repair")?;
+        let marks = background_marks?.context("the background arm ran without its operation")?;
         let started = measured
             .started
-            .with_context(|| format!("{} runs a background repair but its driver keeps no timeline", workload.id()))?;
-        let (partitions, bytes) = match (integrity_before, integrity_after) {
-            (Some(before), Some(after)) => (after.0.saturating_sub(before.0), after.1.saturating_sub(before.1)),
-            _ => (0, 0),
-        };
-        facts.background = Some(background::facts(started, &marks, &measured.timeline, spec.run_for, partitions, bytes));
+            .with_context(|| format!("{} runs a background operation but its driver keeps no timeline", workload.id()))?;
+        match spec.kind {
+            crate::workloads::workload::BackgroundKind::Repair => {
+                let (partitions, bytes) = match (integrity_before, integrity_after) {
+                    (Some(before), Some(after)) => (after.0.saturating_sub(before.0), after.1.saturating_sub(before.1)),
+                    _ => (0, 0),
+                };
+                facts.background = Some(background::facts(started, &marks, &measured.timeline, spec.run_for, partitions, bytes));
+            }
+            // a migration arm records the move's marks, phases and transfer the same way
+            // ([F45](../../docs/src/features/replica-migration.md))
+            crate::workloads::workload::BackgroundKind::Move { .. } => {
+                facts.migration = Some(background::migration_facts(started, &marks, &measured.timeline, spec.run_for));
+            }
+        }
     }
     // build the stage report now that every shard has handed its records over
     //

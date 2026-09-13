@@ -140,7 +140,8 @@ pub enum MoveOutcome {
 pub struct MoveStats {
     /// Snapshot bytes sent to the destination
     pub bytes: u64,
-    /// Log entries replicated to the destination while it caught up
+    /// The destination's log position once it had caught up: what it was fed, by snapshot and
+    /// by log together, since a learner starts from nothing
     pub entries: u64,
     /// How long each phase took, in milliseconds, by the phase's name
     pub phase_ms: BTreeMap<String, u64>,

@@ -290,6 +290,8 @@ impl Workload for ClusterHop {
                     hop: Some(self.hop.facts()),
                     read: None,
                     retention: None,
+                    retire_after: None,
+                    spares: Vec::new(),
                 }),
                 ..ConfOverrides::default()
             }),
