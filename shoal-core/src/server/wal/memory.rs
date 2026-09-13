@@ -66,6 +66,24 @@ impl MemoryWal {
         MemoryWal::default()
     }
 
+    /// Drop one group's log whole, entries, vote and all
+    ///
+    /// What repairing a divergent volatile copy starts from: the group restarts empty and its
+    /// leader feeds it again ([F44](../../../../docs/src/features/repair.md)). The vote goes
+    /// too, as it would with the process.
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group
+    pub fn forget(&self, group: GroupId) {
+        let mut inner = self.inner.borrow_mut();
+        if let Some(log) = inner.groups.remove(&group) {
+            // the bytes the group's commands held are given back
+            let held: usize = log.entries.values().map(Self::weight).sum();
+            inner.bytes = inner.bytes.saturating_sub(held);
+        }
+    }
+
     /// A store for one group over these logs
     ///
     /// # Arguments

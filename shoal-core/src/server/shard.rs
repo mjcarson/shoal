@@ -3667,7 +3667,19 @@ where
                 ServerMsg::SnapshotCleaned { group, outcome } => self.handle_snapshot_cleaned(group, outcome),
                 ServerMsg::Digested { group, op, outcome } => self.handle_digested(group, op, outcome),
                 ServerMsg::Quarantine { group, action, reply } => self.handle_quarantine(group, action, reply).await,
-                ServerMsg::RepairDone { op, group } => self.handle_repair_done(op, group),
+                ServerMsg::RepairDone { op, group, phase } => self.handle_repair_done(op, group, phase),
+                ServerMsg::RepairInstall { group, path, manifest, reply } => {
+                    let outcome = self.restart_group_for_install(group, path, manifest);
+                    let _ = reply.send(outcome);
+                }
+                ServerMsg::RepairRotate { reply } => {
+                    if let Some(replication) = self.replication.as_mut() {
+                        replication.wal.rotate();
+                        let _ = replication.wal.flush().await;
+                    }
+                    self.sweep_segments().await?;
+                    let _ = reply.send(());
+                }
                 ServerMsg::SnapshotBytes { node, stream, offset, bytes } => {
                     self.handle_snapshot_bytes(node, stream, offset, bytes);
                 }

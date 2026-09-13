@@ -188,6 +188,9 @@ pub struct StagedCluster {
     /// How long one scrub may take, in milliseconds, if the test shortened it
     #[serde(default)]
     pub repair_timeout_ms: Option<u64>,
+    /// How long one snapshot transfer may take, in milliseconds, if the test shortened it
+    #[serde(default)]
+    pub snapshot_timeout_ms: Option<u64>,
 }
 
 /// The endpoints a child bound, and the identity it reported

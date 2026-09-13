@@ -1160,6 +1160,9 @@ async fn cluster_server_child() {
             if let Some(bytes) = staged.snapshot_chunk_bytes {
                 replication.snapshot_chunk_bytes = bytes;
             }
+            if let Some(ms) = staged.snapshot_timeout_ms {
+                replication.snapshot_timeout = Duration::from_millis(ms).into();
+            }
             block = block.replication(replication);
             if let Some(bytes) = staged.bulk_queue_bytes {
                 block.transport.bulk_queue_bytes = bytes;
@@ -4931,6 +4934,384 @@ async fn scheduled_scrub_quarantines_without_an_operator() -> Result<(), Fixture
         let view = groups_of(&mut cluster, node)?;
         assert_eq!(view["snapshots"]["installed"], 0, "node {node} installed a snapshot: {}", view["snapshots"]);
         assert_eq!(cluster.node(node).failure(), None, "node {node} died");
+    }
+    Ok(())
+}
+
+/// A corrupt follower is quarantined and repaired from a verified source (C7 M8)
+///
+/// A follower's record is corrupted in place. The read that meets it is refused by name and
+/// quarantines the copy; a `Repair` of that tablet scrubs, finds the copy invalid against a
+/// verified majority, cuts a snapshot on the leader past the follower's checkpoint, streams
+/// it, restarts the follower's group from its held checkpoint to install it, re-merges what
+/// the old generation had above the boundary, scrubs again, and lifts the quarantine once the
+/// copies agree. The follower alone installed a snapshot, every digest agrees, and writes
+/// after the repair land and compact on it as before ([F44](../../docs/src/features/repair.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn corrupt_follower_is_quarantined_and_repaired_from_a_verified_source() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lane_links(true)
+        .checkpoint_entries(8)
+        .retained_entries(64)
+        .write_timeout(Duration::from_secs(3))
+        .repair_timeout(Duration::from_secs(30))
+        .query_deadline(Duration::from_secs(3))
+        .start()
+        .await?;
+    let ok = |error: shoal::client::Errors| FixtureError::NotReady(format!("{error:?}"));
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    let client = Shoal::<TestDbClient>::new(&addr0).await.map_err(ok)?;
+    let hashed = |key: u64| <Note as shoal::shared::traits::PartitionKeySupport>::get_partition_key_from_values(&key);
+    for key in 29_000..29_060u64 {
+        client.send_one(Note { key, text: format!("note-{key}") }).await.map_err(ok)?;
+    }
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    for node in 0..3 {
+        wait_checkpointed(&mut cluster, node, "Note", Duration::from_secs(60))?;
+    }
+    // a group, its leader, and a follower holding it
+    let probe = 29_030u64;
+    let (group, leader) = group_of(&mut cluster, 0, "Note", probe)?;
+    let leader = leader.expect("the group has a leader");
+    let follower = (0..3).find(|node| *node != leader).expect("a follower");
+    let live: Vec<u64> = keys_in_group(&mut cluster, "Note", &group, 29_000, 8)?.into_iter().filter(|key| *key < 29_060).collect();
+    assert!(live.len() >= 2, "too few live keys in group {group}: {live:?}");
+    let (corrupted, other) = (live[0], live[1]);
+    let answer = cluster.node_mut(follower).command(&format!("CORRUPT Note {:016x}", hashed(corrupted)))?;
+    assert_eq!(answer["ok"]["fault"], "corrupt", "{answer}");
+    // the read that meets it is refused by name, and the copy is quarantined
+    let addr_f = cluster.node(follower).endpoints.client.to_string();
+    let read = read_note(&addr_f, corrupted).await;
+    assert!(
+        matches!(
+            failure_code(&read),
+            Some(shoal::shared::protocol::error::ErrorCode::CorruptArchive | shoal::shared::protocol::error::ErrorCode::Quarantined)
+        ),
+        "the corrupt record was served: {read:?}"
+    );
+    let view = groups_of(&mut cluster, follower)?;
+    assert_eq!(view["quarantined"], 1, "{view}");
+    wait_member_quarantined(&mut cluster, follower, true, Duration::from_secs(20))?;
+    // the repair: scrubbed, judged, installed from the leader, verified and lifted
+    let repair = shoal::server::AdminKind::Repair {
+        table: "Note".to_string(),
+        tablet: Some(tablet_of(corrupted) as u16),
+        mode: "repair".to_string(),
+        source: None,
+        release: false,
+    };
+    let op = repair_as_process(&mut cluster, 0, &repair)?;
+    let record = wait_repair_done_via(&mut cluster, 0, op, Duration::from_secs(120))?;
+    let group_id = u64::from_str_radix(&group, 16).expect("a group id");
+    let progress = &record["groups"][group_id.to_string()];
+    let repaired = &progress["outcome"]["Repaired"];
+    assert!(repaired.is_object(), "the copy was not repaired: {record}");
+    assert_eq!(repaired["source"]["node"], cluster.node_ids()[leader], "{record}");
+    assert_eq!(repaired["targets"][0]["node"], cluster.node_ids()[follower], "{record}");
+    assert!(repaired["verified"].as_u64().unwrap_or(0) > repaired["boundary"].as_u64().unwrap_or(0), "{record}");
+    // the follower alone installed a snapshot, and its quarantine is lifted everywhere
+    for node in 0..3 {
+        let view = groups_of(&mut cluster, node)?;
+        let expected = u64::from(node == follower);
+        assert_eq!(view["snapshots"]["installed"], expected, "node {node}: {}", view["snapshots"]);
+        assert_eq!(view["quarantined"], 0, "node {node}: {view}");
+    }
+    wait_member_quarantined(&mut cluster, follower, false, Duration::from_secs(20))?;
+    // every key reads through the repaired copy, and every digest agrees
+    for key in [corrupted, other, probe] {
+        wait_note_routed(&addr_f, key, &format!("note-{key}"), Duration::from_secs(20)).await?;
+    }
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    // the held checkpoint was released: writes after the repair land, compact and move it
+    let before = groups_of(&mut cluster, follower)?;
+    let checkpoint_before = applied_by_group(&before, "Note");
+    for key in 29_060..29_090u64 {
+        client.send_one(Note { key, text: format!("after-{key}") }).await.map_err(ok)?;
+    }
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    compact_now(&mut cluster, follower, "Note")?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let view = groups_of(&mut cluster, follower)?;
+        let checkpoint = view["shards"][0]["groups"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|entry| entry["group"].as_u64() == Some(group_id))
+            .and_then(|entry| entry["checkpoint"].as_u64())
+            .unwrap_or(0);
+        if checkpoint > repaired["boundary"].as_u64().unwrap_or(0) {
+            break;
+        }
+        if std::time::Instant::now() > deadline {
+            panic!("the follower's checkpoint stayed held at {checkpoint}: {view}");
+        }
+        compact_now(&mut cluster, follower, "Note")?;
+    }
+    let _ = checkpoint_before;
+    for id in 0..3 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
+
+/// A corrupt primary is repaired from a healthy quorum, and an unresolved split preserves evidence (C9 M8)
+///
+/// The leader's own record of a group is corrupted: the scrub finds its copy invalid against
+/// two verified copies that agree, the leader hands the lead to one of them and that member
+/// repairs the old leader from a snapshot. Then a different partition is erased on each of two
+/// followers - two valid copies that disagree with each other and with the leader - and a
+/// repair stops `Unresolved` with all three digests recorded, nothing quarantined but what the
+/// checksums said, nothing installed, and every copy readable as it was. An operator's `source`
+/// resolves it: the two are quarantined under the operator's word and repaired from the named
+/// node. Every key read through every node afterwards joins a ledger with the inserts that
+/// made it, and the oracle accepts the history ([F44](../../docs/src/features/repair.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn repair_detects_corrupt_primary_and_preserves_evidence() -> Result<(), FixtureError> {
+    use shoal::shared::identity::NodeId;
+    use shoal_model::event::{ClientOp, MutationOp, OpResult, ReadLevel};
+    use shoal_model::ids::{Attempt, Key, OpId, TabletId, Value};
+    use shoal_model::oracle::{Ledger, Outcome};
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lane_links(true)
+        .checkpoint_entries(8)
+        .retained_entries(64)
+        .write_timeout(Duration::from_secs(3))
+        .repair_timeout(Duration::from_secs(30))
+        .query_deadline(Duration::from_secs(3))
+        .start()
+        .await?;
+    let ok = |error: shoal::client::Errors| FixtureError::NotReady(format!("{error:?}"));
+    let addrs: Vec<String> = (0..3).map(|node| cluster.node(node).endpoints.client.to_string()).collect();
+    let hashed = |key: u64| <Note as shoal::shared::traits::PartitionKeySupport>::get_partition_key_from_values(&key);
+    let keys: Vec<u64> = (1..=40).collect();
+    // the ledger: every key inserted once, with its value as its text
+    let mut ledger = Ledger::default();
+    let mut clock = 0u64;
+    let mut next_id = 0u32;
+    let tablet_id = |key: u64| TabletId {
+        table: shoal_model::ids::TableId(1),
+        range: tablet_of(key) as u16,
+    };
+    for key in &keys {
+        let attempt = Attempt { id: OpId(next_id), retry: 0 };
+        next_id += 1;
+        ledger.invoke(attempt, tablet_id(*key), ClientOp::Mutate(MutationOp::Insert { key: Key(*key as u8), value: Value(*key as u32) }), clock);
+        clock += 1;
+        write_note(&addrs[0], *key, &key.to_string()).await.map_err(ok)?;
+        ledger.complete(attempt, clock, Outcome::Ok(OpResult::Applied(true)));
+        clock += 1;
+    }
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    for node in 0..3 {
+        wait_checkpointed(&mut cluster, node, "Note", Duration::from_secs(60))?;
+    }
+    // a group and the node that leads it; three live keys of it
+    let (group, leader) = group_of(&mut cluster, 0, "Note", keys[0])?;
+    let leader = leader.expect("the group has a leader");
+    let group_id = u64::from_str_radix(&group, 16).expect("a group id");
+    let live: Vec<u64> = keys_in_group(&mut cluster, "Note", &group, 1, 40)?.into_iter().filter(|key| *key <= 40).collect();
+    assert!(live.len() >= 3, "too few live keys in group {group}: {live:?}");
+    let (on_leader, on_first, on_second) = (live[0], live[1], live[2]);
+    let followers: Vec<usize> = (0..3).filter(|node| *node != leader).collect();
+    // the primary corrupted: the read that meets it quarantines the leader's own copy
+    let answer = cluster.node_mut(leader).command(&format!("CORRUPT Note {:016x}", hashed(on_leader)))?;
+    assert_eq!(answer["ok"]["fault"], "corrupt", "{answer}");
+    let read = read_note(&addrs[leader], on_leader).await;
+    assert!(failure_code(&read).is_some(), "the corrupt primary served its record: {read:?}");
+    wait_member_quarantined(&mut cluster, leader, true, Duration::from_secs(20))?;
+    let repair = |mode: &str, source: Option<NodeId>| shoal::server::AdminKind::Repair {
+        table: "Note".to_string(),
+        tablet: Some(tablet_of(on_leader) as u16),
+        mode: mode.to_string(),
+        source,
+        release: false,
+    };
+    let op = repair_as_process(&mut cluster, followers[0], &repair("repair", None))?;
+    let record = wait_repair_done_via(&mut cluster, followers[0], op, Duration::from_secs(180))?;
+    let progress = &record["groups"][group_id.to_string()];
+    let repaired = &progress["outcome"]["Repaired"];
+    assert!(repaired.is_object(), "the primary was not repaired: {record}");
+    // the source is a verified member, never the corrupt primary; the lead moved to it
+    let source = repaired["source"]["node"].as_str().expect("a source").to_string();
+    assert_ne!(source, cluster.node_ids()[leader], "the corrupt primary repaired itself: {record}");
+    assert_eq!(repaired["targets"][0]["node"], cluster.node_ids()[leader], "{record}");
+    assert_eq!(progress["driver"], source, "the driver is not the source: {record}");
+    let (_, new_leader) = group_of(&mut cluster, followers[0], "Note", on_leader)?;
+    assert_ne!(new_leader, Some(leader), "the corrupt primary still leads");
+    wait_member_quarantined(&mut cluster, leader, false, Duration::from_secs(20))?;
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    let installed_before: Vec<u64> = (0..3)
+        .map(|node| groups_of(&mut cluster, node).map(|view| view["snapshots"]["installed"].as_u64().unwrap_or(0)))
+        .collect::<Result<_, _>>()?;
+    assert_eq!(installed_before[leader], 1, "{installed_before:?}");
+    // two followers of the group, each with a different partition erased under a valid checksum
+    let leader_now = new_leader.expect("a leader");
+    let others: Vec<usize> = (0..3).filter(|node| *node != leader_now).collect();
+    for (node, key) in others.iter().zip([on_first, on_second]) {
+        let answer = cluster.node_mut(*node).command(&format!("ERASE Note {:016x}", hashed(key)))?;
+        assert_eq!(answer["ok"]["fault"], "erase", "{answer}");
+    }
+    let op = repair_as_process(&mut cluster, 0, &repair("repair", None))?;
+    let record = wait_repair_done_via(&mut cluster, 0, op, Duration::from_secs(120))?;
+    let progress = &record["groups"][group_id.to_string()];
+    let unresolved = &progress["outcome"]["Unresolved"];
+    assert!(unresolved.is_object(), "a three way split was resolved: {record}");
+    assert_eq!(unresolved["digests"].as_array().map_or(0, Vec::len), 3, "{record}");
+    assert_eq!(unresolved["invalid"], serde_json::json!([]), "{record}");
+    // nothing quarantined, nothing installed, every copy readable as it was
+    for node in 0..3 {
+        let view = groups_of(&mut cluster, node)?;
+        assert_eq!(view["quarantined"], 0, "node {node}: {view}");
+        assert_eq!(view["snapshots"]["installed"], installed_before[node], "node {node} installed something: {}", view["snapshots"]);
+    }
+    for (node, key) in others.iter().zip([on_first, on_second]) {
+        assert_eq!(read_note(&addrs[*node], key).await.map_err(ok)?, None, "the erased copy on node {node} is not as it was");
+        assert_eq!(read_note(&addrs[leader_now], key).await.map_err(ok)?, Some(key.to_string()));
+    }
+    // the operator names the leader's copy as trusted, and the split resolves
+    let trusted = NodeId(cluster.node_ids()[leader_now].parse().expect("a node id"));
+    let op = repair_as_process(&mut cluster, 0, &repair("repair", Some(trusted)))?;
+    let record = wait_repair_done_via(&mut cluster, 0, op, Duration::from_secs(180))?;
+    let progress = &record["groups"][group_id.to_string()];
+    let repaired = &progress["outcome"]["Repaired"];
+    assert!(repaired.is_object(), "the split was not repaired from the named source: {record}");
+    assert_eq!(repaired["source"]["node"], cluster.node_ids()[leader_now], "{record}");
+    assert_eq!(repaired["targets"].as_array().map_or(0, Vec::len), 2, "{record}");
+    assert_eq!(record["source"], cluster.node_ids()[leader_now], "{record}");
+    for node in 0..3 {
+        wait_member_quarantined(&mut cluster, node, false, Duration::from_secs(20))?;
+    }
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    // every key through every node joins the ledger, and the history is sequential
+    for addr in &addrs {
+        for key in &keys {
+            let attempt = Attempt { id: OpId(next_id), retry: 0 };
+            next_id += 1;
+            ledger.invoke(attempt, tablet_id(*key), ClientOp::Read { key: Key(*key as u8), level: ReadLevel::One }, clock);
+            clock += 1;
+            let seen = read_note(addr, *key).await.map_err(ok)?.map(|text| Value(text.parse().expect("a value")));
+            ledger.complete(attempt, clock, Outcome::Ok(OpResult::Value(seen)));
+            clock += 1;
+        }
+    }
+    shoal_model::oracle::check(&ledger).unwrap_or_else(|error| panic!("the history is not sequential: {error:?}"));
+    for id in 0..3 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
+
+/// A repair install is atomic at every crash point (C7 M8)
+///
+/// Node two, armed to die at one of the seven points of an install, has a record corrupted
+/// and is repaired: the install kills it at the point. Restarted clean, whatever the crash
+/// left is redone or cleaned up - the copy is still quarantined by its marker - and a second
+/// repair finds it either installed already and agreeing, which lifts the quarantine, or still
+/// corrupt, which installs it again. At every point node two ends with one generation, every
+/// digest agrees, every key reads the survivors' value through it, and nothing is left in the
+/// install directory ([F44](../../docs/src/features/repair.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn repair_install_is_atomic_at_every_crash_point() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lane_links(true)
+        .checkpoint_entries(8)
+        .retained_entries(64)
+        .write_timeout(Duration::from_secs(3))
+        .repair_timeout(Duration::from_secs(30))
+        .snapshot_timeout(Duration::from_secs(10))
+        .query_deadline(Duration::from_secs(3))
+        .start()
+        .await?;
+    let ok = |error: shoal::client::Errors| FixtureError::NotReady(format!("{error:?}"));
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    let client = Shoal::<TestDbClient>::new(&addr0).await.map_err(ok)?;
+    let hashed = |key: u64| <Note as shoal::shared::traits::PartitionKeySupport>::get_partition_key_from_values(&key);
+    for key in 31_000..31_060u64 {
+        client.send_one(Note { key, text: format!("note-{key}") }).await.map_err(ok)?;
+    }
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    for node in 0..3 {
+        wait_checkpointed(&mut cluster, node, "Note", Duration::from_secs(60))?;
+    }
+    // a group node two follows, and its live keys, one per round
+    let mut chosen = None;
+    for key in 31_000..31_060u64 {
+        let (group, leader) = group_of(&mut cluster, 0, "Note", key)?;
+        if leader.is_some_and(|leader| leader != 2) {
+            chosen = Some((group, key));
+            break;
+        }
+    }
+    let (group, first) = chosen.expect("a group node two does not lead");
+    let group_id = u64::from_str_radix(&group, 16).expect("a group id");
+    let live: Vec<u64> = keys_in_group(&mut cluster, "Note", &group, first, 10)?.into_iter().filter(|key| *key < 31_060).collect();
+    assert!(live.len() >= 7, "too few live keys in group {group}: {live:?}");
+    let points = ["before_pending", "pending_written", "mid_install", "map_saved", "before_checkpoint", "after_checkpoint", "after_cleanup"];
+    for (round, point) in points.iter().enumerate() {
+        let key = live[round];
+        // armed to die at the point, then its copy corrupted
+        let mut staged = cluster.staged(2).clone();
+        staged.crash_at = Some((*point).to_string());
+        cluster.restart_with(2, NodeKind::Server, Some(staged))?;
+        cluster.wait_joined(&[2])?;
+        wait_checkpointed(&mut cluster, 2, "Note", Duration::from_secs(60))?;
+        let answer = cluster.node_mut(2).command(&format!("CORRUPT Note {:016x}", hashed(key)))?;
+        assert_eq!(answer["ok"]["fault"], "corrupt", "at {point}: {answer}");
+        // the repair's install reaches the point, and node two dies there
+        let repair = shoal::server::AdminKind::Repair {
+            table: "Note".to_string(),
+            tablet: Some(tablet_of(key) as u16),
+            mode: "repair".to_string(),
+            source: None,
+            release: false,
+        };
+        let op = repair_as_process(&mut cluster, 0, &repair)?;
+        wait_dead(&cluster, 2, Duration::from_secs(90)).map_err(|_| FixtureError::NotReady(format!("node two never died at {point}")))?;
+        let _ = wait_repair_done_via(&mut cluster, 0, op, Duration::from_secs(120))?;
+        // back clean: the marker still quarantines the copy, and a second repair finishes it
+        cluster.restart(2, NodeKind::Server)?;
+        cluster.wait_joined(&[2])?;
+        wait_not_installing(&mut cluster, 2, Duration::from_secs(30))
+            .map_err(|error| FixtureError::NotReady(format!("after dying at {point}: {error:?}")))?;
+        let view = groups_of(&mut cluster, 2)?;
+        assert_eq!(view["quarantined"], 1, "after dying at {point} the copy is not quarantined: {view}");
+        let op = repair_as_process(&mut cluster, 0, &repair)?;
+        let record = wait_repair_done_via(&mut cluster, 0, op, Duration::from_secs(180))?;
+        let outcome = &record["groups"][group_id.to_string()]["outcome"];
+        assert!(
+            outcome["Repaired"].is_object() || outcome["Clean"].is_object(),
+            "after dying at {point} the second repair came to {record}"
+        );
+        for node in 0..3 {
+            assert_eq!(groups_of(&mut cluster, node)?["quarantined"], 0, "after dying at {point} node {node} still holds a quarantine");
+        }
+        wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(60))
+            .map_err(|error| FixtureError::NotReady(format!("after dying at {point}: {error:?}")))?;
+        // every key of the group reads the survivors' value through node two
+        let addr2 = cluster.node(2).endpoints.client.to_string();
+        for probe in &live {
+            wait_note_routed(&addr2, *probe, &format!("note-{probe}"), Duration::from_secs(20))
+                .await
+                .map_err(|error| FixtureError::NotReady(format!("after dying at {point}: {error:?}")))?;
+        }
+        let install_dir = cluster.dir(2).join("wal").join("Shard-0").join("install");
+        let left: Vec<String> = std::fs::read_dir(&install_dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(left.is_empty(), "after dying at {point} the install directory still holds {left:?}");
+    }
+    for id in 0..2 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
     }
     Ok(())
 }

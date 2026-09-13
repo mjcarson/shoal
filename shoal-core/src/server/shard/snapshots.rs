@@ -81,6 +81,9 @@ pub(super) struct ActiveInstall {
     pub(super) checkpoint_version: Option<u64>,
     /// Whether this is a redo from a marker found at open
     pub(super) redone: bool,
+    /// Whether this is a repair's install, whose merged tail is merged again once it lands
+    /// ([F44](../../../../docs/src/features/repair.md))
+    pub(super) repair: bool,
 }
 
 /// Find the markers a crash left behind and judge each against the checkpoint file
@@ -289,7 +292,7 @@ where
             }
         };
         let answer = match rpc {
-            SnapshotRpc::Begin { vote, stream, manifest } => self.begin_snapshot(origin, group, stream, vote, manifest),
+            SnapshotRpc::Begin { vote, stream, manifest, repair } => self.begin_snapshot(origin, group, stream, vote, manifest, repair),
             SnapshotRpc::End { stream, total, checksum } => {
                 self.end_snapshot(origin, group, stream, total, checksum, head, reply);
                 return;
@@ -307,6 +310,7 @@ where
     /// * `stream` - The stream
     /// * `vote` - The sender's vote
     /// * `manifest` - What is coming
+    /// * `repair` - The repair operation the stream serves, if it is one
     fn begin_snapshot(
         &mut self,
         origin: NodeId,
@@ -314,6 +318,7 @@ where
         stream: [u8; 16],
         vote: crate::server::wal::Vote,
         manifest: SnapshotManifest,
+        repair: Option<uuid::Uuid>,
     ) -> SnapshotAnswer {
         let schema_id = <D::ClientType as QuerySupport>::SCHEMA_ID;
         let Some(replication) = self.replication.as_mut() else {
@@ -343,20 +348,36 @@ where
                 manifest.tablets, slot.spec.tablets
             ));
         }
-        // a boundary already applied here needs nothing: the sender moves on from it
-        let (applied, installing) = {
+        let (applied, installing, checkpoint, quarantined) = {
             let state = slot.state.borrow();
-            (state.applied_index(), state.installing)
+            (state.applied_index(), state.installing, state.checkpoint_index(), state.quarantined.is_some())
         };
-        if manifest.boundary.index <= applied {
+        if installing {
+            return SnapshotAnswer::Refused(format!("group {group} is installing a snapshot already"));
+        }
+        // a repair stream replaces a quarantined copy that is live and applied past the
+        // boundary: judged against the checkpoint the group will be restarted from, which is
+        // held where it is until the restart ([F44](../../../../docs/src/features/repair.md))
+        if repair.is_some() {
+            if !quarantined {
+                return SnapshotAnswer::Refused(format!("this shard's copy of group {group} is not quarantined"));
+            }
+            if manifest.boundary.index <= checkpoint {
+                return SnapshotAnswer::Behind { checkpoint };
+            }
+            let hold = self
+                .conf
+                .cluster
+                .as_ref()
+                .map_or(Duration::from_secs(300), |cluster| cluster.replication.snapshot_timeout.duration());
+            slot.state.borrow_mut().hold_checkpoint_until = Some(Instant::now() + hold);
+        } else if manifest.boundary.index <= applied {
+            // a boundary already applied here needs nothing: the sender moves on from it
             let vote = slot.raft.as_ref().map(|raft| raft.metrics().borrow_watched().vote.clone());
             return match vote {
                 Some(vote) => SnapshotAnswer::Installed { vote },
                 None => SnapshotAnswer::Refused(format!("group {group} is still starting")),
             };
-        }
-        if installing {
-            return SnapshotAnswer::Refused(format!("group {group} is installing a snapshot already"));
         }
         // the same stream again resumes from the prefix held; another stream replaces it
         if let Some(partial) = replication.installs.partials.get(&group) {
@@ -383,10 +404,12 @@ where
             ));
         }
         replication.installs.retire(group);
+        let mut partial = Partial::new(origin, stream, vote, manifest);
+        partial.repair = repair;
         replication
             .installs
             .partials
-            .insert(group, Rc::new(RefCell::new(Partial::new(origin, stream, vote, manifest))));
+            .insert(group, Rc::new(RefCell::new(partial)));
         SnapshotAnswer::Resume { from: 0 }
     }
 
@@ -527,6 +550,7 @@ where
         // the install is handed to openraft under the sender's vote, which it judges as it
         // judges an append: a stale one is refused with this replica's own
         let vote = partial.borrow().vote.clone();
+        let loop_tx = self.shard_local_tx.clone();
         glommio::spawn_local(async move {
             let started = Instant::now();
             // where the prefix stood when it last grew, and when
@@ -548,7 +572,7 @@ where
                     break SnapshotAnswer::Refused(format!("the partial could not be written: {failed}"));
                 }
                 if complete && !writing {
-                    break install_received(&partial, &raft, &path, &marker_dir, &marker_name, vote.clone()).await;
+                    break install_received(&partial, &raft, &path, &marker_dir, &marker_name, vote.clone(), &loop_tx).await;
                 }
                 if next != last_next {
                     last_next = next;
@@ -637,8 +661,15 @@ where
             let _ = done.send(Err(format!("group {group} is installing a snapshot already")));
             return Ok(());
         }
-        // a redo is one whose file the open found under a marker
-        let redone = slot.state.borrow().pending_install.as_ref().is_some_and(|(pending, _)| *pending == path);
+        // a redo is one whose file the open found under a marker; a repair's is one the
+        // group was restarted for
+        let (redone, repair) = {
+            let state = slot.state.borrow();
+            (
+                state.pending_install.as_ref().is_some_and(|(pending, _)| *pending == path) && !state.repair_pending,
+                state.repair_pending,
+            )
+        };
         slot.state.borrow_mut().installing = true;
         let table = slot.table;
         let tablets = manifest.tablets.clone();
@@ -651,6 +682,7 @@ where
                 done: Some(done),
                 checkpoint_version: None,
                 redone,
+                repair,
             },
         );
         event!(Level::INFO, msg = "installing a snapshot", group = %group, %table, redone);
@@ -892,10 +924,20 @@ where
             let mut state = slot.state.borrow_mut();
             state.installing = false;
             state.pending_install = None;
+            state.repair_pending = false;
         }
-        event!(Level::INFO, msg = "a snapshot is installed", group = %group, boundary = active.manifest.boundary.index, records = active.manifest.records);
+        event!(Level::INFO, msg = "a snapshot is installed", group = %group, boundary = active.manifest.boundary.index, records = active.manifest.records, repair = active.repair);
         if let Some(done) = active.done.take() {
             let _ = done.send(Ok(()));
+        }
+        // a repair replaced the archives at the boundary: what the old generation had merged
+        // above it is merged again into the new one, before the resident copies the log
+        // rebuilds can be evicted ([F44](../../../../docs/src/features/repair.md))
+        if active.repair {
+            let boundary = active.manifest.boundary.index;
+            if let Err(error) = self.rehand_segments(group, boundary) {
+                event!(Level::ERROR, msg = "the segments above a repair install could not be handed again", group = %group, boundary, ?error);
+            }
         }
     }
 
@@ -952,17 +994,19 @@ async fn read_records(
 /// * `marker_dir` - Where the marker goes
 /// * `marker_name` - The marker's name
 /// * `vote` - The vote to install under
-async fn install_received(
+/// * `loop_tx` - The loop, which restarts the group for a repair stream
+async fn install_received<D: ShoalDatabase>(
     partial: &Rc<RefCell<Partial>>,
     raft: &openraft::Raft<crate::server::replication::DataConfig, impl openraft::storage::RaftStateMachine<crate::server::replication::DataConfig, SnapshotData = SnapshotData>>,
     path: &std::path::Path,
     marker_dir: &std::path::Path,
     marker_name: &str,
     vote: crate::server::wal::Vote,
+    loop_tx: &kanal::AsyncSender<ServerMsg<D>>,
 ) -> SnapshotAnswer {
-    let (manifest, checksum, group) = {
+    let (manifest, checksum, group, repair) = {
         let partial = partial.borrow();
-        (partial.manifest.clone(), partial.assembler.checksum(), partial.manifest.group)
+        (partial.manifest.clone(), partial.assembler.checksum(), partial.manifest.group, partial.repair)
     };
     if checksum != manifest.checksum {
         partial.borrow_mut().failed = Some(format!(
@@ -992,7 +1036,31 @@ async fn install_received(
         return SnapshotAnswer::Refused(format!("the pending marker could not be written: {error}"));
     }
     crash_point::hit(CrashPoint::PendingWritten);
-    event!(Level::INFO, msg = "a snapshot was received whole; installing", group = %group, boundary = manifest.boundary.index, bytes = manifest.total);
+    event!(Level::INFO, msg = "a snapshot was received whole; installing", group = %group, boundary = manifest.boundary.index, bytes = manifest.total, repair = ?repair);
+    // a repair stream is installed by restarting the group from its held checkpoint, since
+    // openraft refuses a snapshot at or below what the live group has committed
+    // ([F44](../../../../docs/src/features/repair.md)); the answer says the restart is under
+    // way, and the driver's verifying scrub is what waits for the install
+    if repair.is_some() {
+        let (reply, done) = futures_channel::oneshot::channel();
+        if loop_tx
+            .send(ServerMsg::RepairInstall {
+                group,
+                path: path.to_path_buf(),
+                manifest,
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            return SnapshotAnswer::Refused("the shard loop is gone".to_string());
+        }
+        return match done.await {
+            Ok(Ok(())) => SnapshotAnswer::Installed { vote },
+            Ok(Err(error)) => SnapshotAnswer::Refused(format!("the group could not be restarted for the install: {error}")),
+            Err(_) => SnapshotAnswer::Refused("the shard loop dropped the restart".to_string()),
+        };
+    }
     // openraft judges the vote, purges the log through the boundary, and asks the state
     // machine to install, which the loop does and answers once it is durable
     let snapshot = Snapshot {

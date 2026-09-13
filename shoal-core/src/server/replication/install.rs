@@ -149,6 +149,9 @@ pub struct Partial {
     pub resumed: bool,
     /// Whether the lane feeding it ended since the last chunk, so its end answers a resume at once
     pub lane_lost: bool,
+    /// The repair operation this stream serves, if it is one
+    /// ([F44](../../../../docs/src/features/repair.md))
+    pub repair: Option<uuid::Uuid>,
 }
 
 impl Partial {
@@ -177,6 +180,7 @@ impl Partial {
             failed: None,
             resumed: false,
             lane_lost: false,
+            repair: None,
         }
     }
 }

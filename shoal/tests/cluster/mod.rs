@@ -148,6 +148,8 @@ pub struct ClusterBuilder {
     scrub_interval_ms: Option<u64>,
     /// How long one scrub may take, if shortened
     repair_timeout_ms: Option<u64>,
+    /// How long one snapshot transfer may take, if shortened
+    snapshot_timeout_ms: Option<u64>,
     /// How many bytes one snapshot chunk carries, if shrunk
     snapshot_chunk_bytes: Option<usize>,
     /// The bulk lane's queue bound, if shrunk
@@ -367,6 +369,16 @@ impl ClusterBuilder {
     /// * `timeout` - The deadline
     pub fn repair_timeout(mut self, timeout: Duration) -> Self {
         self.repair_timeout_ms = Some(timeout.as_millis() as u64);
+        self
+    }
+
+    /// Shorten how long one snapshot transfer may take
+    ///
+    /// # Arguments
+    ///
+    /// * `timeout` - The deadline
+    pub fn snapshot_timeout(mut self, timeout: Duration) -> Self {
+        self.snapshot_timeout_ms = Some(timeout.as_millis() as u64);
         self
     }
 
@@ -703,6 +715,7 @@ impl Cluster {
             retained_bytes: None,
             scrub_interval_ms: None,
             repair_timeout_ms: None,
+            snapshot_timeout_ms: None,
             snapshot_chunk_bytes: None,
             bulk_queue_bytes: None,
             read_consistency: None,
@@ -1366,6 +1379,7 @@ fn build_membership_cluster(
             query_deadline_ms: builder.query_deadline_ms,
             scrub_interval_ms: builder.scrub_interval_ms,
             repair_timeout_ms: builder.repair_timeout_ms,
+            snapshot_timeout_ms: builder.snapshot_timeout_ms,
         });
     }
     Ok(StagedPlan { per_node, reservations })

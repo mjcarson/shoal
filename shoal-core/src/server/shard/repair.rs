@@ -35,6 +35,11 @@ use crate::shared::protocol::peer::Command;
 /// How long to wait between polls of a member whose report is not in yet
 const DIGEST_POLL: Duration = Duration::from_millis(100);
 
+/// What an error from a driver that no longer leads begins with
+///
+/// A driver that lost the lead abandons the group for the new leader rather than failing it.
+pub const NOT_LEADER: &str = "this shard does not lead ";
+
 /// What a scrub of one group came to
 #[derive(Debug, Clone)]
 pub struct ScrubOutcome {
@@ -84,7 +89,7 @@ pub async fn scrub_group<D: ShoalDatabase>(
         Ok(Ok(response)) => response.log_id.index,
         Ok(Err(RaftError::APIError(ClientWriteError::ForwardToLeader(forward)))) => {
             return Err(format!(
-                "this shard does not lead group {group}: the leader is {:?}",
+                "{NOT_LEADER}group {group}: the leader is {:?}",
                 forward.leader_node.or(forward.leader_id)
             ))
         }
@@ -490,9 +495,87 @@ pub struct DriverContext<D: ShoalDatabase> {
     pub control: kanal::Sender<ControlRequest>,
     /// The loop, which holds this shard's own copy
     pub loop_tx: AsyncSender<ServerMsg<D>>,
+    /// Whether the group's log lives in memory alone
+    pub volatile: bool,
+    /// How long one snapshot transfer may take
+    pub snapshot_timeout: Duration,
 }
 
+/// How many times a cut is taken again for a receiver whose checkpoint is past it
+const CUTS_AT_MOST: usize = 3;
+
 impl<D: ShoalDatabase> DriverContext<D> {
+    /// Replace a quarantined durable copy with a snapshot of this shard's, cut past its checkpoint
+    ///
+    /// The cut is this shard's own, at or past its checkpoint; a receiver whose checkpoint is
+    /// at or past the boundary answers where it stands, and the checkpoint here is moved past
+    /// it - an entry proposed, the WAL rotated and swept, the compactor's merge waited for -
+    /// and the cut taken again, three times at most. Returns the boundary installed
+    /// ([F44](../../../../docs/src/features/repair.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `target` - The quarantined copy
+    async fn install_on(&self, target: ShardAddr) -> Result<u64, String> {
+        let mut peer = crate::server::replication::GroupPeer::for_repair(self.group, target, self.network.clone());
+        for attempt in 0..CUTS_AT_MOST {
+            let built = self.network.build(self.group).await.map_err(|error| format!("cutting a snapshot: {error}"))?;
+            let vote = self.raft.metrics().borrow_watched().vote.clone();
+            event!(Level::INFO, msg = "sending a repair snapshot", op = %self.op, group = %self.group, %target, boundary = built.manifest.boundary.index, attempt);
+            match peer
+                .repair_snapshot(vote, built.path.clone(), built.manifest.clone(), self.op, self.snapshot_timeout)
+                .await?
+            {
+                crate::server::replication::network::RepairSend::Installed => return Ok(built.manifest.boundary.index),
+                crate::server::replication::network::RepairSend::Behind { checkpoint } => {
+                    event!(Level::INFO, msg = "the target's checkpoint is past the cut; moving this shard's past it", op = %self.op, group = %self.group, %target, checkpoint, ours = self.state.borrow().checkpoint_index());
+                    self.advance_past(checkpoint).await?;
+                }
+            }
+        }
+        Err(format!("{target}'s checkpoint outran {CUTS_AT_MOST} cuts"))
+    }
+
+    /// Move this shard's checkpoint for the group past an index
+    ///
+    /// An entry is proposed so the group has a frame past the index, the WAL is rotated and
+    /// swept so the segment is handed to the compactor, and the checkpoint is polled until it
+    /// passes or the scrub deadline does.
+    ///
+    /// # Arguments
+    ///
+    /// * `past` - The index to pass
+    async fn advance_past(&self, past: u64) -> Result<(), String> {
+        let started = Instant::now();
+        while self.state.borrow().checkpoint_index() <= past {
+            if started.elapsed() > self.timeout {
+                return Err(format!("the checkpoint did not pass {past} within {:?}", self.timeout));
+            }
+            // an entry past the index: a scrub under a throwaway operation costs one cut
+            let written = glommio::timer::timeout(self.timeout, async {
+                Ok(self.raft.client_write(Command::scrub(self.table, Uuid::new_v4())).await)
+            })
+            .await;
+            match written {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => return Err(format!("proposing a nudge: {error}")),
+                Err(_) => return Err("the nudge did not commit in time".to_string()),
+            }
+            let (reply, done) = oneshot::channel();
+            self.loop_tx
+                .send(ServerMsg::RepairRotate { reply })
+                .await
+                .map_err(|error| format!("{error:?}"))?;
+            let _ = done.await;
+            // the compactor's merge moves the checkpoint on its own time
+            let waited = Instant::now();
+            while self.state.borrow().checkpoint_index() <= past && waited.elapsed() < Duration::from_secs(5) {
+                glommio::timer::sleep(Duration::from_millis(100)).await;
+            }
+        }
+        Ok(())
+    }
+
     /// Commit where the group stands
     ///
     /// # Arguments
@@ -573,23 +656,43 @@ impl<D: ShoalDatabase> DriverContext<D> {
 /// * `context` - Everything the driver needs
 pub async fn drive_group<D: ShoalDatabase>(context: DriverContext<D>) {
     let outcome = drive_group_inner(&context).await;
+    let mut phase = match &outcome {
+        Ok(phase) => phase.clone(),
+        Err(_) => RepairPhase::Done,
+    };
     if let Err(error) = outcome {
-        event!(Level::ERROR, msg = "a group's repair failed", op = %context.op, group = %context.group, error);
-        let _ = context
-            .commit(GroupRepair {
-                phase: RepairPhase::Done,
-                driver: Some(context.me.node),
-                boundary: None,
-                reports: Vec::new(),
-                outcome: Some(RepairOutcome::Failed { reason: error }),
-            })
-            .await;
+        // a driver that lost the lead leaves the group for the new leader
+        if error.starts_with(NOT_LEADER) {
+            phase = RepairPhase::Pending;
+            event!(Level::INFO, msg = "a group's repair is left for its new leader", op = %context.op, group = %context.group, error);
+            let _ = context
+                .commit(GroupRepair {
+                    phase: RepairPhase::Pending,
+                    driver: None,
+                    boundary: None,
+                    reports: Vec::new(),
+                    outcome: None,
+                })
+                .await;
+        } else {
+            event!(Level::ERROR, msg = "a group's repair failed", op = %context.op, group = %context.group, error);
+            let _ = context
+                .commit(GroupRepair {
+                    phase: RepairPhase::Done,
+                    driver: Some(context.me.node),
+                    boundary: None,
+                    reports: Vec::new(),
+                    outcome: Some(RepairOutcome::Failed { reason: error }),
+                })
+                .await;
+        }
     }
     let _ = context
         .loop_tx
         .send(ServerMsg::RepairDone {
             op: context.op,
             group: context.group,
+            phase,
         })
         .await;
 }
@@ -599,7 +702,7 @@ pub async fn drive_group<D: ShoalDatabase>(context: DriverContext<D>) {
 /// # Arguments
 ///
 /// * `context` - Everything the driver needs
-async fn drive_group_inner<D: ShoalDatabase>(context: &DriverContext<D>) -> Result<(), String> {
+async fn drive_group_inner<D: ShoalDatabase>(context: &DriverContext<D>) -> Result<RepairPhase, String> {
     let me = context.me.node;
     // a release: every member lifts, and the group is done
     if context.release {
@@ -607,7 +710,7 @@ async fn drive_group_inner<D: ShoalDatabase>(context: &DriverContext<D>) -> Resu
             context.quarantine(*member, QuarantineAction::Lift { op: None }).await?;
         }
         event!(Level::INFO, msg = "released a group's quarantines, as the operator asked", op = %context.op, group = %context.group);
-        return context
+        context
             .commit(GroupRepair {
                 phase: RepairPhase::Done,
                 driver: Some(me),
@@ -615,7 +718,8 @@ async fn drive_group_inner<D: ShoalDatabase>(context: &DriverContext<D>) -> Resu
                 reports: Vec::new(),
                 outcome: Some(RepairOutcome::Released),
             })
-            .await;
+            .await?;
+        return Ok(RepairPhase::Done);
     }
     // the scrub: said first, so a driver that dies here is visibly the one that was scrubbing
     context
@@ -671,6 +775,14 @@ async fn drive_group_inner<D: ShoalDatabase>(context: &DriverContext<D>) -> Resu
         })
         .collect();
     event!(Level::INFO, msg = "judged a group's copies", op = %context.op, group = %context.group, boundary = scrub.boundary, outcome = ?verdict.outcome);
+    // a repair lifts the quarantine of a copy that holds the trusted digest, verified: one a
+    // crashed install left quarantined by its marker, or one an operator held back. A verify
+    // never lifts anything
+    if context.mode == RepairMode::Repair && verdict.trusted.is_some() {
+        for member in &verdict.trusted_members {
+            context.quarantine(*member, QuarantineAction::Lift { op: None }).await?;
+        }
+    }
     // a verify is done at the judgement; so is a repair with nothing to repair
     let repairable = context.mode == RepairMode::Repair && matches!(verdict.outcome, RepairOutcome::Divergent { .. });
     context
@@ -678,11 +790,131 @@ async fn drive_group_inner<D: ShoalDatabase>(context: &DriverContext<D>) -> Resu
             phase: if repairable { RepairPhase::Judged } else { RepairPhase::Done },
             driver: Some(me),
             boundary: Some(scrub.boundary),
-            reports,
+            reports: reports.clone(),
             outcome: Some(verdict.outcome.clone()),
         })
         .await?;
-    Ok(())
+    if !repairable {
+        return Ok(RepairPhase::Done);
+    }
+    // the source is the leader: a leader whose own copy is not trusted hands the lead to a
+    // member whose copy is, and that member resumes the record from here
+    if !verdict.trusted_members.contains(&context.me) {
+        let Some(trusted) = verdict.trusted_members.first().copied() else {
+            return Err("no verified member holds the trusted digest".to_string());
+        };
+        event!(Level::WARN, msg = "this leader's copy is not trusted; transferring the lead to a verified member", op = %context.op, group = %context.group, to = %trusted);
+        context
+            .commit(GroupRepair {
+                phase: RepairPhase::Pending,
+                driver: None,
+                boundary: Some(scrub.boundary),
+                reports,
+                outcome: Some(verdict.outcome.clone()),
+            })
+            .await?;
+        context
+            .raft
+            .trigger()
+            .transfer_leader(trusted)
+            .await
+            .map_err(|error| format!("transferring the lead to {trusted}: {error}"))?;
+        return Ok(RepairPhase::Pending);
+    }
+    // every quarantined copy in turn: a durable one from a snapshot cut past its checkpoint,
+    // a volatile one by restarting it empty for the leader to feed
+    let targets: Vec<ShardAddr> = verdict.quarantine.iter().map(|(member, _)| *member).collect();
+    let mut boundary = scrub.boundary;
+    for target in &targets {
+        context
+            .commit(GroupRepair {
+                phase: RepairPhase::Installing {
+                    source: context.me,
+                    target: *target,
+                },
+                driver: Some(me),
+                boundary: Some(scrub.boundary),
+                reports: reports.clone(),
+                outcome: Some(verdict.outcome.clone()),
+            })
+            .await?;
+        if context.volatile {
+            context.quarantine(*target, QuarantineAction::Rebuild).await?;
+            continue;
+        }
+        boundary = context.install_on(*target).await?;
+    }
+    // the second round: what was installed has to agree now
+    context
+        .commit(GroupRepair {
+            phase: RepairPhase::Verifying,
+            driver: Some(me),
+            boundary: Some(boundary),
+            reports: reports.clone(),
+            outcome: Some(verdict.outcome.clone()),
+        })
+        .await?;
+    let second = scrub_group(
+        &context.raft,
+        &context.network,
+        context.me,
+        context.state.clone(),
+        context.table,
+        context.group,
+        &context.members,
+        context.op,
+        context.timeout,
+    )
+    .await?;
+    let after = judge(&context.members, &second, context.source);
+    // a copy that now holds the trusted digest, verified, is no longer divergent
+    let mut lifted = Vec::new();
+    if after.trusted.is_some() {
+        for member in &after.trusted_members {
+            context.quarantine(*member, QuarantineAction::Lift { op: None }).await?;
+            lifted.push(*member);
+        }
+    }
+    let repaired = targets.iter().all(|target| after.trusted_members.contains(target));
+    let outcome = if repaired {
+        RepairOutcome::Repaired {
+            source: context.me,
+            targets: targets.clone(),
+            boundary,
+            verified: second.boundary,
+        }
+    } else {
+        RepairOutcome::Failed {
+            reason: format!("after the install the copies still disagree: {:?}", after.outcome),
+        }
+    };
+    event!(Level::INFO, msg = "a group's repair is done", op = %context.op, group = %context.group, ?outcome, lifted = lifted.len());
+    let reports: Vec<(ShardAddr, Result<DigestSummary, String>)> = second
+        .reports
+        .iter()
+        .map(|(member, report)| {
+            let summary = report.as_ref().map(|report| DigestSummary {
+                digest: report.digest,
+                rows: report.rows,
+                partitions: report.partitions,
+                checksum_failures: match report.integrity {
+                    DigestIntegrity::Verified => 0,
+                    DigestIntegrity::Invalid { checksum_failures } => checksum_failures,
+                },
+            });
+            (*member, summary.map_err(Clone::clone))
+        })
+        .collect();
+    context
+        .commit(GroupRepair {
+            phase: RepairPhase::Done,
+            driver: Some(me),
+            boundary: Some(second.boundary),
+            reports,
+            outcome: Some(outcome),
+        })
+        .await?;
+    Ok(RepairPhase::Done)
 }
 
 impl<D: ShoalDatabase> super::Shard<D>
@@ -804,6 +1036,17 @@ where
                 replication.integrity.quarantined += 1;
                 event!(Level::ERROR, msg = "quarantined this shard's copy of a group", group = %group, reason = quarantine.reason.as_str(), at = quarantine.at, op = %quarantine.op);
             }
+            QuarantineAction::Rebuild => {
+                // the copy is rebuilt from the leader; the quarantine goes with it, since what
+                // it held is gone
+                self.rebuild_group_empty(group)?;
+                let replication = self.replication.as_mut().expect("still here");
+                super::repair::clear_quarantine(&wal_dir, group)
+                    .await
+                    .map_err(|error| format!("removing the quarantine marker: {error}"))?;
+                replication.last_report = None;
+                return Ok(());
+            }
             QuarantineAction::Lift { op } => {
                 let current = state.borrow().quarantined;
                 let Some(current) = current else {
@@ -831,9 +1074,11 @@ where
     ///
     /// * `op` - The operation
     /// * `group` - The group
-    pub(super) fn handle_repair_done(&mut self, op: Uuid, group: GroupId) {
+    pub(super) fn handle_repair_done(&mut self, op: Uuid, group: GroupId, phase: RepairPhase) {
         if let Some(replication) = self.replication.as_mut() {
             replication.driving.remove(&(op, group));
+            // the map is behind the commit for a moment; what was committed is what counts
+            replication.driven.insert((op, group), phase);
         }
         self.drive_repairs();
     }
@@ -852,10 +1097,19 @@ where
         };
         let incarnation = self.local.as_ref().map_or(0, |local| local.borrow().incarnation);
         let repair = self.conf.cluster.as_ref().map(|cluster| cluster.repair.clone()).unwrap_or_default();
+        let snapshot_timeout = self
+            .conf
+            .cluster
+            .as_ref()
+            .map_or(Duration::from_secs(300), |cluster| cluster.replication.snapshot_timeout.duration());
         let loop_tx = self.shard_local_tx.clone();
         let Some(replication) = self.replication.as_mut() else {
             return;
         };
+        // what this shard committed for a record the map no longer carries is forgotten
+        replication
+            .driven
+            .retain(|(op, _), _| map.repairs.iter().any(|record| record.op == *op));
         for record in &map.repairs {
             for (group, progress) in &record.groups {
                 if replication.driving.len() >= repair.concurrent as usize {
@@ -864,7 +1118,12 @@ where
                 if replication.driving.contains(&(record.op, *group)) {
                     continue;
                 }
-                if !matches!(progress.phase, RepairPhase::Pending | RepairPhase::Scrubbing) {
+                // the phase as this shard last committed it, when the map is behind it
+                let phase = match replication.driven.get(&(record.op, *group)) {
+                    Some(driven) if driven.rank() > progress.phase.rank() => driven,
+                    _ => &progress.phase,
+                };
+                if !matches!(phase, RepairPhase::Pending | RepairPhase::Scrubbing) {
                     continue;
                 }
                 let Some(slot) = replication.groups.get(group) else {
@@ -896,6 +1155,8 @@ where
                     timeout: repair.timeout.duration(),
                     control: control.clone(),
                     loop_tx: loop_tx.clone(),
+                    volatile: slot.store.is_volatile(),
+                    snapshot_timeout,
                 };
                 glommio::spawn_local(drive_group(context)).detach();
             }

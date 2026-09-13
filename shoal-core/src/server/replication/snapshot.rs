@@ -579,6 +579,13 @@ pub enum SnapshotRpc {
         stream: [u8; 16],
         /// What is coming
         manifest: SnapshotManifest,
+        /// The repair operation this stream serves, if it is one
+        ///
+        /// A repair stream replaces a quarantined copy that is live and applied past the
+        /// boundary, so it is judged against the receiver's checkpoint rather than its applied
+        /// position and installed by restarting the group from that checkpoint
+        /// ([F44](../../../../docs/src/features/repair.md)).
+        repair: Option<uuid::Uuid>,
     },
     /// Every byte of a stream was sent
     End {
@@ -606,6 +613,11 @@ pub enum SnapshotAnswer {
     },
     /// The snapshot is refused, and this is why
     Refused(String),
+    /// A repair stream's boundary is not past the receiver's checkpoint; cut again past this
+    Behind {
+        /// The receiver's checkpoint
+        checkpoint: u64,
+    },
 }
 
 /// What a begin frame's manifest carries on the bulk lane: where its chunks go

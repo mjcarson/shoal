@@ -111,6 +111,15 @@ pub struct MachineState {
     /// since the log is checksummed and independent of the archives
     /// ([F44](../../../../docs/src/features/repair.md)).
     pub quarantined: Option<Quarantine>,
+    /// Until when the checkpoint stays where it is, while a repair stream is accepted
+    ///
+    /// The stream's boundary has to stay past the checkpoint until the group is restarted
+    /// from it, so `advance_checkpoints` leaves this group alone until then, or until the
+    /// transfer's deadline if it never lands ([F44](../../../../docs/src/features/repair.md)).
+    pub hold_checkpoint_until: Option<std::time::Instant>,
+    /// Whether the pending install is a repair's, whose merged tail has to be merged again
+    /// once it lands ([F44](../../../../docs/src/features/repair.md))
+    pub repair_pending: bool,
 }
 
 impl MachineState {
@@ -145,7 +154,15 @@ impl MachineState {
             pending_install: None,
             digests: VecDeque::new(),
             quarantined: None,
+            hold_checkpoint_until: None,
+            repair_pending: false,
         }
+    }
+
+    /// Whether the checkpoint is held where it is for a repair stream
+    #[must_use]
+    pub fn checkpoint_held(&self) -> bool {
+        self.hold_checkpoint_until.is_some_and(|until| std::time::Instant::now() < until)
     }
 
     /// Note that a scrub was applied and its digest is on its way

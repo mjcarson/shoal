@@ -101,6 +101,8 @@ pub enum QuarantineAction {
         /// The operation the quarantine has to have been decided under, or none for any
         op: Option<Uuid>,
     },
+    /// Restart a volatile group empty, so its leader feeds it whole again
+    Rebuild,
 }
 
 /// One quarantined copy, as a node reports it and the map carries it
@@ -183,6 +185,21 @@ pub enum RepairPhase {
     Done,
 }
 
+impl RepairPhase {
+    /// Where this phase stands in the order a repair moves through
+    #[must_use]
+    pub fn rank(&self) -> u8 {
+        match self {
+            RepairPhase::Pending => 0,
+            RepairPhase::Scrubbing => 1,
+            RepairPhase::Judged => 2,
+            RepairPhase::Installing { .. } => 3,
+            RepairPhase::Verifying => 4,
+            RepairPhase::Done => 5,
+        }
+    }
+}
+
 /// What a group's repair came to
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RepairOutcome {
@@ -207,15 +224,15 @@ pub enum RepairOutcome {
         /// The copies that were not verified, by member
         invalid: Vec<ShardAddr>,
     },
-    /// A quarantined copy was replaced from a verified source and verified afterwards
+    /// Every quarantined copy was replaced from a verified source and verified afterwards
     Repaired {
         /// The source
         source: ShardAddr,
-        /// The copy replaced
-        target: ShardAddr,
-        /// The boundary the snapshot was cut at
+        /// The copies replaced
+        targets: Vec<ShardAddr>,
+        /// The boundary the last snapshot was cut at
         boundary: u64,
-        /// The index the second scrub verified the target at
+        /// The index the second scrub verified the copies at
         verified: u64,
     },
     /// The repair could not be completed; the copy stays quarantined

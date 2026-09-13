@@ -32,6 +32,6 @@ pub mod types;
 
 pub use cores::ControlPlacement;
 pub use plane::{
-    AdminCall, ControlEvent, ControlHandle, ControlPlane, ControlRequest, DataReadiness,
+    AdminCall, AdminSender, ControlEvent, ControlHandle, ControlPlane, ControlRequest, DataReadiness,
     JoinStatus, MapSink, ReadinessView, ShardHealthEvent, TopologyView, VoteProbe,
 };

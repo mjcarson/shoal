@@ -222,6 +222,44 @@ pub enum ControlRequest {
     Shutdown,
 }
 
+/// A cloneable way to make administrative requests as the process, from any thread
+///
+/// The control thread's request channel and nothing else, so a thread that outlives no
+/// handle can still ask ([F44](../../../../docs/src/features/repair.md)).
+#[derive(Clone)]
+pub struct AdminSender {
+    /// Where requests go
+    requests: kanal::Sender<ControlRequest>,
+}
+
+impl AdminSender {
+    /// Make an administrative request as the process itself
+    ///
+    /// # Arguments
+    ///
+    /// * `request` - What is asked
+    ///
+    /// # Errors
+    ///
+    /// Fails if the control thread is gone or did not answer.
+    pub fn admin(&self, request: AdminRequest) -> Result<AdminResponse, ServerError> {
+        let (reply, rx) = kanal::bounded(1);
+        self.requests
+            .send(ControlRequest::Admin(AdminCall {
+                request,
+                principal: None,
+                trusted: true,
+                reply,
+            }))
+            .map_err(|_| ServerError::ControlFailed {
+                error: "the control thread is not answering".to_string(),
+            })?;
+        rx.recv_timeout(PROPOSE_TIMEOUT + REQUEST_TIMEOUT).map_err(|_| ServerError::ControlFailed {
+            error: "the control thread did not answer an admin request".to_string(),
+        })
+    }
+}
+
 /// The cluster as one node sees it
 ///
 /// Built from the applied state on request, so it is what the committed log says and never a
@@ -701,6 +739,17 @@ impl ControlHandle {
             .map_err(|_| ServerError::ControlFailed {
                 error: "the control thread did not answer an admin request".to_string(),
             })
+    }
+
+    /// A handle that can make administrative requests as the process, from any thread
+    ///
+    /// What a benchmark's background thread holds to ask for a repair mid-run
+    /// ([F44](../../../../docs/src/features/repair.md)).
+    #[must_use]
+    pub fn admin_sender(&self) -> AdminSender {
+        AdminSender {
+            requests: self.requests.clone(),
+        }
     }
 
     /// Send the leader one stale report, for a test

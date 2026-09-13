@@ -31,6 +31,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures_channel::oneshot;
+use kanal::AsyncSender;
 use openraft::error::{ClientWriteError, LinearizableReadError, RaftError};
 use openraft::storage::EntryResponder;
 use openraft::{Config, EntryPayload, Raft, ReadPolicy, SnapshotPolicy, StoredMembership};
@@ -176,6 +177,8 @@ pub(super) struct Replication<D: ShoalDatabase> {
     pub(super) quarantines: HashMap<GroupId, crate::server::control::repair::Quarantine>,
     /// The group repairs this shard is driving right now, by operation and group
     pub(super) driving: HashSet<(Uuid, GroupId)>,
+    /// The phase each driver here committed last, which the map may be behind on
+    pub(super) driven: HashMap<(Uuid, GroupId), crate::server::control::repair::RepairPhase>,
     /// When each group this shard leads is next due a scheduled scrub
     pub(super) next_scrub: HashMap<GroupId, Instant>,
 }
@@ -278,6 +281,7 @@ where
             wal_dir: dir.clone(),
             quarantines,
             driving: HashSet::new(),
+            driven: HashMap::new(),
             next_scrub: HashMap::new(),
         });
         self.rebuild_groups().await?;
@@ -446,19 +450,7 @@ where
                 network: replication.network.clone(),
             };
             let config = group_config(&cluster, failover_ms, spec.id);
-            let tx = tx.clone();
-            let addr = ShardAddr::new(me, spec.mine);
-            let primary = spec.is_primary(me);
-            glommio::spawn_local(async move {
-                let outcome = start_group(addr, spec, config, network, store, machine, primary).await;
-                let _ = tx
-                    .send(ServerMsg::GroupUp {
-                        group: network_group(&outcome),
-                        raft: outcome.map(|(_, raft)| raft).map_err(|(_, error)| error),
-                    })
-                    .await;
-            })
-            .detach();
+            spawn_group_start(tx.clone(), me, spec, config, network, store, machine, None);
         }
         // the writes that waited on a group this node no longer hosts are refused by name
         for (id, (meta, table, key, _)) in orphaned {
@@ -471,6 +463,204 @@ where
         Ok(())
     }
 
+    /// Restart a group from its checkpoint with a received repair snapshot to install
+    ///
+    /// The live handle is shut down and built again as a process restart would build it: the
+    /// resident partitions of the group's tablets dropped, the applied position set back to
+    /// the checkpoint, and the received file pending past it, so openraft's startup installs
+    /// the file through the compactor and then replays the retained log above it
+    /// ([F44](../../../../docs/src/features/repair.md)). Proposals queue meanwhile, and the
+    /// quarantine keeps the tablets from serving.
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group
+    /// * `path` - The verified file
+    /// * `manifest` - What it is
+    pub(super) fn restart_group_for_install(&mut self, group: GroupId, path: PathBuf, manifest: SnapshotManifest) -> Result<(), String> {
+        let me = self.node_id();
+        let cluster = self.conf.cluster.clone().unwrap_or_default();
+        let map = self.map.get();
+        let tx = self.shard_local_tx.clone();
+        let Some(replication) = self.replication.as_mut() else {
+            return Err("this node hosts no tablet groups".to_string());
+        };
+        let Some(slot) = replication.groups.get_mut(&group) else {
+            return Err(format!("group {group} is not hosted on this shard"));
+        };
+        if replication.active_installs.contains_key(&group) {
+            return Err(format!("group {group} is installing a snapshot already"));
+        }
+        let Some(previous) = slot.raft.take() else {
+            return Err(format!("group {group} is still starting"));
+        };
+        let table = slot.table;
+        let tablets = slot.spec.tablets.clone();
+        // the state a restart would find: the checkpoint, and the file pending past it
+        let (checkpoint, membership, quarantined) = {
+            let state = slot.state.borrow();
+            (state.checkpoint.clone(), state.checkpoint_membership.clone(), state.quarantined)
+        };
+        let seed = match checkpoint.as_ref().and_then(|point| replication.checkpoint.get(group).map(|file| (point, file))) {
+            Some((point, file)) if file.applied.as_ref() == Some(point) => replication.retries.seed_for(group, file),
+            _ => Vec::new(),
+        };
+        let mut machine_state = MachineState::at(checkpoint.clone(), membership, seed);
+        machine_state.pending_install = Some((path, manifest));
+        machine_state.repair_pending = true;
+        machine_state.quarantined = quarantined;
+        let state = Rc::new(RefCell::new(machine_state));
+        slot.state = state.clone();
+        slot.snapshot = None;
+        slot.snapshot_building = false;
+        // an apply parked on a read for this group belonged to the old handle
+        for batches in replication.parked.values_mut() {
+            batches.retain(|batch| batch.group != group);
+        }
+        replication.parked.retain(|_, batches| !batches.is_empty());
+        event!(Level::WARN, msg = "restarting a group from its checkpoint to install a repair snapshot", group = %group, checkpoint = checkpoint.as_ref().map_or(0, |point| point.index));
+        // the resident copies are the old generation; the log above the checkpoint rebuilds them
+        self.tables.evict_tablets(table, &tablets);
+        let replication = self.replication.as_mut().expect("still here");
+        let slot = replication.groups.get(&group).expect("still here");
+        // truncation cannot happen: a failover base is seconds, not weeks
+        #[allow(clippy::cast_possible_truncation)]
+        let failover_ms = if map.primary_failover_ms > 0 {
+            map.primary_failover_ms
+        } else {
+            cluster.primary_failover_after.duration().as_millis() as u64
+        };
+        let config = group_config(&cluster, failover_ms, group);
+        let network = GroupNetwork {
+            group,
+            network: replication.network.clone(),
+        };
+        let machine = GroupMachine::new(group, state, tx.clone());
+        spawn_group_start(tx, me, slot.spec.clone(), config, network, slot.store.clone(), machine, Some(previous));
+        Ok(())
+    }
+
+    /// Restart a volatile group empty, so its leader feeds it whole again
+    ///
+    /// A divergent copy of an ephemeral table's group is repaired the way a restart repairs it:
+    /// its memory log and its resident partitions dropped, after which the leader's replication
+    /// feeds it from the log or the volatile snapshot ([F44](../../../../docs/src/features/repair.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group
+    pub(super) fn rebuild_group_empty(&mut self, group: GroupId) -> Result<(), String> {
+        let me = self.node_id();
+        let cluster = self.conf.cluster.clone().unwrap_or_default();
+        let map = self.map.get();
+        let tx = self.shard_local_tx.clone();
+        let Some(replication) = self.replication.as_mut() else {
+            return Err("this node hosts no tablet groups".to_string());
+        };
+        let Some(slot) = replication.groups.get_mut(&group) else {
+            return Err(format!("group {group} is not hosted on this shard"));
+        };
+        if !slot.store.is_volatile() {
+            return Err(format!("group {group} is durable; a durable copy is repaired by a snapshot"));
+        }
+        let Some(previous) = slot.raft.take() else {
+            return Err(format!("group {group} is still starting"));
+        };
+        let table = slot.table;
+        let tablets = slot.spec.tablets.clone();
+        let state = Rc::new(RefCell::new(MachineState::at(None, StoredMembership::default(), Vec::new())));
+        slot.state = state.clone();
+        slot.snapshot = None;
+        slot.snapshot_building = false;
+        for batches in replication.parked.values_mut() {
+            batches.retain(|batch| batch.group != group);
+        }
+        replication.parked.retain(|_, batches| !batches.is_empty());
+        // the memory log goes with the handle
+        replication.volatile.forget(group);
+        event!(Level::WARN, msg = "restarting a volatile group empty to repair it", group = %group);
+        self.tables.evict_tablets(table, &tablets);
+        let replication = self.replication.as_mut().expect("still here");
+        let slot = replication.groups.get(&group).expect("still here");
+        // truncation cannot happen: a failover base is seconds, not weeks
+        #[allow(clippy::cast_possible_truncation)]
+        let failover_ms = if map.primary_failover_ms > 0 {
+            map.primary_failover_ms
+        } else {
+            cluster.primary_failover_after.duration().as_millis() as u64
+        };
+        let config = group_config(&cluster, failover_ms, group);
+        let network = GroupNetwork {
+            group,
+            network: replication.network.clone(),
+        };
+        let machine = GroupMachine::new(group, state, tx.clone());
+        spawn_group_start(tx, me, slot.spec.clone(), config, network, slot.store.clone(), machine, Some(previous));
+        Ok(())
+    }
+
+    /// Hand every sealed segment holding a group's frames above a boundary to its compactor again
+    ///
+    /// After a repair install the archives are the source's generation at the boundary, and
+    /// what the old generation had merged above it is gone with it; the frames are still in
+    /// the sealed segments the loop already handed, so they are handed again for this group
+    /// alone ([F44](../../../../docs/src/features/repair.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group
+    /// * `boundary` - The install's boundary
+    pub(super) fn rehand_segments(&mut self, group: GroupId, boundary: u64) -> Result<(), ServerError> {
+        let sinks: HashMap<D::TableNames, kanal::AsyncSender<CompactionJob>> =
+            self.tables.compaction_sinks().into_iter().collect();
+        let Some(replication) = self.replication.as_mut() else {
+            return Ok(());
+        };
+        let Some(slot) = replication.groups.get(&group) else {
+            return Ok(());
+        };
+        let table = slot.table;
+        let Some(sink) = sinks.get(&table) else {
+            return Ok(());
+        };
+        let mut handed = 0usize;
+        for segment in replication.wal.segments() {
+            if !segment.sealed || !segment.handed {
+                continue;
+            }
+            let Some(last) = segment.last.get(&group) else {
+                continue;
+            };
+            if last.index <= boundary {
+                continue;
+            }
+            let mut frames = replication.wal.frames_in(segment.generation, &[(group, boundary)]);
+            if frames.is_empty() {
+                continue;
+            }
+            frames.sort_by_key(|frame| frame.index);
+            let refs: Vec<(u64, u32)> = frames.iter().map(|frame| (frame.offset, frame.len)).collect();
+            // the segment is compacting again for this table, so it is not deleted meanwhile
+            replication.compacting.entry(segment.generation).or_default().insert(table);
+            let job = CompactionJob::Segment {
+                path: replication.wal.segment_path(segment.generation),
+                generation: segment.generation,
+                frames: refs,
+                positions: vec![(group, last.clone())],
+            };
+            if sink.try_send(job).is_err() {
+                return Err(ServerError::GlommioGeneric(format!("{table}'s compactor is not taking jobs")));
+            }
+            handed += 1;
+        }
+        if handed > 0 {
+            let _ = sink.try_send(CompactionJob::Archives);
+        }
+        event!(Level::INFO, msg = "handed the segments above a repair install again", group = %group, boundary, segments = handed);
+        Ok(())
+    }
+
+    /// Take a group's handle from the task that built it
     /// Take a group's handle from the task that built it
     ///
     /// # Arguments
@@ -1332,6 +1522,11 @@ where
                 continue;
             }
             let mut state = slot.state.borrow_mut();
+            // a checkpoint held for a repair stream stays where the stream was judged against
+            // ([F44](../../../../docs/src/features/repair.md))
+            if state.checkpoint_held() {
+                continue;
+            }
             if state.checkpoint_index() < last.index {
                 state.checkpoint = Some(last.clone());
                 state.checkpoint_membership = state.membership.clone();
@@ -2019,6 +2214,47 @@ fn group_config(cluster: &crate::server::conf::Cluster, failover_ms: u64, group:
 
 /// How long the fixture's scrub verb waits for every member's report
 const FIXTURE_SCRUB_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Build a group's handle on a task of its own, after shutting an old one down if there is one
+///
+/// # Arguments
+///
+/// * `tx` - The loop, which hears `GroupUp`
+/// * `me` - This node
+/// * `spec` - The group
+/// * `config` - Its timers
+/// * `network` - Its network
+/// * `store` - Its log
+/// * `machine` - Its state machine
+/// * `previous` - The handle to shut down first, for a restart
+#[allow(clippy::too_many_arguments)]
+fn spawn_group_start<D: ShoalDatabase>(
+    tx: AsyncSender<ServerMsg<D>>,
+    me: NodeId,
+    spec: GroupSpec,
+    config: Arc<Config>,
+    network: GroupNetwork,
+    store: GroupStore,
+    machine: GroupMachine<D>,
+    previous: Option<Raft<DataConfig, GroupMachine<D>>>,
+) {
+    let addr = ShardAddr::new(me, spec.mine);
+    let primary = spec.is_primary(me);
+    glommio::spawn_local(async move {
+        // the old handle first, whole, so two cores never share one log
+        if let Some(previous) = previous {
+            let _ = previous.shutdown().await;
+        }
+        let outcome = start_group(addr, spec, config, network, store, machine, primary).await;
+        let _ = tx
+            .send(ServerMsg::GroupUp {
+                group: network_group(&outcome),
+                raft: outcome.map(|(_, raft)| raft).map_err(|(_, error)| error),
+            })
+            .await;
+    })
+    .detach();
+}
 
 /// The group a start outcome is for
 ///

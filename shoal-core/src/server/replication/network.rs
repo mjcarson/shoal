@@ -385,7 +385,7 @@ impl ShardNetwork {
     /// # Arguments
     ///
     /// * `group` - The group
-    async fn build(&self, group: GroupId) -> Result<Rc<BuiltSnapshot>, String> {
+    pub async fn build(&self, group: GroupId) -> Result<Rc<BuiltSnapshot>, String> {
         let (tx, rx) = oneshot::channel();
         (self.shared.builder)(group, tx);
         rx.await.unwrap_or_else(|_| Err("the shard loop dropped the snapshot request".to_string()))
@@ -733,11 +733,8 @@ impl RaftNetworkV2<DataConfig> for GroupPeer {
         cancel: impl Future<Output = ReplicationClosed> + OptionalSend + 'static,
         option: RPCOption,
     ) -> Result<SnapshotResponse<DataConfig>, StreamingError<DataConfig>> {
-        let started = Instant::now();
-        let deadline = option.hard_ttl();
         let group = self.group;
         let network = self.peer.network.clone();
-        let target = self.peer.target;
         // the file: the loop's cut for this group's own snapshot, or a received one as it is
         let held;
         let (path, manifest): (PathBuf, SnapshotManifest) = match snapshot.snapshot {
@@ -747,6 +744,109 @@ impl RaftNetworkV2<DataConfig> for GroupPeer {
             }
             SnapshotData::Received { path, manifest } => (path, manifest),
         };
+        match self.send_snapshot(vote, path, manifest, None, cancel, option.hard_ttl()).await {
+            Ok(response) => Ok(response),
+            Err(SendError::Streaming(error)) => Err(error),
+            // a stream that is not a repair's is never judged against a checkpoint
+            Err(SendError::Behind(checkpoint)) => Err(unreachable(format!("the receiver answered a checkpoint of {checkpoint} to a plain stream"))),
+        }
+    }
+}
+
+/// Why a snapshot stream did not complete
+enum SendError {
+    /// The receiver's checkpoint is at or past a repair stream's boundary
+    Behind(u64),
+    /// The transfer failed as openraft's would
+    Streaming(StreamingError<DataConfig>),
+}
+
+impl From<StreamingError<DataConfig>> for SendError {
+    /// A transfer failure
+    fn from(error: StreamingError<DataConfig>) -> Self {
+        SendError::Streaming(error)
+    }
+}
+
+impl GroupPeer {
+    /// A peer to one member of a group, for a repair transfer outside openraft's replication
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group
+    /// * `target` - The member
+    /// * `network` - The shard's network
+    #[must_use]
+    pub fn for_repair(group: GroupId, target: ShardAddr, network: ShardNetwork) -> Self {
+        GroupPeer {
+            group,
+            peer: ShardPeer::new(target, network),
+        }
+    }
+
+    /// Send a repair snapshot to a quarantined member, and say what it answered
+    ///
+    /// The driver's transfer ([F44](../../../../docs/src/features/repair.md)): the same stream
+    /// as openraft's, under the repair operation, which the receiver judges against its
+    /// checkpoint and installs by restarting the group. A receiver whose checkpoint is past the
+    /// boundary answers where it stands, so the driver can cut again.
+    ///
+    /// # Arguments
+    ///
+    /// * `vote` - The sender's vote
+    /// * `path` - The file
+    /// * `manifest` - What it is
+    /// * `op` - The repair operation
+    /// * `deadline` - How long the transfer may take
+    ///
+    /// # Errors
+    ///
+    /// Fails as the transfer fails: a refusal, a lost link past the deadline, or the deadline.
+    pub async fn repair_snapshot(
+        &mut self,
+        vote: VoteOf<DataConfig>,
+        path: PathBuf,
+        manifest: SnapshotManifest,
+        op: Uuid,
+        deadline: Duration,
+    ) -> Result<RepairSend, String> {
+        // nothing cancels a repair transfer but its deadline
+        let never = std::future::pending::<ReplicationClosed>();
+        match self.send_snapshot(vote, path, manifest, Some(op), never, deadline).await {
+            Ok(_) => Ok(RepairSend::Installed),
+            Err(SendError::Behind(checkpoint)) => Ok(RepairSend::Behind { checkpoint }),
+            Err(SendError::Streaming(error)) => Err(error.to_string()),
+        }
+    }
+
+    /// Send a snapshot to the member: control on the replication lane, bytes on the bulk lane
+    ///
+    /// A begin RPC learns where to start, the chunks stream from there, an end RPC waits for
+    /// the install, and a receiver short of bytes at the end answers where to resume from
+    /// ([F43](../../../../docs/src/features/node-recovery.md)). Every failure is answered
+    /// unreachable, which openraft retries with a backoff, except a cancellation.
+    ///
+    /// # Arguments
+    ///
+    /// * `vote` - The sender's vote
+    /// * `path` - The file
+    /// * `manifest` - What it is
+    /// * `repair` - The repair operation this stream serves, if it is one
+    /// * `cancel` - Resolves when the transfer is cancelled
+    /// * `deadline` - How long the transfer may take
+    async fn send_snapshot(
+        &mut self,
+        vote: VoteOf<DataConfig>,
+        path: PathBuf,
+        manifest: SnapshotManifest,
+        repair: Option<Uuid>,
+        cancel: impl Future<Output = ReplicationClosed> + OptionalSend + 'static,
+        deadline: Duration,
+    ) -> Result<SnapshotResponse<DataConfig>, SendError> {
+        let started = Instant::now();
+        let group = self.group;
+        let network = self.peer.network.clone();
+        let target = self.peer.target;
         let stream = *Uuid::new_v4().as_bytes();
         let mut cancel = Box::pin(cancel);
         // begin: what is coming, and where the receiver wants it from
@@ -755,6 +855,7 @@ impl RaftNetworkV2<DataConfig> for GroupPeer {
             vote: vote.clone(),
             stream,
             manifest: manifest.clone(),
+            repair,
         })?;
         let answer: SnapshotAnswer = decode(&self.peer.rpc_until(group, begin, started, deadline).await?)?;
         event!(Level::DEBUG, msg = "a snapshot stream begins", group = %group, %target, boundary = manifest.boundary.index, bytes = manifest.total, ?answer);
@@ -763,18 +864,19 @@ impl RaftNetworkV2<DataConfig> for GroupPeer {
             SnapshotAnswer::Installed { vote } => return Ok(SnapshotResponse { vote }),
             SnapshotAnswer::Refused(msg) => {
                 network.shared.snapshots.borrow_mut().aborted += 1;
-                return Err(unreachable(format!("{target} refused the snapshot: {msg}")));
+                return Err(unreachable(format!("{target} refused the snapshot: {msg}")).into());
             }
+            SnapshotAnswer::Behind { checkpoint } => return Err(SendError::Behind(checkpoint)),
         };
         let Some(link) = network.bulk_link(target.node) else {
-            return Err(unreachable(format!("{} is not a member the map knows", target.node)));
+            return Err(unreachable(format!("{} is not a member the map knows", target.node)).into());
         };
         let max = network.shared.local.borrow().max_frame_bytes;
         let chunk_bytes = network.shared.replication.snapshot_chunk_bytes as u64;
         let file = BufferedFile::open(&path)
             .await
             .map_err(|error| unreachable(format!("opening the snapshot file: {error}")))?;
-        let outcome = async {
+        let outcome: Result<SnapshotResponse<DataConfig>, SendError> = async {
             loop {
                 // the stream's begin, routing its chunks to the shard that hosts the group
                 let route = postcard::to_allocvec(&BulkRoute {
@@ -857,12 +959,13 @@ impl RaftNetworkV2<DataConfig> for GroupPeer {
                         event!(Level::DEBUG, msg = "resuming a snapshot stream", group = %group, %target, from = resume);
                         from = resume;
                         if started.elapsed() >= deadline {
-                            return Err(unreachable("the snapshot transfer ran out of time resuming".to_string()));
+                            return Err(SendError::from(unreachable("the snapshot transfer ran out of time resuming".to_string())));
                         }
                     }
                     SnapshotAnswer::Refused(msg) => {
-                        return Err(unreachable(format!("{target} refused the snapshot at its end: {msg}")));
+                        return Err(SendError::from(unreachable(format!("{target} refused the snapshot at its end: {msg}"))));
                     }
+                    SnapshotAnswer::Behind { checkpoint } => return Err(SendError::Behind(checkpoint)),
                 }
             }
         }
@@ -870,8 +973,9 @@ impl RaftNetworkV2<DataConfig> for GroupPeer {
         let _ = file.close().await;
         if let Err(error) = &outcome {
             // a transfer that did not complete is aborted on the lane, so the receiver can
-            // drop what it holds if it wants to; a cancellation is not counted as a failure
-            if !matches!(error, StreamingError::Closed(_)) {
+            // drop what it holds if it wants to; a cancellation is not counted as a failure,
+            // and neither is a receiver saying the cut has to be taken again
+            if !matches!(error, SendError::Streaming(StreamingError::Closed(_)) | SendError::Behind(_)) {
                 network.shared.snapshots.borrow_mut().aborted += 1;
             }
             let end = SnapshotEnd {
@@ -888,6 +992,18 @@ impl RaftNetworkV2<DataConfig> for GroupPeer {
         }
         outcome
     }
+}
+
+/// What a repair transfer came to
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepairSend {
+    /// The receiver took the stream whole and is restarting the group to install it
+    Installed,
+    /// The receiver's checkpoint is at or past the boundary: cut again past it
+    Behind {
+        /// The receiver's checkpoint
+        checkpoint: u64,
+    },
 }
 
 /// Queue a frame on the bulk link, waiting out a full queue until the deadline or a cancellation
