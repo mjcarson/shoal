@@ -13,11 +13,13 @@ pub mod machine;
 pub mod network;
 pub mod proposal;
 pub mod report;
+pub mod snapshot;
 pub mod types;
 
 pub use lease::Lease;
 pub use machine::{GroupMachine, MachineState, SnapshotData};
 pub use network::{GroupNetwork, GroupPeer, ReplicationLink, RpcFailure, ShardNetwork, ShardPeer};
 pub use proposal::{BarrierAnswer, ProposalOutcome};
-pub use report::{GroupReport, NodeReplication, ReadStats, ReadVerb, ReplicationVerb, ShardReplication};
+pub use report::{GroupReport, NodeReplication, ReadStats, ReadVerb, ReplicationVerb, ShardReplication, SnapshotStats};
+pub use snapshot::{BuiltSnapshot, SnapshotAnswer, SnapshotManifest, SnapshotRpc};
 pub use types::{ApplyOutcome, CommandResult, DataConfig, Remembered, ResultKind};

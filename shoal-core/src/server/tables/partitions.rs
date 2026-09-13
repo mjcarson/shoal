@@ -144,6 +144,17 @@ impl<P, B: StableBytes> ValidatedArchive<P, B> {
     }
 }
 
+impl<P, B: StableBytes> ValidatedArchive<P, B> {
+    /// The archived bytes, as validation saw them
+    ///
+    /// A shared slice, so nothing can change the bytes through it and the argument in
+    /// [`Self::archived`] holds. What a snapshot copies an archived partition out as
+    /// ([F43](../../../../docs/src/features/node-recovery.md)).
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.raw
+    }
+}
+
 impl<P, B> ValidatedArchive<P, B> {
     /// Get the number of archived bytes this holds
     ///

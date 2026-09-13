@@ -1572,6 +1572,23 @@ fn handle_command(
                 _ => Err("STALL_SHARD needs a shard index and a stall in milliseconds".to_string()),
             }
         }
+        // cut a snapshot of a group now, on the shard hosting it, and report its manifest
+        // ([F43](../../docs/src/features/node-recovery.md))
+        "SNAPSHOT" => match parts.next().and_then(|hex| u64::from_str_radix(hex, 16).ok()) {
+            Some(group) => {
+                let group = shoal::shared::identity::GroupId(group);
+                pool.replication_verb(shoal::server::replication::ReplicationVerb::Snapshot { group })
+                    .map_err(|error| format!("{error:?}"))
+                    .and_then(|answers| {
+                        // the shard that hosts the group answers a manifest; the rest refuse by name
+                        answers
+                            .into_iter()
+                            .find_map(Result::ok)
+                            .ok_or_else(|| format!("no shard cut a snapshot of group {group}"))
+                    })
+            }
+            None => Err("SNAPSHOT needs a group id in hex".to_string()),
+        },
         // drop the next committed write replies every shard of this node would send
         "DROP_REPLIES" => match parts.next().and_then(|n| n.parse::<u64>().ok()) {
             Some(n) => pool
@@ -2843,6 +2860,31 @@ fn compacting_of(cluster: &mut Cluster, node: usize) -> Result<Vec<u64>, Fixture
     Ok(generations)
 }
 
+/// The records of a snapshot file: each partition key with its archived bytes
+///
+/// Parsed with the file's own layout rather than the engine's reader, since the fixture runs
+/// on tokio and the partition types are not public
+/// ([F43](../../docs/src/features/node-recovery.md)).
+///
+/// # Arguments
+///
+/// * `path` - The file
+fn snapshot_records(path: &std::path::Path) -> Vec<(u64, Vec<u8>)> {
+    let bytes = std::fs::read(path).expect("the snapshot file reads");
+    assert_eq!(&bytes[..8], b"SHOALSNP", "not a snapshot file");
+    let word = |at: usize| u64::from_le_bytes(bytes[at..at + 8].try_into().expect("eight bytes"));
+    let count = word(33);
+    let mut at = 41usize;
+    let mut records = Vec::new();
+    for _ in 0..count {
+        let key = word(at);
+        let len = u32::from_le_bytes(bytes[at + 8..at + 12].try_into().expect("four bytes")) as usize;
+        records.push((key, bytes[at + 12..at + 12 + len].to_vec()));
+        at += 12 + len;
+    }
+    records
+}
+
 /// Wait until a note reads back with a text through a node, or say it never did
 ///
 /// # Arguments
@@ -3646,6 +3688,140 @@ async fn a_volatile_group_purges_its_log() -> Result<(), FixtureError> {
             "no volatile group ever purged its log (applied, checkpoint, purged): {purged:?}"
         );
         std::thread::sleep(Duration::from_millis(200));
+    }
+    for id in 0..3 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
+
+/// A snapshot is one stable cut at exactly its boundary (C7 M7, Q3)
+///
+/// Fifty notes take a mix of inserts, deletes, reinserts and updates through the leader, every
+/// write's committed index kept from its session token. The first half of the mix is sealed
+/// and compacted; a cut is asked for; the second half is written and compacted after it. The
+/// cut's boundary is read from its manifest and the oracle is the last write to each key at or
+/// below it: every key the oracle has is a record holding exactly that text, every key it
+/// deleted is absent, and nothing written after the boundary is in the file
+/// ([F43](../../docs/src/features/node-recovery.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn snapshot_has_one_stable_boundary_under_writes() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lane_links(true)
+        .checkpoint_entries(8)
+        .retained_entries(16)
+        .start()
+        .await?;
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    let client = Shoal::<TestDbClient>::new(&addr0).await.map_err(|error| FixtureError::NotReady(format!("{error:?}")))?;
+    let (group, _) = group_of(&mut cluster, 0, "Note", 7000)?;
+    let keys = keys_in_group(&mut cluster, "Note", &group, 7000, 50)?;
+    // every write, with the index it committed at: (index, key, text or none for a delete)
+    let mut history: Vec<(u64, u64, Option<String>)> = Vec::new();
+    let mut step = |history: &mut Vec<(u64, u64, Option<String>)>, response: shoal::ShoalResponse<TestDbClient>, key: u64, text: Option<String>| {
+        let token = response.session_token().expect("a committed write carries a token");
+        history.push((token.index, key, text));
+    };
+    let ok = |error: shoal::client::Errors| FixtureError::NotReady(format!("{error:?}"));
+    // the first half: every key inserted, a third deleted, some of those reinserted, some updated
+    for key in &keys {
+        let text = format!("k{key}-v1");
+        let response = client.send_one(Note { key: *key, text: text.clone() }).await.map_err(ok)?;
+        step(&mut history, response, *key, Some(text));
+    }
+    for key in keys.iter().step_by(3) {
+        let response = client.send_one(NoteDelete::new(*key)).await.map_err(ok)?;
+        step(&mut history, response, *key, None);
+    }
+    for key in keys.iter().step_by(6) {
+        let text = format!("k{key}-v2");
+        let response = client.send_one(Note { key: *key, text: text.clone() }).await.map_err(ok)?;
+        step(&mut history, response, *key, Some(text));
+    }
+    for key in keys.iter().skip(1).step_by(4) {
+        let text = format!("k{key}-v3");
+        let update = cluster::schema::NoteUpdate {
+            partition_key: *key,
+            text: Some(text.clone()),
+        };
+        match client.send_one(update).await {
+            Ok(response) => step(&mut history, response, *key, Some(text)),
+            // an update of a deleted key is refused and changes nothing
+            Err(shoal::client::Errors::QueryDidNotSucceed { .. }) => {}
+            Err(error) => return Err(ok(error)),
+        }
+    }
+    let first_half = history.iter().map(|(index, _, _)| *index).max().expect("writes happened");
+    wait_checkpoint_past(&mut cluster, &[0], &group, first_half, Duration::from_secs(60))?;
+    // the cut, between the two halves
+    let cut = cluster.node_mut(0).command(&format!("SNAPSHOT {group}"))?;
+    let manifest = cut["ok"].clone();
+    let boundary = manifest["boundary"].as_u64().unwrap_or_else(|| panic!("no boundary in {cut}"));
+    assert!(boundary >= first_half, "the cut's boundary {boundary} is below the compacted writes {first_half}");
+    let path = std::path::PathBuf::from(manifest["path"].as_str().expect("a path"));
+    // the second half, after the cut: more of the same, compacted past too
+    for key in keys.iter().step_by(2) {
+        let text = format!("k{key}-v4");
+        let response = client.send_one(Note { key: *key, text: text.clone() }).await.map_err(ok)?;
+        step(&mut history, response, *key, Some(text));
+    }
+    for key in keys.iter().skip(2).step_by(5) {
+        match client.send_one(NoteDelete::new(*key)).await {
+            Ok(response) => step(&mut history, response, *key, None),
+            // a delete of a key already gone is refused and changes nothing
+            Err(shoal::client::Errors::QueryDidNotSucceed { .. }) => {}
+            Err(error) => return Err(ok(error)),
+        }
+    }
+    let second_half = history.iter().map(|(index, _, _)| *index).max().expect("writes happened");
+    assert!(second_half > boundary, "the second half committed below the boundary");
+    wait_checkpoint_past(&mut cluster, &[0], &group, second_half, Duration::from_secs(60))?;
+    // the oracle: the last write to each key at or below the boundary
+    let mut oracle: std::collections::BTreeMap<u64, Option<String>> = std::collections::BTreeMap::new();
+    let mut ordered = history.clone();
+    ordered.sort_by_key(|(index, _, _)| *index);
+    for (index, key, text) in ordered {
+        if index <= boundary {
+            oracle.insert(key, text);
+        }
+    }
+    let records = snapshot_records(&path);
+    assert_eq!(records.len() as u64, manifest["records"].as_u64().unwrap_or(0), "the manifest's record count");
+    // a record is keyed by the partition hash, not the note's key
+    let hashed = |key: u64| <Note as shoal::shared::traits::PartitionKeySupport>::get_partition_key_from_values(&key);
+    let present: std::collections::BTreeMap<u64, Vec<u8>> = records.into_iter().collect();
+    for (key, expected) in &oracle {
+        match (expected, present.get(&hashed(*key))) {
+            (Some(text), Some(bytes)) => {
+                assert!(
+                    bytes.windows(text.len()).any(|window| window == text.as_bytes()),
+                    "key {key}: the record does not hold {text:?}"
+                );
+                // no other version of the key is in the record
+                for other in ["v1", "v2", "v3", "v4"] {
+                    let stale = format!("k{key}-{other}");
+                    if stale != *text {
+                        assert!(
+                            !bytes.windows(stale.len()).any(|window| window == stale.as_bytes()),
+                            "key {key}: the record holds {stale:?} beside {text:?}"
+                        );
+                    }
+                }
+            }
+            (Some(text), None) => panic!("key {key} should hold {text:?} at {boundary} and is absent"),
+            (None, Some(_)) => panic!("key {key} was deleted before {boundary} and is in the file"),
+            (None, None) => {}
+        }
+    }
+    let live: std::collections::BTreeSet<u64> = oracle
+        .iter()
+        .filter(|(_, text)| text.is_some())
+        .map(|(key, _)| hashed(*key))
+        .collect();
+    for key in present.keys() {
+        assert!(live.contains(key), "partition {key:016x} is in the file and not in the oracle");
     }
     for id in 0..3 {
         assert_eq!(cluster.node(id).failure(), None, "node {id} died");

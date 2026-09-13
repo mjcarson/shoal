@@ -189,6 +189,34 @@ pub enum CompactionJob {
         generation: u64,
         /// This table's frames in it, as (offset, length), in log order per group
         frames: Vec<(u64, u32)>,
+        /// The last entry of each group with frames in the job, which the compactor tracks
+        /// so a snapshot it cuts afterwards knows its boundary
+        /// ([F43](../../../docs/src/features/node-recovery.md))
+        positions: Vec<(crate::shared::identity::GroupId, crate::server::wal::WalLogId)>,
+    },
+    /// Cut a snapshot of one group's tablets from the archives, as they stand between two jobs
+    ///
+    /// The compactor is the only writer of archives and runs one job at a time, so the archive
+    /// map between two segment jobs is exactly the state after every frame merged so far; the
+    /// boundary is the highest position merged for the group, or the loop's checkpoint if that
+    /// is higher, which it is only for a compactor that has merged nothing since a restart
+    /// ([F43](../../../docs/src/features/node-recovery.md)). The file is written under `dir`
+    /// and the shard hears `SnapshotBuilt`.
+    Snapshot {
+        /// The group
+        group: crate::shared::identity::GroupId,
+        /// The structural fingerprint of the schema, for the manifest
+        schema_id: u64,
+        /// The tablets the group serves
+        tablets: Vec<u16>,
+        /// The loop's checkpoint for the group, which the boundary is never below
+        at_least: Option<crate::server::wal::WalLogId>,
+        /// The membership as of the cut
+        membership: openraft::type_config::alias::StoredMembershipOf<crate::server::replication::DataConfig>,
+        /// Every remembered request of the group, which the trailer filters to the boundary
+        retries: Vec<(crate::shared::protocol::peer::RequestId, crate::server::replication::Remembered)>,
+        /// The directory the file goes in
+        dir: PathBuf,
     },
     /// Compact this shards archive data
     Archives,

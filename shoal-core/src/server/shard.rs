@@ -3599,6 +3599,9 @@ where
                     self.handle_segment_compacted(table, generation);
                 }
                 // the checkpoint file landed
+                ServerMsg::BuildSnapshot { group, reply } => self.handle_build_snapshot(group, reply).await?,
+                ServerMsg::SnapshotBuilt { group, outcome } => self.handle_snapshot_built(group, outcome).await?,
+                ServerMsg::InstallSnapshot { group, done, .. } => self.handle_install_snapshot(group, done),
                 ServerMsg::CheckpointWritten { version, outcome } => {
                     self.handle_checkpoint_written(version, outcome)?;
                 }
@@ -3608,8 +3611,7 @@ where
                 }
                 // drive a replication verb, for the fixture
                 ServerMsg::ReplicationVerb { verb, reply } => {
-                    let answer = self.handle_replication_verb(verb).await;
-                    let _ = reply.send(answer);
+                    self.handle_replication_verb(verb, reply).await?;
                 }
                 // drive a read verb, for the fixture
                 ServerMsg::ReadVerb { verb, reply } => {

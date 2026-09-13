@@ -1611,6 +1611,43 @@ where
         Ok((rows, acc))
     }
 
+    /// Every resident partition of some tablets, as its key and archived bytes
+    ///
+    /// What a volatile group's snapshot is cut from
+    /// ([F43](../../../../docs/src/features/node-recovery.md)); a partition with no live row
+    /// is not there.
+    ///
+    /// # Arguments
+    ///
+    /// * `tablets` - The tablets
+    #[must_use]
+    pub fn snapshot_partitions(&self, tablets: &[u16]) -> Vec<(u64, Vec<u8>)> {
+        let mut records = Vec::new();
+        for (key, entry) in &self.partitions {
+            // truncation cannot happen: a tablet id is twelve bits
+            #[allow(clippy::cast_possible_truncation)]
+            let tablet = crate::server::ring::Ring::tablet_of(*key) as u16;
+            if !tablets.contains(&tablet) {
+                continue;
+            }
+            let bytes = match entry {
+                MaybeLoaded::Loaded { partition, .. } => {
+                    if !partition.rows.values().any(|row| matches!(row, MaybeRow::Row(_))) {
+                        continue;
+                    }
+                    rkyv::to_bytes::<rkyv::rancor::Error>(partition).map(|bytes| bytes.to_vec())
+                }
+                MaybeLoaded::Accessible(read) => Ok(read.as_bytes().to_vec()),
+            };
+            match bytes {
+                Ok(bytes) => records.push((*key, bytes)),
+                Err(error) => event!(Level::WARN, msg = "a partition could not be serialized for a snapshot", key, %error),
+            }
+        }
+        records.sort_by_key(|(key, _)| *key);
+        records
+    }
+
     /// Mark partitions as evictable if they are no longer in the intent log
     ///
     /// The generation we are given names an intent log that has been compacted into

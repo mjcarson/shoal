@@ -633,6 +633,42 @@ where
         /// The segment's generation
         generation: u64,
     },
+    /// A transfer wants a snapshot file of a group at or past a boundary
+    ///
+    /// Posted by a group's network from openraft's snapshot transmitter, which cannot touch the
+    /// loop's state; the loop answers with the file it holds, or cuts one and answers once it
+    /// is built ([F43](../../../docs/src/features/node-recovery.md)). Never crosses a thread.
+    BuildSnapshot {
+        /// The group
+        group: crate::shared::identity::GroupId,
+        /// Where the file goes
+        reply: futures_channel::oneshot::Sender<Result<std::rc::Rc<crate::server::replication::BuiltSnapshot>, String>>,
+    },
+    /// A snapshot file was cut, by the compactor or by the loop's own task
+    SnapshotBuilt {
+        /// The group
+        group: crate::shared::identity::GroupId,
+        /// The file and its manifest, or why there is none
+        outcome: Result<(std::path::PathBuf, crate::server::replication::SnapshotManifest), String>,
+    },
+    /// A received snapshot is to be installed, from the group's state machine
+    ///
+    /// Posted by `GroupMachine::install_snapshot` on openraft's worker task, or on the task
+    /// building the group at open when a pending marker is past the checkpoint, and answered
+    /// through `done` once the install is durable ([F43](../../../docs/src/features/node-recovery.md)).
+    /// Never crosses a thread.
+    InstallSnapshot {
+        /// The group
+        group: crate::shared::identity::GroupId,
+        /// The verified file
+        path: std::path::PathBuf,
+        /// What it is
+        manifest: crate::server::replication::SnapshotManifest,
+        /// What openraft was told the snapshot is
+        meta: openraft::type_config::alias::SnapshotMetaOf<crate::server::replication::DataConfig>,
+        /// Fired once the install is durable, or with why it is not
+        done: futures_channel::oneshot::Sender<Result<(), String>>,
+    },
     /// The checkpoint file was written, so the groups it covers may snapshot at it
     CheckpointWritten {
         /// Which write this was, so a stale completion is ignored
@@ -753,6 +789,9 @@ impl<D: ShoalDatabase> Clone for ServerMsg<D> {
             ServerMsg::WalSealed { .. } => panic!("A sealed segment is the writing shard's"),
             ServerMsg::SegmentCompacted { .. } => panic!("A compacted segment is the writing shard's"),
             ServerMsg::CheckpointWritten { .. } => panic!("A checkpoint write is the writing shard's"),
+            ServerMsg::BuildSnapshot { .. } => panic!("A snapshot is built for the shard hosting the group"),
+            ServerMsg::InstallSnapshot { .. } => panic!("A snapshot is installed on the shard hosting the group"),
+            ServerMsg::SnapshotBuilt { .. } => panic!("A built snapshot is the cutting shard's"),
             ServerMsg::ReplicationView(_) => panic!("A replication view is asked of one shard"),
             ServerMsg::ReplicationVerb { .. } => panic!("A replication verb is for one shard"),
             ServerMsg::ReadVerb { .. } => panic!("A read verb is for one shard"),

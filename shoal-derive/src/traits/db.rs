@@ -389,6 +389,13 @@ pub fn add(
             #table_names_ident::#variant_ident => self.#field_ident.digest().await,
         }
     });
+    // build our snapshot partition arms
+    let snapshot_partition_arms = fields.named.iter().zip(variants).map(|(field, variant_ident)| {
+        let field_ident = field.ident.as_ref().unwrap();
+        quote! {
+            #table_names_ident::#variant_ident => self.#field_ident.snapshot_partitions(tablets),
+        }
+    });
     // build our table-of-id arms
     let table_of_id_arms = variants.iter().map(|variant_ident| {
         quote! {
@@ -661,6 +668,13 @@ pub fn add(
             async fn digest_table(&self, table: Self::TableNames) -> Result<(u64, u64), ::shoal::server::ServerError> {
                 match table {
                     #(#digest_arms)*
+                }
+            }
+
+            /// Every resident partition of some tablets of a table, for a volatile snapshot
+            fn snapshot_partitions(&self, table: Self::TableNames, tablets: &[u16]) -> Vec<(u64, Vec<u8>)> {
+                match table {
+                    #(#snapshot_partition_arms)*
                 }
             }
 

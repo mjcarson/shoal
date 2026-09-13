@@ -24,9 +24,13 @@ use super::conf::FileSystemTableConf;
 use super::map::{ArchiveEntry, ArchiveMap, MapIntent, MapIntentKinds};
 use super::IntentLogReader;
 use crate::server::messages::ServerMsg;
+use crate::server::replication::snapshot::{self, SnapshotHeader, SnapshotManifest, SnapshotWriter};
+use crate::server::ring::Ring;
+use crate::server::wal::WalLogId;
 use crate::server::ServerError;
 use crate::server::database::ShoalDatabase;
-use crate::shared::traits::{PartitionKeySupport, RkyvSupport};
+use crate::shared::identity::GroupId;
+use crate::shared::traits::{PartitionKeySupport, RkyvSupport, TableNameSupport as _};
 use crate::storage::{CompactionJob, IntentReadSupport, RecoveryStats, ShouldPrune};
 
 /// The minimum size an active archive must be in order to be considered for compaction
@@ -134,6 +138,12 @@ pub struct FileSystemCompactor<T: IntentReadSupport<R>, R: PartitionKeySupport, 
     shard_local_tx: AsyncSender<ServerMsg<S>>,
     /// The path to this tables archive folder
     archive_path: PathBuf,
+    /// The last entry of each tablet group merged into the archives since this compactor started
+    ///
+    /// What a snapshot cut between two jobs takes as its boundary
+    /// ([F43](../../../../../docs/src/features/node-recovery.md)); empty after a restart, when
+    /// the loop's checkpoint stands in for it.
+    merged: HashMap<GroupId, WalLogId>,
     /// The row type this table contains
     row_kind: PhantomData<R>,
 }
@@ -169,6 +179,7 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             jobs_rx,
             shard_local_tx: shard_local_tx.clone(),
             archive_path: conf.get_archive_path(R::name()),
+            merged: HashMap::new(),
             row_kind: PhantomData,
         };
         Ok(compactor)
@@ -453,12 +464,14 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
     /// * `path` - The segment
     /// * `generation` - Its generation
     /// * `frames` - This table's frames in it, as (offset, length)
+    /// * `positions` - The last entry of each group with frames in the job
     #[instrument(name = "FileSystemCompactor::compact_segment", skip_all, err(Debug))]
     async fn compact_segment(
         &mut self,
         path: PathBuf,
         generation: u64,
         frames: Vec<(u64, u32)>,
+        positions: Vec<(GroupId, WalLogId)>,
     ) -> Result<(), ServerError>
     where
         <T as Archive>::Archived: rkyv::Deserialize<T, Strategy<Pool, rkyv::rancor::Error>>,
@@ -502,6 +515,13 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             self.apply_intents(TailLoss::None).await?;
             self.write_partition().await?
         };
+        // the archives now hold the effect of every frame through these positions
+        for (group, last) in positions {
+            let entry = self.merged.entry(group).or_insert_with(|| last.clone());
+            if last.index >= entry.index {
+                *entry = last;
+            }
+        }
         // the table hears the generation is compacted, then the shard hears this table is done
         self.send_mark_evictables(generation, partitions).await?;
         self.shard_local_tx
@@ -511,6 +531,135 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
             })
             .await?;
         Ok(())
+    }
+
+    /// Cut a snapshot of one group's tablets from the archives as they stand now
+    ///
+    /// Between two jobs the archive map is a consistent state: every frame through the merged
+    /// positions and nothing after, since this task is the only writer of archives. The
+    /// boundary is the highest position merged for the group, or the loop's checkpoint when
+    /// that is higher, which is only the case for a compactor that merged nothing since the
+    /// process started. Every partition of the group's tablets the map names is read at its
+    /// archive offset and written as a record; the trailer is the group's remembered requests
+    /// applied at or below the boundary ([F43](../../../../../docs/src/features/node-recovery.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group
+    /// * `schema_id` - The schema's fingerprint, for the manifest
+    /// * `tablets` - The tablets the group serves
+    /// * `at_least` - The loop's checkpoint for the group
+    /// * `membership` - The membership as of the cut
+    /// * `retries` - Every remembered request of the group
+    /// * `dir` - The directory the file goes in
+    #[allow(clippy::too_many_arguments)]
+    #[instrument(name = "FileSystemCompactor::cut_snapshot", skip_all, err(Debug))]
+    async fn cut_snapshot(
+        &mut self,
+        group: GroupId,
+        schema_id: u64,
+        tablets: Vec<u16>,
+        at_least: Option<WalLogId>,
+        membership: openraft::type_config::alias::StoredMembershipOf<crate::server::replication::DataConfig>,
+        retries: Vec<(crate::shared::protocol::peer::RequestId, crate::server::replication::Remembered)>,
+        dir: PathBuf,
+    ) -> Result<(), ServerError> {
+        let outcome = self
+            .cut_snapshot_file(group, schema_id, tablets, at_least, membership, retries, dir)
+            .await
+            .map_err(|error| format!("{error:?}"));
+        // the shard hears what was built, or why nothing was
+        self.shard_local_tx.send(ServerMsg::SnapshotBuilt { group, outcome }).await?;
+        Ok(())
+    }
+
+    /// The cut itself, apart from telling the shard about it
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group
+    /// * `schema_id` - The schema's fingerprint
+    /// * `tablets` - The tablets the group serves
+    /// * `at_least` - The loop's checkpoint for the group
+    /// * `membership` - The membership as of the cut
+    /// * `retries` - Every remembered request of the group
+    /// * `dir` - The directory the file goes in
+    #[allow(clippy::too_many_arguments)]
+    async fn cut_snapshot_file(
+        &mut self,
+        group: GroupId,
+        schema_id: u64,
+        tablets: Vec<u16>,
+        at_least: Option<WalLogId>,
+        membership: openraft::type_config::alias::StoredMembershipOf<crate::server::replication::DataConfig>,
+        retries: Vec<(crate::shared::protocol::peer::RequestId, crate::server::replication::Remembered)>,
+        dir: PathBuf,
+    ) -> Result<(PathBuf, SnapshotManifest), ServerError> {
+        // the boundary: what was merged here, or the loop's checkpoint if that is further
+        let boundary = match (self.merged.get(&group).cloned(), at_least) {
+            (Some(merged), Some(point)) if point.index > merged.index => point,
+            (Some(merged), _) => merged,
+            (None, Some(point)) => point,
+            (None, None) => {
+                return Err(ServerError::GlommioGeneric(format!(
+                    "group {group} has no boundary to cut a snapshot at: nothing merged and no checkpoint"
+                )));
+            }
+        };
+        // every partition of the group's tablets the map names, in key order so two cuts of
+        // one state are one file
+        let mut entries: Vec<ArchiveEntry> = self
+            .map
+            .to_archive
+            .borrow()
+            .iter()
+            .filter(|(key, _)| {
+                // truncation cannot happen: a tablet id is twelve bits
+                #[allow(clippy::cast_possible_truncation)]
+                let tablet = Ring::tablet_of(**key) as u16;
+                tablets.contains(&tablet)
+            })
+            .map(|(_, entry)| *entry)
+            .collect();
+        entries.sort_by_key(|entry| entry.key);
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join(snapshot::snapshot_name(group, boundary.index));
+        let table = self.table_name.table_id();
+        let header = SnapshotHeader {
+            table,
+            group,
+            boundary: boundary.index,
+            records: entries.len() as u64,
+        };
+        let mut writer = SnapshotWriter::create(&path, header).await?;
+        for entry in &entries {
+            // read this partition's archived bytes as they are, and write them as they are
+            let handle = self.map.get_archive(&entry.archive).await?;
+            let read = handle.read_at(entry.offset, entry.size).await?;
+            handle.close().await?;
+            writer.record(entry.key, &read).await?;
+        }
+        // the trailer: what was remembered at or below the boundary, oldest first
+        let remembered: Vec<_> = retries
+            .into_iter()
+            .filter(|(_, remembered)| remembered.applied <= boundary.index)
+            .collect();
+        let (total, checksum) = writer.finish(&remembered).await?;
+        snapshot::sync_dir(&dir).await?;
+        let manifest = SnapshotManifest {
+            group,
+            table,
+            schema_id,
+            boundary,
+            membership,
+            tablets,
+            records: entries.len() as u64,
+            total,
+            checksum,
+            retries: u32::try_from(remembered.len()).unwrap_or(u32::MAX),
+        };
+        event!(Level::INFO, msg = "cut a snapshot", group = %group, boundary = manifest.boundary.index, records = manifest.records, bytes = total);
+        Ok((path, manifest))
     }
 
     /// Compact archives with the least amount of active data
@@ -771,7 +920,20 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                     path,
                     generation,
                     frames,
-                } => self.compact_segment(path, generation, frames).await?,
+                    positions,
+                } => self.compact_segment(path, generation, frames, positions).await?,
+                CompactionJob::Snapshot {
+                    group,
+                    schema_id,
+                    tablets,
+                    at_least,
+                    membership,
+                    retries,
+                    dir,
+                } => {
+                    self.cut_snapshot(group, schema_id, tablets, at_least, membership, retries, dir)
+                        .await?;
+                }
                 CompactionJob::Archives => self.compact_archives().await?,
                 CompactionJob::Shutdown => {
                     // shutdown this compactor

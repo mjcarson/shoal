@@ -43,9 +43,10 @@ use crate::server::database::ShoalDatabase;
 use crate::server::map::GroupSpec;
 use crate::server::messages::{QueryMetadata, ServerMsg};
 use crate::server::peer::{LinkEvent, ReplicateReply};
+use crate::server::replication::snapshot::{self, BuiltSnapshot, SnapshotHeader, SnapshotManifest, SnapshotWriter, SNAPSHOTS_DIR};
 use crate::server::replication::{
     ApplyOutcome, BarrierAnswer, DataConfig, GroupMachine, GroupNetwork, GroupReport, Lease, MachineState,
-    ProposalOutcome, Remembered, ReplicationVerb, RpcFailure, ShardNetwork, ShardPeer, ShardReplication,
+    ProposalOutcome, Remembered, ReplicationVerb, RpcFailure, ShardNetwork, ShardPeer, ShardReplication, SnapshotStats,
 };
 use crate::server::ring::Ring;
 use crate::server::stage_profile::{StageDurability, StageOp, Stamp};
@@ -58,6 +59,7 @@ use crate::shared::protocol::peer::{Command, ReplicateKind, ReplicateRequestHead
 use crate::shared::protocol::read::SessionToken;
 use crate::shared::responses::ResponseError;
 use crate::shared::traits::{QuerySupport, TableNameSupport};
+use std::path::PathBuf;
 use crate::storage::CompactionJob;
 
 /// How long a proposer waits before asking its own group again while its lease starts
@@ -86,6 +88,15 @@ pub(super) struct Group<D: ShoalDatabase> {
     /// between the install and the handle is a write to a group that exists and is not up yet;
     /// it waits here rather than being refused, and is refused only if the build fails.
     pub(super) waiting: Vec<(QueryMetadata, D::TableNames, u64, Vec<u8>)>,
+    /// The newest snapshot file cut for it, held for transfers
+    /// ([F43](../../../../docs/src/features/node-recovery.md))
+    pub(super) snapshot: Option<Rc<BuiltSnapshot>>,
+    /// Older files a transfer still holds, deleted once it lets go
+    pub(super) retired: Vec<Rc<BuiltSnapshot>>,
+    /// Whether a cut is in flight
+    pub(super) snapshot_building: bool,
+    /// Transfers waiting for the cut in flight
+    pub(super) snapshot_waiting: Vec<oneshot::Sender<Result<Rc<BuiltSnapshot>, String>>>,
 }
 
 /// An apply batch stopped on a partition read
@@ -135,6 +146,8 @@ pub(super) struct Replication<D: ShoalDatabase> {
     pub(super) compacting: HashMap<u64, HashSet<D::TableNames>>,
     /// What proposals have come to
     pub(super) stats: ProposalStats,
+    /// What snapshots have done ([F43](../../../../docs/src/features/node-recovery.md))
+    pub(super) snapshots: SnapshotStats,
     /// How many committed write replies to drop before answering clients again, for the fixture
     pub(super) drop_replies: u64,
     /// How many rebuilds of the groups there have been
@@ -223,6 +236,7 @@ where
             checkpoint_dirty: false,
             compacting: HashMap::new(),
             stats: ProposalStats::default(),
+            snapshots: SnapshotStats::default(),
             drop_replies: 0,
             epoch: 0,
             ticks: 0,
@@ -352,6 +366,10 @@ where
                 store: store.clone(),
                 pending_bytes: 0,
                 waiting: Vec::new(),
+                snapshot: None,
+                retired: Vec::new(),
+                snapshot_building: false,
+                snapshot_waiting: Vec::new(),
             };
             replication.groups.insert(spec.id, group);
             // the handle is built on a task of its own, since building it applies
@@ -975,6 +993,12 @@ where
                 let mut frames = replication.wal.frames_in(segment.generation, &groups);
                 frames.sort_by_key(|frame| (frame.group, frame.index));
                 let refs: Vec<(u64, u32)> = frames.iter().map(|frame| (frame.offset, frame.len)).collect();
+                // where each group stands once these frames are merged, for a snapshot cut
+                // after them ([F43](../../../../docs/src/features/node-recovery.md))
+                let positions: Vec<(GroupId, crate::server::wal::WalLogId)> = groups
+                    .iter()
+                    .filter_map(|(group, _)| segment.last.get(group).map(|last| (*group, last.clone())))
+                    .collect();
                 match sinks.get(&table) {
                     Some(sink) if !refs.is_empty() => {
                         tables.insert(table);
@@ -982,6 +1006,7 @@ where
                             path: replication.wal.segment_path(segment.generation),
                             generation: segment.generation,
                             frames: refs,
+                            positions,
                         })
                         .await?;
                         sink.send(CompactionJob::Archives).await?;
@@ -1191,6 +1216,7 @@ where
                     pending_bytes: slot.pending_bytes,
                     volatile: slot.store.is_volatile(),
                     up: slot.raft.is_some(),
+                    installing: state.installing,
                 }
             })
             .collect::<Vec<_>>();
@@ -1208,6 +1234,7 @@ where
             unknown_outcomes: replication.stats.unknown,
             rejected: replication.stats.rejected,
             reads: self.read_stats,
+            snapshots: replication.snapshots,
             groups,
         }
     }
@@ -1236,21 +1263,52 @@ where
         }
     }
 
-    /// Drive a replication verb, for the fixture
+    /// Drive a replication verb, for the fixture, answering on the reply channel
+    ///
+    /// Every verb but the snapshot cut answers before returning; the cut answers from a task
+    /// once the file is built.
     ///
     /// # Arguments
     ///
     /// * `verb` - What to do
-    pub(super) async fn handle_replication_verb(&mut self, verb: ReplicationVerb) -> Result<serde_json::Value, String> {
+    /// * `reply` - Where the answer goes
+    pub(super) async fn handle_replication_verb(
+        &mut self,
+        verb: ReplicationVerb,
+        reply: std::sync::mpsc::Sender<Result<serde_json::Value, String>>,
+    ) -> Result<(), ServerError> {
+        let answer = self.replication_verb(verb, &reply).await;
+        // a deferred answer is sent from its task; everything else is answered now
+        if let Some(answer) = answer {
+            let _ = reply.send(answer);
+        }
+        Ok(())
+    }
+
+    /// The verb itself: an answer, or none for one answered later from a task
+    ///
+    /// # Arguments
+    ///
+    /// * `verb` - What to do
+    /// * `reply` - Where a deferred answer goes
+    async fn replication_verb(
+        &mut self,
+        verb: ReplicationVerb,
+        reply: &std::sync::mpsc::Sender<Result<serde_json::Value, String>>,
+    ) -> Option<Result<serde_json::Value, String>> {
         let Some(replication) = self.replication.as_mut() else {
-            return Err("this node hosts no tablet groups".to_string());
+            return Some(Err("this node hosts no tablet groups".to_string()));
         };
-        match verb {
+        let reply = reply.clone();
+        let answer: Result<serde_json::Value, String> = match verb {
             ReplicationVerb::Digest { table } => {
                 let Some(name) = D::table_of_id(table) else {
-                    return Err(format!("no table has identity {table}"));
+                    return Some(Err(format!("no table has identity {table}")));
                 };
-                let (rows, hash) = self.tables.digest_table(name).await.map_err(|error| format!("{error:?}"))?;
+                let (rows, hash) = match self.tables.digest_table(name).await {
+                    Ok(digest) => digest,
+                    Err(error) => return Some(Err(format!("{error:?}"))),
+                };
                 let groups: BTreeMap<String, u64> = replication
                     .groups
                     .values()
@@ -1265,7 +1323,9 @@ where
                 Ok(serde_json::json!({ "generation": replication.wal.active_generation() }))
             }
             ReplicationVerb::Compact => {
-                self.sweep_segments().await.map_err(|error| format!("{error:?}"))?;
+                if let Err(error) = self.sweep_segments().await {
+                    return Some(Err(format!("{error:?}")));
+                }
                 let replication = self.replication.as_ref().expect("still here");
                 let handed = replication.wal.segments().iter().filter(|segment| segment.handed).count();
                 Ok(serde_json::json!({ "handed": handed, "segments": replication.wal.segments().len() }))
@@ -1281,6 +1341,213 @@ where
             ReplicationVerb::DropReplies { n } => {
                 replication.drop_replies = n;
                 Ok(serde_json::json!({ "dropping": n }))
+            }
+            ReplicationVerb::Snapshot { group } => {
+                // cut now, on the loop's own request; the manifest is answered from a task once
+                // the cut lands, since the loop hears about it as a message
+                if !replication.groups.contains_key(&group) {
+                    return Some(Err(format!("group {group} is not hosted on this shard")));
+                }
+                let (built_tx, built) = oneshot::channel();
+                if let Err(error) = self.handle_build_snapshot(group, built_tx).await {
+                    return Some(Err(format!("{error:?}")));
+                }
+                glommio::spawn_local(async move {
+                    let outcome = match built.await {
+                        Ok(Ok(built)) => Ok(serde_json::json!({
+                            "boundary": built.manifest.boundary.index,
+                            "records": built.manifest.records,
+                            "total": built.manifest.total,
+                            "checksum": built.manifest.checksum,
+                            "retries": built.manifest.retries,
+                            "path": built.path.display().to_string(),
+                        })),
+                        Ok(Err(error)) => Err(error),
+                        Err(_) => Err("the cut was dropped".to_string()),
+                    };
+                    let _ = reply.send(outcome);
+                })
+                .detach();
+                return None;
+            }
+        };
+        Some(answer)
+    }
+
+    /// Hand a transfer a snapshot file of a group, cutting one if none is held
+    ///
+    /// A held file at or past the group's checkpoint is answered at once; otherwise a cut is
+    /// asked for - of the compactor for a persistent group, of the loop's own task for a
+    /// volatile one - and the reply waits with any other transfer wanting the same cut
+    /// ([F43](../../../../docs/src/features/node-recovery.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group
+    /// * `reply` - Where the file goes
+    pub(super) async fn handle_build_snapshot(
+        &mut self,
+        group: GroupId,
+        reply: oneshot::Sender<Result<Rc<BuiltSnapshot>, String>>,
+    ) -> Result<(), ServerError> {
+        let schema_id = <D::ClientType as QuerySupport>::SCHEMA_ID;
+        let Some(replication) = self.replication.as_mut() else {
+            let _ = reply.send(Err("this node hosts no tablet groups".to_string()));
+            return Ok(());
+        };
+        let Some(slot) = replication.groups.get_mut(&group) else {
+            let _ = reply.send(Err(format!("group {group} is not hosted on this shard")));
+            return Ok(());
+        };
+        // a held file at the checkpoint or past it is the answer
+        let checkpoint = slot.state.borrow().checkpoint_index();
+        if let Some(built) = &slot.snapshot {
+            if built.manifest.boundary.index >= checkpoint {
+                let _ = reply.send(Ok(built.clone()));
+                return Ok(());
+            }
+        }
+        slot.snapshot_waiting.push(reply);
+        if slot.snapshot_building {
+            return Ok(());
+        }
+        slot.snapshot_building = true;
+        let (at_least, membership, retries) = {
+            let state = slot.state.borrow();
+            (
+                state.checkpoint.clone(),
+                state.membership.clone(),
+                state.dedup.iter().rev().map(|(request, remembered)| (*request, *remembered)).collect::<Vec<_>>(),
+            )
+        };
+        let tablets = slot.spec.tablets.clone();
+        let table = slot.table;
+        let dir = replication.wal.dir().join(SNAPSHOTS_DIR);
+        if slot.store.is_volatile() {
+            // a volatile group's rows are the ephemeral table's resident partitions, cut here
+            // where they are all visible, and written on a task of its own
+            let Some(boundary) = at_least else {
+                self.handle_snapshot_built(group, Err(format!("group {group} has applied nothing to cut"))).await?;
+                return Ok(());
+            };
+            let records = self.tables.snapshot_partitions(table, &tablets);
+            let remembered: Vec<_> = retries
+                .into_iter()
+                .filter(|(_, remembered)| remembered.applied <= boundary.index)
+                .collect();
+            let tx = self.shard_local_tx.clone();
+            let table_id = table.table_id();
+            glommio::spawn_local(async move {
+                let outcome = write_volatile_snapshot(&dir, group, table_id, schema_id, boundary, membership, tablets, records, remembered)
+                    .await
+                    .map_err(|error| format!("{error:?}"));
+                let _ = tx.send(ServerMsg::SnapshotBuilt { group, outcome }).await;
+            })
+            .detach();
+            return Ok(());
+        }
+        // a persistent group's rows are its archives, and the compactor cuts them between jobs
+        let sink = self
+            .tables
+            .compaction_sinks()
+            .into_iter()
+            .find(|(name, _)| *name == table)
+            .map(|(_, sink)| sink);
+        let Some(sink) = sink else {
+            self.handle_snapshot_built(group, Err(format!("{table} has no compactor to cut a snapshot with"))).await?;
+            return Ok(());
+        };
+        sink.send(CompactionJob::Snapshot {
+            group,
+            schema_id,
+            tablets,
+            at_least,
+            membership,
+            retries,
+            dir,
+        })
+        .await?;
+        Ok(())
+    }
+
+    /// Take a cut that landed, answer everybody waiting for it, and retire the file it replaces
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group
+    /// * `outcome` - The file and its manifest, or why there is none
+    pub(super) async fn handle_snapshot_built(
+        &mut self,
+        group: GroupId,
+        outcome: Result<(PathBuf, SnapshotManifest), String>,
+    ) -> Result<(), ServerError> {
+        let Some(replication) = self.replication.as_mut() else {
+            return Ok(());
+        };
+        let Some(slot) = replication.groups.get_mut(&group) else {
+            // a cut for a group the map dropped meanwhile: the file is nobody's
+            if let Ok((path, _)) = outcome {
+                let _ = glommio::io::remove(&path).await;
+            }
+            return Ok(());
+        };
+        slot.snapshot_building = false;
+        let waiting = std::mem::take(&mut slot.snapshot_waiting);
+        match outcome {
+            Ok((path, manifest)) => {
+                replication.snapshots.built += 1;
+                let built = Rc::new(BuiltSnapshot { path, manifest });
+                // the file it replaces goes once no transfer holds it
+                if let Some(old) = slot.snapshot.replace(built.clone()) {
+                    slot.retired.push(old);
+                }
+                for reply in waiting {
+                    let _ = reply.send(Ok(built.clone()));
+                }
+            }
+            Err(error) => {
+                event!(Level::WARN, msg = "a snapshot could not be cut", group = %group, error);
+                for reply in waiting {
+                    let _ = reply.send(Err(error.clone()));
+                }
+            }
+        }
+        self.sweep_retired_snapshots().await;
+        Ok(())
+    }
+
+    /// Install a received snapshot, from the group's state machine
+    ///
+    /// The install itself lands with the transfer; until then a received file is refused here,
+    /// which openraft reports as a storage error on the group.
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group
+    /// * `done` - Fired once the install is durable, or with why it is not
+    pub(super) fn handle_install_snapshot(
+        &mut self,
+        group: GroupId,
+        done: oneshot::Sender<Result<(), String>>,
+    ) {
+        let _ = done.send(Err(format!("installing a snapshot for group {group} is not built yet")));
+    }
+
+    /// Delete every retired snapshot file no transfer holds any more
+    pub(super) async fn sweep_retired_snapshots(&mut self) {
+        let Some(replication) = self.replication.as_mut() else {
+            return;
+        };
+        let mut gone = Vec::new();
+        for slot in replication.groups.values_mut() {
+            // a strong count of one is this registry's own handle
+            let (free, held): (Vec<_>, Vec<_>) = slot.retired.drain(..).partition(|built| Rc::strong_count(built) == 1);
+            slot.retired = held;
+            gone.extend(free);
+        }
+        for built in gone {
+            if let Err(error) = glommio::io::remove(&built.path).await {
+                event!(Level::DEBUG, msg = "a retired snapshot file could not be removed", path = %built.path.display(), ?error);
             }
         }
     }
@@ -1319,6 +1586,62 @@ where
             }
         }
     }
+}
+
+/// Write a volatile group's snapshot from its resident partitions, on a task of its own
+///
+/// # Arguments
+///
+/// * `dir` - The directory the file goes in
+/// * `group` - The group
+/// * `table` - Its table
+/// * `schema_id` - The schema's fingerprint
+/// * `boundary` - The applied position the rows are cut at
+/// * `membership` - The membership as of it
+/// * `tablets` - The tablets the group serves
+/// * `records` - Every resident partition of those tablets, as its key and archived bytes
+/// * `remembered` - The remembered requests at or below the boundary, oldest first
+#[allow(clippy::too_many_arguments)]
+async fn write_volatile_snapshot(
+    dir: &std::path::Path,
+    group: GroupId,
+    table: TableId,
+    schema_id: u64,
+    boundary: crate::server::wal::WalLogId,
+    membership: openraft::type_config::alias::StoredMembershipOf<DataConfig>,
+    tablets: Vec<u16>,
+    records: Vec<(u64, Vec<u8>)>,
+    remembered: Vec<(RequestId, Remembered)>,
+) -> std::io::Result<(PathBuf, SnapshotManifest)> {
+    std::fs::create_dir_all(dir)?;
+    let path = dir.join(snapshot::snapshot_name(group, boundary.index));
+    let header = SnapshotHeader {
+        table,
+        group,
+        boundary: boundary.index,
+        records: records.len() as u64,
+    };
+    let mut writer = SnapshotWriter::create(&path, header).await?;
+    for (key, bytes) in &records {
+        writer.record(*key, bytes).await?;
+    }
+    let (total, checksum) = writer.finish(&remembered).await?;
+    snapshot::sync_dir(dir).await?;
+    Ok((
+        path,
+        SnapshotManifest {
+            group,
+            table,
+            schema_id,
+            boundary,
+            membership,
+            tablets,
+            records: records.len() as u64,
+            total,
+            checksum,
+            retries: u32::try_from(remembered.len()).unwrap_or(u32::MAX),
+        },
+    ))
 }
 
 /// The openraft configuration a group runs under

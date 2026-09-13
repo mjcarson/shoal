@@ -46,6 +46,62 @@ pub struct GroupReport {
     pub volatile: bool,
     /// Whether the group's handle is up
     pub up: bool,
+    /// Whether a snapshot is being installed for it, during which its tablets serve no `One` read
+    /// ([F43](../../../../docs/src/features/node-recovery.md))
+    #[serde(default)]
+    pub installing: bool,
+}
+
+/// What a shard's snapshots have done since it started
+///
+/// Counted on both ends of a transfer and folded over the node into
+/// [`NodeReplication::snapshots`], which the `Replication` admin read reports and the
+/// catch-up arms' captures carry ([F43](../../../../docs/src/features/node-recovery.md)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct SnapshotStats {
+    /// Snapshot files cut on this shard
+    pub built: u64,
+    /// Transfers this shard completed as the sender
+    pub sent: u64,
+    /// Snapshots installed on this shard, durably
+    pub installed: u64,
+    /// Bytes sent on the bulk lane
+    pub bytes_sent: u64,
+    /// Bytes accepted into a partial on this shard
+    pub bytes_received: u64,
+    /// Chunks accepted into a partial
+    pub chunks: u64,
+    /// Chunks that arrived for bytes already held
+    pub duplicate_chunks: u64,
+    /// Chunks that arrived past the prefix held, or for a stream not being assembled
+    pub dropped_chunks: u64,
+    /// Streams resumed from a held prefix rather than started from zero
+    pub resumed: u64,
+    /// Transfers this shard gave up on as the sender
+    pub aborted: u64,
+    /// Installs redone at open from a pending marker
+    pub redone: u64,
+}
+
+impl SnapshotStats {
+    /// Fold another shard's counters into these
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The counters to add
+    pub fn absorb(&mut self, other: &SnapshotStats) {
+        self.built += other.built;
+        self.sent += other.sent;
+        self.installed += other.installed;
+        self.bytes_sent += other.bytes_sent;
+        self.bytes_received += other.bytes_received;
+        self.chunks += other.chunks;
+        self.duplicate_chunks += other.duplicate_chunks;
+        self.dropped_chunks += other.dropped_chunks;
+        self.resumed += other.resumed;
+        self.aborted += other.aborted;
+        self.redone += other.redone;
+    }
 }
 
 /// What one shard reports about every group it hosts
@@ -75,6 +131,9 @@ pub struct ShardReplication {
     /// ([F41](../../../../docs/src/features/read-consistency.md))
     #[serde(default)]
     pub reads: ReadStats,
+    /// What the shard's snapshots have done ([F43](../../../../docs/src/features/node-recovery.md))
+    #[serde(default)]
+    pub snapshots: SnapshotStats,
 }
 
 /// What a shard's reads have cost and dropped since it started
@@ -224,6 +283,13 @@ pub struct NodeReplication {
     /// What the node's reads have cost and dropped, folded over its shards
     #[serde(default)]
     pub reads: ReadStats,
+    /// What the node's snapshots have done, folded over its shards
+    /// ([F43](../../../../docs/src/features/node-recovery.md))
+    #[serde(default)]
+    pub snapshots: SnapshotStats,
+    /// How many groups are installing a snapshot right now
+    #[serde(default)]
+    pub installing: usize,
     /// Every shard's report, in shard order
     pub shards: Vec<ShardReplication>,
 }
@@ -248,6 +314,14 @@ impl NodeReplication {
                 folded.absorb(&shard.reads);
                 folded
             }),
+            snapshots: shards.iter().fold(SnapshotStats::default(), |mut folded, shard| {
+                folded.absorb(&shard.snapshots);
+                folded
+            }),
+            installing: shards
+                .iter()
+                .map(|shard| shard.groups.iter().filter(|group| group.installing).count())
+                .sum(),
             shards,
         }
     }
@@ -272,6 +346,14 @@ pub enum ReplicationVerb {
     },
     /// Release a group's held completions
     Release {
+        /// The group
+        group: GroupId,
+    },
+    /// Cut a snapshot of a group now, and say what was built
+    ///
+    /// What the boundary test reads: the manifest of a cut taken between two compactions
+    /// ([F43](../../../../docs/src/features/node-recovery.md)).
+    Snapshot {
         /// The group
         group: GroupId,
     },

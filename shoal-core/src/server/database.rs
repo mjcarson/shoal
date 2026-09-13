@@ -350,6 +350,18 @@ where
     #[allow(async_fn_in_trait)]
     async fn digest_table(&self, table: Self::TableNames) -> Result<(u64, u64), ServerError>;
 
+    /// Every resident partition of some tablets of a table, as its key and archived bytes
+    ///
+    /// What a volatile group's snapshot is cut from: an ephemeral table has no archive, and
+    /// its resident partitions are the whole of its state
+    /// ([F43](../../../docs/src/features/node-recovery.md)). A deleted row is not there.
+    ///
+    /// # Arguments
+    ///
+    /// * `table` - The table
+    /// * `tablets` - The tablets
+    fn snapshot_partitions(&self, table: Self::TableNames, tablets: &[u16]) -> Vec<(u64, Vec<u8>)>;
+
     /// The table a stable identity names, if the schema has it
     ///
     /// # Arguments
