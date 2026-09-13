@@ -32,11 +32,15 @@ Defects that have been fixed move to [Resolved Issues](resolved-issues.md), one 
 carrying the reasoning and the invariants the fix depends on. Item numbers are shared between
 the two pages and never reused, so a number appears on exactly one of them — which is why this
 list starts at 15 and skips 17, 25, 26, 31, 33, 34, 38, 39, 44, 45, 48, 51, 56, 57, 58, 61, 67, 68, 74,
-76, 78, 79, 80, 82, 83, 84, 85, 86, 88, 89, 90, 94 and 101, and
-why ~~item 91~~ ~~item 97~~ ~~item 100~~ item 103 is the newest entry here and item 103 the newest number, and why 17, 33, 78, 79, 80, 82,
-83, 84, 85, 86, 88, 89, 90, 94 and 101 are on the resolved page. **101 never appeared here
+76, 78, 79, 80, 82, 83, 84, 85, 86, 88, 89, 90, 94, 101, 104 and 105, and
+why ~~item 91~~ ~~item 97~~ ~~item 100~~ item 103 is the newest entry here and item 105 the newest number, and why 17, 33, 78, 79, 80, 82,
+83, 84, 85, 86, 88, 89, 90, 94, 101, 104 and 105 are on the resolved page. **101 never appeared here
 either**: it was found by an M6 test and fixed in the same change
-([Resolved #101](resolved/short-lived-member-detection.md)), reproduced first. **33 moved at M5**
+([Resolved #101](resolved/short-lived-member-detection.md)), reproduced first. **104 and 105
+never appeared here either**: both were found by reading the code for M7, reproduced by a
+fixture test each, and fixed before the milestone's own work began
+([Resolved #104](resolved/segments-recompacted-after-restart.md),
+[Resolved #105](resolved/volatile-groups-never-purged.md)). **33 moved at M5**
 ([Resolved #33](resolved/gather-expiry.md)): it was the oldest open hang, and it was reproduced
 before it was fixed. **94 never appeared here either**: it
 was found and fixed while [F38](../features/inter-node-transport.md) made a peer link a client,

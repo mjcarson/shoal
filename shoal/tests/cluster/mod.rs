@@ -136,6 +136,14 @@ pub struct ClusterBuilder {
     write_timeout_ms: Option<u64>,
     /// The bound on bytes proposed and unanswered per group, if lowered
     pending_bytes: Option<usize>,
+    /// How many entries a group commits between snapshots, if shortened
+    checkpoint_entries: Option<u64>,
+    /// How many entries a group keeps behind its snapshot, if shortened
+    retained_entries: Option<u64>,
+    /// How large a WAL segment grows before it rotates, if shrunk
+    segment_bytes: Option<u64>,
+    /// The bound on sealed WAL bytes a slow member may pin, if lowered
+    retained_bytes: Option<u64>,
     /// The cluster's default read level, if set
     read_consistency: Option<String>,
     /// The bundle deadline, in milliseconds, if shortened
@@ -318,6 +326,51 @@ impl ClusterBuilder {
     /// * `bytes` - The bound
     pub fn pending_bytes(mut self, bytes: usize) -> Self {
         self.pending_bytes = Some(bytes);
+        self
+    }
+
+    /// Shorten how many entries a group commits between snapshots
+    /// ([F43](../../../docs/src/features/node-recovery.md))
+    ///
+    /// # Arguments
+    ///
+    /// * `entries` - The count
+    #[must_use]
+    pub fn checkpoint_entries(mut self, entries: u64) -> Self {
+        self.checkpoint_entries = Some(entries);
+        self
+    }
+
+    /// Shorten how many entries a group keeps behind its snapshot
+    ///
+    /// # Arguments
+    ///
+    /// * `entries` - The count
+    #[must_use]
+    pub fn retained_entries(mut self, entries: u64) -> Self {
+        self.retained_entries = Some(entries);
+        self
+    }
+
+    /// Shrink how large a WAL segment grows before it rotates
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - The size
+    #[must_use]
+    pub fn segment_bytes(mut self, bytes: u64) -> Self {
+        self.segment_bytes = Some(bytes);
+        self
+    }
+
+    /// Lower the bound on sealed WAL bytes a slow member may pin
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - The bound
+    #[must_use]
+    pub fn retained_bytes(mut self, bytes: u64) -> Self {
+        self.retained_bytes = Some(bytes);
         self
     }
 
@@ -593,6 +646,10 @@ impl Cluster {
             durability: Vec::new(),
             write_timeout_ms: None,
             pending_bytes: None,
+            checkpoint_entries: None,
+            retained_entries: None,
+            segment_bytes: None,
+            retained_bytes: None,
             read_consistency: None,
             query_deadline_ms: None,
         }
@@ -1242,6 +1299,10 @@ fn build_membership_cluster(
             failover_ms: Some(builder.failover_ms),
             write_timeout_ms: builder.write_timeout_ms,
             pending_bytes: builder.pending_bytes,
+            checkpoint_entries: builder.checkpoint_entries,
+            retained_entries: builder.retained_entries,
+            segment_bytes: builder.segment_bytes,
+            retained_bytes: builder.retained_bytes,
             read_consistency: builder.read_consistency.clone(),
             query_deadline_ms: builder.query_deadline_ms,
         });

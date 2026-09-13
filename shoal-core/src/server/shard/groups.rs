@@ -461,7 +461,7 @@ where
             let log_id = entry.log_id.clone();
             let group = batch.group;
             // the group the entry belongs to, which a batch for a dropped group no longer has
-            let Some((table, generation, state)) = self.group_apply_context(group, log_id.index) else {
+            let Some((table, generation, state, volatile)) = self.group_apply_context(group, log_id.index) else {
                 // a dropped group's batch is let go: its responders fail, its machine's apply
                 // returns, and the handle being shut down is what asked for both
                 return Ok(());
@@ -520,7 +520,18 @@ where
             };
             // the entry is applied, whatever it was
             resumed = false;
-            state.borrow_mut().applied = Some(log_id);
+            let mut applied = state.borrow_mut();
+            applied.applied = Some(log_id);
+            // a volatile group's checkpoint is its applied position: nothing of it reaches a
+            // disk, so nothing else ever moves it, and without a moving checkpoint the snapshot
+            // builder is never offered and the log is never purged
+            // ([Resolved #105](../../../../docs/src/appendix/resolved/volatile-groups-never-purged.md))
+            if volatile {
+                applied.checkpoint = applied.applied.clone();
+                applied.checkpoint_membership = applied.membership.clone();
+                applied.checkpoint_durable = true;
+            }
+            drop(applied);
             if let Some(responder) = responder {
                 responder.send(outcome.unwrap_or(ApplyOutcome::Refused(
                     "a blank or membership entry has no result".to_string(),
@@ -535,13 +546,14 @@ where
         Ok(())
     }
 
-    /// What applying an entry of a group needs: its table, its frame's generation, its state
+    /// What applying an entry of a group needs: its table, its frame's generation, its state,
+    /// and whether its log lives in memory alone
     ///
     /// # Arguments
     ///
     /// * `group` - The group
     /// * `index` - The entry's index
-    fn group_apply_context(&self, group: GroupId, index: u64) -> Option<(D::TableNames, u64, Rc<RefCell<MachineState>>)> {
+    fn group_apply_context(&self, group: GroupId, index: u64) -> Option<(D::TableNames, u64, Rc<RefCell<MachineState>>, bool)> {
         let replication = self.replication.as_ref()?;
         let slot = replication.groups.get(&group)?;
         // the generation the entry's frame is in, or the active one for a volatile group
@@ -549,7 +561,7 @@ where
             .wal
             .generation_of(group, index)
             .unwrap_or_else(|| replication.wal.active_generation());
-        Some((slot.table, generation, slot.state.clone()))
+        Some((slot.table, generation, slot.state.clone(), slot.store.is_volatile()))
     }
 
     /// Resume every apply batch parked on a partition, now that its read has landed or failed

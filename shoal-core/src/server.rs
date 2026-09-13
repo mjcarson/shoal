@@ -166,7 +166,7 @@ where
         // start by name rather than being read by nothing
         let placement = match &conf.cluster {
             Some(cluster) => {
-                cluster.validate(&conf.networking.interface)?;
+                cluster.validate(&conf.networking.interface, conf.networking.max_frame_bytes)?;
                 // a persistent table acknowledged before its fdatasync cannot be a voter in a
                 // durable quorum, and the durability is per table under `storage`, which the
                 // block's own validation cannot see (C5, F40)

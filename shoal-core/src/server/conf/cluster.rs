@@ -427,6 +427,26 @@ fn default_volatile_log_bytes() -> usize {
     256 * 1024 * 1024
 }
 
+/// The default size of one chunk of a snapshot stream
+fn default_snapshot_chunk_bytes() -> usize {
+    1024 * 1024
+}
+
+/// The default deadline for one snapshot transfer
+fn default_snapshot_timeout() -> DurationSpec {
+    DurationSpec(Duration::from_secs(300))
+}
+
+/// The default bound on partial snapshot bytes held on disk, per shard
+fn default_install_bytes() -> u64 {
+    2 * 1024 * 1024 * 1024
+}
+
+/// The default bound on sealed WAL bytes a slow member may pin, per shard
+fn default_retained_bytes() -> u64 {
+    1024 * 1024 * 1024
+}
+
 /// The tablet groups' timers and bounds, which are this node's and not the cluster's
 ///
 /// Every field is node-local: a deadline, a byte bound, a segment size. None of them enters
@@ -473,6 +493,30 @@ pub struct Replication {
         deserialize_with = "utils::deserialize_byte_size"
     )]
     pub volatile_log_bytes: usize,
+    /// How many bytes of a snapshot one chunk on the bulk lane carries
+    /// ([F43](../../../../docs/src/features/node-recovery.md))
+    #[serde(
+        default = "default_snapshot_chunk_bytes",
+        deserialize_with = "utils::deserialize_byte_size"
+    )]
+    pub snapshot_chunk_bytes: usize,
+    /// How long one snapshot transfer may take before the sender gives up and tries again
+    #[serde(default = "default_snapshot_timeout")]
+    pub snapshot_timeout: DurationSpec,
+    /// The most bytes of partial snapshots a shard holds on disk before it refuses a new one
+    #[serde(
+        default = "default_install_bytes",
+        deserialize_with = "utils::deserialize_byte_size_u64"
+    )]
+    pub install_bytes: u64,
+    /// The most sealed WAL bytes a shard keeps for slow members before it forces a snapshot
+    /// and a purge, so a member behind the purge point catches up by snapshot rather than
+    /// pinning the log
+    #[serde(
+        default = "default_retained_bytes",
+        deserialize_with = "utils::deserialize_byte_size_u64"
+    )]
+    pub retained_bytes: u64,
 }
 
 impl Default for Replication {
@@ -486,6 +530,10 @@ impl Default for Replication {
             retained_entries: default_retained_entries(),
             log_cache_bytes: default_log_cache_bytes(),
             volatile_log_bytes: default_volatile_log_bytes(),
+            snapshot_chunk_bytes: default_snapshot_chunk_bytes(),
+            snapshot_timeout: default_snapshot_timeout(),
+            install_bytes: default_install_bytes(),
+            retained_bytes: default_retained_bytes(),
         }
     }
 }
@@ -812,7 +860,15 @@ impl Cluster {
     ///
     /// Every refusal is a [`ShoalError::NotImplemented`] or a [`ShoalError::InvalidConfig`],
     /// and the first one found is returned.
-    pub fn validate(&self, interface: &str) -> Result<(), ServerError> {
+    pub fn validate(&self, interface: &str, max_frame_bytes: u32) -> Result<(), ServerError> {
+        // a snapshot chunk rides one frame, so it has to fit one with its heads
+        // ([F43](../../../../docs/src/features/node-recovery.md))
+        if self.replication.snapshot_chunk_bytes + 4096 > max_frame_bytes as usize {
+            return Err(ServerError::Shoal(ShoalError::InvalidConfig(format!(
+                "cluster.replication.snapshot_chunk_bytes is {} bytes, which does not fit networking.max_frame_bytes ({max_frame_bytes}) with its heads",
+                self.replication.snapshot_chunk_bytes
+            ))));
+        }
         // the strong read level is Quorum; there is no read that waits on every replica
         // ([C6](../../../../docs/src/distributed/reads.md))
         if self.read_consistency == Consistency::All {
@@ -910,6 +966,20 @@ impl Cluster {
                 "cluster.replication.write_timeout is longer than cluster.transport.forward_timeout; a proposal that outlives the forward deadline answers nobody".to_string(),
             )));
         }
+        // a snapshot transfer that gives up before a write would is one that never completes
+        // under load
+        if self.replication.snapshot_timeout.duration() < self.replication.write_timeout.duration() {
+            return Err(ServerError::Shoal(ShoalError::InvalidConfig(
+                "cluster.replication.snapshot_timeout is shorter than write_timeout".to_string(),
+            )));
+        }
+        // the retention budget has to hold the active segment and one sealed one, or every
+        // sweep forces a snapshot
+        if self.replication.retained_bytes < 2 * self.replication.segment_bytes {
+            return Err(ServerError::Shoal(ShoalError::InvalidConfig(
+                "cluster.replication.retained_bytes is under twice segment_bytes; the budget cannot hold two segments".to_string(),
+            )));
+        }
         // the timers the groups derive from the failover base have to be timers at all
         if self.primary_failover_after.duration() < Duration::from_millis(100) {
             return Err(ServerError::Shoal(ShoalError::InvalidConfig(
@@ -986,55 +1056,55 @@ mod tests {
     #[test]
     fn validation_refuses_what_is_not_built() {
         // a bootstrapping node on a real interface is what runs
-        Cluster::default().bootstrap(true).validate("127.0.0.1").expect("a bootstrap was refused");
+        Cluster::default().bootstrap(true).validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES).expect("a bootstrap was refused");
         // a joiner names the control addresses it discovers the cluster through
         Cluster::default()
             .seeds(vec!["10.0.0.1:12002".to_string()])
-            .validate("127.0.0.1")
+            .validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES)
             .expect("a joiner was refused");
         // and a seed has to be an address
         let error = Cluster::default()
             .seeds(vec!["seed-one".to_string()])
-            .validate("127.0.0.1")
+            .validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES)
             .expect_err("a seed that is not an address was accepted");
         assert!(format!("{error}").contains("host:port"), "{error}");
         // a node creates a cluster or joins one, not both
         let error = Cluster::default()
             .bootstrap(true)
             .seeds(vec!["10.0.0.1:12002".to_string()])
-            .validate("127.0.0.1")
+            .validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES)
             .expect_err("a bootstrapper with seeds started");
         assert!(format!("{error}").contains("not both"), "{error}");
         // a node that does neither is nothing
-        assert!(Cluster::default().validate("127.0.0.1").is_err());
+        assert!(Cluster::default().validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES).is_err());
         // the strong read level is Quorum; All is refused naming C6 (F41)
         let error = Cluster::default()
             .bootstrap(true)
             .read_consistency(Consistency::All)
-            .validate("127.0.0.1")
+            .validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES)
             .expect_err("read_consistency All was accepted");
         assert!(format!("{error}").contains("C6"), "{error}");
         Cluster::default()
             .bootstrap(true)
             .read_consistency(Consistency::Quorum)
-            .validate("127.0.0.1")
+            .validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES)
             .expect("read_consistency Quorum was refused");
         // a dial override has to be an address, and one that is parses
         let node = super::NodeId::mint();
         assert!(Cluster::default()
             .bootstrap(true)
             .dial(node, Some("nowhere".to_string()), None)
-            .validate("127.0.0.1")
+            .validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES)
             .is_err());
         Cluster::default()
             .bootstrap(true)
             .dial(node, Some("127.0.0.1:1".to_string()), None)
-            .validate("127.0.0.1")
+            .validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES)
             .expect("a dial override was refused");
         // the detector needs samples before it can suspect anybody
         let mut no_samples = Cluster::default().bootstrap(true);
         no_samples.failure_detector.min_samples = 0;
-        assert!(no_samples.validate("127.0.0.1").is_err());
+        assert!(no_samples.validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES).is_err());
         // peer tls is accepted now, but a certificate that cannot be read is refused as it is read
         let mut with_missing_tls = Cluster::default().bootstrap(true);
         with_missing_tls.tls = Some(super::PeerTls {
@@ -1043,43 +1113,60 @@ mod tests {
             ca: "/does/not/exist/ca.pem".into(),
         });
         assert!(
-            with_missing_tls.validate("127.0.0.1").is_err(),
+            with_missing_tls.validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES).is_err(),
             "an unreadable certificate was accepted"
         );
         // an even voter count is not a quorum anyone wants
-        assert!(Cluster::default().bootstrap(true).control_voters(2).validate("127.0.0.1").is_err());
+        assert!(Cluster::default().bootstrap(true).control_voters(2).validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES).is_err());
         // an unspecified interface with nothing advertised is not an address
-        assert!(Cluster::default().bootstrap(true).validate("0.0.0.0").is_err());
+        assert!(Cluster::default().bootstrap(true).validate("0.0.0.0", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES).is_err());
         Cluster::default()
             .bootstrap(true)
             .advertise("10.0.0.2")
-            .validate("0.0.0.0")
+            .validate("0.0.0.0", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES)
             .expect("an advertised address on 0.0.0.0 was refused");
         // a write acknowledged by one replica is refused by name until there is an API for it
         // ([F40](../../../../docs/src/features/replication.md))
         let error = Cluster::default()
             .bootstrap(true)
             .write_consistency(Consistency::One)
-            .validate("127.0.0.1")
+            .validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES)
             .expect_err("a One write policy was accepted");
         assert!(format!("{error}").contains("C5"), "{error}");
         // a proposal that outlives the forward deadline answers nobody
         let mut long_write = Cluster::default().bootstrap(true);
         long_write.replication.write_timeout = DurationSpec(Duration::from_secs(6));
-        let error = long_write.validate("127.0.0.1").expect_err("a write timeout past the forward timeout was accepted");
+        let error = long_write.validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES).expect_err("a write timeout past the forward timeout was accepted");
         assert!(format!("{error}").contains("forward_timeout"), "{error}");
         // and the groups' timers derive from the failover base, which has to be a timer
         let error = Cluster::default()
             .bootstrap(true)
             .primary_failover_after(Duration::from_millis(50))
-            .validate("127.0.0.1")
+            .validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES)
             .expect_err("a failover base under 100ms was accepted");
         assert!(format!("{error}").contains("heartbeat"), "{error}");
         Cluster::default()
             .bootstrap(true)
             .primary_failover_after(Duration::from_millis(100))
-            .validate("127.0.0.1")
+            .validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES)
             .expect("a failover base of 100ms was refused");
+        // the snapshot settings have bounds of their own ([F43](../../../../docs/src/features/node-recovery.md))
+        let mut big_chunk = Cluster::default().bootstrap(true);
+        big_chunk.replication.snapshot_chunk_bytes = 1024 * 1024;
+        let error = big_chunk.validate("127.0.0.1", 64 * 1024).expect_err("a chunk larger than a frame was accepted");
+        assert!(format!("{error}").contains("snapshot_chunk_bytes"), "{error}");
+        let mut short_transfer = Cluster::default().bootstrap(true);
+        short_transfer.replication.snapshot_timeout = DurationSpec(Duration::from_secs(1));
+        let error = short_transfer
+            .validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES)
+            .expect_err("a snapshot timeout under the write timeout was accepted");
+        assert!(format!("{error}").contains("snapshot_timeout"), "{error}");
+        let mut tight_budget = Cluster::default().bootstrap(true);
+        tight_budget.replication.retained_bytes = tight_budget.replication.segment_bytes;
+        let error = tight_budget
+            .validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES)
+            .expect_err("a retention budget under two segments was accepted");
+        assert!(format!("{error}").contains("retained_bytes"), "{error}");
     }
 
     /// The replication block's defaults are the documented ones, and every field parses
@@ -1093,11 +1180,20 @@ mod tests {
         assert_eq!(defaults.retained_entries, 10_000);
         assert_eq!(defaults.log_cache_bytes, 16 * 1024 * 1024);
         assert_eq!(defaults.volatile_log_bytes, 256 * 1024 * 1024);
+        // the snapshot and retention settings ([F43](../../../../docs/src/features/node-recovery.md))
+        assert_eq!(defaults.snapshot_chunk_bytes, 1024 * 1024);
+        assert_eq!(defaults.snapshot_timeout.duration(), Duration::from_secs(300));
+        assert_eq!(defaults.install_bytes, 2 * 1024 * 1024 * 1024);
+        assert_eq!(defaults.retained_bytes, 1024 * 1024 * 1024);
         // a block naming every field, in the sizes an operator writes
         let parsed: super::Replication = serde_yaml::from_str(
-            "write_timeout: \"2s\"\npending_bytes: \"8MiB\"\nsegment_bytes: \"1MiB\"\ncheckpoint_entries: 64\nretained_entries: 128\nlog_cache_bytes: \"1MiB\"\nvolatile_log_bytes: \"4MiB\"\n",
+            "write_timeout: \"2s\"\npending_bytes: \"8MiB\"\nsegment_bytes: \"1MiB\"\ncheckpoint_entries: 64\nretained_entries: 128\nlog_cache_bytes: \"1MiB\"\nvolatile_log_bytes: \"4MiB\"\nsnapshot_chunk_bytes: \"256KiB\"\nsnapshot_timeout: \"1m\"\ninstall_bytes: \"64MiB\"\nretained_bytes: \"4MiB\"\n",
         )
         .expect("a full replication block parses");
+        assert_eq!(parsed.snapshot_chunk_bytes, 256 * 1024);
+        assert_eq!(parsed.snapshot_timeout.duration(), Duration::from_secs(60));
+        assert_eq!(parsed.install_bytes, 64 * 1024 * 1024);
+        assert_eq!(parsed.retained_bytes, 4 * 1024 * 1024);
         assert_eq!(parsed.write_timeout.duration(), Duration::from_secs(2));
         assert_eq!(parsed.pending_bytes, 8 * 1024 * 1024);
         assert_eq!(parsed.segment_bytes, 1024 * 1024);

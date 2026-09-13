@@ -149,6 +149,19 @@ pub struct StagedCluster {
     /// The bound on bytes proposed and unanswered per group, if the test lowered it
     #[serde(default)]
     pub pending_bytes: Option<usize>,
+    /// How many entries a group commits between snapshots, if the test shortened it
+    /// ([F43](../../../docs/src/features/node-recovery.md))
+    #[serde(default)]
+    pub checkpoint_entries: Option<u64>,
+    /// How many entries a group keeps behind its snapshot, if the test shortened it
+    #[serde(default)]
+    pub retained_entries: Option<u64>,
+    /// How large a WAL segment grows before it rotates, if the test shrank it
+    #[serde(default)]
+    pub segment_bytes: Option<u64>,
+    /// The bound on sealed WAL bytes a slow member may pin, if the test lowered it
+    #[serde(default)]
+    pub retained_bytes: Option<u64>,
     /// The read level the bootstrapper seeds as the cluster's default, if the test set one
     /// ([F41](../../../docs/src/features/read-consistency.md))
     #[serde(default)]

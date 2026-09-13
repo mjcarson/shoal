@@ -1143,6 +1143,20 @@ async fn cluster_server_child() {
             if let Some(bytes) = staged.pending_bytes {
                 replication.pending_bytes = bytes;
             }
+            // the checkpoint, retention and segment knobs, shortened so a member falls past
+            // the purge point inside a test ([F43](../../docs/src/features/node-recovery.md))
+            if let Some(entries) = staged.checkpoint_entries {
+                replication.checkpoint_entries = entries;
+            }
+            if let Some(entries) = staged.retained_entries {
+                replication.retained_entries = entries;
+            }
+            if let Some(bytes) = staged.segment_bytes {
+                replication.segment_bytes = bytes;
+            }
+            if let Some(bytes) = staged.retained_bytes {
+                replication.retained_bytes = bytes;
+            }
             block = block.replication(replication);
             // the default read level, which every bundle without an override inherits
             // ([F41](../../docs/src/features/read-consistency.md))
@@ -3357,7 +3371,7 @@ async fn async_replica_cannot_weaken_durable_quorum() -> Result<(), FixtureError
     let error = ClusterConf::default()
         .bootstrap(true)
         .write_consistency(shoal::server::conf::cluster::Consistency::One)
-        .validate("127.0.0.1")
+        .validate("127.0.0.1", shoal::shared::protocol::DEFAULT_MAX_FRAME_BYTES)
         .expect_err("a One write policy was accepted");
     assert!(format!("{error}").contains("fdatasync"), "{error}");
     // a standalone node with the same table setting starts and serves
@@ -3565,6 +3579,74 @@ async fn restart_does_not_recompact_segments_below_the_checkpoint() -> Result<()
     assert!(initial.is_empty(), "a segment below the checkpoint was handed to the compactor again: {initial:?}");
     // and the node converges with the rest, as ever
     wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    for id in 0..3 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
+
+/// A volatile group builds a snapshot at its applied position and purges its log (Resolved #105)
+///
+/// The ephemeral table's groups keep their log in memory, and before the fix nothing ever moved
+/// their checkpoint: the snapshot builder was never offered, openraft never purged, and the
+/// memory log grew to its bound. With the checkpoint at the applied position on every apply,
+/// the policy builder fires every `checkpoint_entries` and the purge follows
+/// ([Resolved #105](../../docs/src/appendix/resolved/volatile-groups-never-purged.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_volatile_group_purges_its_log() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lane_links(true)
+        .checkpoint_entries(8)
+        .retained_entries(16)
+        .start()
+        .await?;
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    let client = Shoal::<TestDbClient>::new(&addr0).await.map_err(|error| FixtureError::NotReady(format!("{error:?}")))?;
+    // well past the checkpoint and retention counts, on every group of the table
+    for key in 9000..9096u64 {
+        client
+            .send_one(Row {
+                key,
+                data: format!("row-{key}"),
+            })
+            .await
+            .map_err(|error| FixtureError::NotReady(format!("{error:?}")))?;
+    }
+    // a volatile group with a purge point, on the node that led the writes
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let view = groups_of(&mut cluster, 0)?;
+        let purged: Vec<(u64, u64, u64)> = view["shards"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .flat_map(|shard| shard["groups"].as_array().into_iter().flatten())
+            .filter(|group| group["table_name"] == "Row" && group["volatile"] == true)
+            .map(|group| {
+                (
+                    group["applied"].as_u64().unwrap_or(0),
+                    group["checkpoint"].as_u64().unwrap_or(0),
+                    group["purged"].as_u64().unwrap_or(0),
+                )
+            })
+            .collect();
+        assert!(!purged.is_empty(), "no volatile group of Row: {view}");
+        if purged.iter().any(|(_, _, purged)| *purged > 0) {
+            // the checkpoint is the applied position, and the purge stays behind it
+            for (applied, checkpoint, purged) in &purged {
+                assert!(checkpoint <= applied, "{purged:?}");
+                assert!(purged < applied, "{purged:?}");
+            }
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no volatile group ever purged its log (applied, checkpoint, purged): {purged:?}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
     for id in 0..3 {
         assert_eq!(cluster.node(id).failure(), None, "node {id} died");
     }
