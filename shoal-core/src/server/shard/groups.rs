@@ -45,12 +45,12 @@ use crate::server::messages::{QueryMetadata, ServerMsg};
 use crate::server::peer::{LinkEvent, ReplicateReply};
 use crate::server::replication::{
     ApplyOutcome, BarrierAnswer, DataConfig, GroupMachine, GroupNetwork, GroupReport, MachineState,
-    ProposalOutcome, ReplicationVerb, RpcFailure, ShardNetwork, ShardPeer, ShardReplication,
+    ProposalOutcome, Remembered, ReplicationVerb, RpcFailure, ShardNetwork, ShardPeer, ShardReplication,
 };
 use crate::server::ring::Ring;
 use crate::server::stage_profile::{StageDurability, StageOp};
 use crate::server::tables::ApplyStep;
-use crate::server::wal::{Checkpoint, GroupCheckpoint, GroupStore, MemoryWal, ShardWal};
+use crate::server::wal::{Checkpoint, GroupCheckpoint, GroupRetries, GroupStore, MemoryWal, Retries, ShardWal};
 use crate::server::ServerError;
 use crate::shared::identity::{GroupId, NodeId, ShardAddr, TableId};
 use crate::shared::protocol::error::ErrorCode;
@@ -123,6 +123,8 @@ pub(super) struct Replication<D: ShoalDatabase> {
     pub(super) parked: HashMap<(D::TableNames, u64), Vec<ParkedApply>>,
     /// The checkpoint file as it was last written or read
     pub(super) checkpoint: Checkpoint,
+    /// The retry sidecar as it was last written or read
+    pub(super) retries: Retries,
     /// Which write of the checkpoint file is the latest
     pub(super) checkpoint_version: u64,
     /// Whether a checkpoint write is in flight
@@ -202,6 +204,8 @@ where
             let _ = sealed_tx.try_send(ServerMsg::WalSealed { generation });
         }));
         let checkpoint = Checkpoint::read(&dir).await.map_err(ServerError::IO)?;
+        // the retry tables as of that checkpoint, written before it
+        let retries = Retries::read(&dir).await.map_err(ServerError::IO)?;
         let _ = setup;
         self.replication = Some(Replication {
             wal,
@@ -211,6 +215,7 @@ where
             tablets: HashMap::new(),
             parked: HashMap::new(),
             checkpoint,
+            retries,
             checkpoint_version: 0,
             checkpoint_writing: false,
             checkpoint_dirty: false,
@@ -309,16 +314,24 @@ where
             } else {
                 replication.volatile.store(spec.id)
             };
-            // the checkpoint the group starts from, if its table's archives hold one
-            let (checkpoint, membership) = match replication.checkpoint.get(spec.id) {
+            // the checkpoint the group starts from, if its table's archives hold one, and the
+            // retry table as of it, which the log above the checkpoint cannot rebuild
+            let (checkpoint, membership, seed) = match replication.checkpoint.get(spec.id) {
                 Some(point) if store.is_volatile() => {
                     let _ = point;
-                    (None, StoredMembership::default())
+                    (None, StoredMembership::default(), Vec::new())
                 }
-                Some(point) => (point.applied.clone(), point.membership()),
-                None => (None, StoredMembership::default()),
+                Some(point) => (
+                    point.applied.clone(),
+                    point.membership(),
+                    replication.retries.seed_for(spec.id, point),
+                ),
+                None => (None, StoredMembership::default(), Vec::new()),
             };
-            let state = Rc::new(RefCell::new(MachineState::at(checkpoint, membership)));
+            if !seed.is_empty() {
+                event!(Level::DEBUG, msg = "seeded a group's retry table from its sidecar", group = %spec.id, entries = seed.len());
+            }
+            let state = Rc::new(RefCell::new(MachineState::at(checkpoint, membership, seed)));
             let machine = GroupMachine::new(spec.id, state.clone(), tx.clone());
             let group = Group {
                 spec: spec.clone(),
@@ -453,8 +466,8 @@ where
                     // a repeat of a remembered identity is answered as the first was
                     let remembered = state.borrow_mut().dedup.get(&command.request).copied();
                     match remembered {
-                        Some((digest, result)) if digest == command.digest() => {
-                            Some(ApplyOutcome::Duplicate(result))
+                        Some(remembered) if remembered.digest == command.digest() => {
+                            Some(ApplyOutcome::Duplicate(remembered.result))
                         }
                         Some(_) => Some(ApplyOutcome::Refused(
                             "the request identity was reused with a different payload".to_string(),
@@ -462,7 +475,12 @@ where
                         None => match self.tables.apply_command(table, command, generation, resumed) {
                             ApplyStep::Done(result) => {
                                 event!(Level::DEBUG, msg = "applied a command", group = %group, index = log_id.index, table = %table, ok = result.ok);
-                                state.borrow_mut().dedup.put(command.request, (command.digest(), result));
+                                let remembered = Remembered {
+                                    digest: command.digest(),
+                                    result,
+                                    applied: log_id.index,
+                                };
+                                state.borrow_mut().dedup.put(command.request, remembered);
                                 Some(ApplyOutcome::Applied(result))
                             }
                             ApplyStep::Refused(reason) => Some(ApplyOutcome::Refused(reason)),
@@ -998,7 +1016,12 @@ where
         }
     }
 
-    /// Write the checkpoint file from every group's checkpoint, on a task of its own
+    /// Write the retry sidecar and then the checkpoint file from every group's checkpoint, on a task of its own
+    ///
+    /// The sidecar goes first: a checkpoint that names a sidecar index must find one complete
+    /// to it at open, and a crash between the two leaves a sidecar ahead of its checkpoint,
+    /// which the seed rule ignores. The checkpoint counts as durable only once the checkpoint
+    /// file itself landed.
     fn write_checkpoint(&mut self) {
         let Some(replication) = self.replication.as_mut() else {
             return;
@@ -1010,25 +1033,41 @@ where
         replication.checkpoint_dirty = false;
         replication.checkpoint_version += 1;
         let version = replication.checkpoint_version;
-        // what every persistent group says its checkpoint is
+        // what every persistent group says its checkpoint is, and what it remembers as of it
         let mut file = Checkpoint::default();
+        let mut retries = Retries::default();
         for (id, slot) in &replication.groups {
             if slot.store.is_volatile() {
                 continue;
             }
             let state = slot.state.borrow();
             if let Some(applied) = &state.checkpoint {
+                // the entries at or below the checkpoint; the rest the log replay re-derives
+                let entries = state.remembered_through(applied.index);
+                retries.groups.insert(
+                    id.to_string(),
+                    GroupRetries {
+                        retries_at: applied.index,
+                        entries,
+                    },
+                );
                 file.groups.insert(
                     id.to_string(),
-                    GroupCheckpoint::new(Some(applied.clone()), &state.checkpoint_membership),
+                    GroupCheckpoint::new(Some(applied.clone()), &state.checkpoint_membership)
+                        .retries(applied.index, state.retry_floor()),
                 );
             }
         }
         replication.checkpoint = file.clone();
+        replication.retries = retries.clone();
         let dir = replication.wal.dir();
         let tx = self.shard_local_tx.clone();
         glommio::spawn_local(async move {
-            let outcome = file.write(&dir).await.map_err(|error| error.to_string());
+            // the sidecar first, then the checkpoint that names it
+            let outcome = match retries.write(&dir).await {
+                Ok(()) => file.write(&dir).await.map_err(|error| error.to_string()),
+                Err(error) => Err(format!("the retry sidecar could not be written: {error}")),
+            };
             let _ = tx.send(ServerMsg::CheckpointWritten { version, outcome }).await;
         })
         .detach();

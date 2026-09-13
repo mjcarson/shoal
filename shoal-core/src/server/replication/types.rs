@@ -54,6 +54,22 @@ pub struct CommandResult {
     pub ok: bool,
 }
 
+/// What a group remembers about one request identity it applied
+///
+/// The result a retry is answered with, the digest of the payload a retry with a different
+/// payload is refused by, and the log index the command was applied at, which is what orders
+/// the table for its low-water mark and what decides whether a remembered entry is seeded at
+/// open or re-derived from the log ([F42](../../../../docs/src/features/primary-failover.md)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Remembered {
+    /// The digest of the payload the identity was first seen with
+    pub digest: u64,
+    /// The result the command produced
+    pub result: CommandResult,
+    /// The log index the command was applied at
+    pub applied: u64,
+}
+
 /// What the group answers a proposal with
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ApplyOutcome {

@@ -35,7 +35,7 @@ use openraft::type_config::alias::{SnapshotMetaOf, SnapshotOf, StoredMembershipO
 use openraft::{OptionalSend, Snapshot, SnapshotMeta, StoredMembership};
 use serde::{Deserialize, Serialize};
 
-use super::types::{CommandResult, DataConfig};
+use super::types::{DataConfig, Remembered};
 use crate::server::database::ShoalDatabase;
 use crate::server::messages::ServerMsg;
 use crate::server::wal::WalLogId;
@@ -45,8 +45,10 @@ use crate::shared::protocol::peer::RequestId;
 /// How many request identities a group remembers the result of
 ///
 /// A retry of a remembered write is answered as it was the first time. Bounded so the table
-/// stays small however long a group runs; the durable low-water mark that makes the bound a
-/// promise is M6's.
+/// stays small however long a group runs. The table is persisted beside the checkpoint and
+/// seeded from there at open ([F42](../../../../docs/src/features/primary-failover.md)), so
+/// the bound is a count and not a restart; the low-water mark below which an identity is
+/// forgotten is recorded with the checkpoint for M9a's expiry check to read.
 pub const REMEMBERED_REQUESTS: usize = 4096;
 
 /// A snapshot's data: the checkpoint, as JSON, since the rows live in the archives
@@ -71,8 +73,8 @@ pub struct MachineState {
     pub checkpoint_membership: StoredMembershipOf<DataConfig>,
     /// The log id the last snapshot was built at, if one was
     pub snapshot_at: Option<WalLogId>,
-    /// The result each remembered request produced, with the digest of its payload
-    pub dedup: LruCache<RequestId, (u64, CommandResult)>,
+    /// What each remembered request produced, with its payload's digest and its applied index
+    pub dedup: LruCache<RequestId, Remembered>,
     /// Whether the checkpoint has been written to disk since it last moved
     pub checkpoint_durable: bool,
 }
@@ -84,8 +86,18 @@ impl MachineState {
     ///
     /// * `checkpoint` - The checkpoint, or none for a group with nothing compacted
     /// * `membership` - The membership as of it
+    /// * `seed` - The remembered requests as of the checkpoint, oldest first
     #[must_use]
-    pub fn at(checkpoint: Option<WalLogId>, membership: StoredMembershipOf<DataConfig>) -> Self {
+    pub fn at(
+        checkpoint: Option<WalLogId>,
+        membership: StoredMembershipOf<DataConfig>,
+        seed: Vec<(RequestId, Remembered)>,
+    ) -> Self {
+        // the seed is put oldest first, so the newest is what the bound keeps longest
+        let mut dedup = LruCache::new(NonZeroUsize::new(REMEMBERED_REQUESTS).expect("a positive bound"));
+        for (request, remembered) in seed {
+            dedup.put(request, remembered);
+        }
         MachineState {
             applied: checkpoint.clone(),
             membership: membership.clone(),
@@ -93,9 +105,37 @@ impl MachineState {
             snapshot_at: checkpoint.clone(),
             checkpoint,
             checkpoint_membership: membership,
-            dedup: LruCache::new(NonZeroUsize::new(REMEMBERED_REQUESTS).expect("a positive bound")),
+            dedup,
             checkpoint_durable: true,
         }
+    }
+
+    /// The remembered requests applied at or below an index, oldest first
+    ///
+    /// What the retry sidecar records for a checkpoint at that index: everything above it is
+    /// re-derived from the log the checkpoint leaves behind.
+    ///
+    /// # Arguments
+    ///
+    /// * `through` - The index the checkpoint stands at
+    #[must_use]
+    pub fn remembered_through(&self, through: u64) -> Vec<(RequestId, Remembered)> {
+        // the cache iterates newest first, and the sidecar is written oldest first
+        self.dedup
+            .iter()
+            .rev()
+            .filter(|(_, remembered)| remembered.applied <= through)
+            .map(|(request, remembered)| (*request, *remembered))
+            .collect()
+    }
+
+    /// The lowest applied index still remembered, or zero when nothing is
+    ///
+    /// The low-water mark: an identity applied below it has been forgotten, and a retry of it
+    /// would be applied as new. Recorded with the checkpoint for M9a's expiry check.
+    #[must_use]
+    pub fn retry_floor(&self) -> u64 {
+        self.dedup.iter().map(|(_, remembered)| remembered.applied).min().unwrap_or(0)
     }
 
     /// The index the loop has applied, or zero

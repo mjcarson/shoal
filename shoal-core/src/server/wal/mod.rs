@@ -66,8 +66,9 @@ use openraft::{EntryPayload, Membership, OptionalSend, StoredMembership};
 use serde::{Deserialize, Serialize};
 use tracing::{event, Level};
 
-use crate::server::replication::DataConfig;
+use crate::server::replication::{DataConfig, Remembered};
 use crate::shared::identity::{GroupId, ShardAddr};
+use crate::shared::protocol::peer::RequestId;
 pub use frame::{Entry, LeaderId, Vote, WalLogId};
 pub use memory::MemoryWal;
 
@@ -76,6 +77,12 @@ pub const WAL_DIR: &str = "wal";
 
 /// The checkpoint file's name
 pub const CHECKPOINT_FILE: &str = "checkpoint.json";
+
+/// The retry sidecar's name, beside the checkpoint file
+///
+/// Every persistent group's remembered requests as of the checkpoint, written before the
+/// checkpoint that names them ([F42](../../../../docs/src/features/primary-failover.md)).
+pub const RETRIES_FILE: &str = "retries.bin";
 
 /// Turn a glommio error into the io error openraft wants
 ///
@@ -585,6 +592,18 @@ pub struct GroupCheckpoint {
     pub configs: Vec<Vec<ShardAddr>>,
     /// Every member then, learners included
     pub members: Vec<ShardAddr>,
+    /// The log index the retry sidecar's entries for this group are complete to
+    ///
+    /// The checkpoint's own index once a sidecar was written for it; zero from a file written
+    /// before there was one, which seeds nothing.
+    #[serde(default)]
+    pub retries_at: u64,
+    /// The lowest applied index the retry table still remembered, or zero
+    ///
+    /// The low-water mark: a retry of an identity applied below it is applied as new. M9a's
+    /// expiry check reads it; nothing at M6 refuses on it.
+    #[serde(default)]
+    pub retry_floor: u64,
 }
 
 impl GroupCheckpoint {
@@ -606,7 +625,22 @@ impl GroupCheckpoint {
                 .map(|config| config.iter().copied().collect())
                 .collect(),
             members: membership.membership().nodes().map(|(addr, _)| *addr).collect(),
+            retries_at: 0,
+            retry_floor: 0,
         }
+    }
+
+    /// Record which retry sidecar goes with this checkpoint, and the table's low-water mark
+    ///
+    /// # Arguments
+    ///
+    /// * `retries_at` - The index the sidecar's entries are complete to
+    /// * `retry_floor` - The lowest applied index still remembered
+    #[must_use]
+    pub fn retries(mut self, retries_at: u64, retry_floor: u64) -> Self {
+        self.retries_at = retries_at;
+        self.retry_floor = retry_floor;
+        self
     }
 
     /// The membership as openraft holds it
@@ -659,6 +693,85 @@ impl Checkpoint {
     #[must_use]
     pub fn get(&self, group: GroupId) -> Option<&GroupCheckpoint> {
         self.groups.get(&group.to_string())
+    }
+}
+
+/// One group's remembered requests as of a checkpoint
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct GroupRetries {
+    /// The log index the entries are complete to: the checkpoint they were written for
+    pub retries_at: u64,
+    /// The entries, oldest first
+    pub entries: Vec<(RequestId, Remembered)>,
+}
+
+/// The retry sidecar: every persistent group's remembered requests as of its checkpoint
+///
+/// Written before the checkpoint file on the same trigger, so a checkpoint whose `retries_at`
+/// names an index always has a sidecar complete to it; a crash between the two leaves a sidecar
+/// ahead of its checkpoint, which the seed rule ignores. Postcard rather than JSON: a request
+/// identity is sixteen bytes and an index, and there are up to four thousand a group.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Retries {
+    /// Per group, by its identity rendered in hex
+    pub groups: BTreeMap<String, GroupRetries>,
+}
+
+impl Retries {
+    /// Read the retry sidecar, or an empty one if there is none
+    ///
+    /// # Arguments
+    ///
+    /// * `dir` - The WAL directory
+    pub async fn read(dir: &Path) -> io::Result<Self> {
+        let path = dir.join(RETRIES_FILE);
+        if !path.exists() {
+            return Ok(Retries::default());
+        }
+        let bytes = read_whole(&path).await?;
+        postcard::from_bytes(&bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+    }
+
+    /// Write the retry sidecar atomically
+    ///
+    /// # Arguments
+    ///
+    /// * `dir` - The WAL directory
+    pub async fn write(&self, dir: &Path) -> io::Result<()> {
+        let bytes = postcard::to_allocvec(self).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        write_atomic(dir, RETRIES_FILE, bytes).await
+    }
+
+    /// The entries to seed a group's retry table with at open
+    ///
+    /// Only when the sidecar was written for exactly the checkpoint the group starts from, and
+    /// only the entries applied at or below it: an entry above the checkpoint is re-derived by
+    /// the replay of the log, and seeding it would make the replay answer `Duplicate` and skip
+    /// the apply the table needs.
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group
+    /// * `point` - The checkpoint it starts from
+    #[must_use]
+    pub fn seed_for(&self, group: GroupId, point: &GroupCheckpoint) -> Vec<(RequestId, Remembered)> {
+        // a checkpoint from before the sidecar existed names no sidecar
+        if point.retries_at == 0 {
+            return Vec::new();
+        }
+        let Some(retries) = self.groups.get(&group.to_string()) else {
+            return Vec::new();
+        };
+        // a sidecar written for another checkpoint is not this one's
+        if retries.retries_at != point.retries_at {
+            return Vec::new();
+        }
+        retries
+            .entries
+            .iter()
+            .filter(|(_, remembered)| remembered.applied <= point.retries_at)
+            .copied()
+            .collect()
     }
 }
 

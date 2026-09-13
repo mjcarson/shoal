@@ -18,4 +18,4 @@ pub use machine::{GroupMachine, MachineState, SnapshotData};
 pub use network::{GroupNetwork, GroupPeer, ReplicationLink, RpcFailure, ShardNetwork, ShardPeer};
 pub use proposal::{BarrierAnswer, ProposalOutcome};
 pub use report::{GroupReport, NodeReplication, ReadStats, ReadVerb, ReplicationVerb, ShardReplication};
-pub use types::{ApplyOutcome, CommandResult, DataConfig, ResultKind};
+pub use types::{ApplyOutcome, CommandResult, DataConfig, Remembered, ResultKind};
