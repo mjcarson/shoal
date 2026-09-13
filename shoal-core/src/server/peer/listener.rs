@@ -652,11 +652,13 @@ async fn replication_tx_relay(
     }
 }
 
-/// Serve one bulk lane: read a stream's frames, check them, and count them
+/// Serve one bulk lane: read a stream's frames, check them, count them, and hand its chunks on
 ///
-/// Nothing installs a snapshot at M2. What this does is everything up to that: the framing is
-/// read and bounded, every chunk's checksum is checked, and the bytes are counted where the
-/// transport view can see them, so the bulk lane is a lane with a shape rather than a name.
+/// The framing is read and bounded and every chunk's checksum is checked here, where the
+/// bytes are counted for the transport view. A begin whose manifest is a route names the
+/// shard that hosts the stream's group, and every chunk of that stream is sent to it as
+/// [`ServerMsg::SnapshotBytes`] ([F43](../../../../docs/src/features/node-recovery.md)); a
+/// stream with no route - the fixture's bulk probe - is counted and discarded, as at M2.
 ///
 /// # Arguments
 ///
@@ -664,10 +666,12 @@ async fn replication_tx_relay(
 /// * `origin` - The peer this lane comes from
 /// * `rx` - The read half of the connection
 async fn serve_bulk<S: ShoalDatabase>(
-    ctx: ListenerContext<S>,
+    mut ctx: ListenerContext<S>,
     origin: NodeId,
     mut rx: ReadHalf<TcpStream>,
 ) {
+    // where each stream's chunks go, from its begin
+    let mut routes: HashMap<[u8; 16], crate::server::replication::snapshot::BulkRoute> = HashMap::new();
     let outcome: Result<(), ServerError> = async {
         loop {
             let max_frame_bytes = ctx.local.borrow().max_frame_bytes;
@@ -681,7 +685,13 @@ async fn serve_bulk<S: ShoalDatabase>(
                     let manifest = codec::read_vec(&mut rx, begin.manifest_len as usize).await?;
                     ctx.bulk_received
                         .set(ctx.bulk_received.get() + header.body_len() as u64);
-                    drop(manifest);
+                    // a route names the shard the stream belongs to, and it has to exist here
+                    if let Ok(route) = postcard::from_bytes::<crate::server::replication::snapshot::BulkRoute>(&manifest) {
+                        if usize::from(route.target_shard) >= ctx.shard_count {
+                            return Err(ProtocolError::MalformedForward("a snapshot stream names a shard this node does not run").into());
+                        }
+                        routes.insert(begin.stream, route);
+                    }
                 }
                 MessageType::SnapshotChunk => {
                     let raw: [u8; SNAPSHOT_CHUNK_LEN] = codec::read_array(&mut rx).await?;
@@ -690,12 +700,30 @@ async fn serve_bulk<S: ShoalDatabase>(
                     chunk.verify(&bytes)?;
                     ctx.bulk_received
                         .set(ctx.bulk_received.get() + header.body_len() as u64);
+                    // to the shard that hosts the group, if the stream has one
+                    if let Some(route) = routes.get(&chunk.stream) {
+                        let msg = ServerMsg::SnapshotBytes {
+                            node: origin,
+                            stream: chunk.stream,
+                            offset: chunk.offset,
+                            bytes,
+                        };
+                        if ctx
+                            .comms
+                            .send(&crate::server::shard::ShardContact::Local(usize::from(route.target_shard)), msg)
+                            .await
+                            .is_err()
+                        {
+                            return Ok(());
+                        }
+                    }
                 }
                 MessageType::SnapshotEnd => {
                     let raw: [u8; SNAPSHOT_END_LEN] = codec::read_array(&mut rx).await?;
-                    let _end = SnapshotEnd::decode(&raw);
+                    let end = SnapshotEnd::decode(&raw);
                     ctx.bulk_received
                         .set(ctx.bulk_received.get() + header.body_len() as u64);
+                    routes.remove(&end.stream);
                 }
                 other => {
                     return Err(ProtocolError::UnexpectedMessageType {

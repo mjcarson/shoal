@@ -8,6 +8,7 @@
 //! the groups run under, the state machine that hands committed entries to the shard loop, and
 //! the network that carries the group's RPCs over the replication lane.
 
+pub mod install;
 pub mod lease;
 pub mod machine;
 pub mod network;
@@ -16,6 +17,7 @@ pub mod report;
 pub mod snapshot;
 pub mod types;
 
+pub use install::{crash_point, Assembler, CrashPoint, Partial};
 pub use lease::Lease;
 pub use machine::{GroupMachine, MachineState, SnapshotData};
 pub use network::{GroupNetwork, GroupPeer, ReplicationLink, RpcFailure, ShardNetwork, ShardPeer};

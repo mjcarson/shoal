@@ -651,6 +651,22 @@ where
         /// The file and its manifest, or why there is none
         outcome: Result<(std::path::PathBuf, crate::server::replication::SnapshotManifest), String>,
     },
+    /// A chunk of a snapshot stream, relayed from the bulk lane to the shard hosting the group
+    ///
+    /// The lane landed on whichever shard the kernel chose; the begin frame's route names the
+    /// shard the chunks belong to, and the listener sends each one here
+    /// ([F43](../../../docs/src/features/node-recovery.md)). Crosses a thread, carrying bytes
+    /// and nothing executor-local.
+    SnapshotBytes {
+        /// The peer sending the stream
+        node: crate::shared::identity::NodeId,
+        /// The stream
+        stream: [u8; 16],
+        /// Where in the stream these bytes go
+        offset: u64,
+        /// The bytes
+        bytes: Vec<u8>,
+    },
     /// A received snapshot is to be installed, from the group's state machine
     ///
     /// Posted by `GroupMachine::install_snapshot` on openraft's worker task, or on the task
@@ -791,6 +807,7 @@ impl<D: ShoalDatabase> Clone for ServerMsg<D> {
             ServerMsg::CheckpointWritten { .. } => panic!("A checkpoint write is the writing shard's"),
             ServerMsg::BuildSnapshot { .. } => panic!("A snapshot is built for the shard hosting the group"),
             ServerMsg::InstallSnapshot { .. } => panic!("A snapshot is installed on the shard hosting the group"),
+            ServerMsg::SnapshotBytes { .. } => panic!("A snapshot chunk goes to the shard hosting its group"),
             ServerMsg::SnapshotBuilt { .. } => panic!("A built snapshot is the cutting shard's"),
             ServerMsg::ReplicationView(_) => panic!("A replication view is asked of one shard"),
             ServerMsg::ReplicationVerb { .. } => panic!("A replication verb is for one shard"),

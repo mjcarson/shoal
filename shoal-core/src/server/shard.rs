@@ -3,6 +3,7 @@
 mod gather;
 mod groups;
 mod reads;
+mod snapshots;
 
 use bytes::Bytes;
 use futures::{
@@ -2976,6 +2977,16 @@ where
             PeerEvent::Link(LinkEvent::Up { node, lane, incarnation }) => {
                 event!(Level::DEBUG, msg = "a peer link came up", %node, %lane, incarnation);
             }
+            // the bulk lane carries snapshot streams and owes nothing to a client: a lost link
+            // is dialled afresh by the next stream, and the receiver's resume offset recovers
+            // what it lost ([F43](../../../docs/src/features/node-recovery.md))
+            PeerEvent::Link(LinkEvent::Down { node, lane: Lane::Bulk, reason, .. }) => {
+                event!(Level::WARN, msg = "a bulk link went down", %node, reason);
+                if let Some(replication) = self.replication.as_ref() {
+                    replication.network.bulk_down(node);
+                }
+            }
+            PeerEvent::Link(LinkEvent::Frame { lane: Lane::Bulk, .. }) => {}
             PeerEvent::Link(LinkEvent::Frame { node, header, head, payload, .. }) => {
                 self.handle_forwarded(node, header, &head, payload).await?;
             }
@@ -3302,14 +3313,25 @@ where
         ));
         // and the replication links its tablet groups speak over, delivering the same way
         let events = self.shard_local_tx.clone_sync();
+        // a snapshot transfer asks the loop for its file through the mesh, since the transmitter
+        // runs on a task of openraft's ([F43](../../../docs/src/features/node-recovery.md))
+        let builder_tx = self.shard_local_tx.clone_sync();
+        let replication_conf = self.conf.cluster.as_ref().map(|cluster| cluster.replication.clone()).unwrap_or_default();
         let network = ShardNetwork::new(
             self.map.clone(),
             setup.dial.clone(),
             local.clone(),
             client_tls,
             setup.transport.clone(),
+            replication_conf,
             Rc::new(move |event| {
                 let _ = events.try_send(ServerMsg::Peer(PeerEvent::Link(event)));
+            }),
+            Rc::new(move |group, reply| {
+                if let Err(error) = builder_tx.try_send(ServerMsg::BuildSnapshot { group, reply }) {
+                    // the loop is gone; the reply it carried is dropped, which the asker hears
+                    let _ = error;
+                }
             }),
         );
         // bind the peer listener, every shard on the same port with SO_REUSEPORT
@@ -3602,6 +3624,9 @@ where
                 ServerMsg::BuildSnapshot { group, reply } => self.handle_build_snapshot(group, reply).await?,
                 ServerMsg::SnapshotBuilt { group, outcome } => self.handle_snapshot_built(group, outcome).await?,
                 ServerMsg::InstallSnapshot { group, done, .. } => self.handle_install_snapshot(group, done),
+                ServerMsg::SnapshotBytes { node, stream, offset, bytes } => {
+                    self.handle_snapshot_bytes(node, stream, offset, bytes);
+                }
                 ServerMsg::CheckpointWritten { version, outcome } => {
                     self.handle_checkpoint_written(version, outcome)?;
                 }

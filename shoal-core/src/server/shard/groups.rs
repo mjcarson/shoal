@@ -148,6 +148,8 @@ pub(super) struct Replication<D: ShoalDatabase> {
     pub(super) stats: ProposalStats,
     /// What snapshots have done ([F43](../../../../docs/src/features/node-recovery.md))
     pub(super) snapshots: SnapshotStats,
+    /// The snapshots being received, one partial per group at most
+    pub(super) installs: super::snapshots::Installs,
     /// How many committed write replies to drop before answering clients again, for the fixture
     pub(super) drop_replies: u64,
     /// How many rebuilds of the groups there have been
@@ -221,6 +223,12 @@ where
         let checkpoint = Checkpoint::read(&dir).await.map_err(ServerError::IO)?;
         // the retry tables as of that checkpoint, written before it
         let retries = Retries::read(&dir).await.map_err(ServerError::IO)?;
+        // where received snapshots are assembled, bounded in bytes on disk and in the queue
+        let installs = super::snapshots::Installs::new(
+            &dir,
+            cluster.replication.install_bytes,
+            cluster.transport.bulk_queue_bytes,
+        );
         let _ = setup;
         self.replication = Some(Replication {
             wal,
@@ -237,6 +245,7 @@ where
             compacting: HashMap::new(),
             stats: ProposalStats::default(),
             snapshots: SnapshotStats::default(),
+            installs,
             drop_replies: 0,
             epoch: 0,
             ticks: 0,
@@ -849,6 +858,12 @@ where
             let _ = reply.try_send(ReplicateReply::error(head.id, format!("group {group} is still starting")));
             return;
         };
+        // a snapshot rpc is the receiver's: judged on the loop against what it holds
+        // ([F43](../../../../docs/src/features/node-recovery.md))
+        if head.kind == ReplicateKind::Snapshot {
+            self.handle_snapshot_rpc(origin, head, payload, reply);
+            return;
+        }
         let network = replication.network.clone();
         let me = self.my_addr();
         let deadline = Duration::from_millis(u64::from(head.deadline_ms.max(1)));
@@ -878,10 +893,8 @@ where
                     }
                     Err(error) => ReplicateReply::error(head.id, format!("decoding a proposal: {error}")),
                 },
-                ReplicateKind::Snapshot => ReplicateReply::error(
-                    head.id,
-                    "installing a tablet group snapshot is M7's; this replica cannot catch up past the purge point",
-                ),
+                // a snapshot rpc is judged on the loop, so it is answered before this task
+                ReplicateKind::Snapshot => unreachable!("a snapshot rpc is answered on the loop"),
                 // a read barrier: confirm leadership with a heartbeat round and answer the
                 // read log id, or say who leads instead. A lapsed lease is answered by name
                 // rather than waited out, since its heartbeat round cannot complete
@@ -1234,7 +1247,13 @@ where
             unknown_outcomes: replication.stats.unknown,
             rejected: replication.stats.rejected,
             reads: self.read_stats,
-            snapshots: replication.snapshots,
+            snapshots: {
+                // what the loop counted, what the partials counted, what the sender counted
+                let mut stats = replication.snapshots;
+                stats.absorb(&replication.installs.stats());
+                stats.absorb(&replication.network.snapshot_stats());
+                stats
+            },
             groups,
         }
     }
