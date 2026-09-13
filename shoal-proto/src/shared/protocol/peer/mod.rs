@@ -45,14 +45,14 @@ pub use control::{
     CONTROL_HEAD_LEN,
 };
 pub use forward::{
-    decode_entries, decode_error_payload, encode_entries, encode_error_payload, ForwardEntry,
-    ForwardPreamble, ForwardedKind, ForwardedPreamble, FORWARDED_PREAMBLE_LEN,
+    decode_entries, decode_error_payload, encode_entries, encode_error_payload, EntryRead,
+    ForwardEntry, ForwardPreamble, ForwardedKind, ForwardedPreamble, FORWARDED_PREAMBLE_LEN,
     FORWARD_PREAMBLE_LEN, MAX_FORWARD_ENTRIES, MAX_FORWARD_ENTRIES_BYTES, MAX_FORWARD_KEYS,
 };
 pub use hello::{
     PeerHello, PeerHelloAck, CAPABILITIES, CAP_BULK_SNAPSHOT_V1, CAP_CONTROL_RAFT_V1,
-    CAP_FORWARD_V1, CAP_MEMBERSHIP_V1, CAP_REPLICATION_V1, PEER_HELLO_BODY_LEN,
-    PEER_HELLO_FRAME_LEN,
+    CAP_FORWARD_V1, CAP_MEMBERSHIP_V1, CAP_READ_CONSISTENCY_V1, CAP_REPLICATION_V1,
+    PEER_HELLO_BODY_LEN, PEER_HELLO_FRAME_LEN,
 };
 pub use replicate::{
     Command, ReplicateKind, ReplicateRequestHead, ReplicateResponseHead, ReplicateStatus,

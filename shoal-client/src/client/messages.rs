@@ -3,6 +3,7 @@
 use rkyv::util::AlignedVec;
 
 use shoal_proto::shared::protocol::error::ErrorCode;
+use shoal_proto::shared::protocol::read::SessionToken;
 
 #[cfg(feature = "stage-profile")]
 use shoal_proto::stamps::Stamp;
@@ -154,8 +155,9 @@ pub enum ClientMsg {
     ///
     /// The stamps travel with the bytes rather than beside them so that every path a response
     /// takes — ordered, unordered, and the reorder buffer's re-wrap — carries them without
-    /// having to remember to.
-    Response(AlignedVec, ClientStamps),
+    /// having to remember to. So does the session token a committed write's answer carries
+    /// ([F41](../../../../docs/src/features/read-consistency.md)).
+    Response(AlignedVec, ClientStamps, Option<SessionToken>),
     /// A failure the server sent for this query instead of a response
     ///
     /// This carries no index, unlike a response. It arrives on a frame attached to a query id,

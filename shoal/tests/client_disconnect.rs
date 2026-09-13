@@ -62,6 +62,7 @@ async fn handshaken(addr: &str) -> Result<TcpStream, TestError> {
         schema_fingerprint: TestDbClient::SCHEMA_FINGERPRINT,
         max_frame_bytes: protocol::DEFAULT_MAX_FRAME_BYTES,
         mechanisms: AuthMechanisms::NONE,
+        caps: 0,
     };
     sock.write_all(&hello.frame(protocol::DEFAULT_MAX_FRAME_BYTES).expect("a hello frame"))
         .await?;

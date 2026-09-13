@@ -87,6 +87,7 @@ async fn handshaken(addr: &str) -> Result<TcpStream, TestError> {
         schema_fingerprint: TestDbClient::SCHEMA_FINGERPRINT,
         max_frame_bytes: protocol::DEFAULT_MAX_FRAME_BYTES,
         mechanisms: AuthMechanisms::NONE,
+        caps: 0,
     };
     sock.write_all(
         &hello
@@ -316,6 +317,7 @@ async fn a_hello_of_an_unsupported_version_is_refused_with_an_ack() -> Result<()
         schema_fingerprint: TestDbClient::SCHEMA_FINGERPRINT,
         max_frame_bytes: protocol::DEFAULT_MAX_FRAME_BYTES,
         mechanisms: AuthMechanisms::NONE,
+        caps: 0,
     };
     let mut frame = hello
         .frame(protocol::DEFAULT_MAX_FRAME_BYTES)
@@ -362,6 +364,7 @@ async fn a_hello_naming_a_different_schema_is_refused_with_an_ack() -> Result<()
         schema_fingerprint: TestDbClient::SCHEMA_FINGERPRINT ^ 0xffff_ffff_ffff_ffff,
         max_frame_bytes: protocol::DEFAULT_MAX_FRAME_BYTES,
         mechanisms: AuthMechanisms::NONE,
+        caps: 0,
     };
     hostile
         .write_all(

@@ -2,7 +2,7 @@
 //!
 //! ```text
 //!  forward   : [header][preamble 48 B][entries][rkyv Queries]
-//!  forwarded : [header][preamble 32 B][rkyv ResponseKinds | error]
+//!  forwarded : [header][preamble 96 B][rkyv ResponseKinds | error]
 //! ```
 //!
 //! The coordinator that received a bundle from a client routes every query in it by the scalars
@@ -16,7 +16,14 @@
 //! origin can find what it is waiting on. It carries no return address: the origin's pending
 //! record holds the client, the span and the stamps, and a peer never forwards a forward - the
 //! hop count on arrival must be zero.
+//!
+//! Since [F41](../../../../../docs/src/features/read-consistency.md) an entry may carry a read
+//! plan - the level the coordinator resolved, the slot of the gather it fills and the tokens
+//! bounding it - and an answer carries the attempt and slot it fills and the token a write
+//! minted. The widened answer head is what `CAP_READ_CONSISTENCY_V1` names: a peer without the
+//! bit is refused at the hello, since the M2 rule is an exact match.
 
+use super::super::read::{ReadLevel, SessionToken, MAX_SESSION_TOKENS, SESSION_TOKEN_LEN};
 use super::super::trace::{TraceContext, TRACE_CONTEXT_LEN};
 use super::super::ProtocolError;
 use super::{bytes16_at, u16_at, u32_at, u64_at};
@@ -25,7 +32,10 @@ use super::{bytes16_at, u16_at, u32_at, u64_at};
 pub const FORWARD_PREAMBLE_LEN: usize = 48;
 
 /// The size of a forwarded preamble in bytes
-pub const FORWARDED_PREAMBLE_LEN: usize = 32;
+///
+/// Was 32 through M4; the attempt, the slot and a token do not fit six reserved bytes, so it
+/// widened under the read consistency capability.
+pub const FORWARDED_PREAMBLE_LEN: usize = 96;
 
 /// The most entries one forward may carry
 ///
@@ -57,6 +67,41 @@ const ENTRIES_LEN_AT: usize = 44;
 const FLAG_END: u8 = 1 << 0;
 const FLAG_GATHER: u8 = 1 << 1;
 const FLAG_TRACE: u8 = 1 << 2;
+const FLAG_READ: u8 = 1 << 3;
+
+/// The fixed size of an entry's read plan, ahead of its tokens
+const ENTRY_READ_FIXED_LEN: usize = 4;
+
+/// Answer head flag bits
+const FORWARDED_FLAG_TOKEN: u8 = 1 << 0;
+
+/// How the coordinator asked one share of a read to be served
+///
+/// ```text
+///  level u8 | tokens u8 | slot u16 | tokens × 48 B
+/// ```
+///
+/// The level is resolved once on the coordinator - the bundle's override, then the table's
+/// policy, then the cluster's - and forwarded resolved; the serving node validates the byte and
+/// never re-resolves it. The slot is where this share lands in the origin's gather, and the
+/// tokens are the ones bounding this share's tablets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntryRead {
+    /// The level this share is served at
+    pub level: ReadLevel,
+    /// Which slot of the origin's gather this share fills
+    pub slot: u16,
+    /// The committed lower bounds this share has to be served past
+    pub tokens: Vec<SessionToken>,
+}
+
+impl EntryRead {
+    /// How many bytes this plan takes on the wire
+    #[must_use]
+    pub fn encoded_len(&self) -> usize {
+        ENTRY_READ_FIXED_LEN + self.tokens.len() * SESSION_TOKEN_LEN
+    }
+}
 
 /// What is fixed about a forward, ahead of its entries and its bundle
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -163,6 +208,11 @@ pub struct ForwardEntry {
     pub gather: bool,
     /// The trace this query belongs to, if the origin was tracing it
     pub trace: Option<TraceContext>,
+    /// How this share of a read is to be served, if the origin planned it
+    ///
+    /// `None` for a write, and for a read a node built before plans existed would have sent;
+    /// the serving node treats it as `One` with no slot and no tokens.
+    pub read: Option<EntryRead>,
     /// The partition keys this shard owns, when the query was narrowed to a subset
     ///
     /// Empty means answer the query as it stands, which is what every write needs.
@@ -173,9 +223,10 @@ impl ForwardEntry {
     /// How many bytes this entry takes on the wire
     #[must_use]
     pub fn encoded_len(&self) -> usize {
-        // the fixed fields, the context if there is one, and eight bytes a key
+        // the fixed fields, the context and the plan if there are any, and eight bytes a key
         ENTRY_FIXED_LEN
             + if self.trace.is_some() { TRACE_CONTEXT_LEN } else { 0 }
+            + self.read.as_ref().map_or(0, EntryRead::encoded_len)
             + self.keys.len() * 8
     }
 
@@ -200,6 +251,9 @@ impl ForwardEntry {
         if self.trace.is_some() {
             flags |= FLAG_TRACE;
         }
+        if self.read.is_some() {
+            flags |= FLAG_READ;
+        }
         out.push(flags);
         out.push(0);
         // truncation cannot happen: a caller building more keys than the bound is refused below
@@ -207,6 +261,17 @@ impl ForwardEntry {
         out.extend_from_slice(&(self.keys.len() as u32).to_le_bytes());
         if let Some(trace) = &self.trace {
             out.extend_from_slice(&trace.encode());
+        }
+        // the plan sits after the context and before the keys
+        if let Some(read) = &self.read {
+            out.push(read.level.as_byte());
+            // the bound is sixteen, so the count fits its byte; a caller past it is refused
+            #[allow(clippy::cast_possible_truncation)]
+            out.push(read.tokens.len() as u8);
+            out.extend_from_slice(&read.slot.to_le_bytes());
+            for token in &read.tokens {
+                out.extend_from_slice(&token.encode());
+            }
         }
         for key in &self.keys {
             out.extend_from_slice(&key.to_le_bytes());
@@ -231,6 +296,9 @@ pub fn encode_entries(entries: &[ForwardEntry]) -> Result<Vec<u8>, ProtocolError
     for entry in entries {
         if entry.keys.len() > MAX_FORWARD_KEYS as usize {
             return Err(ProtocolError::MalformedForward("an entry with too many keys"));
+        }
+        if entry.read.as_ref().is_some_and(|read| read.tokens.len() > MAX_SESSION_TOKENS) {
+            return Err(ProtocolError::MalformedForward("an entry with too many session tokens"));
         }
         entry.encode_into(&mut out);
     }
@@ -267,7 +335,7 @@ pub fn decode_entries(raw: &[u8], count: u16) -> Result<Vec<ForwardEntry>, Proto
         let keys_len = u32_at(fixed, 18);
         at += ENTRY_FIXED_LEN;
         // a flag this build does not know is an entry it cannot act on
-        if flags & !(FLAG_END | FLAG_GATHER | FLAG_TRACE) != 0 {
+        if flags & !(FLAG_END | FLAG_GATHER | FLAG_TRACE | FLAG_READ) != 0 {
             return Err(ProtocolError::MalformedForward("an entry sets an unknown flag"));
         }
         if keys_len > MAX_FORWARD_KEYS {
@@ -282,6 +350,40 @@ pub fn decode_entries(raw: &[u8], count: u16) -> Result<Vec<ForwardEntry>, Proto
             fixed.copy_from_slice(bytes);
             at += TRACE_CONTEXT_LEN;
             Some(TraceContext::decode(&fixed)?)
+        } else {
+            None
+        };
+        // the read plan, if the flags say one is there
+        let read = if flags & FLAG_READ != 0 {
+            let Some(fixed) = raw.get(at..at + ENTRY_READ_FIXED_LEN) else {
+                return Err(ProtocolError::MalformedForward("a read plan is cut short"));
+            };
+            // a plan names a level, never inherits one: resolution happened on the coordinator
+            let Some(level) = ReadLevel::from_byte(fixed[0])? else {
+                return Err(ProtocolError::MalformedForward("a read plan names no level"));
+            };
+            let tokens = usize::from(fixed[1]);
+            if tokens > MAX_SESSION_TOKENS {
+                return Err(ProtocolError::MalformedForward("a read plan names too many tokens"));
+            }
+            let slot = u16_at(fixed, 2);
+            at += ENTRY_READ_FIXED_LEN;
+            let token_bytes = tokens * SESSION_TOKEN_LEN;
+            let Some(bytes) = raw.get(at..at + token_bytes) else {
+                return Err(ProtocolError::MalformedForward("a read plan's tokens are cut short"));
+            };
+            let mut decoded = Vec::with_capacity(tokens);
+            for chunk in bytes.chunks_exact(SESSION_TOKEN_LEN) {
+                let mut fixed = [0u8; SESSION_TOKEN_LEN];
+                fixed.copy_from_slice(chunk);
+                decoded.push(SessionToken::decode(&fixed)?);
+            }
+            at += token_bytes;
+            Some(EntryRead {
+                level,
+                slot,
+                tokens: decoded,
+            })
         } else {
             None
         };
@@ -303,6 +405,7 @@ pub fn decode_entries(raw: &[u8], count: u16) -> Result<Vec<ForwardEntry>, Proto
             origin_shard,
             gather: flags & FLAG_GATHER != 0,
             trace,
+            read,
             keys,
         });
     }
@@ -351,7 +454,7 @@ impl ForwardedKind {
 /// What is fixed about an answer coming back, ahead of its payload
 ///
 /// ```text
-///  bundle 16 | index u64 | kind u8 | served u8 | reserved 6
+///  bundle 16 | index u64 | kind u8 | served u8 | flags u8 | reserved 5 | attempt u64 | slot u16 | reserved 6 | token 48
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ForwardedPreamble {
@@ -369,6 +472,15 @@ pub struct ForwardedPreamble {
     /// "unclassified" rather than as any kind of query. Nothing about the answer's meaning
     /// depends on it.
     pub served: u8,
+    /// The attempt at the bundle this answers, echoed from the forward
+    ///
+    /// An answer to an attempt the origin has moved past is late and dropped by identity
+    /// rather than by guesswork ([F41](../../../../../docs/src/features/read-consistency.md)).
+    pub attempt: u64,
+    /// The slot of the origin's gather this share fills, echoed from the entry's plan
+    pub slot: u16,
+    /// The token a write minted, if this answers a write that committed
+    pub token: Option<SessionToken>,
 }
 
 impl ForwardedPreamble {
@@ -380,6 +492,14 @@ impl ForwardedPreamble {
         body[16..24].copy_from_slice(&self.index.to_le_bytes());
         body[24] = self.kind.as_byte();
         body[25] = self.served;
+        body[26] = if self.token.is_some() { FORWARDED_FLAG_TOKEN } else { 0 };
+        // five reserved bytes stay zero
+        body[32..40].copy_from_slice(&self.attempt.to_le_bytes());
+        body[40..42].copy_from_slice(&self.slot.to_le_bytes());
+        // six reserved bytes stay zero
+        if let Some(token) = &self.token {
+            body[48..96].copy_from_slice(&token.encode());
+        }
         body
     }
 
@@ -388,12 +508,31 @@ impl ForwardedPreamble {
     /// # Arguments
     ///
     /// * `raw` - The preamble bytes
+    ///
+    /// # Errors
+    ///
+    /// Refuses a kind or a flag this build does not know, and a token it cannot read.
     pub fn decode(raw: &[u8; FORWARDED_PREAMBLE_LEN]) -> Result<Self, ProtocolError> {
+        let flags = raw[26];
+        // a flag this build does not know is an answer it cannot act on
+        if flags & !FORWARDED_FLAG_TOKEN != 0 {
+            return Err(ProtocolError::MalformedForward("an answer sets an unknown flag"));
+        }
+        let token = if flags & FORWARDED_FLAG_TOKEN != 0 {
+            let mut fixed = [0u8; SESSION_TOKEN_LEN];
+            fixed.copy_from_slice(&raw[48..96]);
+            Some(SessionToken::decode(&fixed)?)
+        } else {
+            None
+        };
         Ok(ForwardedPreamble {
             bundle: bytes16_at(raw, 0),
             index: u64_at(raw, 16),
             kind: ForwardedKind::from_byte(raw[24])?,
             served: raw[25],
+            attempt: u64_at(raw, 32),
+            slot: u16_at(raw, 40),
+            token,
         })
     }
 }

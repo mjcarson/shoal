@@ -76,6 +76,7 @@ async fn handshaken_with_bound(addr: &str, max_frame_bytes: u32) -> Result<TcpSt
         schema_fingerprint: TestDbClient::SCHEMA_FINGERPRINT,
         max_frame_bytes,
         mechanisms: AuthMechanisms::NONE,
+        caps: 0,
     };
     sock.write_all(
         &hello

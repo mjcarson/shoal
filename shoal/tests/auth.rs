@@ -246,6 +246,7 @@ async fn raw_handshake(
         schema_fingerprint: AuthDbClient::SCHEMA_FINGERPRINT,
         max_frame_bytes: protocol::DEFAULT_MAX_FRAME_BYTES,
         mechanisms,
+        caps: 0,
     };
     sock.write_all(
         &hello

@@ -769,6 +769,8 @@ where
                     head.id,
                     "installing a tablet group snapshot is M7's; this replica cannot catch up past the purge point",
                 ),
+                // the barrier arm lands with the strong read path
+                ReplicateKind::ReadBarrier => ReplicateReply::error(head.id, "read barriers are not served yet"),
             };
             let _ = reply.send(answer).await;
         })

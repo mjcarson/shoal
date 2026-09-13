@@ -48,6 +48,7 @@ use shoal_proto::shared::auth::{AuthError, Credentials};
 use shoal_proto::shared::protocol::admin::{self as proto_admin, AdminRequest, AdminResponse, TopologyFrame};
 use shoal_proto::shared::protocol::auth::{self as proto_auth, AuthMechanism, AuthStatus};
 use shoal_proto::shared::protocol::error::{self, ErrorCode};
+use shoal_proto::shared::protocol::read::{self, SessionToken};
 use shoal_proto::shared::protocol::trace::TraceContext;
 use shoal_proto::shared::protocol::{self, handshake, MessageType, ProtocolError};
 use shoal_proto::shared::responses::{ArchivedResponseError, ArchivedRowGroup, ResponseActionNames};
@@ -414,6 +415,10 @@ impl ShoalConnectionManager {
             schema_fingerprint: self.schema_fingerprint,
             max_frame_bytes: protocol::DEFAULT_MAX_FRAME_BYTES,
             mechanisms: self.credentials.mechanisms(),
+            // ask for the read options and token sections; the ack says whether this server
+            // reads them, and nothing is sent until it does
+            // ([F41](../../../docs/src/features/read-consistency.md))
+            caps: read::CLIENT_CAP_READ_OPTIONS,
         };
         stream
             .write_all(&hello.frame(protocol::DEFAULT_MAX_FRAME_BYTES)?)
@@ -1626,8 +1631,8 @@ impl<S: QuerySupport> Drop for Shoal<S> {
 /// read by the same function and told apart here rather than by the caller.
 #[derive(Debug)]
 enum Frame {
-    /// A response to a query, as the aligned bytes of its archive
-    Response(Uuid, AlignedVec<16>),
+    /// A response to a query, as the aligned bytes of its archive, and the token it carried
+    Response(Uuid, AlignedVec<16>, Option<SessionToken>),
     /// A failure, for the query it names or for the connection if that id is nil
     Error(Uuid, ErrorCode, String),
     /// A topology frame the server pushed, as its JSON
@@ -1788,12 +1793,23 @@ impl TcpProxy {
         // read the rest of this frame according to what it turned out to be
         match frame.header.kind {
             MessageType::Response => {
+                // a session token sits between the id and the payload when the flags say so,
+                // and is read into its own buffer so the payload still lands at the start of
+                // an aligned allocation ([F41](../../../docs/src/features/read-consistency.md))
+                let payload_len = frame.payload_len()?;
+                let token = if frame.token_len() > 0 {
+                    let mut raw = [0u8; read::SESSION_TOKEN_LEN];
+                    self.reader.read_exact(&mut raw).await?;
+                    Some(SessionToken::decode(&raw)?)
+                } else {
+                    None
+                };
                 // read the payload into an aligned buffer that is never written twice
                 //
                 // this used to `resize(rest_len, 0)` first, which is a full write of zeroes over
                 // a buffer whose every byte the read on the next line overwrote
-                let aligned_buff = read_payload(&mut self.reader, frame.rest_len).await?;
-                Ok(Some(Frame::Response(frame.query_id, aligned_buff)))
+                let aligned_buff = read_payload(&mut self.reader, payload_len).await?;
+                Ok(Some(Frame::Response(frame.query_id, aligned_buff, token)))
             }
             MessageType::Error => {
                 // size this frame's message before anything allocates for it
@@ -1934,8 +1950,8 @@ impl TcpProxy {
             let stamps = ClientStamps::arrived_now();
             // work out which query this frame belongs to and what to hand that query
             let (query_id, wrapped) = match frame {
-                Frame::Response(query_id, aligned_buff) => {
-                    (query_id, ClientMsg::Response(aligned_buff, stamps))
+                Frame::Response(query_id, aligned_buff, token) => {
+                    (query_id, ClientMsg::Response(aligned_buff, stamps, token))
                 }
                 Frame::Error(query_id, code, msg) => {
                     // a failure with no query to attach it to is about the connection itself,
@@ -2108,6 +2124,11 @@ pub struct ShoalResponse<S: QuerySupport> {
     archived: *const <S::ResponseKinds as Archive>::Archived,
     /// When this response arrived on the client side
     stamps: ClientStamps,
+    /// The session token the server sent with this response, if it answered a committed write
+    ///
+    /// A committed lower bound on the tablet the write named; a later read carrying it is
+    /// served past the write ([F41](../../../docs/src/features/read-consistency.md)).
+    token: Option<SessionToken>,
     /// The type of data this is a response for
     phantom: PhantomData<S>,
 }
@@ -2139,7 +2160,7 @@ where
 }
 
 impl<S: QuerySupport> ShoalResponse<S> {
-    pub(super) fn new(buff: AlignedVec, stamps: ClientStamps) -> Result<Self, Errors>
+    pub(super) fn new(buff: AlignedVec, stamps: ClientStamps, token: Option<SessionToken>) -> Result<Self, Errors>
     where
         for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived: CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
@@ -2153,8 +2174,19 @@ impl<S: QuerySupport> ShoalResponse<S> {
             _buff: buff,
             archived: const_archived,
             stamps,
+            token,
             phantom: PhantomData,
         })
+    }
+
+    /// Get the session token this response carried, if the server sent one
+    ///
+    /// Only a committed write's answer carries one, and only down a connection that asked for
+    /// the section, which every client built with this method does. Hand it back on a later
+    /// read through [`SendOptions`](crate::client::SendOptions) to be served past the write.
+    #[must_use]
+    pub fn session_token(&self) -> Option<SessionToken> {
+        self.token
     }
 
     /// Where the buffer backing this response starts in memory
@@ -2181,8 +2213,8 @@ impl<S: QuerySupport> ShoalResponse<S> {
     /// Both halves are handed back together on purpose. The reorder buffer takes a response
     /// apart and puts it back together, and a version of this that returned only the buffer
     /// would silently drop the stamps on every out of order response.
-    pub(super) fn inner(self) -> (AlignedVec, ClientStamps) {
-        (self._buff, self.stamps)
+    pub(super) fn inner(self) -> (AlignedVec, ClientStamps, Option<SessionToken>) {
+        (self._buff, self.stamps, self.token)
     }
 
     /// Get when this response arrived on the client side
@@ -2364,9 +2396,9 @@ where
                         // handle the different client messages
                         match msg {
                             // get this responses message
-                            ClientMsg::Response(response, stamps) => {
+                            ClientMsg::Response(response, stamps, token) => {
                                 // wrap our response so we don't have to keep repaying access costs
-                                let response = ShoalResponse::<S>::new(response, stamps)?;
+                                let response = ShoalResponse::<S>::new(response, stamps, token)?;
                                 // only bother to check our server sent end of stream if our queries are bounded
                                 let end = if self.unbounded_queries {
                                     // we have unbounded queries so set end to false
@@ -2404,9 +2436,9 @@ where
             // handle the different client messages
             match msg {
                 // get this responses message
-                ClientMsg::Response(response, stamps) => {
+                ClientMsg::Response(response, stamps, token) => {
                     // wrap our response so we don't have to keep repaying access costs
-                    let response = ShoalResponse::<S>::new(response, stamps)?;
+                    let response = ShoalResponse::<S>::new(response, stamps, token)?;
                     // get the index for this message
                     let index = response.get_index();
                     // if this is the next row then return it
@@ -2429,8 +2461,8 @@ where
                     // the stamps come back apart with the buffer here, so a response that has
                     // to wait in the reorder buffer keeps the arrival time it was read with
                     // rather than picking up a new one when it is finally returned
-                    let (buff, stamps) = response.inner();
-                    let rewrapped = ClientMsg::Response(buff, stamps);
+                    let (buff, stamps, token) = response.inner();
+                    let rewrapped = ClientMsg::Response(buff, stamps, token);
                     // push this into our pending responses and wait for the next response
                     self.pending.insert(index, rewrapped);
                 }
@@ -2683,9 +2715,9 @@ where
         loop {
             // wait for the next message to return
             match response_rx.recv().await.map_err(receive_failed)? {
-                ClientMsg::Response(archived, stamps) => {
+                ClientMsg::Response(archived, stamps, token) => {
                     // wrap our response so we don't have to keep repaying access costs
-                    let response = ShoalResponse::<S>::new(archived, stamps)?;
+                    let response = ShoalResponse::<S>::new(archived, stamps, token)?;
                     // get the index for this message
                     let index = response.get_index();
                     // if this is our next index then increment next as far as we can
@@ -3015,7 +3047,7 @@ mod tests {
                 .expect("the connection closed instead of yielding a frame");
             server.await.expect("the writer task panicked");
             // a response frame has to read back as one and not as anything else
-            let super::Frame::Response(read_id, buff) = frame else {
+            let super::Frame::Response(read_id, buff, _) = frame else {
                 panic!("a response frame read back as something else for len {len}");
             };
             // the routing field and the payload both survived
@@ -3086,7 +3118,7 @@ mod tests {
             .expect("the connection closed instead of yielding a frame");
         server.await.expect("the writer task panicked");
         // every byte of it is the byte that was sent, in the order it was sent
-        let super::Frame::Response(read_id, buff) = frame else {
+        let super::Frame::Response(read_id, buff, _) = frame else {
             panic!("a response frame read back as something else");
         };
         assert_eq!(read_id, query_id);
@@ -3235,7 +3267,7 @@ mod tests {
                 .await
                 .expect("failed to read the response frame")
                 .expect("the connection closed instead of yielding the response frame");
-            let Frame::Response(read_id, buff) = second else {
+            let Frame::Response(read_id, buff, _) = second else {
                 panic!("a response frame read back as an error for len {len}");
             };
             server.await.expect("the writer task panicked");

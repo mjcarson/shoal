@@ -1,5 +1,6 @@
 //! The peer protocol's codecs, and the refusals that keep a length from sizing anything
 
+use super::super::read::{ReadLevel, SessionToken};
 use super::super::trace::TraceContext;
 use super::super::{Header, MessageType, ProtocolError, HEADER_LEN, PROTOCOL_VERSION};
 use super::*;
@@ -93,6 +94,7 @@ fn some_entries() -> Vec<ForwardEntry> {
             origin_shard: 1,
             gather: true,
             trace: TraceContext::new([9; 16], [8; 8], 1),
+            read: None,
             keys: vec![1, u64::MAX, 42],
         },
         ForwardEntry {
@@ -103,6 +105,7 @@ fn some_entries() -> Vec<ForwardEntry> {
             origin_shard: 0,
             gather: false,
             trace: None,
+            read: None,
             keys: Vec::new(),
         },
     ]
@@ -196,6 +199,9 @@ fn a_forwarded_answer_round_trips() {
             kind,
             // an opaque classification byte travels as it is
             served: 0x21,
+            attempt: 0,
+            slot: 0,
+            token: None,
         };
         assert_eq!(ForwardedPreamble::decode(&preamble.encode()).unwrap(), preamble);
     }
@@ -204,6 +210,9 @@ fn a_forwarded_answer_round_trips() {
         index: 0,
         kind: ForwardedKind::Whole,
         served: 0,
+        attempt: 0,
+        slot: 0,
+        token: None,
     }
     .encode();
     raw[24] = 4;
@@ -291,4 +300,103 @@ fn snapshot_frames_round_trip_and_checksum() {
         };
         assert_eq!(SnapshotEnd::decode(&end.encode()), end);
     }
+}
+
+/// A token for the entry and answer tests
+///
+/// # Arguments
+///
+/// * `index` - The index to put in it
+fn a_token(index: u64) -> SessionToken {
+    SessionToken {
+        cluster: crate::shared::identity::ClusterId(uuid::Uuid::from_bytes([7; 16])),
+        table: crate::shared::identity::TableId(11),
+        tablet: 300,
+        group: crate::shared::identity::GroupId(0xabcd),
+        index,
+    }
+}
+
+/// An entry's read plan and an answer's attempt, slot and token round trip; the refused shapes
+/// are refused (F41)
+#[test]
+fn forward_entries_carry_read_plans_and_answers_carry_attempts() {
+    // an entry with a plan, between a context and its keys
+    let planned = ForwardEntry {
+        offset: 2,
+        index: 9,
+        end: false,
+        shard: 1,
+        origin_shard: 2,
+        gather: true,
+        trace: TraceContext::new([3; 16], [2; 8], 1),
+        read: Some(EntryRead {
+            level: ReadLevel::Quorum,
+            slot: 5,
+            tokens: vec![a_token(1), a_token(2)],
+        }),
+        keys: vec![10, 20],
+    };
+    let bare = ForwardEntry {
+        read: Some(EntryRead {
+            level: ReadLevel::One,
+            slot: 0,
+            tokens: Vec::new(),
+        }),
+        trace: None,
+        keys: Vec::new(),
+        ..planned.clone()
+    };
+    let entries = vec![planned.clone(), bare.clone()];
+    let bytes = encode_entries(&entries).unwrap();
+    assert_eq!(bytes.len(), planned.encoded_len() + bare.encoded_len());
+    assert_eq!(decode_entries(&bytes, 2).unwrap(), entries);
+    // a plan that inherits its level is not a plan: resolution happened on the coordinator
+    let mut inherit = encode_entries(&[bare.clone()]).unwrap();
+    inherit[22] = 0;
+    assert!(decode_entries(&inherit, 1).is_err());
+    // a plan with too many tokens is refused on the way out
+    let over = ForwardEntry {
+        read: Some(EntryRead {
+            level: ReadLevel::One,
+            slot: 0,
+            tokens: (0..17).map(a_token).collect(),
+        }),
+        ..bare.clone()
+    };
+    assert!(encode_entries(&[over]).is_err());
+    // the answer head is ninety six bytes, with and without a token
+    for token in [None, Some(a_token(77))] {
+        let preamble = ForwardedPreamble {
+            bundle: [1; 16],
+            index: 3,
+            kind: ForwardedKind::Whole,
+            served: 0x10,
+            attempt: u64::MAX - 5,
+            slot: 4,
+            token,
+        };
+        let raw = preamble.encode();
+        assert_eq!(raw.len(), FORWARDED_PREAMBLE_LEN);
+        assert_eq!(ForwardedPreamble::decode(&raw).unwrap(), preamble);
+    }
+    // an unknown answer flag is refused
+    let mut flagged = ForwardedPreamble {
+        bundle: [0; 16],
+        index: 0,
+        kind: ForwardedKind::Share,
+        served: 0,
+        attempt: 0,
+        slot: 0,
+        token: None,
+    }
+    .encode();
+    flagged[26] = 1 << 4;
+    assert!(ForwardedPreamble::decode(&flagged).is_err());
+    // the read barrier kind is five
+    assert_eq!(ReplicateKind::from_byte(5).unwrap(), ReplicateKind::ReadBarrier);
+    assert_eq!(ReplicateKind::ReadBarrier.as_byte(), 5);
+    // and the capability bit is its own
+    assert_eq!(CAP_READ_CONSISTENCY_V1, 1 << 5);
+    assert_ne!(CAPABILITIES & CAP_READ_CONSISTENCY_V1, 0);
 }

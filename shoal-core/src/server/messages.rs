@@ -214,6 +214,11 @@ pub struct Reply {
     pub stamps: StageStamps,
     /// The answer, sealed
     pub archived: AlignedVec,
+    /// The session token a committed write minted, for a client that asked for one
+    ///
+    /// Written ahead of the payload by a relay whose connection negotiated the section, and
+    /// dropped by one that did not ([F41](../../../docs/src/features/read-consistency.md)).
+    pub token: Option<crate::shared::protocol::read::SessionToken>,
 }
 
 /// What a peer link learned, delivered into the shard that owns it
@@ -344,6 +349,9 @@ where
         /// Every stage offset a query in this bundle records is measured from here, since
         /// this is the first moment the server knows the bundle exists.
         base: Stamp,
+        /// What the bundle said about how its reads are served, if it said anything
+        /// ([F41](../../../docs/src/features/read-consistency.md))
+        options: Option<crate::shared::protocol::read::ReadOptions>,
     },
     /// A query to execute, still in the buffer it arrived in
     ///
@@ -553,11 +561,13 @@ impl<D: ShoalDatabase> Clone for ServerMsg<D> {
                 span,
                 data,
                 base,
+                options,
             } => ServerMsg::Client {
                 peer: *peer,
                 span: span.clone(),
                 data: data.clone(),
                 base: *base,
+                options: options.clone(),
             },
             ServerMsg::NewClient { client, client_tx } => ServerMsg::NewClient {
                 client: client.clone(),

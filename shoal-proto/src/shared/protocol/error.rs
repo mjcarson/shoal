@@ -84,7 +84,12 @@ pub enum ErrorCode {
     /// when a forward to another node would take its queue past its byte bound
     /// ([F38](../../../../docs/src/features/inter-node-transport.md)).
     Shedding = 30,
-    /// This query ran for longer than it was given - reserved
+    /// This query did not complete within its deadline
+    ///
+    /// A gather that was still owed shares when the bundle's budget ran out, or a strong read
+    /// whose barrier or application wait did not finish in time. Whether a write behind it
+    /// applied is not what this says: a read has no write behind it, and a write is answered
+    /// [`ErrorCode::OutcomeUnknown`] instead ([F41](../../../../docs/src/features/read-consistency.md)).
     Timeout = 31,
     /// This query was handed to another node and its outcome is not known
     ///
@@ -109,6 +114,18 @@ pub enum ErrorCode {
     /// write every one of them ([F39](../../../../docs/src/features/membership.md)). The message
     /// names how many are up and how many are needed.
     QuorumUnavailable = 51,
+    /// A session token names another cluster, or was sent to a node in no cluster
+    ///
+    /// Refused by name rather than ignored: a lower bound from another history bounds nothing
+    /// here ([F41](../../../../docs/src/features/read-consistency.md)).
+    WrongCluster = 52,
+    /// A session token names a group that does not serve its tablet on the replica asked
+    ///
+    /// The token's lineage is not the one this replica holds, so its index means nothing to
+    /// the replica's log ([F41](../../../../docs/src/features/read-consistency.md)).
+    UnknownLineage = 53,
+    /// The bundle asked for a read level this server does not serve
+    UnsupportedReadLevel = 54,
     /// The connection's principal may not perform this administrative request
     Unauthorized = 60,
     /// The request named a topology version other than the current one
@@ -156,6 +173,9 @@ impl ErrorCode {
             41 => ErrorCode::GoingAway,
             50 => ErrorCode::Unavailable,
             51 => ErrorCode::QuorumUnavailable,
+            52 => ErrorCode::WrongCluster,
+            53 => ErrorCode::UnknownLineage,
+            54 => ErrorCode::UnsupportedReadLevel,
             60 => ErrorCode::Unauthorized,
             61 => ErrorCode::StaleVersion,
             62 => ErrorCode::NotLeader,
@@ -182,6 +202,9 @@ impl ErrorCode {
             ErrorCode::GoingAway => "GoingAway",
             ErrorCode::Unavailable => "Unavailable",
             ErrorCode::QuorumUnavailable => "QuorumUnavailable",
+            ErrorCode::WrongCluster => "WrongCluster",
+            ErrorCode::UnknownLineage => "UnknownLineage",
+            ErrorCode::UnsupportedReadLevel => "UnsupportedReadLevel",
             ErrorCode::Unauthorized => "Unauthorized",
             ErrorCode::StaleVersion => "StaleVersion",
             ErrorCode::NotLeader => "NotLeader",

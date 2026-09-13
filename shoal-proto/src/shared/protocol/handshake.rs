@@ -19,8 +19,12 @@
 //! **A reserved byte may be spent, but never moved.** The authentication mechanism fields were cut
 //! out of the reserved tails of both bodies rather than appended to them, which is what let
 //! authentication land without touching the version byte: an older peer wrote those bytes as
-//! zeroes and read them as nothing, and zero is "no mechanism" in both directions. Anything that
-//! needs a field the reserved bytes cannot hold needs a new protocol version, not a longer body.
+//! zeroes and read them as nothing, and zero is "no mechanism" in both directions. The capability
+//! byte at offset 14 was spent the same way ([F41](../../../../docs/src/features/read-consistency.md)):
+//! a client says which optional sections it reads and writes, the server answers with the subset
+//! it grants, and a peer built before the byte existed writes and reads zero, which is "none".
+//! Anything that needs a field the reserved bytes cannot hold needs a new protocol version, not a
+//! longer body.
 
 use super::auth::{AuthMechanism, AuthMechanisms};
 use super::{Flags, Header, MessageType, ProtocolError, HEADER_LEN};
@@ -100,10 +104,10 @@ impl std::fmt::Display for RefusalReason {
 /// The frame a client opens a connection with
 ///
 /// ```text
-///  ┌──────────────────────┬───────────────────┬────────────┬──────────┐
-///  │ schema fingerprint   │ max frame bytes   │ mechanisms │ reserved │
-///  │     (u64 LE, 8 B)    │   (u32 LE, 4 B)   │(u16 LE, 2B)│  (2 B)   │
-///  └──────────────────────┴───────────────────┴────────────┴──────────┘
+///  ┌──────────────────────┬───────────────────┬────────────┬──────┬──────────┐
+///  │ schema fingerprint   │ max frame bytes   │ mechanisms │ caps │ reserved │
+///  │     (u64 LE, 8 B)    │   (u32 LE, 4 B)   │(u16 LE, 2B)│ (1 B)│  (1 B)   │
+///  └──────────────────────┴───────────────────┴────────────┴──────┴──────────┘
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Hello {
@@ -117,6 +121,12 @@ pub struct Hello {
     /// authentication and every client that has not been given any. It is not an error — a server
     /// that requires nothing lets it straight in.
     pub mechanisms: AuthMechanisms,
+    /// The optional sections this client reads and writes, as [`read::CLIENT_CAP_READ_OPTIONS`] bits
+    ///
+    /// Zero is a client built before there were any, and asks for nothing.
+    ///
+    /// [`read::CLIENT_CAP_READ_OPTIONS`]: super::read::CLIENT_CAP_READ_OPTIONS
+    pub caps: u8,
 }
 
 impl Hello {
@@ -126,7 +136,7 @@ impl Hello {
         let fingerprint = self.schema_fingerprint.to_le_bytes();
         let max = self.max_frame_bytes.to_le_bytes();
         let mechanisms = self.mechanisms.bits().to_le_bytes();
-        // the last two bytes are reserved and are written as zeroes
+        // the capability byte, then one reserved byte written as zero
         [
             fingerprint[0],
             fingerprint[1],
@@ -142,17 +152,18 @@ impl Hello {
             max[3],
             mechanisms[0],
             mechanisms[1],
-            0,
+            self.caps,
             0,
         ]
     }
 
     /// Read a hello from the sixteen bytes it was written as
     ///
-    /// The reserved bytes are ignored rather than checked, so a newer client that fills them can
+    /// The reserved byte is ignored rather than checked, so a newer client that fills it can
     /// still open a connection to this build. The mechanism bits are read the same way and are not
     /// masked, for the reason [`AuthMechanisms`] gives: a bit this build cannot name is a mechanism
-    /// a newer client can do, and a server only ever asks this set about mechanisms it wants.
+    /// a newer client can do, and a server only ever asks this set about mechanisms it wants. The
+    /// capability bits are not masked either: a server grants the subset it knows.
     ///
     /// # Arguments
     ///
@@ -164,6 +175,7 @@ impl Hello {
             ]),
             max_frame_bytes: u32::from_le_bytes([raw[8], raw[9], raw[10], raw[11]]),
             mechanisms: AuthMechanisms::from_bits(u16::from_le_bytes([raw[12], raw[13]])),
+            caps: raw[14],
         }
     }
 
@@ -195,10 +207,10 @@ impl Hello {
 /// The frame a server answers a [`Hello`] with, whether it accepts or refuses
 ///
 /// ```text
-///  ┌──────────────────────┬───────────────────┬─────────┬───────────┬──────────┐
-///  │ schema fingerprint   │ max frame bytes   │ reason  │ mechanism │ reserved │
-///  │     (u64 LE, 8 B)    │   (u32 LE, 4 B)   │  (1 B)  │   (1 B)   │  (2 B)   │
-///  └──────────────────────┴───────────────────┴─────────┴───────────┴──────────┘
+///  ┌──────────────────────┬───────────────────┬─────────┬───────────┬──────┬──────────┐
+///  │ schema fingerprint   │ max frame bytes   │ reason  │ mechanism │ caps │ reserved │
+///  │     (u64 LE, 8 B)    │   (u32 LE, 4 B)   │  (1 B)  │   (1 B)   │ (1 B)│  (1 B)   │
+///  └──────────────────────┴───────────────────┴─────────┴───────────┴──────┴──────────┘
 /// ```
 ///
 /// A refusal is a `HelloAck` too. The server always answers before it closes, so that the client
@@ -218,6 +230,11 @@ pub struct HelloAck {
     /// and the connection is usable as soon as this frame is read, which is what every server
     /// with no `auth` section answers and what every server answered before there was one.
     pub mechanism: Option<AuthMechanism>,
+    /// The optional sections this server granted, a subset of what the hello asked for
+    ///
+    /// A client sends a section only once this says the server reads it, and a server built
+    /// before there were any writes zero here, which grants nothing.
+    pub caps: u8,
 }
 
 impl HelloAck {
@@ -231,7 +248,7 @@ impl HelloAck {
             Some(mechanism) => mechanism.as_byte(),
             None => 0,
         };
-        // the last two bytes are reserved and are written as zeroes
+        // the capability byte, then one reserved byte written as zero
         [
             fingerprint[0],
             fingerprint[1],
@@ -247,7 +264,7 @@ impl HelloAck {
             max[3],
             self.reason.as_byte(),
             mechanism,
-            0,
+            self.caps,
             0,
         ]
     }
@@ -275,6 +292,7 @@ impl HelloAck {
             max_frame_bytes: u32::from_le_bytes([raw[8], raw[9], raw[10], raw[11]]),
             reason: RefusalReason::from_byte(raw[12]),
             mechanism,
+            caps: raw[14],
         }
     }
 

@@ -65,8 +65,9 @@ use crate::{
             auth::{self as proto_auth, AuthMechanism, AuthStatus},
             error::{self as proto_error, ErrorCode},
             handshake,
+            read::{ReadOptions, SessionToken, CLIENT_CAP_READ_OPTIONS, READ_OPTIONS_HEAD_LEN},
             trace::{TraceContext, TRACE_CONTEXT_LEN},
-            Header, MessageType, ProtocolError,
+            Flags, Header, MessageType, ProtocolError,
         },
         queries::{ArchivedQueries, Queries},
         traits::{QuerySupport, ShoalResponseSupport},
@@ -97,6 +98,38 @@ async fn read_trace_context(
     tcp_rx.read_exact(&mut raw).await?;
     // and turn them into the context the client sent
     Ok(Some(TraceContext::decode(&raw)?))
+}
+
+/// Read the read options section a request frame carries, if its header says it carries one
+///
+/// Two reads rather than one: the head says how many tokens follow, and the tokens are read
+/// only once their count has been judged against the bound. Like the trace context this is a
+/// buffer of its own, so the payload after it still lands at the start of its allocation
+/// ([F41](../../../docs/src/features/read-consistency.md)).
+///
+/// # Arguments
+///
+/// * `tcp_rx` - The read half of the connection this frame is arriving on
+/// * `header` - The already checked header of the frame being read
+async fn read_read_options(
+    tcp_rx: &mut ReadHalf<TcpStream>,
+    header: &protocol::Header,
+) -> Result<Option<(ReadOptions, usize)>, ServerError> {
+    // a frame with the flag clear carries no section, and reading one would eat its payload
+    if !header.has_read_options() {
+        return Ok(None);
+    }
+    // the head first, which says how many token bytes follow
+    let mut head = [0u8; READ_OPTIONS_HEAD_LEN];
+    tcp_rx.read_exact(&mut head).await?;
+    let (mut options, token_bytes) = ReadOptions::decode_head(&head)?;
+    // then exactly the tokens the head named
+    if token_bytes > 0 {
+        let mut tokens = vec![0u8; token_bytes];
+        tcp_rx.read_exact(&mut tokens).await?;
+        options.decode_tokens(&tokens)?;
+    }
+    Ok(Some((options, READ_OPTIONS_HEAD_LEN + token_bytes)))
 }
 
 /// Write a trace id out the way a collector shows it
@@ -194,8 +227,20 @@ async fn client_rx_relay<S: ShoalDatabase>(
                 break;
             }
         };
+        // read the read options this frame carries, if its flags say it carries any
+        //
+        // a separate read for the reason the trace context is, and only ever sent by a client
+        // whose hello asked for the section ([F41](../../../docs/src/features/read-consistency.md))
+        let (options, options_len) = match read_read_options(&mut tcp_rx, &header).await {
+            Ok(Some((options, len))) => (Some(options), len),
+            Ok(None) => (None, 0),
+            Err(error) => {
+                event!(Level::ERROR, msg = "failed to read a read options section", %peer, ?error);
+                break;
+            }
+        };
         // work out how much of this frame is the bundle rather than what sits ahead of it
-        let payload_len = match header.request_payload_len() {
+        let payload_len = match header.payload_len_after(options_len) {
             Ok(payload_len) => payload_len,
             Err(error) => {
                 event!(Level::ERROR, msg = "refused a frame", %peer, %error);
@@ -262,6 +307,7 @@ async fn client_rx_relay<S: ShoalDatabase>(
                 span,
                 data,
                 base,
+                options,
             })
             .await
         {
@@ -456,6 +502,7 @@ async fn client_tx_relay<S: ShoalDatabase>(
     client_rx: AsyncReceiver<Reply>,
     mut tcp_tx: WriteHalf<TcpStream>,
     peer_max_frame_bytes: u32,
+    caps: u8,
 ) {
     // loop over messages to send back to our client
     'relay: loop {
@@ -479,6 +526,7 @@ async fn client_tx_relay<S: ShoalDatabase>(
                 span,
                 mut stamps,
                 archived,
+                token,
                 ..
             } = reply;
             // enter this query's own span for the framing and the write
@@ -496,6 +544,17 @@ async fn client_tx_relay<S: ShoalDatabase>(
                 ReplyKind::Topology { .. } => (MessageType::Topology, false),
                 ReplyKind::Admin => (MessageType::AdminResponse, false),
             };
+            // a token a write minted goes between the id and the payload, but only down a
+            // connection whose hello asked for one: a client that did not would read it as
+            // the first bytes of its archive ([F41](../../../docs/src/features/read-consistency.md))
+            let token = match token {
+                Some(token) if caps & CLIENT_CAP_READ_OPTIONS != 0 => Some(token.encode()),
+                _ => None,
+            };
+            let (flags, token_len) = match &token {
+                Some(token) => (Flags::SESSION_TOKEN, token.len()),
+                None => (Flags::NONE, 0),
+            };
             // build the header and query id that go ahead of this frame
             //
             // a response too large for this client to accept is answered with a failure naming
@@ -503,8 +562,9 @@ async fn client_tx_relay<S: ShoalDatabase>(
             // never learn the reason for. every other query on this connection is unaffected
             let preamble = match protocol::server_preamble(
                 message,
+                flags,
                 &query_id,
-                archived.len(),
+                archived.len() + token_len,
                 peer_max_frame_bytes,
             ) {
                 Ok(preamble) => preamble,
@@ -538,8 +598,14 @@ async fn client_tx_relay<S: ShoalDatabase>(
                     continue;
                 }
             };
-            // build our vectored byte slices to send
-            let mut bufs = &mut [IoSlice::new(&preamble), IoSlice::new(&archived)][..];
+            // build our vectored byte slices to send: the preamble, the token if there is
+            // one, and the archive
+            let token_slice: &[u8] = token.as_ref().map_or(&[], |token| token.as_slice());
+            let mut bufs = &mut [
+                IoSlice::new(&preamble),
+                IoSlice::new(token_slice),
+                IoSlice::new(&archived),
+            ][..];
             // keep sending our data until all of this archive has been sent
             //
             // a short write or a write error here means this client is gone, so this connection
@@ -606,6 +672,7 @@ fn control_reply(id: Uuid, kind: ReplyKind, json: &[u8]) -> Reply {
         span: Span::none(),
         stamps: StageStamps::new(Stamp::now()),
         archived,
+        token: None,
     }
 }
 
@@ -661,6 +728,7 @@ async fn server_handshake<S: ShoalDatabase>(
         reason: handshake::RefusalReason::Accepted,
         // filled in once we have read what this client can do
         mechanism: None,
+        caps: 0,
     };
     // read the header of whatever this client opened with
     let mut header_bytes = [0u8; protocol::HEADER_LEN];
@@ -738,9 +806,12 @@ async fn server_handshake<S: ShoalDatabase>(
         stream.flush().await?;
         return Err(AuthError::NoCredentials.into());
     }
-    // this client speaks our protocol and was built from our schema, so let it in
+    // this client speaks our protocol and was built from our schema, so let it in, granting
+    // the optional sections it asked for that this build reads
+    // ([F41](../../../docs/src/features/read-consistency.md))
     let accept = handshake::HelloAck {
         mechanism,
+        caps: hello.caps & CLIENT_CAP_READ_OPTIONS,
         ..accept
     };
     stream.write_all(&accept.frame(max_frame_bytes)?).await?;
@@ -974,10 +1045,12 @@ async fn client_acceptor<S: ShoalDatabase>(
                 return;
             }
             // start writing responses back to this client, bounded by what it said it accepts
+            // and carrying the sections it asked for
             let tx_task = glommio::spawn_local(client_tx_relay::<S>(
                 client_rx,
                 tcp_tx,
                 hello.max_frame_bytes,
+                hello.caps & CLIENT_CAP_READ_OPTIONS,
             ));
             // read this clients bundles until it goes away or sends something we refuse; its
             // principal rides along, since an admin request on this connection is judged by it
@@ -1774,7 +1847,11 @@ where
         body: &Bytes,
         queries: &ArchivedQueries<D::ClientType>,
         stamps: StageStamps,
+        options: Option<&ReadOptions>,
     ) -> Result<(), ServerError> {
+        // the options are acted on once reads have a plan; until then a bundle that sent
+        // them is routed as one that did not
+        let _ = options;
         // an empty bundle has no last query, and nothing to send either way
         let Some(last_offset) = queries.queries.len().checked_sub(1) else {
             return Ok(());
@@ -1990,6 +2067,7 @@ where
                             origin_shard: self.shard_id as u16,
                             gather: gather.is_some(),
                             trace,
+                            read: None,
                             keys: keys.unwrap_or_default(),
                         };
                         let slot = remote.entry(*node).or_insert_with(Vec::new);
@@ -2166,11 +2244,12 @@ where
     /// * `span` - The root span the relay opened when this bundle came off the socket
     /// * `data` - The bundle to route
     /// * `base` - When the last byte of this bundle came off the socket
+    /// * `options` - What the bundle said about its reads, if anything
     #[allow(clippy::future_not_send)]
     #[instrument(
         name = "Coordinator::handle_client",
         parent = &span,
-        skip(self, peer, span, data),
+        skip(self, peer, span, data, options),
         err(Debug)
     )]
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
@@ -2180,6 +2259,7 @@ where
         span: Span,
         data: RequestBody,
         base: Stamp,
+        options: Option<ReadOptions>,
     ) -> Result<(), ServerError>
     where
         for<'b> <<<D as ShoalDatabase>::ClientType as QuerySupport>::QueryKinds as Archive>::Archived:
@@ -2211,7 +2291,7 @@ where
         // label it as a batch level cost rather than a per query one
         stamps.mark_decoded();
         // route every query in the bundle to the shards that answer it
-        self.send_to_shard(peer, &span, &body, archived, stamps)
+        self.send_to_shard(peer, &span, &body, archived, stamps, options.as_ref())
             .await
     }
 
@@ -2235,8 +2315,35 @@ where
         client: Uuid,
         query_id: Uuid,
         span: Span,
+        stamps: StageStamps,
+        response: <D::ClientType as QuerySupport>::ResponseKinds,
+    ) -> Result<(), ServerError> {
+        self.reply_with_token(client, query_id, span, stamps, response, None).await
+    }
+
+    /// Send a response back to the client, with the session token a write minted
+    ///
+    /// The one path a token takes to a client: a committed write's answer carries the group
+    /// and index it committed at, so a later read can be served past it
+    /// ([F41](../../../docs/src/features/read-consistency.md)). Every other answer goes
+    /// through [`Self::reply`], which passes none.
+    ///
+    /// # Arguments
+    ///
+    /// * `client` - The client to send this reply to
+    /// * `query_id` - The id of the query being answered
+    /// * `span` - The span to reply under
+    /// * `stamps` - When this query reached each stage so far, and its index
+    /// * `response` - The response to send
+    /// * `token` - The token the write minted, if it committed
+    async fn reply_with_token(
+        &mut self,
+        client: Uuid,
+        query_id: Uuid,
+        span: Span,
         mut stamps: StageStamps,
         response: <D::ClientType as QuerySupport>::ResponseKinds,
+        token: Option<SessionToken>,
     ) -> Result<(), ServerError> {
         // read the index and the end flag off the response before it is bytes
         //
@@ -2253,7 +2360,7 @@ where
         // stages on the get path large enough to be worth measuring on its own
         stamps.mark_replied();
         // and hand the bytes on the same way an answer serialized in the table is
-        self.reply_sealed(client, query_id, index, end, ReplyKind::Whole, span, stamps, archived)
+        self.reply_sealed(client, query_id, index, end, ReplyKind::Whole, span, stamps, archived, token)
             .await
     }
 
@@ -2273,6 +2380,7 @@ where
     /// * `span` - The span to reply under
     /// * `stamps` - When this query reached each stage so far, and its index
     /// * `archived` - The serialized response
+    /// * `token` - The session token a committed write minted, if this answers one
     #[allow(clippy::too_many_arguments)]
     async fn reply_sealed(
         &mut self,
@@ -2284,6 +2392,7 @@ where
         span: Span,
         mut stamps: StageStamps,
         archived: rkyv::util::AlignedVec<16>,
+        token: Option<SessionToken>,
     ) -> Result<(), ServerError> {
         // get this clients channel to send replies over
         match self.client_map.get(&client) {
@@ -2306,6 +2415,7 @@ where
                         span,
                         stamps,
                         archived,
+                        token,
                     })
                     .await
                     .is_err()
@@ -2488,7 +2598,7 @@ where
                     unreachable!("an answer is either open or sealed")
                 };
                 return self
-                    .reply_sealed(addr, query_id, m_index, m_end, ReplyKind::Whole, span, stamps, archived)
+                    .reply_sealed(addr, query_id, m_index, m_end, ReplyKind::Whole, span, stamps, archived, None)
                     .await;
             };
             // record that this queries synchronous work is finished
@@ -2521,6 +2631,7 @@ where
                             span,
                             stamps,
                             archived,
+                            None,
                         )
                         .await?;
                     } else {
@@ -2810,6 +2921,7 @@ where
                     pending.span,
                     pending.stamps,
                     payload,
+                    preamble.token,
                 )
                 .await
             }
@@ -3175,7 +3287,8 @@ where
                     span,
                     data,
                     base,
-                } => self.handle_client(peer, span, data, base).await?,
+                    options,
+                } => self.handle_client(peer, span, data, base, options).await?,
                 // handle this query from the user, reading it out of the bundle it arrived in
                 ServerMsg::Query {
                     meta,
