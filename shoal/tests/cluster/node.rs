@@ -191,6 +191,19 @@ pub struct StagedCluster {
     /// How long one snapshot transfer may take, in milliseconds, if the test shortened it
     #[serde(default)]
     pub snapshot_timeout_ms: Option<u64>,
+    /// How long a retired copy's files are kept, in milliseconds, if the test shortened it
+    /// ([F45](../../../docs/src/features/replica-migration.md))
+    #[serde(default)]
+    pub retire_after_ms: Option<u64>,
+    /// How far behind a learner may be when it is made a voter, if the test set it
+    #[serde(default)]
+    pub catchup_lag: Option<u64>,
+    /// How long one phase of a move may take, in milliseconds, if the test shortened it
+    #[serde(default)]
+    pub migration_timeout_ms: Option<u64>,
+    /// A move phase the node's driver exits the process right after committing, if armed
+    #[serde(default)]
+    pub move_crash_at: Option<String>,
 }
 
 /// The endpoints a child bound, and the identity it reported

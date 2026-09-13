@@ -32,11 +32,11 @@ use openraft::declare_raft_types;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::migrate::{DataConfiguration, MoveRecord};
+use super::migrate::{DataConfiguration, GroupMove, MoveOutcome, MovePhase, MoveRecord, KEPT_MOVES};
 use super::runtime::GlommioRuntime;
 use super::repair::{GroupRepair, QuarantinedCopy, RepairMode, RepairOutcome, RepairPhase, RepairRecord, KEPT_REPAIRS};
 use crate::server::conf::cluster::{BootstrapPolicy, Consistency};
-use crate::shared::identity::{ClusterId, GroupId, NodeId, TableId};
+use crate::shared::identity::{ClusterId, GroupId, NodeId, ShardAddr, TableId};
 
 declare_raft_types!(
     /// The control group's type configuration
@@ -324,6 +324,41 @@ pub enum ControlCommand {
         /// Every quarantined copy it holds
         copies: Vec<QuarantinedCopy>,
     },
+    /// Move the replica set holding a tablet from one member to another
+    /// ([F45](../../../../docs/src/features/replica-migration.md))
+    Move {
+        /// The identity of the operation
+        op: Uuid,
+        /// Who asked
+        principal: String,
+        /// The topology version the request was written against
+        expected_version: u64,
+        /// A tablet the set serves
+        tablet: u16,
+        /// The member leaving the set
+        from: NodeId,
+        /// The member replacing it
+        to: NodeId,
+    },
+    /// A group's driver says where its move stands
+    ///
+    /// A node's proposal like `RepairProgress`: no operation id of its own and no version.
+    /// The one that carries the last group's `Activated` publishes the configuration, and the
+    /// one that carries the last `Done` finishes the record and releases what queued behind
+    /// it - both in apply, so every member derives the same map
+    /// ([F45](../../../../docs/src/features/replica-migration.md)).
+    MoveProgress {
+        /// The operation
+        op: Uuid,
+        /// The group
+        group: GroupId,
+        /// The node driving it
+        node: NodeId,
+        /// The incarnation it drives at
+        incarnation: u64,
+        /// Where the group stands now
+        progress: GroupMove,
+    },
 }
 
 impl ControlCommand {
@@ -357,6 +392,12 @@ impl ControlCommand {
                 expected_version,
                 ..
             } => Some((*op, principal, "repair", *expected_version)),
+            ControlCommand::Move {
+                op,
+                principal,
+                expected_version,
+                ..
+            } => Some((*op, principal, "move", *expected_version)),
             _ => None,
         }
     }
@@ -388,6 +429,10 @@ impl fmt::Display for ControlCommand {
             }
             ControlCommand::ReportQuarantine { node, copies, .. } => {
                 write!(f, "ReportQuarantine({node} {} copies)", copies.len())
+            }
+            ControlCommand::Move { op, tablet, from, to, .. } => write!(f, "Move({op} tablet {tablet} {from} -> {to})"),
+            ControlCommand::MoveProgress { op, group, progress, .. } => {
+                write!(f, "MoveProgress({op} {group} {})", progress.phase.name())
             }
         }
     }
@@ -924,6 +969,286 @@ impl ControlState {
                 self.topology_version += 1;
                 self.members.get_mut(node).expect("checked above").quarantined = copies.clone();
                 self.applied()
+            }
+            // a move: the record, with the set derived from the map as it stands
+            ControlCommand::Move {
+                op,
+                principal,
+                expected_version,
+                tablet,
+                from,
+                to,
+            } => self.apply_move(*op, principal, *expected_version, *tablet, *from, *to),
+            // a driver's word on where a group's move stands
+            ControlCommand::MoveProgress {
+                op,
+                group,
+                node,
+                incarnation,
+                progress,
+            } => self.apply_move_progress(*op, *group, *node, *incarnation, progress),
+        }
+    }
+
+    /// Record a move of the replica set holding a tablet
+    ///
+    /// The set is what the map serves the tablet with now - the rule's members, or the
+    /// configuration an earlier move left - and every table's group over it; the target is
+    /// the set with `from` replaced by `to` in place, on the shard the rule would give the
+    /// first tablet on `to`. One transition per set: a move or a repair not yet done on any
+    /// of the set's groups queues this one behind it
+    /// ([F45](../../../../docs/src/features/replica-migration.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `op` - The operation
+    /// * `principal` - Who asked
+    /// * `expected_version` - The topology version the request was written against
+    /// * `tablet` - A tablet the set serves
+    /// * `from` - The member leaving
+    /// * `to` - The member replacing it
+    fn apply_move(
+        &mut self,
+        op: Uuid,
+        principal: &str,
+        expected_version: u64,
+        tablet: u16,
+        from: NodeId,
+        to: NodeId,
+    ) -> ControlResponse {
+        if self.policy.is_none() || self.initialized.is_none() {
+            return ControlResponse::Refused {
+                reason: "no placement has been initialized to move a replica set of".to_string(),
+            };
+        }
+        if from == to {
+            return ControlResponse::Refused {
+                reason: format!("{from} cannot replace itself"),
+            };
+        }
+        // the destination has to be an up member; the source a member at all
+        match self.members.get(&to) {
+            Some(state) if state.health == MemberHealth::Up => {}
+            Some(state) => {
+                return ControlResponse::Refused {
+                    reason: format!("{to} is {}, and only an up member can be moved to", state.health.name()),
+                };
+            }
+            None => {
+                return ControlResponse::Refused {
+                    reason: format!("{to} is not a member of this cluster"),
+                };
+            }
+        }
+        if !self.members.contains_key(&from) {
+            return ControlResponse::Refused {
+                reason: format!("{from} is not a member of this cluster"),
+            };
+        }
+        if let Some(refusal) = self.check_version(expected_version) {
+            return refusal;
+        }
+        // the set as it is served now, and the tablets the rule placed together
+        let map = crate::server::map::TabletMap::from_state(self, None, &self.tables.clone());
+        let expected = map.replicas_of(usize::from(tablet));
+        let (rule, tablets) = map.rule_set_of(usize::from(tablet));
+        if expected.is_empty() || tablets.is_empty() {
+            return ControlResponse::Refused {
+                reason: format!("no replica set serves tablet {tablet}"),
+            };
+        }
+        let Some(slot) = expected.iter().position(|member| member.node == from) else {
+            return ControlResponse::Refused {
+                reason: format!("{from} is not a member of the set serving tablet {tablet}: {expected:?}"),
+            };
+        };
+        if expected.iter().any(|member| member.node == to) {
+            return ControlResponse::Refused {
+                reason: format!("{to} is already a member of the set serving tablet {tablet}"),
+            };
+        }
+        // the destination's shard: the one the rule would give the set's first tablet on it
+        let nodes = self.initialized.as_ref().map_or(1, Vec::len).max(1);
+        let to_shards = self.members.get(&to).map_or(1, |state| state.record.shards).max(1);
+        // truncation cannot happen: the modulus is a shard count, which the ring bounds
+        #[allow(clippy::cast_possible_truncation)]
+        let to_shard = ((usize::from(tablets[0]) / nodes) % to_shards) as u16;
+        let to_addr = ShardAddr::new(to, to_shard);
+        let mut target = expected.clone();
+        target[slot] = to_addr;
+        // every table's group over the set, under the identity the rule minted
+        let groups: BTreeMap<GroupId, GroupMove> = self
+            .tables
+            .iter()
+            .map(|(_, table)| (GroupId::of(*table, &rule), GroupMove::default()))
+            .collect();
+        // one transition per set: a move or a repair not done on any of its groups goes first
+        let behind_move = self
+            .moves
+            .values()
+            .filter(|record| !record.is_done() && record.tablets == tablets)
+            .max_by_key(|record| record.requested_at)
+            .map(|record| record.op);
+        let behind_repair = self
+            .repairs
+            .values()
+            .filter(|record| record.groups.iter().any(|(group, progress)| groups.contains_key(group) && !progress.is_done()))
+            .max_by_key(|record| record.requested_at)
+            .map(|record| record.op);
+        let phase = match behind_move.or(behind_repair) {
+            Some(behind) => MovePhase::Queued { behind },
+            None => MovePhase::Planned,
+        };
+        self.topology_version += 1;
+        self.moves.insert(
+            op,
+            MoveRecord {
+                op,
+                tablets,
+                from: expected[slot],
+                to: to_addr,
+                expected,
+                target,
+                phase,
+                groups,
+                principal: principal.to_string(),
+                requested_at: self.topology_version,
+                outcome: None,
+            },
+        );
+        // forget the oldest done records once too many are kept
+        while self.moves.len() > KEPT_MOVES {
+            let oldest = self
+                .moves
+                .values()
+                .filter(|record| record.is_done())
+                .min_by_key(|record| record.requested_at)
+                .map(|record| record.op);
+            match oldest {
+                Some(op) => {
+                    self.moves.remove(&op);
+                }
+                None => break,
+            }
+        }
+        self.applied()
+    }
+
+    /// Record where a group's move stands, and what the whole record follows from it
+    ///
+    /// The last group's `Activated` publishes the configuration: the set's target members
+    /// with every group's uniform index, replacing an earlier one for the same tablets unless
+    /// that would roll a group's configuration backward. The last `Done` finishes the record
+    /// and releases every move queued behind it.
+    ///
+    /// # Arguments
+    ///
+    /// * `op` - The operation
+    /// * `group` - The group
+    /// * `node` - The node driving it
+    /// * `incarnation` - The incarnation it drives at
+    /// * `progress` - Where the group stands now
+    fn apply_move_progress(
+        &mut self,
+        op: Uuid,
+        group: GroupId,
+        node: NodeId,
+        incarnation: u64,
+        progress: &GroupMove,
+    ) -> ControlResponse {
+        let Some(member) = self.members.get(&node) else {
+            return ControlResponse::Refused {
+                reason: format!("{node} is not a member, so cannot drive a move"),
+            };
+        };
+        if incarnation < member.record.incarnation {
+            return ControlResponse::Fenced {
+                node,
+                committed: member.record.incarnation,
+                offered: incarnation,
+            };
+        }
+        let Some(record) = self.moves.get_mut(&op) else {
+            return ControlResponse::Refused {
+                reason: format!("no move operation {op} is recorded"),
+            };
+        };
+        if record.is_queued() {
+            return ControlResponse::Refused {
+                reason: format!("move {op} is queued behind another transition and cannot be driven yet"),
+            };
+        }
+        let Some(current) = record.groups.get_mut(&group) else {
+            return ControlResponse::Refused {
+                reason: format!("group {group} is not part of move {op}"),
+            };
+        };
+        // a group that is done stays done, whatever a late driver says
+        if current.is_done() {
+            return self.applied();
+        }
+        if current == progress {
+            return self.applied();
+        }
+        *current = progress.clone();
+        self.topology_version += 1;
+        let version = self.topology_version;
+        // the last group activated publishes the set's configuration
+        if !record.is_published() && record.groups.values().all(GroupMove::is_activated) {
+            record.phase = MovePhase::Published;
+            let configuration = record.configuration(version);
+            let first = configuration.tablets[0];
+            let backward = self.configurations.get(&first).is_some_and(|existing| {
+                existing
+                    .configs
+                    .iter()
+                    .any(|(group, index)| configuration.configs.get(group).is_some_and(|new| new < index))
+            });
+            if !backward {
+                self.configurations.insert(first, configuration);
+            }
+        }
+        // the last group done finishes the record and releases what waited behind it
+        let record = self.moves.get_mut(&op).expect("checked above");
+        if record.groups.values().all(GroupMove::is_done) {
+            record.phase = MovePhase::Done;
+            let failed = record.groups.values().find_map(|progress| match &progress.outcome {
+                Some(MoveOutcome::Failed { reason }) => Some(reason.clone()),
+                _ => None,
+            });
+            record.outcome = Some(match failed {
+                Some(reason) => MoveOutcome::Failed { reason },
+                None => MoveOutcome::Moved,
+            });
+            self.release_queued(op);
+        }
+        self.applied()
+    }
+
+    /// Release every transition queued behind an operation that is done
+    ///
+    /// A move queued behind it is planned; the first in request order alone, since the rest
+    /// queue behind that one in turn. Deterministic, so every member releases the same one.
+    ///
+    /// # Arguments
+    ///
+    /// * `behind` - The operation that is done
+    fn release_queued(&mut self, behind: Uuid) {
+        let next = self
+            .moves
+            .values()
+            .filter(|record| record.phase == (MovePhase::Queued { behind }))
+            .min_by_key(|record| record.requested_at)
+            .map(|record| record.op);
+        if let Some(next) = next {
+            if let Some(record) = self.moves.get_mut(&next) {
+                record.phase = MovePhase::Planned;
+            }
+            // the rest of the queue waits behind the one released
+            for record in self.moves.values_mut() {
+                if record.phase == (MovePhase::Queued { behind }) {
+                    record.phase = MovePhase::Queued { behind: next };
+                }
             }
         }
     }
@@ -1582,6 +1907,217 @@ mod tests {
             ControlResponse::Repeated { .. }
         ));
         assert_eq!(state.table_read_policy.get(&TableId::of("Row")), Some(&Consistency::One));
+    }
+
+    /// A move is recorded against the set as the map serves it, queued behind a transition on
+    /// the same set, published by the last group activated and finished by the last group done,
+    /// which releases the queue; every refusal is by name
+    /// ([F45](../../../../docs/src/features/replica-migration.md))
+    #[test]
+    fn a_move_is_recorded_queued_published_and_released() {
+        use crate::server::control::migrate::{GroupMove, MoveOutcome, MovePhase, MoveStats};
+        use crate::shared::identity::{GroupId, ShardAddr};
+        let (mut state, _, node) = bootstrapped();
+        let (b, c, d) = (NodeId::mint(), NodeId::mint(), NodeId::mint());
+        for (other, name) in [(b, "b"), (c, "c"), (d, "d")] {
+            state.apply(&ControlCommand::Admit(member(other, name)));
+            state.apply(&ControlCommand::ObserveMember(member(other, name)));
+        }
+        let tables = vec![
+            ("Row".to_string(), TableId::of("Row")),
+            ("Note".to_string(), TableId::of("Note")),
+        ];
+        // three placed at a factor of three, and d a member the placement never named
+        let version = state.topology_version;
+        assert_eq!(
+            state.apply(&ControlCommand::Initialize {
+                op: Uuid::new_v4(),
+                principal: "alice".to_string(),
+                expected_version: version,
+                nodes: vec![node, b, c],
+                tables: tables.clone(),
+            }),
+            ControlResponse::Applied { topology_version: version + 1 }
+        );
+        let moving = |op, expected_version, tablet, from, to| ControlCommand::Move {
+            op,
+            principal: "alice".to_string(),
+            expected_version,
+            tablet,
+            from,
+            to,
+        };
+        let version = state.topology_version;
+        // refusals: a stranger, a source outside the set, a destination inside it, a stale version
+        assert!(matches!(
+            state.apply(&moving(Uuid::new_v4(), version, 0, c, NodeId::mint())),
+            ControlResponse::Refused { reason } if reason.contains("not a member")
+        ));
+        assert!(matches!(
+            state.apply(&moving(Uuid::new_v4(), version, 0, d, b)),
+            ControlResponse::Refused { reason } if reason.contains("not a member of the set")
+        ));
+        assert!(matches!(
+            state.apply(&moving(Uuid::new_v4(), version, 0, c, b)),
+            ControlResponse::Refused { reason } if reason.contains("already a member")
+        ));
+        assert!(matches!(
+            state.apply(&moving(Uuid::new_v4(), version, 0, c, c)),
+            ControlResponse::Refused { reason } if reason.contains("itself")
+        ));
+        assert!(matches!(
+            state.apply(&moving(Uuid::new_v4(), version - 1, 0, c, d)),
+            ControlResponse::Refused { reason } if reason.contains("stale")
+        ));
+        // a joining destination is refused too
+        let e = NodeId::mint();
+        state.apply(&ControlCommand::Admit(member(e, "e")));
+        let version = state.topology_version;
+        assert!(matches!(
+            state.apply(&moving(Uuid::new_v4(), version, 0, c, e)),
+            ControlResponse::Refused { reason } if reason.contains("joining")
+        ));
+        // the real one: recorded against the set the map serves tablet zero with
+        let map = crate::server::map::TabletMap::from_state(&state, None, &tables);
+        let expected = map.replicas_of(0);
+        let (_, tablets) = map.rule_set_of(0);
+        let slot = expected.iter().position(|member| member.node == c).expect("c is in the set");
+        let op = Uuid::new_v4();
+        assert_eq!(
+            state.apply(&moving(op, version, 0, c, d)),
+            ControlResponse::Applied { topology_version: version + 1 }
+        );
+        let record = state.moves.get(&op).expect("recorded").clone();
+        assert_eq!(record.phase, MovePhase::Planned);
+        assert_eq!(record.expected, expected);
+        assert_eq!(record.tablets, tablets);
+        assert_eq!(record.from, expected[slot]);
+        assert_eq!(record.to, ShardAddr::new(d, 0));
+        let mut target = expected.clone();
+        target[slot] = record.to;
+        assert_eq!(record.target, target);
+        assert_eq!(record.groups.len(), 2, "one group per table");
+        assert!(record.groups.values().all(|progress| progress.phase == MovePhase::Planned));
+        let groups: Vec<GroupId> = record.groups.keys().copied().collect();
+        // the map carries it, and the destination learns from it
+        let map = crate::server::map::TabletMap::from_state(&state, None, &tables);
+        assert_eq!(map.moves.len(), 1);
+        assert_eq!(map.learner_of(0), Some(record.to));
+        assert!(map.places(d));
+        // a second move of the same set queues behind it; another set is planned
+        let version = state.topology_version;
+        let queued = Uuid::new_v4();
+        assert_eq!(
+            state.apply(&moving(queued, version, 0, b, d)),
+            ControlResponse::Applied { topology_version: version + 1 }
+        );
+        assert_eq!(state.moves[&queued].phase, MovePhase::Queued { behind: op });
+        let other_tablet = (0..4096u16).find(|tablet| !record.covers(*tablet)).expect("another set");
+        let version = state.topology_version;
+        let other = Uuid::new_v4();
+        assert_eq!(
+            state.apply(&moving(other, version, other_tablet, node, d)),
+            ControlResponse::Applied { topology_version: version + 1 }
+        );
+        assert_eq!(state.moves[&other].phase, MovePhase::Planned);
+        // progress: an unknown op, a queued op and a stranger are refused; an old run is fenced
+        let progress = |phase, config| GroupMove {
+            phase,
+            driver: Some(node),
+            config,
+            stats: MoveStats::default(),
+            outcome: None,
+        };
+        let report = |op, group, incarnation, progress: GroupMove| ControlCommand::MoveProgress {
+            op,
+            group,
+            node,
+            incarnation,
+            progress,
+        };
+        assert!(matches!(
+            state.apply(&report(Uuid::new_v4(), groups[0], 1, progress(MovePhase::Learner, None))),
+            ControlResponse::Refused { reason } if reason.contains("no move operation")
+        ));
+        assert!(matches!(
+            state.apply(&report(queued, groups[0], 1, progress(MovePhase::Learner, None))),
+            ControlResponse::Refused { reason } if reason.contains("queued")
+        ));
+        assert!(matches!(
+            state.apply(&report(op, GroupId(1), 1, progress(MovePhase::Learner, None))),
+            ControlResponse::Refused { reason } if reason.contains("not part of")
+        ));
+        assert!(matches!(
+            state.apply(&report(op, groups[0], 0, progress(MovePhase::Learner, None))),
+            ControlResponse::Fenced { .. }
+        ));
+        // a phase moves the version once, and the same phase again moves nothing
+        let version = state.topology_version;
+        assert_eq!(
+            state.apply(&report(op, groups[0], 1, progress(MovePhase::Learner, None))),
+            ControlResponse::Applied { topology_version: version + 1 }
+        );
+        assert_eq!(
+            state.apply(&report(op, groups[0], 1, progress(MovePhase::Learner, None))),
+            ControlResponse::Applied { topology_version: version + 1 }
+        );
+        assert_eq!(state.moves[&op].groups[&groups[0]].phase, MovePhase::Learner);
+        assert_eq!(state.moves[&op].phase, MovePhase::Planned);
+        // one group activated publishes nothing; the last one publishes the configuration
+        state.apply(&report(op, groups[0], 1, progress(MovePhase::Activated, Some(40))));
+        assert_eq!(state.moves[&op].phase, MovePhase::Planned);
+        assert!(state.configurations.is_empty());
+        let version = state.topology_version;
+        assert_eq!(
+            state.apply(&report(op, groups[1], 1, progress(MovePhase::Activated, Some(41)))),
+            ControlResponse::Applied { topology_version: version + 1 }
+        );
+        assert_eq!(state.moves[&op].phase, MovePhase::Published);
+        let configuration = state.configurations.get(&tablets[0]).expect("published");
+        assert_eq!(configuration.members, target);
+        assert_eq!(configuration.tablets, tablets);
+        assert_eq!(configuration.configs.get(&groups[0]), Some(&40));
+        assert_eq!(configuration.configs.get(&groups[1]), Some(&41));
+        assert_eq!(configuration.published_at, version + 1);
+        // the map serves the set from the target now, and nobody learns it any more
+        let map = crate::server::map::TabletMap::from_state(&state, None, &tables);
+        assert_eq!(map.replicas_of(0), target);
+        assert_eq!(map.learner_of(0), None);
+        assert!(map.holds(d, 0));
+        assert!(!map.holds(c, 0));
+        // the last group done finishes the record, and the queued move is planned
+        let done = |outcome| GroupMove {
+            phase: MovePhase::Done,
+            driver: Some(node),
+            config: Some(40),
+            stats: MoveStats::default(),
+            outcome: Some(outcome),
+        };
+        state.apply(&report(op, groups[0], 1, done(MoveOutcome::Moved)));
+        assert_eq!(state.moves[&op].phase, MovePhase::Published);
+        assert_eq!(state.moves[&queued].phase, MovePhase::Queued { behind: op });
+        state.apply(&report(op, groups[1], 1, done(MoveOutcome::Moved)));
+        assert_eq!(state.moves[&op].phase, MovePhase::Done);
+        assert_eq!(state.moves[&op].outcome, Some(MoveOutcome::Moved));
+        assert_eq!(state.moves[&queued].phase, MovePhase::Planned);
+        assert!(state.moves[&queued].groups.keys().eq(groups.iter()));
+        // a done group stays done, whatever a late driver says
+        let version = state.topology_version;
+        assert_eq!(
+            state.apply(&report(op, groups[0], 1, progress(MovePhase::Learner, None))),
+            ControlResponse::Applied { topology_version: version }
+        );
+        assert_eq!(state.moves[&op].groups[&groups[0]].phase, MovePhase::Done);
+        // the released move's expected set is the one it was recorded against, which the
+        // configuration has since replaced: its driver reconciles against the group, not here
+        assert_eq!(state.moves[&queued].expected, expected);
+        // the done record is no longer carried by the map, and the repeated op is remembered
+        let map = crate::server::map::TabletMap::from_state(&state, None, &tables);
+        assert!(map.moves.iter().all(|record| record.op != op));
+        assert!(matches!(
+            state.apply(&moving(op, state.topology_version, 0, c, d)),
+            ControlResponse::Repeated { .. }
+        ));
     }
 
     /// A membership entry sets roles, admits configured strangers as joining, and moves once

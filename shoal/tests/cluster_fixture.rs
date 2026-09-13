@@ -14,7 +14,7 @@
 //! `cargo test`; the fixture runs them by name with `--exact --ignored`.
 
 use std::io::Write as _;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use shoal::client::Shoal;
 use shoal::server::conf::{Cluster as ClusterConf, Networking, Resources};
@@ -1174,6 +1174,16 @@ async fn cluster_server_child() {
             if let Some(ms) = staged.scrub_interval_ms {
                 block.repair.scrub_interval = Some(Duration::from_millis(ms).into());
             }
+            // the move's lag, deadline and grace ([F45](../../docs/src/features/replica-migration.md))
+            if let Some(ms) = staged.retire_after_ms {
+                block.migration.retire_after = Duration::from_millis(ms).into();
+            }
+            if let Some(lag) = staged.catchup_lag {
+                block.migration.catchup_lag = lag;
+            }
+            if let Some(ms) = staged.migration_timeout_ms {
+                block.migration.timeout = Duration::from_millis(ms).into();
+            }
             // the default read level, which every bundle without an override inherits
             // ([F41](../../docs/src/features/read-consistency.md))
             if let Some(level) = &staged.read_consistency {
@@ -1670,6 +1680,60 @@ fn handle_command(
         "REPAIR_STATUS" => match parts.next().and_then(|text| text.parse::<uuid::Uuid>().ok()) {
             Some(op) => admin(AdminKind::RepairStatus { op }),
             None => Err("REPAIR_STATUS needs an operation id".to_string()),
+        },
+        // move the replica set holding a key's tablet from one node to another, as the
+        // process, and answer the operation it was recorded under
+        // ([F45](../../docs/src/features/replica-migration.md))
+        "MOVE" => {
+            let key = parts.next().and_then(|hex| u64::from_str_radix(hex, 16).ok());
+            let from = node_at(&mut parts);
+            let to = node_at(&mut parts);
+            match (key, from, to) {
+                (Some(key), Some(from), Some(to)) => {
+                    // truncation cannot happen: a tablet id is twelve bits
+                    #[allow(clippy::cast_possible_truncation)]
+                    let tablet = tablet_of(key) as u16;
+                    let kind = AdminKind::Move { tablet, from, to };
+                    let op = uuid::Uuid::new_v4();
+                    let mut last = String::new();
+                    let mut answer = None;
+                    for _ in 0..8 {
+                        let version = pool.topology().map(|topology| topology.version).unwrap_or(0);
+                        match pool.admin(AdminRequest { op, expected_version: version, kind: kind.clone() }) {
+                            Ok(response) => match response.outcome {
+                                Ok(shoal::shared::protocol::admin::AdminOutcome::Applied { version })
+                                | Ok(shoal::shared::protocol::admin::AdminOutcome::Repeated { version }) => {
+                                    answer = Some(Ok(serde_json::json!({ "op": op.to_string(), "version": version, "tablet": tablet })));
+                                    break;
+                                }
+                                Ok(other) => {
+                                    answer = Some(Err(format!("MOVE answered {other:?}")));
+                                    break;
+                                }
+                                Err(error) if error.code() == shoal::shared::protocol::error::ErrorCode::StaleVersion => {
+                                    last = format!("{}: {}", error.code(), error.msg);
+                                    std::thread::sleep(Duration::from_millis(100));
+                                }
+                                Err(error) => {
+                                    answer = Some(Err(format!("{}: {}", error.code(), error.msg)));
+                                    break;
+                                }
+                            },
+                            Err(error) => {
+                                answer = Some(Err(format!("{error:?}")));
+                                break;
+                            }
+                        }
+                    }
+                    answer.unwrap_or(Err(last))
+                }
+                _ => Err("MOVE needs a key in hex, a source node index and a destination node index".to_string()),
+            }
+        }
+        // the record of a move, by its operation
+        "MOVE_STATUS" => match parts.next().and_then(|text| text.parse::<uuid::Uuid>().ok()) {
+            Some(op) => admin(AdminKind::MoveStatus { op }),
+            None => Err("MOVE_STATUS needs an operation id".to_string()),
         },
         // propose a scrub of a group through this node, which has to lead it, and poll every
         // member's digest ([F44](../../docs/src/features/repair.md))
@@ -4637,6 +4701,45 @@ fn repair_as_process(cluster: &mut Cluster, node: usize, kind: &shoal::server::A
         .as_str()
         .and_then(|op| op.parse().ok())
         .ok_or_else(|| FixtureError::NotReady(format!("the repair was not recorded: {reply}")))
+}
+
+/// Ask for a move of the set holding a key through one node, as the process
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `node` - The node to ask through
+/// * `key` - A key in the set
+/// * `from` - The node leaving the set
+/// * `to` - The node replacing it
+fn move_as_process(cluster: &mut Cluster, node: usize, key: u64, from: usize, to: usize) -> Result<uuid::Uuid, FixtureError> {
+    let reply = cluster.node_mut(node).command(&format!("MOVE {key:016x} {from} {to}"))?;
+    let op = reply["ok"]["op"]
+        .as_str()
+        .ok_or_else(|| FixtureError::ChildFailed(format!("MOVE answered {reply}")))?;
+    op.parse().map_err(|error| FixtureError::ChildFailed(format!("MOVE answered {op}: {error}")))
+}
+
+/// Poll a move's record through one node until it is done, or the time is up
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `node` - The node to ask through
+/// * `op` - The operation
+/// * `within` - How long to wait
+fn wait_move_done_via(cluster: &mut Cluster, node: usize, op: uuid::Uuid, within: Duration) -> Result<serde_json::Value, FixtureError> {
+    let started = Instant::now();
+    let mut last = serde_json::Value::Null;
+    while started.elapsed() < within {
+        let record = cluster.node_mut(node).command(&format!("MOVE_STATUS {op}"))?["ok"].clone();
+        if record["phase"] == "Done" {
+            return Ok(record);
+        }
+        last = record;
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    Err(FixtureError::ChildFailed(format!("move {op} did not finish within {within:?}: {last}")))
 }
 
 /// Wait until every group of a repair is done, asking a node as the process

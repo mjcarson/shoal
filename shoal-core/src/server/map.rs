@@ -548,6 +548,28 @@ impl TabletMap {
         }
     }
 
+    /// The replica set the rule places a tablet in: the rule's members and every tablet under them
+    ///
+    /// What a move names: the set's tablets share a configuration and an identity per table,
+    /// and are moved together ([F45](../../../docs/src/features/replica-migration.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `tablet` - The tablet
+    #[must_use]
+    pub fn rule_set_of(&self, tablet: usize) -> (Vec<ShardAddr>, Vec<u16>) {
+        let rule = self.rule_replicas_of(tablet);
+        if rule.is_empty() {
+            return (rule, Vec::new());
+        }
+        let tablets = (0..TABLET_COUNT)
+            .filter(|other| self.rule_replicas_of(*other) == rule)
+            // truncation cannot happen: a tablet id is twelve bits
+            .map(|other| u16::try_from(other).unwrap_or(u16::MAX))
+            .collect();
+        (rule, tablets)
+    }
+
     /// Every replica set the rule derives, keyed by the rule's members, with the tablets under it
     ///
     /// The sets a group's identity is minted from; a set that moved is still one set here,

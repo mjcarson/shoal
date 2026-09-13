@@ -1883,6 +1883,25 @@ impl Core {
                     release: *release,
                 }
             }
+            // the record of a move, as the applied state holds it
+            // ([F45](../../../../docs/src/features/replica-migration.md))
+            AdminKind::MoveStatus { op } => {
+                let outcome = match state.moves.get(op) {
+                    Some(record) => Ok(AdminOutcome::Read(serde_json::to_value(record).unwrap_or_default())),
+                    None => Err(AdminError::new(ErrorCode::Internal, format!("no move operation {op} is recorded"))),
+                };
+                let _ = call.reply.send(answer(outcome));
+                return;
+            }
+            // a move is judged whole by the state machine, against the map it derives
+            AdminKind::Move { tablet, from, to } => ControlCommand::Move {
+                op: call.request.op,
+                principal: call.principal.clone().unwrap_or_else(|| "process".to_string()),
+                expected_version: call.request.expected_version,
+                tablet: *tablet,
+                from: *from,
+                to: *to,
+            },
         };
         // a mutation needs a principal the committed policy names, unless the process itself asks
         if !call.trusted {

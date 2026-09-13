@@ -115,6 +115,26 @@ pub enum AdminKind {
         /// The operation
         op: Uuid,
     },
+    /// Move the replica set holding a tablet from one member to another
+    ///
+    /// The set is every table's group over the tablets the rule placed together; `from` has
+    /// to be a member of it and `to` an up member that is not, placed or not. The destination
+    /// is fed as a learner, made a voter through the group's own membership transition, and
+    /// published as the set's configuration before the source's copy retires
+    /// ([F45](../../../../docs/src/features/replica-migration.md)).
+    Move {
+        /// A tablet the set serves
+        tablet: u16,
+        /// The member leaving the set
+        from: NodeId,
+        /// The member replacing it
+        to: NodeId,
+    },
+    /// The record of a move operation, as the control state holds it
+    MoveStatus {
+        /// The operation
+        op: Uuid,
+    },
 }
 
 impl AdminKind {
@@ -127,6 +147,7 @@ impl AdminKind {
                 | AdminKind::SetControlVoters { .. }
                 | AdminKind::SetTableReadPolicy { .. }
                 | AdminKind::Repair { .. }
+                | AdminKind::Move { .. }
         )
     }
 
@@ -143,6 +164,8 @@ impl AdminKind {
             AdminKind::SetTableReadPolicy { .. } => "set_table_read_policy",
             AdminKind::Repair { .. } => "repair",
             AdminKind::RepairStatus { .. } => "repair_status",
+            AdminKind::Move { .. } => "move",
+            AdminKind::MoveStatus { .. } => "move_status",
         }
     }
 }
@@ -371,6 +394,20 @@ mod tests {
         assert_eq!(back, request);
         assert!(request.kind.is_mutation());
         assert!(!AdminKind::Members.is_mutation());
+        // a move is a mutation and its status a read, and both round trip
+        let moving = AdminKind::Move {
+            tablet: 7,
+            from: NodeId::mint(),
+            to: NodeId::mint(),
+        };
+        assert!(moving.is_mutation());
+        assert_eq!(moving.name(), "move");
+        let status = AdminKind::MoveStatus { op: Uuid::new_v4() };
+        assert!(!status.is_mutation());
+        for kind in [moving, status] {
+            let json = serde_json::to_vec(&kind).expect("a kind encodes");
+            assert_eq!(decode_rest::<AdminKind>(&json).expect("a kind decodes"), kind);
+        }
         // an answer, applied and refused
         let response = AdminResponse {
             node: NodeId::mint(),

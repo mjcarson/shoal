@@ -588,6 +588,72 @@ impl Default for Repair {
     }
 }
 
+/// The default lag, in entries, a learner has to be within before it is made a voter
+fn default_catchup_lag() -> u64 {
+    64
+}
+
+/// The default deadline for one phase of a move
+fn default_migration_timeout() -> DurationSpec {
+    DurationSpec(Duration::from_secs(600))
+}
+
+/// The default grace a retired copy's files are kept for
+fn default_retire_after() -> DurationSpec {
+    DurationSpec(Duration::from_secs(300))
+}
+
+/// The default number of group moves one shard drives at a time
+fn default_migration_concurrent() -> u32 {
+    1
+}
+
+/// The migration settings, which are this node's alone
+///
+/// A move feeds a learner, waits for it to catch up, writes the group's membership transition
+/// and retires the source's copy after a grace; what each of those waits for and how long it
+/// may take is set here, on the node driving it
+/// ([F45](../../../../docs/src/features/replica-migration.md)).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Migration {
+    /// How many entries behind the leader a learner may be when it is made a voter
+    ///
+    /// The joint transition waits for the destination to acknowledge the uniform membership
+    /// whatever this says; the lag only decides when that transition starts, so a learner
+    /// that has taken the snapshot and most of the tail is promoted rather than chased.
+    #[serde(default = "default_catchup_lag")]
+    pub catchup_lag: u64,
+    /// How long one phase of a move may take before the driver fails it
+    ///
+    /// Has to be no shorter than `replication.snapshot_timeout`, since the learner phase is a
+    /// snapshot transfer.
+    #[serde(default = "default_migration_timeout")]
+    pub timeout: DurationSpec,
+    /// How long a retired copy's files are kept after the configuration is published
+    ///
+    /// A router with a map older than the configuration may still send the retired copy a
+    /// query inside this window; it is refused by name, never served, and the files are
+    /// evidence rather than authority until they are reclaimed.
+    #[serde(default = "default_retire_after")]
+    pub retire_after: DurationSpec,
+    /// How many group moves one shard drives at a time
+    #[serde(default = "default_migration_concurrent")]
+    pub concurrent: u32,
+}
+
+impl Default for Migration {
+    /// The defaults the configuration page writes down
+    fn default() -> Self {
+        Migration {
+            catchup_lag: default_catchup_lag(),
+            timeout: default_migration_timeout(),
+            retire_after: default_retire_after(),
+            concurrent: default_migration_concurrent(),
+        }
+    }
+}
+
 /// The replication policy a bootstrap seeds into the cluster
 ///
 /// Everything in the `cluster:` block that belongs to the cluster rather than to one node, in
@@ -712,6 +778,10 @@ pub struct Cluster {
     /// ([F44](../../../../docs/src/features/repair.md))
     #[serde(default)]
     pub repair: Repair,
+    /// The migration settings, which are this node's alone
+    /// ([F45](../../../../docs/src/features/replica-migration.md))
+    #[serde(default)]
+    pub migration: Migration,
     /// Where this node dials particular members, keyed by their identity, when not where they advertise
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub dial: std::collections::BTreeMap<NodeId, DialOverride>,
@@ -741,6 +811,7 @@ impl Default for Cluster {
             transport: Transport::default(),
             replication: Replication::default(),
             repair: Repair::default(),
+            migration: Migration::default(),
             dial: std::collections::BTreeMap::new(),
         }
     }
@@ -1054,6 +1125,18 @@ impl Cluster {
                 "cluster.repair.concurrent is zero; at least one group repair has to be driven at a time".to_string(),
             )));
         }
+        // a move's learner phase is a snapshot transfer, so its deadline cannot be shorter
+        if self.migration.timeout.duration() < self.replication.snapshot_timeout.duration() {
+            return Err(ServerError::Shoal(ShoalError::InvalidConfig(
+                "cluster.migration.timeout is shorter than replication.snapshot_timeout".to_string(),
+            )));
+        }
+        // no moves at a time is no moves at all
+        if self.migration.concurrent == 0 {
+            return Err(ServerError::Shoal(ShoalError::InvalidConfig(
+                "cluster.migration.concurrent is zero; at least one group move has to be driven at a time".to_string(),
+            )));
+        }
         // the retention budget has to hold the active segment and one sealed one, or every
         // sweep forces a snapshot
         if self.replication.retained_bytes < 2 * self.replication.segment_bytes {
@@ -1267,6 +1350,19 @@ mod tests {
             .validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES)
             .expect_err("no repairs at a time was accepted");
         assert!(format!("{error}").contains("repair.concurrent"), "{error}");
+        // and so do the migration settings ([F45](../../../../docs/src/features/replica-migration.md))
+        let mut short_move = Cluster::default().bootstrap(true);
+        short_move.migration.timeout = DurationSpec(Duration::from_secs(1));
+        let error = short_move
+            .validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES)
+            .expect_err("a migration timeout under the snapshot timeout was accepted");
+        assert!(format!("{error}").contains("migration.timeout"), "{error}");
+        let mut no_moves = Cluster::default().bootstrap(true);
+        no_moves.migration.concurrent = 0;
+        let error = no_moves
+            .validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES)
+            .expect_err("no moves at a time was accepted");
+        assert!(format!("{error}").contains("migration.concurrent"), "{error}");
         let mut scheduled = Cluster::default().bootstrap(true);
         scheduled.repair.scrub_interval = Some(DurationSpec(Duration::from_secs(3600)));
         scheduled
@@ -1293,6 +1389,29 @@ mod tests {
         let empty: super::Repair = serde_yaml::from_str("{}").expect("an empty block parses");
         assert_eq!(empty, defaults);
         assert!(serde_yaml::from_str::<super::Repair>("install: true\n").is_err());
+    }
+
+    /// The migration block's defaults are the documented ones, and every field parses
+    /// ([F45](../../../../docs/src/features/replica-migration.md))
+    #[test]
+    fn the_migration_block_parses_with_its_defaults() {
+        let defaults = super::Migration::default();
+        assert_eq!(defaults.catchup_lag, 64);
+        assert_eq!(defaults.timeout.duration(), Duration::from_secs(600));
+        assert_eq!(defaults.retire_after.duration(), Duration::from_secs(300));
+        assert_eq!(defaults.concurrent, 1);
+        // a block naming every field
+        let parsed: super::Migration =
+            serde_yaml::from_str("catchup_lag: 8\ntimeout: \"20m\"\nretire_after: \"1m\"\nconcurrent: 2\n")
+                .expect("a full migration block parses");
+        assert_eq!(parsed.catchup_lag, 8);
+        assert_eq!(parsed.timeout.duration(), Duration::from_secs(1200));
+        assert_eq!(parsed.retire_after.duration(), Duration::from_secs(60));
+        assert_eq!(parsed.concurrent, 2);
+        // an empty block is the defaults, an unknown field is refused
+        let empty: super::Migration = serde_yaml::from_str("{}").expect("an empty block parses");
+        assert_eq!(empty, defaults);
+        assert!(serde_yaml::from_str::<super::Migration>("budget: 1\n").is_err());
     }
 
     /// The replication block's defaults are the documented ones, and every field parses
