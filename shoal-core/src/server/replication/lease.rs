@@ -15,7 +15,8 @@
 
 use std::time::Duration;
 
-use openraft::Raft;
+use openraft::{Raft, ServerState};
+use openraft_rt::WatchReceiver as _;
 
 use super::machine::GroupMachine;
 use super::types::DataConfig;
@@ -49,25 +50,26 @@ impl Lease {
     /// * `me` - This shard's address
     #[must_use]
     pub fn of<D: ShoalDatabase>(raft: &Raft<DataConfig, GroupMachine<D>>, me: ShardAddr) -> Self {
-        match raft.as_leader() {
-            Ok(leader) => {
-                // a voter alone is its own quorum, as openraft judges it
-                if raft.voter_ids().count() <= 1 {
-                    return Lease::Leads;
-                }
-                let lease = Duration::from_millis(raft.config().election_timeout_max);
-                match leader.last_quorum_acked() {
-                    None => Lease::NotStarted,
-                    Some(acked) if acked.elapsed() > lease => Lease::Lapsed,
-                    Some(_) => Lease::Leads,
-                }
-            }
-            Err(forward) => match forward.leader_node.or(forward.leader_id) {
-                // a hint naming this shard is a vote not yet committed here
-                Some(leader) if leader == me => Lease::NotStarted,
-                Some(leader) => Lease::Elsewhere(leader),
-                None => Lease::Electing,
-            },
+        // one snapshot of the metrics, and the lock released at once
+        let metrics = raft.metrics().borrow_watched().clone();
+        // judged from the server state rather than from the committed vote alone: a restarted
+        // node holds a vote for itself from its last term and leads nothing until it is elected
+        // again, and a lease on a vote that is not being led would be polled for nothing
+        if metrics.state != ServerState::Leader {
+            return match metrics.current_leader {
+                Some(leader) if leader != me => Lease::Elsewhere(leader),
+                _ => Lease::Electing,
+            };
+        }
+        // a voter alone is its own quorum, as openraft judges it
+        if metrics.membership_config.membership().voter_ids().count() <= 1 {
+            return Lease::Leads;
+        }
+        let lease = Duration::from_millis(raft.config().election_timeout_max);
+        match metrics.last_quorum_acked {
+            None => Lease::NotStarted,
+            Some(acked) if acked.into_inner().elapsed() > lease => Lease::Lapsed,
+            Some(_) => Lease::Leads,
         }
     }
 

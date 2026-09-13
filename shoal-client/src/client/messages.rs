@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use shoal_proto::shared::protocol::error::ErrorCode;
 use shoal_proto::shared::protocol::read::{ReadLevel, ReadOptions, SessionToken};
+use uuid::Uuid;
 
 /// What a caller says about how the reads in a bundle are served
 ///
@@ -29,6 +30,21 @@ pub struct SendOptions {
     ///
     /// At most sixteen; a send with more is refused before anything is written.
     pub tokens: Vec<SessionToken>,
+    /// The bundle id to send under, so a re-send is the same request to the server
+    ///
+    /// A write's identity on the server is its bundle id and its index in the bundle, and a
+    /// group answers a repeat of one it applied with the result it produced the first time.
+    /// Pinning the id is what makes a re-send after an unknown outcome safe: the write happens
+    /// once whatever the client saw ([F42](../../../../docs/src/features/primary-failover.md)).
+    /// Never on the wire as a section; it is the bundle's own id.
+    pub identity: Option<Uuid>,
+    /// How long to keep re-sending the bundle while the server's answer says to try again
+    ///
+    /// `NotLeader`, `Unavailable`, `QuorumUnavailable`, `ConnectionLost`, `OutcomeUnknown` and
+    /// `Timeout` are tried again under the same identity with a growing pause between tries,
+    /// until one succeeds, another code comes back, or this budget runs out - and then the
+    /// last answer is the caller's. Only a collected send retries; a stream never does.
+    pub retry: Option<Duration>,
 }
 
 impl SendOptions {
@@ -68,6 +84,28 @@ impl SendOptions {
     #[must_use]
     pub fn token(mut self, token: SessionToken) -> Self {
         self.tokens.push(token);
+        self
+    }
+
+    /// Send the bundle under this id, so a re-send is the same request
+    ///
+    /// # Arguments
+    ///
+    /// * `identity` - The bundle id
+    #[must_use]
+    pub fn identity(mut self, identity: Uuid) -> Self {
+        self.identity = Some(identity);
+        self
+    }
+
+    /// Keep re-sending the bundle under one identity for this long while the answer says to
+    ///
+    /// # Arguments
+    ///
+    /// * `within` - The budget for every try together
+    #[must_use]
+    pub fn retry(mut self, within: Duration) -> Self {
+        self.retry = Some(within);
         self
     }
 

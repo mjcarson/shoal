@@ -2851,6 +2851,100 @@ async fn write_note_token(
     Ok(response.session_token())
 }
 
+/// Write one note through a node as the options say, keeping the answer
+///
+/// The options are where a write's identity and its retry budget go
+/// ([F42](../../docs/src/features/primary-failover.md)).
+///
+/// # Arguments
+///
+/// * `addr` - The endpoint
+/// * `key` - The key
+/// * `text` - The text
+/// * `options` - How the write is sent
+async fn write_note_as(
+    addr: &str,
+    key: u64,
+    text: &str,
+    options: &shoal::client::SendOptions,
+) -> Result<shoal::ShoalResponse<TestDbClient>, shoal::client::Errors> {
+    let client = Shoal::<TestDbClient>::new(addr).await?;
+    client
+        .send_one_with(
+            Note {
+                key,
+                text: text.to_string(),
+            },
+            options,
+        )
+        .await
+}
+
+/// Delete one note through a node as the options say, keeping the answer
+///
+/// A delete of a note that is not there is answered as a query that did not succeed, which
+/// is the original result a retry of a delete that did succeed must never be given.
+///
+/// # Arguments
+///
+/// * `addr` - The endpoint
+/// * `key` - The key
+/// * `options` - How the delete is sent
+async fn delete_note_as(
+    addr: &str,
+    key: u64,
+    options: &shoal::client::SendOptions,
+) -> Result<shoal::ShoalResponse<TestDbClient>, shoal::client::Errors> {
+    let client = Shoal::<TestDbClient>::new(addr).await?;
+    client.send_one_with(NoteDelete::new(key), options).await
+}
+
+/// Rotate and compact every named node until a group's checkpoint on each is at or past an index
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `nodes` - The nodes
+/// * `group` - The group, as `group_of` names it
+/// * `index` - The index the checkpoint has to reach
+/// * `within` - How long to keep trying
+fn wait_checkpoint_past(
+    cluster: &mut Cluster,
+    nodes: &[usize],
+    group: &str,
+    index: u64,
+    within: Duration,
+) -> Result<(), FixtureError> {
+    let deadline = std::time::Instant::now() + within;
+    loop {
+        let mut behind = Vec::new();
+        for node in nodes {
+            let _ = cluster.node_mut(*node).command("ROTATE")?;
+            let _ = cluster.node_mut(*node).command("COMPACT")?;
+            let view = groups_of(cluster, *node)?;
+            let mut checkpoint = None;
+            for shard in view["shards"].as_array().into_iter().flatten() {
+                for found in shard["groups"].as_array().into_iter().flatten() {
+                    let id = found["group"].as_u64().unwrap_or_default();
+                    if format!("{id:016x}") == group {
+                        checkpoint = found["checkpoint"].as_u64();
+                    }
+                }
+            }
+            if checkpoint.is_none_or(|checkpoint| checkpoint < index) {
+                behind.push((*node, checkpoint));
+            }
+        }
+        if behind.is_empty() {
+            return Ok(());
+        }
+        if std::time::Instant::now() > deadline {
+            return Err(FixtureError::NotReady(format!("group {group}'s checkpoint never reached {index}: {behind:?}")));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
 /// Delete one note through a node
 ///
 /// # Arguments
@@ -4817,6 +4911,424 @@ async fn established_tablets_survive_control_quorum_loss() -> Result<(), Fixture
     };
     cluster.wait_map_version(&[0, 1, 2], version)?;
     wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    for id in 0..3 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
+
+/// A lost reply is recovered by a retry under the same identity, which returns the original result once (C5 M6, F42)
+///
+/// A note is written. Its delete is sent under an identity with the reply dropped on the
+/// leader, so the client sees only its own deadline: the outcome is unknown. The leader is
+/// killed, and the same delete under the same identity through a survivor is answered with the
+/// original result - the note was there and is gone - rather than as a delete of nothing; a
+/// fresh delete finds nothing. Then the entry is checkpointed and purged on every node, every
+/// node restarted, and the same identity is answered the same way again: the retry table
+/// came from the sidecar beside the checkpoint, since the log no longer held it.
+#[tokio::test(flavor = "multi_thread")]
+async fn lost_response_retry_returns_original_result() -> Result<(), FixtureError> {
+    use shoal::client::SendOptions;
+    use shoal::shared::protocol::error::ErrorCode;
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lane_links(true)
+        .write_timeout(Duration::from_secs(3))
+        .query_deadline(Duration::from_secs(3))
+        .start()
+        .await?;
+    let (key, group) = key_led_by(&mut cluster, "Note", 0, 1000)?;
+    let addrs: Vec<String> = (0..3).map(|id| cluster.node(id).endpoints.client.to_string()).collect();
+    write_note(&addrs[0], key, "v1").await?;
+    for addr in &addrs {
+        wait_note(addr, key, Some("v1"), Duration::from_secs(10)).await?;
+    }
+    // the delete commits and applies, and its reply is dropped: the client times out
+    let identity = uuid::Uuid::new_v4();
+    let dropped = cluster.node_mut(0).command("DROP_REPLIES 1")?;
+    assert!(dropped.get("ok").is_some(), "{dropped}");
+    let started = std::time::Instant::now();
+    let lost = delete_note_as(&addrs[0], key, &SendOptions::new().identity(identity).deadline(Duration::from_secs(1))).await;
+    assert_eq!(failure_code(&lost), Some(ErrorCode::Timeout), "the dropped reply was answered {lost:?}");
+    assert!(started.elapsed() < Duration::from_secs(3), "the client waited past its deadline and slack");
+    // the delete happened: every node has no note
+    for addr in &addrs {
+        wait_note(addr, key, None, Duration::from_secs(10)).await?;
+    }
+    // the leader dies; the same identity through a survivor is the original result
+    cluster.kill(0)?;
+    let (_, leader) = wait_group_leader_change(&mut cluster, 1, "Note", key, 0)?;
+    let again = delete_note_as(&addrs[leader], key, &SendOptions::new().identity(identity).retry(Duration::from_secs(15))).await;
+    let again = again.unwrap_or_else(|error| panic!("the retry under the same identity was not the original result: {error:?}"));
+    assert!(again.attempts() >= 1);
+    assert_eq!(again.bundle(), identity);
+    let token = again.session_token().expect("a duplicate answers with a token");
+    // and a delete of its own finds nothing
+    let fresh = delete_note(&addrs[leader], key).await;
+    assert!(matches!(fresh, Err(shoal::client::Errors::QueryDidNotSucceed { .. })), "{fresh:?}");
+    // the entry goes below every survivor's checkpoint, node zero comes back and catches up,
+    // and every node restarts: the retry table is what the sidecar held
+    cluster.restart(0, NodeKind::Server)?;
+    cluster.wait_joined(&[0])?;
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    wait_checkpoint_past(&mut cluster, &[0, 1, 2], &group, token.index, Duration::from_secs(60))?;
+    for id in 0..3 {
+        cluster.restart(id, NodeKind::Server)?;
+    }
+    cluster.wait_joined(&[0, 1, 2])?;
+    let addrs: Vec<String> = (0..3).map(|id| cluster.node(id).endpoints.client.to_string()).collect();
+    let (_, leader) = wait_group_leader_via(&mut cluster, 0, "Note", key)?;
+    let restored = delete_note_as(&addrs[leader], key, &SendOptions::new().identity(identity).retry(Duration::from_secs(15))).await;
+    assert!(restored.is_ok(), "after a checkpoint and a restart the identity was applied as new: {restored:?}");
+    let fresh = delete_note(&addrs[leader], key).await;
+    assert!(matches!(fresh, Err(shoal::client::Errors::QueryDidNotSucceed { .. })), "{fresh:?}");
+    for id in 0..3 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
+
+/// A session token is served past its lower bound on a behind replica, and through a leader change (C6 M6, F42)
+///
+/// A write through the leader hands back a token; the lane to one follower is cut and a
+/// second write hands back another. A session read through the cut follower past the second
+/// token waits for an apply that cannot come and times out; healed, it is served. The leader
+/// is killed: the token names the group and an index, neither of which an election changes,
+/// so a session read through either survivor is served past it, a write through the new
+/// leader mints a token the other survivor serves past, and a token forged to another lineage
+/// is still refused by name.
+#[tokio::test(flavor = "multi_thread")]
+async fn session_read_waits_for_committed_lower_bound() -> Result<(), FixtureError> {
+    use shoal::client::{ReadLevel, SendOptions};
+    use shoal::shared::identity::GroupId;
+    use shoal::shared::protocol::error::ErrorCode;
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lane_links(true)
+        .write_timeout(Duration::from_secs(3))
+        .query_deadline(Duration::from_secs(3))
+        .start()
+        .await?;
+    let (key, _) = key_led_by(&mut cluster, "Note", 0, 1000)?;
+    let addrs: Vec<String> = (0..3).map(|id| cluster.node(id).endpoints.client.to_string()).collect();
+    let first = write_note_token(&addrs[0], key, "v1").await?.expect("a committed write mints a token");
+    for addr in &addrs {
+        wait_note(addr, key, Some("v1"), Duration::from_secs(10)).await?;
+    }
+    // node two falls behind: a session read past the new write waits, and times out
+    cluster.data_link(0, 2).cut();
+    cluster.data_link(2, 0).cut();
+    let second = write_note_token(&addrs[0], key, "v2").await?.expect("a committed write mints a token");
+    assert!(second.index > first.index);
+    let behind = read_note_with(&addrs[2], key, &SendOptions::new().read(ReadLevel::One).token(second).deadline(Duration::from_secs(1))).await;
+    assert_eq!(failure_code(&behind), Some(ErrorCode::Timeout), "a session read on a behind replica answered {behind:?}");
+    // healed, the same read is served past the bound
+    cluster.data_link(0, 2).heal();
+    cluster.data_link(2, 0).heal();
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        match read_note_with(&addrs[2], key, &SendOptions::new().read(ReadLevel::One).token(second)).await {
+            Ok(Some(text)) if text == "v2" => break,
+            Ok(other) => panic!("a session read was served before its bound: {other:?}"),
+            Err(error) => {
+                assert!(std::time::Instant::now() < deadline, "the session read never succeeded after the heal: {error:?}");
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        }
+    }
+    // the leader dies: the token outlives it
+    cluster.kill(0)?;
+    let (_, leader) = wait_group_leader_change(&mut cluster, 1, "Note", key, 0)?;
+    let other = 3 - leader;
+    for reader in [leader, other] {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            match read_note_with(&addrs[reader], key, &SendOptions::new().read(ReadLevel::One).token(second)).await {
+                Ok(Some(text)) if text == "v2" => break,
+                Ok(seen) => panic!("a session read through node {reader} was served before its bound: {seen:?}"),
+                Err(error) => {
+                    assert!(std::time::Instant::now() < deadline, "the session read through node {reader} never succeeded: {error:?}");
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+            }
+        }
+    }
+    // a write through the new leader mints a token the other survivor serves past
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let third = loop {
+        match write_note_token(&addrs[leader], key, "v3").await {
+            Ok(Some(token)) => break token,
+            Ok(None) => panic!("a committed write minted no token"),
+            Err(error) => {
+                assert!(std::time::Instant::now() < deadline, "the write through the new leader never landed: {error:?}");
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        }
+    };
+    assert_eq!(third.group, second.group, "an election moved the lineage");
+    assert!(third.index > second.index);
+    assert_eq!(
+        read_note_with(&addrs[other], key, &SendOptions::new().read(ReadLevel::One).token(third)).await?.as_deref(),
+        Some("v3")
+    );
+    // and a token from another lineage is refused by name, still
+    let mut forged = third;
+    forged.group = GroupId(third.group.0 ^ 0xdead_beef);
+    let refused = read_note_with(&addrs[other], key, &SendOptions::new().read(ReadLevel::One).token(forged)).await;
+    assert_eq!(failure_code(&refused), Some(ErrorCode::UnknownLineage), "{refused:?}");
+    for id in 1..3 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
+
+/// A forwarded write keeps its identity and its budget through a redirect, and is sent to another holder when the link is down (C2 M6, F42)
+///
+/// Four nodes at a factor of three, so the fourth holds no copy of a quarter of the tablets
+/// and forwards their writes. A delete under one identity through the non-holder and then
+/// through a holder is answered with the original result once and never applied twice. A
+/// write through the non-holder while the group cannot commit is answered at the bundle's own
+/// deadline rather than the server's proposal deadline: the budget counted down across the
+/// hop. And with the lane to the primary cut, a write through the non-holder is sent to
+/// another holder that is up, under the same attempt, and lands once.
+#[tokio::test(flavor = "multi_thread")]
+async fn deadline_and_operation_id_survive_forwarding() -> Result<(), FixtureError> {
+    use shoal::client::SendOptions;
+    use shoal::shared::protocol::error::ErrorCode;
+    let mut cluster = Cluster::builder()
+        .cluster(4, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lane_links(true)
+        .write_timeout(Duration::from_secs(3))
+        .query_deadline(Duration::from_secs(3))
+        .start()
+        .await?;
+    let addrs: Vec<String> = (0..4).map(|id| cluster.node(id).endpoints.client.to_string()).collect();
+    let ids = cluster.node_ids();
+    // the placement, and a key the fourth node holds no copy of
+    let map = cluster.node_mut(0).command("MAP")?;
+    let placement: Vec<String> = map["ok"]["placement"]
+        .as_array()
+        .expect("a placement")
+        .iter()
+        .map(|id| id.as_str().unwrap_or_default().to_string())
+        .collect();
+    assert_eq!(placement.len(), 4, "{map}");
+    let index_of = |id: &str| ids.iter().position(|node| node == id).expect("a placed node");
+    let mut keys = Vec::new();
+    for key in 1000u64.. {
+        let tablet = tablet_of(key);
+        let non_holder = index_of(&placement[(tablet + 3) % 4]);
+        if non_holder == 3 {
+            keys.push(key);
+            if keys.len() == 3 {
+                break;
+            }
+        }
+    }
+    let (key, budget_key, reroute_key) = (keys[0], keys[1], keys[2]);
+    let tablet = tablet_of(key);
+    let primary = index_of(&placement[tablet % 4]);
+    let holders: Vec<usize> = (1..3).map(|k| index_of(&placement[(tablet + k) % 4])).collect();
+    // the write is forwarded from the non-holder and lands on the holders
+    write_note(&addrs[3], key, "v1").await?;
+    for holder in std::iter::once(&primary).chain(holders.iter()) {
+        wait_note(&addrs[*holder], key, Some("v1"), Duration::from_secs(10)).await?;
+    }
+    // one identity, through the non-holder and then through a holder: the original result once
+    let identity = uuid::Uuid::new_v4();
+    let first = delete_note_as(&addrs[3], key, &SendOptions::new().identity(identity)).await;
+    assert!(first.is_ok(), "the forwarded delete answered {first:?}");
+    let again = delete_note_as(&addrs[holders[0]], key, &SendOptions::new().identity(identity)).await;
+    assert!(again.is_ok(), "the same identity through a holder answered {again:?}");
+    let fresh = delete_note(&addrs[holders[0]], key).await;
+    assert!(matches!(fresh, Err(shoal::client::Errors::QueryDidNotSucceed { .. })), "{fresh:?}");
+    // the budget counts down across the hop: with the group unable to commit, a write through
+    // the non-holder is answered at its own deadline, not the server's proposal deadline
+    let (group, _) = group_of(&mut cluster, primary, "Note", budget_key)?;
+    assert_eq!(group_of(&mut cluster, primary, "Note", key)?.0, group, "the keys are on two groups");
+    for holder in &holders {
+        let _ = cluster.node_mut(*holder).command(&format!("STALL_WAL {group}"))?;
+    }
+    let started = std::time::Instant::now();
+    let stalled = write_note_as(&addrs[3], budget_key, "v", &SendOptions::new().deadline(Duration::from_millis(500))).await;
+    let elapsed = started.elapsed();
+    assert!(
+        matches!(failure_code(&stalled), Some(ErrorCode::OutcomeUnknown | ErrorCode::Timeout)),
+        "a write that could not commit answered {stalled:?}"
+    );
+    assert!(elapsed < Duration::from_millis(2500), "the forwarded write waited {elapsed:?}, past its bundle's budget");
+    for holder in &holders {
+        let _ = cluster.node_mut(*holder).command(&format!("RELEASE_WAL {group}"))?;
+    }
+    // the lane to the primary is down: the forward the link never wrote goes to another holder
+    let before = read_stats(&mut cluster, 3)?["stats"]["reroutes"].as_u64().unwrap_or(0);
+    cluster.data_link(3, primary).cut();
+    cluster.data_link(primary, 3).cut();
+    let rerouted = write_note_as(
+        &addrs[3],
+        reroute_key,
+        "v",
+        &SendOptions::new().identity(uuid::Uuid::new_v4()).retry(Duration::from_secs(15)),
+    )
+    .await;
+    assert!(rerouted.is_ok(), "a write through the non-holder with the primary's lane cut answered {rerouted:?}");
+    let reroutes = read_stats(&mut cluster, 3)?["stats"]["reroutes"].as_u64().unwrap_or(0);
+    assert!(reroutes > before, "the forward was not sent to another holder");
+    for holder in &holders {
+        wait_note(&addrs[*holder], reroute_key, Some("v"), Duration::from_secs(10)).await?;
+    }
+    cluster.data_link(3, primary).heal();
+    cluster.data_link(primary, 3).heal();
+    wait_digests_equal(&mut cluster, &[primary, holders[0], holders[1]], "Note", Duration::from_secs(30))?;
+    for id in 0..4 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
+
+/// Every acknowledged result survives repeated elections and lost replies (C7 M6, F42)
+///
+/// The oracle-driven mix of updates, deletes and no-ops through all three nodes, every
+/// operation under an identity of its own with a retry budget, while the leader of the hot
+/// group has its replies dropped, is killed, restarted, and the next leader is killed and
+/// restarted in turn. The sequential oracle accepts the history - a retry answered with its
+/// first result is one operation, an unknown outcome may have happened or not - and a read of
+/// every key on every node joins it and is accepted too.
+#[tokio::test(flavor = "multi_thread")]
+async fn quorum_history_survives_repeated_elections() -> Result<(), FixtureError> {
+    use shoal::client::SendOptions;
+    use shoal_model::event::{ClientOp, MutationOp, OpResult, ReadLevel};
+    use shoal_model::ids::{Attempt, Key, OpId, TabletId, Value};
+    use shoal_model::oracle::{Ledger, Outcome};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .detector_interval_ms(200)
+        .write_timeout(Duration::from_secs(3))
+        .query_deadline(Duration::from_secs(3))
+        .start()
+        .await?;
+    // six keys on one group, so the chaos below is aimed at the group they all live on
+    let (hot, group) = key_led_by(&mut cluster, "Note", 0, 1000)?;
+    let keys = keys_in_group(&mut cluster, "Note", &group, hot, 6)?;
+    let addrs: Vec<String> = (0..3).map(|node| cluster.node(node).endpoints.client.to_string()).collect();
+    let ledger = Arc::new(Mutex::new(Ledger::default()));
+    let clock = Arc::new(AtomicU64::new(0));
+    let next_id = Arc::new(AtomicU64::new(0));
+    let tablet_id = |key: u64| TabletId {
+        table: shoal_model::ids::TableId(1),
+        range: tablet_of(key) as u16,
+    };
+    // every key inserted once, before anything concurrent
+    for key in &keys {
+        let id = OpId(next_id.fetch_add(1, Ordering::SeqCst) as u32);
+        let attempt = Attempt { id, retry: 0 };
+        let op = ClientOp::Mutate(MutationOp::Insert { key: Key((*key % 251) as u8), value: Value(0) });
+        let invoke = clock.fetch_add(1, Ordering::SeqCst);
+        ledger.lock().unwrap().invoke(attempt, tablet_id(*key), op, invoke);
+        write_note(&addrs[0], *key, "0").await?;
+        let complete = clock.fetch_add(1, Ordering::SeqCst);
+        ledger.lock().unwrap().complete(attempt, complete, Outcome::Ok(OpResult::Applied(true)));
+    }
+    // updates and deletes through every node at once, each under an identity with a budget
+    let mut tasks = Vec::new();
+    for node in 0..3 {
+        let endpoints = addrs.clone();
+        let keys = keys.clone();
+        let ledger = ledger.clone();
+        let clock = clock.clone();
+        let next_id = next_id.clone();
+        tasks.push(tokio::spawn(async move {
+            // a client over every node, so a killed one is routed around
+            let mut ordered = endpoints.clone();
+            ordered.rotate_left(node);
+            let client = Shoal::<TestDbClient>::builder().endpoints(ordered).build().await?;
+            for round in 0..8u32 {
+                for (at, key) in keys.iter().enumerate() {
+                    let value = Value(node as u32 * 100 + round + 1);
+                    let delete = (round as usize + at + node) % 4 == 0;
+                    let op = if delete {
+                        MutationOp::Delete { key: Key((*key % 251) as u8) }
+                    } else {
+                        MutationOp::Update { key: Key((*key % 251) as u8), value }
+                    };
+                    let id = OpId(next_id.fetch_add(1, Ordering::SeqCst) as u32);
+                    let attempt = Attempt { id, retry: 0 };
+                    let invoke = clock.fetch_add(1, Ordering::SeqCst);
+                    ledger.lock().unwrap().invoke(attempt, TabletId {
+                        table: shoal_model::ids::TableId(1),
+                        range: tablet_of(*key) as u16,
+                    }, ClientOp::Mutate(op), invoke);
+                    let options = SendOptions::new().identity(uuid::Uuid::new_v4()).retry(Duration::from_secs(20));
+                    let outcome = if delete {
+                        match client.send_one_with(cluster::schema::NoteDelete::new(*key), &options).await {
+                            Ok(_) => Outcome::Ok(OpResult::Applied(true)),
+                            Err(shoal::client::Errors::QueryDidNotSucceed { .. }) => Outcome::Ok(OpResult::Applied(false)),
+                            Err(_) => Outcome::Unknown,
+                        }
+                    } else {
+                        let update = cluster::schema::NoteUpdate {
+                            partition_key: *key,
+                            text: Some(value.0.to_string()),
+                        };
+                        match client.send_one_with(update, &options).await {
+                            Ok(_) => Outcome::Ok(OpResult::Applied(true)),
+                            Err(shoal::client::Errors::QueryDidNotSucceed { .. }) => Outcome::Ok(OpResult::Applied(false)),
+                            Err(_) => Outcome::Unknown,
+                        }
+                    };
+                    let complete = clock.fetch_add(1, Ordering::SeqCst);
+                    ledger.lock().unwrap().complete(attempt, complete, outcome);
+                }
+            }
+            Ok::<(), shoal::client::Errors>(())
+        }));
+    }
+    // meanwhile: replies dropped on the leader, the leader killed and restarted, twice over
+    let mut leader = 0;
+    for _ in 0..2 {
+        std::thread::sleep(Duration::from_millis(500));
+        let _ = cluster.node_mut(leader).command("DROP_REPLIES 3")?;
+        std::thread::sleep(Duration::from_millis(300));
+        cluster.kill(leader)?;
+        let via = (leader + 1) % 3;
+        let (_, elected) = wait_group_leader_change(&mut cluster, via, "Note", hot, leader)?;
+        cluster.restart(leader, NodeKind::Server)?;
+        cluster.wait_joined(&[leader])?;
+        leader = elected;
+    }
+    for task in tasks {
+        task.await.expect("a writer task panicked")?;
+    }
+    // the replicas converge, and a read of every key on every node joins the ledger
+    let addrs: Vec<String> = (0..3).map(|node| cluster.node(node).endpoints.client.to_string()).collect();
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(60))?;
+    for addr in &addrs {
+        for key in &keys {
+            let id = OpId(next_id.fetch_add(1, Ordering::SeqCst) as u32);
+            let attempt = Attempt { id, retry: 0 };
+            let invoke = clock.fetch_add(1, Ordering::SeqCst);
+            ledger.lock().unwrap().invoke(
+                attempt,
+                tablet_id(*key),
+                ClientOp::Read {
+                    key: Key((*key % 251) as u8),
+                    level: ReadLevel::One,
+                },
+                invoke,
+            );
+            let seen = read_note(addr, *key).await?.map(|text| Value(text.parse().expect("a value")));
+            let complete = clock.fetch_add(1, Ordering::SeqCst);
+            ledger.lock().unwrap().complete(attempt, complete, Outcome::Ok(OpResult::Value(seen)));
+        }
+    }
+    let ledger = ledger.lock().unwrap().clone();
+    shoal_model::oracle::check(&ledger).unwrap_or_else(|error| panic!("the history is not sequential: {error:?}"));
     for id in 0..3 {
         assert_eq!(cluster.node(id).failure(), None, "node {id} died");
     }
