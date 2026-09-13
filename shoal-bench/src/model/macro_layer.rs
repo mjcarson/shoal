@@ -354,6 +354,48 @@ pub struct ClusterFacts {
     /// second by second ([C10](../../../docs/src/distributed/performance.md)).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub catchup: Option<CatchupFacts>,
+    /// The repair the arm ran in the background and what the client saw across it, if it did
+    ///
+    /// Only the background arm carries one; absent before
+    /// [F44](../../../docs/src/features/repair.md). The marks are when the repair was asked for
+    /// and when its record was done, the windows are the client's distribution before, during
+    /// and after it, and the counters are what every node's scrubs read - which is what a
+    /// scheduled scrub would cost the foreground ([C10](../../../docs/src/distributed/performance.md), Q12).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<BackgroundFacts>,
+}
+
+/// A repair run in the background of a measured phase, and what the client saw across it
+///
+/// Every time is milliseconds from the start of the measured phase, on the driver's clock.
+/// The windows are cut at the marks rather than at what the client saw, since a scrub is not
+/// an outage: the question is what it cost, and the answer is `during` read against `before`
+/// ([F44](../../../docs/src/features/repair.md)).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackgroundFacts {
+    /// What was asked for: `verify`
+    pub kind: String,
+    /// When the repair was asked for, if it was inside the run
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_ms: Option<u64>,
+    /// When every group of it was done, if that was inside the run
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_ms: Option<u64>,
+    /// How long that took, in whole seconds, if it finished
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seconds: Option<u64>,
+    /// How many groups the record covered
+    pub groups: u64,
+    /// How many of them came to a clean verdict
+    pub clean: u64,
+    /// Partitions the scrubs hashed, across every node
+    pub partitions: u64,
+    /// Bytes the scrubs read off the archives, across every node
+    pub bytes: u64,
+    /// The three windows: `before`, `during` and `after`, each with its own distribution
+    pub windows: Vec<WindowFacts>,
+    /// One bucket per second of the measured phase
+    pub series: Vec<SecondFacts>,
 }
 
 /// How a fault's returning node caught up, sampled from its own report after the restart

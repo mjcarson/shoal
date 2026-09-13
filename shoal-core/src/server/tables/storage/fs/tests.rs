@@ -604,3 +604,174 @@ fn a_missing_archive_is_reported_not_created() {
         );
     });
 }
+
+// ========================================================================
+// Archive record checksum tests (F44)
+// ========================================================================
+
+/// Build an archive map over a temp dir with its directories in place
+///
+/// # Arguments
+///
+/// * `temp_dir` - The directory to keep both halves of the table's storage in
+async fn archive_map(temp_dir: &TempDir) -> (FileSystemTableConf, ArchiveMap) {
+    // build a config that keeps both halves of this tables storage in our temp dir
+    let conf = FileSystemTableConf::builder()
+        .latency_sensitive(FileSystemLatencyWriterConf::default().path(temp_dir.path()))
+        .throughput_sensitive(FileSystemThroughputWriterConf::default().path(temp_dir.path()));
+    // make the directories an archive map expects to find
+    conf.setup_paths("TestRecord").await.unwrap();
+    // load an archive map over them, which is empty since nothing has been written
+    let map = ArchiveMap::new("shard-0", "TestRecord", &conf).await.unwrap();
+    (conf, map)
+}
+
+/// A record written by this build round-trips, and a flipped byte in it is refused by name
+///
+/// This is the M8 integrity row: every record of a format 2 archive carries a checksum over
+/// its payload, the one read path verifies it, and a payload that no longer hashes to it is
+/// `CorruptArchive` naming the archive and the partition rather than whatever rkyv would
+/// have made of the bytes - which, for a flipped byte inside a string, is often nothing at all.
+#[test]
+fn archive_records_are_checksummed_and_a_flipped_byte_is_refused() {
+    use super::map::{write_record, ArchiveFormat, ARCHIVE_HEADER_LEN};
+    use futures::AsyncWriteExt;
+    use std::io::{Read, Seek, SeekFrom, Write};
+
+    LocalExecutor::default().run(async {
+        let temp_dir = test_dir();
+        let (conf, map) = archive_map(&temp_dir).await;
+        // a new active archive begins with the header and its records carry checksums
+        let mut writer = map.get_active_writer().await.unwrap();
+        let active = *map.active.borrow();
+        assert_eq!(map.format_of(&active), ArchiveFormat::Checksummed);
+        // write one record: any bytes will do, since the checksum is over the payload alone
+        let payload: Vec<u8> = (0..4096u32).map(|i| (i % 251) as u8).collect();
+        let offset = write_record(&mut writer, &payload).await.unwrap();
+        writer.sync().await.unwrap();
+        writer.close().await.unwrap();
+        // the payload sits past the header and the record's own prefix
+        assert_eq!(offset as usize, ARCHIVE_HEADER_LEN + 16);
+        let entry = super::map::ArchiveEntry {
+            key: 7,
+            archive: active,
+            offset,
+            size: payload.len(),
+        };
+        map.set_partition(7, entry);
+        // the record reads back as it was written, verified
+        let read = map.read_record(&entry).await.unwrap();
+        assert_eq!(&read[..], &payload[..]);
+        assert_eq!(map.integrity.checksum_failures.get(), 0);
+        assert_eq!(map.integrity.unverified_reads.get(), 0);
+        // the file begins with the header that says what it is
+        let path = conf.get_archive_path("TestRecord").join(active.to_string());
+        let mut file = std::fs::OpenOptions::new().read(true).write(true).open(&path).unwrap();
+        let mut head = [0u8; ARCHIVE_HEADER_LEN];
+        file.read_exact(&mut head).unwrap();
+        assert_eq!(ArchiveFormat::detect(&head), ArchiveFormat::Checksummed);
+        // flip one byte in the middle of the payload on disk
+        let flipped = offset + 1000;
+        file.seek(SeekFrom::Start(flipped)).unwrap();
+        let mut byte = [0u8; 1];
+        file.read_exact(&mut byte).unwrap();
+        byte[0] ^= 0x40;
+        file.seek(SeekFrom::Start(flipped)).unwrap();
+        file.write_all(&byte).unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        // the next read of that record is refused by name, and counted
+        let error = map.read_record(&entry).await.expect_err("a flipped byte was read as valid");
+        match error {
+            ServerError::Shoal(ShoalError::CorruptArchive {
+                archive,
+                partition_id,
+                expected,
+                found,
+            }) => {
+                assert_eq!(archive, active);
+                assert_eq!(partition_id, 7);
+                assert_ne!(expected, found);
+            }
+            other => panic!("Expected CorruptArchive, got: {other:?}"),
+        }
+        assert_eq!(map.integrity.checksum_failures.get(), 1);
+        // and the loader gives up on it rather than retrying bytes that will not change
+        assert_eq!(classify(&error), LoadFailure::Fatal);
+        map.close_all().await.unwrap();
+    });
+}
+
+/// An archive from before checksums reads as it always did, and every read of it is counted
+///
+/// A format 1 archive has no header and `[size][payload]` records. Nothing in it can be
+/// verified, so the read is served as it was before F44 and counted as unverified, which is
+/// what the integrity report shows an operator whose archives have not all been rewritten yet.
+#[test]
+fn a_format_1_archive_reads_unverified_and_is_counted() {
+    use super::map::ArchiveFormat;
+
+    LocalExecutor::default().run(async {
+        let temp_dir = test_dir();
+        let (conf, map) = archive_map(&temp_dir).await;
+        // lay a format 1 archive down by hand: one record, no header, no checksum
+        let old = Uuid::new_v4();
+        let payload: Vec<u8> = (0..512u32).map(|i| (i % 13) as u8).collect();
+        let mut bytes = payload.len().to_le_bytes().to_vec();
+        bytes.extend_from_slice(&payload);
+        let path = conf.get_archive_path("TestRecord").join(old.to_string());
+        std::fs::write(&path, &bytes).unwrap();
+        map.all_archives.borrow_mut().insert(old);
+        let entry = super::map::ArchiveEntry {
+            key: 3,
+            archive: old,
+            offset: 8,
+            size: payload.len(),
+        };
+        map.set_partition(3, entry);
+        // opening it decides its format from its first bytes
+        let handle = map.get_archive(&old).await.unwrap();
+        handle.close().await.unwrap();
+        assert_eq!(map.format_of(&old), ArchiveFormat::Unverified);
+        // the record reads as it was written, and the read is counted as one nothing verified
+        let read = map.read_record(&entry).await.unwrap();
+        assert_eq!(&read[..], &payload[..]);
+        assert_eq!(map.integrity.unverified_reads.get(), 1);
+        assert_eq!(map.integrity.checksum_failures.get(), 0);
+        // a flipped byte in it is not caught here, which is the whole reason format 2 exists
+        map.close_all().await.unwrap();
+    });
+}
+
+/// A torn record - one the read comes back short on - is corruption too
+#[test]
+fn a_torn_record_is_refused() {
+    use super::map::write_record;
+    use futures::AsyncWriteExt;
+
+    LocalExecutor::default().run(async {
+        let temp_dir = test_dir();
+        let (conf, map) = archive_map(&temp_dir).await;
+        let mut writer = map.get_active_writer().await.unwrap();
+        let active = *map.active.borrow();
+        let payload = vec![9u8; 2048];
+        let offset = write_record(&mut writer, &payload).await.unwrap();
+        writer.sync().await.unwrap();
+        writer.close().await.unwrap();
+        // point an entry past the end of what was written, which is what a record whose
+        // tail was never flushed looks like from the map's side
+        let entry = super::map::ArchiveEntry {
+            key: 1,
+            archive: active,
+            offset,
+            size: payload.len() + 8192,
+        };
+        // close the cached handle so the file size is what is on disk
+        map.close_all().await.unwrap();
+        let _ = conf;
+        let error = map.read_record(&entry).await.expect_err("a short read was served");
+        assert!(matches!(error, ServerError::Shoal(ShoalError::CorruptArchive { .. })), "{error:?}");
+        assert_eq!(map.integrity.checksum_failures.get(), 1);
+        map.close_all().await.unwrap();
+    });
+}

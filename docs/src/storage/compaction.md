@@ -390,7 +390,11 @@ for (used, archive_ids) in &sorted.sorted {
 
 The rules:
 
-- **Skip archives more than 50% live.** Rewriting them costs more than it reclaims.
+- **Skip archives more than 50% live.** Rewriting them costs more than it reclaims. *Except an
+  archive from before checksums* ([F44](../features/repair.md)): a format 1 archive is
+  rewritten whatever its utilization, since rewriting it into the format 2 active archive is how
+  its records come to carry a checksum; every record read for the rewrite is verified first, so
+  a corrupt one fails the compaction rather than being laundered under a fresh checksum.
 - **Never compact the active archive in place.** If it qualifies, mint a new active uuid and
   swap the writer instead. The comment explains why: compacting it "can lead to dangling
   partitions if we have already compacted data to the prior active archive in this

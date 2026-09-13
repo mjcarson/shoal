@@ -390,6 +390,12 @@ where
         }
     }
 
+    /// A handle to make administrative requests as the process from another thread, on a cluster node
+    #[must_use]
+    pub fn admin_sender(&self) -> Option<crate::server::control::AdminSender> {
+        self.control.as_ref().map(ControlHandle::admin_sender)
+    }
+
     /// Make one shard fail, for a test of what the cluster does about a dead shard
     ///
     /// # Arguments

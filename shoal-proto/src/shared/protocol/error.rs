@@ -136,6 +136,11 @@ pub enum ErrorCode {
     ///
     /// A joiner before the placement is initialized, or a node the placement does not name.
     NotInitialized = 63,
+    /// The copy this read would be served from is quarantined
+    ///
+    /// A checksum failed on it, or a scrub found it divergent, and it serves nothing until a
+    /// verified repair or an operator lifts it ([F44](../../../../docs/src/features/repair.md)).
+    Quarantined = 64,
 }
 
 impl ErrorCode {
@@ -180,6 +185,7 @@ impl ErrorCode {
             61 => ErrorCode::StaleVersion,
             62 => ErrorCode::NotLeader,
             63 => ErrorCode::NotInitialized,
+            64 => ErrorCode::Quarantined,
             // zero, and anything a newer peer knows about that we do not
             _ => ErrorCode::Unknown,
         }
@@ -209,6 +215,7 @@ impl ErrorCode {
             ErrorCode::StaleVersion => "StaleVersion",
             ErrorCode::NotLeader => "NotLeader",
             ErrorCode::NotInitialized => "NotInitialized",
+            ErrorCode::Quarantined => "Quarantined",
         }
     }
 }

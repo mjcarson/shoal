@@ -51,6 +51,7 @@ use super::detector::Detector;
 use super::listener::{control_acceptor, err, ok, Inbound};
 use super::network::{PeerNetwork, RpcFailure};
 use super::store::{self, ControlStateMachine, CONTROL_DIR};
+use super::repair::{QuarantinedCopy, RepairMode};
 use super::types::{
     ControlCommand, ControlConfig, ControlResponse, ControlState, MemberHealth, MemberRecord,
     MemberRole, MemberState,
@@ -207,10 +208,56 @@ pub enum ControlRequest {
     ShardHealth(ShardHealthEvent),
     /// A shard's tablet groups, as it last reported them
     Replication(crate::server::replication::ShardReplication),
+    /// A node's own proposal - a repair driver's progress - answered with what it came to
+    /// ([F44](../../../../docs/src/features/repair.md))
+    Propose {
+        /// The command
+        command: ControlCommand,
+        /// Where its outcome goes
+        reply: kanal::Sender<Result<ControlResponse, String>>,
+    },
     /// Send the leader one report behind the last, as a replay would be, for a test
     StaleReport(mpsc::Sender<Result<(), String>>),
     /// Stop the group and exit the thread
     Shutdown,
+}
+
+/// A cloneable way to make administrative requests as the process, from any thread
+///
+/// The control thread's request channel and nothing else, so a thread that outlives no
+/// handle can still ask ([F44](../../../../docs/src/features/repair.md)).
+#[derive(Clone)]
+pub struct AdminSender {
+    /// Where requests go
+    requests: kanal::Sender<ControlRequest>,
+}
+
+impl AdminSender {
+    /// Make an administrative request as the process itself
+    ///
+    /// # Arguments
+    ///
+    /// * `request` - What is asked
+    ///
+    /// # Errors
+    ///
+    /// Fails if the control thread is gone or did not answer.
+    pub fn admin(&self, request: AdminRequest) -> Result<AdminResponse, ServerError> {
+        let (reply, rx) = kanal::bounded(1);
+        self.requests
+            .send(ControlRequest::Admin(AdminCall {
+                request,
+                principal: None,
+                trusted: true,
+                reply,
+            }))
+            .map_err(|_| ServerError::ControlFailed {
+                error: "the control thread is not answering".to_string(),
+            })?;
+        rx.recv_timeout(PROPOSE_TIMEOUT + REQUEST_TIMEOUT).map_err(|_| ServerError::ControlFailed {
+            error: "the control thread did not answer an admin request".to_string(),
+        })
+    }
 }
 
 /// The cluster as one node sees it
@@ -694,6 +741,17 @@ impl ControlHandle {
             })
     }
 
+    /// A handle that can make administrative requests as the process, from any thread
+    ///
+    /// What a benchmark's background thread holds to ask for a repair mid-run
+    /// ([F44](../../../../docs/src/features/repair.md)).
+    #[must_use]
+    pub fn admin_sender(&self) -> AdminSender {
+        AdminSender {
+            requests: self.requests.clone(),
+        }
+    }
+
     /// Send the leader one stale report, for a test
     ///
     /// # Errors
@@ -824,6 +882,10 @@ struct Core {
     reachability: BTreeMap<NodeId, Reachability>,
     /// The shard health last proposed, so a change is proposed once
     reported_shards: Vec<u16>,
+    /// The quarantined copies across this node's shards, as they last reported
+    quarantined: Vec<QuarantinedCopy>,
+    /// The quarantined copies last proposed, so a change is proposed once
+    reported_quarantine: Vec<QuarantinedCopy>,
     /// The failure detector, which only a leader feeds
     detector: Detector,
     /// The members whose health this leader is proposing, so one verdict is in flight per member
@@ -1223,6 +1285,8 @@ async fn serve(startup: Startup) -> Result<(), ServerError> {
         report_seq: 0,
         reachability: BTreeMap::new(),
         reported_shards: Vec::new(),
+        quarantined: Vec::new(),
+        reported_quarantine: Vec::new(),
         detector: Detector::new(&policy.failure_detector),
         health_in_flight: BTreeSet::new(),
         replication: BTreeMap::new(),
@@ -1377,6 +1441,19 @@ impl Core {
             ControlRequest::Replication(report) => {
                 // the newest report per shard is what readiness folds
                 self.replication.insert(report.shard, report);
+                // the quarantined copies across every shard, for the next report
+                self.quarantined = self.quarantined_copies();
+            }
+            ControlRequest::Propose { command, reply } => {
+                // a node's own proposal goes through whoever leads
+                let raft = self.raft.clone();
+                let network = self.network.clone();
+                let machine = self.machine.clone();
+                glommio::spawn_local(async move {
+                    let outcome = propose(&raft, &network, &machine, command).await.map_err(|error| format!("{error:?}"));
+                    let _ = reply.send(outcome);
+                })
+                .detach();
             }
             ControlRequest::ShardHealth(health) => {
                 // a shard runs fewer than a u16 holds
@@ -1639,6 +1716,23 @@ impl Core {
             if member.health == MemberHealth::Down {
                 self.propose_health(report.node, MemberHealth::Up, member.record.incarnation, None);
             }
+            // a change in the member's quarantined copies is committed, so every node routes
+            // around them ([F44](../../../../docs/src/features/repair.md))
+            let copies: Vec<QuarantinedCopy> = report.quarantined.iter().map(QuarantinedCopy::from_member).collect();
+            if member.quarantined != copies {
+                let raft = self.raft.clone();
+                let network = self.network.clone();
+                let machine = self.machine.clone();
+                let command = ControlCommand::ReportQuarantine {
+                    node: report.node,
+                    incarnation: report.incarnation,
+                    copies,
+                };
+                glommio::spawn_local(async move {
+                    let _ = propose(&raft, &network, &machine, command).await;
+                })
+                .detach();
+            }
             // a change in shard health is committed, so every node sees it
             if member.shards_failed != report.shards_failed {
                 let raft = self.raft.clone();
@@ -1745,6 +1839,48 @@ impl Core {
                     expected_version: call.request.expected_version,
                     table: *id,
                     level,
+                }
+            }
+            // the record of a repair, as the applied state holds it
+            AdminKind::RepairStatus { op } => {
+                let outcome = match state.repairs.get(op) {
+                    Some(record) => Ok(AdminOutcome::Read(serde_json::to_value(record).unwrap_or_default())),
+                    None => Err(AdminError::new(ErrorCode::Internal, format!("no repair operation {op} is recorded"))),
+                };
+                let _ = call.reply.send(answer(outcome));
+                return;
+            }
+            // the table and the mode are resolved before anything is proposed
+            AdminKind::Repair {
+                table,
+                tablet,
+                mode,
+                source,
+                release,
+            } => {
+                let Some((_, id)) = self.tables.iter().find(|(name, _)| name == table) else {
+                    let _ = call.reply.send(answer(Err(AdminError::new(
+                        ErrorCode::Internal,
+                        format!("no table is named {table}; the schema serves {:?}", self.tables.iter().map(|(name, _)| name).collect::<Vec<_>>()),
+                    ))));
+                    return;
+                };
+                let Some(mode) = RepairMode::parse(mode) else {
+                    let _ = call.reply.send(answer(Err(AdminError::new(
+                        ErrorCode::Internal,
+                        format!("{mode} is not a repair mode; verify or repair"),
+                    ))));
+                    return;
+                };
+                ControlCommand::Repair {
+                    op: call.request.op,
+                    principal: call.principal.clone().unwrap_or_else(|| "process".to_string()),
+                    expected_version: call.request.expected_version,
+                    table: *id,
+                    tablet: *tablet,
+                    mode,
+                    source: *source,
+                    release: *release,
                 }
             }
         };
@@ -2059,6 +2195,25 @@ impl Core {
         .detach();
     }
 
+    /// Every quarantined copy across this node's shards, as they last reported
+    fn quarantined_copies(&self) -> Vec<QuarantinedCopy> {
+        let mut copies: Vec<QuarantinedCopy> = self
+            .replication
+            .values()
+            .flat_map(|shard| shard.groups.iter())
+            .filter_map(|group| {
+                group.quarantined.map(|reason| QuarantinedCopy {
+                    table: group.table,
+                    group: group.group,
+                    tablets: group.tablet_ids.clone(),
+                    reason,
+                })
+            })
+            .collect();
+        copies.sort_by_key(|copy| copy.group);
+        copies
+    }
+
     /// Send the leader this node's status report
     fn report(&mut self) {
         if self.status != JoinStatus::Joined {
@@ -2066,6 +2221,21 @@ impl Core {
         }
         // the leader keeps its own health; a change in its shards is committed directly
         if self.is_leader {
+            if self.reported_quarantine != self.quarantined {
+                self.reported_quarantine = self.quarantined.clone();
+                let raft = self.raft.clone();
+                let network = self.network.clone();
+                let machine = self.machine.clone();
+                let command = ControlCommand::ReportQuarantine {
+                    node: self.node,
+                    incarnation: self.member.incarnation,
+                    copies: self.quarantined.clone(),
+                };
+                glommio::spawn_local(async move {
+                    let _ = propose(&raft, &network, &machine, command).await;
+                })
+                .detach();
+            }
             if self.reported_shards != self.shards_failed {
                 self.reported_shards = self.shards_failed.clone();
                 let raft = self.raft.clone();
@@ -2189,6 +2359,7 @@ impl Core {
                 .filter(|(_, reach)| reach.misses == 0)
                 .map(|(node, reach)| (*node, reach.rtt_us))
                 .collect(),
+            quarantined: self.quarantined.iter().map(QuarantinedCopy::to_member).collect(),
         };
         let payload = serde_json::to_vec(&report).map_err(|error| error.to_string())?;
         let network = self.network.clone();

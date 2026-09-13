@@ -275,8 +275,11 @@ block another on IO. The cost is that shard count is baked into the layout
 - One *persisting* storage engine. `NoStorage` is the second implementor and answers "nothing"
   to most of the trait, so the parts of `StorageSupport` that describe how bytes reach a device
   still have exactly one user ([F9](../features/ephemeral-tables.md)).
-- No checksums on archive data — only on intent log records and the map snapshot. A corrupt
-  archive extent is detected only if rkyv validation happens to fail.
+- ~~No checksums on archive data — only on intent log records and the map snapshot. A corrupt
+  archive extent is detected only if rkyv validation happens to fail.~~ Every record of a
+  format 2 archive carries a checksum verified on every read, and so do the checkpoint file
+  and the retry sidecar ([F44](../features/repair.md)); an archive from before it is read
+  unverified and counted until archive compaction rewrites it.
 - No way to rebuild a lost archive map by scanning archives, despite the size prefixes being
   written for that purpose.
 - No compression and no block-level encoding; partitions are stored as raw rkyv archives.

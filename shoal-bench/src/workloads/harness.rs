@@ -13,6 +13,7 @@
 //!   deliberately run with different shard counts.
 //! - A workload that panics or hangs costs its own run instead of the rest of the capture.
 
+pub mod background;
 pub mod cluster;
 pub mod conf;
 pub mod driver;
@@ -187,6 +188,12 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
     if fault.is_some() && staged.is_none() {
         bail!("{} asks for a fault and places no peers to inject it into", workload.id());
     }
+    // a background repair is asked of a placed cluster's control plane, so the same refusal
+    // ([F44](../../docs/src/features/repair.md))
+    let background_spec = workload.background(request.scale);
+    if background_spec.is_some() && staged.is_none() {
+        bail!("{} asks for a background repair and places no peers to run it over", workload.id());
+    }
     // start the shards and wait until they answer - or, for a server somebody else started,
     // only wait until it answers
     let mut pool = match &request.server {
@@ -279,6 +286,21 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
         )?),
         _ => None,
     };
+    // a background arm's repair is asked for on its schedule and polled until the run ends;
+    // the integrity counters before the run are what its cost is read against
+    let integrity_before = match (&background_spec, pool.as_ref(), conf.as_ref(), staged.as_ref()) {
+        (Some(_), Some(pool), Some(conf), Some(staged)) => Some(cluster::integrity_sum(&cluster::node_reports(staged, pool, conf, &runtime)?)),
+        _ => None,
+    };
+    let background_injected = match (&background_spec, pool.as_ref(), seeded.is_ok()) {
+        (Some(spec), Some(pool), true) => {
+            let admin = pool
+                .admin_sender()
+                .with_context(|| format!("{} asks for a background repair on a node with no control plane", workload.id()))?;
+            Some(background::inject(spec, admin, run_started)?)
+        }
+        _ => None,
+    };
     // drive the workload, keeping the result rather than unwrapping it, so the server is stopped
     // on the failing path as well as the succeeding one
     let outcome = seeded.and_then(|()| {
@@ -290,6 +312,12 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
     // the fault's marks, waited for before the servers are read so the restarted peer is in
     // the reports
     let marks = injected.map(fault::Injected::finish).transpose();
+    // and the background repair's, which stops its polling
+    let background_marks = background_injected.map(background::Injected::finish).transpose();
+    let integrity_after = match (&background_spec, pool.as_ref(), conf.as_ref(), staged.as_ref()) {
+        (Some(_), Some(pool), Some(conf), Some(staged)) => Some(cluster::integrity_sum(&cluster::node_reports(staged, pool, conf, &runtime)?)),
+        _ => None,
+    };
     // what the links did during the run, and where every replica ended, read before the
     // servers that hold them stop
     if let (Some(facts), Some(pool), Some(conf), Some(staged)) =
@@ -325,6 +353,19 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
         if let (Some(samples), Some(restarted)) = (&marks.catchup, marks.restarted_at) {
             facts.catchup = Some(catchup::cut(restarted.saturating_duration_since(started), samples));
         }
+    }
+    // a background arm cuts what its client saw at the repair's marks
+    // ([F44](../../docs/src/features/repair.md))
+    if let (Some(spec), Some(facts)) = (&background_spec, cluster_facts.as_mut()) {
+        let marks = background_marks?.context("the background arm ran without its repair")?;
+        let started = measured
+            .started
+            .with_context(|| format!("{} runs a background repair but its driver keeps no timeline", workload.id()))?;
+        let (partitions, bytes) = match (integrity_before, integrity_after) {
+            (Some(before), Some(after)) => (after.0.saturating_sub(before.0), after.1.saturating_sub(before.1)),
+            _ => (0, 0),
+        };
+        facts.background = Some(background::facts(started, &marks, &measured.timeline, spec.run_for, partitions, bytes));
     }
     // build the stage report now that every shard has handed its records over
     //

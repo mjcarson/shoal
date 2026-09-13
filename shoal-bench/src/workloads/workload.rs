@@ -302,6 +302,20 @@ pub struct FaultSpec {
     pub run_for: std::time::Duration,
 }
 
+/// A repair an arm asks the harness to run in the background of its measured phase
+///
+/// Only a placed arm can ask for one, since the repair is asked of the cluster's control plane;
+/// the harness refuses one on any other arm ([F44](../../../docs/src/features/repair.md)).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackgroundSpec {
+    /// How long after the measured phase starts to ask for the repair
+    pub at: std::time::Duration,
+    /// How long the whole run is scheduled for, which bounds the polling
+    pub run_for: std::time::Duration,
+    /// The table to verify, by the name the schema spells it
+    pub table: &'static str,
+}
+
 /// One operation of a timed run, as the client saw it
 ///
 /// What a fault arm keeps beside its distribution: every operation stamped by when it started
@@ -541,6 +555,20 @@ pub trait Workload: Send + Sync {
     /// ([F43](../../../docs/src/features/node-recovery.md)).
     fn catchup(&self) -> bool {
         false
+    }
+
+    /// The repair this workload asks the harness to run in the background, if any
+    ///
+    /// Only the background arm asks for one, and the record gains `cluster.background`
+    /// ([F44](../../../docs/src/features/repair.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `scale` - How large a run was asked for, which decides the schedule
+    fn background(&self, scale: Scale) -> Option<BackgroundSpec> {
+        // an ordinary arm runs against a cluster nothing scrubs
+        let _ = scale;
+        None
     }
 }
 

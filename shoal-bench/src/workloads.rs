@@ -24,6 +24,7 @@
 //! A test asserts those two agree, so forgetting the second is a test failure rather than a
 //! workload that is never run.
 
+pub mod cluster_background;
 pub mod cluster_catchup;
 pub mod cluster_failover;
 pub mod cluster_hop;
@@ -172,6 +173,14 @@ pub fn all() -> Vec<Box<dyn Workload>> {
     // ([F43](../../docs/src/features/node-recovery.md))
     built.extend(
         cluster_catchup::all()
+            .into_iter()
+            .map(|workload| Box::new(workload) as Box<dyn Workload>),
+    );
+    // the background arm, appended after the catch-up arms: the same placement and mixture
+    // with a repair scrubbing the table in the background of the run
+    // ([F44](../../docs/src/features/repair.md))
+    built.extend(
+        cluster_background::all()
             .into_iter()
             .map(|workload| Box::new(workload) as Box<dyn Workload>),
     );

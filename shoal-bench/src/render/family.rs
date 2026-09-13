@@ -761,6 +761,40 @@ pub const FAMILIES: &[Family] = &[
              node's own retry table, which only its leading would exercise.",
     },
     Family {
+        name: "cluster-background",
+        title: "What a scrub costs the foreground while it runs",
+        surface: Surface::AllWorkloads,
+        what_it_measures:
+            "One arm, `background/repair`: the kill arm's placement, mixture and client, driven \
+             for the kill arm's time with nothing killed, and a `Repair` of the reference table \
+             in verify mode asked for a third of the way through, its record polled each second \
+             until every group is done. Every group's leader scrubs it while the mixture goes on: \
+             the resident partitions hashed on the shard loop, the archived ones read off the disk \
+             and hashed on a task, every member's report polled and judged. `cluster.background` \
+             is when the repair was asked for and done, how many groups it covered and how many \
+             were clean, what the scrubs hashed and read across every node, and the client's \
+             distribution before, during and after it with a per second series.",
+        how_to_read_it:
+            "`during` against `before` is the number: what a scrub of the whole table costs the \
+             foreground's median and tail while it runs, and `seconds` is how long it costs it \
+             for. `bytes` over `seconds` is what the scrubs read off the archives per second, \
+             which a scheduled scrub at an interval would spend that fraction of the time; \
+             `partitions` says how much of that was resident and cost the loop rather than the \
+             disk. A `clean` under `groups` is a verdict to read the record for, not a cost.",
+        what_would_make_it_wrong:
+            "A `finished_ms` that is absent, which means the run ended inside the scrub and the \
+             `after` window is empty. A `bytes` of zero at full scale, which means every partition \
+             was resident and the arm priced the loop's hashing alone. Reading `during` as an \
+             outage: the client keeps its depth throughout and a slower window is the scrub's \
+             share of the cores and the device, not a refusal.",
+        what_it_cannot_say:
+            "What a repair that installs costs, which is the snapshot arm's transfer on top of \
+             this. What a scrub costs over a network, where the digests are a round trip each. \
+             What it costs on a table whose archives are wider than memory, where the archived \
+             pass is the whole of it. What a scheduled interval should be: this is the cost of one \
+             pass, and the interval multiplies it.",
+    },
+    Family {
         name: "retired",
         title: "The retired blended workload",
         surface: Surface::AllWorkloads,
@@ -826,6 +860,9 @@ pub fn family_for(id: &str) -> Option<&'static Family> {
     } else if id.starts_with("macro/cluster/catchup/") {
         // the catch-up arms, before the wider cluster prefix for the same reason
         "cluster-catchup"
+    } else if id.starts_with("macro/cluster/background/") {
+        // the background arm, before the wider cluster prefix for the same reason
+        "cluster-background"
     } else if id.starts_with("macro/cluster/failover/") {
         // the fault arms, before the wider cluster prefix for the same reason
         "cluster-failover"

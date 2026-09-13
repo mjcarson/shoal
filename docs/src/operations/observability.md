@@ -380,6 +380,20 @@ What is *not* fixed is the discarding itself: a flipped bit mid-log still costs 
 after it ([Recovery](../storage/recovery.md#truncation-and-corruption)), on the compaction path
 as much as the recovery one.
 
+**Archives are covered too since [F44](../features/repair.md).** Every record of a format 2
+archive carries a checksum, and a read that meets one that does not hash logs an `ERROR`
+naming the archive and the partition, quarantines the copy the record belongs to (`ERROR`
+`"quarantined this shard's copy of a group"` with the group, the reason, the index and the
+operation), and counts. The counts are the `integrity` block of the `Replication` admin read,
+per shard and folded per node - `checksum_failures`, `unverified_reads` (records read from an
+archive written before checksums, which archive compaction retires), `log_lost` (groups built
+at open with a checkpoint or archives and no log behind them,
+[item 99](../appendix/resolved/durable-log-reversion.md)), `quarantined`, `scrubs`,
+`scrub_partitions` and `scrub_bytes` - and readiness carries the node's quarantined count
+beside its installing one. A scrub logs `INFO` on apply and on its digest landing, the judge
+`INFO` with the outcome, and a quarantine over the lane `WARN`; a corrupt checkpoint file or
+retry sidecar fails the open by name.
+
 ### Debug output that is not tracing
 
 ~~Three places print directly to stdout, bypassing the level filter entirely: `Networking::to_addr`,

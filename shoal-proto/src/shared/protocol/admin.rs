@@ -90,6 +90,31 @@ pub enum AdminKind {
         /// The level, or none to clear it
         level: Option<String>,
     },
+    /// Scrub a table's groups at a committed boundary, judge the copies, and repair or release
+    ///
+    /// `verify` scrubs, judges and quarantines what the verdict names; `repair` goes on to
+    /// replace every quarantined copy from a verified source. A `source` overrides the
+    /// majority rule with the operator's word, and `release` lifts the quarantines the
+    /// operation's groups hold after an explicit outcome rather than judging them
+    /// ([F44](../../../../docs/src/features/repair.md)).
+    Repair {
+        /// The table, by the name the schema spells it
+        table: String,
+        /// One tablet, or every tablet of the table
+        tablet: Option<u16>,
+        /// `verify` or `repair`
+        mode: String,
+        /// The node whose copies are to be trusted, or none for the majority rule
+        source: Option<NodeId>,
+        /// Whether to lift the quarantines rather than judge
+        #[serde(default)]
+        release: bool,
+    },
+    /// The record of a repair operation, as the control state holds it
+    RepairStatus {
+        /// The operation
+        op: Uuid,
+    },
 }
 
 impl AdminKind {
@@ -98,7 +123,10 @@ impl AdminKind {
     pub const fn is_mutation(&self) -> bool {
         matches!(
             self,
-            AdminKind::Initialize { .. } | AdminKind::SetControlVoters { .. } | AdminKind::SetTableReadPolicy { .. }
+            AdminKind::Initialize { .. }
+                | AdminKind::SetControlVoters { .. }
+                | AdminKind::SetTableReadPolicy { .. }
+                | AdminKind::Repair { .. }
         )
     }
 
@@ -113,6 +141,8 @@ impl AdminKind {
             AdminKind::Initialize { .. } => "initialize",
             AdminKind::SetControlVoters { .. } => "set_control_voters",
             AdminKind::SetTableReadPolicy { .. } => "set_table_read_policy",
+            AdminKind::Repair { .. } => "repair",
+            AdminKind::RepairStatus { .. } => "repair_status",
         }
     }
 }
@@ -199,6 +229,23 @@ pub struct TopologyMember {
     pub incarnation: u64,
     /// The shards that have failed on it, by index
     pub shards_failed: Vec<u16>,
+    /// The copies it holds that are quarantined, which reads are routed around
+    /// ([F44](../../../../docs/src/features/repair.md))
+    #[serde(default)]
+    pub quarantined: Vec<QuarantinedMember>,
+}
+
+/// One quarantined copy on a member, as a client sees it
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuarantinedMember {
+    /// The table
+    pub table: TableId,
+    /// The group, as its identity's number
+    pub group: u64,
+    /// The tablets the copy serves
+    pub tablets: Vec<u16>,
+    /// Why
+    pub reason: String,
 }
 
 /// The cluster as a client sees it
@@ -324,6 +371,7 @@ mod tests {
                 health: "up".to_string(),
                 incarnation: 2,
                 shards_failed: vec![1],
+                quarantined: Vec::new(),
             }],
             placement: vec![NodeId::mint()],
             desired_rf: 3,

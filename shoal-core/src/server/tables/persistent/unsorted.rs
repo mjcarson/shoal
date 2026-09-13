@@ -16,8 +16,7 @@ use rkyv::validation::shared::SharedValidator;
 use rkyv::validation::Validator;
 use rkyv::{Archive, Deserialize, Serialize};
 use std::cell::RefCell;
-use std::collections::HashMap;
-use std::collections::{hash_map, HashSet};
+use std::collections::{hash_map, BTreeMap, HashMap, HashSet};
 use std::hash::BuildHasherDefault;
 use std::sync::Arc;
 use tracing::Span;
@@ -25,6 +24,7 @@ use tracing::{event, instrument, Level};
 use uuid::Uuid;
 
 use crate::server::messages::{Answer, LoadedPartition, QueryMetadata, SealReply, ServerMsg};
+use crate::server::replication::digest::{hash_partition, PartitionDigest, PendingDigest};
 use crate::server::replication::{CommandResult, ResultKind};
 use crate::server::tables::persistent::{adjust_memory_usage, open, ApplyStep, RowSink};
 use crate::shared::protocol::peer::Command;
@@ -1334,6 +1334,74 @@ where
         Ok((rows, acc))
     }
 
+    /// Take a canonical cut of some tablets: hash what is resident, collect what is archived
+    ///
+    /// The loop's half of a scrub ([F44](../../../../docs/src/features/repair.md)): every
+    /// resident partition of the tablets is hashed here, as its key, its row count and its row
+    /// re-serialized, and every archived partition that is not resident is collected with a
+    /// handle to read it by. A resident copy shadows the archived one, since it is the newer.
+    /// Unlike [`Self::digest`] this reads nothing from disk on the loop and never sees archive
+    /// bytes as such, so two replicas with the same rows agree however their archives lie.
+    ///
+    /// # Arguments
+    ///
+    /// * `tablets` - The tablets
+    ///
+    /// # Errors
+    ///
+    /// Fails if an archive a collected record is in cannot be opened.
+    pub async fn canonical_cut(&self, tablets: &[u16]) -> Result<PendingDigest, ServerError> {
+        let mut resident_keys = HashSet::new();
+        let mut resident = BTreeMap::new();
+        // every resident partition of the tablets, hashed as the row it holds
+        for (key, entry) in &self.partitions {
+            // truncation cannot happen: a tablet id is twelve bits
+            #[allow(clippy::cast_possible_truncation)]
+            let tablet = crate::server::ring::Ring::tablet_of(*key) as u16;
+            if !tablets.contains(&tablet) {
+                continue;
+            }
+            // a resident copy is the state whatever the archive holds
+            resident_keys.insert(*key);
+            let bytes = match entry {
+                MaybeLoaded::Loaded { partition, .. } => match &partition.row {
+                    MaybeRow::Row(row) => Some(RkyvSupport::serialize(row)),
+                    MaybeRow::Tombstone => None,
+                },
+                MaybeLoaded::Accessible(read) => match &read.archived().row {
+                    ArchivedMaybeRow::Row(row) => <R as RkyvSupport>::deserialize(row).ok().map(|row| RkyvSupport::serialize(&row)),
+                    ArchivedMaybeRow::Tombstone => None,
+                },
+            };
+            if let Some(digest) = hash_partition(*key, bytes.iter().map(|bytes| bytes.as_slice())) {
+                resident.insert(*key, digest);
+            }
+        }
+        // what is archived and not resident, with the handles to read it by
+        let archived = self.storage.archived_cut(tablets, &resident_keys).await?;
+        Ok(PendingDigest {
+            resident,
+            archived,
+            hasher: Self::hash_archived,
+        })
+    }
+
+    /// Hash one archived partition's bytes canonically
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The partition key
+    /// * `bytes` - The record's payload, verified
+    fn hash_archived(key: u64, bytes: &[u8]) -> Result<Option<PartitionDigest>, ServerError> {
+        // the record is read back as the row it holds and re-serialized, never hashed as it lies
+        let archived = <UnsortedPartition<R> as RkyvSupport>::access(bytes)?;
+        let row = match &archived.row {
+            ArchivedMaybeRow::Row(row) => Some(RkyvSupport::serialize(&<R as RkyvSupport>::deserialize(row)?)),
+            ArchivedMaybeRow::Tombstone => None,
+        };
+        Ok(hash_partition(key, row.iter().map(|bytes| bytes.as_slice())))
+    }
+
     /// Every resident partition of some tablets, as its key and archived bytes
     ///
     /// What a volatile group's snapshot is cut from
@@ -1590,6 +1658,11 @@ where
     for<'a> <<T as ShoalTableSupport>::UpdateData as Archive>::Archived:
         CheckBytes<Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>>,
 {
+    /// A tombstone: a partition whose one row was deleted
+    fn erased(key: u64) -> Self {
+        UnsortedPartition::tombstone(key)
+    }
+
     /// The intent type to use
     type Intent = UnsortedIntents<T>;
 

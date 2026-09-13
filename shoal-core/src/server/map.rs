@@ -27,13 +27,14 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use super::conf::cluster::{BootstrapPolicy, Consistency, DurationSpec};
+use super::control::repair::{QuarantinedCopy, RepairRecord};
 use super::control::types::{ControlState, MemberHealth, MemberRole};
 use super::peer::handshake::{Admission, PeerAddr, Verdict};
 use super::ring::{Ring, TABLET_COUNT};
 use super::shard::ShardContact;
 use super::ServerError;
 use crate::shared::identity::{ClusterId, GroupId, NodeId, ShardAddr, TableId};
-use crate::shared::protocol::admin::{TopologyFrame, TopologyMember};
+use crate::shared::protocol::admin::{QuarantinedMember, TopologyFrame, TopologyMember};
 
 /// One member of the cluster, as the map carries it
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,6 +57,10 @@ pub struct MapMember {
     pub incarnation: u64,
     /// The shards that have failed on it, by index
     pub shards_failed: Vec<u16>,
+    /// The copies it holds that are quarantined, which reads are routed around
+    /// ([F44](../../../docs/src/features/repair.md))
+    #[serde(default)]
+    pub quarantined: Vec<QuarantinedCopy>,
 }
 
 /// Why a default write cannot be admitted right now
@@ -128,6 +133,10 @@ pub struct TabletMap {
     pub table_read_policy: BTreeMap<TableId, Consistency>,
     /// The principals allowed to change the cluster
     pub admins: Vec<String>,
+    /// The repair operations not yet done on every group, which a group's leader drives
+    /// ([F44](../../../docs/src/features/repair.md))
+    #[serde(default)]
+    pub repairs: Vec<RepairRecord>,
     /// The failover base every tablet group derives its timers from, in milliseconds
     ///
     /// The policy's `primary_failover_after`, carried so every node's groups miss a leader at
@@ -153,6 +162,7 @@ impl Default for TabletMap {
             read_consistency: Consistency::One,
             table_read_policy: BTreeMap::new(),
             admins: Vec::new(),
+            repairs: Vec::new(),
             primary_failover_ms: 0,
         }
     }
@@ -195,6 +205,7 @@ impl TabletMap {
                         health: member.health,
                         incarnation: member.record.incarnation,
                         shards_failed: member.shards_failed.clone(),
+                        quarantined: member.quarantined.clone(),
                     },
                 )
             })
@@ -222,6 +233,7 @@ impl TabletMap {
             read_consistency: policy.map_or(Consistency::One, |policy| policy.read_consistency),
             table_read_policy: state.table_read_policy.clone(),
             admins: policy.map_or_else(Vec::new, |policy| policy.admins.clone()),
+            repairs: state.repairs.values().filter(|record| !record.is_done()).cloned().collect(),
             // truncation cannot happen: a failover base is seconds, not weeks
             #[allow(clippy::cast_possible_truncation)]
             primary_failover_ms: policy.map_or(0, |policy| policy.primary_failover_after.duration().as_millis() as u64),
@@ -236,6 +248,26 @@ impl TabletMap {
     #[must_use]
     pub fn is_up(&self, node: NodeId) -> bool {
         self.members.get(&node).is_some_and(|member| member.health == MemberHealth::Up)
+    }
+
+    /// Whether a member's copy of a tablet is quarantined for any table
+    ///
+    /// Routing is per tablet and not per table, so a holder with any table's copy of the tablet
+    /// quarantined is routed around for every table; the refusal at the holder is exact
+    /// ([F44](../../../docs/src/features/repair.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The member
+    /// * `tablet` - The tablet
+    #[must_use]
+    pub fn is_quarantined(&self, node: NodeId, tablet: usize) -> bool {
+        // truncation cannot happen: a tablet id is twelve bits
+        #[allow(clippy::cast_possible_truncation)]
+        let tablet = tablet as u16;
+        self.members
+            .get(&node)
+            .is_some_and(|member| member.quarantined.iter().any(|copy| copy.tablets.contains(&tablet)))
     }
 
     /// The replica a node holding no copy of a tablet sends to: the first holder that is up
@@ -253,9 +285,10 @@ impl TabletMap {
     #[must_use]
     pub fn preferred_holder(&self, tablet: usize, avoid: Option<NodeId>) -> Option<ShardAddr> {
         let replicas = self.replicas_of(tablet);
+        // a holder whose copy is quarantined is passed over like one that is down
         let up = replicas
             .iter()
-            .find(|replica| Some(replica.node) != avoid && self.is_up(replica.node))
+            .find(|replica| Some(replica.node) != avoid && self.is_up(replica.node) && !self.is_quarantined(replica.node, tablet))
             .copied();
         match (up, avoid) {
             (Some(holder), _) => Some(holder),
@@ -286,7 +319,9 @@ impl TabletMap {
             let holders: Vec<ShardAddr> = self
                 .replicas_of(tablet)
                 .into_iter()
-                .filter(|replica| replica.node != avoid && replica.node != me && self.is_up(replica.node))
+                .filter(|replica| {
+                    replica.node != avoid && replica.node != me && self.is_up(replica.node) && !self.is_quarantined(replica.node, tablet)
+                })
                 .collect();
             common = Some(match common {
                 None => holders,
@@ -469,6 +504,35 @@ impl TabletMap {
         groups
     }
 
+    /// Every group of one table the placement derives, with its members and its tablets
+    ///
+    /// What a repair record is filled with at apply: the same sets every node builds its own
+    /// groups from, over every node rather than one
+    /// ([F44](../../../docs/src/features/repair.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `table` - The table
+    #[must_use]
+    pub fn groups_of(&self, table: TableId) -> Vec<(GroupId, Vec<ShardAddr>, Vec<u16>)> {
+        // every replica set, keyed by the set, with the tablets under it
+        let mut sets: BTreeMap<Vec<ShardAddr>, Vec<u16>> = BTreeMap::new();
+        for tablet in 0..TABLET_COUNT {
+            let members = self.replicas_of(tablet);
+            if !members.is_empty() {
+                // truncation cannot happen: a tablet id is twelve bits
+                #[allow(clippy::cast_possible_truncation)]
+                sets.entry(members).or_default().push(tablet as u16);
+            }
+        }
+        let mut groups: Vec<(GroupId, Vec<ShardAddr>, Vec<u16>)> = sets
+            .into_iter()
+            .map(|(members, tablets)| (GroupId::of(table, &members), members, tablets))
+            .collect();
+        groups.sort_by_key(|(id, _, _)| *id);
+        groups
+    }
+
     /// Whether a node holds a replica of a tablet
     ///
     /// # Arguments
@@ -542,14 +606,21 @@ impl TabletMap {
         let counts = self.placement_counts();
         let nodes = counts.len();
         for tablet in 0..TABLET_COUNT {
-            if self.holds(me, tablet) {
-                // truncation cannot happen: the modulus is a u16
-                #[allow(clippy::cast_possible_truncation)]
-                let shard = ((tablet / nodes) % shards.max(1)) as u16;
-                ring.set_owner(tablet, shard);
+            // truncation cannot happen: the modulus is a u16
+            #[allow(clippy::cast_possible_truncation)]
+            let local = ((tablet / nodes) % shards.max(1)) as u16;
+            // a copy this node holds and may serve is read here; a quarantined one is read
+            // elsewhere while another holder is up, and here as the backstop, where the
+            // refusal names the quarantine ([F44](../../../docs/src/features/repair.md))
+            if self.holds(me, tablet) && !self.is_quarantined(me, tablet) {
+                ring.set_owner(tablet, local);
             } else if let Some(holder) = self.preferred_holder(tablet, None) {
                 // a tablet this node holds no copy of goes to a holder that is up, which is
                 // the primary until the primary is called down
+                if holder.node == me {
+                    ring.set_owner(tablet, local);
+                    continue;
+                }
                 let contact = ShardContact::Remote {
                     node: holder.node,
                     shard: holder.shard,
@@ -557,6 +628,8 @@ impl TabletMap {
                 if let Some(index) = ring.index_of(&contact) {
                     ring.set_owner(tablet, index);
                 }
+            } else if self.holds(me, tablet) {
+                ring.set_owner(tablet, local);
             }
         }
         Ok(Some(ring))
@@ -582,6 +655,16 @@ impl TabletMap {
                     health: member.health.name().to_string(),
                     incarnation: member.incarnation,
                     shards_failed: member.shards_failed.clone(),
+                    quarantined: member
+                        .quarantined
+                        .iter()
+                        .map(|copy| QuarantinedMember {
+                            table: copy.table,
+                            group: copy.group.0,
+                            tablets: copy.tablets.clone(),
+                            reason: copy.reason.as_str().to_string(),
+                        })
+                        .collect(),
                 })
                 .collect(),
             placement: self.placement.clone(),

@@ -21,7 +21,7 @@ use tracing::{event, instrument, Level};
 use uuid::Uuid;
 
 use super::conf::FileSystemTableConf;
-use super::map::{ArchiveEntry, ArchiveMap, MapIntent, MapIntentKinds};
+use super::map::{write_record, ArchiveEntry, ArchiveFormat, ArchiveMap, MapIntent, MapIntentKinds, ARCHIVE_HEADER_LEN};
 use super::IntentLogReader;
 use crate::server::messages::ServerMsg;
 use crate::server::replication::snapshot::{self, SnapshotHeader, SnapshotManifest, SnapshotReader, SnapshotWriter};
@@ -29,6 +29,7 @@ use crate::server::ring::Ring;
 use crate::server::wal::WalLogId;
 use crate::server::ServerError;
 use crate::server::database::ShoalDatabase;
+use crate::storage::ArchiveFault;
 use crate::shared::identity::GroupId;
 use crate::shared::traits::{PartitionKeySupport, RkyvSupport, TableNameSupport as _};
 use crate::storage::{CompactionJob, IntentReadSupport, RecoveryStats, ShouldPrune};
@@ -241,15 +242,13 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         // crawl over all partitions with intents
         for partition in self.changes.keys() {
             // get this partiitons current archive if it exists
-            if let Some(entry) = self.map.to_archive.borrow().get(partition) {
-                // get this archive or insert it into our map
-                let handle = self.map.get_archive(&entry.archive).await?;
-                // set options for reading from this file
-                let read = handle.read_at(entry.offset, entry.size).await?;
+            // the entry is copied out so no borrow of the map is held across the read
+            let entry = self.map.to_archive.borrow().get(partition).copied();
+            if let Some(entry) = entry {
+                // read this partitions record, verified against its checksum
+                let read = self.map.read_record(&entry).await?;
                 // load this partitions data
                 let archived = <T as RkyvSupport>::access(&read)?;
-                // close this handle now that we are done reading
-                handle.close().await?;
                 // deserialize this partition
                 let deserialized = <T as RkyvSupport>::deserialize(archived)?;
                 // add this deserialized partition to our loaded partition map
@@ -315,17 +314,10 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         for (key, partition) in &self.loaded {
             // serialize this partitions data
             let archived = rkyv::to_bytes::<_>(partition)?;
-            // get the size of the data to write
-            // this size is only used in recovery operations of archive files
-            let size = archived.len();
-            // write our size
-            self.writer.write_all(&size.to_le_bytes()).await?;
-            // get the current positions of the writer
-            let offset = self.writer.current_pos();
-            // write this archived partition
-            self.writer.write_all(archived.as_slice()).await?;
+            // write this archived partition as a record: its size, its checksum, its bytes
+            let offset = write_record(&mut self.writer, archived.as_slice()).await?;
             // build the archive entry for this partitions data
-            let intent = MapIntent::entry(*key, active_id, offset, size);
+            let intent = MapIntent::entry(*key, active_id, offset, archived.len());
             // write this map intent to our map intent log
             let entry = write_map_intent!(self.map_writer, intent, Entry);
             // add this entry to our entries list
@@ -501,6 +493,11 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                         path.display()
                     )));
                 };
+                // a scrub entry carries no intent; the WAL's index never names one for
+                // compaction, and one that reached here is skipped rather than decoded
+                if command.scrub_op().is_some() {
+                    continue;
+                }
                 let (partition_key, intent) = T::partition_key_and_intent_checked(&command.payload)?;
                 self.changes.entry(partition_key).or_default().push(intent);
             }
@@ -633,10 +630,9 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         };
         let mut writer = SnapshotWriter::create(&path, header).await?;
         for entry in &entries {
-            // read this partition's archived bytes as they are, and write them as they are
-            let handle = self.map.get_archive(&entry.archive).await?;
-            let read = handle.read_at(entry.offset, entry.size).await?;
-            handle.close().await?;
+            // read this partition's archived bytes as they are, verified against their
+            // checksum so a corrupt copy is never a source, and write them as they are
+            let read = self.map.read_record(entry).await?;
             writer.record(entry.key, &read).await?;
         }
         // the trailer: what was remembered at or below the boundary, oldest first
@@ -753,12 +749,10 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                     "the snapshot holds partition {key:016x} of tablet {tablet}, which it does not claim to cover"
                 )));
             }
-            // written as a compaction writes a partition: the size, then the bytes, then the map intent
-            let size = bytes.len();
-            self.writer.write_all(&size.to_le_bytes()).await?;
-            let offset = self.writer.current_pos();
-            self.writer.write_all(&bytes).await?;
-            let intent = MapIntent::entry(key, active_id, offset, size);
+            // written as a compaction writes a partition: the record, then the map intent, so
+            // an installed record carries a checksum whatever the sender's archive did
+            let offset = write_record(&mut self.writer, &bytes).await?;
+            let intent = MapIntent::entry(key, active_id, offset, bytes.len());
             let entry = write_map_intent!(self.map_writer, intent, Entry);
             self.entries.push((key, entry));
             written.insert(key);
@@ -811,6 +805,74 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         Ok(trailer)
     }
 
+    /// Inject a fault into one partition's archived copy, for the fixture
+    ///
+    /// The compactor owns the archives, so the fault is done here, between two jobs, where
+    /// the map is consistent ([F44](../../../../../docs/src/features/repair.md)). A corruption
+    /// is written through a buffered handle and synced; Linux flushes the range before the next
+    /// direct read, so the loader meets the flipped byte. A forget logs the removal the way a
+    /// prune would; an erase writes a record with no live row under a valid checksum.
+    ///
+    /// # Arguments
+    ///
+    /// * `fault` - The fault
+    /// * `key` - The partition
+    async fn inject_fault(&mut self, fault: ArchiveFault, key: u64) -> Result<serde_json::Value, String> {
+        self.inject_fault_inner(fault, key).await.map_err(|error| format!("{error:?}"))
+    }
+
+    /// The fault itself, with the engine's own errors
+    ///
+    /// # Arguments
+    ///
+    /// * `fault` - The fault
+    /// * `key` - The partition
+    async fn inject_fault_inner(&mut self, fault: ArchiveFault, key: u64) -> Result<serde_json::Value, ServerError> {
+        // only a compacted partition has an archived copy to fault
+        let Some(entry) = self.map.find_partition(key) else {
+            return Err(ServerError::GlommioGeneric(format!("no archive of {} holds partition {key:016x}", self.table_name)));
+        };
+        match fault {
+            ArchiveFault::Corrupt => {
+                // flip one byte in the middle of the record's payload, in place
+                let path = self.archive_path.join(entry.archive.to_string());
+                let file = OpenOptions::new().read(true).write(true).buffered_open(&path).await?;
+                let at = entry.offset + (entry.size as u64) / 2;
+                let read = file.read_at(at, 1).await?;
+                let Some(byte) = read.first().copied() else {
+                    return Err(ServerError::GlommioGeneric(format!("archive {} is shorter than the record it should hold", entry.archive)));
+                };
+                file.write_at(vec![byte ^ 0x40], at).await?;
+                file.fdatasync().await?;
+                file.close().await?;
+                event!(Level::WARN, msg = "corrupted a record, as the fixture asked", table = %self.table_name, partition = format!("{key:016x}"), archive = %entry.archive, at);
+                Ok(serde_json::json!({ "fault": "corrupt", "archive": entry.archive.to_string(), "offset": at, "was": byte }))
+            }
+            ArchiveFault::Forget => {
+                // log the removal the way a prune does, then drop the entry
+                write_map_intent!(self.map_writer, MapIntent::Remove(key), Remove);
+                self.map_writer.sync().await?;
+                self.map.remove_partition(key);
+                event!(Level::WARN, msg = "forgot a partition, as the fixture asked", table = %self.table_name, partition = format!("{key:016x}"));
+                Ok(serde_json::json!({ "fault": "forget", "archive": entry.archive.to_string() }))
+            }
+            ArchiveFault::Erase => {
+                // a record with no live row, written and pointed at like any compaction's
+                let erased = T::erased(key);
+                let archived = rkyv::to_bytes::<Error>(&erased)?;
+                let active_id = *self.map.active.borrow();
+                let offset = write_record(&mut self.writer, archived.as_slice()).await?;
+                let intent = MapIntent::entry(key, active_id, offset, archived.len());
+                let entry = write_map_intent!(self.map_writer, intent, Entry);
+                self.writer.sync().await?;
+                self.map_writer.sync().await?;
+                self.map.set_partition(key, entry);
+                event!(Level::WARN, msg = "erased a partition, as the fixture asked", table = %self.table_name, partition = format!("{key:016x}"));
+                Ok(serde_json::json!({ "fault": "erase", "archive": active_id.to_string(), "offset": offset }))
+            }
+        }
+    }
+
     /// Compact archives with the least amount of active data
     #[instrument(name = "FileSystemCompactor::compact_archives", skip_all, err(Debug))]
     async fn compact_archives(&mut self) -> Result<(), ServerError> {
@@ -833,8 +895,14 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                     let archive = DmaFile::open(&path).await?;
                     // get the size of this file
                     let size = archive.file_size().await?;
+                    // an archive from before checksums is rewritten whatever its utilization,
+                    // since that is how its records come to carry one
+                    // (F44); the active archive is this build's and never needs it
+                    let head = archive.read_at(0, ARCHIVE_HEADER_LEN).await?;
+                    let unverified = ArchiveFormat::detect(&head) == ArchiveFormat::Unverified
+                        && *old_id != *self.map.active.borrow();
                     // skip this file if its more then 50% utilized
-                    if *used as f64 > size as f64 * 0.50 {
+                    if !unverified && *used as f64 > size as f64 * 0.50 {
                         // this file is largely valid so don't compact it
                         event!(Level::DEBUG, archive = old_id.to_string(), skip = true);
                         // close this archive
@@ -868,14 +936,11 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                     let active_id = *self.map.active.borrow();
                     // read all of the still valid data from this archive
                     for mut entry in entries {
-                        // read this entry from our archive file
-                        let read = archive.read_at(entry.offset, entry.size).await?;
-                        // write our size
-                        self.writer.write_all(&entry.size.to_le_bytes()).await?;
-                        // get the current positions of the writer
-                        let start = self.writer.current_pos();
-                        // write this entry to our new archive
-                        self.writer.write_all(&read[..]).await?;
+                        // read this entry from our archive file, verified against its
+                        // checksum: a corrupt record is never rewritten under a fresh one
+                        let read = self.map.read_record(&entry).await?;
+                        // write this entry to our new archive as a checksummed record
+                        let start = write_record(&mut self.writer, &read[..]).await?;
                         // update our entries info
                         entry.archive = active_id;
                         entry.offset = start;
@@ -1084,6 +1149,11 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                         .await?;
                 }
                 CompactionJob::Install { group, tablets, path } => self.install_snapshot(group, tablets, path).await?,
+                CompactionJob::Fault { fault, key, reply } => {
+                    // a fault the fixture asked for, answered with what was done
+                    let outcome = self.inject_fault(fault, key).await;
+                    let _ = reply.send(outcome);
+                }
                 CompactionJob::Archives => self.compact_archives().await?,
                 CompactionJob::Shutdown => {
                     // shutdown this compactor

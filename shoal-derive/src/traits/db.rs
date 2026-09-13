@@ -361,6 +361,8 @@ pub fn add(
                     ::shoal::server::replication::ResultKind::Insert => ::shoal::shared::responses::ResponseAction::Insert(result.ok),
                     ::shoal::server::replication::ResultKind::Delete => ::shoal::shared::responses::ResponseAction::Delete(result.ok),
                     ::shoal::server::replication::ResultKind::Update => ::shoal::shared::responses::ResponseAction::Update(result.ok),
+                    // a scrub is proposed by the shard and never answered to a client
+                    ::shoal::server::replication::ResultKind::Scrub => ::shoal::shared::responses::ResponseAction::Insert(result.ok),
                 };
                 #response_ident::#row_ident(::shoal::shared::responses::Response::<#row_ident> { id, index, data, end })
             }
@@ -387,6 +389,13 @@ pub fn add(
         let field_ident = field.ident.as_ref().unwrap();
         quote! {
             #table_names_ident::#variant_ident => self.#field_ident.digest().await,
+        }
+    });
+    // build our canonical cut arms
+    let canonical_cut_arms = fields.named.iter().zip(variants).map(|(field, variant_ident)| {
+        let field_ident = field.ident.as_ref().unwrap();
+        quote! {
+            #table_names_ident::#variant_ident => self.#field_ident.canonical_cut(tablets).await,
         }
     });
     // build our snapshot partition arms
@@ -682,6 +691,13 @@ pub fn add(
             async fn digest_table(&self, table: Self::TableNames) -> Result<(u64, u64), ::shoal::server::ServerError> {
                 match table {
                     #(#digest_arms)*
+                }
+            }
+
+            /// Take a canonical cut of some tablets of a table, for a scrub
+            async fn canonical_cut(&self, table: Self::TableNames, tablets: &[u16]) -> Result<::shoal::server::replication::PendingDigest, ::shoal::server::ServerError> {
+                match table {
+                    #(#canonical_cut_arms)*
                 }
             }
 

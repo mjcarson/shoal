@@ -31,6 +31,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures_channel::oneshot;
+use kanal::AsyncSender;
 use openraft::error::{ClientWriteError, LinearizableReadError, RaftError};
 use openraft::storage::EntryResponder;
 use openraft::{Config, EntryPayload, Raft, ReadPolicy, SnapshotPolicy, StoredMembership};
@@ -45,8 +46,9 @@ use crate::server::messages::{QueryMetadata, ServerMsg};
 use crate::server::peer::{LinkEvent, ReplicateReply};
 use crate::server::replication::snapshot::{self, BuiltSnapshot, SnapshotHeader, SnapshotManifest, SnapshotWriter, SNAPSHOTS_DIR};
 use crate::server::replication::{
-    ApplyOutcome, BarrierAnswer, DataConfig, GroupMachine, GroupNetwork, GroupReport, Lease, MachineState,
-    ProposalOutcome, Remembered, ReplicationVerb, RpcFailure, ShardNetwork, ShardPeer, ShardReplication, SnapshotStats,
+    ApplyOutcome, BarrierAnswer, CommandResult, DataConfig, GroupMachine, GroupNetwork, GroupReport, IntegrityStats,
+    Lease, MachineState, ProposalOutcome, Remembered, ReplicationVerb, ResultKind, RpcFailure, ShardNetwork, ShardPeer,
+    ShardReplication, SnapshotStats,
 };
 use crate::server::ring::Ring;
 use crate::server::stage_profile::{StageDurability, StageOp, Stamp};
@@ -148,6 +150,9 @@ pub(super) struct Replication<D: ShoalDatabase> {
     pub(super) stats: ProposalStats,
     /// What snapshots have done ([F43](../../../../docs/src/features/node-recovery.md))
     pub(super) snapshots: SnapshotStats,
+    /// What the loop found of its storage's integrity: the counters the archive maps do not
+    /// keep ([F44](../../../../docs/src/features/repair.md))
+    pub(super) integrity: IntegrityStats,
     /// The snapshots being received, one partial per group at most
     pub(super) installs: super::snapshots::Installs,
     /// The installs in progress, one per group at most
@@ -166,6 +171,16 @@ pub(super) struct Replication<D: ShoalDatabase> {
     pub(super) stopping: bool,
     /// Whether a segment sweep is wanted before the next message
     pub(super) sweep_due: bool,
+    /// The shard's WAL directory, where quarantine markers live
+    pub(super) wal_dir: PathBuf,
+    /// The quarantines found at open, applied to their groups as they are built
+    pub(super) quarantines: HashMap<GroupId, crate::server::control::repair::Quarantine>,
+    /// The group repairs this shard is driving right now, by operation and group
+    pub(super) driving: HashSet<(Uuid, GroupId)>,
+    /// The phase each driver here committed last, which the map may be behind on
+    pub(super) driven: HashMap<(Uuid, GroupId), crate::server::control::repair::RepairPhase>,
+    /// When each group this shard leads is next due a scheduled scrub
+    pub(super) next_scrub: HashMap<GroupId, Instant>,
 }
 
 impl<D: ShoalDatabase> Shard<D>
@@ -234,6 +249,9 @@ where
         // is built, or cleaned up if the checkpoint passed it meanwhile
         // ([F43](../../../../docs/src/features/node-recovery.md))
         let pending_installs = super::snapshots::scan_pending(&installs, &checkpoint).await;
+        // a quarantine decided before a restart holds through it
+        // ([F44](../../../../docs/src/features/repair.md))
+        let quarantines = super::repair::scan_quarantine(&dir);
         let _ = setup;
         self.replication = Some(Replication {
             wal,
@@ -250,6 +268,7 @@ where
             compacting: HashMap::new(),
             stats: ProposalStats::default(),
             snapshots: SnapshotStats::default(),
+            integrity: IntegrityStats::default(),
             installs,
             active_installs: HashMap::new(),
             pending_installs,
@@ -259,6 +278,11 @@ where
             last_report: None,
             stopping: false,
             sweep_due: false,
+            wal_dir: dir.clone(),
+            quarantines,
+            driving: HashSet::new(),
+            driven: HashMap::new(),
+            next_scrub: HashMap::new(),
         });
         self.rebuild_groups().await?;
         Ok(())
@@ -287,6 +311,7 @@ where
         let placed = self.placed;
         let tx = self.shard_local_tx.clone();
         let map = self.map.get();
+        let table_map = &self.table_map;
         let Some(replication) = self.replication.as_mut() else {
             return Ok(());
         };
@@ -369,6 +394,28 @@ where
                 ),
                 None => (None, StoredMembership::default(), Vec::new()),
             };
+            // a durable group whose checkpoint or archives say this shard held it, with no
+            // log behind them, lost its WAL: what it acknowledged is gone, and the leader
+            // feeds it again rather than stopping - said here, once, by name, since the
+            // leader's side of a reversion is a library log line
+            // ([Resolved #99](../../../../docs/src/appendix/resolved/durable-log-reversion.md))
+            if !store.is_volatile() && replication.wal.last_log_id_of(spec.id).is_none() {
+                let held = match &checkpoint {
+                    Some(point) => Some(format!("checkpoint {}", point.index)),
+                    None if table_map.holds_any(table, &spec.tablets) => Some("archives".to_string()),
+                    None => None,
+                };
+                if let Some(held) = held {
+                    replication.integrity.log_lost += 1;
+                    event!(
+                        Level::ERROR,
+                        msg = "a durable group has no log behind what this shard holds of it: its WAL was lost, and its leader will feed it again",
+                        group = %spec.id,
+                        table = %table,
+                        held,
+                    );
+                }
+            }
             if !seed.is_empty() {
                 event!(Level::DEBUG, msg = "seeded a group's retry table from its sidecar", group = %spec.id, entries = seed.len());
             }
@@ -376,6 +423,11 @@ where
             // a received snapshot past the checkpoint, which openraft installs as it builds
             // the group ([F43](../../../../docs/src/features/node-recovery.md))
             machine_state.pending_install = replication.pending_installs.remove(&spec.id);
+            // a quarantine that outlived a restart
+            if let Some(quarantine) = replication.quarantines.remove(&spec.id) {
+                event!(Level::WARN, msg = "a copy is still quarantined from before the restart", group = %spec.id, reason = quarantine.reason.as_str());
+                machine_state.quarantined = Some(quarantine);
+            }
             let state = Rc::new(RefCell::new(machine_state));
             let machine = GroupMachine::new(spec.id, state.clone(), tx.clone());
             let group = Group {
@@ -397,20 +449,8 @@ where
                 group: spec.id,
                 network: replication.network.clone(),
             };
-            let config = group_config(&cluster, failover_ms, spec.id, store.is_volatile());
-            let tx = tx.clone();
-            let addr = ShardAddr::new(me, spec.mine);
-            let primary = spec.is_primary(me);
-            glommio::spawn_local(async move {
-                let outcome = start_group(addr, spec, config, network, store, machine, primary).await;
-                let _ = tx
-                    .send(ServerMsg::GroupUp {
-                        group: network_group(&outcome),
-                        raft: outcome.map(|(_, raft)| raft).map_err(|(_, error)| error),
-                    })
-                    .await;
-            })
-            .detach();
+            let config = group_config(&cluster, failover_ms, spec.id);
+            spawn_group_start(tx.clone(), me, spec, config, network, store, machine, None);
         }
         // the writes that waited on a group this node no longer hosts are refused by name
         for (id, (meta, table, key, _)) in orphaned {
@@ -423,6 +463,204 @@ where
         Ok(())
     }
 
+    /// Restart a group from its checkpoint with a received repair snapshot to install
+    ///
+    /// The live handle is shut down and built again as a process restart would build it: the
+    /// resident partitions of the group's tablets dropped, the applied position set back to
+    /// the checkpoint, and the received file pending past it, so openraft's startup installs
+    /// the file through the compactor and then replays the retained log above it
+    /// ([F44](../../../../docs/src/features/repair.md)). Proposals queue meanwhile, and the
+    /// quarantine keeps the tablets from serving.
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group
+    /// * `path` - The verified file
+    /// * `manifest` - What it is
+    pub(super) fn restart_group_for_install(&mut self, group: GroupId, path: PathBuf, manifest: SnapshotManifest) -> Result<(), String> {
+        let me = self.node_id();
+        let cluster = self.conf.cluster.clone().unwrap_or_default();
+        let map = self.map.get();
+        let tx = self.shard_local_tx.clone();
+        let Some(replication) = self.replication.as_mut() else {
+            return Err("this node hosts no tablet groups".to_string());
+        };
+        let Some(slot) = replication.groups.get_mut(&group) else {
+            return Err(format!("group {group} is not hosted on this shard"));
+        };
+        if replication.active_installs.contains_key(&group) {
+            return Err(format!("group {group} is installing a snapshot already"));
+        }
+        let Some(previous) = slot.raft.take() else {
+            return Err(format!("group {group} is still starting"));
+        };
+        let table = slot.table;
+        let tablets = slot.spec.tablets.clone();
+        // the state a restart would find: the checkpoint, and the file pending past it
+        let (checkpoint, membership, quarantined) = {
+            let state = slot.state.borrow();
+            (state.checkpoint.clone(), state.checkpoint_membership.clone(), state.quarantined)
+        };
+        let seed = match checkpoint.as_ref().and_then(|point| replication.checkpoint.get(group).map(|file| (point, file))) {
+            Some((point, file)) if file.applied.as_ref() == Some(point) => replication.retries.seed_for(group, file),
+            _ => Vec::new(),
+        };
+        let mut machine_state = MachineState::at(checkpoint.clone(), membership, seed);
+        machine_state.pending_install = Some((path, manifest));
+        machine_state.repair_pending = true;
+        machine_state.quarantined = quarantined;
+        let state = Rc::new(RefCell::new(machine_state));
+        slot.state = state.clone();
+        slot.snapshot = None;
+        slot.snapshot_building = false;
+        // an apply parked on a read for this group belonged to the old handle
+        for batches in replication.parked.values_mut() {
+            batches.retain(|batch| batch.group != group);
+        }
+        replication.parked.retain(|_, batches| !batches.is_empty());
+        event!(Level::WARN, msg = "restarting a group from its checkpoint to install a repair snapshot", group = %group, checkpoint = checkpoint.as_ref().map_or(0, |point| point.index));
+        // the resident copies are the old generation; the log above the checkpoint rebuilds them
+        self.tables.evict_tablets(table, &tablets);
+        let replication = self.replication.as_mut().expect("still here");
+        let slot = replication.groups.get(&group).expect("still here");
+        // truncation cannot happen: a failover base is seconds, not weeks
+        #[allow(clippy::cast_possible_truncation)]
+        let failover_ms = if map.primary_failover_ms > 0 {
+            map.primary_failover_ms
+        } else {
+            cluster.primary_failover_after.duration().as_millis() as u64
+        };
+        let config = group_config(&cluster, failover_ms, group);
+        let network = GroupNetwork {
+            group,
+            network: replication.network.clone(),
+        };
+        let machine = GroupMachine::new(group, state, tx.clone());
+        spawn_group_start(tx, me, slot.spec.clone(), config, network, slot.store.clone(), machine, Some(previous));
+        Ok(())
+    }
+
+    /// Restart a volatile group empty, so its leader feeds it whole again
+    ///
+    /// A divergent copy of an ephemeral table's group is repaired the way a restart repairs it:
+    /// its memory log and its resident partitions dropped, after which the leader's replication
+    /// feeds it from the log or the volatile snapshot ([F44](../../../../docs/src/features/repair.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group
+    pub(super) fn rebuild_group_empty(&mut self, group: GroupId) -> Result<(), String> {
+        let me = self.node_id();
+        let cluster = self.conf.cluster.clone().unwrap_or_default();
+        let map = self.map.get();
+        let tx = self.shard_local_tx.clone();
+        let Some(replication) = self.replication.as_mut() else {
+            return Err("this node hosts no tablet groups".to_string());
+        };
+        let Some(slot) = replication.groups.get_mut(&group) else {
+            return Err(format!("group {group} is not hosted on this shard"));
+        };
+        if !slot.store.is_volatile() {
+            return Err(format!("group {group} is durable; a durable copy is repaired by a snapshot"));
+        }
+        let Some(previous) = slot.raft.take() else {
+            return Err(format!("group {group} is still starting"));
+        };
+        let table = slot.table;
+        let tablets = slot.spec.tablets.clone();
+        let state = Rc::new(RefCell::new(MachineState::at(None, StoredMembership::default(), Vec::new())));
+        slot.state = state.clone();
+        slot.snapshot = None;
+        slot.snapshot_building = false;
+        for batches in replication.parked.values_mut() {
+            batches.retain(|batch| batch.group != group);
+        }
+        replication.parked.retain(|_, batches| !batches.is_empty());
+        // the memory log goes with the handle
+        replication.volatile.forget(group);
+        event!(Level::WARN, msg = "restarting a volatile group empty to repair it", group = %group);
+        self.tables.evict_tablets(table, &tablets);
+        let replication = self.replication.as_mut().expect("still here");
+        let slot = replication.groups.get(&group).expect("still here");
+        // truncation cannot happen: a failover base is seconds, not weeks
+        #[allow(clippy::cast_possible_truncation)]
+        let failover_ms = if map.primary_failover_ms > 0 {
+            map.primary_failover_ms
+        } else {
+            cluster.primary_failover_after.duration().as_millis() as u64
+        };
+        let config = group_config(&cluster, failover_ms, group);
+        let network = GroupNetwork {
+            group,
+            network: replication.network.clone(),
+        };
+        let machine = GroupMachine::new(group, state, tx.clone());
+        spawn_group_start(tx, me, slot.spec.clone(), config, network, slot.store.clone(), machine, Some(previous));
+        Ok(())
+    }
+
+    /// Hand every sealed segment holding a group's frames above a boundary to its compactor again
+    ///
+    /// After a repair install the archives are the source's generation at the boundary, and
+    /// what the old generation had merged above it is gone with it; the frames are still in
+    /// the sealed segments the loop already handed, so they are handed again for this group
+    /// alone ([F44](../../../../docs/src/features/repair.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group
+    /// * `boundary` - The install's boundary
+    pub(super) fn rehand_segments(&mut self, group: GroupId, boundary: u64) -> Result<(), ServerError> {
+        let sinks: HashMap<D::TableNames, kanal::AsyncSender<CompactionJob>> =
+            self.tables.compaction_sinks().into_iter().collect();
+        let Some(replication) = self.replication.as_mut() else {
+            return Ok(());
+        };
+        let Some(slot) = replication.groups.get(&group) else {
+            return Ok(());
+        };
+        let table = slot.table;
+        let Some(sink) = sinks.get(&table) else {
+            return Ok(());
+        };
+        let mut handed = 0usize;
+        for segment in replication.wal.segments() {
+            if !segment.sealed || !segment.handed {
+                continue;
+            }
+            let Some(last) = segment.last.get(&group) else {
+                continue;
+            };
+            if last.index <= boundary {
+                continue;
+            }
+            let mut frames = replication.wal.frames_in(segment.generation, &[(group, boundary)]);
+            if frames.is_empty() {
+                continue;
+            }
+            frames.sort_by_key(|frame| frame.index);
+            let refs: Vec<(u64, u32)> = frames.iter().map(|frame| (frame.offset, frame.len)).collect();
+            // the segment is compacting again for this table, so it is not deleted meanwhile
+            replication.compacting.entry(segment.generation).or_default().insert(table);
+            let job = CompactionJob::Segment {
+                path: replication.wal.segment_path(segment.generation),
+                generation: segment.generation,
+                frames: refs,
+                positions: vec![(group, last.clone())],
+            };
+            if sink.try_send(job).is_err() {
+                return Err(ServerError::GlommioGeneric(format!("{table}'s compactor is not taking jobs")));
+            }
+            handed += 1;
+        }
+        if handed > 0 {
+            let _ = sink.try_send(CompactionJob::Archives);
+        }
+        event!(Level::INFO, msg = "handed the segments above a repair install again", group = %group, boundary, segments = handed);
+        Ok(())
+    }
+
+    /// Take a group's handle from the task that built it
     /// Take a group's handle from the task that built it
     ///
     /// # Arguments
@@ -446,6 +684,8 @@ where
                 for (meta, table, key, payload) in waiting {
                     self.propose_write(meta, table, key, payload).await?;
                 }
+                // a repair waiting on this group is driven once it is led
+                self.drive_repairs();
             }
             // a handle built for a group the map has since dropped
             (None, Ok(raft)) => {
@@ -510,6 +750,16 @@ where
                 EntryPayload::Membership(membership) => {
                     state.borrow_mut().membership = StoredMembership::new(Some(log_id.clone()), membership.clone());
                     None
+                }
+                EntryPayload::Normal(command) if command.scrub_op().is_some() => {
+                    // a scrub: take the canonical cut at this index, and write nothing
+                    // ([F44](../../../../docs/src/features/repair.md))
+                    let op = command.scrub_op().expect("a scrub names its operation");
+                    self.apply_scrub(group, table, op, log_id.index, &state).await;
+                    Some(ApplyOutcome::Applied(CommandResult {
+                        kind: ResultKind::Scrub,
+                        ok: true,
+                    }))
                 }
                 EntryPayload::Normal(command) => {
                     // a repeat of a remembered identity is answered as the first was
@@ -602,6 +852,79 @@ where
         Some((slot.table, generation, slot.state.clone(), slot.store.is_volatile()))
     }
 
+    /// Apply a scrub: hash the resident half on the loop, and read the archived half on a task
+    ///
+    /// The applied position moves past the scrub as soon as this returns; the task posts
+    /// `ServerMsg::Digested` when it has read, verified and hashed every archived record of
+    /// the group's tablets as the map stood here ([F44](../../../../docs/src/features/repair.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group
+    /// * `table` - Its table
+    /// * `op` - The operation
+    /// * `index` - The index the scrub was applied at
+    /// * `state` - The group's machine state
+    async fn apply_scrub(&mut self, group: GroupId, table: D::TableNames, op: Uuid, index: u64, state: &Rc<RefCell<MachineState>>) {
+        let schema_id = <D::ClientType as QuerySupport>::SCHEMA_ID;
+        // the tablets the group serves, as the map placed them
+        let tablets: Vec<u16> = self
+            .replication
+            .as_ref()
+            .and_then(|replication| replication.groups.get(&group))
+            .map(|slot| slot.spec.tablets.clone())
+            .unwrap_or_default();
+        state.borrow_mut().note_scrub(op);
+        if let Some(replication) = self.replication.as_mut() {
+            replication.integrity.scrubs += 1;
+        }
+        // the resident pass is the pause; the rest is the task's
+        let cut = match self.tables.canonical_cut(table, &tablets).await {
+            Ok(cut) => cut,
+            Err(error) => {
+                event!(Level::ERROR, msg = "a scrub could not take its cut", group = %group, op = %op, error = ?error);
+                state.borrow_mut().record_digest(op, crate::server::replication::DigestAnswer::Unknown);
+                return;
+            }
+        };
+        event!(Level::INFO, msg = "applied a scrub", group = %group, op = %op, index, resident = cut.resident.len(), archived = cut.archived.len());
+        let tx = self.shard_local_tx.clone();
+        glommio::spawn_local(async move {
+            let outcome = cut.finish(schema_id, &tablets, index).await.map_err(|error| format!("{error:?}"));
+            let _ = tx.send(ServerMsg::Digested { group, op, outcome }).await;
+        })
+        .detach();
+    }
+
+    /// Record what a scrub's task came to
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group
+    /// * `op` - The operation
+    /// * `outcome` - The report, or why there is none
+    pub(super) fn handle_digested(&mut self, group: GroupId, op: Uuid, outcome: Result<crate::server::replication::DigestReport, String>) {
+        let Some(replication) = self.replication.as_mut() else {
+            return;
+        };
+        let Some(slot) = replication.groups.get(&group) else {
+            return;
+        };
+        match outcome {
+            Ok(report) => {
+                event!(Level::INFO, msg = "a scrub's digest is in", group = %group, op = %op, boundary = report.boundary, digest = format!("{:016x}", report.digest), partitions = report.partitions, rows = report.rows, integrity = ?report.integrity, unverified = report.unverified);
+                replication.integrity.scrub_bytes += report.bytes;
+                replication.integrity.scrub_partitions += report.partitions;
+                slot.state.borrow_mut().record_digest(op, crate::server::replication::DigestAnswer::Report(report));
+            }
+            Err(error) => {
+                event!(Level::ERROR, msg = "a scrub's cut could not be read", group = %group, op = %op, error);
+                slot.state.borrow_mut().record_digest(op, crate::server::replication::DigestAnswer::Unknown);
+            }
+        }
+    }
+
+    /// Resume every apply batch parked on a partition, now that its read has landed or failed
     /// Resume every apply batch parked on a partition, now that its read has landed or failed
     ///
     /// # Arguments
@@ -875,6 +1198,40 @@ where
             self.handle_snapshot_rpc(origin, head, payload, reply);
             return;
         }
+        // a quarantine is the holding shard's to persist, on the loop, and answered once it is
+        // ([F44](../../../../docs/src/features/repair.md))
+        if head.kind == ReplicateKind::Quarantine {
+            match postcard::from_bytes::<crate::server::control::repair::QuarantineAction>(&payload) {
+                Ok(action) => {
+                    let tx = self.shard_local_tx.clone();
+                    glommio::spawn_local(async move {
+                        let (done_tx, done) = oneshot::channel();
+                        let _ = tx.send(ServerMsg::Quarantine { group, action, reply: Some(done_tx) }).await;
+                        let answer = match done.await {
+                            Ok(Ok(())) => encode_reply(head.id, &()),
+                            Ok(Err(error)) => ReplicateReply::error(head.id, error),
+                            Err(_) => ReplicateReply::error(head.id, "the quarantine was dropped".to_string()),
+                        };
+                        let _ = reply.send(answer).await;
+                    })
+                    .detach();
+                }
+                Err(error) => {
+                    let _ = reply.try_send(ReplicateReply::error(head.id, format!("decoding a quarantine: {error}")));
+                }
+            }
+            return;
+        }
+        // a digest is answered from what the loop holds
+        // ([F44](../../../../docs/src/features/repair.md))
+        if head.kind == ReplicateKind::Digest {
+            let answer = match <[u8; 16]>::try_from(payload.as_slice()) {
+                Ok(bytes) => encode_reply(head.id, &slot.state.borrow().digest_of(Uuid::from_bytes(bytes))),
+                Err(_) => ReplicateReply::error(head.id, "a digest request names no operation".to_string()),
+            };
+            let _ = reply.try_send(answer);
+            return;
+        }
         let network = replication.network.clone();
         let me = self.my_addr();
         let deadline = Duration::from_millis(u64::from(head.deadline_ms.max(1)));
@@ -904,8 +1261,10 @@ where
                     }
                     Err(error) => ReplicateReply::error(head.id, format!("decoding a proposal: {error}")),
                 },
-                // a snapshot rpc is judged on the loop, so it is answered before this task
-                ReplicateKind::Snapshot => unreachable!("a snapshot rpc is answered on the loop"),
+                // a snapshot rpc and a digest are judged on the loop, so they are answered before this task
+                ReplicateKind::Snapshot | ReplicateKind::Digest | ReplicateKind::Quarantine => {
+                    unreachable!("answered on the loop")
+                }
                 // a read barrier: confirm leadership with a heartbeat round and answer the
                 // read log id, or say who leads instead. A lapsed lease is answered by name
                 // rather than waited out, since its heartbeat round cannot complete
@@ -1163,6 +1522,11 @@ where
                 continue;
             }
             let mut state = slot.state.borrow_mut();
+            // a checkpoint held for a repair stream stays where the stream was judged against
+            // ([F44](../../../../docs/src/features/repair.md))
+            if state.checkpoint_held() {
+                continue;
+            }
             if state.checkpoint_index() < last.index {
                 state.checkpoint = Some(last.clone());
                 state.checkpoint_membership = state.membership.clone();
@@ -1324,6 +1688,7 @@ where
                     volatile: slot.store.is_volatile(),
                     up: slot.raft.is_some(),
                     installing: state.installing,
+                    quarantined: state.quarantined.map(|quarantine| quarantine.reason),
                 }
             })
             .collect::<Vec<_>>();
@@ -1346,6 +1711,12 @@ where
                 let mut stats = replication.snapshots;
                 stats.absorb(&replication.installs.stats());
                 stats.absorb(&replication.network.snapshot_stats());
+                stats
+            },
+            integrity: {
+                // what the loop found at open, and what the archive maps counted since
+                let mut stats = replication.integrity;
+                stats.absorb(&self.table_map.integrity());
                 stats
             },
             groups,
@@ -1454,6 +1825,65 @@ where
             ReplicationVerb::DropReplies { n } => {
                 replication.drop_replies = n;
                 Ok(serde_json::json!({ "dropping": n }))
+            }
+            ReplicationVerb::Scrub { group } => {
+                // the scrub runs on a task: the loop has to apply the entry it proposes
+                let Some(slot) = replication.groups.get(&group) else {
+                    return Some(Err(format!("group {group} is not hosted on this shard")));
+                };
+                let Some(raft) = slot.raft.clone() else {
+                    return Some(Err(format!("group {group} is still starting")));
+                };
+                let network = replication.network.clone();
+                let state = slot.state.clone();
+                let members = slot.spec.members.clone();
+                let table = slot.spec.table;
+                let me = self.my_addr();
+                let op = Uuid::new_v4();
+                glommio::spawn_local(async move {
+                    let outcome = super::repair::scrub_group(&raft, &network, me, state, table, group, &members, op, FIXTURE_SCRUB_TIMEOUT).await;
+                    let answer = outcome.map(|scrub| {
+                        let reports: serde_json::Map<String, serde_json::Value> = scrub
+                            .reports
+                            .iter()
+                            .map(|(member, report)| {
+                                let value = match report {
+                                    Ok(report) => serde_json::to_value(report).unwrap_or_default(),
+                                    Err(error) => serde_json::json!({ "error": error }),
+                                };
+                                (member.to_string(), value)
+                            })
+                            .collect();
+                        serde_json::json!({ "op": scrub.op.to_string(), "boundary": scrub.boundary, "reports": reports })
+                    });
+                    let _ = reply.send(answer);
+                })
+                .detach();
+                return None;
+            }
+            ReplicationVerb::Fault { table, fault, key } => {
+                // the compactor owns the archives, so it does the fault and answers from there;
+                // the resident copy goes first, so the next read meets the archive
+                let Some(name) = D::table_of_id(table) else {
+                    return Some(Err(format!("no table has identity {table}")));
+                };
+                // truncation cannot happen: a tablet id is twelve bits
+                #[allow(clippy::cast_possible_truncation)]
+                let tablet = Ring::tablet_of(key) as u16;
+                self.tables.evict_tablets(name, &[tablet]);
+                let sink = self
+                    .tables
+                    .compaction_sinks()
+                    .into_iter()
+                    .find(|(sink_name, _)| *sink_name == name)
+                    .map(|(_, sink)| sink);
+                let Some(sink) = sink else {
+                    return Some(Err(format!("{name} has no archives to fault")));
+                };
+                if let Err(error) = sink.send(CompactionJob::Fault { fault, key, reply }).await {
+                    return Some(Err(format!("{error:?}")));
+                }
+                return None;
             }
             ReplicationVerb::Snapshot { group } => {
                 // cut now, on the loop's own request; the manifest is answered from a task once
@@ -1754,8 +2184,7 @@ async fn write_volatile_snapshot(
 /// * `cluster` - The cluster block
 /// * `failover_ms` - The failover base, in milliseconds: the map's, or the block's until a map carries one
 /// * `group` - The group
-/// * `volatile` - Whether the group's log lives in memory alone
-fn group_config(cluster: &crate::server::conf::Cluster, failover_ms: u64, group: GroupId, volatile: bool) -> Arc<Config> {
+fn group_config(cluster: &crate::server::conf::Cluster, failover_ms: u64, group: GroupId) -> Arc<Config> {
     let base = failover_ms.max(100);
     let config = Config {
         cluster_name: format!("group-{group}"),
@@ -1770,11 +2199,61 @@ fn group_config(cluster: &crate::server::conf::Cluster, failover_ms: u64, group:
         // truncation cannot happen: a transfer's budget is minutes, not weeks
         #[allow(clippy::cast_possible_truncation)]
         install_snapshot_timeout: cluster.replication.snapshot_timeout.duration().as_millis() as u64,
-        allow_log_reversion: Some(volatile),
+        // a follower whose log is shorter than what it acknowledged lost its disk: the
+        // follower is the one that is wrong, and the leader resets its progress and feeds it
+        // again - from the log, or past the purge point from a snapshot - rather than stopping
+        // the process every group on this shard shares
+        // ([Resolved #99](../../../../docs/src/appendix/resolved/durable-log-reversion.md)).
+        // a volatile group's members lose their log on every restart by design
+        allow_log_reversion: Some(true),
         ..Config::default()
     };
     // the defaults validate, and every field set above is within what validate accepts
     Arc::new(config.validate().unwrap_or_default())
+}
+
+/// How long the fixture's scrub verb waits for every member's report
+const FIXTURE_SCRUB_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Build a group's handle on a task of its own, after shutting an old one down if there is one
+///
+/// # Arguments
+///
+/// * `tx` - The loop, which hears `GroupUp`
+/// * `me` - This node
+/// * `spec` - The group
+/// * `config` - Its timers
+/// * `network` - Its network
+/// * `store` - Its log
+/// * `machine` - Its state machine
+/// * `previous` - The handle to shut down first, for a restart
+#[allow(clippy::too_many_arguments)]
+fn spawn_group_start<D: ShoalDatabase>(
+    tx: AsyncSender<ServerMsg<D>>,
+    me: NodeId,
+    spec: GroupSpec,
+    config: Arc<Config>,
+    network: GroupNetwork,
+    store: GroupStore,
+    machine: GroupMachine<D>,
+    previous: Option<Raft<DataConfig, GroupMachine<D>>>,
+) {
+    let addr = ShardAddr::new(me, spec.mine);
+    let primary = spec.is_primary(me);
+    glommio::spawn_local(async move {
+        // the old handle first, whole, so two cores never share one log
+        if let Some(previous) = previous {
+            let _ = previous.shutdown().await;
+        }
+        let outcome = start_group(addr, spec, config, network, store, machine, primary).await;
+        let _ = tx
+            .send(ServerMsg::GroupUp {
+                group: network_group(&outcome),
+                raft: outcome.map(|(_, raft)| raft).map_err(|(_, error)| error),
+            })
+            .await;
+    })
+    .detach();
 }
 
 /// The group a start outcome is for

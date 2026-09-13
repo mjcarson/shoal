@@ -25,12 +25,13 @@ pub mod detector;
 pub mod listener;
 pub mod network;
 pub mod plane;
+pub mod repair;
 pub mod runtime;
 pub mod store;
 pub mod types;
 
 pub use cores::ControlPlacement;
 pub use plane::{
-    AdminCall, ControlEvent, ControlHandle, ControlPlane, ControlRequest, DataReadiness,
+    AdminCall, AdminSender, ControlEvent, ControlHandle, ControlPlane, ControlRequest, DataReadiness,
     JoinStatus, MapSink, ReadinessView, ShardHealthEvent, TopologyView, VoteProbe,
 };

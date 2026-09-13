@@ -23,6 +23,7 @@ pub use fs::FileSystem;
 pub use none::NoStorage;
 
 use crate::server::messages::{QueryMetadata, ServerMsg};
+use crate::server::replication::{ArchivedCut, IntegrityStats};
 use crate::server::stage_profile::{StageDurability, StageStamps};
 use crate::server::{Conf, ServerError};
 use crate::shared::responses::{Response, ResponseAction};
@@ -170,6 +171,23 @@ pub struct FlushProgress {
     pub rotated: bool,
 }
 
+/// A fault the fixture injects into one partition's archived copy, for the repair tests
+///
+/// Each is a state a scrub has to tell apart ([F44](../../../docs/src/features/repair.md)):
+/// bytes that no longer hash to their checksum, a partition the map no longer names though
+/// every checksum is whole, and a record with a valid checksum whose content changed. Only a
+/// compacted partition can be faulted, since the fault is in the archives, and the resident
+/// copy is evicted so the next read meets it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ArchiveFault {
+    /// Flip one byte of the partition's record in place
+    Corrupt,
+    /// Drop the partition's map entry, as though it had been pruned
+    Forget,
+    /// Rewrite the partition as one with no live row, under a valid checksum
+    Erase,
+}
+
 /// A compaction job
 #[derive(Debug, Clone)]
 pub enum CompactionJob {
@@ -233,6 +251,16 @@ pub enum CompactionJob {
         tablets: Vec<u16>,
         /// The verified file
         path: PathBuf,
+    },
+    /// Inject a fault into one partition's archived copy, for the fixture
+    /// ([F44](../../../docs/src/features/repair.md))
+    Fault {
+        /// The fault
+        fault: ArchiveFault,
+        /// The partition
+        key: u64,
+        /// Where what was done is answered
+        reply: std::sync::mpsc::Sender<Result<serde_json::Value, String>>,
     },
     /// Compact this shards archive data
     Archives,
@@ -344,6 +372,13 @@ pub trait IntentReadSupport<T: RkyvSupport>: Sized + RkyvSupport + PartitionSupp
         stats: &mut RecoveryStats,
     ) -> ShouldPrune;
 
+    /// A partition of this type with no live row, for the fixture's erase fault
+    ///
+    /// # Arguments
+    ///
+    /// * `key` - The partition key
+    fn erased(key: u64) -> Self;
+
     /// Get the partition key for a specific intent
     fn partition_key_and_intent(read: &ReadResult) -> Result<(u64, Self::Intent), ServerError>
     where
@@ -387,6 +422,48 @@ impl<N: TableNameSupport> FullArchiveMap<N> {
     /// Insert a new archive map into our full archive map
     pub fn insert(&self, table_name: N, map: ArchiveMapKinds) {
         self.map.borrow_mut().insert(table_name, map);
+    }
+
+    /// What every table's archives have seen of their own integrity, folded
+    ///
+    /// The reads are counted on each table's map, since that is what every reader of a
+    /// table's archives shares ([F44](../../../docs/src/features/repair.md)).
+    #[must_use]
+    pub fn integrity(&self) -> IntegrityStats {
+        // fold every filesystem map's counters
+        let mut folded = IntegrityStats::default();
+        for map in self.map.borrow().values() {
+            let ArchiveMapKinds::FileSystem(fs_map) = map;
+            folded.checksum_failures += fs_map.integrity.checksum_failures.get();
+            folded.unverified_reads += fs_map.integrity.unverified_reads.get();
+        }
+        folded
+    }
+
+    /// Whether a table's archives hold any partition of some tablets
+    ///
+    /// What says a shard once held a group when its checkpoint is gone with its log
+    /// ([Resolved #99](../../../docs/src/appendix/resolved/durable-log-reversion.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `table_name` - The table
+    /// * `tablets` - The tablets
+    #[must_use]
+    pub fn holds_any(&self, table_name: N, tablets: &[u16]) -> bool {
+        // a table with no map holds nothing
+        let map = self.map.borrow();
+        let Some(ArchiveMapKinds::FileSystem(fs_map)) = map.get(&table_name) else {
+            return false;
+        };
+        // any partition of the named tablets
+        let held = fs_map.to_archive.borrow().keys().any(|key| {
+            // truncation cannot happen: a tablet id is twelve bits
+            #[allow(clippy::cast_possible_truncation)]
+            let tablet = crate::server::ring::Ring::tablet_of(*key) as u16;
+            tablets.contains(&tablet)
+        });
+        held
     }
 }
 
@@ -649,6 +726,23 @@ pub trait StorageSupport: Sized {
     /// An engine that stores nothing has none.
     fn archived_keys(&self) -> Vec<u64> {
         Vec::new()
+    }
+
+    /// Collect where every archived partition of some tablets lives, apart from the resident ones
+    ///
+    /// The archived half of a canonical cut ([F44](../../../docs/src/features/repair.md)):
+    /// taken on the loop while the map is what it is at the boundary, with a duplicated handle
+    /// per distinct archive, so the task that reads it afterwards reads the state at the
+    /// boundary however the map moves. An engine that stores nothing collects nothing.
+    ///
+    /// # Arguments
+    ///
+    /// * `tablets` - The tablets
+    /// * `resident` - The keys the table already hashed from memory
+    #[allow(async_fn_in_trait)]
+    async fn archived_cut(&self, tablets: &[u16], resident: &HashSet<u64>) -> Result<ArchivedCut, ServerError> {
+        let _ = (tablets, resident);
+        Ok(ArchivedCut::empty())
     }
 
     /// Note the WAL generation a replicated command is applied in

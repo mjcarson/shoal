@@ -859,6 +859,21 @@ pub fn wait_peer_placed(staged: &Staged, index: u32, runtime: &tokio::runtime::R
 /// * `pool` - Node zero's running pool
 /// * `conf` - The configuration node zero was started with, for the report cadence
 /// * `runtime` - The client runtime the peers are asked on
+/// What every node's scrubs have hashed and read, summed: partitions, then bytes
+///
+/// # Arguments
+///
+/// * `reports` - Every node's report
+#[must_use]
+pub fn integrity_sum(reports: &[(String, shoal::server::replication::NodeReplication)]) -> (u64, u64) {
+    reports.iter().fold((0, 0), |(partitions, bytes), (_, report)| {
+        (
+            partitions + report.integrity.scrub_partitions,
+            bytes + report.integrity.scrub_bytes,
+        )
+    })
+}
+
 pub fn node_reports(
     staged: &Staged,
     pool: &shoal::ShoalPool<crate::workloads::schema::Bench>,
@@ -1186,6 +1201,7 @@ mod tests {
             reads: Some(facts),
             fault: None,
             catchup: None,
+            background: None,
         };
         let text = serde_json::to_string(&cluster).expect("serializes");
         let back: ClusterFacts = serde_json::from_str(&text).expect("parses");
@@ -1278,6 +1294,7 @@ mod tests {
             reads: None,
             fault: None,
             catchup: None,
+            background: None,
         };
         // the record round trips with every replica's debt and the schedule on it
         let text = serde_json::to_string(&facts).expect("serializes");

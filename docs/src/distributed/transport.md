@@ -43,7 +43,13 @@ takes from a replica to its leader for a read index; a forward entry carries a r
 resolved level, the gather slot it fills and its tokens - under `FLAG_READ`; the `Forwarded`
 head widens from thirty-two bytes to ninety-six for the attempt, the slot and a token; and all
 three sit behind `CAP_READ_CONSISTENCY_V1`, which the M2 exact-match rule refuses an M4 peer
-by. Between a client and a node the same milestone spends the hello's reserved byte fourteen on
+by. **At M8** ([F44](../features/repair.md)) the replication lane gains `Digest`, a member's
+canonical report of a scrub asked by the operation and answered pending, the report or
+unknown, and `Quarantine`, a driver's word to a member about its copy, answered once the
+member's marker is durable; a repair snapshot rides the M7 stream with the operation on its
+begin, judged against the receiver's checkpoint and answered `Behind` when the cut has to be
+taken again. `PROTOCOL_VERSION` went to 4 for the scrub entry a peer built before could not
+tell from a write. Between a client and a node the same milestone spends the hello's reserved byte fourteen on
 a capability set, and only a granted bit puts a read options section behind a bundle's trace
 context or a session token ahead of a response's payload - the selected-version contract, with
 no version bump. **At M6** ([F42](../features/primary-failover.md)) the transport learns the
@@ -116,7 +122,7 @@ Client encryption requires equivalent protection on both control and data peer l
 | --- | --- |
 | Peer hello/ack | Identity, incarnation, capabilities, schema identity, refusal reason |
 | Forward / Forwarded | Original operation/query and attempt ids, destination, coverage, resolved policy, remaining deadline, bounded hop count and return address. *At M5:* the attempt minted per bundle and echoed, the resolved level and the slot per entry, the budget remaining rather than a fresh one, and a token on a write's answer |
-| Data consensus | Tablet/group identity plus selected library's election, append, configuration and read-barrier payloads. *At M4:* `Replicate`/`ReplicateResponse` on the replication lane, openraft's `AppendEntries` and `Vote` as postcard. *At M5:* `ReadBarrier`, answered with the leader's `ReadLogId` or a leader hint |
+| Data consensus | Tablet/group identity plus selected library's election, append, configuration and read-barrier payloads. *At M4:* `Replicate`/`ReplicateResponse` on the replication lane, openraft's `AppendEntries` and `Vote` as postcard. *At M5:* `ReadBarrier`, answered with the leader's `ReadLogId` or a leader hint. *At M8:* `Digest` and `Quarantine`, and the scrub entry as a command whose tablet no write can name |
 | Replication receipts | Matching term/history, replica/configuration and durable completion evidence; duplicate-safe. *At M4:* openraft's append response, sent after the follower's `fdatasync` |
 | Catch-up | Tablet/group, matching term/index boundary and snapshot fallback negotiation. *At M7:* openraft's, from the retained log while the follower is inside it and a snapshot once it is not |
 | Snapshot begin/chunk/end | Snapshot/transition identity, manifest, boundary, offset, length, checksum and resume metadata. *At M7:* the `Begin`/`End` RPCs on the replication lane and the `SnapshotBegin`/chunk/`SnapshotEnd` frames on the bulk lane, each chunk `[offset u64][bytes]` under `replication.snapshot_chunk_bytes`, resumed from the prefix the receiver holds |

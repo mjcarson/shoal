@@ -38,6 +38,9 @@ pub enum ResultKind {
     Delete,
     /// A row was updated, or was not there to update
     Update,
+    /// A scrub was applied: the replica took its canonical digest and wrote nothing
+    /// ([F44](../../../../docs/src/features/repair.md))
+    Scrub,
 }
 
 /// What applying one command produced, derived in committed order on every replica

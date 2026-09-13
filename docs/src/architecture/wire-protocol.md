@@ -35,10 +35,14 @@ whose type it does not know, and it is what makes `decode_response`'s "shorter t
 id" check possible — and `Header::request_payload_len`'s "shorter than the trace context it claims"
 check beside it.
 
-`version` is `PROTOCOL_VERSION`, ~~currently 1~~ **currently 3**. A frame naming any other version
-is refused. It went to 2 when a get's answer started carrying the index of the partitions its rows
-came from ([F27](../features/grouped-responses.md)), and to 3 when a request frame started being
-able to carry a trace context ([F35](../features/wire-trace-context.md)).
+`version` is `PROTOCOL_VERSION`, ~~currently 1~~ ~~currently 3~~ **currently 4**. A frame naming
+any other version is refused. It went to 2 when a get's answer started carrying the index of the
+partitions its rows came from ([F27](../features/grouped-responses.md)), to 3 when a request
+frame started being able to carry a trace context ([F35](../features/wire-trace-context.md)),
+and to 4 when a tablet group's log gained the scrub entry and the replication lane the digest
+and quarantine requests ([F44](../features/repair.md)) - not a framing change on this lane, but
+a peer built before it would apply the entry as a write with no payload, and the peer hello's
+exact match is what keeps it out.
 
 `type` is one of twelve, with discriminants that are explicit, start at 1, and are never reused:
 

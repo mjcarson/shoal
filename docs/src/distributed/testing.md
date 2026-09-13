@@ -120,8 +120,13 @@ At M7 the proxy can also throttle a lane to a byte rate, and the recovery row's 
 snapshot phase" is `CRASH_AT`, a child armed to exit at one of the seven points of an install
 (`snapshot_install_is_atomic_at_every_crash_point`); the storage row's checkpoint/manifest
 interruption is the same matrix, since the marker and the checkpoint are what the points
-straddle. Delayed and failed fsyncs are still `STALL_WAL`, and torn writes, disk full and bit
-corruption are M8's.*
+straddle. Delayed and failed fsyncs are still `STALL_WAL`, ~~and torn writes, disk full and bit
+corruption are M8's~~ and at M8 bit corruption is `CORRUPT <table> <key>`, a byte of a
+partition's archived record flipped in place by the compactor that owns the archives, beside
+`FORGET` - the partition's map entry dropped - and `ERASE` - the partition rewritten with no live
+row under a valid checksum; a corrupt checkpoint file or retry sidecar is refused at open by
+its own checksum (`checkpoint_and_retries_are_checksummed`). Disk full and a torn write to an
+archive are still filed.*
 
 SIGKILL does not model loss of OS/device caches. Durability tests need injected persistence
 completions and failure semantics, with controlled machine/power-loss experiments optional later.
@@ -154,6 +159,16 @@ test compares nodes at a boundary it establishes itself - waiting on `wait_diges
 until every node agrees, which is what the applied indexes the same verb reports per group
 make legible when one does not. It is a digest of applied state, not of archives, so a layout
 self-test is still to come.*
+*At M8 ([F44](../features/repair.md)) the canonical digest is the scrub's: a log entry every
+replica applies in committed order and takes a cut at, folding every partition's rows
+re-serialized in key order under the schema fingerprint and the tablet list, so coverage is in
+the digest and the boundary is the entry's index. `DIGEST` stays as it was, on purpose - the
+independent fold this section requires - and `canonical_digest_ignores_archive_layout_at_same_boundary`
+is the layout self-test: three replicas merged thrice, once and never agree at one boundary, a
+forgotten or an erased partition does not, a corrupted one is invalid, and the fixture's fold
+agrees with every verdict. Quarantine and source selection are tested by corrupting the primary
+(`repair_detects_corrupt_primary_and_preserves_evidence`) and a follower
+(`corrupt_follower_is_quarantined_and_repaired_from_a_verified_source`).*
 
 ### Assertions on the path
 

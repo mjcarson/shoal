@@ -721,6 +721,52 @@ where
             String,
         >,
     },
+    /// A scrub's cut was read and hashed off the loop, or could not be
+    /// ([F44](../../../docs/src/features/repair.md))
+    Digested {
+        /// The group
+        group: crate::shared::identity::GroupId,
+        /// The operation
+        op: Uuid,
+        /// The report, or why there is none
+        outcome: Result<crate::server::replication::DigestReport, String>,
+    },
+    /// Quarantine a copy this shard holds, or lift it, and answer once the marker is durable
+    /// ([F44](../../../docs/src/features/repair.md))
+    Quarantine {
+        /// The group
+        group: crate::shared::identity::GroupId,
+        /// What to do
+        action: crate::server::control::repair::QuarantineAction,
+        /// Where to say it is done, if anybody waits
+        reply: Option<futures_channel::oneshot::Sender<Result<(), String>>>,
+    },
+    /// A repair stream was received whole: restart the group from its checkpoint so it installs
+    /// ([F44](../../../docs/src/features/repair.md))
+    RepairInstall {
+        /// The group
+        group: crate::shared::identity::GroupId,
+        /// The verified file
+        path: std::path::PathBuf,
+        /// What it is
+        manifest: crate::server::replication::SnapshotManifest,
+        /// Answered once the restart is under way, or with why it is not
+        reply: futures_channel::oneshot::Sender<Result<(), String>>,
+    },
+    /// Rotate the WAL and sweep, so a group's checkpoint can move past its last entry
+    RepairRotate {
+        /// Answered once the sweep ran
+        reply: futures_channel::oneshot::Sender<()>,
+    },
+    /// A repair driver finished with a group, for whatever reason
+    RepairDone {
+        /// The operation
+        op: Uuid,
+        /// The group
+        group: crate::shared::identity::GroupId,
+        /// The phase it committed last, which the map may not carry yet
+        phase: crate::server::control::repair::RepairPhase,
+    },
     /// A snapshot install's marker and file are gone, so the install is complete
     SnapshotCleaned {
         /// The group
@@ -855,6 +901,11 @@ impl<D: ShoalDatabase> Clone for ServerMsg<D> {
             ServerMsg::SnapshotInstalled { .. } => panic!("An installed snapshot is the installing shard's"),
             ServerMsg::SnapshotRecords { .. } => panic!("A snapshot's records are the installing shard's"),
             ServerMsg::SnapshotCleaned { .. } => panic!("A cleaned install is the installing shard's"),
+            ServerMsg::Digested { .. } => panic!("A digest is the scrubbing shard's"),
+            ServerMsg::Quarantine { .. } => panic!("A quarantine is the holding shard's"),
+            ServerMsg::RepairDone { .. } => panic!("A repair driver is one shard's"),
+            ServerMsg::RepairInstall { .. } => panic!("A repair install is the holding shard's"),
+            ServerMsg::RepairRotate { .. } => panic!("A rotation is one shard's"),
             ServerMsg::SnapshotBuilt { .. } => panic!("A built snapshot is the cutting shard's"),
             ServerMsg::ReplicationView(_) => panic!("A replication view is asked of one shard"),
             ServerMsg::ReplicationVerb { .. } => panic!("A replication verb is for one shard"),

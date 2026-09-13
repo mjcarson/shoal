@@ -305,6 +305,43 @@ pub struct ClusterFactsLite {
     /// before F43
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub catchup: Option<CatchupFactsLite>,
+    /// The repair the background arm ran and what its client saw across it; absent for every
+    /// other arm and before F44
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<BackgroundFactsLite>,
+}
+
+/// A repair run in the background of a measured phase, and what the client saw across it
+///
+/// A mirror of the artifact's `BackgroundFacts`, whole: the marks say when the repair was
+/// asked for and done, the counters what the scrubs hashed and read, the windows each carry
+/// their own distribution and the series is one bucket per second, so the scrub's cost can be
+/// drawn as the plateau it is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackgroundFactsLite {
+    /// What was asked for: `verify`
+    pub kind: String,
+    /// When the repair was asked for, in milliseconds from the start of the measured phase
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_ms: Option<u64>,
+    /// When every group of it was done, if inside the run
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_ms: Option<u64>,
+    /// How long that took, in whole seconds
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seconds: Option<u64>,
+    /// How many groups the record covered
+    pub groups: u64,
+    /// How many came to a clean verdict
+    pub clean: u64,
+    /// Partitions the scrubs hashed, across every node
+    pub partitions: u64,
+    /// Bytes the scrubs read off the archives, across every node
+    pub bytes: u64,
+    /// The three windows: `before`, `during` and `after`
+    pub windows: Vec<WindowFactsLite>,
+    /// One bucket per second of the measured phase
+    pub series: Vec<SecondFactsLite>,
 }
 
 /// How a fault's returning node caught up, sampled from its own report after the restart

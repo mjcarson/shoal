@@ -190,7 +190,7 @@ data and proves every workload still runs — which is what you want before spen
 real one. Budget twenty minutes for a macro-only smoke pass; the criterion layer is what makes a
 full smoke run take longer than you expect.
 
-The macro layer is three hundred and eighty nine **workloads** living in `shoal-bench/src/workloads/`,
+The macro layer is three hundred and ninety **workloads** living in `shoal-bench/src/workloads/`,
 each generating its own rows from `--seed` — there is no dataset to fetch
 ([F8](docs/src/features/purpose-built-workloads.md)). They come in three kinds and the differences
 matter:
@@ -234,6 +234,12 @@ matter:
   `cluster.fault` - the marks, the client's first failure and recovery, three windows with a
   distribution each and a per second series - so the outage is never averaged into the run.
   Node zero is the driver's own process and is never the one killed.
+- **The background arm** is one workload ([F44](docs/src/features/repair.md)):
+  `macro/cluster/background/repair`, the kill arm's placement and mixture with nothing killed
+  and a `Repair` of the reference table in verify mode asked for a third of the way through
+  (`Workload::background`). Its capture carries `cluster.background` - the marks, the groups,
+  what the scrubs hashed and read, three windows and a per second series - so a scrub's cost
+  to the foreground is `during` read against `before`.
 - **The configuration sweep** is fifty-eight workloads under `macro/conf/`, each one the grid's
   reference cell `macro/grid/unsorted/r50/1024` with **exactly one field** of the server
   configuration moved ([F20](docs/src/features/configuration-sweeps.md)). It answers what a setting
@@ -426,6 +432,14 @@ go through `shoal`.**
 
 - One shard per CPU core (cpu 0 reserved for coordination; a cluster node also reserves the
   control core's whole physical core for its control thread unless `cluster.control_core_shared`)
+- Since [F44](docs/src/features/repair.md) every archive record is `[size][gxhash64][payload]`
+  behind a format 2 header, written by `write_record` and verified by `ArchiveMap::read_record`
+  and nowhere else; a scrub is `Command::scrub`, a command whose tablet is `SCRUB_TABLET`,
+  applied in committed order and never handed to a compactor; a quarantine is
+  `MachineState::quarantined`, persisted under `wal/Shard-N/quarantine/`, decided locally and
+  committed through the node's report; `Repair` is driven by the group's leader in
+  `shard/repair.rs` with every phase committed before the step it names, and a durable copy is
+  repaired by restarting its group from its held checkpoint with the received file pending
 - A `cluster:` block makes the node a cluster member ([F37](docs/src/features/node-identity-control-plane.md)):
   `server/meta.rs` mints a `NodeId` and a `ClusterId` into a format 3 marker, `server/control/`
   runs an embedded `openraft 0.10.0-alpha.34` group on a glommio `AsyncRuntime` written there, and
