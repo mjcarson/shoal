@@ -25,6 +25,21 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, ReadBuf};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpStream, ToSocketAddrs};
 use tokio::task::JoinHandle;
+use std::time::{Duration, Instant};
+
+/// How much longer than its own deadline a client waits for a bundle before calling it unknown
+///
+/// A server answers `Timeout` at the bundle's deadline itself, so a client that waited only as
+/// long would turn a definite answer into an unknown one; the slack is for that answer to
+/// arrive. Past it the client stops waiting and gives back the waiter, and the outcome is
+/// unknown ([F42](../../../docs/src/features/primary-failover.md)).
+const DEADLINE_SLACK: Duration = Duration::from_secs(1);
+
+/// The first pause between two tries of a retried bundle
+const RETRY_BACKOFF_MIN: Duration = Duration::from_millis(20);
+
+/// The longest pause between two tries of a retried bundle
+const RETRY_BACKOFF_MAX: Duration = Duration::from_millis(500);
 use tracing::{event, info_span, instrument, Instrument, Level, Span};
 // the extension trait that resolves what trace the caller is in, which only exists with a layer
 // that can answer the question
@@ -1133,7 +1148,7 @@ impl<S: QuerySupport> Shoal<S> {
     pub async fn admin(&self, request: &AdminRequest) -> Result<AdminResponse, Errors> {
         // an id for the answer to come back under, tracked like a query's
         let mut id = Uuid::new_v4();
-        let (response_tx, response_rx) = self.track_response(&mut id)?;
+        let (response_tx, response_rx) = self.track_response(&mut id, false)?;
         // the body, then the header that announces it
         let body = proto_admin::encode_body(&id, request)
             .map_err(|error| Errors::Config(format!("encoding an admin request: {error}")))?;
@@ -1194,10 +1209,20 @@ impl<S: QuerySupport> Shoal<S> {
     }
 
     /// Add a response stream to our channel map
+    ///
+    /// A pinned id is the caller's identity for the bundle and is never re-minted: a collision
+    /// means the same bundle is still in flight on this client, and the send is refused
+    /// rather than sent under a different name ([F42](../../../docs/src/features/primary-failover.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `query_id` - The bundle id, re-minted on a collision unless pinned
+    /// * `pinned` - Whether the id is the caller's and must stay what it is
     #[cfg_attr(feature = "hotpath", hotpath::measure)]
     fn track_response(
         &self,
         query_id: &mut Uuid,
+        pinned: bool,
     ) -> Result<(AsyncSender<ClientMsg>, AsyncReceiver<ClientMsg>), Errors> {
         // get the next available response channel or create a new one
         let (tx, rx) = match self.channel_queue_rx.try_recv().map_err(receive_failed)? {
@@ -1221,6 +1246,14 @@ impl<S: QuerySupport> Shoal<S> {
                 );
                 // we found a unique query id so stop trying to find a new id
                 break;
+            }
+            // a pinned id that collides is the same bundle still in flight: refused, and the
+            // channel pair goes back to the queue
+            if pinned {
+                let _ = self.channel_queue_tx.try_send((tx, rx));
+                return Err(Errors::Config(format!(
+                    "bundle {query_id} is still in flight on this client; a retry waits for its last try to end"
+                )));
             }
             // try to generate a unique query id
             *query_id = Uuid::new_v4();
@@ -1302,29 +1335,81 @@ impl<S: QuerySupport> Shoal<S> {
     ) -> Result<(ShoalResultStream<S>, BatchStamps), Errors> {
         // start timing this bundle
         let mut stamps = BatchStamps::entered_now();
+        // a pinned identity is the bundle's id; the id is tracked before the bundle is
+        // serialized, since the id is inside the bytes and a collision may re-mint it
+        if let Some(identity) = options.identity {
+            queries.id = identity;
+        }
+        let (response_tx, response_rx) = self.track_response(&mut queries.id, options.identity.is_some())?;
         // archive our queries
-        let archived = rkyv::to_bytes::<_>(&queries)?;
+        let archived = match rkyv::to_bytes::<_>(&queries) {
+            Ok(archived) => archived,
+            Err(error) => {
+                // nothing will be written, so the waiter goes and the channels go back
+                self.channel_map.pin().remove(&queries.id);
+                let _ = self.channel_queue_tx.send((response_tx, response_rx)).await;
+                return Err(error.into());
+            }
+        };
         // record what serializing this bundle cost
         stamps.mark_serialized();
-        // build the header that goes ahead of this bundle
-        //
-        // this is done before we take a connection from the pool, so a bundle too large to frame
-        // fails without ever consuming a pool slot. it is attributed to serialization rather than
-        // to the pool wait, the same way the streaming path attributes it
-        // the context names this send's own span, so the server's root hangs off it. resolving it
-        // here rather than at the socket keeps it inside the span it is naming
-        let trace = current_trace_context();
-        let mut head = protocol::RequestHead::Fixed(protocol::request_preamble_traced(
-            trace.as_ref(),
-            archived.len(),
-            self.peer_max_frame_bytes(),
-        )?);
-        // start tracking this response
-        let (response_tx, response_rx) = self.track_response(&mut queries.id)?;
-        // get a connection from our connection pool and send our query
-        let mut conn = self.pool.get().await.map_err(|e| {
-            Errors::ConnectionPool(format!("failed to get connection from pool: {e}"))
-        })?;
+        self.send_tracked(queries.id, &archived, options, stamps, response_tx, response_rx).await
+    }
+
+    /// Send a bundle whose id is tracked and whose bytes are serialized, over a pooled connection
+    ///
+    /// The half of a send that a retry repeats: the same bytes under the same id, on whichever
+    /// connection the pool hands out. Every failure before the write gives the waiter back, so
+    /// a pinned id can be tracked again for the next try
+    /// ([F42](../../../docs/src/features/primary-failover.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The bundle id, already tracked
+    /// * `archived` - The bundle's bytes
+    /// * `options` - How the bundle's reads are served
+    /// * `stamps` - What the bundle has cost so far
+    /// * `response_tx` - The tracked waiter's sender
+    /// * `response_rx` - Its receiver
+    #[cfg_attr(feature = "hotpath", hotpath::measure)]
+    async fn send_tracked(
+        &self,
+        id: Uuid,
+        archived: &AlignedVec,
+        options: &SendOptions,
+        mut stamps: BatchStamps,
+        response_tx: AsyncSender<ClientMsg>,
+        response_rx: AsyncReceiver<ClientMsg>,
+    ) -> Result<(ShoalResultStream<S>, BatchStamps), Errors> {
+        // everything before the write, so a failure there gives the waiter back
+        let before_write = async {
+            // build the header that goes ahead of this bundle
+            //
+            // this is done before we take a connection from the pool, so a bundle too large to frame
+            // fails without ever consuming a pool slot. it is attributed to serialization rather than
+            // to the pool wait, the same way the streaming path attributes it
+            // the context names this send's own span, so the server's root hangs off it. resolving it
+            // here rather than at the socket keeps it inside the span it is naming
+            let trace = current_trace_context();
+            let head = protocol::RequestHead::Fixed(protocol::request_preamble_traced(
+                trace.as_ref(),
+                archived.len(),
+                self.peer_max_frame_bytes(),
+            )?);
+            // get a connection from our connection pool and send our query
+            let conn = self.pool.get().await.map_err(|e| {
+                Errors::ConnectionPool(format!("failed to get connection from pool: {e}"))
+            })?;
+            Ok::<_, Errors>((trace, head, conn))
+        };
+        let (trace, mut head, mut conn) = match before_write.await {
+            Ok(ready) => ready,
+            Err(error) => {
+                self.channel_map.pin().remove(&id);
+                let _ = self.channel_queue_tx.send((response_tx, response_rx)).await;
+                return Err(error);
+            }
+        };
         // record what waiting on the connection pool cost
         //
         // this is where client side backpressure shows up once enough queries are in flight
@@ -1341,13 +1426,25 @@ impl<S: QuerySupport> Shoal<S> {
             )?;
         }
         // build our vectored byte slices to send
-        let mut bufs = &mut [IoSlice::new(head.as_bytes()), IoSlice::new(&archived)][..];
+        let mut bufs = &mut [IoSlice::new(head.as_bytes()), IoSlice::new(archived)][..];
         // keep sending our data until all of this archive has been sent
         while !bufs.is_empty() {
             // send this data back to our client
-            match conn.write_vectored(bufs).await? {
+            let written = match conn.write_vectored(bufs).await {
+                Ok(n) => n,
+                Err(error) => {
+                    // a socket that failed mid-write may or may not have delivered the bundle:
+                    // the waiter goes, and the outcome is the caller's to treat as unknown
+                    self.channel_map.pin().remove(&id);
+                    let _ = self.channel_queue_tx.send((response_tx, response_rx)).await;
+                    return Err(Errors::IO(error));
+                }
+            };
+            match written {
                 // if n is zero then no bytes were written
-                n if n == 0 => {
+                0 => {
+                    self.channel_map.pin().remove(&id);
+                    let _ = self.channel_queue_tx.send((response_tx, response_rx)).await;
                     return Err(Errors::IO(std::io::Error::new(
                         ErrorKind::WriteZero,
                         "no bytes were written",
@@ -1364,7 +1461,7 @@ impl<S: QuerySupport> Shoal<S> {
         // this is done after the write rather than before it, because a bundle that never
         // reached the socket is not owed anything by that connection
         self.channel_map.pin().insert(
-            queries.id,
+            id,
             Waiter {
                 conn: Some(conn.id),
                 tx: response_tx.clone(),
@@ -1378,18 +1475,22 @@ impl<S: QuerySupport> Shoal<S> {
         // that window from the other side: one of the two always sees the other
         if self.dead_conns.pin().contains_key(&conn.id) {
             // this stream is over before it started, so give its slot straight back
-            self.channel_map.pin().remove(&queries.id);
+            self.channel_map.pin().remove(&id);
             let _ = self.channel_queue_tx.send((response_tx, response_rx)).await;
             return Err(Errors::Server {
-                query_id: Some(queries.id),
+                query_id: Some(id),
                 index: None,
                 code: ErrorCode::ConnectionLost,
                 msg: "the connection this query was written to had already stopped".to_owned(),
             });
         }
+        // the client stops waiting a little after the bundle's own deadline, if it named one
+        let deadline = options
+            .deadline
+            .map(|budget| tokio::time::Instant::now() + budget + DEADLINE_SLACK);
         // build a new shoal result stream
         let result_stream = ShoalResultStream {
-            id: queries.id,
+            id,
             response_tx: Some(response_tx),
             response_rx: Some(response_rx),
             channel_map: self.channel_map.clone(),
@@ -1399,8 +1500,99 @@ impl<S: QuerySupport> Shoal<S> {
             pending: BTreeMap::default(),
             phantom: PhantomData,
             span: Span::current(),
+            deadline,
         };
         Ok((result_stream, stamps))
+    }
+
+    /// Send a bundle and collect every answer, trying again under one identity while told to
+    ///
+    /// The bundle is serialized once under its identity - the caller's, or one minted here -
+    /// and sent as the same bytes on every try, so the server sees one request however many
+    /// times it was asked: a write a group applied answers its first result, never a second
+    /// effect. A try ends in the answers, or in a failure; a failure that says to try again
+    /// (`NotLeader`, `Unavailable`, `QuorumUnavailable`, `ConnectionLost`, `OutcomeUnknown`,
+    /// `Timeout`, a lost connection or an empty pool) is tried again after a pause that doubles
+    /// from twenty milliseconds to half a second, while `retry`'s budget lasts; anything else,
+    /// and the last failure once the budget is gone, is the caller's. With no `retry` there is
+    /// one try ([F42](../../../docs/src/features/primary-failover.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `queries` - The queries to execute
+    /// * `options` - How the bundle is served, and whether and how long to retry
+    #[instrument(name = "Shoal::exec_with", skip_all, err(Debug))]
+    pub async fn exec_with(
+        &self,
+        mut queries: Queries<S>,
+        options: &SendOptions,
+    ) -> Result<Vec<ShoalResponse<S>>, Errors>
+    where
+        <S::ResponseKinds as Archive>::Archived:
+            rkyv::Deserialize<S::ResponseKinds, Strategy<Pool, rkyv::rancor::Error>>,
+        for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived:
+            rkyv::bytecheck::CheckBytes<
+                Strategy<
+                    rkyv::validation::Validator<
+                        rkyv::validation::archive::ArchiveValidator<'a>,
+                        rkyv::validation::shared::SharedValidator,
+                    >,
+                    rkyv::rancor::Error,
+                >,
+            >,
+    {
+        // one identity for every try, serialized once
+        let identity = options.identity.unwrap_or_else(Uuid::new_v4);
+        queries.id = identity;
+        let archived = rkyv::to_bytes::<_>(&queries)?;
+        let budget = options.retry;
+        let started = Instant::now();
+        let mut pause = RETRY_BACKOFF_MIN;
+        let mut attempts = 0u32;
+        loop {
+            attempts += 1;
+            // one try: track the identity, send the bytes, collect every answer
+            let outcome = async {
+                let mut id = identity;
+                let stamps = BatchStamps::entered_now();
+                let (response_tx, response_rx) = self.track_response(&mut id, true)?;
+                let (mut stream, _) = self
+                    .send_tracked(identity, &archived, options, stamps, response_tx, response_rx)
+                    .await?;
+                let mut responses = Vec::with_capacity(queries.queries.len());
+                while let Some(response) = stream.next().await? {
+                    // a failure the server wrote as a response rather than as an error frame
+                    // is a failure of this try all the same; a query that worked and found
+                    // nothing is an answer
+                    if let Err(error @ Errors::Server { .. }) = response.suceeded(QuerySuceededOpts::default()) {
+                        return Err(error);
+                    }
+                    responses.push(response);
+                }
+                Ok::<_, Errors>(responses)
+            }
+            .await;
+            match outcome {
+                Ok(mut responses) => {
+                    // every answer says how many tries it took
+                    for response in &mut responses {
+                        response.attempts = attempts;
+                    }
+                    return Ok(responses);
+                }
+                Err(error) => {
+                    // only what says to try again is tried again, and only within the budget
+                    let again = retriable(&error)
+                        && budget.is_some_and(|within| started.elapsed() + pause < within);
+                    if !again {
+                        return Err(error);
+                    }
+                    event!(Level::DEBUG, msg = "trying a bundle again", id = %identity, attempts, ?error, ?pause);
+                    tokio::time::sleep(pause).await;
+                    pause = (pause * 2).min(RETRY_BACKOFF_MAX);
+                }
+            }
+        }
     }
 
     /// Execute a query and wait for all responses.
@@ -1522,13 +1714,22 @@ impl<S: QuerySupport> Shoal<S> {
     {
         // build a query bundle with our single query
         let queries = self.query().add(query);
-        // send it, with the options
-        let (mut stream, _) = self.send_stamped_with(queries, options).await?;
-        // wait for our single response
-        let response = stream
-            .next()
-            .await?
-            .ok_or(Errors::StreamAlreadyTerminated)?;
+        // a send that may be tried again is collected; one that may not streams as before
+        let response = if options.retry.is_some() {
+            self.exec_with(queries, options)
+                .await?
+                .into_iter()
+                .next()
+                .ok_or(Errors::StreamAlreadyTerminated)?
+        } else {
+            // send it, with the options
+            let (mut stream, _) = self.send_stamped_with(queries, options).await?;
+            // wait for our single response
+            stream
+                .next()
+                .await?
+                .ok_or(Errors::StreamAlreadyTerminated)?
+        };
         // check if this query succeeded
         response.suceeded(QuerySuceededOpts::default())?;
         Ok(response)
@@ -1715,7 +1916,7 @@ impl<S: QuerySupport> Shoal<S> {
         // generate a random ID to override all of the ids used in our queries
         let mut id = Uuid::new_v4();
         // start tracking this response
-        let (response_tx, response_rx) = self.track_response(&mut id)?;
+        let (response_tx, response_rx) = self.track_response(&mut id, false)?;
         // build a new shoal result stream
         let result_stream = ShoalResultStream {
             id,
@@ -1728,6 +1929,8 @@ impl<S: QuerySupport> Shoal<S> {
             pending: BTreeMap::default(),
             phantom: PhantomData,
             span: Span::current(),
+            // a stream never stops waiting on its own: its queries keep coming
+            deadline: None,
         };
         // wraap our result in a stream that supports queries and results
         let query_stream = ShoalQueryStream {
@@ -1751,7 +1954,7 @@ impl<S: QuerySupport> Shoal<S> {
         // generate a random ID to override all of the ids used in our queries
         let mut id = Uuid::new_v4();
         // start tracking this response
-        let (response_tx, response_rx) = self.track_response(&mut id)?;
+        let (response_tx, response_rx) = self.track_response(&mut id, false)?;
         // build a new shoal result stream
         let result_stream = ShoalUnorderedResultStream {
             id,
@@ -2295,6 +2498,11 @@ pub struct ShoalResponse<S: QuerySupport> {
     /// A committed lower bound on the tablet the write named; a later read carrying it is
     /// served past the write ([F41](../../../docs/src/features/read-consistency.md)).
     token: Option<SessionToken>,
+    /// The bundle this response answers, which is the identity a retry repeats
+    bundle: Uuid,
+    /// How many tries the bundle took, which is one unless it was retried
+    /// ([F42](../../../docs/src/features/primary-failover.md))
+    attempts: u32,
     /// The type of data this is a response for
     phantom: PhantomData<S>,
 }
@@ -2326,7 +2534,15 @@ where
 }
 
 impl<S: QuerySupport> ShoalResponse<S> {
-    pub(super) fn new(buff: AlignedVec, stamps: ClientStamps, token: Option<SessionToken>) -> Result<Self, Errors>
+    /// Wrap a response's bytes
+    ///
+    /// # Arguments
+    ///
+    /// * `buff` - The bytes, aligned
+    /// * `stamps` - When they arrived
+    /// * `token` - The session token they carried, if any
+    /// * `bundle` - The bundle they answer
+    pub(super) fn new(buff: AlignedVec, stamps: ClientStamps, token: Option<SessionToken>, bundle: Uuid) -> Result<Self, Errors>
     where
         for<'a> <<S as QuerySupport>::ResponseKinds as Archive>::Archived: CheckBytes<
             Strategy<Validator<ArchiveValidator<'a>, SharedValidator>, rkyv::rancor::Error>,
@@ -2341,8 +2557,22 @@ impl<S: QuerySupport> ShoalResponse<S> {
             archived: const_archived,
             stamps,
             token,
+            bundle,
+            attempts: 1,
             phantom: PhantomData,
         })
+    }
+
+    /// The bundle this response answers: the identity a retry of it would repeat
+    #[must_use]
+    pub fn bundle(&self) -> Uuid {
+        self.bundle
+    }
+
+    /// How many tries the bundle took: one, unless [`Shoal::exec_with`] tried it again
+    #[must_use]
+    pub fn attempts(&self) -> u32 {
+        self.attempts
     }
 
     /// Get the session token this response carried, if the server sent one
@@ -2524,6 +2754,12 @@ pub struct ShoalResultStream<S: QuerySupport> {
     /// never sent anything. This is the same span the query's `Waiter` parked, so a response and
     /// the delivery of it are siblings under the send that asked for them.
     span: Span,
+    /// When this client stops waiting for the next answer, if the bundle named a deadline
+    ///
+    /// The bundle's deadline plus a slack for the server's own `Timeout` to arrive; past it
+    /// the stream ends with `Timeout` and the outcome is unknown
+    /// ([F42](../../../docs/src/features/primary-failover.md)).
+    deadline: Option<tokio::time::Instant>,
 }
 
 impl<S: QuerySupport> ShoalResultStream<S>
@@ -2564,7 +2800,7 @@ where
                             // get this responses message
                             ClientMsg::Response(response, stamps, token) => {
                                 // wrap our response so we don't have to keep repaying access costs
-                                let response = ShoalResponse::<S>::new(response, stamps, token)?;
+                                let response = ShoalResponse::<S>::new(response, stamps, token, self.id)?;
                                 // only bother to check our server sent end of stream if our queries are bounded
                                 let end = if self.unbounded_queries {
                                     // we have unbounded queries so set end to false
@@ -2597,14 +2833,28 @@ where
                     }
                 }
             }
-            // get the next response from our query
-            let msg = response_rx.recv().await.map_err(receive_failed)?;
+            // get the next response from our query, for as long as this client will wait
+            let msg = match self.deadline {
+                Some(deadline) => match tokio::time::timeout_at(deadline, response_rx.recv()).await {
+                    Ok(received) => received.map_err(receive_failed)?,
+                    // nothing came in time: the outcome is unknown, and the stream is over
+                    Err(_) => {
+                        return Err(Errors::Server {
+                            query_id: Some(self.id),
+                            index: None,
+                            code: ErrorCode::Timeout,
+                            msg: "no answer arrived within the deadline the client set; the outcome is unknown".to_owned(),
+                        })
+                    }
+                },
+                None => response_rx.recv().await.map_err(receive_failed)?,
+            };
             // handle the different client messages
             match msg {
                 // get this responses message
                 ClientMsg::Response(response, stamps, token) => {
                     // wrap our response so we don't have to keep repaying access costs
-                    let response = ShoalResponse::<S>::new(response, stamps, token)?;
+                    let response = ShoalResponse::<S>::new(response, stamps, token, self.id)?;
                     // get the index for this message
                     let index = response.get_index();
                     // if this is the next row then return it
@@ -2883,7 +3133,7 @@ where
             match response_rx.recv().await.map_err(receive_failed)? {
                 ClientMsg::Response(archived, stamps, token) => {
                     // wrap our response so we don't have to keep repaying access costs
-                    let response = ShoalResponse::<S>::new(archived, stamps, token)?;
+                    let response = ShoalResponse::<S>::new(archived, stamps, token, self.id)?;
                     // get the index for this message
                     let index = response.get_index();
                     // if this is our next index then increment next as far as we can
@@ -3143,13 +3393,62 @@ impl<Q: QuerySupport> ShoalQueryStream<Q> {
 
 #[cfg(test)]
 mod tests {
-    use super::{endpoint_order, error, protocol, ClientMsg, ErrorCode, Frame, Span, TcpProxy, TopologyState, Waiter};
+    use super::{endpoint_order, error, protocol, retriable, ClientMsg, ErrorCode, Errors, Frame, Span, TcpProxy, TopologyState, Waiter};
+    use super::SendOptions;
+    use std::time::Duration;
     use papaya::HashMap;
     use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
     use tokio::io::AsyncWriteExt;
     use tokio::net::{TcpListener, TcpStream};
     use uuid::Uuid;
+
+    /// A retry repeats only what says to try again, and the options carry the identity and the budget (F42)
+    ///
+    /// The codes a retried bundle is sent again on are the definite refusals and the unknown
+    /// outcomes a repeat under one identity is safe against; a query that worked and found
+    /// nothing, a caller's mistake and a payload that does not serialize are not tried again.
+    #[test]
+    fn a_retry_repeats_only_what_says_to_try_again() {
+        let server = |code: ErrorCode| Errors::Server {
+            query_id: None,
+            index: None,
+            code,
+            msg: String::new(),
+        };
+        for code in [
+            ErrorCode::NotLeader,
+            ErrorCode::Unavailable,
+            ErrorCode::QuorumUnavailable,
+            ErrorCode::ConnectionLost,
+            ErrorCode::OutcomeUnknown,
+            ErrorCode::Timeout,
+        ] {
+            assert!(retriable(&server(code)), "{code:?} is not tried again");
+        }
+        for code in [
+            ErrorCode::Internal,
+            ErrorCode::Shedding,
+            ErrorCode::WrongCluster,
+            ErrorCode::UnknownLineage,
+            ErrorCode::Unauthorized,
+            ErrorCode::NotInitialized,
+            ErrorCode::StorageRead,
+        ] {
+            assert!(!retriable(&server(code)), "{code:?} is tried again");
+        }
+        assert!(retriable(&Errors::IO(std::io::Error::other("the socket went"))));
+        assert!(retriable(&Errors::ConnectionPool("empty".to_string())));
+        assert!(!retriable(&Errors::Config("a caller's mistake".to_string())));
+        assert!(!retriable(&Errors::StreamAlreadyTerminated));
+        // the options carry the identity and the budget, and neither is a wire section
+        let id = uuid::Uuid::new_v4();
+        let options = SendOptions::new().identity(id).retry(Duration::from_secs(3));
+        assert_eq!(options.identity, Some(id));
+        assert_eq!(options.retry, Some(Duration::from_secs(3)));
+        assert!(options.is_empty(), "an identity or a budget is not a read options section");
+        assert_eq!(options.to_wire(), SendOptions::new().to_wire());
+    }
 
     /// Build the whole of an error frame, preamble and message together
     ///
@@ -3686,5 +3985,32 @@ mod endpoint_tests {
     #[test]
     fn no_endpoints_yields_nothing() {
         assert_eq!(endpoint_order(3, 0).count(), 0);
+    }
+}
+
+/// Whether a failed try of a bundle says to try again under the same identity
+///
+/// A refusal before admission, a leader that is not one, a quorum that is not there, a lost
+/// connection, an unknown outcome and a deadline are all answered again by the same request:
+/// nothing was applied, or whatever was applied answers its first result to a repeat. A
+/// server's other failures, a bundle that does not serialize, and a caller's mistake are not
+/// ([F42](../../../docs/src/features/primary-failover.md)).
+///
+/// # Arguments
+///
+/// * `error` - What the try came to
+fn retriable(error: &Errors) -> bool {
+    match error {
+        Errors::Server { code, .. } => matches!(
+            code,
+            ErrorCode::NotLeader
+                | ErrorCode::Unavailable
+                | ErrorCode::QuorumUnavailable
+                | ErrorCode::ConnectionLost
+                | ErrorCode::OutcomeUnknown
+                | ErrorCode::Timeout
+        ),
+        Errors::IO(_) | Errors::ConnectionPool(_) => true,
+        _ => false,
     }
 }

@@ -51,7 +51,8 @@ cargo run -p shoal-model --example regenerate_schedules   # after a model change
 # the cluster fixture (F36) re-executes this binary as its children, so it is its own test target.
 # since F37 its servers are cluster nodes: each child runs a control thread on a core the fixture
 # allocates; since F39 they join each other through node zero and the M1, M2 and M3 acceptance
-# tests live here; since F40 every tablet is replicated between them and the nine M4 tests too.
+# tests live here; since F40 every tablet is replicated between them and the nine M4 tests too;
+# since F42 the thirteen M6 tests kill, stall, isolate and restart them.
 # every test allocates whole cores, so the suite is what a loaded machine makes it: a failure
 # that passes alone was a timeout, and the child logs are under SHOAL_CHILD_LOG=<dir> (one file
 # per child, DEBUG, large). run it at six threads: at the default thirty-two the fencing test
@@ -187,7 +188,7 @@ data and proves every workload still runs — which is what you want before spen
 real one. Budget twenty minutes for a macro-only smoke pass; the criterion layer is what makes a
 full smoke run take longer than you expect.
 
-The macro layer is three hundred and eighty five **workloads** living in `shoal-bench/src/workloads/`,
+The macro layer is three hundred and eighty nine **workloads** living in `shoal-bench/src/workloads/`,
 each generating its own rows from `--seed` — there is no dataset to fetch
 ([F8](docs/src/features/purpose-built-workloads.md)). They come in three kinds and the differences
 matter:
@@ -224,6 +225,13 @@ matter:
   wrote on purpose (`Workload::expects_rows`). The cluster arms' port blocks are numbered among
   the cluster arms and stay under 32768; one numbered among every workload sat in the ephemeral
   range and lost its control port to a `TIME_WAIT`.
+- **The failover arm** is one workload ([F42](docs/src/features/primary-failover.md)):
+  `macro/cluster/failover/kill`, the durable replication cell driven for a fixed time by a
+  client that does not retry, with node one killed a third of the way through and started
+  again two thirds through by the harness (`Workload::fault`). Its capture carries
+  `cluster.fault` - the marks, the client's first failure and recovery, three windows with a
+  distribution each and a per second series - so the outage is never averaged into the run.
+  Node zero is the driver's own process and is never the one killed.
 - **The configuration sweep** is fifty-eight workloads under `macro/conf/`, each one the grid's
   reference cell `macro/grid/unsorted/r50/1024` with **exactly one field** of the server
   configuration moved ([F20](docs/src/features/configuration-sweeps.md)). It answers what a setting

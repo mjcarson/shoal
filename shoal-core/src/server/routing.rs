@@ -284,10 +284,14 @@ impl<T: ShoalSortedTable + std::fmt::Debug> ArchivedShardRouting for SortedQuery
     ///
     /// * `archived` - The query, still in the buffer it arrived in
     fn archived_partition_keys(archived: &<Self as rkyv::Archive>::Archived) -> Vec<u64> {
-        // only a get returns rows whose order this could describe
+        // a get names several, in the order its rows merge in; every other query names the
+        // one partition it writes or checks, which is what a forward of it is rerouted by
+        // ([F42](../../../docs/src/features/primary-failover.md))
         match archived {
             ArchivedSortedQuery::Get(get) => native_keys(&get.partition_keys),
-            _ => Vec::new(),
+            ArchivedSortedQuery::Exists(exists) => native_keys(&exists.partition_keys),
+            ArchivedSortedQuery::Insert { key, .. } | ArchivedSortedQuery::Delete { key, .. } => vec![key.to_native()],
+            ArchivedSortedQuery::Update(update) => vec![update.partition_key.to_native()],
         }
     }
 
@@ -382,10 +386,14 @@ impl<T: ShoalUnsortedTable + std::fmt::Debug> ArchivedShardRouting for UnsortedQ
     ///
     /// * `archived` - The query, still in the buffer it arrived in
     fn archived_partition_keys(archived: &<Self as rkyv::Archive>::Archived) -> Vec<u64> {
-        // only a get returns rows whose order this could describe
+        // a get names several, in the order its rows merge in; every other query names the
+        // one partition it writes or checks, which is what a forward of it is rerouted by
+        // ([F42](../../../docs/src/features/primary-failover.md))
         match archived {
             ArchivedUnsortedQuery::Get(get) => native_keys(&get.partition_keys),
-            _ => Vec::new(),
+            ArchivedUnsortedQuery::Insert { key, .. } | ArchivedUnsortedQuery::Delete { key, .. } => vec![key.to_native()],
+            ArchivedUnsortedQuery::Update(update) => vec![update.partition_key.to_native()],
+            ArchivedUnsortedQuery::Exists(exists) => vec![exists.partition_key.to_native()],
         }
     }
 

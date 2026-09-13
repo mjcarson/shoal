@@ -15,9 +15,9 @@ use openraft::type_config::TypeConfigExt as _;
 use openraft::{AsyncRuntime as _, EntryPayload, LogId, OptionalSend, Snapshot, SnapshotMeta, StorageError, StoredMembership};
 
 use super::frame::{Entry, LeaderId, WalLogId};
-use super::{Checkpoint, GroupCheckpoint, GroupStore, MemoryWal, ShardWal};
+use super::{Checkpoint, GroupCheckpoint, GroupRetries, GroupStore, MemoryWal, Retries, ShardWal};
 use crate::server::control::runtime::GlommioRuntime;
-use crate::server::replication::{ApplyOutcome, CommandResult, DataConfig, ResultKind};
+use crate::server::replication::{ApplyOutcome, CommandResult, DataConfig, MachineState, Remembered, ResultKind};
 use crate::shared::identity::{GroupId, ShardAddr, TableId};
 use crate::shared::protocol::peer::{Command, RequestId};
 
@@ -376,6 +376,99 @@ fn checkpoint_file_round_trips_membership() {
         let point = read.get(GroupId(7)).expect("the group's checkpoint");
         assert_eq!(point.applied, Some(log_id(2, 9)));
         assert_eq!(point.membership(), membership);
+    });
+}
+
+/// The retry table is written beside the checkpoint and seeds a group past the purge point
+///
+/// A group's retry table used to be rebuilt from the log alone, so an identity applied below
+/// the checkpoint was forgotten at restart once the segment holding it was purged, and a retry
+/// of it was applied as new. The sidecar carries the entries as of the checkpoint; a checkpoint
+/// from before it seeds nothing, a sidecar written for another checkpoint seeds nothing, and an
+/// entry above the checkpoint is left for the replay to re-derive
+/// ([F42](../../../../docs/src/features/primary-failover.md)). The end to end half - restart
+/// after a compaction and retry - is `lost_response_retry_returns_original_result`.
+#[test]
+fn retry_table_survives_the_purge_point() {
+    let mut runtime = GlommioRuntime::new(1);
+    runtime.block_on(async {
+        let dir = tempfile::tempdir().expect("failed to build a temp dir");
+        let membership = StoredMembership::new(
+            Some(log_id(1, 0)),
+            openraft::Membership::new(
+                vec![members(&[1, 2, 3])],
+                members(&[1, 2, 3]).into_iter().map(|addr| (addr, addr)).collect::<std::collections::BTreeMap<_, _>>(),
+            )
+            .expect("a valid membership"),
+        );
+        let request = |index: u64| RequestId {
+            bundle: [7; 16],
+            index,
+        };
+        let remembered = |applied: u64, ok: bool| Remembered {
+            digest: 0xfeed + applied,
+            result: CommandResult {
+                kind: ResultKind::Delete,
+                ok,
+            },
+            applied,
+        };
+        // a machine that applied three requests, the checkpoint at the second
+        let mut state = MachineState::at(None, membership.clone(), Vec::new());
+        state.dedup.put(request(1), remembered(3, true));
+        state.dedup.put(request(2), remembered(5, false));
+        state.dedup.put(request(3), remembered(9, true));
+        assert_eq!(state.retry_floor(), 3);
+        let through = state.remembered_through(5);
+        assert_eq!(through, vec![(request(1), remembered(3, true)), (request(2), remembered(5, false))]);
+        // the sidecar and the checkpoint that names it round trip
+        let mut retries = Retries::default();
+        retries.groups.insert(
+            GroupId(7).to_string(),
+            GroupRetries {
+                retries_at: 5,
+                entries: through,
+            },
+        );
+        retries.write(dir.path()).await.expect("failed to write the sidecar");
+        let mut file = Checkpoint::default();
+        file.groups.insert(
+            GroupId(7).to_string(),
+            GroupCheckpoint::new(Some(log_id(2, 5)), &membership).retries(5, state.retry_floor()),
+        );
+        file.write(dir.path()).await.expect("failed to write the checkpoint");
+        let read_retries = Retries::read(dir.path()).await.expect("failed to read the sidecar");
+        assert_eq!(read_retries, retries);
+        let read = Checkpoint::read(dir.path()).await.expect("failed to read the checkpoint");
+        assert_eq!(read, file);
+        let point = read.get(GroupId(7)).expect("the group's checkpoint");
+        assert_eq!((point.retries_at, point.retry_floor), (5, 3));
+        // the seed is the sidecar's entries, and a machine seeded from it remembers them
+        let seed = read_retries.seed_for(GroupId(7), point);
+        assert_eq!(seed.len(), 2);
+        let mut seeded = MachineState::at(Some(log_id(2, 5)), membership.clone(), seed);
+        assert_eq!(seeded.dedup.get(&request(2)).copied(), Some(remembered(5, false)));
+        assert_eq!(seeded.dedup.get(&request(3)), None);
+        assert_eq!(seeded.retry_floor(), 3);
+        // a checkpoint from before the sidecar existed - the same file without the two
+        // fields - loads with zeros and seeds nothing
+        let mut value = serde_json::to_value(&file).expect("a checkpoint serializes");
+        let entry = value["groups"][GroupId(7).to_string()]
+            .as_object_mut()
+            .expect("a group's checkpoint is an object");
+        entry.remove("retries_at");
+        entry.remove("retry_floor");
+        let old: Checkpoint = serde_json::from_value(value)
+            .unwrap_or_else(|error| panic!("an M4 checkpoint no longer loads: {error}"));
+        let old_point = old.get(GroupId(7)).expect("the old checkpoint");
+        assert_eq!((old_point.retries_at, old_point.retry_floor), (0, 0));
+        assert!(read_retries.seed_for(GroupId(7), old_point).is_empty());
+        // a sidecar written for another checkpoint seeds nothing either
+        let other = GroupCheckpoint::new(Some(log_id(2, 9)), &membership).retries(9, 3);
+        assert!(read_retries.seed_for(GroupId(7), &other).is_empty());
+        // and a missing sidecar is an empty one
+        let empty = tempfile::tempdir().expect("failed to build a temp dir");
+        assert_eq!(Retries::read(empty.path()).await.expect("failed to read"), Retries::default());
     });
 }
 

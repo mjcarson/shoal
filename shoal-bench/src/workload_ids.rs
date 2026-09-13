@@ -483,6 +483,9 @@ pub const IDS: &[&str] = &[
     "macro/cluster/fanout/filter",
     "macro/cluster/fanout/limit",
     "macro/cluster/fanout/empty",
+    // the failover arm (F42): the durable replication cell for a fixed time with node one
+    // killed and started again inside it. appended after the read arms
+    "macro/cluster/failover/kill",
 ];
 
 /// Whether an id names a workload this build knows about

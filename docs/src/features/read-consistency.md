@@ -214,20 +214,25 @@ refuses every older client, for a section most bundles never send. The capabilit
 old client and a new server, or the reverse, keep working with the section simply absent.
 
 **Retrying a read within its budget.** The attempt is minted and echoed so a bounded reroute can
-be added; the reroute has to invalidate the old attempt's slots and re-forward the bundle's
-bytes, which is M6's retry work, and it is not done here.
+be added; ~~the reroute has to invalidate the old attempt's slots and re-forward the bundle's
+bytes, which is M6's retry work, and it is not done here.~~ [F42](primary-failover.md) reroutes
+a share the link never wrote under the *same* attempt and slot, since nothing under them was
+accepted; a written share is never re-sent by the server.
 
 ## Limitations
 
-- **No read retry.** A share that fails or times out fails the query; nothing reroutes within the
-  budget. The attempt identity is in place for it.
+- ~~**No read retry.** A share that fails or times out fails the query; nothing reroutes within the
+  budget. The attempt identity is in place for it.~~ Since [F42](primary-failover.md) a share
+  the link never wrote is sent to another holder once; a share that was written and timed out
+  still fails the query.
 - **No cross-tablet snapshot.** A read over several tablets waits on each group's barrier in turn
   and may observe the tablets at different instants, which is what C6 says.
-- **Tokens across a leader change are untested until M6.** The lineage check is by group identity
+- ~~**Tokens across a leader change are untested until M6.** The lineage check is by group identity
   and the wait by index; `session_read_waits_for_committed_lower_bound` and
-  `read_barrier_survives_leader_change_and_delayed_messages` are M6 gates and were not run.
+  `read_barrier_survives_leader_change_and_delayed_messages` are M6 gates and were not run.~~
+  Both run since [F42](primary-failover.md).
 - **Leadership is not moved.** A strong read through a follower hops to the leader on every read;
-  nothing transfers leadership toward the reader.
+  nothing transfers leadership toward the reader. F42 left it where it was too.
 - **`Primary` is absent.** Filed.
 - **Coverage is not on the wire.** The slot is server-side state; a client reads a complete
   answer or one error and nothing in between, and cannot see which partitions were covered.

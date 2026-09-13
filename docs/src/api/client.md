@@ -199,10 +199,12 @@ pub async fn send(&self, mut queries: Queries<S>) -> Result<ShoalResultStream<S>
 
 `shoal-client/src/client.rs`
 
-Archive, register the id, grab a connection, write vectored, return a stream. Note the archive
+Archive, register the id, grab a connection, write vectored, return a stream. ~~Note the archive
 is built *before* the id is finalised by `track_response` — if `track_response` regenerates the
 id on collision, the archived bytes carry the old one. Unreachable in practice, but the
-ordering is wrong.
+ordering is wrong.~~ Since [F42](../features/primary-failover.md) the id is tracked before the
+bundle is serialized, so the archived bytes always carry the id the waiter is registered under,
+and a pinned id that collides is refused rather than regenerated.
 
 Convenience wrappers:
 
@@ -212,6 +214,7 @@ Convenience wrappers:
 | `exec(queries)` | Drains the stream, collects failures into `Errors::BulkError` |
 | `exists(query)` | Returns `bool`; missing data is not an error |
 | `send_with(queries, &options)`, `send_one_with(query, &options)`, `stream_with(options)` | The same, saying how the bundle's reads are served ([F41](../features/read-consistency.md)) |
+| `exec_with(queries, &options)` | Drains the stream into a `Vec<ShoalResponse>`, and retries the whole bundle under its identity when the options say to ([F42](../features/primary-failover.md)) |
 
 `SendOptions` names a read level - `ReadLevel::One`, the local replica's applied state, or
 `ReadLevel::Quorum`, a barrier from the tablet's leader and an application wait through it - a
@@ -220,6 +223,19 @@ that earlier writes handed back, so the reads are served past them. `ShoalBuilde
 sets a default for every send. A server that does not read the section is sent none and serves
 the bundle as it always has; `ShoalResponse::session_token()` is the token a committed write's
 answer carried, if the server sent one.
+
+Since [F42](../features/primary-failover.md) `SendOptions` also names an **identity** and a
+**retry**, neither of which rides the wire. `identity(uuid)` pins the bundle id, which is the
+request identity every replicated command carries, so a second send under it is answered by the
+group's retry table as the first was - the original result, applied once - across a leader
+change and across a restart; a pinned id still in flight is `Errors::Config`. `retry(within)`
+makes `send_one_with` and `exec_with` repeat the send with a backoff from twenty milliseconds
+to half a second while the answer says to try again - `NotLeader`, `Unavailable`,
+`QuorumUnavailable`, `ConnectionLost`, `OutcomeUnknown`, `Timeout`, a lost connection or a dead
+pool - and stop on anything definite; `ShoalResponse::attempts()` says how many times and
+`bundle()` under which id. A send with a `deadline` has a timer of its own a second past it:
+when nothing has answered by then the waiter is withdrawn and the caller gets `Timeout`, an
+unknown outcome, which is exactly what the identity is for. `stream_with` ignores `retry`.
 
 `send` and `send_one` each have a `_stamped` twin returning `(…, BatchStamps)` — when the bundle
 entered, when it finished serializing, when a pooled connection was acquired, and when its last
@@ -476,9 +492,13 @@ a PBKDF2 derivation on both ends. Nothing measures it
 
 - Health checks do not detect a dead peer
   ([D6](../direction/connection-pool.md#health-checks-that-work)).
-- No retry, no reconnect logic above bb8, and no request timeout anywhere
+- ~~No retry, no reconnect logic above bb8, and no request timeout anywhere
   ([D6](../direction/connection-pool.md#deadlines), and
-  [retries](../direction/connection-pool.md#retries), which are only safe for `Get` and `Exists`).
+  [retries](../direction/connection-pool.md#retries), which are only safe for `Get` and `Exists`).~~
+  Since [F42](../features/primary-failover.md) a send with a deadline has a timer, and a send
+  under an identity and a retry budget is repeated safely for writes too, since the identity
+  is what the server answers a repeat by. Streams still never retry, and there is still no
+  reconnect logic above bb8.
 - Ordered streams buffer unboundedly behind a gap.
 - ~~Only one endpoint is ever known — `Shoal::new` takes the first address `lookup_host` returns,
   so there is no failover.~~ Built as [F16](../features/client-builder.md): a client knows every

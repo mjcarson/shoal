@@ -14,7 +14,13 @@ admitted as learners through seeds, voters promoted under the explicit policy an
 the member state machine's `Joining`, `Up` and `Down`, fencing by a persisted incarnation, the
 leader's phi-accrual detector over freshness-aware status reports committing `Down` and `Up`
 through the log, shard health committed beside it, and readiness that tells a joined control
-plane from data that can take default writes. `Leaving`, `Removing`, `Removed`, grace expiry
+plane from data that can take default writes. Since M6 ([F42](../features/primary-failover.md))
+a member that fell silent before its fifth report is judged too - the expected interval stands
+in for the samples it never sent ([Resolved #101](../appendix/resolved/short-lived-member-detection.md))
+- a `Down` verdict moves no replica and no placement (`down_retains_placement_during_grace`),
+the map carries the policy's `primary_failover_after` so every node's groups elect at the
+cluster's pace, and a node holding no copy of a tablet routes it by health, `Up` first.
+`Leaving`, `Removing`, `Removed`, grace expiry
 and removal are M9b's. Before that: ~~`Shard::join_cluster` broadcasts a local join and `Ring::add`
 ignores unknown shards.~~ ~~Reserved
 ping/pong frames have no implementation.~~ ~~The pool lacks a dependable readiness/failure handle.~~

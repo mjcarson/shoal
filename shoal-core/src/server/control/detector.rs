@@ -13,6 +13,13 @@
 //! new leader starts with no evidence: every member is seeded with the expected interval and a
 //! grace period, so a member that never reports to it is suspected after the grace and nobody is
 //! called down for the election itself.
+//!
+//! A member with fewer than `min_samples` observed intervals is judged with the expected
+//! interval standing in for the missing ones, so a member that falls silent after its first
+//! report is suspected at the expected pace rather than never
+//! ([Resolved #101](../../../../docs/src/appendix/resolved/short-lived-member-detection.md)):
+//! before that, the detector waited for `min_samples` real intervals and a member killed young
+//! stayed `Up` for as long as the cluster ran.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
@@ -183,7 +190,10 @@ impl Detector {
         }
     }
 
-    /// The suspicion level of a member now, if there is enough evidence for one
+    /// The suspicion level of a member now, if the member is known at all
+    ///
+    /// A member with fewer than `min_samples` intervals is judged at the expected pace, with
+    /// the expected interval standing in for what it has not reported yet.
     ///
     /// # Arguments
     ///
@@ -192,9 +202,6 @@ impl Detector {
     #[must_use]
     pub fn phi(&self, node: NodeId, now: Instant) -> Option<f64> {
         let samples = self.members.get(&node)?;
-        if samples.intervals.len() < self.min_samples {
-            return None;
-        }
         let (mean, stddev) = self.fit(samples);
         Some(phi(since_ms(samples.last_arrival, now), mean, stddev))
     }
@@ -232,11 +239,7 @@ impl Detector {
                     mean_ms: mean,
                     stddev_ms: stddev,
                     since_last_ms: since,
-                    phi: if samples.intervals.len() < self.min_samples {
-                        0.0
-                    } else {
-                        phi(since, mean, stddev)
-                    },
+                    phi: phi(since, mean, stddev),
                     last_seq: samples.last_seq,
                 }
             })
@@ -251,15 +254,19 @@ impl Detector {
     ///
     /// * `samples` - The member's samples
     fn fit(&self, samples: &Samples) -> (f64, f64) {
-        let count = samples.intervals.len().max(1) as f64;
-        let mean = samples.intervals.iter().sum::<f64>() / count;
-        let variance = samples
+        // the expected interval stands in for every sample the member has not reported yet
+        let expected = self.interval.as_secs_f64() * 1000.0;
+        let padding = self.min_samples.saturating_sub(samples.intervals.len());
+        let intervals: Vec<f64> = samples
             .intervals
             .iter()
-            .map(|interval| (interval - mean).powi(2))
-            .sum::<f64>()
-            / count;
-        let floor = self.interval.as_secs_f64() * 1000.0 / 4.0;
+            .copied()
+            .chain(std::iter::repeat_n(expected, padding))
+            .collect();
+        let count = intervals.len().max(1) as f64;
+        let mean = intervals.iter().sum::<f64>() / count;
+        let variance = intervals.iter().map(|interval| (interval - mean).powi(2)).sum::<f64>() / count;
+        let floor = expected / 4.0;
         (mean, variance.sqrt().max(floor))
     }
 }
@@ -392,12 +399,38 @@ mod tests {
         let view = detector.view(now + step * 10);
         assert_eq!(view[0].samples, 5);
         assert!(view[0].phi > 8.0);
-        // a newer run starts over, with no verdict until it has reported enough
+        // a newer run starts over: calm at the expected pace, suspected once silent for long
         assert!(detector.observe(node, 2, 1, now + step * 10));
-        assert!(detector.phi(node, now + step * 20).is_none());
+        assert!(detector.phi(node, now + step * 11).is_some_and(|phi| phi < 1.0));
+        assert!(detector.phi(node, now + step * 20).is_some_and(|phi| phi > 8.0));
         // and a forgotten member is gone
         detector.forget(node);
         assert!(detector.view(now).is_empty());
+    }
+
+    /// A member silent after its first reports is suspected at the expected pace, not never
+    ///
+    /// Two reports a hundred milliseconds apart, then silence: three intervals short of the
+    /// five the detector wants, and before [Resolved #101](../../../../docs/src/appendix/resolved/short-lived-member-detection.md)
+    /// that was no verdict at all. The expected interval stands in for the missing samples: calm
+    /// at the pace, suspected after a second of silence, and the view says how many samples are
+    /// real (F42).
+    #[test]
+    fn a_member_silent_before_its_fifth_report_is_suspected() {
+        let mut detector = detector();
+        let node = NodeId::mint();
+        let start = Instant::now();
+        let step = Duration::from_millis(100);
+        assert!(detector.observe(node, 1, 1, start));
+        assert!(detector.observe(node, 1, 2, start + step));
+        // one real interval, four expected ones: calm just after the pace
+        assert!(detector.suspects(start + step * 2).is_empty());
+        let view = detector.view(start + step * 2);
+        assert_eq!(view[0].samples, 1);
+        assert!(view[0].phi < 1.0, "{}", view[0].phi);
+        // and suspected once the silence is long by any measure
+        assert_eq!(detector.suspects(start + Duration::from_millis(1100)), vec![node]);
+        assert!(detector.view(start + Duration::from_millis(1100))[0].phi > 8.0);
     }
 
     /// A new leader seeds the members it knows: none is suspected during the grace, a silent
@@ -412,10 +445,11 @@ mod tests {
         assert!(detector.suspects(start + Duration::from_millis(400)).is_empty());
         // well past it: suspected
         assert_eq!(detector.suspects(start + Duration::from_millis(900)), vec![node]);
-        // a real report replaces the seed, and the member needs real samples again
+        // a real report replaces the seed, and the member is judged at the expected pace
         assert!(detector.observe(node, 1, 7, start + Duration::from_millis(450)));
         assert!(!detector.view(start)[0].seeded);
-        assert!(detector.phi(node, start + Duration::from_secs(5)).is_none());
+        assert!(detector.phi(node, start + Duration::from_millis(500)).is_some_and(|phi| phi < 1.0));
+        assert!(detector.phi(node, start + Duration::from_secs(5)).is_some_and(|phi| phi > 8.0));
         // a reset forgets everything
         detector.reset();
         assert!(detector.view(start).is_empty());

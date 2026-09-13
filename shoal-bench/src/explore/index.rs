@@ -24,10 +24,10 @@
 use std::collections::BTreeMap;
 
 use shoal_top::index::{
-    Capture, ClusterFactsLite, ConfFactsLite, FamilyText, FanoutFactsLite, INDEX_VERSION, Index,
-    Layer as IndexLayer, HopFactsLite, HopMixLite, MacroPoint, NodeCoresLite, NodeReadFactsLite,
-    OfferedLoadLite, OpStats, OutcomeFactsLite, ReadFactsLite, ReplicaFactsLite, ScaleFactsLite,
-    Timing, Verdict, Workload,
+    Capture, ClusterFactsLite, ConfFactsLite, FamilyText, FanoutFactsLite, FaultFactsLite,
+    INDEX_VERSION, Index, Layer as IndexLayer, HopFactsLite, HopMixLite, MacroPoint, NodeCoresLite,
+    NodeReadFactsLite, OfferedLoadLite, OpStats, OutcomeFactsLite, ReadFactsLite, ReplicaFactsLite,
+    ScaleFactsLite, SecondFactsLite, Timing, Verdict, WindowFactsLite, Workload,
 };
 
 use crate::model::macro_layer::{
@@ -520,6 +520,44 @@ pub fn cluster_facts(cluster: &ClusterFacts) -> ClusterFactsLite {
                     timeouts: node.timeouts,
                     late_shares: node.late_shares,
                     duplicate_shares: node.duplicate_shares,
+                })
+                .collect(),
+        }),
+        // a fault arm's record travels whole, series and all: the outage is the number the arm
+        // exists for, and the series is what keeps it from being averaged away
+        // ([F42](../../../docs/src/features/primary-failover.md))
+        fault: cluster.fault.as_ref().map(|fault| FaultFactsLite {
+            kind: fault.kind.clone(),
+            node: fault.node,
+            at_ms: fault.at_ms,
+            restarted_at_ms: fault.restarted_at_ms,
+            first_failure_ms: fault.first_failure_ms,
+            recovered_ms: fault.recovered_ms,
+            outage_ms: fault.outage_ms,
+            sustained_ms: fault.sustained_ms,
+            windows: fault
+                .windows
+                .iter()
+                .map(|window| WindowFactsLite {
+                    name: window.name.clone(),
+                    from_ms: window.from_ms,
+                    to_ms: window.to_ms,
+                    ops: window.ops,
+                    errors: window.errors,
+                    p50_us: window.p50_us,
+                    p99_us: window.p99_us,
+                    max_us: window.max_us,
+                })
+                .collect(),
+            series: fault
+                .series
+                .iter()
+                .map(|second| SecondFactsLite {
+                    second: second.second,
+                    ops: second.ops,
+                    errors: second.errors,
+                    p50_us: second.p50_us,
+                    p99_us: second.p99_us,
                 })
                 .collect(),
         }),

@@ -196,7 +196,12 @@ the caller explicitly opts in, and defaulting to `ReadsOnly`.
 
 Retrying writes safely needs server-side deduplication — a per-query idempotency key the server
 remembers long enough to recognise a repeat. That is a server feature, not a client one, and it
-belongs in [TODOs](../appendix/todos.md) rather than being sketched here. Note what
+belongs in [TODOs](../appendix/todos.md) rather than being sketched here. **Built for a cluster
+node by [F42](../features/primary-failover.md)**, and the caller opts in exactly as this
+paragraph recommends: `SendOptions::identity` pins the bundle id the replicated command carries
+and the group's retry table answers a repeat with the first result, `retry(within)` is the
+budget, and the default still sends once. A standalone node has no table and still retries
+nothing. Note what
 [FoundationDB](prior-art.md#foundationdb) does instead: it retries the *transaction*, not the
 request, which is why it can retry anything. Shoal has no transaction to retry, so it has to pick
 its queries.

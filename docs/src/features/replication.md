@@ -209,9 +209,11 @@ bounds what one link will hold for a follower that is not reading.
 **Dedup is an LRU with a digest, for now.** A group remembers the last 4096 request
 identities and the result each produced, keyed by bundle id and index, with the payload's
 digest beside it; a retry with the same identity is answered as the first time, a different
-payload under the same identity is refused. The table is rebuilt from the log on restart and
+payload under the same identity is refused. ~~The table is rebuilt from the log on restart and
 is not part of the checkpoint, which is why M6 owns the durable low-water mark that would make
-the bound a promise.
+the bound a promise.~~ Since [F42](primary-failover.md) the table is written beside the
+checkpoint as `retries.bin` and seeded from it at open, and the checkpoint carries its
+low-water mark.
 
 **Timers from one setting.** `primary_failover_after` was recorded and unused since F37; it
 is now the base every group derives its heartbeat and election range from, so the policy every
@@ -249,11 +251,16 @@ node agreed about decides how fast a leader is missed. The fixture sets it to a 
 - **A member behind the purge point cannot catch up.** `install_snapshot` and the `Snapshot`
   kind on the lane are refused naming M7. Within `retained_entries` a lagging member is fed
   from the log; past it, it is stuck until M7 transfers the archives.
-- **A node holding no replica of a tablet routes its writes to the placement primary's node.**
+- ~~**A node holding no replica of a tablet routes its writes to the placement primary's node.**
   When that node is down, those writes fail `Unavailable` until the map moves - which nothing
-  does before M6's failover; a node holding a replica is unaffected.
-- **Dedup is bounded by count, not by a durable session mark.** 4096 identities per group, in
-  memory, rebuilt from the log; an identity older than that is applied as new. M6.
+  does before M6's failover; a node holding a replica is unaffected.~~ Since
+  [F42](primary-failover.md) such a node routes to the first holder the map calls `Up`, and a
+  forward the link never wrote is sent to another holder once.
+- ~~**Dedup is bounded by count, not by a durable session mark.** 4096 identities per group, in
+  memory, rebuilt from the log; an identity older than that is applied as new. M6.~~ Since
+  [F42](primary-failover.md) the table is persisted beside the checkpoint and seeded at open;
+  it is still 4096 identities, and the low-water mark the checkpoint records is what M9a's
+  expiry will read.
 - **A checkpoint is per table, and the whole file is rewritten.** A shard with many tables
   rewrites every group's line when one moves; the file is small and the write is atomic.
 - **The proposer's answer waits on its own apply**, so a write through a follower costs the
@@ -271,10 +278,12 @@ node agreed about decides how fast a leader is missed. The fixture sets it to a 
   a lag that grows under sustained load, is filed in [todos](../appendix/todos.md).
 - **Isolation of a leader is a timeout, not a step-down.** An isolated leader learns it is
   not one when its lease expires; until then a write through it is `OutcomeUnknown` at the
-  write deadline. M6 makes that a `NotLeader` at the lease.
+  write deadline. ~~M6 makes that a `NotLeader` at the lease.~~ Since [F42](primary-failover.md)
+  a write past the lease is `NotLeader` before anything is appended; inside it, still unknown.
 - **Group leadership after a failover is wherever the election put it.** The primary
   preference is a head start at first start and nothing after; a leader on a non-primary stays
-  there. ~~M5~~ M6 - [F41](read-consistency.md) left it where it was.
+  there. ~~M5~~ ~~M6~~ [F41](read-consistency.md) and [F42](primary-failover.md) both left it
+  where it was, on purpose; moving it is filed.
 - **The capture is the benchmark host's.** The arms ran at smoke scale on the development host;
   the numbers below prove they run and record, and nothing else.
 

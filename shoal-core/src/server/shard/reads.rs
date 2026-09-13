@@ -30,7 +30,7 @@ use super::{Shard, ShardContact};
 use crate::server::database::ShoalDatabase;
 use crate::server::messages::{QueryMetadata, ReadPlan, ReadWaits, ReplyKind, ServerMsg};
 use crate::server::replication::{
-    BarrierAnswer, DataConfig, GroupMachine, ReadVerb, RpcFailure, ShardNetwork, ShardPeer,
+    BarrierAnswer, DataConfig, GroupMachine, Lease, ReadVerb, RpcFailure, ShardNetwork, ShardPeer,
 };
 use crate::server::ring::Ring;
 use crate::server::routing::ArchivedShardRouting;
@@ -611,6 +611,18 @@ where
                 "held": self.held.as_ref().map_or(0, |held| held.shares.len()),
                 "stats": serde_json::to_value(self.read_stats).unwrap_or_default(),
             })),
+            // block this shard's executor: every group on it falls silent while the control
+            // thread keeps reporting. The reply goes out first, on the loop's next yield
+            ReadVerb::StallShard { ms } => {
+                glommio::spawn_local(async move {
+                    glommio::timer::sleep(std::time::Duration::from_millis(50)).await;
+                    event!(Level::WARN, msg = "stalling this shard's executor, as the fixture asked", ms);
+                    std::thread::sleep(std::time::Duration::from_millis(ms));
+                    event!(Level::WARN, msg = "the shard's executor is running again", ms);
+                })
+                .detach();
+                Ok(serde_json::json!({ "stalling": true, "ms": ms }))
+            }
         }
     }
 
@@ -727,6 +739,9 @@ async fn read_barrier<D: ShoalDatabase>(
     deadline: Stamp,
 ) -> Result<(u64, bool), ResponseError> {
     let mut hopped = false;
+    // a leader another member named, asked directly on the next turn rather than through
+    // this shard's own handle, which may not have heard of the election yet
+    let mut redirect: Option<ShardAddr> = None;
     loop {
         let left = remaining(deadline);
         if left.is_zero() {
@@ -735,27 +750,44 @@ async fn read_barrier<D: ShoalDatabase>(
                 format!("no leader of group {group} confirmed a read barrier within the deadline"),
             ));
         }
-        // ask this shard's own handle first: if it leads, the heartbeat round is its own
-        let asked = glommio::timer::timeout(left, async { Ok(raft.get_read_linearizer(ReadPolicy::ReadIndex).await) }).await;
-        let hint = match asked {
-            Err(_) => {
-                return Err(ResponseError::new(
-                    ErrorCode::Timeout,
-                    format!("group {group} did not confirm a read barrier within the deadline"),
-                ))
-            }
-            Ok(Ok(linearizer)) => return Ok((linearizer.read_log_id().index(), hopped)),
-            Ok(Err(RaftError::APIError(LinearizableReadError::ForwardToLeader(forward)))) => {
-                forward.leader_node.or(forward.leader_id)
-            }
-            Ok(Err(RaftError::APIError(LinearizableReadError::QuorumNotEnough(short)))) => {
-                return Err(ResponseError::new(
-                    ErrorCode::QuorumUnavailable,
-                    format!("group {group} could not confirm its leader: {short}"),
-                ))
-            }
-            Ok(Err(RaftError::Fatal(fatal))) => {
-                return Err(ResponseError::new(ErrorCode::Unavailable, format!("group {group} is stopped: {fatal}")))
+        let hint = match redirect.take() {
+            // follow the hint this shard was given
+            Some(leader) => Some(leader),
+            None => {
+                // a lease that lapsed cannot complete a heartbeat round: answered by name rather
+                // than waited out ([F42](../../../../docs/src/features/primary-failover.md))
+                if Lease::of(raft, me) == Lease::Lapsed {
+                    return Err(ResponseError::new(
+                        ErrorCode::QuorumUnavailable,
+                        format!(
+                            "the lease of {me} on group {group} lapsed: no quorum acknowledged it within {:?}",
+                            Lease::length(raft)
+                        ),
+                    ));
+                }
+                // ask this shard's own handle first: if it leads, the heartbeat round is its own
+                let asked = glommio::timer::timeout(left, async { Ok(raft.get_read_linearizer(ReadPolicy::ReadIndex).await) }).await;
+                match asked {
+                    Err(_) => {
+                        return Err(ResponseError::new(
+                            ErrorCode::Timeout,
+                            format!("group {group} did not confirm a read barrier within the deadline"),
+                        ))
+                    }
+                    Ok(Ok(linearizer)) => return Ok((linearizer.read_log_id().index(), hopped)),
+                    Ok(Err(RaftError::APIError(LinearizableReadError::ForwardToLeader(forward)))) => {
+                        forward.leader_node.or(forward.leader_id)
+                    }
+                    Ok(Err(RaftError::APIError(LinearizableReadError::QuorumNotEnough(short)))) => {
+                        return Err(ResponseError::new(
+                            ErrorCode::QuorumUnavailable,
+                            format!("group {group} could not confirm its leader: {short}"),
+                        ))
+                    }
+                    Ok(Err(RaftError::Fatal(fatal))) => {
+                        return Err(ResponseError::new(ErrorCode::Unavailable, format!("group {group} is stopped: {fatal}")))
+                    }
+                }
             }
         };
         match hint {
@@ -774,8 +806,13 @@ async fn read_barrier<D: ShoalDatabase>(
                             let linearizer = Linearizer::<DataConfig>::new(me, read_log_id, None);
                             return Ok((linearizer.read_log_id().index(), hopped));
                         }
-                        // the member we asked does not lead either: follow its hint, after
-                        // a pause so a group mid-election is not hammered
+                        // the member we asked does not lead either, and names who does: ask
+                        // that member next, after a pause so a group mid-election is not hammered
+                        Ok(BarrierAnswer::NotLeader(Some(next))) if next != me => {
+                            redirect = Some(next);
+                            glommio::timer::sleep(LEASE_POLL).await;
+                        }
+                        // it names nobody, or this shard: ask this shard's own handle again
                         Ok(BarrierAnswer::NotLeader(_)) => glommio::timer::sleep(LEASE_POLL).await,
                         Ok(BarrierAnswer::NoQuorum(msg)) => {
                             return Err(ResponseError::new(
@@ -807,20 +844,34 @@ async fn read_barrier<D: ShoalDatabase>(
                     }
                 }
             }
-            // no leader known: wait for one, then ask again
-            None => {
-                let left = remaining(deadline);
-                let elected = raft
-                    .wait(Some(left))
-                    .metrics(|metrics| metrics.current_leader.is_some(), "a leader")
-                    .await;
-                if elected.is_err() {
+            // an empty hint: this shard's own lease has not started, or nobody leads - judged
+            // from the handle, since a wait for "a leader" on a handle that names itself
+            // returns at once
+            None => match Lease::of(raft, me) {
+                Lease::Lapsed => {
                     return Err(ResponseError::new(
-                        ErrorCode::Timeout,
-                        format!("group {group} elected no leader within the deadline"),
-                    ));
+                        ErrorCode::QuorumUnavailable,
+                        format!(
+                            "the lease of {me} on group {group} lapsed: no quorum acknowledged it within {:?}",
+                            Lease::length(raft)
+                        ),
+                    ))
                 }
-            }
+                Lease::NotStarted | Lease::Leads | Lease::Elsewhere(_) => glommio::timer::sleep(LEASE_POLL).await,
+                Lease::Electing => {
+                    let left = remaining(deadline);
+                    let elected = raft
+                        .wait(Some(left))
+                        .metrics(|metrics| metrics.current_leader.is_some(), "a leader")
+                        .await;
+                    if elected.is_err() {
+                        return Err(ResponseError::new(
+                            ErrorCode::Timeout,
+                            format!("group {group} elected no leader within the deadline"),
+                        ));
+                    }
+                }
+            },
         }
     }
 }

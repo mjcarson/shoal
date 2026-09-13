@@ -232,7 +232,10 @@ leaks it and the client waits forever, since there are no timeouts anywhere.~~ S
 [F41](../features/read-consistency.md) a gather has a slot per share and a deadline: it is
 released when every slot is covered or one has failed, or at the bundle's
 `networking.query_deadline`, when the query is answered `Timeout` once and a share that arrives
-afterwards is dropped by identity ([Resolved #33](../appendix/resolved/gather-expiry.md)). What
+afterwards is dropped by identity ([Resolved #33](../appendix/resolved/gather-expiry.md)). Since
+[F42](../features/primary-failover.md) a share forwarded to a peer whose link never wrote it is
+sent to another holder once, under the same slot, so the gather waits for exactly the share it
+was owed. What
 a shard holds while it waits is still unbounded
 ([Known Issues #15](../appendix/known-issues.md#15-no-backpressure-anywhere)).
 

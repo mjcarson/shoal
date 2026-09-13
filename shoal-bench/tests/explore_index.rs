@@ -588,8 +588,8 @@ fn the_presets_pick_arms_that_answer_their_own_metric() {
 #[test]
 fn the_facts_mirrors_are_total() {
     use shoal_bench::model::macro_layer::{
-        ClusterFacts, ConfFacts, FanoutFacts, HopFacts, HopMix, NodeCores, NodeReadFacts, OfferedLoad,
-        OutcomeFacts, ReadFacts, ReplicaFacts, ScaleFacts,
+        ClusterFacts, ConfFacts, FanoutFacts, FaultFacts, HopFacts, HopMix, NodeCores, NodeReadFacts,
+        OfferedLoad, OutcomeFacts, ReadFacts, ReplicaFacts, ScaleFacts, SecondFacts, WindowFacts,
     };
     let keys = |value: serde_json::Value| -> Vec<String> {
         value
@@ -715,6 +715,34 @@ fn the_facts_mirrors_are_total() {
                 duplicate_shares: 0,
             }],
         }),
+        // a fault arm's record travels whole, windows and series included (F42)
+        fault: Some(FaultFacts {
+            kind: "kill".to_string(),
+            node: 1,
+            at_ms: 20_000,
+            restarted_at_ms: Some(40_000),
+            first_failure_ms: Some(20_050),
+            recovered_ms: Some(26_000),
+            outage_ms: Some(5_950),
+            sustained_ms: 2_000,
+            windows: vec![WindowFacts {
+                name: "before".to_string(),
+                from_ms: 0,
+                to_ms: 20_050,
+                ops: 1_000,
+                errors: 0,
+                p50_us: 300,
+                p99_us: 900,
+                max_us: 1_200,
+            }],
+            series: vec![SecondFacts {
+                second: 0,
+                ops: 50,
+                errors: 0,
+                p50_us: 300,
+                p99_us: 900,
+            }],
+        }),
     };
     let mirrored = explore::index::cluster_facts(&cluster);
     assert_eq!(keys(serde_json::to_value(&cluster).unwrap()), keys(serde_json::to_value(&mirrored).unwrap()));
@@ -733,6 +761,18 @@ fn the_facts_mirrors_are_total() {
     assert_eq!(
         keys(serde_json::to_value(&cluster.replicas[0]).unwrap()),
         keys(serde_json::to_value(&mirrored.replicas[0]).unwrap())
+    );
+    assert_eq!(
+        keys(serde_json::to_value(&cluster.fault).unwrap()),
+        keys(serde_json::to_value(&mirrored.fault).unwrap())
+    );
+    assert_eq!(
+        keys(serde_json::to_value(&cluster.fault.as_ref().unwrap().windows[0]).unwrap()),
+        keys(serde_json::to_value(&mirrored.fault.as_ref().unwrap().windows[0]).unwrap())
+    );
+    assert_eq!(
+        keys(serde_json::to_value(&cluster.fault.as_ref().unwrap().series[0]).unwrap()),
+        keys(serde_json::to_value(&mirrored.fault.as_ref().unwrap().series[0]).unwrap())
     );
     assert_eq!(
         keys(serde_json::to_value(&cluster.offered_load).unwrap()),

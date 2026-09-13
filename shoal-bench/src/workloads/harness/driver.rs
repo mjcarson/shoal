@@ -37,7 +37,7 @@ use shoal::shared::responses::ResponseActionNames;
 use shoal::Shoal;
 
 use crate::workloads::schema::BenchClient;
-use crate::workloads::workload::Measurement;
+use crate::workloads::workload::{Measurement, TimelineSample};
 
 /// How many queries to buffer before sending them as one batch
 ///
@@ -564,6 +564,132 @@ where
     while let Some(slot) = slots.join_next().await {
         measured.absorb(slot.context("a query slot panicked")??);
     }
+    Ok(measured)
+}
+
+/// How long a slot of a timed run waits after a failed operation before its next
+///
+/// A closed loop against a dead endpoint fails as fast as the kernel refuses it, and a slot
+/// that sent again at once would count thousands of refusals a second and call them
+/// operations. The pause keeps the error count a count of attempts a client would plausibly
+/// make; the outage is measured in time, never in errors.
+pub const FAILURE_BACKOFF: Duration = Duration::from_millis(10);
+
+/// Runs a mixture of reads and writes for a fixed time, keeping every operation on a timeline
+///
+/// The measurement [`drive_mixed_per_query`] takes, with three differences, all of which exist
+/// because something is going to go wrong in the middle of the run on purpose
+/// ([F42](../../../../docs/src/features/primary-failover.md)):
+///
+/// - **It runs for a duration, not a count.** A fault is scheduled at a time, and a run that
+///   ended at a count would end before or after the fault depending on the throughput of the
+///   day. Every slot stops sending once the duration has elapsed and the last answers drain.
+/// - **A failed operation does not end the run.** It is counted under `failed`, stamped on the
+///   timeline as a failure, and the slot pauses [`FAILURE_BACKOFF`] before its next. The
+///   distribution under `read` and `write` holds successes alone; a refusal's round trip is
+///   not a service time.
+/// - **Every operation is stamped on a timeline**, by when it was sent from the run's start and
+///   whether it was answered, so the harness can cut the outage out of the run afterwards
+///   rather than average it in ([C10](../../../../docs/src/distributed/performance.md)).
+///
+/// # Arguments
+///
+/// * `clients` - The clients to spread the slots across, in order
+/// * `concurrency` - How many queries may be outstanding at once in total, one per slot
+/// * `run_for` - How long to keep sending
+/// * `warmup` - How many queries to send before sampling starts
+/// * `build` - Builds the query at a given index, and names the operation it is
+pub async fn drive_mixed_timed<F, Q>(
+    clients: &[Arc<Shoal<BenchClient>>],
+    concurrency: u32,
+    run_for: Duration,
+    warmup: u64,
+    build: F,
+) -> Result<Measurement>
+where
+    F: Fn(u64) -> (&'static str, Q) + Send + Sync + 'static,
+    Q: Into<crate::workloads::schema::BenchQueryKinds> + Send,
+{
+    assert!(!clients.is_empty(), "a run needs at least one client");
+    // one clock for every slot, which is the axis the timeline and the fault marks share
+    let started = Instant::now();
+    let ends = started + run_for;
+    // one shared cursor, so the mixture is a function of the index here too
+    let next = Arc::new(AtomicU64::new(0));
+    let build = Arc::new(build);
+    let mut slots = tokio::task::JoinSet::new();
+    for slot in 0..concurrency.max(1) {
+        // deal this slot to a client, walking them in turn so the load is spread evenly
+        let client = clients[slot as usize % clients.len()].clone();
+        let next = next.clone();
+        let build = build.clone();
+        slots.spawn(async move {
+            let mut measured = Measurement::default();
+            measured.started = Some(started);
+            loop {
+                // stop sending once the run is over; what is outstanding on this slot is done
+                let now = Instant::now();
+                if now >= ends {
+                    break;
+                }
+                // claim the next query, whose index decides which kind it is
+                let index = next.fetch_add(1, Ordering::Relaxed);
+                let (op, query) = build(index);
+                // one timestamp either side of one query, which is what makes this a service time
+                let sent = now;
+                let outcome = client.send_one_stamped(query).await;
+                let elapsed = sent.elapsed();
+                match outcome {
+                    Ok((response, stamps)) => {
+                        // this query's client side record, opened and closed in one call
+                        measured.stages.one(stamps, &response);
+                        // count the queries by what they were, and the rows by what came back
+                        match response.kind() {
+                            ResponseActionNames::Insert => {
+                                measured.count("writes", 1);
+                                measured.count("inserted", 1);
+                            }
+                            ResponseActionNames::Get => {
+                                measured.count("reads", 1);
+                                measured.count("retrieved", rows_in(&response));
+                            }
+                            _ => {}
+                        }
+                        // the warmup is counted on the claimed index so every slot agrees where it ends
+                        if index >= warmup {
+                            measured.record(op, elapsed);
+                        }
+                        measured.timeline.push(TimelineSample {
+                            at: sent - started,
+                            elapsed,
+                            ok: true,
+                        });
+                    }
+                    Err(_) => {
+                        // a failure is counted and stamped, never recorded as a service time,
+                        // and the slot pauses so a dead endpoint is not counted a thousand times
+                        // a second
+                        measured.count("failed", 1);
+                        measured.timeline.push(TimelineSample {
+                            at: sent - started,
+                            elapsed,
+                            ok: false,
+                        });
+                        tokio::time::sleep(FAILURE_BACKOFF).await;
+                    }
+                }
+            }
+            Ok::<Measurement, anyhow::Error>(measured)
+        });
+    }
+    // pool what every slot gathered, which pools each operation under its own name and joins
+    // the timelines
+    let mut measured = Measurement::default();
+    while let Some(slot) = slots.join_next().await {
+        measured.absorb(slot.context("a query slot panicked")??);
+    }
+    // the timeline is read in the order things happened, which several slots did not pool in
+    measured.timeline.sort_by_key(|sample| sample.at);
     Ok(measured)
 }
 

@@ -1,7 +1,7 @@
 # Milestones
 
 The Before-M0 gate is settled ([decision record](protocol.md#decision-record), 2026-09-11), and
-~~M0, M1 and M2~~ M0 through M4 are delivered. Keep M0–M10 as stable identifiers; M9a/b/c refine M9
+~~M0, M1 and M2~~ M0 through M6 are delivered. Keep M0–M10 as stable identifiers; M9a/b/c refine M9
 without renumbering later work. Acceptance tests live in their owning C pages and are indexed
 by [C11](testing.md#the-acceptance-test-table). Each test names one gate below. This is an order
 with dependencies and measurable exit criteria, not dates.
@@ -288,6 +288,35 @@ and `LeaseRead` is never used.
 
 ### M6. Primary failover
 
+**Delivered** on 2026-09-13 as [F42](../features/primary-failover.md). All thirteen fixture rows
+below are runnable as `cargo test -p shoal --test cluster_fixture -- --test-threads 6`, the C10
+row as `cargo test -p shoal-bench`, with the retry table's persistence, the routing rules, the
+detector's fix and the client's retry loop as unit tests beside them. What was delivered, what
+was not, and the evidence are on the F page; the rest of this section is the gate as it was
+set. *Not done, on purpose:* leadership is not moved toward a reader or back to a returning
+node; identity expiry is M9a's and only the floor is recorded; a returning leader waits out
+its old lease before its groups are led again ([item 103](../appendix/known-issues.md#103-a-returning-leader-is-refused-its-own-re-election-until-its-old-lease-lapses-and-hops-to-it-wait));
+catch-up past the purge point is M7's; streams never retry; no coverage list rides the
+response frame; a `Down` member is never removed (M9b); leases stay deferred (Q6); and the
+capture is the benchmark host's - the arm ran at smoke scale on the development host.
+
+| Test | Where | What it asserts |
+| --- | --- | --- |
+| `stale_heartbeat_reports_cannot_lose_acked_write` | `shoal/tests/cluster_fixture.rs` ([C7](failover.md)) | The B=100/C=101/A+B=102 schedule on real nodes: node one cut off while 101 commits, healed and caught up, node two cut off while 102 commits, node zero killed; the election lands on node one, the only member whose log holds 102, it is on both survivors, and node zero converges when it returns |
+| `delayed_topology_cannot_authorize_old_primary` | `shoal/tests/cluster_fixture.rs` ([C7](failover.md)) | Node zero's data lanes cut both ways with its control lanes up and delayed, so it stays `Up` and the map does not move; the survivors elect and commit; past its lease a write through node zero is `NotLeader` before anything is appended and a strong read is refused, never the stale value; with the lanes swapped every node still commits; healed, the refused write is nowhere and digests agree |
+| `shard_stall_with_live_control_plane_can_fail_over` | `shoal/tests/cluster_fixture.rs` ([C7](failover.md)) | The leader's one shard blocked for six seconds while its control thread keeps reporting and the member stays `Up`: the survivors elect within the stall, a write through the new leader commits, and the shard follows the higher term when it wakes |
+| `quorum_history_survives_repeated_elections` | `shoal/tests/cluster_fixture.rs` ([C7](failover.md)) | The oracle's mix of updates, deletes and no-ops through all three nodes, every operation under an identity with a retry budget, eight rounds of dropped replies on the hot group's leader, a kill and a restart, then the next leader's; the sequential oracle accepts the history and a read of every key on every node joins it |
+| `strong_read_refuses_isolated_old_primary` | `shoal/tests/cluster_fixture.rs` ([C7](failover.md)) | Node zero isolated on every lane while the survivors elect and commit: a strong read through it is `QuorumUnavailable` past its lease and `Timeout` before, never the old value; a `One` read is the old value; a write past the lease is `NotLeader`; healed, its barrier hops and sees the new value |
+| `quorum_loss_is_unavailable_without_data_loss` | `shoal/tests/cluster_fixture.rs` ([C7](failover.md)) | Two of three nodes killed: a write through the survivor is `OutcomeUnknown` while its lease lasts and `NotLeader` after, never acknowledged, and a strong read is refused, with the control plane quorumless too so admission is not what refuses; both restarted, a new write commits, every acknowledged key is everywhere and the unknown write's key holds one value everywhere |
+| `lost_response_retry_returns_original_result` | `shoal/tests/cluster_fixture.rs` ([C5](replication.md)) | A delete under an identity with its reply dropped on the leader is `Timeout` at the client's deadline; the leader killed, the same delete under the same identity through a survivor is the original result once and a fresh delete finds nothing; checkpointed, purged and restarted on every node, the same identity is answered the same way from `retries.bin` |
+| `session_read_waits_for_committed_lower_bound` | `shoal/tests/cluster_fixture.rs` ([C6](reads.md)) | A session read past a token through a cut follower is `Timeout` and served once healed; the leader killed, the token is served past on either survivor, a write through the new leader mints one the other serves past, and a forged lineage is still `UnknownLineage` |
+| `read_barrier_survives_leader_change_and_delayed_messages` | `shoal/tests/cluster_fixture.rs` ([C6](reads.md)) | The leader paused with SIGSTOP while the survivors elect and commit and the control lanes into it are slowed; resumed and still believing it leads, its own barrier is refused at its lapsed lease, then hops to the new leader once the higher term reaches it; five seconds of strong reads through it are each the new value or an error and never the old |
+| `deadline_and_operation_id_survive_forwarding` | `shoal/tests/cluster_fixture.rs` ([C2](transport.md)) | Four nodes at a factor of three: a delete under one identity through the non-holder and then a holder is the original result once; a write through the non-holder while the group cannot commit is answered at the bundle's own deadline, not the server's; with the lane to the primary cut, a write is sent to another holder under the same attempt and lands once |
+| `down_retains_placement_during_grace` | `shoal/tests/cluster_fixture.rs` ([C3](membership.md)) | Node two killed and called `Down` with an episode: the placement and every group's members are unchanged on every survivor and still name it; a key it led is written through node zero once its group elected; restarted it is `Up` in the same placement and converges |
+| `metadata_quorum_cannot_replace_a_missing_data_quorum` | `shoal/tests/cluster_fixture.rs` ([C13](protocol.md)) | Node zero's data lanes cut with every control lane up: a policy change commits and moves the map on every node, node zero included, and authorizes nothing - past its lease a write through it is `NotLeader`, a strong read is refused, the survivors commit through the new leader, and healed its refused write is nowhere |
+| `established_tablets_survive_control_quorum_loss` | `shoal/tests/cluster_fixture.rs` ([C13](protocol.md)) | Every control lane cut so the control group has no leader: an admin mutation is refused naming `NotLeader`, writes and strong reads through every node still commit; healed, a leader is elected and the same mutation commits and moves the version |
+| `fault_capture_preserves_outage_time_series` | `shoal-bench/src/workloads/harness/fault.rs` ([C10](performance.md)) | A ten second timeline with a kill at three, failures to six with one lucky success among them and slow successes after: `before`, `during` and `after` are cut at the client's first failure and its first sustained success, each with its own distribution, the outage is their gap, the series has a bucket per second with the dip in it, the record round trips, and an F40 cluster record loads with no fault |
+
 **Delivers.** Data-group elections, matching-history recovery, current-term activation/read barriers,
 old-primary fencing and complete stable retry/result handling. Default operations distinguish
 rejected from unknown outcomes. Established data groups survive control-quorum loss where their
@@ -301,6 +330,16 @@ C13 separation of control/data quorums. Include updates/deletes/no-ops and condi
 schedules. Initial client outage objective is election-base + 2s only under the named bounded-delay,
 healthy-survivor/backlog conditions. Record actual resource-reduced throughput after failure;
 do not require it to equal three healthy nodes. Without safe retries and reads this is not HA-ready.
+*Met:* no acknowledged result is lost across the schedules above, the oracle-judged one
+included; a rejected outcome and an unknown one are distinct at the lease, on the lane and in
+the client's retry list; established groups commit without a control quorum and metadata stops;
+`Down` is not an election prerequisite (`shard_stall_with_live_control_plane_can_fail_over`).
+*Not met as written:* the outage objective. The follower lease is `election_timeout_max`, twice
+the base, and a randomized election follows it, so a failover completes between two and three
+times the base - two to three seconds at the fixture's second, ten to fifteen at the default
+five - and the [F42 page](../features/primary-failover.md#performance) records the arm's shape
+at the default rather than a number against the objective; the throughput after the kill is
+on the same record, not required to equal three nodes.
 
 ### M7. Recover a node brought back online
 

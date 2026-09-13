@@ -25,10 +25,17 @@ anything is recorded; `One` writes are refused at validation and an `Async` pers
 on a cluster node at start. A group's checkpoint is the log id its table's archives are
 complete to, moved by the compactor from sealed segments every group applied past; the
 snapshot is that checkpoint, the purge follows it, and a segment goes once every group purged
-past it. Rotation advances nothing but the durable position. What is not there: catch-up past
-the purge point (M7), a durable low-water mark for the retry table and the leader's step-down
-at its lease (M6), leadership moved after a failover (~~M5~~ M6). Every M4 row of the table below is
-a test. Before that, and still on a standalone node:
+past it. Rotation advances nothing but the durable position. Since M6
+([F42](../features/primary-failover.md)) the retry table is persisted beside the checkpoint as
+`retries.bin` and seeded at open, so a retry after the purge point is answered as the first
+attempt was; the checkpoint carries the table's low-water mark for M9a's expiry check; a
+leader whose lease lapsed answers `NotLeader` before it appends rather than `OutcomeUnknown`
+at its deadline; a proposal hopping to a leader whose link is down is `NotLeader` at once when
+its frame was never written; and a client can pin its bundle id as the identity and retry
+under it. What is not there: catch-up past the purge point (M7), ~~a durable low-water mark
+for the retry table and the leader's step-down at its lease (M6),~~ leadership moved after a
+failover - it stays where the election put it. Every M4 and M6 row of the table below is a
+test. Before that, and still on a standalone node:
 `FileSystem::commit` (`shoal-core/src/server/tables/storage/fs.rs`) serializes an intent,
 checksums it and stages it into a per-shard, per-table WAL. The table applies a mutation in
 memory and parks its result in `PendingResponse`; local durability later releases it.
@@ -217,7 +224,8 @@ identities. The wire format and table identity must remain usable by client-only
 
 [C13](protocol.md) Q1–Q4, [C4](tablet-map.md), [C2](transport.md), and C7's checkpoint contract
 before M4 - all met ([Q2, Q3 and Q4 at M4](protocol.md#q2-q3-and-q4-at-m4)). Basic
-application ~~lands in~~ landed at M4; the full retry/failover release gate is M6.
+application ~~lands in~~ landed at M4; the full retry/failover release gate ~~is M6~~ was met at
+M6 ([Q4 at M6](protocol.md#q4-at-m6)).
 
 ## How it would be measured
 

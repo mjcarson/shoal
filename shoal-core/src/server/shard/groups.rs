@@ -44,13 +44,13 @@ use crate::server::map::GroupSpec;
 use crate::server::messages::{QueryMetadata, ServerMsg};
 use crate::server::peer::{LinkEvent, ReplicateReply};
 use crate::server::replication::{
-    ApplyOutcome, BarrierAnswer, DataConfig, GroupMachine, GroupNetwork, GroupReport, MachineState,
-    ProposalOutcome, ReplicationVerb, RpcFailure, ShardNetwork, ShardPeer, ShardReplication,
+    ApplyOutcome, BarrierAnswer, DataConfig, GroupMachine, GroupNetwork, GroupReport, Lease, MachineState,
+    ProposalOutcome, Remembered, ReplicationVerb, RpcFailure, ShardNetwork, ShardPeer, ShardReplication,
 };
 use crate::server::ring::Ring;
-use crate::server::stage_profile::{StageDurability, StageOp};
+use crate::server::stage_profile::{StageDurability, StageOp, Stamp};
 use crate::server::tables::ApplyStep;
-use crate::server::wal::{Checkpoint, GroupCheckpoint, GroupStore, MemoryWal, ShardWal};
+use crate::server::wal::{Checkpoint, GroupCheckpoint, GroupRetries, GroupStore, MemoryWal, Retries, ShardWal};
 use crate::server::ServerError;
 use crate::shared::identity::{GroupId, NodeId, ShardAddr, TableId};
 use crate::shared::protocol::error::ErrorCode;
@@ -123,6 +123,8 @@ pub(super) struct Replication<D: ShoalDatabase> {
     pub(super) parked: HashMap<(D::TableNames, u64), Vec<ParkedApply>>,
     /// The checkpoint file as it was last written or read
     pub(super) checkpoint: Checkpoint,
+    /// The retry sidecar as it was last written or read
+    pub(super) retries: Retries,
     /// Which write of the checkpoint file is the latest
     pub(super) checkpoint_version: u64,
     /// Whether a checkpoint write is in flight
@@ -133,6 +135,8 @@ pub(super) struct Replication<D: ShoalDatabase> {
     pub(super) compacting: HashMap<u64, HashSet<D::TableNames>>,
     /// What proposals have come to
     pub(super) stats: ProposalStats,
+    /// How many committed write replies to drop before answering clients again, for the fixture
+    pub(super) drop_replies: u64,
     /// How many rebuilds of the groups there have been
     pub(super) epoch: u64,
     /// Deadline ticks since the last segment sweep
@@ -154,7 +158,7 @@ where
         >,
 {
     /// This node's identity, on a cluster node
-    fn node_id(&self) -> NodeId {
+    pub(super) fn node_id(&self) -> NodeId {
         self.local
             .as_ref()
             .map_or(NodeId::default(), |local| local.borrow().node)
@@ -202,6 +206,8 @@ where
             let _ = sealed_tx.try_send(ServerMsg::WalSealed { generation });
         }));
         let checkpoint = Checkpoint::read(&dir).await.map_err(ServerError::IO)?;
+        // the retry tables as of that checkpoint, written before it
+        let retries = Retries::read(&dir).await.map_err(ServerError::IO)?;
         let _ = setup;
         self.replication = Some(Replication {
             wal,
@@ -211,11 +217,13 @@ where
             tablets: HashMap::new(),
             parked: HashMap::new(),
             checkpoint,
+            retries,
             checkpoint_version: 0,
             checkpoint_writing: false,
             checkpoint_dirty: false,
             compacting: HashMap::new(),
             stats: ProposalStats::default(),
+            drop_replies: 0,
             epoch: 0,
             ticks: 0,
             last_report: None,
@@ -266,6 +274,14 @@ where
             Vec::new()
         };
         let wanted: HashSet<GroupId> = specs.iter().map(|spec| spec.id).collect();
+        // the failover base the cluster agreed, or this node's own until a map carries one
+        // truncation cannot happen: a failover base is seconds, not weeks
+        #[allow(clippy::cast_possible_truncation)]
+        let failover_ms = if map.primary_failover_ms > 0 {
+            map.primary_failover_ms
+        } else {
+            cluster.primary_failover_after.duration().as_millis() as u64
+        };
         // stop what the map no longer names
         let gone: Vec<GroupId> = replication
             .groups
@@ -309,16 +325,24 @@ where
             } else {
                 replication.volatile.store(spec.id)
             };
-            // the checkpoint the group starts from, if its table's archives hold one
-            let (checkpoint, membership) = match replication.checkpoint.get(spec.id) {
+            // the checkpoint the group starts from, if its table's archives hold one, and the
+            // retry table as of it, which the log above the checkpoint cannot rebuild
+            let (checkpoint, membership, seed) = match replication.checkpoint.get(spec.id) {
                 Some(point) if store.is_volatile() => {
                     let _ = point;
-                    (None, StoredMembership::default())
+                    (None, StoredMembership::default(), Vec::new())
                 }
-                Some(point) => (point.applied.clone(), point.membership()),
-                None => (None, StoredMembership::default()),
+                Some(point) => (
+                    point.applied.clone(),
+                    point.membership(),
+                    replication.retries.seed_for(spec.id, point),
+                ),
+                None => (None, StoredMembership::default(), Vec::new()),
             };
-            let state = Rc::new(RefCell::new(MachineState::at(checkpoint, membership)));
+            if !seed.is_empty() {
+                event!(Level::DEBUG, msg = "seeded a group's retry table from its sidecar", group = %spec.id, entries = seed.len());
+            }
+            let state = Rc::new(RefCell::new(MachineState::at(checkpoint, membership, seed)));
             let machine = GroupMachine::new(spec.id, state.clone(), tx.clone());
             let group = Group {
                 spec: spec.clone(),
@@ -335,7 +359,7 @@ where
                 group: spec.id,
                 network: replication.network.clone(),
             };
-            let config = group_config(&cluster, spec.id, store.is_volatile());
+            let config = group_config(&cluster, failover_ms, spec.id, store.is_volatile());
             let tx = tx.clone();
             let addr = ShardAddr::new(me, spec.mine);
             let primary = spec.is_primary(me);
@@ -453,8 +477,8 @@ where
                     // a repeat of a remembered identity is answered as the first was
                     let remembered = state.borrow_mut().dedup.get(&command.request).copied();
                     match remembered {
-                        Some((digest, result)) if digest == command.digest() => {
-                            Some(ApplyOutcome::Duplicate(result))
+                        Some(remembered) if remembered.digest == command.digest() => {
+                            Some(ApplyOutcome::Duplicate(remembered.result))
                         }
                         Some(_) => Some(ApplyOutcome::Refused(
                             "the request identity was reused with a different payload".to_string(),
@@ -462,7 +486,12 @@ where
                         None => match self.tables.apply_command(table, command, generation, resumed) {
                             ApplyStep::Done(result) => {
                                 event!(Level::DEBUG, msg = "applied a command", group = %group, index = log_id.index, table = %table, ok = result.ok);
-                                state.borrow_mut().dedup.put(command.request, (command.digest(), result));
+                                let remembered = Remembered {
+                                    digest: command.digest(),
+                                    result,
+                                    applied: log_id.index,
+                                };
+                                state.borrow_mut().dedup.put(command.request, remembered);
                                 Some(ApplyOutcome::Applied(result))
                             }
                             ApplyStep::Refused(reason) => Some(ApplyOutcome::Refused(reason)),
@@ -631,7 +660,11 @@ where
         let raft = group.raft.clone();
         let network = replication.network.clone();
         let me = self.my_addr();
-        let deadline = cluster.replication.write_timeout.duration();
+        // the write's budget: the proposal deadline, or what is left of the bundle's if that is
+        // shorter - a forwarded write counts down from the origin's budget, never up from a
+        // fresh one ([C2](../../../../docs/src/distributed/transport.md))
+        let bundle_left = Duration::from_nanos(meta.read.deadline.since(Stamp::now()));
+        let deadline = cluster.replication.write_timeout.duration().min(bundle_left);
         let all = self.map.get().write_consistency == crate::server::conf::cluster::Consistency::All;
         let tx = self.shard_local_tx.clone();
         glommio::spawn_local(async move {
@@ -694,6 +727,13 @@ where
             }
         }
         let (client, id, index, end) = (meta.client, meta.id, meta.index, meta.end);
+        let committed = matches!(
+            &outcome,
+            ProposalOutcome::Answered {
+                outcome: ApplyOutcome::Applied(_) | ApplyOutcome::Duplicate(_),
+                ..
+            }
+        );
         // a committed write mints a token naming where it committed
         let token = match (&outcome, group) {
             (
@@ -735,6 +775,17 @@ where
         };
         meta.stamps.mark_exec_done();
         let span = meta.span.clone();
+        // the fixture's lost response: the write committed and applied, and its answer goes
+        // nowhere, which is what a retry under the same identity has to recover from
+        if committed {
+            if let Some(replication) = self.replication.as_mut() {
+                if replication.drop_replies > 0 {
+                    replication.drop_replies -= 1;
+                    event!(Level::WARN, msg = "dropping a committed write's reply, as the fixture asked", id = %id, index);
+                    return Ok(());
+                }
+            }
+        }
         // the token rides the answer to a client that asked for one, and the answer head to a
         // peer that forwarded the write
         self.reply_with_token(client, id, span, meta.stamps, response, token).await
@@ -802,22 +853,27 @@ where
                     "installing a tablet group snapshot is M7's; this replica cannot catch up past the purge point",
                 ),
                 // a read barrier: confirm leadership with a heartbeat round and answer the
-                // read log id, or say who leads instead
+                // read log id, or say who leads instead. A lapsed lease is answered by name
+                // rather than waited out, since its heartbeat round cannot complete
                 ReplicateKind::ReadBarrier => {
-                    let answer = match raft.get_read_linearizer(ReadPolicy::ReadIndex).await {
-                        Ok(linearizer) => BarrierAnswer::Ready(linearizer.read_log_id().clone()),
-                        Err(RaftError::APIError(LinearizableReadError::ForwardToLeader(forward))) => {
-                            BarrierAnswer::NotLeader(forward.leader_node.or(forward.leader_id))
+                    if Lease::of(&raft, me) == Lease::Lapsed {
+                        let answer = BarrierAnswer::NoQuorum(format!(
+                            "the lease of {me} on the group lapsed: no quorum acknowledged it within {:?}",
+                            Lease::length(&raft)
+                        ));
+                        encode_reply(head.id, &answer)
+                    } else {
+                        match raft.get_read_linearizer(ReadPolicy::ReadIndex).await {
+                            Ok(linearizer) => encode_reply(head.id, &BarrierAnswer::Ready(linearizer.read_log_id().clone())),
+                            Err(RaftError::APIError(LinearizableReadError::ForwardToLeader(forward))) => {
+                                encode_reply(head.id, &BarrierAnswer::NotLeader(forward.leader_node.or(forward.leader_id)))
+                            }
+                            Err(RaftError::APIError(LinearizableReadError::QuorumNotEnough(short))) => {
+                                encode_reply(head.id, &BarrierAnswer::NoQuorum(short.to_string()))
+                            }
+                            Err(RaftError::Fatal(fatal)) => ReplicateReply::error(head.id, format!("read_barrier: {fatal}")),
                         }
-                        Err(RaftError::APIError(LinearizableReadError::QuorumNotEnough(short))) => {
-                            BarrierAnswer::NoQuorum(short.to_string())
-                        }
-                        Err(RaftError::Fatal(fatal)) => {
-                            ReplicateReply::error(head.id, format!("read_barrier: {fatal}"));
-                            BarrierAnswer::NoQuorum(format!("the group is stopped: {fatal}"))
-                        }
-                    };
-                    encode_reply(head.id, &answer)
+                    }
                 }
             };
             let _ = reply.send(answer).await;
@@ -838,7 +894,7 @@ where
             LinkEvent::Frame { node, head, payload, .. } => {
                 replication.network.answered(node, &head, payload.to_vec());
             }
-            LinkEvent::Down { node, reason, .. } => replication.network.down(node, &reason),
+            LinkEvent::Down { node, reason, unsent, .. } => replication.network.down(node, &reason, &unsent),
             LinkEvent::Up { .. } => {}
         }
     }
@@ -998,7 +1054,12 @@ where
         }
     }
 
-    /// Write the checkpoint file from every group's checkpoint, on a task of its own
+    /// Write the retry sidecar and then the checkpoint file from every group's checkpoint, on a task of its own
+    ///
+    /// The sidecar goes first: a checkpoint that names a sidecar index must find one complete
+    /// to it at open, and a crash between the two leaves a sidecar ahead of its checkpoint,
+    /// which the seed rule ignores. The checkpoint counts as durable only once the checkpoint
+    /// file itself landed.
     fn write_checkpoint(&mut self) {
         let Some(replication) = self.replication.as_mut() else {
             return;
@@ -1010,25 +1071,41 @@ where
         replication.checkpoint_dirty = false;
         replication.checkpoint_version += 1;
         let version = replication.checkpoint_version;
-        // what every persistent group says its checkpoint is
+        // what every persistent group says its checkpoint is, and what it remembers as of it
         let mut file = Checkpoint::default();
+        let mut retries = Retries::default();
         for (id, slot) in &replication.groups {
             if slot.store.is_volatile() {
                 continue;
             }
             let state = slot.state.borrow();
             if let Some(applied) = &state.checkpoint {
+                // the entries at or below the checkpoint; the rest the log replay re-derives
+                let entries = state.remembered_through(applied.index);
+                retries.groups.insert(
+                    id.to_string(),
+                    GroupRetries {
+                        retries_at: applied.index,
+                        entries,
+                    },
+                );
                 file.groups.insert(
                     id.to_string(),
-                    GroupCheckpoint::new(Some(applied.clone()), &state.checkpoint_membership),
+                    GroupCheckpoint::new(Some(applied.clone()), &state.checkpoint_membership)
+                        .retries(applied.index, state.retry_floor()),
                 );
             }
         }
         replication.checkpoint = file.clone();
+        replication.retries = retries.clone();
         let dir = replication.wal.dir();
         let tx = self.shard_local_tx.clone();
         glommio::spawn_local(async move {
-            let outcome = file.write(&dir).await.map_err(|error| error.to_string());
+            // the sidecar first, then the checkpoint that names it
+            let outcome = match retries.write(&dir).await {
+                Ok(()) => file.write(&dir).await.map_err(|error| error.to_string()),
+                Err(error) => Err(format!("the retry sidecar could not be written: {error}")),
+            };
             let _ = tx.send(ServerMsg::CheckpointWritten { version, outcome }).await;
         })
         .detach();
@@ -1180,6 +1257,10 @@ where
                 replication.wal.release(group);
                 Ok(serde_json::json!({ "released": group.to_string() }))
             }
+            ReplicationVerb::DropReplies { n } => {
+                replication.drop_replies = n;
+                Ok(serde_json::json!({ "dropping": n }))
+            }
         }
     }
 
@@ -1231,13 +1312,11 @@ where
 /// # Arguments
 ///
 /// * `cluster` - The cluster block
+/// * `failover_ms` - The failover base, in milliseconds: the map's, or the block's until a map carries one
 /// * `group` - The group
 /// * `volatile` - Whether the group's log lives in memory alone
-fn group_config(cluster: &crate::server::conf::Cluster, group: GroupId, volatile: bool) -> Arc<Config> {
-    let base = cluster.primary_failover_after.duration().as_millis();
-    // truncation cannot happen: a failover base is seconds, not weeks
-    #[allow(clippy::cast_possible_truncation)]
-    let base = (base as u64).max(100);
+fn group_config(cluster: &crate::server::conf::Cluster, failover_ms: u64, group: GroupId, volatile: bool) -> Arc<Config> {
+    let base = failover_ms.max(100);
     let config = Config {
         cluster_name: format!("group-{group}"),
         heartbeat_interval: (base / 10).max(10),
@@ -1360,6 +1439,15 @@ async fn propose_through<D: ShoalDatabase>(
         if remaining.is_zero() {
             return ProposalOutcome::NotLeader(format!("no leader of group {group} took the write within the deadline"));
         }
+        // a lease that lapsed is a definite refusal before anything is appended: openraft would
+        // refuse the write with an empty hint, and waiting for "a leader" on a handle that
+        // names itself is satisfied at once ([F42](../../../../docs/src/features/primary-failover.md))
+        if Lease::of(raft, me) == Lease::Lapsed {
+            return ProposalOutcome::NotLeader(format!(
+                "the lease of {me} on group {group} lapsed: no quorum acknowledged it within {:?}",
+                Lease::length(raft)
+            ));
+        }
         let written = glommio::timer::timeout(remaining, async { Ok(raft.client_write(command.clone()).await) }).await;
         match written {
             // the leader took it and did not commit it in time: it may yet
@@ -1423,17 +1511,28 @@ async fn propose_through<D: ShoalDatabase>(
                             Err(RpcFailure::Unreachable(msg)) => ProposalOutcome::Unknown(msg),
                         };
                     }
-                    // no leader known: wait for one, then ask again
-                    None => {
-                        let remaining = deadline.saturating_sub(started.elapsed());
-                        let elected = raft
-                            .wait(Some(remaining))
-                            .metrics(|metrics| metrics.current_leader.is_some(), "a leader")
-                            .await;
-                        if elected.is_err() {
-                            return ProposalOutcome::NotLeader(format!("group {group} elected no leader within the deadline"));
+                    // an empty hint: this shard's own lease has not started or has lapsed, or
+                    // nobody leads - judged from the handle rather than waited on, since a
+                    // wait for "a leader" on a handle that names itself returns at once
+                    None => match Lease::of(raft, me) {
+                        Lease::Lapsed => {
+                            return ProposalOutcome::NotLeader(format!(
+                                "the lease of {me} on group {group} lapsed: no quorum acknowledged it within {:?}",
+                                Lease::length(raft)
+                            ));
                         }
-                    }
+                        Lease::NotStarted | Lease::Leads | Lease::Elsewhere(_) => glommio::timer::sleep(LEASE_POLL).await,
+                        Lease::Electing => {
+                            let remaining = deadline.saturating_sub(started.elapsed());
+                            let elected = raft
+                                .wait(Some(remaining))
+                                .metrics(|metrics| metrics.current_leader.is_some(), "a leader")
+                                .await;
+                            if elected.is_err() {
+                                return ProposalOutcome::NotLeader(format!("group {group} elected no leader within the deadline"));
+                            }
+                        }
+                    },
                 }
             }
             Ok(Err(error)) => return ProposalOutcome::Failed(format!("writing to group {group}: {error}")),

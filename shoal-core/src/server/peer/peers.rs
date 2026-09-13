@@ -7,6 +7,7 @@
 //! (nothing was written), and anything in between - written and unanswered when the link drops or
 //! the deadline passes - is an unknown outcome, because a write may have applied.
 
+use bytes::Bytes;
 use rustls::ClientConfig;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
@@ -22,6 +23,7 @@ use crate::server::database::ShoalDatabase;
 use crate::server::messages::{PeerEvent, ServerMsg};
 use crate::server::stage_profile::{StageStamps, Stamp};
 use crate::shared::identity::NodeId;
+use crate::shared::protocol::peer::ForwardEntry;
 use kanal::Sender;
 use tracing::Span;
 use uuid::Uuid;
@@ -49,6 +51,19 @@ pub struct Pending<D: ShoalDatabase> {
     pub attempt: u64,
     /// The slot of the origin's gather it fills, if it is a share
     pub slot: u16,
+    /// The entry as it was forwarded, kept so a forward the link never wrote can go again
+    /// ([F42](../../../../docs/src/features/primary-failover.md))
+    pub entry: ForwardEntry,
+    /// The bundle's bytes, shared with the frame rather than copied
+    pub body: Bytes,
+    /// The partition keys this share covers, as their hashes, for choosing another holder
+    pub partitions: Vec<u64>,
+    /// The bundle's base index, which a forward names
+    pub base_index: u64,
+    /// When the bundle itself stops waiting, which a second forward counts down from
+    pub bundle_deadline: Stamp,
+    /// Whether this is already the second forward of the share: one reroute, never two
+    pub rerouted: bool,
 }
 
 /// The links to every peer this shard forwards to

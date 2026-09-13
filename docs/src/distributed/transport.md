@@ -41,7 +41,15 @@ three sit behind `CAP_READ_CONSISTENCY_V1`, which the M2 exact-match rule refuse
 by. Between a client and a node the same milestone spends the hello's reserved byte fourteen on
 a capability set, and only a granted bit puts a read options section behind a bundle's trace
 context or a session token ahead of a response's payload - the selected-version contract, with
-no version bump.
+no version bump. **At M6** ([F42](../features/primary-failover.md)) the transport learns the
+difference between a frame it wrote and one it did not, on both lanes: a forward the data link
+never wrote is sent to another holder once under the same attempt and slot, a proposal or a
+barrier the replication link never wrote is `NotSent` and answered `NotLeader` at once, and
+either that was written and never answered stays unknown. A link a frame wants redials at
+`reconnect_min` rather than waiting out its exponential backoff, which is what bounds the wait
+for that answer at a dead peer to the floor and what keeps the control plane's leader from
+losing its lead every time a member returns. The identity and the budget cross the hop
+unchanged (`deadline_and_operation_id_survive_forwarding`); nothing on the wire moved.
 
 Before that: ~~`ShardContact::Local`, `Comms::send` and the kanal mesh route queries within a
 process.~~ `ServerMsg::Partition` still carries a Glommio read result with a restricted Send

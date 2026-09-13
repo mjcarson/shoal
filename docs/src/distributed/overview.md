@@ -5,7 +5,7 @@
 default write waits for a durable quorum.** These pages
 plan a highly available cluster of Shoal nodes. The `C` pages are design records;
 [milestones](milestones.md) name implementation gates, acceptance tests and benchmark evidence.
-~~Four~~ Five gates are met: the protocol contract that precedes M0 was agreed on 2026-09-11 and is
+~~Four~~ ~~Five~~ Six gates are met: the protocol contract that precedes M0 was agreed on 2026-09-11 and is
 numbered P1–P6 in [C13](protocol.md#the-contract);
 [M0](milestones.md#m0-step-0-the-harness-and-the-facts) — the executable model of that contract,
 the process fixture, and the benchmark's cluster record — was delivered the same day as
@@ -35,9 +35,15 @@ replicating to nobody — as [F40](../features/replication.md).
 elects across nodes or replicates yet.~~ And a read that can be made to see the write: a
 `Quorum` read through a barrier from the tablet's leader, a session token a write hands back,
 every gather with a slot per share and a deadline, and seven arms that price a barrier, a
-token and a fan-out — as [F41](../features/read-consistency.md). What is not there: ~~strong
-reads (M5),~~ failover that
-moves leadership and the retry table's durable mark (M6), a member behind the purge point
+token and a fan-out — as [F41](../features/read-consistency.md). And
+[M6](milestones.md#m6-primary-failover) — failover: a retry table that survives the purge
+point, a lapsed lease answered `NotLeader` before anything is appended, a barrier that follows
+the leader, routing by health with a never-written share sent to another holder once, a client
+identity and an opt-in retry, and one arm that records the outage as a time series — as
+[F42](../features/primary-failover.md). What is not there: ~~strong
+reads (M5),~~ ~~failover that
+moves leadership and the retry table's durable mark (M6),~~ leadership moved toward a reader or
+back to a returning node, a member behind the purge point
 catching up (M7), and everything from rebalancing on. They extend the unbuilt
 [Distribution](../appendix/todos.md#distribution) and
 [Rebalancing](../appendix/todos.md#rebalancing) entries.
@@ -138,7 +144,7 @@ groups can operate if their data quorum survives, while topology changes stop.
 | C2 onward → C10 | Measure transport first, then replication, recovery and scale-out |
 | C2 onward → C9 | Compatibility and admin authorization are designed early, exercised throughout |
 
-M5 and M6 together establish strong-read behavior during failover. C7's snapshot/checkpoint
+M5 and M6 together ~~establish~~ established strong-read behavior during failover. C7's snapshot/checkpoint
 contract is designed before M4, although transfer lands in M7. M9 separates migration mechanics,
 placement policy and changing shard counts. See the detailed exit gates on the milestones page.
 

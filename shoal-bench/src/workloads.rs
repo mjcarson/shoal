@@ -24,6 +24,7 @@
 //! A test asserts those two agree, so forgetting the second is a test failure rather than a
 //! workload that is never run.
 
+pub mod cluster_failover;
 pub mod cluster_hop;
 pub mod cluster_overhead;
 pub mod cluster_reads;
@@ -154,6 +155,14 @@ pub fn all() -> Vec<Box<dyn Workload>> {
     // ([F41](../../docs/src/features/read-consistency.md))
     built.extend(
         cluster_reads::all()
+            .into_iter()
+            .map(|workload| Box::new(workload) as Box<dyn Workload>),
+    );
+    // the failover arm, appended after the read arms: the durable replication cell driven for
+    // a fixed time with node one killed and started again inside it
+    // ([F42](../../docs/src/features/primary-failover.md))
+    built.extend(
+        cluster_failover::all()
             .into_iter()
             .map(|workload| Box::new(workload) as Box<dyn Workload>),
     );

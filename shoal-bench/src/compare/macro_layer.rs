@@ -815,6 +815,7 @@ mod tests {
                 replicas: Vec::new(),
                 outcomes: None,
                 reads: None,
+                fault: None,
             });
         }
         capture

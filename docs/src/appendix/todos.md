@@ -262,15 +262,57 @@ nobody. M5 is delivered as [F41](../features/read-consistency.md): a `Quorum` re
 read barrier from its group's leader and applies through it, a committed write hands back a
 session token a later read is served past, every gather has a slot per share and a deadline, a
 bundle's level resolves per table from versioned control state, and seven arms price a barrier,
-a session token and a fan-out.
+a session token and a fan-out. M6 is delivered as [F42](../features/primary-failover.md): the
+retry table survives the purge point, a lapsed lease is `NotLeader` before anything is
+appended, a barrier follows the leader, a non-holder routes by health and a never-written share
+is sent to another holder once, a client pins its identity and retries under a budget, and one
+arm records a kill and a restart as a time series.
+
+**What F42 left undone, deliberately.** Recorded here so the next milestone starts from the
+list rather than from the diff:
+
+- **Moving leadership.** Toward a reader, back to a returning node, or off a node that leads
+  too much: an election puts it where it puts it and nothing transfers it. openraft has
+  `trigger().transfer_leader()`; what is missing is the policy that would call it, which is
+  M8's repair or a load-aware transfer C7 schedules separately.
+- **Identity expiry.** `retry_floor` is on the checkpoint and nothing reads it; an identity
+  below the floor is applied as new. M9a's `retry_identity_survives_snapshot_and_migration`
+  is the test that will read it, and the answer for an identity below the floor should be a
+  refusal by name, not a second apply.
+- **A stream retry.** `stream_with` ignores `retry`: a bundle that is open-ended has no answer
+  to compare a second attempt against, and the ordered stream would have to know which indices
+  the caller already saw. The single-bundle retry covers `send_one_with` and `exec_with`.
+- **A coverage list on the response frame.** Still the slot on the coordinator; still nothing
+  reconciles across shares.
+- **A shorter failover window.** The follower lease is `election_timeout_max`, twice the
+  base, so a failover takes two to three times the base. openraft has no pre-vote and no way
+  to expire a follower's lease early; a link that dropped could be a hint to elect, but the
+  other followers would still refuse the vote inside their lease. The window is the base's to
+  tune.
+- **A returning leader's own re-election.** Refused by the same lease until it lapses
+  ([item 103](known-issues.md#103-a-returning-leader-is-refused-its-own-re-election-until-its-old-lease-lapses-and-hops-to-it-wait));
+  a hop that lands on a member that is `Electing` could be answered `NotLeader` at once rather
+  than waiting the election out, which would make the returning node's window a burst of
+  refusals rather than a stall.
+- **The transport's floor is the file's.** `reconnect_min` bounds how long a hop to a dead
+  peer waits; it is not on the map, so two nodes can disagree about it where they cannot about
+  the failover base.
+- **A pause and a partition arm.** The failover arm kills; the fixture pauses and partitions.
+  A capture of either is a second and third arm on the same harness, with the fault kind on
+  the record already.
+- **A retrying client's view of the same fault.** The arm's client does not retry, on purpose;
+  the arm that drives with `identity` and `retry` measures how well the retry hides the outage
+  and belongs beside this one.
 
 **What F41 left undone, deliberately.** Recorded here so the next milestone starts from the
 list rather than from the diff:
 
-- **A read retry within its budget.** The attempt is minted per bundle on the coordinator and
+- ~~**A read retry within its budget.** The attempt is minted per bundle on the coordinator and
   echoed by every share, so a late one is dropped by identity; nothing reroutes yet. The reroute
   has to invalidate the old attempt's slots and re-forward the bundle's bytes, which is M6's
-  retry work beside the write retry.
+  retry work beside the write retry.~~ Built by [F42](../features/primary-failover.md), under
+  the same attempt and slot rather than a new one: a share the link never wrote was never
+  seen, so the slot still waits for exactly it.
 - **A coverage list on the response frame.** Coverage is the slot on the coordinator, and no
   reply is built from fewer covered slots than slots; the client sees a complete answer or one
   error and cannot see which partitions were covered. It would ride the response under the same
@@ -290,8 +332,8 @@ list rather than from the diff:
   waits are on `cluster.reads` instead, summed and per node. Rendering them is the one change
   that would put the arms into `STAGED_WORKLOADS`.
 - **Moving leadership toward a reader.** A strong read through a follower hops to the leader on
-  every read; nothing transfers leadership. M6, with the failover work that decides where
-  leadership lives.
+  every read; nothing transfers leadership. ~~M6, with the failover work that decides where
+  leadership lives.~~ M6 decided it stays where the election put it; see F42's list below.
 - **Cancelling a barrier's work at the deadline.** A read that times out is answered and its
   wait task finishes on its own; the `Cancel` question below covers what stopping it would buy.
 
@@ -301,14 +343,19 @@ list rather than from the diff:
 - **Installing a snapshot.** A member behind its leader's purge point is refused by name over
   the replication lane and in the state machine; M7 transfers the archives, and until then
   `retained_entries` is the whole catch-up budget.
-- **A durable low-water mark for the retry table.** Dedup is a 4096-entry LRU per group, in
-  memory, rebuilt from the log on restart; an identity older than that is applied as new. M6.
-- **Stepping an isolated leader down at its lease.** It learns it is not one when its lease
+- ~~**A durable low-water mark for the retry table.** Dedup is a 4096-entry LRU per group, in
+  memory, rebuilt from the log on restart; an identity older than that is applied as new. M6.~~
+  Built by [F42](../features/primary-failover.md): `retries.bin` beside the checkpoint, the
+  floor on it; expiry is M9a's.
+- ~~**Stepping an isolated leader down at its lease.** It learns it is not one when its lease
   expires and a write through it before then is `OutcomeUnknown` at the write deadline; M6 turns
-  that into `NotLeader` at the lease.
+  that into `NotLeader` at the lease.~~ Built by [F42](../features/primary-failover.md) as a
+  judgement rather than a step-down: a lapsed lease is `NotLeader` before anything is appended.
 - **Moving leadership back, or the write ring with it.** The placement primary is preferred
-  at first start by a head start and by nothing after; a node holding no replica of a tablet
-  routes its writes to the primary's node whoever leads. ~~M5 and~~ M6; M5 left it where it was.
+  at first start by a head start and by nothing after; ~~a node holding no replica of a tablet
+  routes its writes to the primary's node whoever leads. ~~M5 and~~ M6; M5 left it where it was.~~
+  since [F42](../features/primary-failover.md) a non-holder routes by health, `Up` first.
+  Leadership itself is still not moved, on purpose; see F42's list below.
 - **An open-loop capacity arm.** The three arms are closed loops at one depth, which cannot
   expose an overload pause or a lag that grows; the schedule C10 asks for, with completion
   against scheduled issue times, is the arm that would.
@@ -357,9 +404,11 @@ rather than from the diff:
   ([item 96](known-issues.md#96-clustertransportping_interval-is-parsed-documented-and-consumed-by-nothing)).~~
   Built by [F39](../features/membership.md) as the control thread's pinger, beside the detector
   and not as it ([Resolved #96](resolved/ping-interval-consumer.md)).
-- **Retrying a forward.** `attempt` is carried and always zero; a shed, a lost link and a
+- ~~**Retrying a forward.** `attempt` is carried and always zero; a shed, a lost link and a
   deadline are answered with a code and left to the client. M6's identity is what makes a
-  server-side retry safe.
+  server-side retry safe.~~ Half built by [F42](../features/primary-failover.md): a forward the
+  link never wrote is sent to another holder once, and everything else is the client's under
+  its identity - the server never re-sends a frame that was written.
 - **The certificate-to-node binding** the `shoal-node://<id>` SAN is written for, with the
   joiner (Q11). The joiner came ([F39](../features/membership.md)) and fences by incarnation;
   the binding is still open, above.
@@ -753,6 +802,12 @@ about a client that has already returned rows, and that one is about a server th
 applied a write.
 
 ### An idempotency key, so a write can be retried
+
+**Built for a cluster node by [F42](../features/primary-failover.md)**: the key is the bundle id
+a caller pins with `SendOptions::identity`, which every replicated command carries as its
+`RequestId`, and the server remembers the last 4096 per group across a restart and past the
+purge point. What remains is the standalone node, which has no retry table, and expiry, which
+is M9a's. The rest of this entry is the question as it was asked.
 
 A client cannot retry a write. `Get` and `Exists` are idempotent and `Insert`, `Update`, and
 `Delete` are not (`shared/responses.rs:27-39`), so a bundle lost to a dead socket can only be

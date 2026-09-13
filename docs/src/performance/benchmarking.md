@@ -109,9 +109,14 @@ Alongside them it writes `<label>.meta.json`, which is what lets a committed num
 whether it still describes the current code: the commit, whether the tree was dirty, a content
 hash of the sources each layer measures, and the machine, governor and toolchain it ran on.
 
-A full capture is now **three hundred and seventy eight workloads times five runs** (the
+A full capture is now ~~**three hundred and seventy eight workloads times five runs**~~ **three
+hundred and eighty nine workloads times five runs** - the eleven past three hundred and
+seventy eight are the three replication arms ([F40](../features/replication.md)), the seven read
+arms ([F41](../features/read-consistency.md)) and `macro/cluster/failover/kill`
+([F42](../features/primary-failover.md)), which is the one arm whose length is a fixed minute
+rather than a query count and the one that kills a server process mid-run (the
 three hundred and seventy fifth is `macro/cluster/overhead/nodes/1`, [F37](../features/node-identity-control-plane.md);
-the last three are the hop arms `macro/cluster/hop/{same_shard,local_shard,remote_node}`,
+the next three are the hop arms `macro/cluster/hop/{same_shard,local_shard,remote_node}`,
 [F38](../features/inter-node-transport.md), each of which is two server processes - and since
 [F39](../features/membership.md) the second joins the first through its seed, the first waits
 for it to be promoted and initializes the placement, the one-node arm places itself, and
