@@ -1203,12 +1203,14 @@ where
             if now < next {
                 continue;
             }
-            // a group already under a pending record waits for it
+            // a group already under a pending record waits for it, and so does one whose set
+            // is under a move ([F45](../../../../docs/src/features/replica-migration.md))
             let pending = map
                 .repairs
                 .iter()
                 .any(|record| record.groups.get(group).is_some_and(|progress| !progress.is_done()));
-            if pending {
+            let moving = map.moves.iter().any(|record| !record.is_done() && record.groups.contains_key(group));
+            if pending || moving {
                 continue;
             }
             due.push((*group, slot.spec.table, slot.spec.tablets.first().copied().unwrap_or(0)));

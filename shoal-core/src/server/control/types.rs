@@ -34,7 +34,7 @@ use uuid::Uuid;
 
 use super::migrate::{DataConfiguration, GroupMove, MoveOutcome, MovePhase, MoveRecord, KEPT_MOVES};
 use super::runtime::GlommioRuntime;
-use super::repair::{GroupRepair, QuarantinedCopy, RepairMode, RepairOutcome, RepairPhase, RepairRecord, KEPT_REPAIRS};
+use super::repair::{GroupRepair, QuarantinedCopy, RepairMode, RepairPhase, RepairRecord, KEPT_REPAIRS};
 use crate::server::conf::cluster::{BootstrapPolicy, Consistency};
 use crate::shared::identity::{ClusterId, GroupId, NodeId, ShardAddr, TableId};
 
@@ -861,13 +861,30 @@ impl ControlState {
                 if let Some(refusal) = self.check_version(*expected_version) {
                     return refusal;
                 }
-                // the groups the placement derives for the table, or the one holding the tablet
+                // the groups the placement derives for the table, or the one holding the tablet;
+                // a group whose set is under a move not yet done waits behind it
+                // ([F45](../../../../docs/src/features/replica-migration.md))
                 let map = crate::server::map::TabletMap::from_state(self, None, &self.tables.clone());
                 let groups: BTreeMap<GroupId, GroupRepair> = map
                     .groups_of(*table)
                     .into_iter()
                     .filter(|(_, _, tablets)| tablet.is_none_or(|wanted| tablets.contains(&wanted)))
-                    .map(|(id, _, _)| (id, GroupRepair::default()))
+                    .map(|(id, _, _)| {
+                        let behind = self
+                            .moves
+                            .values()
+                            .filter(|record| !record.is_done() && record.groups.contains_key(&id))
+                            .max_by_key(|record| record.requested_at)
+                            .map(|record| record.op);
+                        let progress = match behind {
+                            Some(behind) => GroupRepair {
+                                phase: RepairPhase::Queued { behind },
+                                ..GroupRepair::default()
+                            },
+                            None => GroupRepair::default(),
+                        };
+                        (id, progress)
+                    })
                     .collect();
                 if groups.is_empty() {
                     return ControlResponse::Refused {
@@ -938,11 +955,21 @@ impl ControlState {
                 if current.is_done() {
                     return self.applied();
                 }
+                // a group queued behind a move is nobody's to drive yet
+                if current.is_queued() {
+                    return ControlResponse::Refused {
+                        reason: format!("group {group} of repair {op} is queued behind a move and cannot be driven yet"),
+                    };
+                }
                 if current == progress {
                     return self.applied();
                 }
                 *current = progress.clone();
                 self.topology_version += 1;
+                // the last group done releases the moves queued behind this repair
+                if record.is_done() {
+                    self.release_queued(*op);
+                }
                 self.applied()
             }
             // a member's quarantined copies
@@ -1234,6 +1261,15 @@ impl ControlState {
     ///
     /// * `behind` - The operation that is done
     fn release_queued(&mut self, behind: Uuid) {
+        // a repair's groups queued behind a move are pending again, all of them: a repair
+        // serializes with a move on the set, and its own groups are driven one at a time
+        for record in self.repairs.values_mut() {
+            for progress in record.groups.values_mut() {
+                if progress.phase == (RepairPhase::Queued { behind }) {
+                    progress.phase = RepairPhase::Pending;
+                }
+            }
+        }
         let next = self
             .moves
             .values()
@@ -2118,6 +2154,108 @@ mod tests {
             state.apply(&moving(op, state.topology_version, 0, c, d)),
             ControlResponse::Repeated { .. }
         ));
+    }
+
+    /// A repair of a set under a move queues behind it and is released when the move is done,
+    /// a move of a set under a repair queues behind that and is released when the repair is,
+    /// and neither is driven while queued ([F45](../../../../docs/src/features/replica-migration.md))
+    #[test]
+    fn a_repair_and_a_move_serialize_on_a_set() {
+        use crate::server::control::migrate::{GroupMove, MoveOutcome, MovePhase, MoveStats};
+        use crate::server::control::repair::{GroupRepair, RepairMode, RepairOutcome, RepairPhase};
+        let (mut state, _, node) = bootstrapped();
+        let (b, c, d) = (NodeId::mint(), NodeId::mint(), NodeId::mint());
+        for (other, name) in [(b, "b"), (c, "c"), (d, "d")] {
+            state.apply(&ControlCommand::Admit(member(other, name)));
+            state.apply(&ControlCommand::ObserveMember(member(other, name)));
+        }
+        let tables = vec![("Row".to_string(), TableId::of("Row"))];
+        let version = state.topology_version;
+        state.apply(&ControlCommand::Initialize {
+            op: Uuid::new_v4(),
+            principal: "alice".to_string(),
+            expected_version: version,
+            nodes: vec![node, b, c],
+            tables: tables.clone(),
+        });
+        let moving = |op, expected_version, from, to| ControlCommand::Move {
+            op,
+            principal: "alice".to_string(),
+            expected_version,
+            tablet: 0,
+            from,
+            to,
+        };
+        let repairing = |op, expected_version| ControlCommand::Repair {
+            op,
+            principal: "alice".to_string(),
+            expected_version,
+            table: TableId::of("Row"),
+            tablet: Some(0),
+            mode: RepairMode::Verify,
+            source: None,
+            release: false,
+        };
+        // a move, then a repair of the same set: queued behind the move
+        let moved = Uuid::new_v4();
+        state.apply(&moving(moved, state.topology_version, c, d));
+        let group = *state.moves[&moved].groups.keys().next().expect("a group");
+        let repaired = Uuid::new_v4();
+        state.apply(&repairing(repaired, state.topology_version));
+        assert_eq!(state.repairs[&repaired].groups[&group].phase, RepairPhase::Queued { behind: moved });
+        // nobody drives a queued group
+        let progress = ControlCommand::RepairProgress {
+            op: repaired,
+            group,
+            node,
+            incarnation: 1,
+            progress: GroupRepair {
+                phase: RepairPhase::Scrubbing,
+                ..GroupRepair::default()
+            },
+        };
+        assert!(matches!(state.apply(&progress), ControlResponse::Refused { reason } if reason.contains("queued")));
+        // the move done releases it to pending
+        let done = |op, group| ControlCommand::MoveProgress {
+            op,
+            group,
+            node,
+            incarnation: 1,
+            progress: GroupMove {
+                phase: MovePhase::Done,
+                driver: Some(node),
+                config: Some(5),
+                stats: MoveStats::default(),
+                outcome: Some(MoveOutcome::Moved),
+            },
+        };
+        state.apply(&done(moved, group));
+        assert_eq!(state.moves[&moved].phase, MovePhase::Done);
+        assert_eq!(state.repairs[&repaired].groups[&group].phase, RepairPhase::Pending);
+        // a repair under way, then a move of the set: queued behind the repair
+        assert!(matches!(state.apply(&progress), ControlResponse::Applied { .. }));
+        let back = Uuid::new_v4();
+        state.apply(&moving(back, state.topology_version, d, c));
+        assert_eq!(state.moves[&back].phase, MovePhase::Queued { behind: repaired });
+        let group_done = ControlCommand::RepairProgress {
+            op: repaired,
+            group,
+            node,
+            incarnation: 1,
+            progress: GroupRepair {
+                phase: RepairPhase::Done,
+                driver: Some(node),
+                boundary: Some(9),
+                reports: Vec::new(),
+                outcome: Some(RepairOutcome::Clean { unreported: Vec::new() }),
+            },
+        };
+        state.apply(&group_done);
+        assert!(state.repairs[&repaired].is_done());
+        assert_eq!(state.moves[&back].phase, MovePhase::Planned);
+        // the released move is recorded against the set as the map served it when it was
+        // asked, which the earlier move had already moved
+        assert!(state.moves[&back].expected.iter().any(|member| member.node == d));
     }
 
     /// A membership entry sets roles, admits configured strangers as joining, and moves once

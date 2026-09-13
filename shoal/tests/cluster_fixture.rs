@@ -9155,3 +9155,99 @@ async fn retry_identity_survives_snapshot_and_migration() -> Result<(), FixtureE
     }
     Ok(())
 }
+
+/// A repair and a move of one set serialize, and writes commit throughout (C9 M9a)
+///
+/// A verify of the set node zero leads is asked for as it is moved from node two to node
+/// three: the repair's group is queued behind the move, writes keep committing, the move
+/// finishes, and the repair then runs on the new configuration and reports clean with node
+/// three among its reports. A move back asked for while a second verify runs is queued behind
+/// the repair and runs after it. A partition corrupted on the source before the first move
+/// never reaches the destination: the leader's verified copy is the one fed, and every holder
+/// agrees afterwards ([F45](../../docs/src/features/replica-migration.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn repair_serializes_with_migration_and_new_commits() -> Result<(), FixtureError> {
+    use shoal::server::AdminKind;
+    let mut cluster = three_placed_one_spare(
+        Cluster::builder()
+            .write_timeout(Duration::from_secs(3))
+            .query_deadline(Duration::from_secs(3))
+            .retire_after(Duration::from_secs(1))
+            .catchup_lag(0)
+            .migration_timeout(Duration::from_secs(300))
+            .repair_timeout(Duration::from_secs(60)),
+    )
+    .await?;
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    let (key, group) = key_led_by(&mut cluster, "Note", 0, 9800)?;
+    let keys = note_keys_in_group(&mut cluster, &group, 9800, 8)?;
+    for key in &keys {
+        write_note(&addr0, *key, &format!("base-{key}")).await?;
+    }
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    // the source's archived copy of one partition corrupted: never a snapshot's source
+    compact_now(&mut cluster, 2, "Note")?;
+    let _ = cluster.node_mut(2).command(&format!("CORRUPT Note {:016x}", {
+        use shoal::shared::traits::PartitionKeySupport as _;
+        Note::get_partition_key_from_values(&keys[0])
+    }))?;
+    // the move, and a verify of the set asked for while it runs
+    let op = move_as_process(&mut cluster, 0, key, 2, 3)?;
+    let verify = AdminKind::Repair {
+        table: "Note".to_string(),
+        tablet: Some(tablet_of(key) as u16),
+        mode: "verify".to_string(),
+        source: None,
+        release: false,
+    };
+    let repair = repair_as_process(&mut cluster, 0, &verify)?;
+    let record = cluster.node_mut(0).command(&format!("REPAIR_STATUS {repair}"))?["ok"].clone();
+    let queued = record["groups"]
+        .as_object()
+        .into_iter()
+        .flat_map(|groups| groups.values())
+        .any(|progress| progress["phase"]["Queued"]["behind"] == serde_json::json!(op.to_string()));
+    assert!(queued, "the repair was not queued behind the move: {record}");
+    // writes commit throughout
+    for round in 0..3u32 {
+        for key in &keys {
+            write_note_eventually(&addr0, *key, &format!("during-{round}-{key}"), Duration::from_secs(15)).await?;
+        }
+    }
+    let moved = wait_move_done_via(&mut cluster, 0, op, Duration::from_secs(150))?;
+    assert_eq!(moved["outcome"], serde_json::json!("Moved"), "{moved}");
+    // the repair runs on the new configuration: clean, with node three among the reports
+    let repaired = wait_repair_done_via(&mut cluster, 0, repair, Duration::from_secs(120))?;
+    let ids = cluster.node_ids();
+    for (id, progress) in repaired["groups"].as_object().expect("groups") {
+        assert!(progress["outcome"]["Clean"].is_object(), "group {id} of the repair: {progress}");
+        let reported: Vec<usize> = progress["reports"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|report| report[0]["node"].as_str().and_then(|node| ids.iter().position(|known| known == node)))
+            .collect();
+        assert!(reported.contains(&3), "node three did not report for group {id}: {progress}");
+        assert!(!reported.contains(&2), "the retired source reported for group {id}: {progress}");
+    }
+    // a second verify under way, and a move back asked for meanwhile: queued behind it
+    let second = repair_as_process(&mut cluster, 0, &verify)?;
+    let back = move_as_process(&mut cluster, 0, key, 3, 2)?;
+    let record = move_record_via(&mut cluster, 0, back)?;
+    let behind = record["phase"]["Queued"]["behind"].as_str().map(str::to_string);
+    let done_already = wait_repair_done_via(&mut cluster, 0, second, Duration::from_secs(120)).is_ok();
+    assert!(behind == Some(second.to_string()) || done_already, "the move was not queued behind the repair: {record}");
+    let moved_back = wait_move_done_via(&mut cluster, 0, back, Duration::from_secs(150))?;
+    assert_eq!(moved_back["outcome"], serde_json::json!("Moved"), "{moved_back}");
+    // every holder agrees, and the corrupted partition was never fed anywhere
+    for key in &keys {
+        write_note_eventually(&addr0, *key, &format!("after-{key}"), Duration::from_secs(15)).await?;
+    }
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(60))?;
+    let integrity = groups_of(&mut cluster, 2)?["integrity"].clone();
+    assert_eq!(integrity["checksum_failures"], 0, "the returned copy met a corrupt record: {integrity}");
+    for id in 0..4 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}

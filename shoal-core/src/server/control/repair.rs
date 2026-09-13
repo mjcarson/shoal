@@ -166,6 +166,12 @@ pub struct DigestSummary {
 /// Where a group's repair stands
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RepairPhase {
+    /// Waiting for a move of the group's set to finish
+    /// ([F45](../../../../docs/src/features/replica-migration.md))
+    Queued {
+        /// The move it waits behind
+        behind: Uuid,
+    },
     /// Nobody has driven it yet
     Pending,
     /// The scrub entry is proposed and the reports are being polled
@@ -190,12 +196,13 @@ impl RepairPhase {
     #[must_use]
     pub fn rank(&self) -> u8 {
         match self {
-            RepairPhase::Pending => 0,
-            RepairPhase::Scrubbing => 1,
-            RepairPhase::Judged => 2,
-            RepairPhase::Installing { .. } => 3,
-            RepairPhase::Verifying => 4,
-            RepairPhase::Done => 5,
+            RepairPhase::Queued { .. } => 0,
+            RepairPhase::Pending => 1,
+            RepairPhase::Scrubbing => 2,
+            RepairPhase::Judged => 3,
+            RepairPhase::Installing { .. } => 4,
+            RepairPhase::Verifying => 5,
+            RepairPhase::Done => 6,
         }
     }
 }
@@ -277,6 +284,12 @@ impl GroupRepair {
     #[must_use]
     pub fn is_done(&self) -> bool {
         self.phase == RepairPhase::Done
+    }
+
+    /// Whether the group waits for a move of its set to finish
+    #[must_use]
+    pub fn is_queued(&self) -> bool {
+        matches!(self.phase, RepairPhase::Queued { .. })
     }
 }
 
