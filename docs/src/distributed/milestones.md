@@ -1,7 +1,7 @@
 # Milestones
 
 The Before-M0 gate is settled ([decision record](protocol.md#decision-record), 2026-09-11), and
-~~M0, M1 and M2~~ M0 through M6 are delivered. Keep M0–M10 as stable identifiers; M9a/b/c refine M9
+~~M0, M1 and M2~~ M0 through M7 are delivered. Keep M0–M10 as stable identifiers; M9a/b/c refine M9
 without renumbering later work. Acceptance tests live in their owning C pages and are indexed
 by [C11](testing.md#the-acceptance-test-table). Each test names one gate below. This is an order
 with dependencies and measurable exit criteria, not dates.
@@ -343,6 +343,34 @@ on the same record, not required to equal three nodes.
 
 ### M7. Recover a node brought back online
 
+**Delivered** on 2026-09-13 as [F43](../features/node-recovery.md). All eight fixture rows below
+are runnable as `cargo test -p shoal --test cluster_fixture -- --test-threads 6`, the C10 row as
+`cargo test -p shoal-bench`, with the snapshot file format, the chunk assembler, the WAL's
+checkpoint filter and marker carry, and the four settings' bounds as unit tests beside them. What
+was delivered, what was not, and the evidence are on the F page; the rest of this section is the
+gate as it was set. Two defects found while mapping the code were fixed on the way, each
+reproduced first: [item 104](../appendix/resolved/segments-recompacted-after-restart.md) and
+[item 105](../appendix/resolved/volatile-groups-never-purged.md). *Not done, on purpose:* a
+snapshot is per group, so a returning node installs every tablet its replica set shares rather
+than the ones it is behind on; a partial transfer survives a lane cut but not a receiver restart;
+the bench arms ran at smoke scale on the development host, where the outage outlasts the
+absence and neither arm shows a catch-up; item 99 (a durable follower's log reversion) stays
+for M8; and a member isolated on every lane long enough to inflate its term trips an openraft
+debug assertion in the control plane when healed
+([item 106](../appendix/known-issues.md#106-a-member-isolated-on-every-lane-long-enough-to-inflate-its-term-trips-an-openraft-debug-assertion-when-healed)).
+
+| Test | Where | What it asserts |
+| --- | --- | --- |
+| `returning_node_catches_up_by_log_or_snapshot` | `shoal/tests/cluster_fixture.rs` ([C7](failover.md)) | Node two killed, a few writes, and back: fed from the retained log, nothing installed. Killed again while the persistent and the ephemeral table checkpoint and purge past what it holds, and back: every group it is behind on installs a snapshot - the persistent ones through the compactor, the volatile ones into memory - every digest agrees, and a delete under an identity made while it was down is the original result through it afterwards |
+| `snapshot_has_one_stable_boundary_under_writes` | `shoal/tests/cluster_fixture.rs` ([C7](failover.md)) | Fifty notes take inserts, deletes, reinserts and updates through the leader, each write's committed index kept from its session token; half the mix sealed and compacted, a cut asked for, the rest written and compacted after; the cut's boundary is read from its manifest and every key is exactly the last write at or below it, every deleted key is absent, and nothing after the boundary is in the file |
+| `snapshot_install_is_atomic_at_every_crash_point` | `shoal/tests/cluster_fixture.rs` ([C7](failover.md)) | Node two left behind the purge point of every group and restarted armed to die at each of the seven points of an install, then restarted clean: before the marker it is sent a fresh snapshot, from the marker to the checkpoint the install is redone, past the checkpoint the marker is cleaned up and the log feeds it; one generation at every point, every digest agrees and every key read through it is the survivors' value |
+| `snapshot_duplicates_and_resume_are_safe` | `shoal-core/src/server/replication/install.rs`, `shoal/tests/cluster_fixture.rs` ([C7](failover.md)) | Unit: repeated and reordered chunks are written once and the resume offset is the prefix held. Fixture: node two left behind with wide rows so every snapshot is many chunks, back with its lanes cut and healed mid-stream, whatever was lost is dropped past the prefix, the end answers where to resume and each group installs once; left behind again with the leader of one group killed mid-stream, the new leader's stream replaces the partial and the group installs once |
+| `installing_tablet_never_serves_partial_state` | `shoal/tests/cluster_fixture.rs` ([C7](failover.md)) | Node two left behind and back with every install paused after its first record: a `One` read of an installing persistent group's key through it is `Unavailable`, `GROUPS` shows the group installing and readiness counts it, a read of the ephemeral table - installed in memory at once - is served, and once the pause lifts every read is the new value |
+| `retention_and_recovery_memory_are_bounded` | `shoal/tests/cluster_fixture.rs` ([C7](failover.md)) | Node two's data lanes cut both ways and the leader taking wide writes well past `retained_bytes` at a segment size that makes the budget four segments: the leader's sealed WAL stays under twice the budget as each sweep forces the groups pinning the oldest segments to snapshot and purge, its memory grows by less than a bound, writes commit on the majority throughout, and healed node two is behind the forced purge point, installs and converges |
+| `down_within_grace_moves_no_replicas` | `shoal/tests/cluster_fixture.rs` ([C3](membership.md)/[C7](failover.md)) | Node one, leading a third of the groups, killed and called `Down`: the groups elect elsewhere and the placement and every group's members are unchanged on both survivors; enough is written to purge past what it held; restarted within the grace it is `Up` in the same placement, catches up by snapshot, and leads nothing until an election it wins |
+| `whole_cluster_restart_preserves_durable_history` | `shoal/tests/cluster_fixture.rs` ([C7](failover.md)) | Writes land with one node's WAL completions held back and a batch of replies dropped on the leader, so keys are acknowledged, unknown to their client, or in one node's log only; every node rotates and compacts, is killed at once and restarted; every acknowledged key is on every node once, every unknown key holds one value everywhere, the digests agree, and no segment below a checkpoint was compacted again |
+| `catchup_capture_records_convergence` | `shoal-bench/src/workloads/harness/catchup.rs` ([C10](performance.md)) | Samples of a returning node with a lag that falls, a snapshot that lands and a log tail after it are cut into a record with the restart mark, the second it converged and held, the split by path - the snapshot's bytes and entries against the log's - and a series with a bucket per sample; a run that ends before convergence says `none` and keeps the series; an F42 record loads with no catch-up |
+
 **Delivers.** Retained-log catch-up, stable checkpoints, chunked resumable snapshots and atomic durable
 installation. Include configuration/history, retry state and absence coverage. Per-tablet eligibility,
 retention/recovery space budgets and backpressure. Q3/Q9 completed, including behavior when a hot
@@ -354,6 +382,15 @@ installation boundary and source failover point while writes and compaction cont
 **Evidence/exit.** Exact state and history after every crash, old or new complete installed generation,
 bounded resources and convergence within a stated foreground-load envelope. Capture log/snapshot
 catch-up rates and foreground tails; preserving a Down node's placement during grace is proved.
+*Met:* one complete generation at every crash point and after a source failover; the
+retention budget bounds the sealed WAL and the leader's memory with a cut follower under
+load, and a hot stream past the budget is purged behind and fed a snapshot rather than pinning
+history; a `Down` member's placement is preserved through the grace. *Met in shape, not in
+number:* the catch-up arms record the rates and the tails, and ran at smoke scale on the
+development host only, where the outage outlasted the absence; the capture is the benchmark
+host's. *Decided:* [Q3 and Q9 at M7](protocol.md#q3-and-q9-at-m7) - the cut is taken between
+two compactor jobs at the archives' boundary, and the budget is bytes of sealed WAL with a
+forced purge behind the groups pinning it.
 
 ### M8. Repair
 

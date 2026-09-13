@@ -341,10 +341,49 @@ where
 
     /// Hash a table's applied state, for a fixture comparing replicas
     ///
+    /// Reads the archived partitions beside the resident ones, so it is asynchronous
+    /// ([F43](../../../docs/src/features/node-recovery.md)).
+    ///
     /// # Arguments
     ///
     /// * `table` - The table
-    fn digest_table(&self, table: Self::TableNames) -> (u64, u64);
+    #[allow(async_fn_in_trait)]
+    async fn digest_table(&self, table: Self::TableNames) -> Result<(u64, u64), ServerError>;
+
+    /// Every resident partition of some tablets of a table, as its key and archived bytes
+    ///
+    /// What a volatile group's snapshot is cut from: an ephemeral table has no archive, and
+    /// its resident partitions are the whole of its state
+    /// ([F43](../../../docs/src/features/node-recovery.md)). A deleted row is not there.
+    ///
+    /// # Arguments
+    ///
+    /// * `table` - The table
+    /// * `tablets` - The tablets
+    fn snapshot_partitions(&self, table: Self::TableNames, tablets: &[u16]) -> Vec<(u64, Vec<u8>)>;
+
+    /// Drop every resident partition of some tablets of a table
+    ///
+    /// What a snapshot install ends with on a persistent table, whose archives now hold the
+    /// installed generation ([F43](../../../docs/src/features/node-recovery.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `table` - The table
+    /// * `tablets` - The tablets
+    fn evict_tablets(&mut self, table: Self::TableNames, tablets: &[u16]);
+
+    /// Replace every resident partition of some tablets of a table with a snapshot's records
+    ///
+    /// What a snapshot install is on an ephemeral table
+    /// ([F43](../../../docs/src/features/node-recovery.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `table` - The table
+    /// * `tablets` - The tablets
+    /// * `records` - The partitions, as their keys and archived bytes
+    fn install_partitions(&mut self, table: Self::TableNames, tablets: &[u16], records: Vec<(u64, Vec<u8>)>) -> Result<(), ServerError>;
 
     /// The table a stable identity names, if the schema has it
     ///

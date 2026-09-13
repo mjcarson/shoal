@@ -166,7 +166,7 @@ where
         // start by name rather than being read by nothing
         let placement = match &conf.cluster {
             Some(cluster) => {
-                cluster.validate(&conf.networking.interface)?;
+                cluster.validate(&conf.networking.interface, conf.networking.max_frame_bytes)?;
                 // a persistent table acknowledged before its fdatasync cannot be a voter in a
                 // durable quorum, and the durability is per table under `storage`, which the
                 // block's own validation cannot see (C5, F40)
@@ -410,6 +410,38 @@ where
             shard,
             error: "the shard is already gone".to_string(),
         })
+    }
+
+    /// Arm a crash point, so the next snapshot install on this node dies there, for a test
+    ///
+    /// Process-global and off unless armed ([F43](../../../docs/src/features/node-recovery.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `point` - The point's name, or `none` to disarm
+    ///
+    /// # Errors
+    ///
+    /// Refuses a name that is not a point.
+    pub fn crash_at(&self, point: &str) -> Result<(), ServerError> {
+        let point = if point == "none" {
+            replication::CrashPoint::None
+        } else {
+            replication::CrashPoint::from_name(point).ok_or_else(|| {
+                ServerError::Shoal(ShoalError::InvalidConfig(format!("{point} is not a crash point")))
+            })?
+        };
+        replication::crash_point::arm(point);
+        Ok(())
+    }
+
+    /// Make every snapshot install on this node pause after its first record, for a test
+    ///
+    /// # Arguments
+    ///
+    /// * `ms` - How long, or zero for no pause
+    pub fn hold_install(&self, ms: u64) {
+        replication::crash_point::hold(ms);
     }
 
     /// Send the control leader one report behind the last, as a replay would be, for a test

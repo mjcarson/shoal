@@ -1185,6 +1185,7 @@ mod tests {
             outcomes: None,
             reads: Some(facts),
             fault: None,
+            catchup: None,
         };
         let text = serde_json::to_string(&cluster).expect("serializes");
         let back: ClusterFacts = serde_json::from_str(&text).expect("parses");
@@ -1276,6 +1277,7 @@ mod tests {
             replicas,
             reads: None,
             fault: None,
+            catchup: None,
         };
         // the record round trips with every replica's debt and the schedule on it
         let text = serde_json::to_string(&facts).expect("serializes");

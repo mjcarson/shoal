@@ -222,6 +222,7 @@ impl Workload for Failover {
             node: KILLED_NODE,
             at,
             restart_after: fraction_of(run_for, RESTART_AT).saturating_sub(at),
+            run_for,
         })
     }
 }

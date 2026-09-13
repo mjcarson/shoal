@@ -137,11 +137,16 @@ pub fn resolve(base: &Path, id: &str, overrides: &ConfOverrides, port: u16) -> R
     // a cluster arm bootstraps a cluster of one, on the default control core, with the factor
     // it names and nothing else moved - the block's other defaults are the documented ones
     if let Some(cluster) = &overrides.cluster {
-        conf.cluster = Some(
-            shoal::server::conf::Cluster::default()
-                .bootstrap(true)
-                .replication_factor(cluster.replication_factor),
-        );
+        let mut block = shoal::server::conf::Cluster::default()
+            .bootstrap(true)
+            .replication_factor(cluster.replication_factor);
+        // the catch-up arms move the checkpoint and retention counts, and nothing else
+        // ([F43](../../../../docs/src/features/node-recovery.md))
+        if let Some(retention) = cluster.retention {
+            block.replication.checkpoint_entries = retention.checkpoint_entries;
+            block.replication.retained_entries = retention.retained_entries;
+        }
+        conf.cluster = Some(block);
     }
     Ok(conf)
 }
@@ -216,6 +221,7 @@ pub fn cluster_facts(
         // and a read arm's counters are read the same way, after the run
         reads: None,
         fault: None,
+        catchup: None,
     }))
 }
 

@@ -816,6 +816,7 @@ mod tests {
                 outcomes: None,
                 reads: None,
                 fault: None,
+                catchup: None,
             });
         }
         capture

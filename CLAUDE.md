@@ -52,11 +52,13 @@ cargo run -p shoal-model --example regenerate_schedules   # after a model change
 # since F37 its servers are cluster nodes: each child runs a control thread on a core the fixture
 # allocates; since F39 they join each other through node zero and the M1, M2 and M3 acceptance
 # tests live here; since F40 every tablet is replicated between them and the nine M4 tests too;
-# since F42 the thirteen M6 tests kill, stall, isolate and restart them.
+# since F42 the thirteen M6 tests kill, stall, isolate and restart them; since F43 the eight M7
+# tests leave a node behind the purge point, throttle and cut the snapshot streams that feed it,
+# and crash it at every point of an install (CRASH_AT).
 # every test allocates whole cores, so the suite is what a loaded machine makes it: a failure
 # that passes alone was a timeout, and the child logs are under SHOAL_CHILD_LOG=<dir> (one file
-# per child, DEBUG, large). run it at six threads: at the default thirty-two the fencing test
-# fails every time (known issue 100)
+# per child, DEBUG, hundreds of MB each - point it under target/, never at a tmpfs). run it at
+# six threads: at the default thirty-two the fencing test fails every time (known issue 100)
 cargo test -p shoal --test cluster_fixture -- --test-threads 6
 
 # item 33's reproduction (F41): a standalone two shard get whose shares are held expires at the

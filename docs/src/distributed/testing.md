@@ -50,6 +50,14 @@ a data shard stalled under a live control plane - and `DROP_REPLIES <n>`, which 
 `n` committed write replies on a shard so a client sees only its own deadline for a write that
 landed; the helpers ask a named node for a key's leader rather than node zero, since the M6
 tests kill node zero, and write and delete under a `SendOptions` identity with a retry budget.
+Since [F43](../features/node-recovery.md) a child answers `SNAPSHOT <group>`, the manifest of
+a cut taken now, and `CRASH_AT <point>`, which arms it to exit at one of the seven points of
+an install; the builder sets `checkpoint_entries`, `retained_entries`, `segment_bytes`,
+`retained_bytes`, `snapshot_chunk_bytes` and `bulk_queue_bytes`, and a staged node `crash_at`
+and `install_hold_ms`; a proxy link can be throttled to a byte rate so a stream that a loopback
+would carry in milliseconds takes seconds; `DIGEST` reads archived partitions beside resident
+ones, since after a restart or an install nothing is resident; and the helpers leave a node
+behind the purge point on purpose and wait for it to install and converge.
 A standalone node in the same test binary is started in process, since the fixture's
 directories all belong to the cluster. Benchmark
 readiness probes and tracing-based path assertions provide reusable patterns. There is no whole-engine deterministic simulator; this proposal does not require
@@ -107,7 +115,13 @@ or cut a stream but cannot safely parse/drop encrypted application frames. Use t
 before encryption or a fake transport for frame-class manipulation, plus TLS process tests for
 the real channel. The model must not depend on silently disabling validation in production paths.
 *At M2 the fixture's link is that byte proxy - cut, delay, heal - and the frame-class fake
-transport is still to come; the real-TLS test is `a_peer_listener_requires_a_certificate_from_the_cluster_authority`.*
+transport is still to come; the real-TLS test is `a_peer_listener_requires_a_certificate_from_the_cluster_authority`.
+At M7 the proxy can also throttle a lane to a byte rate, and the recovery row's "kill at each
+snapshot phase" is `CRASH_AT`, a child armed to exit at one of the seven points of an install
+(`snapshot_install_is_atomic_at_every_crash_point`); the storage row's checkpoint/manifest
+interruption is the same matrix, since the marker and the checkpoint are what the points
+straddle. Delayed and failed fsyncs are still `STALL_WAL`, and torn writes, disk full and bit
+corruption are M8's.*
 
 SIGKILL does not model loss of OS/device caches. Durability tests need injected persistence
 completions and failure semantics, with controlled machine/power-loss experiments optional later.

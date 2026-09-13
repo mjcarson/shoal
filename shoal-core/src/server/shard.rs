@@ -3,6 +3,7 @@
 mod gather;
 mod groups;
 mod reads;
+mod snapshots;
 
 use bytes::Bytes;
 use futures::{
@@ -2669,6 +2670,16 @@ where
             if !meta.read.ready && meta.read.needs_wait() {
                 return self.await_read_barrier(meta, query, span, gathered_meta);
             }
+            // a tablet whose group is installing a snapshot serves no read: what is resident
+            // is the old generation and what is on disk is half the new one
+            // ([F43](../../../docs/src/features/node-recovery.md))
+            if let Some(group) = self.installing_group(&query) {
+                let error = crate::shared::responses::ResponseError::new(
+                    ErrorCode::Unavailable,
+                    format!("group {group} is installing a snapshot; its tablets are not readable until it is installed"),
+                );
+                return self.answer_read_failure(meta, query, span, gathered_meta, error).await;
+            }
         }
         // try to handle this query
         if let Some((addr, query_id, mut stamps, answer)) = self.tables.handle(meta, query).await {
@@ -2976,6 +2987,13 @@ where
             PeerEvent::Link(LinkEvent::Up { node, lane, incarnation }) => {
                 event!(Level::DEBUG, msg = "a peer link came up", %node, %lane, incarnation);
             }
+            // the bulk lane carries snapshot streams and owes nothing to a client: a lost link
+            // is dialled afresh by the next stream, and the receiver's resume offset recovers
+            // what it lost ([F43](../../../docs/src/features/node-recovery.md))
+            PeerEvent::Link(LinkEvent::Down { node, lane: Lane::Bulk, reason, .. }) => {
+                event!(Level::WARN, msg = "a bulk link went down", %node, reason);
+            }
+            PeerEvent::Link(LinkEvent::Frame { lane: Lane::Bulk, .. }) => {}
             PeerEvent::Link(LinkEvent::Frame { node, header, head, payload, .. }) => {
                 self.handle_forwarded(node, header, &head, payload).await?;
             }
@@ -3302,14 +3320,25 @@ where
         ));
         // and the replication links its tablet groups speak over, delivering the same way
         let events = self.shard_local_tx.clone_sync();
+        // a snapshot transfer asks the loop for its file through the mesh, since the transmitter
+        // runs on a task of openraft's ([F43](../../../docs/src/features/node-recovery.md))
+        let builder_tx = self.shard_local_tx.clone_sync();
+        let replication_conf = self.conf.cluster.as_ref().map(|cluster| cluster.replication.clone()).unwrap_or_default();
         let network = ShardNetwork::new(
             self.map.clone(),
             setup.dial.clone(),
             local.clone(),
             client_tls,
             setup.transport.clone(),
+            replication_conf,
             Rc::new(move |event| {
                 let _ = events.try_send(ServerMsg::Peer(PeerEvent::Link(event)));
+            }),
+            Rc::new(move |group, reply| {
+                if let Err(error) = builder_tx.try_send(ServerMsg::BuildSnapshot { group, reply }) {
+                    // the loop is gone; the reply it carried is dropped, which the asker hears
+                    let _ = error;
+                }
             }),
         );
         // bind the peer listener, every shard on the same port with SO_REUSEPORT
@@ -3599,6 +3628,24 @@ where
                     self.handle_segment_compacted(table, generation);
                 }
                 // the checkpoint file landed
+                ServerMsg::BuildSnapshot { group, reply } => self.handle_build_snapshot(group, reply).await?,
+                ServerMsg::SnapshotBuilt { group, outcome } => self.handle_snapshot_built(group, outcome).await?,
+                ServerMsg::InstallSnapshot {
+                    group,
+                    path,
+                    manifest,
+                    meta,
+                    done,
+                } => self.handle_install_snapshot(group, path, manifest, meta, done).await?,
+                ServerMsg::SnapshotInstalled { table, group, outcome } => {
+                    self.handle_snapshot_installed(table, group, outcome).await?;
+                }
+                ServerMsg::SnapshotRecords { group, outcome } => self.handle_snapshot_records(group, outcome).await?,
+                ServerMsg::SnapshotCleaned { group, outcome } => self.handle_snapshot_cleaned(group, outcome),
+                ServerMsg::SnapshotBytes { node, stream, offset, bytes } => {
+                    self.handle_snapshot_bytes(node, stream, offset, bytes);
+                }
+                ServerMsg::BulkLaneEnded { node } => self.handle_bulk_lane_ended(node),
                 ServerMsg::CheckpointWritten { version, outcome } => {
                     self.handle_checkpoint_written(version, outcome)?;
                 }
@@ -3608,8 +3655,7 @@ where
                 }
                 // drive a replication verb, for the fixture
                 ServerMsg::ReplicationVerb { verb, reply } => {
-                    let answer = self.handle_replication_verb(verb).await;
-                    let _ = reply.send(answer);
+                    self.handle_replication_verb(verb, reply).await?;
                 }
                 // drive a read verb, for the fixture
                 ServerMsg::ReadVerb { verb, reply } => {

@@ -722,6 +722,45 @@ pub const FAMILIES: &[Family] = &[
              to test and the open-loop schedule's to measure.",
     },
     Family {
+        name: "cluster-catchup",
+        title: "What a returning node's catch-up costs, by log and by snapshot",
+        surface: Surface::AllWorkloads,
+        what_it_measures:
+            "Two arms, `catchup/log` and `catchup/snapshot`: the kill arm's placement, mixture, \
+             client and schedule - node one killed a third of the way through and started again \
+             two thirds through - differing in how far the survivors' logs reach back when the \
+             node returns. The log arm runs at the configuration's defaults and the node is fed \
+             from the retained log; the snapshot arm shortens `checkpoint_entries` to sixteen and \
+             `retained_entries` to thirty-two, so every group the node hosts \
+             has purged past what it holds and it is fed a snapshot per group. Beside the fault \
+             record, `cluster.catchup` is what the returning node's own report said each second \
+             after it was placed: how it caught up, the seconds to converge, the bytes and entries \
+             the snapshots moved, the entries the log fed, and a series of its lag.",
+        how_to_read_it:
+            "`seconds_to_converge` against `by` is the number: what the log costs a returning node \
+             and what a snapshot costs it, on the same placement under the same load. \
+             `snapshot_bytes` over the seconds is the transfer rate the bulk lane managed, and \
+             `log_entries` over the same seconds the log's. The fault record's `after` window \
+             against its `before` is what the catch-up cost the survivors, and the series is \
+             where the lag fell - a lag that steps down is a snapshot landing, one that slopes \
+             is the log. A `by` of `none` is a run that ended before the node converged, and the \
+             series says what it was doing.",
+        what_would_make_it_wrong:
+            "A snapshot arm whose `by` is `log`: the node was inside the retained window after \
+             all, which means the run wrote less than the retention in the third it was away, \
+             and the arm is measuring nothing the log arm does not. A `converged_ms` before \
+             `restarted_ms`, which means the sampler read a stale report. Comparing the two arms' \
+             `seconds_to_converge` when the outage differed between them: the node returns at the \
+             same mark, but what it has to catch up on is what the survivors wrote meanwhile, \
+             which the outage decides.",
+        what_it_cannot_say:
+            "What a catch-up costs on a node that led nothing, or one that hosts a table other \
+             than the reference one. What it costs over a network, where the bulk lane's rate is \
+             the wire's. What a hot stream that cannot catch up inside its budget does over \
+             minutes: the run is a minute and the retention test is the fixture's. The returning \
+             node's own retry table, which only its leading would exercise.",
+    },
+    Family {
         name: "retired",
         title: "The retired blended workload",
         surface: Surface::AllWorkloads,
@@ -784,6 +823,9 @@ pub fn family_for(id: &str) -> Option<&'static Family> {
     } else if id.starts_with("macro/cluster/reads/") || id.starts_with("macro/cluster/fanout/") {
         // the read arms, before the wider cluster prefix for the same reason
         "cluster-reads"
+    } else if id.starts_with("macro/cluster/catchup/") {
+        // the catch-up arms, before the wider cluster prefix for the same reason
+        "cluster-catchup"
     } else if id.starts_with("macro/cluster/failover/") {
         // the fault arms, before the wider cluster prefix for the same reason
         "cluster-failover"

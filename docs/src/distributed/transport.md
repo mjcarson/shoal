@@ -32,7 +32,12 @@ naming the correlation id, the group, the target shard, the kind - `AppendEntrie
 `Propose`, `Snapshot` - and the deadline, and a postcard body; one link per peer node per
 shard with its own correlation table and its own bound, `transport.replication_queue_bytes`,
 so a follower that stops reading holds nothing but its queue. `Propose` is the one hop a write
-takes from a replica to its leader; `Snapshot` is answered by name until M7. **At M5**
+takes from a replica to its leader; ~~`Snapshot` is answered by name until M7~~ `Snapshot` is
+the M7 control pair ([F43](../features/node-recovery.md)): `Begin` carries the sender's vote,
+the stream id and the manifest and `End` the total and checksum, answered `Resume { from }`,
+`Installed` or `Refused`, while the bytes ride the bulk lane as `SnapshotBegin`, chunks and
+`SnapshotEnd` frames routed to the target shard, so a stalled transfer holds the bulk lane's
+queue and never the replication lane's. **At M5**
 ([F41](../features/read-consistency.md)) the lane gains `ReadBarrier`, the one hop a strong read
 takes from a replica to its leader for a read index; a forward entry carries a read plan - the
 resolved level, the gather slot it fills and its tokens - under `FLAG_READ`; the `Forwarded`
@@ -113,8 +118,8 @@ Client encryption requires equivalent protection on both control and data peer l
 | Forward / Forwarded | Original operation/query and attempt ids, destination, coverage, resolved policy, remaining deadline, bounded hop count and return address. *At M5:* the attempt minted per bundle and echoed, the resolved level and the slot per entry, the budget remaining rather than a fresh one, and a token on a write's answer |
 | Data consensus | Tablet/group identity plus selected library's election, append, configuration and read-barrier payloads. *At M4:* `Replicate`/`ReplicateResponse` on the replication lane, openraft's `AppendEntries` and `Vote` as postcard. *At M5:* `ReadBarrier`, answered with the leader's `ReadLogId` or a leader hint |
 | Replication receipts | Matching term/history, replica/configuration and durable completion evidence; duplicate-safe. *At M4:* openraft's append response, sent after the follower's `fdatasync` |
-| Catch-up | Tablet/group, matching term/index boundary and snapshot fallback negotiation |
-| Snapshot begin/chunk/end | Snapshot/transition identity, manifest, boundary, offset, length, checksum and resume metadata |
+| Catch-up | Tablet/group, matching term/index boundary and snapshot fallback negotiation. *At M7:* openraft's, from the retained log while the follower is inside it and a snapshot once it is not |
+| Snapshot begin/chunk/end | Snapshot/transition identity, manifest, boundary, offset, length, checksum and resume metadata. *At M7:* the `Begin`/`End` RPCs on the replication lane and the `SnapshotBegin`/chunk/`SnapshotEnd` frames on the bulk lane, each chunk `[offset u64][bytes]` under `replication.snapshot_chunk_bytes`, resumed from the prefix the receiver holds |
 | Control Raft | Typed request/response identity and embedded OpenRaft payload |
 | Ping / Pong / StatusReport | Probe sequence/incarnation and bounded/coalesced status; no assumption about extensible library heartbeat replies |
 | Admin | Authenticated request id, expected version for mutations, operation id and status/result |

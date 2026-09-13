@@ -30,8 +30,10 @@ leader change (`session_read_waits_for_committed_lower_bound`,
 `read_barrier_survives_leader_change_and_delayed_messages`): a barrier asked of a member that
 names another leader follows it, a lapsed lease refuses a barrier at once as
 `QuorumUnavailable`, and a read share the link never wrote is sent to another holder once
-within the budget. Still not built: a coverage list on the response frame and `Primary` as a
-level.
+within the budget. Since M7 ([F43](../features/node-recovery.md)) a read of a tablet whose
+group is installing a snapshot is refused `Unavailable` at either level, and the rest of the
+node serves (`installing_tablet_never_serves_partial_state`). Still not built: a coverage
+list on the response frame and `Primary` as a level.
 Before that: `route_archived` splits queries across owning shards, `Shard::handle_gathered`
 merges responses, restores partition order and applies the final limit, and ~~existing gather
 state lacks expiry (item 33)~~ a gather expires at its bundle's deadline

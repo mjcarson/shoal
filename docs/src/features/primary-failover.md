@@ -247,8 +247,8 @@ driver is in process with node zero, as every cluster arm's is, and the record s
 - **Streams never retry.** `stream_with` ignores `retry`; a bundle that is open-ended has no
   answer to compare a second attempt against.
 - **A rerouted share is rerouted once.** A second failure is `Unavailable`.
-- **Catch-up past the purge point is M7's.** A returning node behind its leader's purge point is
-  still refused by name.
+- ~~**Catch-up past the purge point is M7's.** A returning node behind its leader's purge point is
+  still refused by name.~~ Delivered by [F43](node-recovery.md).
 - **A `Down` member is never removed.** `auto_remove_after` is M9b's; the grace test asserts the
   placement holds and nothing more.
 - **The capture is the benchmark host's.** The arm ran at smoke scale on the development host,

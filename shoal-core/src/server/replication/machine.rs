@@ -22,8 +22,9 @@
 //! checkpoint and carries no rows, since the archives are the rows. Installing one is M7's.
 
 use std::cell::RefCell;
-use std::io::{self, Cursor};
+use std::io;
 use std::num::NonZeroUsize;
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use futures::{Stream, StreamExt as _};
@@ -33,8 +34,8 @@ use lru::LruCache;
 use openraft::storage::{EntryResponder, RaftSnapshotBuilder, RaftStateMachine};
 use openraft::type_config::alias::{SnapshotMetaOf, SnapshotOf, StoredMembershipOf};
 use openraft::{OptionalSend, Snapshot, SnapshotMeta, StoredMembership};
-use serde::{Deserialize, Serialize};
 
+use super::snapshot::SnapshotManifest;
 use super::types::{DataConfig, Remembered};
 use crate::server::database::ShoalDatabase;
 use crate::server::messages::ServerMsg;
@@ -51,14 +52,26 @@ use crate::shared::protocol::peer::RequestId;
 /// forgotten is recorded with the checkpoint for M9a's expiry check to read.
 pub const REMEMBERED_REQUESTS: usize = 4096;
 
-/// A snapshot's data: the checkpoint, as JSON, since the rows live in the archives
-pub type SnapshotData = Cursor<Vec<u8>>;
-
-/// What a snapshot's bytes say
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct SnapshotBody {
-    /// The checkpoint the snapshot stands at
-    checkpoint: Option<WalLogId>,
+/// A snapshot's data: a lazy handle at this group's checkpoint, or a file received from a peer
+///
+/// The rows are never in memory. This group's own snapshot is the promise of a file the loop
+/// cuts when a transfer asks for it ([`ServerMsg::BuildSnapshot`]); one received from a leader
+/// is a verified file on disk with the manifest that describes it, which the loop installs
+/// ([F43](../../../../docs/src/features/node-recovery.md)).
+#[derive(Debug, Clone)]
+pub enum SnapshotData {
+    /// This group's own, at its checkpoint: the file is cut when a transfer asks
+    Own {
+        /// The checkpoint
+        checkpoint: Option<WalLogId>,
+    },
+    /// A file received from a leader, verified, waiting to be installed
+    Received {
+        /// The file
+        path: PathBuf,
+        /// What it is
+        manifest: SnapshotManifest,
+    },
 }
 
 /// What the loop and the machine share about one group
@@ -77,6 +90,12 @@ pub struct MachineState {
     pub dedup: LruCache<RequestId, Remembered>,
     /// Whether the checkpoint has been written to disk since it last moved
     pub checkpoint_durable: bool,
+    /// Whether a snapshot is being installed, during which the group's tablets serve no `One`
+    /// read ([F43](../../../../docs/src/features/node-recovery.md))
+    pub installing: bool,
+    /// A received snapshot verified at open and not yet installed, which openraft installs
+    /// when it builds the group and finds it past the checkpoint
+    pub pending_install: Option<(PathBuf, SnapshotManifest)>,
 }
 
 impl MachineState {
@@ -107,6 +126,8 @@ impl MachineState {
             checkpoint_membership: membership,
             dedup,
             checkpoint_durable: true,
+            installing: false,
+            pending_install: None,
         }
     }
 
@@ -191,18 +212,32 @@ impl<D: ShoalDatabase> GroupMachine<D> {
         self.state.clone()
     }
 
-    /// The snapshot at the checkpoint
+    /// The snapshot at the checkpoint, or the received one waiting to be installed past it
     fn snapshot(&self) -> SnapshotOf<DataConfig, SnapshotData> {
         let state = self.state.borrow();
-        let body = SnapshotBody {
-            checkpoint: state.checkpoint.clone(),
-        };
+        // a received file past the checkpoint is what openraft installs at open
+        if let Some((path, manifest)) = &state.pending_install {
+            if manifest.boundary.index > state.checkpoint_index() {
+                return Snapshot {
+                    meta: SnapshotMeta {
+                        last_log_id: Some(manifest.boundary.clone()),
+                        last_membership: manifest.membership.clone(),
+                    },
+                    snapshot: SnapshotData::Received {
+                        path: path.clone(),
+                        manifest: manifest.clone(),
+                    },
+                };
+            }
+        }
         Snapshot {
             meta: SnapshotMeta {
                 last_log_id: state.checkpoint.clone(),
                 last_membership: state.checkpoint_membership.clone(),
             },
-            snapshot: Cursor::new(serde_json::to_vec(&body).unwrap_or_default()),
+            snapshot: SnapshotData::Own {
+                checkpoint: state.checkpoint.clone(),
+            },
         }
     }
 }
@@ -272,22 +307,46 @@ impl<D: ShoalDatabase> RaftStateMachine<DataConfig> for GroupMachine<D> {
         self.clone()
     }
 
-    /// Installing a snapshot is catch-up past the purge point, which M7 delivers
+    /// Install a received snapshot through the loop, or take this group's own as already there
+    ///
+    /// Posts the install to the loop and waits until it is durable - never on the loop's own
+    /// task, which is what openraft's worker and its startup restore guarantee. This group's
+    /// own snapshot is metadata at a checkpoint the archives already hold, so installing it
+    /// is nothing to do ([F43](../../../../docs/src/features/node-recovery.md)).
     async fn install_snapshot(
         &mut self,
-        _meta: &SnapshotMetaOf<DataConfig>,
-        _snapshot: SnapshotData,
+        meta: &SnapshotMetaOf<DataConfig>,
+        snapshot: SnapshotData,
     ) -> Result<(), io::Error> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "installing a tablet group snapshot is M7's; a replica behind the purge point cannot catch up yet",
-        ))
+        match snapshot {
+            SnapshotData::Own { .. } => Ok(()),
+            SnapshotData::Received { path, manifest } => {
+                let (done, through) = oneshot::channel();
+                self.tx
+                    .send(ServerMsg::InstallSnapshot {
+                        group: self.group,
+                        path,
+                        manifest,
+                        meta: meta.clone(),
+                        done,
+                    })
+                    .await
+                    .map_err(|_| io::Error::other("the shard loop is gone"))?;
+                through
+                    .await
+                    .map_err(|_| io::Error::other("the shard loop dropped a snapshot install"))?
+                    .map_err(io::Error::other)
+            }
+        }
     }
 
-    /// The snapshot at the checkpoint, once there is a checkpoint
+    /// The snapshot at the checkpoint, once there is one, or a received file waiting past it
     async fn get_current_snapshot(&mut self) -> Result<Option<SnapshotOf<DataConfig, SnapshotData>>, io::Error> {
-        let built = self.state.borrow().snapshot_at.is_some();
-        Ok(built.then(|| self.snapshot()))
+        let (built, pending) = {
+            let state = self.state.borrow();
+            (state.snapshot_at.is_some(), state.pending_install.is_some())
+        };
+        Ok((built || pending).then(|| self.snapshot()))
     }
 }
 

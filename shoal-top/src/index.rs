@@ -301,6 +301,55 @@ pub struct ClusterFactsLite {
     /// before F42
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fault: Option<FaultFactsLite>,
+    /// How the fault's returning node caught up; absent for every arm but the catch-up ones and
+    /// before F43
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catchup: Option<CatchupFactsLite>,
+}
+
+/// How a fault's returning node caught up, sampled from its own report after the restart
+///
+/// A mirror of the artifact's `CatchupFacts`, whole: how it caught up, when it was back and
+/// when it had converged, what the snapshots and the log each moved, and one sample per
+/// second of its lag, so a catch-up can be drawn as the fall it is rather than read as one
+/// number.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CatchupFactsLite {
+    /// `log`, `snapshot`, or `none` for a run that ended first
+    pub by: String,
+    /// When the node was placed again, in milliseconds from the start of the measured phase
+    pub restarted_ms: u64,
+    /// When it had converged, if it did inside the run
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub converged_ms: Option<u64>,
+    /// How long that took, in whole seconds
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seconds_to_converge: Option<u64>,
+    /// Bytes of snapshots it received
+    pub snapshot_bytes: u64,
+    /// Snapshots it installed
+    pub snapshots: u64,
+    /// Log entries it applied that no snapshot covered
+    pub log_entries: u64,
+    /// Log entries the snapshots covered
+    pub snapshot_entries: u64,
+    /// One sample per second from the restart to convergence or the end of the run
+    pub series: Vec<CatchupSecondFactsLite>,
+}
+
+/// One second of a returning node's catch-up
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CatchupSecondFactsLite {
+    /// Which second of the measured phase
+    pub second: u64,
+    /// The widest committed-to-applied gap on any of its groups
+    pub lag_max: u64,
+    /// How many of its groups were installing a snapshot
+    pub installing: u64,
+    /// Bytes of snapshots received so far
+    pub snapshot_bytes: u64,
+    /// The sum of every group's applied index
+    pub applied: u64,
 }
 
 /// A fault an arm injected, and what its client saw before, during and after it

@@ -24,6 +24,7 @@
 //! A test asserts those two agree, so forgetting the second is a test failure rather than a
 //! workload that is never run.
 
+pub mod cluster_catchup;
 pub mod cluster_failover;
 pub mod cluster_hop;
 pub mod cluster_overhead;
@@ -163,6 +164,14 @@ pub fn all() -> Vec<Box<dyn Workload>> {
     // ([F42](../../docs/src/features/primary-failover.md))
     built.extend(
         cluster_failover::all()
+            .into_iter()
+            .map(|workload| Box::new(workload) as Box<dyn Workload>),
+    );
+    // the catch-up arms, appended after the failover arm: the same kill with the returning
+    // node inside the retained log and past the purge point
+    // ([F43](../../docs/src/features/node-recovery.md))
+    built.extend(
+        cluster_catchup::all()
             .into_iter()
             .map(|workload| Box::new(workload) as Box<dyn Workload>),
     );

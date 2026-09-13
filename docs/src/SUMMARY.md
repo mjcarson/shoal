@@ -104,6 +104,7 @@
   - [F40. Replication and quorum writes](features/replication.md)
   - [F41. Read consistency levels](features/read-consistency.md)
   - [F42. Primary failover](features/primary-failover.md)
+  - [F43. Recovering a node brought back online](features/node-recovery.md)
 
 # Direction
 
@@ -189,6 +190,8 @@
   - [94. An answer owed to a client that had left ended the shard](appendix/resolved/disconnected-client-cleanup.md)
   - [96. `cluster.transport.ping_interval` is parsed, documented and consumed by nothing](appendix/resolved/ping-interval-consumer.md)
   - [101. A member that fell silent before its fifth report was never called Down](appendix/resolved/short-lived-member-detection.md)
+  - [104. A restart merged every sealed segment below the checkpoint into the archives again](appendix/resolved/segments-recompacted-after-restart.md)
+  - [105. A volatile group never checkpointed, so its log was never purged](appendix/resolved/volatile-groups-never-purged.md)
 - [TODOs and Unbuilt Work](appendix/todos.md)
 - [Review, August 2026](appendix/review-2026-08.md)
 - [Glossary](appendix/glossary.md)

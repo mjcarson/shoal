@@ -32,7 +32,14 @@ attempt was; the checkpoint carries the table's low-water mark for M9a's expiry 
 leader whose lease lapsed answers `NotLeader` before it appends rather than `OutcomeUnknown`
 at its deadline; a proposal hopping to a leader whose link is down is `NotLeader` at once when
 its frame was never written; and a client can pin its bundle id as the identity and retry
-under it. What is not there: catch-up past the purge point (M7), ~~a durable low-water mark
+under it. Since M7 ([F43](../features/node-recovery.md)) a member behind the purge point is
+fed a snapshot per group - a file the compactor cuts at the group's checkpoint with the retry
+table's remembered results in its trailer, streamed over the bulk lane, installed atomically
+under a marker and reseeded into the dedup table - and the sealed WAL is bounded in bytes by
+`replication.retained_bytes`, past which the groups pinning it are forced to snapshot and
+purge; a volatile group snapshots the same way into memory and its checkpoint is its applied
+position ([item 105](../appendix/resolved/volatile-groups-never-purged.md)). What is not there:
+~~catch-up past the purge point (M7),~~ ~~a durable low-water mark
 for the retry table and the leader's step-down at its lease (M6),~~ leadership moved after a
 failover - it stays where the election put it. Every M4 and M6 row of the table below is a
 test. Before that, and still on a standalone node:
