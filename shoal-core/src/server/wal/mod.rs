@@ -577,6 +577,21 @@ impl WalInner {
             frame::Frame::Truncate { group, keep_after } => {
                 self.truncate_index(group, keep_after.map(|log_id| log_id.index));
             }
+            // a forgotten group: its state and every segment's memory of it are gone, and
+            // the frames before this one are dead ([F45](../../../../docs/src/features/replica-migration.md))
+            frame::Frame::Forget { group } => self.forget_group(group),
+        }
+    }
+
+    /// Drop a group's state whole, and every segment's memory of its frames
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group
+    fn forget_group(&mut self, group: GroupId) {
+        self.groups.remove(&group);
+        for segment in self.segments.values_mut() {
+            segment.last.remove(&group);
         }
     }
 }
@@ -667,10 +682,16 @@ pub struct GroupCheckpoint {
     pub retries_at: u64,
     /// The lowest applied index the retry table still remembered, or zero
     ///
-    /// The low-water mark: a retry of an identity applied below it is applied as new. M9a's
-    /// expiry check reads it; nothing at M6 refuses on it.
+    /// The low-water mark: a retry of an identity applied below it is applied as new
+    /// ([F45](../../../../docs/src/features/replica-migration.md) refuses by the identity's
+    /// own time instead, since an index says nothing a client can compare its retry to).
     #[serde(default)]
     pub retry_floor: u64,
+    /// The newest time-ordered identity the retry table had forgotten, in milliseconds since
+    /// the epoch; zero for none, and from a file written before there was one
+    /// ([F45](../../../../docs/src/features/replica-migration.md))
+    #[serde(default)]
+    pub expired_before: u64,
 }
 
 impl GroupCheckpoint {
@@ -694,7 +715,19 @@ impl GroupCheckpoint {
             members: membership.membership().nodes().map(|(addr, _)| *addr).collect(),
             retries_at: 0,
             retry_floor: 0,
+            expired_before: 0,
         }
+    }
+
+    /// Record the newest time-ordered identity the retry table had forgotten
+    ///
+    /// # Arguments
+    ///
+    /// * `expired_before` - Its timestamp, in milliseconds since the epoch
+    #[must_use]
+    pub fn expired_before(mut self, expired_before: u64) -> Self {
+        self.expired_before = expired_before;
+        self
     }
 
     /// Record which retry sidecar goes with this checkpoint, and the table's low-water mark
@@ -1215,6 +1248,28 @@ impl ShardWal {
     #[must_use]
     pub fn segments(&self) -> Vec<SegmentView> {
         self.inner.borrow().segments.values().cloned().collect()
+    }
+
+    /// Forget a group's log whole: a marker frame, then its state and every segment's memory of it
+    ///
+    /// A retired copy's log is dead history: its frames stay in the sealed segments until they
+    /// are reclaimed with everything else in them, are never handed to a compactor again, and
+    /// a replay past the marker rebuilds nothing from them, so a copy of the same group added
+    /// to this shard later starts with no log, no vote and no committed position of its own
+    /// ([F45](../../../../docs/src/features/replica-migration.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group
+    ///
+    /// # Errors
+    ///
+    /// Fails if the marker could not be staged.
+    pub fn forget(&self, group: GroupId) -> io::Result<()> {
+        let frame = frame::encode_marker(frame::FrameKind::Forget, group, None)?;
+        self.stage(&frame, group, None)?;
+        self.inner.borrow_mut().forget_group(group);
+        Ok(())
     }
 
     /// Note that the loop handed a segment to the compactors

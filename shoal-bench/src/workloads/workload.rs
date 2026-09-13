@@ -194,6 +194,18 @@ pub struct ClusterOverride {
     /// is past the purge point ([F43](../../../docs/src/features/node-recovery.md)). Applied to
     /// every node of the placement, since every node resolves the arm's own overrides.
     pub retention: Option<RetentionOverride>,
+    /// The grace a retired copy's files are kept for, when the arm moves it off the default
+    ///
+    /// The migration arm shortens it so a move finishes inside the run: a move is done only
+    /// once the source has retired its copy, and the default grace is minutes
+    /// ([F45](../../../docs/src/features/replica-migration.md)).
+    pub retire_after: Option<std::time::Duration>,
+    /// The shard count of every member staged beside the placement and placed on by nothing
+    ///
+    /// A spare joins the cluster and holds no tablet until a move brings it into a set; the
+    /// migration arm stages one as its destination
+    /// ([F45](../../../docs/src/features/replica-migration.md)).
+    pub spares: Vec<u16>,
 }
 
 /// The groups' checkpoint and retention counts an arm moves off the defaults
@@ -230,6 +242,8 @@ impl ClusterOverride {
             hop: None,
             read: None,
             retention: None,
+            retire_after: None,
+            spares: Vec::new(),
         }
     }
 
@@ -248,7 +262,15 @@ impl ClusterOverride {
             hop: None,
             read: None,
             retention: None,
+            retire_after: None,
+            spares: Vec::new(),
         }
+    }
+
+    /// How many members this arm stages, counting node zero and every spare
+    #[must_use]
+    pub fn members(&self) -> usize {
+        self.nodes() + self.spares.len()
     }
 
     /// How many nodes this arm places, counting node zero
@@ -302,18 +324,38 @@ pub struct FaultSpec {
     pub run_for: std::time::Duration,
 }
 
-/// A repair an arm asks the harness to run in the background of its measured phase
+/// What a background arm asks the harness to run inside its measured phase
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BackgroundKind {
+    /// A `Repair` of a table in verify mode ([F44](../../../docs/src/features/repair.md))
+    Repair,
+    /// A `Move` of the set holding a tablet from one node of the placement to another member
+    /// ([F45](../../../docs/src/features/replica-migration.md))
+    Move {
+        /// The tablet whose set moves
+        tablet: u16,
+        /// The node leaving the set, by its position among the staged nodes
+        from: u32,
+        /// The member replacing it, by its position among the staged nodes
+        to: u32,
+    },
+}
+
+/// An operation an arm asks the harness to run in the background of its measured phase
 ///
-/// Only a placed arm can ask for one, since the repair is asked of the cluster's control plane;
-/// the harness refuses one on any other arm ([F44](../../../docs/src/features/repair.md)).
+/// Only a placed arm can ask for one, since the operation is asked of the cluster's control
+/// plane; the harness refuses one on any other arm ([F44](../../../docs/src/features/repair.md),
+/// [F45](../../../docs/src/features/replica-migration.md)).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BackgroundSpec {
-    /// How long after the measured phase starts to ask for the repair
+    /// How long after the measured phase starts to ask for it
     pub at: std::time::Duration,
     /// How long the whole run is scheduled for, which bounds the polling
     pub run_for: std::time::Duration,
-    /// The table to verify, by the name the schema spells it
+    /// The table to verify, by the name the schema spells it; a move names a tablet instead
     pub table: &'static str,
+    /// What is asked for
+    pub kind: BackgroundKind,
 }
 
 /// One operation of a timed run, as the client saw it

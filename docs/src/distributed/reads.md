@@ -32,7 +32,12 @@ names another leader follows it, a lapsed lease refuses a barrier at once as
 `QuorumUnavailable`, and a read share the link never wrote is sent to another holder once
 within the budget. Since M7 ([F43](../features/node-recovery.md)) a read of a tablet whose
 group is installing a snapshot is refused `Unavailable` at either level, and the rest of the
-node serves (`installing_tablet_never_serves_partial_state`). Still not built: a coverage
+node serves (`installing_tablet_never_serves_partial_state`). Since
+[F45](../features/replica-migration.md) a read of a tablet no group on the shard serves at all
+- a copy that retired under a move, or one that was never there - is refused `StaleTopology`
+at the map version held, before it waits for anything and never from the rows the shard still
+holds on disk; a forwarded one is refused on a frame the origin acts on, sending it once to
+another holder (`retired_copy_never_serves_from_grace_files`). Still not built: a coverage
 list on the response frame and `Primary` as a level.
 Before that: `route_archived` splits queries across owning shards, `Shard::handle_gathered`
 merges responses, restores partition order and applies the final limit, and ~~existing gather

@@ -795,6 +795,42 @@ pub const FAMILIES: &[Family] = &[
              pass, and the interval multiplies it.",
     },
     Family {
+        name: "cluster-migration",
+        title: "What a move costs the foreground, and how long it takes",
+        surface: Surface::AllWorkloads,
+        what_it_measures:
+            "One arm, `migration/move`: the kill arm's placement, mixture and client with a \
+             fourth member staged beside the placement and placed on by nothing, driven for the \
+             kill arm's time with nothing killed, and a `Move` of one set from node one to the \
+             spare asked for a third of the way through, its record polled each second until it \
+             is done. The destination is fed as a learner, made a voter through the group's own \
+             joint transition once it is within the catch-up lag, activated by its own apply, \
+             published as the set's configuration, and the source's copy retired after its grace, \
+             all while the mixture goes on. `cluster.migration` is when the move was asked for and \
+             done, how long each phase took, what the destination was fed - snapshot bytes and log \
+             entries - and the client's distribution before, during and after it with a per \
+             second series.",
+        how_to_read_it:
+            "`during` against `before` is the number: what a move of one set costs the \
+             foreground's median and tail while it runs, and `seconds` is how long it costs it \
+             for. `phase_ms` says where the time went: `catching_up` is the transfer, \
+             `reconfiguring` the joint transition, `retiring` the source's grace, which \
+             `cluster.migration.retire_after` sets and which is not a cost. `bytes` over the \
+             catch-up is the transfer rate when the destination was fed a snapshot; `entries` \
+             when it was fed the log.",
+        what_would_make_it_wrong:
+            "A `finished_ms` that is absent, which means the run ended inside the move and the \
+             `after` window is empty; an `outcome` other than `moved`. A `bytes` of zero at full \
+             scale, which means the set's rows fit the retained log and the arm priced a log feed \
+             alone. Reading `during` as an outage: the client keeps its depth throughout, and a \
+             slower window is the transfer's share of the cores and the device, not a refusal.",
+        what_it_cannot_say:
+            "What a move costs over a network, where the bulk lane's rate is the wire's. What \
+             moving a set the client is not writing to costs, or moving one node's every set at \
+             once, which is M9b's rebalancer. What a stale router pays, which the fixture proves \
+             and the arm's single client never meets.",
+    },
+    Family {
         name: "retired",
         title: "The retired blended workload",
         surface: Surface::AllWorkloads,
@@ -863,6 +899,9 @@ pub fn family_for(id: &str) -> Option<&'static Family> {
     } else if id.starts_with("macro/cluster/background/") {
         // the background arm, before the wider cluster prefix for the same reason
         "cluster-background"
+    } else if id.starts_with("macro/cluster/migration/") {
+        // the migration arm, before the wider cluster prefix for the same reason
+        "cluster-migration"
     } else if id.starts_with("macro/cluster/failover/") {
         // the fault arms, before the wider cluster prefix for the same reason
         "cluster-failover"

@@ -47,11 +47,20 @@ resumable chunks over the bulk lane and installed atomically under a marker with
 redone at open, the sealed WAL bounded in bytes with a forced purge behind the groups pinning
 it, an installing group's tablets refusing reads while the rest of the node serves, and two
 arms that price the catch-up by log and by snapshot — as
-[F43](../features/node-recovery.md). What is not there: ~~strong
+[F43](../features/node-recovery.md). And [M8](milestones.md#m8-repair) — repair: every
+archive record checksummed, a scrub as a log entry every replica cuts at, a quarantine decided
+locally and committed second, a `Repair` driven by each group's leader from a verified majority
+or an operator's word, and one arm that prices a scrub — as [F44](../features/repair.md). And
+[M9a](milestones.md#m9a-safe-replica-migration) — a replica set moved: a `Move` recorded and
+driven phase by phase under the identity the rule minted, the destination a learner until the
+group's own joint transition and its own apply make it count, a configuration published beside
+the rule, the source's copy retired for a grace and refusing by name, a retry identity with a
+time and a window, and one arm that prices the move — as
+[F45](../features/replica-migration.md). What is not there: ~~strong
 reads (M5),~~ ~~failover that
 moves leadership and the retry table's durable mark (M6),~~ ~~a member behind the purge point
-catching up (M7),~~ leadership moved toward a reader or
-back to a returning node, and everything from rebalancing on. They extend the unbuilt
+catching up (M7),~~ ~~repair (M8), a replica set that moves (M9a),~~ leadership moved toward a reader or
+back to a returning node, and everything from the rebalancer on. They extend the unbuilt
 [Distribution](../appendix/todos.md#distribution) and
 [Rebalancing](../appendix/todos.md#rebalancing) entries.
 

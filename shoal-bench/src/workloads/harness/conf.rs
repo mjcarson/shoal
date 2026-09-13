@@ -146,6 +146,11 @@ pub fn resolve(base: &Path, id: &str, overrides: &ConfOverrides, port: u16) -> R
             block.replication.checkpoint_entries = retention.checkpoint_entries;
             block.replication.retained_entries = retention.retained_entries;
         }
+        // and the migration arm the grace a retired copy is kept for
+        // ([F45](../../../../docs/src/features/replica-migration.md))
+        if let Some(retire_after) = cluster.retire_after {
+            block.migration.retire_after = retire_after.into();
+        }
         conf.cluster = Some(block);
     }
     Ok(conf)
@@ -223,6 +228,7 @@ pub fn cluster_facts(
         fault: None,
         catchup: None,
         background: None,
+        migration: None,
     }))
 }
 

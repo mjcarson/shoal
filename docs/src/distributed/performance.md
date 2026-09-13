@@ -71,7 +71,15 @@ in verify mode asked for a third of the way through, its record polled until eve
 done. Its record carries `cluster.background` - the marks, the groups and how many were clean,
 what the scrubs hashed and read across every node, and the client's distribution before,
 during and after with a per second series - which is the interference this page asks for.
-The open-loop schedule is not built; the arms are closed loops at one depth.
+Since [F45](../features/replica-migration.md) the migration arm runs:
+`macro/cluster/migration/move`, the kill arm's placement and mixture with a fourth member
+staged beside the placement and placed on by nothing, and a `Move` of one set from node one to
+the spare asked for a third of the way through, its record polled until it is done. Its record
+carries `cluster.migration` - the marks, how long each phase took summed over the set's
+groups, what the destination was fed and the client's distribution before, during and after
+with a per second series - which is the transfer bytes, duration and pauses M9a's exit asks
+for; the harness stages the spare and shortens the source's grace so the move is done inside
+the run. The open-loop schedule is not built; the arms are closed loops at one depth.
 
 ## The design
 
@@ -264,6 +272,7 @@ assign the gates. Generated cluster pages retain the book's scope/comparability 
 | `fault_capture_preserves_outage_time_series` | Failure/recovery window remains visible with separate before/during/after distributions | M6 |
 | `catchup_capture_records_convergence` | A returning node's record carries its restart and convergence marks, the split by log and by snapshot and the lag series; a run that ends unconverged says so and keeps the series | M7 |
 | `background_capture_records_scrub_interference` | A background repair's record carries its marks, the windows before, during and after it with their own distributions, a bucket per second and what the scrubs read; a run with no repair is all `before`; an older record loads without it | M8 |
+| `migration_capture_records_transfer_and_pauses` | A move's record carries its marks, the time each phase took, what the destination was fed, the windows before, during and after with their own distributions and a bucket per second, and `unfinished` for a run that ended first; an F44 record loads without it | M9a |
 | `physical_cluster_records_each_node_environment` | Unequal real hardware and primary placement are retained in comparability metadata | M10 |
 
 ## Related

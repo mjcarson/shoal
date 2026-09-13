@@ -207,7 +207,8 @@ leader is filed as an additive third arm.
 
 **A sorted table in the fixture.** It would add a third table - nine more groups a node at a
 factor of three - to every fixture test's start, restart and digest, for a limit semantics the
-`responses.rs` proof and `sorted.rs`'s own limit tests already pin. Filed for M9a.
+`responses.rs` proof and `sorted.rs`'s own limit tests already pin. ~~Filed for M9a.~~ M9a did not
+need it either: its tests move the fixture's two tables and read them by key.
 
 **A version bump for the section.** A new `PROTOCOL_VERSION` folds into the fingerprint and
 refuses every older client, for a section most bundles never send. The capability byte lets an

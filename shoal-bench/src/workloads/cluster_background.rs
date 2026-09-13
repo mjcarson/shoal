@@ -32,7 +32,7 @@ use anyhow::Result;
 use crate::model::macro_layer::Timing;
 use crate::workloads::cluster_failover::Failover;
 use crate::workloads::harness::seed::Scale;
-use crate::workloads::workload::{BackgroundSpec, BoxFuture, Context, Measurement, Workload, WorkloadPlan};
+use crate::workloads::workload::{BackgroundKind, BackgroundSpec, BoxFuture, Context, Measurement, Workload, WorkloadPlan};
 
 /// The arm's identifier
 pub const REPAIR_ID: &str = "macro/cluster/background/repair";
@@ -129,6 +129,7 @@ impl Workload for Background {
             at: run_for * REPAIR_AT.0 / REPAIR_AT.1,
             run_for,
             table: REPAIR_TABLE,
+            kind: BackgroundKind::Repair,
         })
     }
 }

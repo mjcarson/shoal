@@ -140,9 +140,13 @@ impl<S: QuerySupport> Queries<S> {
 }
 
 impl<S: QuerySupport> Default for Queries<S> {
+    /// An empty bundle under a fresh, time-ordered identity
+    ///
+    /// Time-ordered so a group that has forgotten the identity can tell its age and refuse a
+    /// retry that is too late by name ([F45](../../../docs/src/features/replica-migration.md)).
     fn default() -> Self {
         Queries {
-            id: Uuid::new_v4(),
+            id: Uuid::now_v7(),
             queries: Vec::with_capacity(1),
             base_index: 0,
         }

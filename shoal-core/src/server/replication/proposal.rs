@@ -34,6 +34,11 @@ pub enum ProposalOutcome {
     Unknown(String),
     /// The group is stopped or the write failed some other way: a definite refusal
     Failed(String),
+    /// The write's identity is older than the group promises to remember: a definite refusal
+    ///
+    /// Judged before anything is proposed, so the log never carries a retry that might be a
+    /// second effect ([F45](../../../../docs/src/features/replica-migration.md)).
+    Expired(String),
 }
 
 /// What a group's leader answers a read barrier request with

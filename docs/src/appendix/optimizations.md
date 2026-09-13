@@ -192,6 +192,7 @@ so they get worse by existing longer rather than under load.
 | **B10** | [**O52**](#o52-a-snapshot-copies-every-record-of-the-archives-into-one-file) — a snapshot copies the archives rather than pinning them | Argued — every byte of a group's tablets read, written, synced and read again per cut, on the table's one compactor, before a byte reaches the lane | L | `macro/cluster/catchup/snapshot` on the benchmark host | Contained on the wire, not on the compactor | no |
 | **B11** | [**O53**](#o53-the-assembler-keeps-a-map-of-received-chunks-and-forgets-them-on-a-restart) — the assembler keeps a map of received chunks and forgets them on a restart | Argued — a `BTreeMap` entry per chunk out of order, and a stream started over after the receiver restarts | S | `macro/cluster/catchup/snapshot` with a receiver restart, which no arm does | Contained | no |
 | **B12** | [**O54**](#o54-a-scrub-reads-every-archived-partition-of-a-group-once-per-pass) — a scrub reads every archived partition of a group once per pass | Measured in shape — the background arm's `bytes` is the group's archives whole, per pass | M | `macro/cluster/background/repair` at full scale, where the archives are wider than memory | Contained | no |
+| **B13** | [**O55**](#o55-a-learner-inside-the-retained-log-is-fed-a-snapshot-when-the-leaders-cached-cut-is-newer-than-its-purge-point) — a learner inside the retained log is fed a snapshot when the leader's cached cut is newer than its purge point | Argued — a whole group's archives on the bulk lane where a log tail would do | M | `macro/cluster/migration/move` at full scale, whose `bytes` is zero when the log fed the destination | Contained | no |
 
 **Tier C — blocked on a design pass, not on effort.**
 
@@ -2709,3 +2710,17 @@ Filed by [F44](../features/repair.md). A cut that reads the disk was the smaller
 right first, and it is what makes the digest independent of anything the compactor wrote
 beside the record - which is worth keeping in mind before the map carries the digest, since a
 digest the compactor computed is not evidence against the compactor.
+
+### O55. A learner inside the retained log is fed a snapshot when the leader's cached cut is newer than its purge point
+
+| | |
+| --- | --- |
+| **Rank** | **B13** — argued, contained |
+| **Impact** | Argued — a move's destination starts with no log, and openraft feeds a member with no log from the leader's earliest retained entry unless the leader has a snapshot past that entry, in which case the snapshot goes first. A group that has cut a snapshot since its purge point - which under `LogsSinceLast(checkpoint_entries)` is most groups most of the time - therefore feeds every new learner the whole of its archives over the bulk lane and then the tail, where a group whose retained log reaches back far enough could have fed the log alone. The migration arm's `bytes` says which happened: zero at smoke scale, where the log fed it |
+| **Difficulty** | M — the choice is openraft's, made from `last_purged_log_id` against the snapshot's `last_log_id`; shoal decides what it *offers* as its current snapshot, and could decline to offer one to a replication stream whose target is a learner the retained log covers. The cost of getting it wrong is a learner that waits for a log the leader purges under it, which the library recovers from by sending the snapshot after all |
+| **Blocks** | nothing; a transfer budget ([C8](../distributed/rebalancing.md#transfer-budgets), M9b) is where the bytes would be paced either way |
+| **Tradeoff** | Contained — a snapshot fed to a learner is the same file a returning member gets, and a log fed to one is the same entries a follower gets |
+| **Benchmark** | `macro/cluster/migration/move`, whose `bytes` against `entries` says which path fed the destination and whose `catching_up` says what it took |
+
+Filed by [F45](../features/replica-migration.md). The arm was built to price the transfer
+before anything decided how to shape it.

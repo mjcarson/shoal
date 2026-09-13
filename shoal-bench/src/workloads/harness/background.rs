@@ -21,8 +21,8 @@ use shoal::server::control::AdminSender;
 use shoal::shared::protocol::admin::{AdminKind, AdminOutcome, AdminRequest};
 use shoal::shared::protocol::error::ErrorCode;
 
-use crate::model::macro_layer::{BackgroundFacts, SecondFacts, WindowFacts};
-use crate::workloads::workload::{BackgroundSpec, TimelineSample};
+use crate::model::macro_layer::{BackgroundFacts, MigrationFacts, SecondFacts, WindowFacts};
+use crate::workloads::workload::{BackgroundKind, BackgroundSpec, TimelineSample};
 
 /// How often the record is polled
 pub const POLL_EVERY: Duration = Duration::from_secs(1);
@@ -42,6 +42,15 @@ pub struct Marks {
     pub op: Option<uuid::Uuid>,
     /// What went wrong, if something did
     pub error: Option<String>,
+    /// What a move came to, as its record says, once done
+    /// ([F45](../../../../docs/src/features/replica-migration.md))
+    pub outcome: Option<String>,
+    /// How long each phase of a move took, summed over its groups, by the phase's name
+    pub phase_ms: Vec<(String, u64)>,
+    /// Snapshot bytes a move fed the destination, summed over its groups
+    pub bytes: u64,
+    /// Log entries a move fed the destination while it caught up, summed over its groups
+    pub entries: u64,
 }
 
 /// A background repair in progress: the thread driving it
@@ -71,19 +80,20 @@ impl Injected {
     }
 }
 
-/// Starts the thread that asks for the repair on the schedule and polls it
+/// Starts the thread that asks for the operation on the schedule and polls it
 ///
 /// # Arguments
 ///
 /// * `spec` - When to ask, and for what
 /// * `admin` - How to ask, as the process
 /// * `started` - When the measured phase started, which the schedule counts from
-pub fn inject(spec: &BackgroundSpec, admin: AdminSender, started: Instant) -> Result<Injected> {
+/// * `nodes` - Every staged node's identity, in staged order, which a move names its nodes by
+pub fn inject(spec: &BackgroundSpec, admin: AdminSender, started: Instant, nodes: Vec<shoal::shared::identity::NodeId>) -> Result<Injected> {
     let spec = spec.clone();
     let (stop, stopped) = mpsc::channel();
     let handle = std::thread::Builder::new()
         .name("background".to_string())
-        .spawn(move || schedule(&spec, &admin, started, &stopped))
+        .spawn(move || schedule(&spec, &admin, started, &stopped, &nodes))
         .context("failed to start the background thread")?;
     Ok(Injected { handle, stop })
 }
@@ -96,23 +106,45 @@ pub fn inject(spec: &BackgroundSpec, admin: AdminSender, started: Instant) -> Re
 /// * `admin` - How to ask
 /// * `started` - When the measured phase started
 /// * `stopped` - Fires when the run is over
-fn schedule(spec: &BackgroundSpec, admin: &AdminSender, started: Instant, stopped: &mpsc::Receiver<()>) -> Marks {
+fn schedule(
+    spec: &BackgroundSpec,
+    admin: &AdminSender,
+    started: Instant,
+    stopped: &mpsc::Receiver<()>,
+    nodes: &[shoal::shared::identity::NodeId],
+) -> Marks {
     let mut marks = Marks::default();
     // wait for the mark, unless the run ends first
     let until = started + spec.at;
     let wait = until.saturating_duration_since(Instant::now());
     if stopped.recv_timeout(wait).is_ok() {
-        marks.error = Some("the run ended before the repair was due".to_string());
+        marks.error = Some("the run ended before the operation was due".to_string());
         return marks;
     }
     // the request, retried only for a version that moved underneath it
     let op = uuid::Uuid::new_v4();
-    let kind = AdminKind::Repair {
-        table: spec.table.to_string(),
-        tablet: None,
-        mode: "verify".to_string(),
-        source: None,
-        release: false,
+    let kind = match &spec.kind {
+        BackgroundKind::Repair => AdminKind::Repair {
+            table: spec.table.to_string(),
+            tablet: None,
+            mode: "verify".to_string(),
+            source: None,
+            release: false,
+        },
+        BackgroundKind::Move { tablet, from, to } => {
+            let (Some(from), Some(to)) = (
+                nodes.get(usize::try_from(*from).unwrap_or(usize::MAX)),
+                nodes.get(usize::try_from(*to).unwrap_or(usize::MAX)),
+            ) else {
+                marks.error = Some(format!("the move names nodes {from} and {to}, and {} are staged", nodes.len()));
+                return marks;
+            };
+            AdminKind::Move {
+                tablet: *tablet,
+                from: *from,
+                to: *to,
+            }
+        }
     };
     let mut asked = false;
     for _ in 0..8 {
@@ -157,10 +189,14 @@ fn schedule(spec: &BackgroundSpec, admin: &AdminSender, started: Instant, stoppe
     marks.op = Some(op);
     // poll the record until every group is done, or the run ends
     loop {
+        let status = match &spec.kind {
+            BackgroundKind::Repair => AdminKind::RepairStatus { op },
+            BackgroundKind::Move { .. } => AdminKind::MoveStatus { op },
+        };
         let record = match admin.admin(AdminRequest {
             op: uuid::Uuid::new_v4(),
             expected_version: 0,
-            kind: AdminKind::RepairStatus { op },
+            kind: status,
         }) {
             Ok(response) => match response.outcome {
                 Ok(AdminOutcome::Read(record)) => record,
@@ -182,7 +218,33 @@ fn schedule(spec: &BackgroundSpec, admin: &AdminSender, started: Instant, stoppe
                 .filter(|group| group["outcome"]["Clean"].is_object())
                 .count() as u64
         });
-        let done = groups.is_some_and(|groups| !groups.is_empty() && groups.values().all(|group| group["phase"] == "Done"));
+        // a move's record carries what each group's transition cost
+        // ([F45](../../../../docs/src/features/replica-migration.md))
+        if matches!(spec.kind, BackgroundKind::Move { .. }) {
+            let mut phases: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
+            let (mut bytes, mut entries) = (0u64, 0u64);
+            for group in groups.into_iter().flat_map(|groups| groups.values()) {
+                bytes += group["stats"]["bytes"].as_u64().unwrap_or(0);
+                entries += group["stats"]["entries"].as_u64().unwrap_or(0);
+                if let Some(phase_ms) = group["stats"]["phase_ms"].as_object() {
+                    for (phase, ms) in phase_ms {
+                        *phases.entry(phase.clone()).or_default() += ms.as_u64().unwrap_or(0);
+                    }
+                }
+            }
+            marks.phase_ms = phases.into_iter().collect();
+            marks.bytes = bytes;
+            marks.entries = entries;
+            marks.outcome = match &record["outcome"] {
+                serde_json::Value::String(outcome) => Some(outcome.to_lowercase()),
+                serde_json::Value::Object(outcome) => outcome.keys().next().map(|key| key.to_lowercase()),
+                _ => None,
+            };
+        }
+        let done = match &spec.kind {
+            BackgroundKind::Repair => groups.is_some_and(|groups| !groups.is_empty() && groups.values().all(|group| group["phase"] == "Done")),
+            BackgroundKind::Move { .. } => record["phase"] == "Done",
+        };
         if done {
             marks.finished_at = Some(Instant::now());
             return marks;
@@ -288,6 +350,60 @@ pub fn cut(
     }
 }
 
+/// Cuts a timeline at a move's marks into its record
+///
+/// # Arguments
+///
+/// * `started` - When the measured phase started, on the driver's clock
+/// * `marks` - When the thread did what, and what the record said
+/// * `timeline` - Every operation of the run, in the order it was sent
+/// * `run_for` - How long the run was scheduled for
+#[must_use]
+pub fn migration_facts(started: Instant, marks: &Marks, timeline: &[TimelineSample], run_for: Duration) -> MigrationFacts {
+    let started_at = marks.started_at.map(|at| at.saturating_duration_since(started));
+    let finished_at = marks.finished_at.map(|at| at.saturating_duration_since(started));
+    migration_cut(started_at, finished_at, marks, timeline, run_for)
+}
+
+/// The pure half of [`migration_facts`], on durations from the start of the run
+///
+/// # Arguments
+///
+/// * `started_at` - When the move was asked for, if it was
+/// * `finished_at` - When its record was done, if inside the run
+/// * `marks` - What the record said
+/// * `timeline` - Every operation of the run, in the order it was sent
+/// * `run_for` - How long the run was scheduled for
+#[must_use]
+pub fn migration_cut(
+    started_at: Option<Duration>,
+    finished_at: Option<Duration>,
+    marks: &Marks,
+    timeline: &[TimelineSample],
+    run_for: Duration,
+) -> MigrationFacts {
+    // the windows and the series are cut exactly as a repair's are
+    let windows = cut(started_at, finished_at, marks.groups, 0, timeline, run_for, 0, 0);
+    MigrationFacts {
+        started_ms: started_at.map(millis),
+        finished_ms: finished_at.map(millis),
+        seconds: match (started_at, finished_at) {
+            (Some(from), Some(to)) => Some(millis(to.saturating_sub(from)) / 1000),
+            _ => None,
+        },
+        groups: marks.groups,
+        outcome: match (&marks.outcome, finished_at) {
+            (Some(outcome), Some(_)) => outcome.clone(),
+            _ => "unfinished".to_string(),
+        },
+        phase_ms: marks.phase_ms.clone(),
+        bytes: marks.bytes,
+        entries: marks.entries,
+        windows: windows.windows,
+        series: windows.series,
+    }
+}
+
 /// A duration in whole milliseconds
 ///
 /// # Arguments
@@ -373,5 +489,61 @@ mod tests {
             }))
             .expect("an F43 record loads");
         assert!(older.background.is_none());
+        assert!(older.migration.is_none());
+    }
+
+    /// A move's record carries its marks, phases and transfer, and its windows and series are
+    /// cut as a repair's are; a run that ended first is `unfinished` (F45)
+    #[test]
+    fn migration_capture_records_transfer_and_pauses() {
+        let timeline: Vec<TimelineSample> = (0..300u64)
+            .map(|index| {
+                let at = Duration::from_millis(index * 100);
+                let slow = (10..20).contains(&(index / 10));
+                TimelineSample {
+                    at,
+                    elapsed: Duration::from_micros(if slow { 900 } else { 300 }),
+                    ok: true,
+                }
+            })
+            .collect();
+        let marks = super::Marks {
+            started_at: None,
+            finished_at: None,
+            groups: 2,
+            clean: 0,
+            op: None,
+            error: None,
+            outcome: Some("moved".to_string()),
+            phase_ms: vec![("catching_up".to_string(), 4000), ("learner".to_string(), 300)],
+            bytes: 12_345,
+            entries: 678,
+        };
+        let facts = super::migration_cut(Some(Duration::from_secs(10)), Some(Duration::from_secs(20)), &marks, &timeline, Duration::from_secs(30));
+        assert_eq!(facts.started_ms, Some(10_000));
+        assert_eq!(facts.finished_ms, Some(20_000));
+        assert_eq!(facts.seconds, Some(10));
+        assert_eq!(facts.groups, 2);
+        assert_eq!(facts.outcome, "moved");
+        assert_eq!(facts.phase_ms.len(), 2);
+        assert_eq!((facts.bytes, facts.entries), (12_345, 678));
+        let names: Vec<&str> = facts.windows.iter().map(|window| window.name.as_str()).collect();
+        assert_eq!(names, ["before", "during", "after"]);
+        assert!(facts.windows[1].p50_us > facts.windows[0].p50_us, "{:?}", facts.windows);
+        assert_eq!(facts.series.len(), 30);
+        // a run that ended before the move was done
+        let unfinished = super::migration_cut(Some(Duration::from_secs(10)), None, &marks, &timeline, Duration::from_secs(30));
+        assert_eq!(unfinished.outcome, "unfinished");
+        assert_eq!(unfinished.seconds, None);
+        assert_eq!(unfinished.windows[2].ops, 0);
+        // a record from before the arm carries no migration block and loads
+        let older: crate::model::macro_layer::ClusterFacts =
+            serde_json::from_value(serde_json::json!({
+                "nodes": 3, "desired_rf": 3, "active_rf": 3, "write_policy": "quorum",
+                "read_policy": "one", "durability": "durable", "driver": "node", "cores": [],
+                "tables": 1, "tablets": 4096, "emulated": true
+            }))
+            .expect("an F44 record loads");
+        assert!(older.migration.is_none());
     }
 }

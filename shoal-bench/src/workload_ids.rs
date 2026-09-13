@@ -493,6 +493,9 @@ pub const IDS: &[&str] = &[
     // the background arm (F44): the kill arm's placement and mixture with a verify of the table
     // scrubbed in the background. appended after the catch-up arms
     "macro/cluster/background/repair",
+    // the migration arm (F45): the kill arm's placement with a spare beside it and one set
+    // moved to the spare inside the run. appended after the background arm
+    "macro/cluster/migration/move",
 ];
 
 /// Whether an id names a workload this build knows about

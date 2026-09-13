@@ -309,6 +309,10 @@ pub struct ClusterFactsLite {
     /// other arm and before F44
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background: Option<BackgroundFactsLite>,
+    /// The move the migration arm ran and what its client saw across it; absent for every
+    /// other arm and before F45
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub migration: Option<MigrationFactsLite>,
 }
 
 /// A repair run in the background of a measured phase, and what the client saw across it
@@ -338,6 +342,39 @@ pub struct BackgroundFactsLite {
     pub partitions: u64,
     /// Bytes the scrubs read off the archives, across every node
     pub bytes: u64,
+    /// The three windows: `before`, `during` and `after`
+    pub windows: Vec<WindowFactsLite>,
+    /// One bucket per second of the measured phase
+    pub series: Vec<SecondFactsLite>,
+}
+
+/// A move run in the background of a measured phase, and what the client saw across it
+///
+/// A mirror of the artifact's `MigrationFacts`, whole: the marks, the phases, the transfer,
+/// the windows and the series, so a move can be drawn as the plateau it is and its phases
+/// read against its length.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MigrationFactsLite {
+    /// When the move was asked for, in milliseconds from the start of the measured phase
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_ms: Option<u64>,
+    /// When its record was done, if inside the run
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_ms: Option<u64>,
+    /// How long that took, in whole seconds
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seconds: Option<u64>,
+    /// How many groups the set moved as
+    pub groups: u64,
+    /// What the move came to
+    pub outcome: String,
+    /// How long each phase took, in milliseconds, by the phase's name
+    #[serde(default)]
+    pub phase_ms: Vec<(String, u64)>,
+    /// Snapshot bytes the destination was fed
+    pub bytes: u64,
+    /// Log entries the destination was fed while it caught up
+    pub entries: u64,
     /// The three windows: `before`, `during` and `after`
     pub windows: Vec<WindowFactsLite>,
     /// One bucket per second of the measured phase

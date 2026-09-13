@@ -78,6 +78,13 @@ pub enum ErrorCode {
     ResponseTooLarge = 20,
     /// This request is larger than the frame bound the connection agreed on - reserved
     RequestTooLarge = 21,
+    /// The request's identity is older than the group promises to remember
+    ///
+    /// A definite refusal, judged before anything is proposed: a time-ordered identity
+    /// minted before the retry window, or before the newest identity the group has
+    /// forgotten, is answered by name rather than applied as new - a retry that late might be
+    /// the write's second effect ([F45](../../../../docs/src/features/replica-migration.md)).
+    IdentityExpired = 22,
     /// The server is over capacity and did not run this query
     ///
     /// A definite refusal: nothing accepted the query, so a write behind it did not apply. Sent
@@ -126,6 +133,14 @@ pub enum ErrorCode {
     UnknownLineage = 53,
     /// The bundle asked for a read level this server does not serve
     UnsupportedReadLevel = 54,
+    /// The node asked no longer serves this tablet, and answered from a newer map
+    ///
+    /// A definite refusal: the query was routed by a map older than the configuration the
+    /// tablet now lives under - to a source whose copy retired, or to a node that never held
+    /// it - and nothing accepted it. The coordinator sends it once to another holder; a
+    /// client that meets it retries under the same identity
+    /// ([F45](../../../../docs/src/features/replica-migration.md)).
+    StaleTopology = 55,
     /// The connection's principal may not perform this administrative request
     Unauthorized = 60,
     /// The request named a topology version other than the current one
@@ -171,6 +186,7 @@ impl ErrorCode {
             12 => ErrorCode::CorruptArchive,
             20 => ErrorCode::ResponseTooLarge,
             21 => ErrorCode::RequestTooLarge,
+            22 => ErrorCode::IdentityExpired,
             30 => ErrorCode::Shedding,
             31 => ErrorCode::Timeout,
             32 => ErrorCode::OutcomeUnknown,
@@ -181,6 +197,7 @@ impl ErrorCode {
             52 => ErrorCode::WrongCluster,
             53 => ErrorCode::UnknownLineage,
             54 => ErrorCode::UnsupportedReadLevel,
+            55 => ErrorCode::StaleTopology,
             60 => ErrorCode::Unauthorized,
             61 => ErrorCode::StaleVersion,
             62 => ErrorCode::NotLeader,
@@ -201,6 +218,7 @@ impl ErrorCode {
             ErrorCode::CorruptArchive => "CorruptArchive",
             ErrorCode::ResponseTooLarge => "ResponseTooLarge",
             ErrorCode::RequestTooLarge => "RequestTooLarge",
+            ErrorCode::IdentityExpired => "IdentityExpired",
             ErrorCode::Shedding => "Shedding",
             ErrorCode::Timeout => "Timeout",
             ErrorCode::OutcomeUnknown => "OutcomeUnknown",
@@ -211,6 +229,7 @@ impl ErrorCode {
             ErrorCode::WrongCluster => "WrongCluster",
             ErrorCode::UnknownLineage => "UnknownLineage",
             ErrorCode::UnsupportedReadLevel => "UnsupportedReadLevel",
+            ErrorCode::StaleTopology => "StaleTopology",
             ErrorCode::Unauthorized => "Unauthorized",
             ErrorCode::StaleVersion => "StaleVersion",
             ErrorCode::NotLeader => "NotLeader",

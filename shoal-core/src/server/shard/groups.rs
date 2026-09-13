@@ -104,7 +104,7 @@ pub(super) struct Group<D: ShoalDatabase> {
 /// An apply batch stopped on a partition read
 pub(super) struct ParkedApply {
     /// The group the batch belongs to
-    group: GroupId,
+    pub(super) group: GroupId,
     /// The batch, the command that parked it at the front
     entries: VecDeque<EntryResponder<DataConfig>>,
     /// Fired once the batch is through
@@ -181,6 +181,13 @@ pub(super) struct Replication<D: ShoalDatabase> {
     pub(super) driven: HashMap<(Uuid, GroupId), crate::server::control::repair::RepairPhase>,
     /// When each group this shard leads is next due a scheduled scrub
     pub(super) next_scrub: HashMap<GroupId, Instant>,
+    /// The group moves this shard is driving right now, by operation and group
+    /// ([F45](../../../../docs/src/features/replica-migration.md))
+    pub(super) driving_moves: HashSet<(Uuid, GroupId)>,
+    /// The progress each move driver here committed last, which the map may be behind on
+    pub(super) driven_moves: HashMap<(Uuid, GroupId), crate::server::control::migrate::GroupMove>,
+    /// The copies this shard retired under a move, kept for the grace, by group
+    pub(super) retired: HashMap<GroupId, super::migrate::RetiredCopy>,
 }
 
 impl<D: ShoalDatabase> Shard<D>
@@ -252,6 +259,9 @@ where
         // a quarantine decided before a restart holds through it
         // ([F44](../../../../docs/src/features/repair.md))
         let quarantines = super::repair::scan_quarantine(&dir);
+        // a copy retired before a restart stays retired until its files are reclaimed
+        // ([F45](../../../../docs/src/features/replica-migration.md))
+        let retired = super::migrate::scan_retired(&dir);
         let _ = setup;
         self.replication = Some(Replication {
             wal,
@@ -283,6 +293,9 @@ where
             driving: HashSet::new(),
             driven: HashMap::new(),
             next_scrub: HashMap::new(),
+            driving_moves: HashSet::new(),
+            driven_moves: HashMap::new(),
+            retired,
         });
         self.rebuild_groups().await?;
         Ok(())
@@ -346,10 +359,23 @@ where
             .collect();
         // a write waiting on a group the map dropped is answered below, once the borrow is done
         let mut orphaned = Vec::new();
+        // a group a published move took from this shard is retired rather than only stopped
+        // ([F45](../../../../docs/src/features/replica-migration.md))
+        let my_addr = ShardAddr::new(me, u16::try_from(shard_id).unwrap_or(u16::MAX));
+        let mut retiring = Vec::new();
         for id in gone {
-            if let Some(group) = replication.groups.remove(&id) {
+            if let Some(mut group) = replication.groups.remove(&id) {
+                orphaned.extend(std::mem::take(&mut group.waiting).into_iter().map(|waiting| (id, waiting)));
+                let moved = map
+                    .moves
+                    .iter()
+                    .find(|record| record.from == my_addr && record.groups.contains_key(&id) && record.is_published())
+                    .map(|record| record.op);
+                if let Some(op) = moved {
+                    retiring.push((id, group, op));
+                    continue;
+                }
                 event!(Level::INFO, msg = "stopping a tablet group the map no longer names", group = %id);
-                orphaned.extend(group.waiting.into_iter().map(|waiting| (id, waiting)));
                 if let Some(raft) = group.raft {
                     glommio::spawn_local(async move {
                         let _ = raft.shutdown().await;
@@ -361,12 +387,22 @@ where
         replication.tablets.clear();
         // build what it newly names
         for spec in specs {
+            // a group whose retired copy is still here is built once the copy is reclaimed
+            if replication.retired.contains_key(&spec.id) {
+                event!(Level::WARN, msg = "the map names a group whose retired copy is not reclaimed yet; building it once it is", group = %spec.id);
+                continue;
+            }
             for tablet in &spec.tablets {
                 replication.tablets.insert((spec.table, *tablet), spec.id);
             }
             if let Some(existing) = replication.groups.get_mut(&spec.id) {
-                // the same identity is the same table over the same members; the tablets are
-                // the same too, since the identity is a function of the members
+                // the same identity is the same table over the same tablets; the members may
+                // have moved under it, and a learner may have become a member, which the
+                // raft already knows from its own log - the spec refreshes in place and the
+                // handle is never rebuilt ([F45](../../../../docs/src/features/replica-migration.md))
+                if existing.spec.members != spec.members || existing.spec.learner != spec.learner {
+                    event!(Level::INFO, msg = "a tablet group's members moved under it", group = %spec.id, members = ?spec.members, learner = spec.learner);
+                }
                 existing.spec = spec;
                 continue;
             }
@@ -420,6 +456,9 @@ where
                 event!(Level::DEBUG, msg = "seeded a group's retry table from its sidecar", group = %spec.id, entries = seed.len());
             }
             let mut machine_state = MachineState::at(checkpoint, membership, seed);
+            // what the checkpoint says this copy had forgotten
+            // ([F45](../../../../docs/src/features/replica-migration.md))
+            machine_state.expired_before = replication.checkpoint.get(spec.id).map_or(0, |point| point.expired_before);
             // a received snapshot past the checkpoint, which openraft installs as it builds
             // the group ([F43](../../../../docs/src/features/node-recovery.md))
             machine_state.pending_install = replication.pending_installs.remove(&spec.id);
@@ -451,6 +490,10 @@ where
             };
             let config = group_config(&cluster, failover_ms, spec.id);
             spawn_group_start(tx.clone(), me, spec, config, network, store, machine, None);
+        }
+        // the copies a move took from here retire, with their files, for the grace
+        for (id, group, op) in retiring {
+            self.retire_group(id, group, op).await?;
         }
         // the writes that waited on a group this node no longer hosts are refused by name
         for (id, (meta, table, key, _)) in orphaned {
@@ -497,9 +540,9 @@ where
         let table = slot.table;
         let tablets = slot.spec.tablets.clone();
         // the state a restart would find: the checkpoint, and the file pending past it
-        let (checkpoint, membership, quarantined) = {
+        let (checkpoint, membership, quarantined, expired_before) = {
             let state = slot.state.borrow();
-            (state.checkpoint.clone(), state.checkpoint_membership.clone(), state.quarantined)
+            (state.checkpoint.clone(), state.checkpoint_membership.clone(), state.quarantined, state.expired_before)
         };
         let seed = match checkpoint.as_ref().and_then(|point| replication.checkpoint.get(group).map(|file| (point, file))) {
             Some((point, file)) if file.applied.as_ref() == Some(point) => replication.retries.seed_for(group, file),
@@ -509,6 +552,7 @@ where
         machine_state.pending_install = Some((path, manifest));
         machine_state.repair_pending = true;
         machine_state.quarantined = quarantined;
+        machine_state.expired_before = expired_before;
         let state = Rc::new(RefCell::new(machine_state));
         slot.state = state.clone();
         slot.snapshot = None;
@@ -684,8 +728,9 @@ where
                 for (meta, table, key, payload) in waiting {
                     self.propose_write(meta, table, key, payload).await?;
                 }
-                // a repair waiting on this group is driven once it is led
+                // a repair or a move waiting on this group is driven once it is led
                 self.drive_repairs();
+                self.drive_moves();
             }
             // a handle built for a group the map has since dropped
             (None, Ok(raft)) => {
@@ -748,7 +793,7 @@ where
                 // a blank or a membership entry moves the applied position and nothing else
                 EntryPayload::Blank => None,
                 EntryPayload::Membership(membership) => {
-                    state.borrow_mut().membership = StoredMembership::new(Some(log_id.clone()), membership.clone());
+                    state.borrow_mut().note_membership(StoredMembership::new(Some(log_id.clone()), membership.clone()));
                     None
                 }
                 EntryPayload::Normal(command) if command.scrub_op().is_some() => {
@@ -779,7 +824,7 @@ where
                                     result,
                                     applied: log_id.index,
                                 };
-                                state.borrow_mut().dedup.put(command.request, remembered);
+                                state.borrow_mut().remember(command.request, remembered);
                                 Some(ApplyOutcome::Applied(result))
                             }
                             ApplyStep::Refused(reason) => Some(ApplyOutcome::Refused(reason)),
@@ -1020,14 +1065,28 @@ where
             ));
             return self.answer_proposal(meta, table, tablet, None, outcome, 0).await;
         }
+        // an identity older than the group promises to remember is refused before anything
+        // is proposed, so the log never carries a retry that might be a second effect
+        // ([F45](../../../../docs/src/features/replica-migration.md))
+        let request = RequestId {
+            bundle: *meta.id.as_bytes(),
+            index: meta.index as u64,
+        };
+        // truncation cannot happen: a retry window is minutes, not weeks
+        #[allow(clippy::cast_possible_truncation)]
+        let window_ms = cluster.replication.retry_window.duration().as_millis() as u64;
+        if group.state.borrow().is_expired(&request, super::migrate::now_ms(), window_ms) {
+            let outcome = ProposalOutcome::Expired(format!(
+                "the identity of this write is older than the {:?} retry window, or older than an identity group {id} has forgotten; a retry this late is not answered its first result",
+                cluster.replication.retry_window.duration()
+            ));
+            return self.answer_proposal(meta, table, tablet, None, outcome, 0).await;
+        }
         group.pending_bytes += bytes;
         let command = Command {
             table: table.table_id(),
             tablet,
-            request: RequestId {
-                bundle: *meta.id.as_bytes(),
-                index: meta.index as u64,
-            },
+            request,
             payload,
         };
         let raft = group.raft.clone();
@@ -1089,7 +1148,7 @@ where
             }
             match &outcome {
                 ProposalOutcome::Unknown(_) => replication.stats.unknown += 1,
-                ProposalOutcome::Shed(_) | ProposalOutcome::NotLeader(_) | ProposalOutcome::Failed(_) => {
+                ProposalOutcome::Shed(_) | ProposalOutcome::NotLeader(_) | ProposalOutcome::Failed(_) | ProposalOutcome::Expired(_) => {
                     replication.stats.rejected += 1;
                 }
                 ProposalOutcome::Answered {
@@ -1145,6 +1204,9 @@ where
             ProposalOutcome::Failed(msg) => {
                 D::ClientType::failed(table, id, index, end, ResponseError::new(ErrorCode::Unavailable, msg))
             }
+            ProposalOutcome::Expired(msg) => {
+                D::ClientType::failed(table, id, index, end, ResponseError::new(ErrorCode::IdentityExpired, msg))
+            }
         };
         meta.stamps.mark_exec_done();
         let span = meta.span.clone();
@@ -1184,6 +1246,13 @@ where
             let _ = reply.try_send(ReplicateReply::error(head.id, "this node hosts no tablet groups"));
             return;
         };
+        // whether a retired copy is gone is asked of a shard that may not host the group at all
+        // ([F45](../../../../docs/src/features/replica-migration.md))
+        if head.kind == ReplicateKind::Retired {
+            let gone = !replication.groups.contains_key(&group) && !replication.retired.contains_key(&group);
+            let _ = reply.try_send(encode_reply(head.id, &gone));
+            return;
+        }
         let Some(slot) = replication.groups.get(&group) else {
             let _ = reply.try_send(ReplicateReply::error(head.id, format!("group {group} is not hosted on this shard")));
             return;
@@ -1222,6 +1291,13 @@ where
             }
             return;
         }
+        // how far this copy has applied is answered from what the loop holds
+        // ([F45](../../../../docs/src/features/replica-migration.md))
+        if head.kind == ReplicateKind::Applied {
+            let applied = slot.state.borrow().applied.as_ref().map_or(0, |log_id| log_id.index);
+            let _ = reply.try_send(encode_reply(head.id, &applied));
+            return;
+        }
         // a digest is answered from what the loop holds
         // ([F44](../../../../docs/src/features/repair.md))
         if head.kind == ReplicateKind::Digest {
@@ -1253,6 +1329,15 @@ where
                     },
                     Err(error) => ReplicateReply::error(head.id, format!("decoding vote: {error}")),
                 },
+                // the lead handed to this member, or to another it is told about
+                // ([F45](../../../../docs/src/features/replica-migration.md))
+                ReplicateKind::TransferLeader => match postcard::from_bytes(&payload) {
+                    Ok(request) => match raft.handle_transfer_leader(request).await {
+                        Ok(response) => encode_reply(head.id, &response),
+                        Err(error) => ReplicateReply::error(head.id, format!("transfer_leader: {error}")),
+                    },
+                    Err(error) => ReplicateReply::error(head.id, format!("decoding transfer_leader: {error}")),
+                },
                 ReplicateKind::Propose => match Command::decode(&payload) {
                     Ok(command) => {
                         // one hop only: a proposal that arrived here is not forwarded again
@@ -1262,7 +1347,11 @@ where
                     Err(error) => ReplicateReply::error(head.id, format!("decoding a proposal: {error}")),
                 },
                 // a snapshot rpc and a digest are judged on the loop, so they are answered before this task
-                ReplicateKind::Snapshot | ReplicateKind::Digest | ReplicateKind::Quarantine => {
+                ReplicateKind::Snapshot
+                | ReplicateKind::Digest
+                | ReplicateKind::Quarantine
+                | ReplicateKind::Applied
+                | ReplicateKind::Retired => {
                     unreachable!("answered on the loop")
                 }
                 // a read barrier: confirm leadership with a heartbeat round and answer the
@@ -1529,7 +1618,9 @@ where
             }
             if state.checkpoint_index() < last.index {
                 state.checkpoint = Some(last.clone());
-                state.checkpoint_membership = state.membership.clone();
+                // the membership as of the checkpoint, not the one applied since it
+                // ([F45](../../../../docs/src/features/replica-migration.md))
+                state.checkpoint_membership = state.membership_at(last.index);
                 state.checkpoint_durable = false;
                 moved = true;
             }
@@ -1584,7 +1675,8 @@ where
                 file.groups.insert(
                     id.to_string(),
                     GroupCheckpoint::new(Some(applied.clone()), &state.checkpoint_membership)
-                        .retries(applied.index, state.retry_floor()),
+                        .retries(applied.index, state.retry_floor())
+                        .expired_before(state.expired_before),
                 );
             }
         }
@@ -1688,6 +1780,11 @@ where
                     volatile: slot.store.is_volatile(),
                     up: slot.raft.is_some(),
                     installing: state.installing,
+                    voters: metrics
+                        .as_ref()
+                        .map(|metrics| metrics.committed_membership_config.voter_ids().collect())
+                        .unwrap_or_default(),
+                    learner: slot.spec.learner,
                     quarantined: state.quarantined.map(|quarantine| quarantine.reason),
                 }
             })
@@ -1955,12 +2052,17 @@ where
             return Ok(());
         }
         slot.snapshot_building = true;
-        let (at_least, membership, retries) = {
+        let (at_least, memberships, retries, expired_before) = {
             let state = slot.state.borrow();
+            // every membership a cut between the checkpoint and here could be as of, the
+            // checkpoint's first; the compactor picks the one at its boundary
+            let mut memberships = vec![state.checkpoint_membership.clone()];
+            memberships.extend(state.memberships.iter().cloned());
             (
                 state.checkpoint.clone(),
-                state.membership.clone(),
+                memberships,
                 state.dedup.iter().rev().map(|(request, remembered)| (*request, *remembered)).collect::<Vec<_>>(),
+                state.expired_before,
             )
         };
         let tablets = slot.spec.tablets.clone();
@@ -1978,10 +2080,11 @@ where
                 .into_iter()
                 .filter(|(_, remembered)| remembered.applied <= boundary.index)
                 .collect();
+            let membership = membership_as_of(&memberships, boundary.index);
             let tx = self.shard_local_tx.clone();
             let table_id = table.table_id();
             glommio::spawn_local(async move {
-                let outcome = write_volatile_snapshot(&dir, group, table_id, schema_id, boundary, membership, tablets, records, remembered)
+                let outcome = write_volatile_snapshot(&dir, group, table_id, schema_id, boundary, membership, tablets, records, remembered, expired_before)
                     .await
                     .map_err(|error| format!("{error:?}"));
                 let _ = tx.send(ServerMsg::SnapshotBuilt { group, outcome }).await;
@@ -2005,8 +2108,9 @@ where
             schema_id,
             tablets,
             at_least,
-            membership,
+            memberships,
             retries,
+            expired_before,
             dir,
         })
         .await?;
@@ -2127,6 +2231,7 @@ where
 /// * `tablets` - The tablets the group serves
 /// * `records` - Every resident partition of those tablets, as its key and archived bytes
 /// * `remembered` - The remembered requests at or below the boundary, oldest first
+/// * `expired_before` - The newest time-ordered identity the group has forgotten
 #[allow(clippy::too_many_arguments)]
 async fn write_volatile_snapshot(
     dir: &std::path::Path,
@@ -2138,6 +2243,7 @@ async fn write_volatile_snapshot(
     tablets: Vec<u16>,
     records: Vec<(u64, Vec<u8>)>,
     remembered: Vec<(RequestId, Remembered)>,
+    expired_before: u64,
 ) -> std::io::Result<(PathBuf, SnapshotManifest)> {
     std::fs::create_dir_all(dir)?;
     let path = dir.join(snapshot::snapshot_name(group, boundary.index));
@@ -2166,8 +2272,32 @@ async fn write_volatile_snapshot(
             total,
             checksum,
             retries: u32::try_from(remembered.len()).unwrap_or(u32::MAX),
+            expired_before,
         },
     ))
+}
+
+/// The membership as of a boundary: the newest of the candidates applied at or below it
+///
+/// The candidates are the checkpoint's membership first and every one applied since, so a cut
+/// carries what the receiver's log will continue from rather than a membership whose entry
+/// arrives after the install ([F45](../../../../docs/src/features/replica-migration.md)).
+///
+/// # Arguments
+///
+/// * `memberships` - The candidates, oldest first
+/// * `boundary` - The cut's boundary
+#[must_use]
+pub fn membership_as_of(
+    memberships: &[openraft::type_config::alias::StoredMembershipOf<DataConfig>],
+    boundary: u64,
+) -> openraft::type_config::alias::StoredMembershipOf<DataConfig> {
+    memberships
+        .iter()
+        .rev()
+        .find(|membership| membership.log_id().as_ref().is_none_or(|log_id| log_id.index <= boundary))
+        .cloned()
+        .unwrap_or_default()
 }
 
 /// The openraft configuration a group runs under
@@ -2239,7 +2369,8 @@ fn spawn_group_start<D: ShoalDatabase>(
     previous: Option<Raft<DataConfig, GroupMachine<D>>>,
 ) {
     let addr = ShardAddr::new(me, spec.mine);
-    let primary = spec.is_primary(me);
+    // a learner is never the primary, whatever slot the target puts it in
+    let primary = spec.is_primary(me) && !spec.learner;
     glommio::spawn_local(async move {
         // the old handle first, whole, so two cores never share one log
         if let Some(previous) = previous {
@@ -2303,6 +2434,13 @@ async fn start_group<D: ShoalDatabase>(
         Err(error) => return Err((group, format!("asking whether the group is initialized: {error}"))),
     };
     let members: BTreeMap<ShardAddr, ShardAddr> = spec.members.iter().map(|member| (*member, *member)).collect();
+    // a learner initializes nothing and elects nobody: the group exists on its members, and
+    // the leader's replication is what brings this copy up
+    // ([F45](../../../../docs/src/features/replica-migration.md))
+    if spec.learner {
+        event!(Level::INFO, msg = "built a tablet group as its learner", group = %group, members = spec.members.len());
+        return Ok((group, raft));
+    }
     if !initialized && (primary || spec.members.len() == 1) {
         if let Err(error) = raft.initialize(members.clone()).await {
             event!(Level::DEBUG, msg = "a group was initialized already", group = %group, %error);

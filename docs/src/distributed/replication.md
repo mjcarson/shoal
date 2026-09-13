@@ -28,7 +28,10 @@ snapshot is that checkpoint, the purge follows it, and a segment goes once every
 past it. Rotation advances nothing but the durable position. Since M6
 ([F42](../features/primary-failover.md)) the retry table is persisted beside the checkpoint as
 `retries.bin` and seeded at open, so a retry after the purge point is answered as the first
-attempt was; the checkpoint carries the table's low-water mark for M9a's expiry check; a
+attempt was; the checkpoint carries the table's low-water mark ~~for M9a's expiry check~~ and,
+since [F45](../features/replica-migration.md), the newest time-ordered identity the table has
+forgotten, which with `replication.retry_window` is what a retry is judged expired against
+before it is proposed - `IdentityExpired` by name, never applied as new; a
 leader whose lease lapsed answers `NotLeader` before it appends rather than `OutcomeUnknown`
 at its deadline; a proposal hopping to a leader whose link is down is `NotLeader` at once when
 its frame was never written; and a client can pin its bundle id as the identity and retry

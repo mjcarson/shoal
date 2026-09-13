@@ -25,6 +25,7 @@
 //! workload that is never run.
 
 pub mod cluster_background;
+pub mod cluster_migration;
 pub mod cluster_catchup;
 pub mod cluster_failover;
 pub mod cluster_hop;
@@ -181,6 +182,14 @@ pub fn all() -> Vec<Box<dyn Workload>> {
     // ([F44](../../docs/src/features/repair.md))
     built.extend(
         cluster_background::all()
+            .into_iter()
+            .map(|workload| Box::new(workload) as Box<dyn Workload>),
+    );
+    // the migration arm, appended after the background arm: the same placement with a spare
+    // beside it and one set moved to the spare inside the run
+    // ([F45](../../docs/src/features/replica-migration.md))
+    built.extend(
+        cluster_migration::all()
             .into_iter()
             .map(|workload| Box::new(workload) as Box<dyn Workload>),
     );

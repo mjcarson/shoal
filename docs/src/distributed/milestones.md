@@ -1,7 +1,7 @@
 # Milestones
 
 The Before-M0 gate is settled ([decision record](protocol.md#decision-record), 2026-09-11), and
-~~M0, M1 and M2~~ M0 through M7 are delivered. Keep M0–M10 as stable identifiers; M9a/b/c refine M9
+~~M0, M1 and M2~~ ~~M0 through M7~~ M0 through M8 and M9a are delivered. Keep M0–M10 as stable identifiers; M9a/b/c refine M9
 without renumbering later work. Acceptance tests live in their owning C pages and are indexed
 by [C11](testing.md#the-acceptance-test-table). Each test names one gate below. This is an order
 with dependencies and measurable exit criteria, not dates.
@@ -138,7 +138,7 @@ are runnable as `cargo test -p shoal --test cluster_fixture`; the fanout measure
 run -p shoal-spike --release -- fanout`. What was delivered, what was not, and the evidence are
 on the F page; the rest of this section is the gate as it was set. *Not done, on purpose:* the
 map is an ordered node list pushed whole, not per-tablet records or deltas - those arrive when a
-tablet can move (M9a); `Initialize` is applied once and a second is refused naming M9a; `Down`
+tablet can move (~~M9a~~ a set's configuration rides the map since [F45](../features/replica-migration.md)); `Initialize` is applied once and a second is refused ~~naming M9a~~ naming the `Move` operation; `Down`
 moves nothing, and grace expiry, `Leaving`, `Removing` and removal are M9b's; a replication
 factor above one is desired and reported, with one copy served (M4); a certificate is still not
 bound to a node - Q11's identity half is the incarnation, and the SAN stays unread; the
@@ -294,7 +294,7 @@ row as `cargo test -p shoal-bench`, with the retry table's persistence, the rout
 detector's fix and the client's retry loop as unit tests beside them. What was delivered, what
 was not, and the evidence are on the F page; the rest of this section is the gate as it was
 set. *Not done, on purpose:* leadership is not moved toward a reader or back to a returning
-node; identity expiry is M9a's and only the floor is recorded; a returning leader waits out
+node; ~~identity expiry is M9a's and only the floor is recorded~~ identity expiry arrived with [F45](../features/replica-migration.md); a returning leader waits out
 its old lease before its groups are led again ([item 103](../appendix/known-issues.md#103-a-returning-leader-is-refused-its-own-re-election-until-its-old-lease-lapses-and-hops-to-it-wait));
 catch-up past the purge point is M7's; streams never retry; no coverage list rides the
 response frame; a `Down` member is never removed (M9b); leases stay deferred (Q6); and the
@@ -437,7 +437,8 @@ Corrupt primary and followers separately; vary archive layout, deletes and check
 
 **Evidence/exit.** Corruption detected and repaired from justified evidence, or stopped with an
 actionable unresolved state. Measure scrub/repair resource and foreground-latency interference.
-Migration interaction is tested when its implementation arrives in M9a.
+~~Migration interaction is tested when its implementation arrives in M9a.~~ Migration interaction
+is `repair_serializes_with_migration_and_new_commits`, delivered with [F45](../features/replica-migration.md).
 *Met:* a corrupt primary and corrupt followers are found by their checksums and repaired from
 a verified majority, a split nobody can judge stops with every digest recorded and every copy
 as it was, and an operator's word resolves it; the layout, the deletes and the checkpoint
@@ -460,6 +461,40 @@ and safe node replacement can be delivered before retiring the local shard-count
 
 ### M9a. Safe replica migration
 
+**Delivered** on 2026-09-13 as [F45](../features/replica-migration.md). All nine fixture rows
+below are runnable as `cargo test -p shoal --test cluster_fixture -- --test-threads 6`, the C10
+rows as `cargo test -p shoal-bench`, with the map's overlay, the record's apply and queueing,
+the identity window, the forgotten log and the `migration:` block's bounds as unit tests beside
+them. What was delivered, what was not, and the evidence are on the F page; the rest of this
+section is the gate as it was set. *Not done, on purpose:* a move is of a whole replica set -
+every table's group over the tablets the rule placed together - since routing is per tablet,
+and the set's groups move one at a time per shard; there is no transfer budget, no disk reserve,
+no same-node move, no replication factor change and no operator-chosen destination shard, all
+M9b's; a learner is fed the whole group's snapshot where a log tail would do
+([O55](../appendix/optimizations.md#o55-a-learner-inside-the-retained-log-is-fed-a-snapshot-when-the-leaders-cached-cut-is-newer-than-its-purge-point));
+a stale route is answered by the origin's one further send rather than a relayed second hop;
+identity expiry is judged on the coordinator's own replica against a wall clock and its own
+eviction watermark, never in apply; a failed move leaves each group where its committed
+membership says and is finished by asking again; and the migration arm ran at smoke scale on
+the development host, where the destination was fed by log and no snapshot byte was priced.
+
+| Test | Where | What it asserts |
+| --- | --- | --- |
+| `move_preserves_write_after_zero_lag_report` | `shoal/tests/cluster_fixture.rs` ([C8](rebalancing.md)) | Three placed nodes and a spare, the set node two leads moved to node three while writes land on it throughout. Once the destination has reported no lag, the source's shard holds its shares and a batch through the source is acknowledged well after that report. Every write acknowledged during the move reads back through the destination and both survivors once the source has retired, the source no longer hosts the group, every digest agrees, and the map carries the set's configuration |
+| `migration_resumes_after_each_phase_failure` | `shoal/tests/cluster_fixture.rs` ([C8](rebalancing.md)) | One set moved back and forth between node two and node three eighteen times: at each of the six phases a driver commits, once with the driver of the persistent table's group armed to die right after the commit, once with the destination killed as the phase is reached, once with the control leader killed there. Every move completes `Moved` from its record. Writers through every node update and delete the set's keys throughout under identities with a retry budget; the ledger of their answers and a read of every key on every holder afterwards is accepted by the sequential oracle, and every holder's digest agrees |
+| `learner_never_counts_before_configuration_commit` | `shoal/tests/cluster_fixture.rs` ([C8](rebalancing.md)) | Once the destination is being fed, the old quorum is made short by one - a follower paused and the data lanes between the leader and the other cut - so the leader has itself and a learner with every entry. A write through the leader is acknowledged unknown and never committed: it is not visible on the leader's own copy, and no group passes `Reconfiguring`. Healed, the write commits, the transition commits, and the move finishes with every key on the destination |
+| `retired_copy_never_serves_from_grace_files` | `shoal/tests/cluster_fixture.rs` ([C8](rebalancing.md)) | At a factor of two, node one's control lanes are cut so its map stays at the placement while the pair node two holds with node zero is moved to node three, the rows archived on the source first. After publication node zero writes values only the new configuration holds. A read through node one is forwarded to node two by its stale map, refused `StaleTopology` there rather than answered from the retained rows, sent once to node zero, and is the new value; the source's marker and archived partition exist during the grace and are gone after it; healed, node one reads its own way |
+| `shared_wal_cleanup_preserves_other_tablets` | `shoal/tests/cluster_fixture.rs` ([C8](rebalancing.md)) | One set moved from node two and retired there while writes land on node two's other sets, the WAL rotated and compacted, node two restarted and compacted again. Every key of the other sets reads through node two as through node zero, the retired tablets' partitions are gone from node two, the moved set is whole on its new holders, and the segments that held the retired group's frames beside the others' are reclaimed once the others purge past them |
+| `stale_routes_terminate_without_duplicate_writes` | `shoal/tests/cluster_fixture.rs` ([C4](tablet-map.md)) | The same stale router, writing under identities during the move, after the retirement, and after the source is killed. Each write is the value or a named error inside the bundle deadline, never silence; the stale refusals are met and sent on; every acknowledged key reads back on both holders with exactly the value last acknowledged |
+| `data_configuration_outlives_stale_placement_hint` | `shoal/tests/cluster_fixture.rs` ([C4](tablet-map.md)) | The driver of the persistent table's group armed to die right after committing `Configured`, before `Activated` and so before publication. The destination's committed voters name it and not the source while every map still places the set by the rule and carries no configuration. Restarted, the record is finished forward from the group's committed membership - never a transition back - the move completes, writes commit through the new configuration and read back on the destination, and the source is never a voter again |
+| `retry_identity_survives_snapshot_and_migration` | `shoal/tests/cluster_fixture.rs` ([C5](replication.md)) | A note written under a time-ordered identity through its set's leader, the leader checkpointed past it, the set moved to node three. A retry of the identity through the destination and through the leader is the original result, once; the identity under a changed payload is refused by name; an identity minted before the window is `IdentityExpired` through every node; a fresh identity that is not time-ordered is applied |
+| `repair_serializes_with_migration_and_new_commits` | `shoal/tests/cluster_fixture.rs` ([C9](operations.md)) | A verify of the set asked for as it moves is queued behind the move; writes keep committing; the move finishes; the repair then runs on the new configuration and reports clean with node three among its reports and the retired source absent. A move back asked for while a second verify runs is queued behind the repair and runs after it. A partition corrupted on the source before the first move never reaches a holder |
+| `a_configuration_overrides_the_rule_and_keeps_the_id` | `shoal-core/src/server/map.rs` ([C4](tablet-map.md)) | A move's destination derives the set's groups as learner specs on the shard the record names, is placed, and holds nothing; the configuration overrides the rule for exactly the set's tablets, the identity is the one the rule minted on every node, the source no longer hosts the group, and the rings route the moved set to its new holders |
+| `the_migration_block_parses_with_its_defaults`, `validation_refuses_what_is_not_built` | `shoal-core/src/server/conf/cluster.rs` | A lag of sixty-four entries, a ten minute phase timeout, a five minute grace and one move at a time; a timeout under the snapshot timeout, no moves at a time and a retry window under the write timeout refused by name |
+| `an_identity_past_the_window_is_expired` | `shoal-core/src/server/replication/machine.rs` ([C5](replication.md)) | An identity inside the window is not expired and one outside it is; a random identity never is; the table filled past its bound moves the watermark to the oldest identity's time and an unknown identity older than that is expired inside the window; a forgotten random identity moves nothing; the checkpoint carries the watermark and a file without it seeds zero |
+| `migration_capture_records_transfer_and_pauses` | `shoal-bench/src/workloads/harness/background.rs` ([C10](performance.md)) | A timeline cut at the move's marks into three windows with the slower middle one, a bucket per second, the phases and the transfer carried, `unfinished` for a run that ended first; an F44 record loads without the block |
+| `the_migration_arm_places_a_fourth_node` | `shoal-bench/src/workloads/cluster_migration.rs` ([C10](performance.md)) | The arm on the kill arm's durable placement and scale with one spare beside it and a short grace, no fault, a move from a placed node to the spare inside the run, its id appended after the background arm |
+
 **Delivers.** Durable transition records; nonvoting learner catch-up; library configuration transition
 with required old/new quorums; activation barrier; leadership transfer; metadata reconciliation;
 bounded stale routing and delayed safe cleanup. Per-tablet serialization with repair and RF changes.
@@ -470,6 +505,18 @@ at every phase and an acknowledged write after a zero-lag report.
 
 **Evidence/exit.** Every phase resumes safely; old-config in-flight operations survive publication
 and retirement. Verify foreground correctness first; record transfer bytes/duration and pauses.
+*Met:* every phase resumes from its record under a killed driver, destination and control
+leader, eighteen times over one set, with the oracle accepting the writers' history; a write
+acknowledged after the zero-lag report is on the destination once the source retired; a
+caught-up learner never counts before the uniform commit; a stale router's read is refused by
+the retired source and answered by a survivor, its writes terminate in two sends without a
+duplicate, and the source's files go after the grace without touching the other tablets' history
+in the shared WAL; a retry identity is the original result across a checkpoint and a move and
+expires by its own time. *Met in shape, not in number:* the migration arm records the transfer
+and the pauses, and ran at smoke scale on the development host only - the move done in seven
+seconds, the destination fed by log; the capture is the benchmark host's. *Decided:*
+[Q4 and Q5 at M9a](protocol.md#q4-and-q5-at-m9a) - a time-ordered identity with a window and a
+watermark, and a token that survives a move under the pinned identity.
 
 ### M9b. Capacity-aware rebalancing and removal
 

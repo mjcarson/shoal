@@ -818,6 +818,7 @@ mod tests {
                 fault: None,
                 catchup: None,
                 background: None,
+                migration: None,
             });
         }
         capture

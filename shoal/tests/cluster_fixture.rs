@@ -14,7 +14,7 @@
 //! `cargo test`; the fixture runs them by name with `--exact --ignored`.
 
 use std::io::Write as _;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use shoal::client::Shoal;
 use shoal::server::conf::{Cluster as ClusterConf, Networking, Resources};
@@ -1163,6 +1163,10 @@ async fn cluster_server_child() {
             if let Some(ms) = staged.snapshot_timeout_ms {
                 replication.snapshot_timeout = Duration::from_millis(ms).into();
             }
+            // the retry window ([F45](../../docs/src/features/replica-migration.md))
+            if let Some(ms) = staged.retry_window_ms {
+                replication.retry_window = Duration::from_millis(ms).into();
+            }
             block = block.replication(replication);
             if let Some(bytes) = staged.bulk_queue_bytes {
                 block.transport.bulk_queue_bytes = bytes;
@@ -1173,6 +1177,16 @@ async fn cluster_server_child() {
             }
             if let Some(ms) = staged.scrub_interval_ms {
                 block.repair.scrub_interval = Some(Duration::from_millis(ms).into());
+            }
+            // the move's lag, deadline and grace ([F45](../../docs/src/features/replica-migration.md))
+            if let Some(ms) = staged.retire_after_ms {
+                block.migration.retire_after = Duration::from_millis(ms).into();
+            }
+            if let Some(lag) = staged.catchup_lag {
+                block.migration.catchup_lag = lag;
+            }
+            if let Some(ms) = staged.migration_timeout_ms {
+                block.migration.timeout = Duration::from_millis(ms).into();
             }
             // the default read level, which every bundle without an override inherits
             // ([F41](../../docs/src/features/read-consistency.md))
@@ -1231,6 +1245,10 @@ async fn cluster_server_child() {
         }
         if let Some(ms) = staged.install_hold_ms {
             pool.hold_install(ms);
+        }
+        // a move phase to die right after committing ([F45](../../docs/src/features/replica-migration.md))
+        if let Some(phase) = &staged.move_crash_at {
+            pool.move_crash_at(phase, None).expect("a move phase the fixture names exists");
         }
     }
     // ready means every shard is answering, on the port the pool resolved, and the control
@@ -1670,6 +1688,71 @@ fn handle_command(
         "REPAIR_STATUS" => match parts.next().and_then(|text| text.parse::<uuid::Uuid>().ok()) {
             Some(op) => admin(AdminKind::RepairStatus { op }),
             None => Err("REPAIR_STATUS needs an operation id".to_string()),
+        },
+        // move the replica set holding a key's tablet from one node to another, as the
+        // process, and answer the operation it was recorded under
+        // ([F45](../../docs/src/features/replica-migration.md))
+        "MOVE" => {
+            let key = parts.next().and_then(|hex| u64::from_str_radix(hex, 16).ok());
+            let from = node_at(&mut parts);
+            let to = node_at(&mut parts);
+            match (key, from, to) {
+                (Some(key), Some(from), Some(to)) => {
+                    // truncation cannot happen: a tablet id is twelve bits
+                    #[allow(clippy::cast_possible_truncation)]
+                    let tablet = tablet_of(key) as u16;
+                    let kind = AdminKind::Move { tablet, from, to };
+                    let op = uuid::Uuid::new_v4();
+                    let mut last = String::new();
+                    let mut answer = None;
+                    for _ in 0..8 {
+                        let version = pool.topology().map(|topology| topology.version).unwrap_or(0);
+                        match pool.admin(AdminRequest { op, expected_version: version, kind: kind.clone() }) {
+                            Ok(response) => match response.outcome {
+                                Ok(shoal::shared::protocol::admin::AdminOutcome::Applied { version })
+                                | Ok(shoal::shared::protocol::admin::AdminOutcome::Repeated { version }) => {
+                                    answer = Some(Ok(serde_json::json!({ "op": op.to_string(), "version": version, "tablet": tablet })));
+                                    break;
+                                }
+                                Ok(other) => {
+                                    answer = Some(Err(format!("MOVE answered {other:?}")));
+                                    break;
+                                }
+                                Err(error) if error.code() == shoal::shared::protocol::error::ErrorCode::StaleVersion => {
+                                    last = format!("{}: {}", error.code(), error.msg);
+                                    std::thread::sleep(Duration::from_millis(100));
+                                }
+                                Err(error) => {
+                                    answer = Some(Err(format!("{}: {}", error.code(), error.msg)));
+                                    break;
+                                }
+                            },
+                            Err(error) => {
+                                answer = Some(Err(format!("{error:?}")));
+                                break;
+                            }
+                        }
+                    }
+                    answer.unwrap_or(Err(last))
+                }
+                _ => Err("MOVE needs a key in hex, a source node index and a destination node index".to_string()),
+            }
+        }
+        // arm a move phase, so this node's driver of a group - or of whichever group commits
+        // the phase first - dies right after committing it
+        "MOVE_CRASH_AT" => match parts.next() {
+            Some(phase) => {
+                let group = parts.next().and_then(|hex| u64::from_str_radix(hex, 16).ok()).map(shoal::shared::identity::GroupId);
+                pool.move_crash_at(phase, group)
+                    .map(|()| serde_json::json!({ "armed": phase }))
+                    .map_err(|error| format!("{error:?}"))
+            }
+            None => Err("MOVE_CRASH_AT needs a phase name".to_string()),
+        },
+        // the record of a move, by its operation
+        "MOVE_STATUS" => match parts.next().and_then(|text| text.parse::<uuid::Uuid>().ok()) {
+            Some(op) => admin(AdminKind::MoveStatus { op }),
+            None => Err("MOVE_STATUS needs an operation id".to_string()),
         },
         // propose a scrub of a group through this node, which has to lead it, and poll every
         // member's digest ([F44](../../docs/src/features/repair.md))
@@ -4637,6 +4720,53 @@ fn repair_as_process(cluster: &mut Cluster, node: usize, kind: &shoal::server::A
         .as_str()
         .and_then(|op| op.parse().ok())
         .ok_or_else(|| FixtureError::NotReady(format!("the repair was not recorded: {reply}")))
+}
+
+/// Ask for a move of the set holding a key through one node, as the process
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `node` - The node to ask through
+/// * `key` - A key in the set
+/// * `from` - The node leaving the set
+/// * `to` - The node replacing it
+fn move_as_process(cluster: &mut Cluster, node: usize, key: u64, from: usize, to: usize) -> Result<uuid::Uuid, FixtureError> {
+    let started = Instant::now();
+    loop {
+        let reply = cluster.node_mut(node).command(&format!("MOVE {key:016x} {from} {to}"))?;
+        if let Some(op) = reply["ok"]["op"].as_str() {
+            return op.parse().map_err(|error| FixtureError::ChildFailed(format!("MOVE answered {op}: {error}")));
+        }
+        // a control leader being elected after a kill is waited for, as an operator would
+        let electing = reply["error"].as_str().is_some_and(|error| error.starts_with("NotLeader"));
+        if !electing || started.elapsed() > Duration::from_secs(30) {
+            return Err(FixtureError::ChildFailed(format!("MOVE answered {reply}")));
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
+/// Poll a move's record through one node until it is done, or the time is up
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `node` - The node to ask through
+/// * `op` - The operation
+/// * `within` - How long to wait
+fn wait_move_done_via(cluster: &mut Cluster, node: usize, op: uuid::Uuid, within: Duration) -> Result<serde_json::Value, FixtureError> {
+    let started = Instant::now();
+    let mut last = serde_json::Value::Null;
+    while started.elapsed() < within {
+        let record = cluster.node_mut(node).command(&format!("MOVE_STATUS {op}"))?["ok"].clone();
+        if record["phase"] == "Done" {
+            return Ok(record);
+        }
+        last = record;
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    Err(FixtureError::ChildFailed(format!("move {op} did not finish within {within:?}: {last}")))
 }
 
 /// Wait until every group of a repair is done, asking a node as the process
@@ -7810,6 +7940,1313 @@ async fn quorum_history_survives_repeated_elections() -> Result<(), FixtureError
     let ledger = ledger.lock().unwrap().clone();
     shoal_model::oracle::check(&ledger).unwrap_or_else(|error| panic!("the history is not sequential: {error:?}"));
     for id in 0..3 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
+
+/// A four node cluster with three placed at a factor of three and a fourth member unplaced
+///
+/// The shape every migration test starts from: node three joined after the placement was
+/// initialized and holds nothing until a move brings it in
+/// ([F45](../../docs/src/features/replica-migration.md)).
+///
+/// # Arguments
+///
+/// * `builder` - The rest of the cluster's shape
+async fn three_placed_one_spare(builder: cluster::ClusterBuilder) -> Result<Cluster, FixtureError> {
+    let mut cluster = builder.cluster(4, CoreClaim::Count(1)).replication_factor(3).lane_links(true).initialize(false).start().await?;
+    cluster.initialize(&[0, 1, 2])?;
+    Ok(cluster)
+}
+
+/// Every key of the persistent table that node zero's map puts in a group, from a start
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `group` - The group, in hex
+/// * `from` - The first key to try
+/// * `count` - How many to find
+fn note_keys_in_group(cluster: &mut Cluster, group: &str, from: u64, count: usize) -> Result<Vec<u64>, FixtureError> {
+    keys_in_group(cluster, "Note", group, from, count)
+}
+
+/// Whether a node hosts a group, as its own `GROUPS` view has it
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `node` - The node
+/// * `group` - The group, in hex
+fn hosts_group(cluster: &mut Cluster, node: usize, group: &str) -> Result<bool, FixtureError> {
+    let view = groups_of(cluster, node)?;
+    let wanted = u64::from_str_radix(group, 16).unwrap_or_default();
+    Ok(view["shards"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|shard| shard["groups"].as_array().into_iter().flatten())
+        .any(|found| found["group"].as_u64() == Some(wanted)))
+}
+
+/// A write acknowledged after the destination reports zero lag is on the destination (C8 M9a)
+///
+/// Three placed nodes and a spare. The set node two leads is moved to node three while
+/// writes keep landing on it: the destination is fed as a learner, made a voter through the
+/// group's own transition, published, and the source's copy retired. Once the destination
+/// has reported no lag, the source's shard holds its shares and a batch through the source is
+/// acknowledged well after that report. Every write acknowledged during the move reads back
+/// through the destination and both survivors once the source has retired, the source no
+/// longer hosts the group, and every digest agrees
+/// ([F45](../../docs/src/features/replica-migration.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn move_preserves_write_after_zero_lag_report() -> Result<(), FixtureError> {
+    let mut cluster = three_placed_one_spare(
+        Cluster::builder()
+            .write_timeout(Duration::from_secs(3))
+            .query_deadline(Duration::from_secs(3))
+            .retire_after(Duration::from_secs(2))
+            .catchup_lag(0),
+    )
+    .await?;
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    let addr3 = cluster.node(3).endpoints.client.to_string();
+    let ok = |error: shoal::client::Errors| FixtureError::NotReady(format!("{error:?}"));
+    let client = Shoal::<TestDbClient>::new(&addr0).await.map_err(ok)?;
+    // a set node two leads, and keys in it on both tables
+    let (key, group) = key_led_by(&mut cluster, "Note", 2, 9000)?;
+    let keys = note_keys_in_group(&mut cluster, &group, 9000, 12)?;
+    assert!(keys.contains(&key));
+    for key in &keys {
+        client.send_one(Note { key: *key, text: format!("before-{key}") }).await.map_err(ok)?;
+        client.send_one(Row { key: *key, data: format!("before-{key}") }).await.map_err(ok)?;
+    }
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    assert!(hosts_group(&mut cluster, 2, &group)?);
+    assert!(!hosts_group(&mut cluster, 3, &group)?);
+    // the move, with writes landing on the set throughout; once the destination has reported
+    // no lag, the source's shard holds its shares so a batch through the source is answered
+    // well after that report, which is exactly the write the barrier is for
+    let op = move_as_process(&mut cluster, 0, key, 2, 3)?;
+    wait_move_phase(&mut cluster, 0, op, 3, Duration::from_secs(60))?;
+    let _ = cluster.node_mut(2).command("HOLD_SHARES 0 1500")?;
+    let addr2 = cluster.node(2).endpoints.client.to_string();
+    for key in &keys {
+        write_note_eventually(&addr2, *key, &format!("held-{key}"), Duration::from_secs(20)).await?;
+    }
+    let mut round = 0u64;
+    let started = std::time::Instant::now();
+    let record = loop {
+        for key in &keys {
+            write_note_eventually(&addr0, *key, &format!("during-{key}-{round}"), Duration::from_secs(15)).await?;
+        }
+        round += 1;
+        let record = cluster.node_mut(0).command(&format!("MOVE_STATUS {op}"))?["ok"].clone();
+        if record["phase"] == "Done" {
+            break record;
+        }
+        assert!(started.elapsed() < Duration::from_secs(180), "the move never finished: {record}");
+    };
+    assert_eq!(record["outcome"], serde_json::json!("Moved"), "{record}");
+    // one more round after the source retired, and every key reads back on the destination
+    for key in &keys {
+        write_note_eventually(&addr0, *key, &format!("after-{key}"), Duration::from_secs(15)).await?;
+    }
+    for key in &keys {
+        wait_note(&addr3, *key, Some(&format!("after-{key}")), Duration::from_secs(15)).await?;
+    }
+    // the source no longer hosts the group, the destination does, and every copy agrees
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while hosts_group(&mut cluster, 2, &group)? {
+        assert!(std::time::Instant::now() < deadline, "node two still hosts the moved group");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    assert!(hosts_group(&mut cluster, 3, &group)?);
+    wait_digests_equal(&mut cluster, &[0, 1, 3], "Note", Duration::from_secs(30))?;
+    wait_digests_equal(&mut cluster, &[0, 1, 3], "Row", Duration::from_secs(30))?;
+    // the record carries the transfer's timings and the map carries the configuration
+    let group_record = &record["groups"];
+    assert!(group_record.as_object().is_some_and(|groups| groups.len() == 2), "{record}");
+    let map = cluster.node_mut(3).command("MAP")?;
+    assert_eq!(map["ok"]["configurations"].as_array().map_or(0, Vec::len), 1, "{}", map["ok"]["configurations"]);
+    for id in 0..4 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
+
+/// The record of a move, as one node holds it
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `via` - The node to ask
+/// * `op` - The operation
+fn move_record_via(cluster: &mut Cluster, via: usize, op: uuid::Uuid) -> Result<serde_json::Value, FixtureError> {
+    Ok(cluster.node_mut(via).command(&format!("MOVE_STATUS {op}"))?["ok"].clone())
+}
+
+/// Where a move phase stands in the order a move goes through, by its record spelling
+///
+/// # Arguments
+///
+/// * `phase` - The phase, as the record's JSON spells it
+fn move_phase_rank(phase: &serde_json::Value) -> u8 {
+    match phase.as_str() {
+        Some("Planned") => 1,
+        Some("Learner") => 2,
+        Some("CatchingUp") => 3,
+        Some("Reconfiguring") => 4,
+        Some("Configured") => 5,
+        Some("Activated") => 6,
+        Some("Published") => 7,
+        Some("Retiring") => 8,
+        Some("Done") => 9,
+        // queued is an object
+        _ => 0,
+    }
+}
+
+/// The highest phase any group of a move has reached, and whether the record is done
+///
+/// # Arguments
+///
+/// * `record` - The record
+fn move_progress(record: &serde_json::Value) -> (u8, bool) {
+    let groups = record["groups"].as_object();
+    let highest = groups
+        .into_iter()
+        .flat_map(|groups| groups.values())
+        .map(|group| move_phase_rank(&group["phase"]))
+        .max()
+        .unwrap_or(0);
+    let published = record["phase"] == "Published" || record["phase"] == "Done";
+    (highest.max(if published { 7 } else { 0 }), record["phase"] == "Done")
+}
+
+/// Wait until any group of a move has reached a phase, or the record is done
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `via` - The node to ask
+/// * `op` - The operation
+/// * `rank` - The phase's rank
+/// * `within` - How long to wait
+fn wait_move_phase(cluster: &mut Cluster, via: usize, op: uuid::Uuid, rank: u8, within: Duration) -> Result<serde_json::Value, FixtureError> {
+    let started = Instant::now();
+    loop {
+        let record = move_record_via(cluster, via, op)?;
+        let (highest, done) = move_progress(&record);
+        if highest >= rank || done {
+            return Ok(record);
+        }
+        if started.elapsed() > within {
+            return Err(FixtureError::ChildFailed(format!("move {op} never reached phase rank {rank}: {record}")));
+        }
+        std::thread::sleep(Duration::from_millis(30));
+    }
+}
+
+/// The committed voters of a group, as one node's handle has them, by node index
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `node` - The node
+/// * `group` - The group, in hex
+fn voters_of(cluster: &mut Cluster, node: usize, group: &str) -> Result<Vec<usize>, FixtureError> {
+    let view = groups_of(cluster, node)?;
+    let ids = cluster.node_ids();
+    let wanted = u64::from_str_radix(group, 16).unwrap_or_default();
+    let found = view["shards"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|shard| shard["groups"].as_array().into_iter().flatten())
+        .find(|found| found["group"].as_u64() == Some(wanted))
+        .ok_or_else(|| FixtureError::ChildFailed(format!("node {node} does not host group {group}")))?;
+    let mut voters: Vec<usize> = found["voters"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|voter| voter["node"].as_str().and_then(|id| ids.iter().position(|known| known == id)))
+        .collect();
+    voters.sort_unstable();
+    Ok(voters)
+}
+
+/// Restart the named nodes, and wait until they have joined again
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `dead` - The nodes
+fn restart_all(cluster: &mut Cluster, dead: &[usize]) -> Result<(), FixtureError> {
+    for id in dead {
+        cluster.restart(*id, NodeKind::Server)?;
+    }
+    if !dead.is_empty() {
+        cluster.wait_joined(dead)?;
+    }
+    Ok(())
+}
+
+/// Wait until some node has died on its own, and say which
+///
+/// A process that exited is a zombie until the fixture reaps it and still answers a signal,
+/// so its stdout closing is what says it is gone; a second driver committing the same phase
+/// a moment later dies too, which the pause after the first is for.
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `within` - How long to wait
+fn wait_any_dead(cluster: &Cluster, within: Duration) -> Result<Vec<usize>, FixtureError> {
+    let started = Instant::now();
+    let mut dead = Vec::new();
+    let mut first_seen: Option<Instant> = None;
+    loop {
+        for id in 0..cluster.len() {
+            if cluster.is_started(id) && !dead.contains(&id) && cluster.node(id).failure().is_some() {
+                dead.push(id);
+                first_seen.get_or_insert_with(Instant::now);
+            }
+        }
+        if first_seen.is_some_and(|seen| seen.elapsed() > Duration::from_millis(750)) {
+            dead.sort_unstable();
+            return Ok(dead);
+        }
+        if started.elapsed() > within {
+            return Err(FixtureError::ChildFailed("no node died at the armed phase".to_string()));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// A caught-up learner never counts toward the old quorum before the configuration commits (C8 M9a)
+///
+/// The set node zero leads is moved from node two to node three. Once the destination is
+/// being fed and has caught up, the old quorum is made short by one - node one paused and the
+/// data lanes between the leader and node two cut - so the leader has itself and a learner
+/// with every entry. A write through the leader is acknowledged unknown and never committed:
+/// it is not visible on the leader's own copy, and no group passes `Reconfiguring`. Healed,
+/// the write commits, the transition commits, and the move finishes with every key on the
+/// destination ([F45](../../docs/src/features/replica-migration.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn learner_never_counts_before_configuration_commit() -> Result<(), FixtureError> {
+    use shoal::shared::protocol::error::ErrorCode;
+    let mut cluster = three_placed_one_spare(
+        Cluster::builder()
+            .write_timeout(Duration::from_secs(2))
+            .query_deadline(Duration::from_secs(3))
+            .retire_after(Duration::from_secs(1))
+            .catchup_lag(0)
+            .migration_timeout(Duration::from_secs(300))
+            .detector_interval_ms(200),
+    )
+    .await?;
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    let addr3 = cluster.node(3).endpoints.client.to_string();
+    // a set node zero leads, so the leader survives the cut, with node two as the source
+    let (key, group) = key_led_by(&mut cluster, "Note", 0, 9100)?;
+    let keys = note_keys_in_group(&mut cluster, &group, 9100, 4)?;
+    for key in &keys {
+        write_note(&addr0, *key, &format!("base-{key}")).await?;
+    }
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    // the move, and the destination being fed
+    let op = move_as_process(&mut cluster, 0, key, 2, 3)?;
+    wait_move_phase(&mut cluster, 0, op, 3, Duration::from_secs(60))?;
+    // the old quorum short by one: node one paused, node two cut off from the leader
+    cluster.node(1).pause()?;
+    cluster.data_link(0, 2).cut();
+    cluster.data_link(2, 0).cut();
+    // a write through the leader is proposed, reaches the learner, and is never acknowledged
+    let held = write_note(&addr0, keys[0], "held").await;
+    let code = failure_code(&held);
+    assert!(
+        matches!(
+            code,
+            Some(ErrorCode::OutcomeUnknown | ErrorCode::NotLeader | ErrorCode::QuorumUnavailable | ErrorCode::Timeout | ErrorCode::Unavailable)
+        ),
+        "a write with the old quorum short by one was answered {held:?}"
+    );
+    // not committed: the leader's own copy still reads the base, and nothing was configured
+    let seen = read_note(&addr0, keys[0]).await;
+    assert!(
+        matches!(&seen, Ok(Some(text)) if *text == format!("base-{}", keys[0])) || seen.is_err(),
+        "the leader served a write that never committed: {seen:?}"
+    );
+    let record = move_record_via(&mut cluster, 0, op)?;
+    let (highest, _) = move_progress(&record);
+    assert!(highest < 5, "a group was configured with the old quorum short by one: {record}");
+    // healed: the write commits, the transition commits, and the move finishes
+    cluster.node(1).resume()?;
+    cluster.data_link(0, 2).heal();
+    cluster.data_link(2, 0).heal();
+    wait_note(&addr0, keys[0], Some("held"), Duration::from_secs(30)).await?;
+    let record = wait_move_done_via(&mut cluster, 0, op, Duration::from_secs(150))?;
+    assert_eq!(record["outcome"], serde_json::json!("Moved"), "{record}");
+    wait_note(&addr3, keys[0], Some("held"), Duration::from_secs(30)).await?;
+    for key in &keys[1..] {
+        wait_note(&addr3, *key, Some(&format!("base-{key}")), Duration::from_secs(15)).await?;
+    }
+    wait_digests_equal(&mut cluster, &[0, 1, 3], "Note", Duration::from_secs(60))?;
+    for id in 0..4 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
+
+/// A committed data configuration outlives the stale placement the map still carries (C4 M9a)
+///
+/// The driver of the set node one leads is armed to die right after committing `Configured`,
+/// before `Activated` and so before the configuration is published: the group's uniform
+/// membership naming node three is committed on the group while every node's map still
+/// places the set on node two. Restarted, the driver finishes the record forward from the
+/// group's committed membership - the destination's voters name node three and never node
+/// two again - the move completes, and writes commit through the new configuration
+/// ([F45](../../docs/src/features/replica-migration.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn data_configuration_outlives_stale_placement_hint() -> Result<(), FixtureError> {
+    let mut cluster = three_placed_one_spare(
+        Cluster::builder()
+            .write_timeout(Duration::from_secs(3))
+            .query_deadline(Duration::from_secs(3))
+            .retire_after(Duration::from_secs(1))
+            .catchup_lag(0)
+            .migration_timeout(Duration::from_secs(300))
+            .detector_interval_ms(200),
+    )
+    .await?;
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    let addr3 = cluster.node(3).endpoints.client.to_string();
+    let (key, group) = key_led_by(&mut cluster, "Note", 1, 9200)?;
+    let keys = note_keys_in_group(&mut cluster, &group, 9200, 4)?;
+    for key in &keys {
+        write_note(&addr0, *key, &format!("base-{key}")).await?;
+    }
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    // whichever node drives the persistent table's group dies right after committing
+    // `Configured`; the ephemeral table's group goes on, so one node dies
+    for node in 0..4 {
+        let _ = cluster.node_mut(node).command(&format!("MOVE_CRASH_AT configured {group}"))?;
+    }
+    let op = move_as_process(&mut cluster, 0, key, 2, 3)?;
+    let dead = wait_any_dead(&cluster, Duration::from_secs(90))?;
+    assert!(!dead.is_empty(), "no driver died at configured");
+    let via = (0..4).find(|id| !dead.contains(id) && *id != 2 && *id != 3).unwrap_or(3);
+    // committed on the group and not published: the destination's voters name it and not the
+    // source, while the map still places the set by the rule
+    let record = move_record_via(&mut cluster, via, op)?;
+    assert_ne!(record["phase"], "Published", "{record}");
+    assert_ne!(record["phase"], "Done", "{record}");
+    let configured: Vec<String> = record["groups"]
+        .as_object()
+        .into_iter()
+        .flat_map(|groups| groups.iter())
+        .filter(|(_, progress)| move_phase_rank(&progress["phase"]) >= 5)
+        .map(|(id, _)| format!("{:016x}", id.parse::<u64>().unwrap_or_default()))
+        .collect();
+    assert!(!configured.is_empty(), "{record}");
+    for group in &configured {
+        let voters = voters_of(&mut cluster, 3, group)?;
+        assert!(voters.contains(&3) && !voters.contains(&2), "group {group}'s committed voters are {voters:?}");
+    }
+    let map = cluster.node_mut(via).command("MAP")?;
+    assert!(map["ok"]["configurations"].as_array().is_some_and(Vec::is_empty), "{}", map["ok"]["configurations"]);
+    // restarted, the record is finished forward, never backward
+    restart_all(&mut cluster, &dead)?;
+    let record = wait_move_done_via(&mut cluster, via, op, Duration::from_secs(150))?;
+    assert_eq!(record["outcome"], serde_json::json!("Moved"), "{record}");
+    for group in &configured {
+        let voters = voters_of(&mut cluster, 3, group)?;
+        assert_eq!(voters, vec![0, 1, 3], "group {group}'s committed voters after the move");
+    }
+    // writes commit through the new configuration and read back on the destination
+    for key in &keys {
+        write_note_eventually(&addr0, *key, &format!("after-{key}"), Duration::from_secs(15)).await?;
+        wait_note(&addr3, *key, Some(&format!("after-{key}")), Duration::from_secs(15)).await?;
+    }
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while hosts_group(&mut cluster, 2, &group)? {
+        assert!(Instant::now() < deadline, "node two still hosts the moved group");
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    wait_digests_equal(&mut cluster, &[0, 1, 3], "Note", Duration::from_secs(60))?;
+    let map = cluster.node_mut(via).command("MAP")?;
+    assert_eq!(map["ok"]["configurations"].as_array().map_or(0, Vec::len), 1, "{}", map["ok"]["configurations"]);
+    for id in 0..4 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
+
+/// Every move resumes from its record after the driver, the destination or the control
+/// leader fails at every phase (C8 M9a)
+///
+/// One set is moved back and forth between node two and node three, eighteen times: at each
+/// of the six phases a driver commits, once with the driver armed to die right after the
+/// commit, once with the destination killed as the phase is reached, and once with the
+/// control leader killed there. Every move completes from its record with `Moved`. Throughout,
+/// writers through every node update and delete the set's keys under identities with a retry
+/// budget; the ledger of their answers and a read of every key on every holder afterwards is
+/// accepted by the sequential oracle, and every holder's digest agrees
+/// ([F45](../../docs/src/features/replica-migration.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn migration_resumes_after_each_phase_failure() -> Result<(), FixtureError> {
+    use shoal::client::SendOptions;
+    use shoal_model::event::{ClientOp, MutationOp, OpResult, ReadLevel};
+    use shoal_model::ids::{Attempt, Key, OpId, TabletId, Value};
+    use shoal_model::oracle::{Ledger, Outcome};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
+    let mut cluster = three_placed_one_spare(
+        Cluster::builder()
+            .write_timeout(Duration::from_secs(3))
+            .query_deadline(Duration::from_secs(3))
+            .retire_after(Duration::from_secs(1))
+            .catchup_lag(0)
+            .migration_timeout(Duration::from_secs(300))
+            .detector_interval_ms(200),
+    )
+    .await?;
+    let (key, group) = key_led_by(&mut cluster, "Note", 0, 9300)?;
+    // six keys per writer, each writer's own, so the oracle's bound on operations per key holds
+    let keys = note_keys_in_group(&mut cluster, &group, 9300, 24)?;
+    let addrs: Vec<String> = (0..4).map(|node| cluster.node(node).endpoints.client.to_string()).collect();
+    let ledger = Arc::new(Mutex::new(Ledger::default()));
+    let clock = Arc::new(AtomicU64::new(0));
+    let next_id = Arc::new(AtomicU64::new(0));
+    let stop = Arc::new(AtomicBool::new(false));
+    let tablet_id = |key: u64| TabletId {
+        table: shoal_model::ids::TableId(1),
+        range: tablet_of(key) as u16,
+    };
+    // every key inserted once, before anything concurrent
+    for key in &keys {
+        let id = OpId(next_id.fetch_add(1, Ordering::SeqCst) as u32);
+        let attempt = Attempt { id, retry: 0 };
+        let op = ClientOp::Mutate(MutationOp::Insert { key: Key((*key % 251) as u8), value: Value(0) });
+        let invoke = clock.fetch_add(1, Ordering::SeqCst);
+        ledger.lock().unwrap().invoke(attempt, tablet_id(*key), op, invoke);
+        write_note(&addrs[0], *key, "0").await?;
+        let complete = clock.fetch_add(1, Ordering::SeqCst);
+        ledger.lock().unwrap().complete(attempt, complete, Outcome::Ok(OpResult::Applied(true)));
+    }
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    // writers through every node, each on keys of its own under an identity with a budget,
+    // until told to stop or the oracle's bound on operations per key is near
+    let mut tasks = Vec::new();
+    for node in 0..4 {
+        let endpoints = addrs.clone();
+        let keys: Vec<u64> = keys[node * 6..node * 6 + 6].to_vec();
+        let ledger = ledger.clone();
+        let clock = clock.clone();
+        let next_id = next_id.clone();
+        let stop = stop.clone();
+        tasks.push(tokio::spawn(async move {
+            let mut ordered = endpoints.clone();
+            ordered.rotate_left(node);
+            let mut round = 0u32;
+            while !stop.load(Ordering::SeqCst) && round < 26 {
+                // a client built per round, so a node killed meanwhile is dialled afresh
+                let Ok(client) = Shoal::<TestDbClient>::builder().endpoints(ordered.clone()).build().await else {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    continue;
+                };
+                for (at, key) in keys.iter().enumerate() {
+                    if stop.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    let value = Value(node as u32 * 1000 + round + 1);
+                    let delete = (round as usize + at + node) % 5 == 0;
+                    let op = if delete {
+                        MutationOp::Delete { key: Key((*key % 251) as u8) }
+                    } else {
+                        MutationOp::Update { key: Key((*key % 251) as u8), value }
+                    };
+                    let id = OpId(next_id.fetch_add(1, Ordering::SeqCst) as u32);
+                    let attempt = Attempt { id, retry: 0 };
+                    let invoke = clock.fetch_add(1, Ordering::SeqCst);
+                    ledger.lock().unwrap().invoke(attempt, TabletId {
+                        table: shoal_model::ids::TableId(1),
+                        range: tablet_of(*key) as u16,
+                    }, ClientOp::Mutate(op), invoke);
+                    let options = SendOptions::new().identity(uuid::Uuid::new_v4()).retry(Duration::from_secs(20));
+                    let outcome = if delete {
+                        match client.send_one_with(cluster::schema::NoteDelete::new(*key), &options).await {
+                            Ok(_) => Outcome::Ok(OpResult::Applied(true)),
+                            Err(shoal::client::Errors::QueryDidNotSucceed { .. }) => Outcome::Ok(OpResult::Applied(false)),
+                            Err(_) => Outcome::Unknown,
+                        }
+                    } else {
+                        let update = cluster::schema::NoteUpdate {
+                            partition_key: *key,
+                            text: Some(value.0.to_string()),
+                        };
+                        match client.send_one_with(update, &options).await {
+                            Ok(_) => Outcome::Ok(OpResult::Applied(true)),
+                            Err(shoal::client::Errors::QueryDidNotSucceed { .. }) => Outcome::Ok(OpResult::Applied(false)),
+                            Err(_) => Outcome::Unknown,
+                        }
+                    };
+                    let complete = clock.fetch_add(1, Ordering::SeqCst);
+                    ledger.lock().unwrap().complete(attempt, complete, outcome);
+                    tokio::time::sleep(Duration::from_millis(400)).await;
+                }
+                round += 1;
+            }
+            Ok::<(), shoal::client::Errors>(())
+        }));
+    }
+    // the matrix: each phase a driver commits, under each kind of failure
+    let phases = [("learner", 2u8), ("catching_up", 3), ("reconfiguring", 4), ("configured", 5), ("activated", 6), ("retiring", 8)];
+    let kinds = ["driver", "destination", "control_leader"];
+    let mut holder = 2usize;
+    for kind in kinds {
+        for (phase, rank) in phases {
+            let (from, to) = (holder, if holder == 2 { 3 } else { 2 });
+            let via = if from == 0 { 1 } else { 0 };
+            eprintln!("--- {kind} at {phase}: moving {from} -> {to}");
+            // the driver of the persistent table's group alone, wherever it is: the two
+            // groups commit a phase within milliseconds of each other, and two voters of the
+            // ephemeral table's group losing their memory log at once is that table's data
+            // gone by definition, not a move failing
+            if kind == "driver" {
+                for node in 0..4 {
+                    let _ = cluster.node_mut(node).command(&format!("MOVE_CRASH_AT {phase} {group}"))?;
+                }
+            }
+            let op = move_as_process(&mut cluster, via, key, from, to)?;
+            match kind {
+                "driver" => {
+                    let dead = wait_any_dead(&cluster, Duration::from_secs(120))?;
+                    eprintln!("    died: {dead:?}");
+                    restart_all(&mut cluster, &dead)?;
+                    for node in 0..4 {
+                        let _ = cluster.node_mut(node).command("MOVE_CRASH_AT none")?;
+                    }
+                    assert_eq!(dead.len(), 1, "{kind} at {phase}: more than one node died: {dead:?}");
+                }
+                "destination" => {
+                    wait_move_phase(&mut cluster, via, op, rank, Duration::from_secs(120))?;
+                    cluster.kill(to)?;
+                    std::thread::sleep(Duration::from_secs(1));
+                    cluster.restart(to, NodeKind::Server)?;
+                    cluster.wait_joined(&[to])?;
+                }
+                _ => {
+                    wait_move_phase(&mut cluster, via, op, rank, Duration::from_secs(120))?;
+                    let leader = cluster.leader_index(via)?.unwrap_or(0);
+                    cluster.kill(leader)?;
+                    std::thread::sleep(Duration::from_secs(1));
+                    cluster.restart(leader, NodeKind::Server)?;
+                    cluster.wait_joined(&[leader])?;
+                }
+            }
+            let record = wait_move_done_via(&mut cluster, via, op, Duration::from_secs(240))?;
+            assert_eq!(record["outcome"], serde_json::json!("Moved"), "{kind} at {phase}: {record}");
+            holder = to;
+            let holders: Vec<usize> = (0..4).filter(|id| *id != from).collect();
+            wait_digests_equal(&mut cluster, &holders, "Note", Duration::from_secs(90))?;
+        }
+    }
+    stop.store(true, Ordering::SeqCst);
+    for task in tasks {
+        task.await.expect("a writer task panicked")?;
+    }
+    // a read of every key on every holder joins the ledger, and the oracle accepts it
+    let holders: Vec<usize> = (0..4).filter(|id| *id != (if holder == 2 { 3 } else { 2 })).collect();
+    wait_digests_equal(&mut cluster, &holders, "Note", Duration::from_secs(60))?;
+    for node in &holders {
+        let addr = cluster.node(*node).endpoints.client.to_string();
+        for key in &keys {
+            let id = OpId(next_id.fetch_add(1, Ordering::SeqCst) as u32);
+            let attempt = Attempt { id, retry: 0 };
+            let invoke = clock.fetch_add(1, Ordering::SeqCst);
+            ledger.lock().unwrap().invoke(
+                attempt,
+                tablet_id(*key),
+                ClientOp::Read {
+                    key: Key((*key % 251) as u8),
+                    level: ReadLevel::One,
+                },
+                invoke,
+            );
+            let seen = read_note(&addr, *key).await?.map(|text| Value(text.parse().expect("a value")));
+            let complete = clock.fetch_add(1, Ordering::SeqCst);
+            ledger.lock().unwrap().complete(attempt, complete, Outcome::Ok(OpResult::Value(seen)));
+        }
+    }
+    let ledger = ledger.lock().unwrap().clone();
+    shoal_model::oracle::check(&ledger).unwrap_or_else(|error| panic!("the history is not sequential: {error:?}"));
+    for id in 0..4 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
+
+/// A four node cluster with three placed at a given factor and a fourth member unplaced
+///
+/// # Arguments
+///
+/// * `builder` - The rest of the cluster's shape
+/// * `rf` - The replication factor
+async fn three_placed_one_spare_at(builder: cluster::ClusterBuilder, rf: u32) -> Result<Cluster, FixtureError> {
+    let mut cluster = builder.cluster(4, CoreClaim::Count(1)).replication_factor(rf).lane_links(true).initialize(false).start().await?;
+    cluster.initialize(&[0, 1, 2])?;
+    Ok(cluster)
+}
+
+/// A key of the persistent table whose pair is led by one node and completed by another
+///
+/// At a factor of two a set is a pair, and the third placed node routes to it by forwarding;
+/// the key's group is read through the leader, since node zero does not host every set.
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `leader` - The node that has to lead
+/// * `other` - The pair's other member
+/// * `from` - The first key to try
+fn pair_led_by(cluster: &mut Cluster, leader: usize, other: usize, from: u64) -> Result<(u64, String), FixtureError> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        for key in from..from + 512 {
+            let Ok((group, led)) = group_of(cluster, leader, "Note", key) else {
+                continue;
+            };
+            // the primary too, so a router that holds no copy sends to the leader first
+            if led == Some(leader) && primary_of(cluster, leader, &group)? == Some(leader) && hosts_group(cluster, other, &group)? {
+                return Ok((key, group));
+            }
+        }
+        if Instant::now() > deadline {
+            return Err(FixtureError::NotReady(format!("no key from {from} has a pair led by node {leader} with node {other}")));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// The placement primary of a group, as one node's view has its members, by node index
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `node` - The node to ask
+/// * `group` - The group, in hex
+fn primary_of(cluster: &mut Cluster, node: usize, group: &str) -> Result<Option<usize>, FixtureError> {
+    let view = groups_of(cluster, node)?;
+    let ids = cluster.node_ids();
+    let wanted = u64::from_str_radix(group, 16).unwrap_or_default();
+    Ok(view["shards"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|shard| shard["groups"].as_array().into_iter().flatten())
+        .find(|found| found["group"].as_u64() == Some(wanted))
+        .and_then(|found| found["members"][0]["node"].as_str().and_then(|id| ids.iter().position(|known| known == id))))
+}
+
+/// Keys of the persistent table a given node's map puts in a group, skipping what it does not host
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `via` - The node to ask, which hosts the group
+/// * `group` - The group, in hex
+/// * `from` - The first key to try
+/// * `count` - How many to find
+fn keys_in_group_via(cluster: &mut Cluster, via: usize, group: &str, from: u64, count: usize) -> Result<Vec<u64>, FixtureError> {
+    let mut keys = Vec::with_capacity(count);
+    for key in from..from + 4096 {
+        if keys.len() == count {
+            break;
+        }
+        if let Ok((candidate, _)) = group_of(cluster, via, "Note", key) {
+            if candidate == group {
+                keys.push(key);
+            }
+        }
+    }
+    if keys.len() < count {
+        return Err(FixtureError::NotReady(format!("fewer than {count} keys from {from} are served by group {group}")));
+    }
+    Ok(keys)
+}
+
+/// The generations of the WAL segments on a node's first shard, from their file names
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `node` - The node
+fn segments_on(cluster: &Cluster, node: usize) -> Vec<u64> {
+    let mut generations: Vec<u64> = std::fs::read_dir(cluster.dir(node).join("wal").join("Shard-0"))
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "wal"))
+                .filter_map(|entry| entry.path().file_stem().and_then(|stem| stem.to_str().and_then(|stem| stem.parse().ok())))
+                .collect()
+        })
+        .unwrap_or_default();
+    generations.sort_unstable();
+    generations
+}
+
+/// Whether a node holds a retired copy's marker for a group
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `node` - The node
+/// * `group` - The group, in hex
+fn has_retired_marker(cluster: &Cluster, node: usize, group: &str) -> bool {
+    cluster.dir(node).join("wal").join("Shard-0").join("retired").join(group).exists()
+}
+
+/// Whether a partition of the persistent table is in a node's archives, by faulting it harmlessly
+///
+/// A corruption of a copy the cluster no longer counts is harmless, and the verb refuses a
+/// partition the archives do not hold, which is what says the files are gone.
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `node` - The node
+/// * `key` - The note's key
+fn archived_on(cluster: &mut Cluster, node: usize, key: u64) -> Result<bool, FixtureError> {
+    use shoal::shared::traits::PartitionKeySupport as _;
+    let hash = Note::get_partition_key_from_values(&key);
+    let reply = cluster.node_mut(node).command(&format!("CORRUPT Note {hash:016x}"))?;
+    Ok(reply.get("ok").is_some())
+}
+
+/// Every key of a set read through one node, with what each answered
+///
+/// # Arguments
+///
+/// * `addr` - The node's client endpoint
+/// * `keys` - The keys
+async fn read_all(addr: &str, keys: &[u64]) -> Vec<(u64, Result<Option<String>, shoal::client::Errors>)> {
+    let mut seen = Vec::with_capacity(keys.len());
+    for key in keys {
+        seen.push((*key, read_note(addr, *key).await));
+    }
+    seen
+}
+
+/// A retired copy never serves from its grace files, and the files go after the grace (C8 M9a)
+///
+/// Three placed at a factor of two and a spare, so a set is a pair and the third placed node
+/// routes to it by forwarding. Node one's control lanes are cut so its map stays at the
+/// placement while the set node two holds with node zero is moved to node three. After the
+/// move, node zero writes new values that only the new configuration holds. A read through
+/// node one is forwarded to node two by its stale map; node two refuses it `StaleTopology`
+/// rather than answering from the rows it retained, node one sends it once to node zero, and
+/// the read is the new value - never the retained one. Node two's marker and archived
+/// partitions exist during the grace and are gone after it, and node one reads its own way
+/// once its map catches up ([F45](../../docs/src/features/replica-migration.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn retired_copy_never_serves_from_grace_files() -> Result<(), FixtureError> {
+    let mut cluster = three_placed_one_spare_at(
+        Cluster::builder()
+            .write_timeout(Duration::from_secs(3))
+            .query_deadline(Duration::from_secs(3))
+            .retire_after(Duration::from_secs(6))
+            .catchup_lag(0)
+            .migration_timeout(Duration::from_secs(300))
+            .detector_interval_ms(200),
+        2,
+    )
+    .await?;
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    let addr1 = cluster.node(1).endpoints.client.to_string();
+    // a set node two leads whose other member is node zero, so node one is the router
+    let (key, group) = pair_led_by(&mut cluster, 2, 0, 9400)?;
+    let keys = keys_in_group_via(&mut cluster, 2, &group, key, 6)?;
+    for key in &keys {
+        write_note(&addr0, *key, &format!("old-{key}")).await?;
+    }
+    wait_digests_equal(&mut cluster, &[0, 2], "Note", Duration::from_secs(30))?;
+    // archived on the source, so the retained rows are files and not only a log
+    compact_now(&mut cluster, 2, "Note")?;
+    assert!(archived_on(&mut cluster, 2, keys[0])?, "the rows were not archived on the source");
+    // node one keeps the placement: nothing the control plane commits reaches it
+    for other in [0, 2, 3] {
+        cluster.control_link(other, 1).cut();
+        cluster.control_link(1, other).cut();
+    }
+    let stale_version = cluster.node_mut(1).command("MAP")?["ok"]["version"].as_u64().unwrap_or(0);
+    // the move, driven and published without node one; the grace is observed from the
+    // publication, since the record is done only once the source's files are gone
+    let op = move_as_process(&mut cluster, 0, key, 2, 3)?;
+    wait_move_phase(&mut cluster, 0, op, 7, Duration::from_secs(150))?;
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !has_retired_marker(&cluster, 2, &group) {
+        assert!(Instant::now() < deadline, "the source never retired its copy");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(cluster.node_mut(1).command("MAP")?["ok"]["version"].as_u64().unwrap_or(0), stale_version, "node one's map moved");
+    // the new configuration holds new values; the retained copy on node two holds the old
+    for key in &keys {
+        write_note_eventually(&addr0, *key, &format!("new-{key}"), Duration::from_secs(15)).await?;
+    }
+    assert!(has_retired_marker(&cluster, 2, &group), "no retired marker on the source");
+    assert!(archived_on(&mut cluster, 2, keys[0])?, "the retained partition is not on the source during the grace");
+    // a read through the stale router: forwarded to the source, refused there, sent on to
+    // node zero, and the new value - never the retained one
+    let before = read_stats(&mut cluster, 1)?;
+    for (key, seen) in read_all(&addr1, &keys).await {
+        match seen {
+            Ok(Some(text)) => assert_eq!(text, format!("new-{key}"), "a read through the stale router served a retained row"),
+            other => panic!("a read through the stale router answered {other:?}"),
+        }
+    }
+    let after = read_stats(&mut cluster, 1)?;
+    assert!(
+        after["stats"]["stale_refusals"].as_u64() > before["stats"]["stale_refusals"].as_u64(),
+        "the source never refused a stale forward: {after}"
+    );
+    assert!(after["stats"]["reroutes"].as_u64() > before["stats"]["reroutes"].as_u64(), "nothing was sent on: {after}");
+    let source = read_stats(&mut cluster, 2)?;
+    assert!(source["stats"]["stale_served"].as_u64().unwrap_or(0) > 0, "the source did not refuse by name: {source}");
+    // the grace over, the marker and the archived partitions are gone, and the move is done
+    let deadline = Instant::now() + Duration::from_secs(40);
+    while has_retired_marker(&cluster, 2, &group) {
+        assert!(Instant::now() < deadline, "the retired copy was never reclaimed");
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    assert!(!archived_on(&mut cluster, 2, keys[0])?, "the retained partition survived the grace");
+    let record = wait_move_done_via(&mut cluster, 0, op, Duration::from_secs(150))?;
+    assert_eq!(record["outcome"], serde_json::json!("Moved"), "{record}");
+    // healed, node one's map catches up and it reads its own way
+    for other in [0, 2, 3] {
+        cluster.control_link(other, 1).heal();
+        cluster.control_link(1, other).heal();
+    }
+    let current = cluster.node_mut(0).command("MAP")?["ok"]["version"].as_u64().unwrap_or(0);
+    cluster.wait_map_version(&[1], current)?;
+    for (key, seen) in read_all(&addr1, &keys).await {
+        assert!(matches!(&seen, Ok(Some(text)) if *text == format!("new-{key}")), "after healing: {seen:?}");
+    }
+    for id in 0..4 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
+
+/// Writes through a stale router terminate, in bound, without a duplicate (C4 M9a)
+///
+/// The same shape: node one's map is held at the placement while the pair node two holds
+/// with node zero moves to node three. Writes through node one under identities, during the
+/// move and after it, are each answered - the value, or a named error inside the bundle
+/// deadline - and the source is killed after it retired, so a forward to it is a lost link
+/// rather than a refusal. Every acknowledged key reads back on both holders with exactly the
+/// value acknowledged, once ([F45](../../docs/src/features/replica-migration.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn stale_routes_terminate_without_duplicate_writes() -> Result<(), FixtureError> {
+    use shoal::client::SendOptions;
+    use shoal::shared::protocol::error::ErrorCode;
+    let mut cluster = three_placed_one_spare_at(
+        Cluster::builder()
+            .write_timeout(Duration::from_secs(3))
+            .query_deadline(Duration::from_secs(4))
+            .retire_after(Duration::from_secs(1))
+            .catchup_lag(0)
+            .migration_timeout(Duration::from_secs(300))
+            .detector_interval_ms(200),
+        2,
+    )
+    .await?;
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    let addr1 = cluster.node(1).endpoints.client.to_string();
+    let addr3 = cluster.node(3).endpoints.client.to_string();
+    let (key, group) = pair_led_by(&mut cluster, 2, 0, 9500)?;
+    let keys = keys_in_group_via(&mut cluster, 2, &group, key, 12)?;
+    for key in &keys {
+        write_note(&addr0, *key, "base").await?;
+    }
+    wait_digests_equal(&mut cluster, &[0, 2], "Note", Duration::from_secs(30))?;
+    for other in [0, 2, 3] {
+        cluster.control_link(other, 1).cut();
+        cluster.control_link(1, other).cut();
+    }
+    let client = Shoal::<TestDbClient>::new(&addr1).await.map_err(|error| FixtureError::NotReady(format!("{error:?}")))?;
+    // a write through the stale router under an identity: the value acknowledged, or a named
+    // error inside the bundle deadline, never silence
+    let mut acknowledged: Vec<(u64, String)> = Vec::new();
+    let mut write_via_stale = |key: u64, value: String| {
+        let client = &client;
+        async move {
+            let started = Instant::now();
+            let options = SendOptions::new().identity(uuid::Uuid::new_v4()).retry(Duration::from_secs(15));
+            let update = cluster::schema::NoteUpdate {
+                partition_key: key,
+                text: Some(value.clone()),
+            };
+            let outcome = client.send_one_with(update, &options).await;
+            let elapsed = started.elapsed();
+            match outcome {
+                Ok(_) => Some(value),
+                Err(error) => {
+                    let code = failure_code(&Err::<(), _>(error));
+                    assert!(
+                        matches!(
+                            code,
+                            Some(
+                                ErrorCode::StaleTopology
+                                    | ErrorCode::OutcomeUnknown
+                                    | ErrorCode::NotLeader
+                                    | ErrorCode::Unavailable
+                                    | ErrorCode::Timeout
+                                    | ErrorCode::QuorumUnavailable
+                            )
+                        ),
+                        "a write through the stale router was answered {code:?} after {elapsed:?}"
+                    );
+                    assert!(elapsed < Duration::from_secs(25), "a write through the stale router took {elapsed:?}");
+                    None
+                }
+            }
+        }
+    };
+    // during the move
+    let op = move_as_process(&mut cluster, 0, key, 2, 3)?;
+    for (at, key) in keys.iter().enumerate() {
+        if let Some(value) = write_via_stale(*key, format!("during-{at}")).await {
+            acknowledged.push((*key, value));
+        }
+    }
+    let record = wait_move_done_via(&mut cluster, 0, op, Duration::from_secs(150))?;
+    assert_eq!(record["outcome"], serde_json::json!("Moved"), "{record}");
+    // after it, with the source's copy retired
+    for (at, key) in keys.iter().enumerate() {
+        if let Some(value) = write_via_stale(*key, format!("retired-{at}")).await {
+            acknowledged.push((*key, value));
+        }
+    }
+    // and with the source dead: a forward to it is a lost link, sent on the same way
+    cluster.kill(2)?;
+    for (at, key) in keys.iter().enumerate() {
+        if let Some(value) = write_via_stale(*key, format!("dead-{at}")).await {
+            acknowledged.push((*key, value));
+        }
+    }
+    assert!(acknowledged.len() > keys.len(), "too few writes through the stale router were acknowledged: {}", acknowledged.len());
+    // every acknowledged key reads back on both holders with the value last acknowledged
+    let mut last: std::collections::BTreeMap<u64, String> = std::collections::BTreeMap::new();
+    for (key, value) in &acknowledged {
+        last.insert(*key, value.clone());
+    }
+    for addr in [&addr0, &addr3] {
+        for (key, value) in &last {
+            wait_note(addr, *key, Some(value), Duration::from_secs(20)).await?;
+        }
+    }
+    let stats = read_stats(&mut cluster, 1)?;
+    assert!(stats["stats"]["stale_refusals"].as_u64().unwrap_or(0) > 0, "no stale refusal was met: {stats}");
+    assert!(stats["stats"]["reroutes"].as_u64().unwrap_or(0) > 0, "nothing was sent on: {stats}");
+    for other in [0, 3] {
+        cluster.control_link(other, 1).heal();
+        cluster.control_link(1, other).heal();
+    }
+    for id in [0, 1, 3] {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
+
+/// A shared WAL's cleanup after a retirement preserves the source's other tablets (C8 M9a)
+///
+/// Three placed at a factor of three and a spare. One set is moved from node two to node
+/// three and retired there while writes land on node two's other sets, before and after the
+/// move; the WAL is rotated and compacted, node two is restarted, and compacted again. Every
+/// key of the other sets reads through node two as it does through node zero, the retired
+/// tablets' partitions are gone from node two, and the sealed segments that held the retired
+/// group's frames beside the others' are reclaimed
+/// ([F45](../../docs/src/features/replica-migration.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn shared_wal_cleanup_preserves_other_tablets() -> Result<(), FixtureError> {
+    let mut cluster = three_placed_one_spare(
+        Cluster::builder()
+            .write_timeout(Duration::from_secs(3))
+            .query_deadline(Duration::from_secs(3))
+            .retire_after(Duration::from_secs(2))
+            .catchup_lag(0)
+            .migration_timeout(Duration::from_secs(300))
+            .checkpoint_entries(8)
+            .retained_entries(16)
+            .segment_bytes(64 * 1024),
+    )
+    .await?;
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    let (key, moved) = key_led_by(&mut cluster, "Note", 2, 9600)?;
+    let moved_keys = note_keys_in_group(&mut cluster, &moved, 9600, 8)?;
+    // keys of every other set node two hosts
+    let mut others = Vec::new();
+    for candidate in 9600..9800u64 {
+        let (group, _) = group_of(&mut cluster, 0, "Note", candidate)?;
+        if group != moved {
+            others.push(candidate);
+        }
+        if others.len() == 24 {
+            break;
+        }
+    }
+    for key in moved_keys.iter().chain(&others) {
+        write_note(&addr0, *key, &format!("before-{key}")).await?;
+    }
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    // the segments that hold the retired group's frames beside the others': every one on
+    // disk before the move
+    let _ = cluster.node_mut(2).command("ROTATE")?;
+    let holding = segments_on(&cluster, 2);
+    assert!(!holding.is_empty());
+    // the move, with writes landing on the other sets throughout
+    let op = move_as_process(&mut cluster, 0, key, 2, 3)?;
+    for key in &others {
+        write_note_eventually(&addr0, *key, &format!("during-{key}"), Duration::from_secs(15)).await?;
+    }
+    let record = wait_move_done_via(&mut cluster, 0, op, Duration::from_secs(150))?;
+    assert_eq!(record["outcome"], serde_json::json!("Moved"), "{record}");
+    let deadline = Instant::now() + Duration::from_secs(40);
+    while has_retired_marker(&cluster, 2, &moved) {
+        assert!(Instant::now() < deadline, "the retired copy was never reclaimed");
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    // rotate and compact, restart, and compact again
+    for key in &others {
+        write_note_eventually(&addr0, *key, &format!("after-{key}"), Duration::from_secs(15)).await?;
+    }
+    let _ = cluster.node_mut(2).command("ROTATE")?;
+    let _ = cluster.node_mut(2).command("COMPACT")?;
+    std::thread::sleep(Duration::from_secs(1));
+    cluster.restart(2, NodeKind::Server)?;
+    cluster.wait_joined(&[2])?;
+    // a restarted node binds its client port afresh
+    let addr2 = cluster.node(2).endpoints.client.to_string();
+    for key in &others {
+        write_note_eventually(&addr0, *key, &format!("final-{key}"), Duration::from_secs(15)).await?;
+    }
+    let _ = cluster.node_mut(2).command("ROTATE")?;
+    let _ = cluster.node_mut(2).command("COMPACT")?;
+    // every key of the other sets reads through node two as through node zero
+    for key in &others {
+        wait_note(&addr2, *key, Some(&format!("final-{key}")), Duration::from_secs(20)).await?;
+        wait_note(&addr0, *key, Some(&format!("final-{key}")), Duration::from_secs(20)).await?;
+    }
+    // the retired tablets' partitions are gone from node two, and it does not host the group
+    assert!(!hosts_group(&mut cluster, 2, &moved)?, "node two still hosts the moved group");
+    assert!(!archived_on(&mut cluster, 2, moved_keys[0])?, "a retired partition is still archived on node two");
+    assert!(!has_retired_marker(&cluster, 2, &moved));
+    // and the moved set is whole on its new holders
+    for key in &moved_keys {
+        wait_note(&cluster.node(3).endpoints.client.to_string(), *key, Some(&format!("before-{key}")), Duration::from_secs(20)).await?;
+    }
+    // the segments that held the retired group's frames beside the others' are reclaimed
+    // once the others purge past them: driven by more writes, rotations and compactions
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let mut round = 0u64;
+    loop {
+        for key in &others {
+            write_note_eventually(&addr0, *key, &format!("churn-{round}-{key}"), Duration::from_secs(15)).await?;
+        }
+        round += 1;
+        let _ = cluster.node_mut(2).command("ROTATE")?;
+        let _ = cluster.node_mut(2).command("COMPACT")?;
+        std::thread::sleep(Duration::from_millis(500));
+        let remaining: Vec<u64> = segments_on(&cluster, 2).into_iter().filter(|generation| holding.contains(generation)).collect();
+        if remaining.is_empty() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the segments holding the retired group's frames were never reclaimed: {remaining:?} of {holding:?}");
+    }
+    for id in 0..4 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
+
+/// A retry identity survives a checkpoint and a move, and one past the window is refused (C5 M9a)
+///
+/// A note is written under a time-ordered identity through the leader of its set, the leader
+/// checkpoints past it, and the set is moved from node two to node three. A retry of the
+/// identity through the destination and through the leader is the original result, once: the
+/// row still holds what the first write put there. The identity under a changed payload is
+/// refused by name. An identity minted before the window is `IdentityExpired` through every
+/// node, and a fresh identity that is not time-ordered is applied
+/// ([F45](../../docs/src/features/replica-migration.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn retry_identity_survives_snapshot_and_migration() -> Result<(), FixtureError> {
+    use shoal::client::SendOptions;
+    use shoal::shared::protocol::error::ErrorCode;
+    let mut cluster = three_placed_one_spare(
+        Cluster::builder()
+            .write_timeout(Duration::from_secs(2))
+            .query_deadline(Duration::from_secs(3))
+            .retire_after(Duration::from_secs(1))
+            .catchup_lag(0)
+            .migration_timeout(Duration::from_secs(300))
+            .checkpoint_entries(8)
+            .retained_entries(16)
+            .retry_window(Duration::from_secs(30)),
+    )
+    .await?;
+    let (key, group) = key_led_by(&mut cluster, "Note", 0, 9700)?;
+    let keys = note_keys_in_group(&mut cluster, &group, 9700, 6)?;
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    // the write under a time-ordered identity, answered once
+    let identity = uuid::Uuid::now_v7();
+    let options = SendOptions::new().identity(identity);
+    write_note_as(&addr0, key, "first", &options).await?;
+    for other in &keys[1..] {
+        write_note(&addr0, *other, "filler").await?;
+    }
+    // checkpointed past it on the leader, so the identity lives in the sidecar and the trailer
+    for round in 0..3u32 {
+        for other in &keys[1..] {
+            write_note(&addr0, *other, &format!("filler-{round}")).await?;
+        }
+        compact_now(&mut cluster, 0, "Note")?;
+    }
+    wait_checkpointed(&mut cluster, 0, "Note", Duration::from_secs(30))?;
+    // the set moved to node three
+    let op = move_as_process(&mut cluster, 0, key, 2, 3)?;
+    let record = wait_move_done_via(&mut cluster, 0, op, Duration::from_secs(150))?;
+    assert_eq!(record["outcome"], serde_json::json!("Moved"), "{record}");
+    let addr3 = cluster.node(3).endpoints.client.to_string();
+    wait_note(&addr3, key, Some("first"), Duration::from_secs(20)).await?;
+    // a retry through the destination and through the leader is the original result, once
+    let retried = write_note_as(&addr3, key, "first", &options).await?;
+    assert!(retried.suceeded(shoal::client::QuerySuceededOpts::default()).is_ok());
+    let retried = write_note_as(&addr0, key, "first", &options).await?;
+    assert!(retried.suceeded(shoal::client::QuerySuceededOpts::default()).is_ok());
+    // and a changed payload under the same identity is refused by name
+    let reused = write_note_as(&addr3, key, "second", &options).await;
+    match reused {
+        Err(shoal::client::Errors::Server { msg, .. }) => assert!(msg.contains("reused"), "{msg}"),
+        Err(shoal::client::Errors::QueryDidNotSucceed { .. }) => {}
+        other => panic!("a reused identity with another payload was answered {other:?}"),
+    }
+    wait_note(&addr3, key, Some("first"), Duration::from_secs(10)).await?;
+    wait_note(&addr0, key, Some("first"), Duration::from_secs(10)).await?;
+    // an identity minted before the window is expired through every node
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("after the epoch");
+    let stale = uuid::Uuid::new_v7(uuid::Timestamp::from_unix(uuid::NoContext, now.as_secs() - 120, 0));
+    let expired = SendOptions::new().identity(stale);
+    for node in [0, 1, 3] {
+        let addr = cluster.node(node).endpoints.client.to_string();
+        let answered = write_note_as(&addr, key, "late", &expired).await;
+        assert_eq!(failure_code(&answered), Some(ErrorCode::IdentityExpired), "through node {node}: {answered:?}");
+    }
+    wait_note(&addr3, key, Some("first"), Duration::from_secs(10)).await?;
+    // a fresh identity that is not time-ordered is applied
+    let random = SendOptions::new().identity(uuid::Uuid::new_v4());
+    write_note_as(&addr3, key, "random", &random).await?;
+    wait_note(&addr0, key, Some("random"), Duration::from_secs(10)).await?;
+    wait_digests_equal(&mut cluster, &[0, 1, 3], "Note", Duration::from_secs(30))?;
+    for id in 0..4 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
+
+/// A repair and a move of one set serialize, and writes commit throughout (C9 M9a)
+///
+/// A verify of the set node zero leads is asked for as it is moved from node two to node
+/// three: the repair's group is queued behind the move, writes keep committing, the move
+/// finishes, and the repair then runs on the new configuration and reports clean with node
+/// three among its reports. A move back asked for while a second verify runs is queued behind
+/// the repair and runs after it. A partition corrupted on the source before the first move
+/// never reaches the destination: the leader's verified copy is the one fed, and every holder
+/// agrees afterwards ([F45](../../docs/src/features/replica-migration.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn repair_serializes_with_migration_and_new_commits() -> Result<(), FixtureError> {
+    use shoal::server::AdminKind;
+    let mut cluster = three_placed_one_spare(
+        Cluster::builder()
+            .write_timeout(Duration::from_secs(3))
+            .query_deadline(Duration::from_secs(3))
+            .retire_after(Duration::from_secs(1))
+            .catchup_lag(0)
+            .migration_timeout(Duration::from_secs(300))
+            .repair_timeout(Duration::from_secs(60)),
+    )
+    .await?;
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    let (key, group) = key_led_by(&mut cluster, "Note", 0, 9800)?;
+    let keys = note_keys_in_group(&mut cluster, &group, 9800, 8)?;
+    for key in &keys {
+        write_note(&addr0, *key, &format!("base-{key}")).await?;
+    }
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    // the source's archived copy of one partition corrupted: never a snapshot's source
+    compact_now(&mut cluster, 2, "Note")?;
+    let _ = cluster.node_mut(2).command(&format!("CORRUPT Note {:016x}", {
+        use shoal::shared::traits::PartitionKeySupport as _;
+        Note::get_partition_key_from_values(&keys[0])
+    }))?;
+    // the move, and a verify of the set asked for while it runs
+    let op = move_as_process(&mut cluster, 0, key, 2, 3)?;
+    let verify = AdminKind::Repair {
+        table: "Note".to_string(),
+        tablet: Some(tablet_of(key) as u16),
+        mode: "verify".to_string(),
+        source: None,
+        release: false,
+    };
+    let repair = repair_as_process(&mut cluster, 0, &verify)?;
+    let record = cluster.node_mut(0).command(&format!("REPAIR_STATUS {repair}"))?["ok"].clone();
+    let queued = record["groups"]
+        .as_object()
+        .into_iter()
+        .flat_map(|groups| groups.values())
+        .any(|progress| progress["phase"]["Queued"]["behind"] == serde_json::json!(op.to_string()));
+    assert!(queued, "the repair was not queued behind the move: {record}");
+    // writes commit throughout
+    for round in 0..3u32 {
+        for key in &keys {
+            write_note_eventually(&addr0, *key, &format!("during-{round}-{key}"), Duration::from_secs(15)).await?;
+        }
+    }
+    let moved = wait_move_done_via(&mut cluster, 0, op, Duration::from_secs(150))?;
+    assert_eq!(moved["outcome"], serde_json::json!("Moved"), "{moved}");
+    // the repair runs on the new configuration: clean, with node three among the reports
+    let repaired = wait_repair_done_via(&mut cluster, 0, repair, Duration::from_secs(120))?;
+    let ids = cluster.node_ids();
+    for (id, progress) in repaired["groups"].as_object().expect("groups") {
+        assert!(progress["outcome"]["Clean"].is_object(), "group {id} of the repair: {progress}");
+        let reported: Vec<usize> = progress["reports"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|report| report[0]["node"].as_str().and_then(|node| ids.iter().position(|known| known == node)))
+            .collect();
+        assert!(reported.contains(&3), "node three did not report for group {id}: {progress}");
+        assert!(!reported.contains(&2), "the retired source reported for group {id}: {progress}");
+    }
+    // a second verify under way, and a move back asked for meanwhile: queued behind it
+    let second = repair_as_process(&mut cluster, 0, &verify)?;
+    let back = move_as_process(&mut cluster, 0, key, 3, 2)?;
+    let record = move_record_via(&mut cluster, 0, back)?;
+    let behind = record["phase"]["Queued"]["behind"].as_str().map(str::to_string);
+    let done_already = wait_repair_done_via(&mut cluster, 0, second, Duration::from_secs(120)).is_ok();
+    assert!(behind == Some(second.to_string()) || done_already, "the move was not queued behind the repair: {record}");
+    let moved_back = wait_move_done_via(&mut cluster, 0, back, Duration::from_secs(150))?;
+    assert_eq!(moved_back["outcome"], serde_json::json!("Moved"), "{moved_back}");
+    // every holder agrees, and the corrupted partition was never fed anywhere
+    for key in &keys {
+        write_note_eventually(&addr0, *key, &format!("after-{key}"), Duration::from_secs(15)).await?;
+    }
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(60))?;
+    let integrity = groups_of(&mut cluster, 2)?["integrity"].clone();
+    assert_eq!(integrity["checksum_failures"], 0, "the returned copy met a corrupt record: {integrity}");
+    for id in 0..4 {
         assert_eq!(cluster.node(id).failure(), None, "node {id} died");
     }
     Ok(())

@@ -23,7 +23,7 @@ rkyv = { version = "0.8.10", features = ["uuid-1"] }
 # to the values 2.3.1 gives them. moving this major re-homes every row ever written, so it is a
 # migration and not a version bump - see resolved item 65
 gxhash = "2.3"
-uuid = { version = "1", features = ["v4", "serde"] }
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
 glommio = { path = "../glommio/glommio", version = "0.10"}
 tokio = { version = "1", features = ["full"] }
 kanal = "0.1.0-pre8"

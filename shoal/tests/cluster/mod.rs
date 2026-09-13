@@ -158,6 +158,14 @@ pub struct ClusterBuilder {
     read_consistency: Option<String>,
     /// The bundle deadline, in milliseconds, if shortened
     query_deadline_ms: Option<u64>,
+    /// How long a retired copy's files are kept, in milliseconds, if shortened
+    retire_after_ms: Option<u64>,
+    /// How far behind a learner may be when it is made a voter, if set
+    catchup_lag: Option<u64>,
+    /// How long one phase of a move may take, in milliseconds, if shortened
+    migration_timeout_ms: Option<u64>,
+    /// How long a write's identity may be retried within, in milliseconds, if shortened
+    retry_window_ms: Option<u64>,
 }
 
 impl ClusterBuilder {
@@ -379,6 +387,48 @@ impl ClusterBuilder {
     /// * `timeout` - The deadline
     pub fn snapshot_timeout(mut self, timeout: Duration) -> Self {
         self.snapshot_timeout_ms = Some(timeout.as_millis() as u64);
+        self
+    }
+
+    /// Shorten how long a retired copy's files are kept
+    /// ([F45](../../../docs/src/features/replica-migration.md))
+    ///
+    /// # Arguments
+    ///
+    /// * `grace` - The grace
+    pub fn retire_after(mut self, grace: Duration) -> Self {
+        self.retire_after_ms = Some(grace.as_millis() as u64);
+        self
+    }
+
+    /// Set how far behind a learner may be when it is made a voter
+    ///
+    /// # Arguments
+    ///
+    /// * `entries` - The lag
+    pub fn catchup_lag(mut self, entries: u64) -> Self {
+        self.catchup_lag = Some(entries);
+        self
+    }
+
+    /// Shorten how long one phase of a move may take
+    ///
+    /// # Arguments
+    ///
+    /// * `timeout` - The deadline
+    pub fn migration_timeout(mut self, timeout: Duration) -> Self {
+        self.migration_timeout_ms = Some(timeout.as_millis() as u64);
+        self
+    }
+
+    /// Shorten how long a write's identity may be retried within
+    /// ([F45](../../../docs/src/features/replica-migration.md))
+    ///
+    /// # Arguments
+    ///
+    /// * `window` - The window
+    pub fn retry_window(mut self, window: Duration) -> Self {
+        self.retry_window_ms = Some(window.as_millis() as u64);
         self
     }
 
@@ -715,6 +765,10 @@ impl Cluster {
             retained_bytes: None,
             scrub_interval_ms: None,
             repair_timeout_ms: None,
+            retire_after_ms: None,
+            catchup_lag: None,
+            migration_timeout_ms: None,
+            retry_window_ms: None,
             snapshot_timeout_ms: None,
             snapshot_chunk_bytes: None,
             bulk_queue_bytes: None,
@@ -1380,6 +1434,11 @@ fn build_membership_cluster(
             scrub_interval_ms: builder.scrub_interval_ms,
             repair_timeout_ms: builder.repair_timeout_ms,
             snapshot_timeout_ms: builder.snapshot_timeout_ms,
+            retire_after_ms: builder.retire_after_ms,
+            catchup_lag: builder.catchup_lag,
+            migration_timeout_ms: builder.migration_timeout_ms,
+            retry_window_ms: builder.retry_window_ms,
+            move_crash_at: None,
         });
     }
     Ok(StagedPlan { per_node, reservations })

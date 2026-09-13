@@ -103,7 +103,7 @@ control group committed and pushed ([F39](../features/membership.md)) - tablet `
 to node `t % N`, then to a shard of that node - and the nodes agree ~~for the same reason, because
 they read one file~~ because they install the same map and derive with the same rule; the
 authority that could *change* the map ~~is M3's~~ is the control group, through one explicit
-`Initialize`, and what could move a tablet is M9a's. What the shape buys now is exactness and speed; what it buys later is the ability to
+`Initialize`, and what ~~could move a tablet is M9a's~~ moves a replica set is a `Move` ([F45](../features/replica-migration.md)), which overrides the rule for that set's tablets and leaves the rest where the rule puts them. What the shape buys now is exactness and speed; what it buys later is the ability to
 move a tablet at all.
 
 ### Why the id comes from the high bits

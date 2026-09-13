@@ -32,7 +32,7 @@ use uuid::Uuid;
 
 use super::error::ErrorCode;
 use super::QUERY_ID_LEN;
-use crate::shared::identity::{ClusterId, NodeId, TableId};
+use crate::shared::identity::{ClusterId, NodeId, ShardAddr, TableId};
 
 /// A request a client makes of the cluster rather than of a table
 ///
@@ -115,6 +115,26 @@ pub enum AdminKind {
         /// The operation
         op: Uuid,
     },
+    /// Move the replica set holding a tablet from one member to another
+    ///
+    /// The set is every table's group over the tablets the rule placed together; `from` has
+    /// to be a member of it and `to` an up member that is not, placed or not. The destination
+    /// is fed as a learner, made a voter through the group's own membership transition, and
+    /// published as the set's configuration before the source's copy retires
+    /// ([F45](../../../../docs/src/features/replica-migration.md)).
+    Move {
+        /// A tablet the set serves
+        tablet: u16,
+        /// The member leaving the set
+        from: NodeId,
+        /// The member replacing it
+        to: NodeId,
+    },
+    /// The record of a move operation, as the control state holds it
+    MoveStatus {
+        /// The operation
+        op: Uuid,
+    },
 }
 
 impl AdminKind {
@@ -127,6 +147,7 @@ impl AdminKind {
                 | AdminKind::SetControlVoters { .. }
                 | AdminKind::SetTableReadPolicy { .. }
                 | AdminKind::Repair { .. }
+                | AdminKind::Move { .. }
         )
     }
 
@@ -143,6 +164,8 @@ impl AdminKind {
             AdminKind::SetTableReadPolicy { .. } => "set_table_read_policy",
             AdminKind::Repair { .. } => "repair",
             AdminKind::RepairStatus { .. } => "repair_status",
+            AdminKind::Move { .. } => "move",
+            AdminKind::MoveStatus { .. } => "move_status",
         }
     }
 }
@@ -248,12 +271,41 @@ pub struct QuarantinedMember {
     pub reason: String,
 }
 
+/// A replica set that no longer follows the placement rule, as a client sees it
+/// ([F45](../../../../docs/src/features/replica-migration.md))
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfiguredSet {
+    /// The tablets the set serves, ascending
+    pub tablets: Vec<u16>,
+    /// Its members, the primary first
+    pub members: Vec<ShardAddr>,
+    /// The topology version it was published at
+    pub published_at: u64,
+}
+
+/// A move not yet done, as a client sees it
+/// ([F45](../../../../docs/src/features/replica-migration.md))
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MoveSummary {
+    /// The operation
+    pub op: Uuid,
+    /// The tablets the replica set serves, ascending
+    pub tablets: Vec<u16>,
+    /// The member leaving the set
+    pub from: ShardAddr,
+    /// The member replacing it
+    pub to: ShardAddr,
+    /// Where the move stands, by the phase's name
+    pub phase: String,
+}
+
 /// The cluster as a client sees it
 ///
 /// The placement is the ordered node list every node builds its ring from, not a table of
 /// tablets: tablet `t` belongs to `placement[t % N]` and, on that node, to shard
 /// `(t / N) % shards`, the same rule the server routes with. Empty before the placement is
-/// initialized.
+/// initialized. A replica set that moved is listed in `configurations` and served by the
+/// members named there instead ([F45](../../../../docs/src/features/replica-migration.md)).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TopologyFrame {
     /// The cluster
@@ -280,6 +332,13 @@ pub struct TopologyFrame {
     /// ([F41](../../../../docs/src/features/read-consistency.md))
     #[serde(default)]
     pub table_read_policy: Vec<(String, String)>,
+    /// The replica sets that no longer follow the placement rule
+    /// ([F45](../../../../docs/src/features/replica-migration.md))
+    #[serde(default)]
+    pub configurations: Vec<ConfiguredSet>,
+    /// The moves not yet done
+    #[serde(default)]
+    pub moves: Vec<MoveSummary>,
 }
 
 /// Write a body of `[id][json]` for any of the three frames
@@ -335,6 +394,20 @@ mod tests {
         assert_eq!(back, request);
         assert!(request.kind.is_mutation());
         assert!(!AdminKind::Members.is_mutation());
+        // a move is a mutation and its status a read, and both round trip
+        let moving = AdminKind::Move {
+            tablet: 7,
+            from: NodeId::mint(),
+            to: NodeId::mint(),
+        };
+        assert!(moving.is_mutation());
+        assert_eq!(moving.name(), "move");
+        let status = AdminKind::MoveStatus { op: Uuid::new_v4() };
+        assert!(!status.is_mutation());
+        for kind in [moving, status] {
+            let json = serde_json::to_vec(&kind).expect("a kind encodes");
+            assert_eq!(decode_rest::<AdminKind>(&json).expect("a kind decodes"), kind);
+        }
         // an answer, applied and refused
         let response = AdminResponse {
             node: NodeId::mint(),
@@ -380,6 +453,18 @@ mod tests {
             read_consistency: "one".to_string(),
             tables: vec![("Row".to_string(), TableId::of("Row"))],
             table_read_policy: vec![("Row".to_string(), "quorum".to_string())],
+            configurations: vec![ConfiguredSet {
+                tablets: vec![1, 4],
+                members: vec![ShardAddr::from(4), ShardAddr::from(2)],
+                published_at: 3,
+            }],
+            moves: vec![MoveSummary {
+                op: Uuid::new_v4(),
+                tablets: vec![2, 5],
+                from: ShardAddr::from(1),
+                to: ShardAddr::from(4),
+                phase: "learner".to_string(),
+            }],
         };
         let body = encode_body(&Uuid::nil(), &frame).expect("a topology encodes");
         let back: TopologyFrame = decode_rest(&body[QUERY_ID_LEN..]).expect("a topology decodes");

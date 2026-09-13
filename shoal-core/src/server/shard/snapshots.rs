@@ -775,7 +775,7 @@ where
                 return Ok(());
             }
         };
-        let (tablets, boundary, membership, volatile) = {
+        let (tablets, boundary, membership, volatile, expired_before) = {
             let Some(replication) = self.replication.as_ref() else {
                 return Ok(());
             };
@@ -787,6 +787,7 @@ where
                 active.manifest.boundary.clone(),
                 active.manifest.membership.clone(),
                 slot.store.is_volatile(),
+                active.manifest.expired_before,
             )
         };
         // a persistent table's resident copies are the old generation; the archives are the new
@@ -803,11 +804,16 @@ where
             state.checkpoint = Some(boundary.clone());
             state.membership = membership.clone();
             state.checkpoint_membership = membership;
+            // nothing applied since the checkpoint is left: the snapshot is the checkpoint
+            state.memberships.clear();
             state.snapshot_at = Some(boundary.clone());
             state.dedup.clear();
             for (request, remembered) in trailer {
                 state.dedup.put(request, remembered);
             }
+            // what the sender had forgotten, this copy has too
+            // ([F45](../../../../docs/src/features/replica-migration.md))
+            state.expired_before = state.expired_before.max(expired_before);
             // a volatile group's checkpoint is never written; a persistent one's is next
             state.checkpoint_durable = volatile;
         }

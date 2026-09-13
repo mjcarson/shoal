@@ -441,6 +441,21 @@ where
         Ok(())
     }
 
+    /// Arm a move phase this process dies right after committing, for the crash matrix
+    /// ([F45](../../../docs/src/features/replica-migration.md))
+    ///
+    /// # Arguments
+    ///
+    /// * `phase` - The phase's name, or `none` to disarm
+    /// * `group` - The group whose driver dies, or none for whichever commits the phase first
+    ///
+    /// # Errors
+    ///
+    /// Refuses a name that is not a phase a driver commits.
+    pub fn move_crash_at(&self, phase: &str, group: Option<crate::shared::identity::GroupId>) -> Result<(), ServerError> {
+        shard::migrate::crash_point::arm(phase, group).map_err(|msg| ServerError::Shoal(ShoalError::InvalidConfig(msg)))
+    }
+
     /// Make every snapshot install on this node pause after its first record, for a test
     ///
     /// # Arguments

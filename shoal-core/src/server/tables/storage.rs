@@ -229,10 +229,15 @@ pub enum CompactionJob {
         tablets: Vec<u16>,
         /// The loop's checkpoint for the group, which the boundary is never below
         at_least: Option<crate::server::wal::WalLogId>,
-        /// The membership as of the cut
-        membership: openraft::type_config::alias::StoredMembershipOf<crate::server::replication::DataConfig>,
+        /// Every membership the cut could be as of, the checkpoint's first and the ones applied
+        /// since after it; the one at the boundary goes in the manifest
+        /// ([F45](../../../docs/src/features/replica-migration.md))
+        memberships: Vec<openraft::type_config::alias::StoredMembershipOf<crate::server::replication::DataConfig>>,
         /// Every remembered request of the group, which the trailer filters to the boundary
         retries: Vec<(crate::shared::protocol::peer::RequestId, crate::server::replication::Remembered)>,
+        /// The newest time-ordered identity the group has forgotten, for the manifest
+        /// ([F45](../../../docs/src/features/replica-migration.md))
+        expired_before: u64,
         /// The directory the file goes in
         dir: PathBuf,
     },
@@ -251,6 +256,18 @@ pub enum CompactionJob {
         tablets: Vec<u16>,
         /// The verified file
         path: PathBuf,
+    },
+    /// Remove every archived partition of some tablets, once a retired copy's grace is over
+    ///
+    /// The absence half of an install with no file: every partition of the tablets the map
+    /// names is removed through the map intent log and the map repointed, and the shard hears
+    /// `TabletsDropped`. Redoable: a removal of a key already absent is nothing
+    /// ([F45](../../../docs/src/features/replica-migration.md)).
+    Drop {
+        /// The group whose copy retired
+        group: crate::shared::identity::GroupId,
+        /// The tablets to remove
+        tablets: Vec<u16>,
     },
     /// Inject a fault into one partition's archived copy, for the fixture
     /// ([F44](../../../docs/src/features/repair.md))
@@ -813,6 +830,7 @@ mod tests {
                 failed: None,
                 // and a write waits on nothing a read does
                 read: crate::server::messages::ReadPlan::one(Stamp::now()),
+                from_peer: false,
             };
             pending.add(meta, *pos, ResponseAction::Insert(true));
         }
@@ -986,6 +1004,7 @@ mod tests {
                 failed: None,
                 // and a write waits on nothing a read does
                 read: crate::server::messages::ReadPlan::one(Stamp::now()),
+                from_peer: false,
             };
             pending.add(meta, pos, ResponseAction::Insert(true));
             // the watermark has not moved, so neither has what is releasable

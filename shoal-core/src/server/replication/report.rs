@@ -50,6 +50,13 @@ pub struct GroupReport {
     /// ([F43](../../../../docs/src/features/node-recovery.md))
     #[serde(default)]
     pub installing: bool,
+    /// The voters of the group's committed membership, as this shard's handle has it
+    /// ([F45](../../../../docs/src/features/replica-migration.md))
+    #[serde(default)]
+    pub voters: Vec<ShardAddr>,
+    /// Whether this shard hosts the group as a move's learner
+    #[serde(default)]
+    pub learner: bool,
     /// Why this shard's copy is quarantined, if it is ([F44](../../../../docs/src/features/repair.md))
     #[serde(default)]
     pub quarantined: Option<crate::server::control::repair::QuarantineReason>,
@@ -237,6 +244,13 @@ pub struct ReadStats {
     /// ([F42](../../../../docs/src/features/primary-failover.md))
     #[serde(default)]
     pub reroutes: u64,
+    /// Forwards a node refused because it no longer serves the tablet
+    /// ([F45](../../../../docs/src/features/replica-migration.md))
+    #[serde(default)]
+    pub stale_refusals: u64,
+    /// Queries this shard refused because no group here serves their tablet
+    #[serde(default)]
+    pub stale_served: u64,
 }
 
 impl ReadStats {
@@ -258,6 +272,8 @@ impl ReadStats {
         self.late_shares += other.late_shares;
         self.duplicate_shares += other.duplicate_shares;
         self.reroutes += other.reroutes;
+        self.stale_refusals += other.stale_refusals;
+        self.stale_served += other.stale_served;
     }
 
     /// Record one barrier, and whether it hopped

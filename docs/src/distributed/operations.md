@@ -38,8 +38,14 @@ the frame every client is handed, which is what routes reads around them; and
 not have the end-to-end integrity metadata required by this design.~~ Every archive record,
 the checkpoint file and the retry sidecar carry a checksum; an archive from before the format
 is read unverified and counted until archive compaction rewrites it.
-It has no
-migration, backup/restore ~~or cluster-admin API~~ and the rest of the admin families are
+Since [F45](../features/replica-migration.md) it has `Move` and `MoveStatus` - the replica set
+holding a tablet moved from one member to another, authorized, versioned, idempotent and
+audited like `Repair`, recorded by operation with a phase per group and readable through any
+node; a move asked for under a repair of the set, or a repair under a move, is recorded queued
+behind it rather than refused, and the record says what it waits behind - and
+`cluster.migration` with the catch-up lag, the phase timeout, the retired copy's grace and how
+many moves a shard drives at once. It has no
+~~migration,~~ backup/restore ~~or cluster-admin API~~ and the rest of the admin families are
 their milestones'.
 
 ## The design
