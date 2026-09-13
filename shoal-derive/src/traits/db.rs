@@ -396,6 +396,20 @@ pub fn add(
             #table_names_ident::#variant_ident => self.#field_ident.snapshot_partitions(tablets),
         }
     });
+    // build our evict tablets arms
+    let evict_tablets_arms = fields.named.iter().zip(variants).map(|(field, variant_ident)| {
+        let field_ident = field.ident.as_ref().unwrap();
+        quote! {
+            #table_names_ident::#variant_ident => self.#field_ident.evict_tablets(tablets),
+        }
+    });
+    // build our install partitions arms
+    let install_partitions_arms = fields.named.iter().zip(variants).map(|(field, variant_ident)| {
+        let field_ident = field.ident.as_ref().unwrap();
+        quote! {
+            #table_names_ident::#variant_ident => self.#field_ident.install_partitions(tablets, records),
+        }
+    });
     // build our table-of-id arms
     let table_of_id_arms = variants.iter().map(|variant_ident| {
         quote! {
@@ -675,6 +689,20 @@ pub fn add(
             fn snapshot_partitions(&self, table: Self::TableNames, tablets: &[u16]) -> Vec<(u64, Vec<u8>)> {
                 match table {
                     #(#snapshot_partition_arms)*
+                }
+            }
+
+            /// Drop every resident partition of some tablets of a table
+            fn evict_tablets(&mut self, table: Self::TableNames, tablets: &[u16]) {
+                match table {
+                    #(#evict_tablets_arms)*
+                }
+            }
+
+            /// Replace every resident partition of some tablets of a table with a snapshot's records
+            fn install_partitions(&mut self, table: Self::TableNames, tablets: &[u16], records: Vec<(u64, Vec<u8>)>) -> Result<(), ::shoal::server::ServerError> {
+                match table {
+                    #(#install_partitions_arms)*
                 }
             }
 

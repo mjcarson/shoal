@@ -765,6 +765,8 @@ where
         let slot = replication.groups.get(&group).expect("still here");
         {
             let mut state = slot.state.borrow_mut();
+            // what the snapshot covered, for a catch-up split by path
+            replication.snapshots.entries_installed += boundary.index.saturating_sub(state.applied_index());
             state.applied = Some(boundary.clone());
             state.checkpoint = Some(boundary.clone());
             state.membership = membership.clone();

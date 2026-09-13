@@ -188,6 +188,21 @@ pub struct ClusterOverride {
     /// How this arm's reads are served, if it is a read arm, recorded the same way
     /// ([F41](../../../docs/src/features/read-consistency.md))
     pub read: Option<ReadArm>,
+    /// The groups' checkpoint and retention counts, when the arm moves them off the defaults
+    ///
+    /// What the catch-up arms differ in: the snapshot arm shortens both so the returning node
+    /// is past the purge point ([F43](../../../docs/src/features/node-recovery.md)). Applied to
+    /// every node of the placement, since every node resolves the arm's own overrides.
+    pub retention: Option<RetentionOverride>,
+}
+
+/// The groups' checkpoint and retention counts an arm moves off the defaults
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetentionOverride {
+    /// How many entries a group commits between snapshots
+    pub checkpoint_entries: u64,
+    /// How many entries a group keeps behind its snapshot
+    pub retained_entries: u64,
 }
 
 /// How a read arm was built: the level it reads at, whether it carries tokens, and its fanout
@@ -214,6 +229,7 @@ impl ClusterOverride {
             peers: Vec::new(),
             hop: None,
             read: None,
+            retention: None,
         }
     }
 
@@ -231,6 +247,7 @@ impl ClusterOverride {
             peers: vec![shards; peers],
             hop: None,
             read: None,
+            retention: None,
         }
     }
 
@@ -280,6 +297,9 @@ pub struct FaultSpec {
     pub at: std::time::Duration,
     /// How long after the kill to start it again, from the same staged identity
     pub restart_after: std::time::Duration,
+    /// How long the whole run is scheduled for, which bounds anything the harness watches
+    /// after the restart ([F43](../../../docs/src/features/node-recovery.md))
+    pub run_for: std::time::Duration,
 }
 
 /// One operation of a timed run, as the client saw it
@@ -512,6 +532,15 @@ pub trait Workload: Send + Sync {
         // an ordinary arm runs against a cluster nothing happens to
         let _ = scale;
         None
+    }
+
+    /// Whether the harness samples the returning node's catch-up after the fault's restart
+    ///
+    /// Only meaningful on an arm with a fault whose node comes back; the catch-up arms ask for
+    /// it and the record gains `cluster.catchup`
+    /// ([F43](../../../docs/src/features/node-recovery.md)).
+    fn catchup(&self) -> bool {
+        false
     }
 }
 

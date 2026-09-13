@@ -588,8 +588,8 @@ fn the_presets_pick_arms_that_answer_their_own_metric() {
 #[test]
 fn the_facts_mirrors_are_total() {
     use shoal_bench::model::macro_layer::{
-        ClusterFacts, ConfFacts, FanoutFacts, FaultFacts, HopFacts, HopMix, NodeCores, NodeReadFacts,
-        OfferedLoad, OutcomeFacts, ReadFacts, ReplicaFacts, ScaleFacts, SecondFacts, WindowFacts,
+        CatchupFacts, CatchupSecondFacts, ClusterFacts, ConfFacts, FanoutFacts, FaultFacts, HopFacts, HopMix, NodeCores,
+        NodeReadFacts, OfferedLoad, OutcomeFacts, ReadFacts, ReplicaFacts, ScaleFacts, SecondFacts, WindowFacts,
     };
     let keys = |value: serde_json::Value| -> Vec<String> {
         value
@@ -743,8 +743,34 @@ fn the_facts_mirrors_are_total() {
                 p99_us: 900,
             }],
         }),
+        // a catch-up arm's record travels whole, series included (F43)
+        catchup: Some(CatchupFacts {
+            by: "snapshot".to_string(),
+            restarted_ms: 40_000,
+            converged_ms: Some(43_000),
+            seconds_to_converge: Some(3),
+            snapshot_bytes: 900_000,
+            snapshots: 3,
+            log_entries: 60,
+            snapshot_entries: 1_400,
+            series: vec![CatchupSecondFacts {
+                second: 40,
+                lag_max: 500,
+                installing: 1,
+                snapshot_bytes: 0,
+                applied: 1_000,
+            }],
+        }),
     };
     let mirrored = explore::index::cluster_facts(&cluster);
+    assert_eq!(
+        keys(serde_json::to_value(&cluster.catchup).unwrap()),
+        keys(serde_json::to_value(&mirrored.catchup).unwrap())
+    );
+    assert_eq!(
+        keys(serde_json::to_value(&cluster.catchup.as_ref().unwrap().series[0]).unwrap()),
+        keys(serde_json::to_value(&mirrored.catchup.as_ref().unwrap().series[0]).unwrap())
+    );
     assert_eq!(keys(serde_json::to_value(&cluster).unwrap()), keys(serde_json::to_value(&mirrored).unwrap()));
     assert_eq!(
         keys(serde_json::to_value(&cluster.reads).unwrap()),

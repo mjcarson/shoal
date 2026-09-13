@@ -84,6 +84,12 @@ pub struct SnapshotStats {
     /// Purges forced by the retention budget, one per group per sweep that was over it
     #[serde(default)]
     pub forced: u64,
+    /// Log entries the installed snapshots covered: the boundary less what was applied before
+    ///
+    /// What lets a catch-up be split by path: the applied position grows by this through
+    /// snapshots and by the rest through the log.
+    #[serde(default)]
+    pub entries_installed: u64,
 }
 
 impl SnapshotStats {
@@ -105,6 +111,7 @@ impl SnapshotStats {
         self.aborted += other.aborted;
         self.redone += other.redone;
         self.forced += other.forced;
+        self.entries_installed += other.entries_installed;
     }
 }
 

@@ -24,7 +24,7 @@
 use std::collections::BTreeMap;
 
 use shoal_top::index::{
-    Capture, ClusterFactsLite, ConfFactsLite, FamilyText, FanoutFactsLite, FaultFactsLite,
+    Capture, CatchupFactsLite, CatchupSecondFactsLite, ClusterFactsLite, ConfFactsLite, FamilyText, FanoutFactsLite, FaultFactsLite,
     INDEX_VERSION, Index, Layer as IndexLayer, HopFactsLite, HopMixLite, MacroPoint, NodeCoresLite,
     NodeReadFactsLite, OfferedLoadLite, OpStats, OutcomeFactsLite, ReadFactsLite, ReplicaFactsLite,
     ScaleFactsLite, SecondFactsLite, Timing, Verdict, WindowFactsLite, Workload,
@@ -558,6 +558,29 @@ pub fn cluster_facts(cluster: &ClusterFacts) -> ClusterFactsLite {
                     errors: second.errors,
                     p50_us: second.p50_us,
                     p99_us: second.p99_us,
+                })
+                .collect(),
+        }),
+        // a catch-up arm's record travels whole too, series and all
+        // ([F43](../../../docs/src/features/node-recovery.md))
+        catchup: cluster.catchup.as_ref().map(|catchup| CatchupFactsLite {
+            by: catchup.by.clone(),
+            restarted_ms: catchup.restarted_ms,
+            converged_ms: catchup.converged_ms,
+            seconds_to_converge: catchup.seconds_to_converge,
+            snapshot_bytes: catchup.snapshot_bytes,
+            snapshots: catchup.snapshots,
+            log_entries: catchup.log_entries,
+            snapshot_entries: catchup.snapshot_entries,
+            series: catchup
+                .series
+                .iter()
+                .map(|second| CatchupSecondFactsLite {
+                    second: second.second,
+                    lag_max: second.lag_max,
+                    installing: second.installing,
+                    snapshot_bytes: second.snapshot_bytes,
+                    applied: second.applied,
                 })
                 .collect(),
         }),

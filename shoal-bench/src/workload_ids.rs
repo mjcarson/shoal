@@ -486,6 +486,10 @@ pub const IDS: &[&str] = &[
     // the failover arm (F42): the durable replication cell for a fixed time with node one
     // killed and started again inside it. appended after the read arms
     "macro/cluster/failover/kill",
+    // the catch-up arms (F43): the kill arm with the returning node fed by log and by snapshot.
+    // appended after the failover arm
+    "macro/cluster/catchup/log",
+    "macro/cluster/catchup/snapshot",
 ];
 
 /// Whether an id names a workload this build knows about

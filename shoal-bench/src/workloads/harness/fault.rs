@@ -46,6 +46,9 @@ pub struct Marks {
     pub killed_at: Option<Instant>,
     /// When the peer was serving and placed again
     pub restarted_at: Option<Instant>,
+    /// What the returning peer looked like each second after that, if it was watched
+    /// ([F43](../../../../docs/src/features/node-recovery.md))
+    pub catchup: Option<Vec<super::catchup::Sample>>,
     /// What went wrong bringing it back, if something did
     pub error: Option<String>,
 }
@@ -86,10 +89,12 @@ impl Injected {
 /// * `conf` - The base configuration file the respawned peer resolves from
 /// * `scale` - The scale it resolves at
 /// * `started` - When the measured phase started, which the schedule counts from
+/// * `watch_until` - Sample the returning peer's catch-up until this instant, if asked
 ///
 /// # Errors
 ///
 /// The spec names node zero, which is this process, or a node the placement does not have.
+#[allow(clippy::too_many_arguments)]
 pub fn inject(
     spec: &FaultSpec,
     peers: Arc<Mutex<Vec<PeerChild>>>,
@@ -98,6 +103,7 @@ pub fn inject(
     conf: &Path,
     scale: &str,
     started: Instant,
+    watch_until: Option<Instant>,
 ) -> Result<Injected> {
     // node zero is the driver's own process, and a peer the placement never had cannot die
     if spec.node == 0 {
@@ -114,7 +120,7 @@ pub fn inject(
     let scale = scale.to_string();
     let handle = std::thread::Builder::new()
         .name("fault".to_string())
-        .spawn(move || schedule(&spec, &peers, &staged, &id, &conf, &scale, started))
+        .spawn(move || schedule(&spec, &peers, &staged, &id, &conf, &scale, started, watch_until))
         .context("failed to start the fault thread")?;
     Ok(Injected { handle })
 }
@@ -130,6 +136,8 @@ pub fn inject(
 /// * `conf` - The base configuration file
 /// * `scale` - The scale
 /// * `started` - When the measured phase started
+/// * `watch_until` - Sample the returning peer's catch-up until this instant, if asked
+#[allow(clippy::too_many_arguments)]
 fn schedule(
     spec: &FaultSpec,
     peers: &Mutex<Vec<PeerChild>>,
@@ -138,6 +146,7 @@ fn schedule(
     conf: &Path,
     scale: &str,
     started: Instant,
+    watch_until: Option<Instant>,
 ) -> Marks {
     let mut marks = Marks::default();
     // wait until the schedule says, from the start of the measured phase and not from now
@@ -197,6 +206,13 @@ fn schedule(
         return marks;
     }
     marks.restarted_at = Some(Instant::now());
+    // a catch-up arm watches the returning peer from here until it converges or the run ends
+    if let Some(until) = watch_until {
+        match super::catchup::sample(staged, spec.node, started, until, &runtime) {
+            Ok(samples) => marks.catchup = Some(samples),
+            Err(error) => marks.error = Some(format!("node {} could not be watched: {error:#}", spec.node)),
+        }
+    }
     marks
 }
 

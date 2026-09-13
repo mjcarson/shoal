@@ -16,6 +16,7 @@
 pub mod cluster;
 pub mod conf;
 pub mod driver;
+pub mod catchup;
 pub mod fault;
 pub mod keys;
 pub mod metrics;
@@ -272,6 +273,9 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
             &request.conf,
             request.scale.as_str(),
             run_started,
+            // a catch-up arm has the returning node sampled until the run ends
+            // ([F43](../../docs/src/features/node-recovery.md))
+            workload.catchup().then_some(run_started + spec.run_for),
         )?),
         _ => None,
     };
@@ -317,6 +321,10 @@ pub fn run(workload: &dyn Workload, request: &RunRequest) -> Result<MacroCapture
             &measured.timeline,
             wall_clock,
         ));
+        // and how the returning node caught up, if the arm asked for it to be watched
+        if let (Some(samples), Some(restarted)) = (&marks.catchup, marks.restarted_at) {
+            facts.catchup = Some(catchup::cut(restarted.saturating_duration_since(started), samples));
+        }
     }
     // build the stage report now that every shard has handed its records over
     //

@@ -345,6 +345,63 @@ pub struct ClusterFacts {
     /// ([C10](../../../docs/src/distributed/performance.md)).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fault: Option<FaultFacts>,
+    /// How the fault's returning node caught up, if the arm asked for it to be sampled
+    ///
+    /// Only the catch-up arms carry one; absent before
+    /// [F43](../../../docs/src/features/node-recovery.md). Sampled from the returning node's
+    /// own report each second after the restart mark, so the record says how it caught up - by
+    /// log or by snapshot - how long that took, what it moved, and what its lag looked like
+    /// second by second ([C10](../../../docs/src/distributed/performance.md)).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catchup: Option<CatchupFacts>,
+}
+
+/// How a fault's returning node caught up, sampled from its own report after the restart
+///
+/// Every time is milliseconds from the start of the measured phase, on the driver's clock,
+/// the same axis the fault's marks are on. Convergence is the first sample after the restart
+/// whose lag is zero and whose groups are all up and not installing, held for one more sample;
+/// a run that ended first has none, and says so rather than reporting a backlog as caught up
+/// ([C7](../../../docs/src/distributed/failover.md)).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CatchupFacts {
+    /// How the node caught up: `log`, `snapshot` when at least one was installed, or `none`
+    /// when it never converged inside the run
+    pub by: String,
+    /// When the node was serving and placed again, in milliseconds from the start of the run
+    pub restarted_ms: u64,
+    /// When it had converged, if it did inside the run
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub converged_ms: Option<u64>,
+    /// How long that took, in whole seconds, if it did
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seconds_to_converge: Option<u64>,
+    /// Bytes of snapshots it received in the run
+    pub snapshot_bytes: u64,
+    /// Snapshots it installed
+    pub snapshots: u64,
+    /// Log entries it applied after its first sample that no snapshot covered
+    pub log_entries: u64,
+    /// Log entries the snapshots covered
+    pub snapshot_entries: u64,
+    /// One sample per second from the restart to convergence or the end of the run
+    pub series: Vec<CatchupSecondFacts>,
+}
+
+/// One second of a returning node's catch-up
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CatchupSecondFacts {
+    /// Which second of the measured phase, from zero
+    pub second: u64,
+    /// The widest gap between a group's committed index on node zero and its applied index on
+    /// the node, which is what the node itself cannot know until a leader tells it
+    pub lag_max: u64,
+    /// How many of its groups were installing a snapshot
+    pub installing: u64,
+    /// Bytes of snapshots received so far
+    pub snapshot_bytes: u64,
+    /// The sum of every group's applied index, which the log and the snapshots both move
+    pub applied: u64,
 }
 
 /// A fault an arm injected, and what its client saw before, during and after it
