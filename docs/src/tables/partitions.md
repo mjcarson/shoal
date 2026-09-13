@@ -448,5 +448,8 @@ being easy to get wrong, and it is wrong in the ways noted above.
 - `access(...).unwrap()` on `Accessible` partitions in many places
   (`.../persistent/sorted.rs:245`, `:355`, `:453`, `:599`, `:734`, `:890`) — a corrupt archive
   panics the shard rather than surfacing an error.
-- No partition-level checksum; corruption in an archive is caught only if rkyv validation
-  happens to reject it.
+- ~~No partition-level checksum; corruption in an archive is caught only if rkyv validation
+  happens to reject it.~~ Every record of a format 2 archive carries a checksum verified before
+  rkyv sees the bytes, and a mismatch is `CorruptArchive` by name and quarantines the copy
+  ([F44](../features/repair.md)); an archive from before the format is unverified until archive
+  compaction rewrites it.

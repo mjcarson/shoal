@@ -28,10 +28,19 @@ and the snapshot counters (built, sent, installed, bytes each way, chunks, dupli
 resumes, aborts, redos, forced purges and entries installed), per node the installing count
 - and readiness counts a node's installing groups, so a node with a tablet installing is not
 ready for that tablet and is for the rest; the sealed WAL's budget is `replication.retained_bytes`.
-It has no distributed
-repair, migration, backup/restore ~~or cluster-admin API~~ and the rest of the admin families are
-their milestones'. Existing disk archives do not have the
-end-to-end integrity metadata required by this design.
+Since [F44](../features/repair.md) it has `Repair` and `RepairStatus` - a scrub of a table's
+groups at a committed boundary, a verdict over its copies, a quarantine of what the verdict
+names, and in repair mode an install from a verified source, recorded by operation and readable
+through any node - the integrity row of the metrics table below, per group whether a copy is
+quarantined and why, per node the quarantined count, and every member's quarantined copies on
+the frame every client is handed, which is what routes reads around them; and
+`cluster.repair` with a scheduled scrub that is off by default. ~~Existing disk archives do
+not have the end-to-end integrity metadata required by this design.~~ Every archive record,
+the checkpoint file and the retry sidecar carry a checksum; an archive from before the format
+is read unverified and counted until archive compaction rewrites it.
+It has no
+migration, backup/restore ~~or cluster-admin API~~ and the rest of the admin families are
+their milestones'.
 
 ## The design
 
@@ -79,7 +88,7 @@ resumable by id. Record state changes so automated and manual removal are equall
 | Reads | Barrier/application wait, stale/session routing, retry/timeout and incomplete-share errors |
 | Recovery | Retained history bytes/oldest position, snapshot generation/progress, blocked recovery and time to catch up. *At M7:* the snapshot counters and the installing flag on `Replication`; the time to catch up is the catch-up arms' record |
 | Resources | Pending bytes, lane queue bytes, memory caps, free disk reserve, transfer throughput and I/O failures |
-| Integrity | Checksum failures, quarantined copies, repair source/provenance and unresolved divergence |
+| Integrity | Checksum failures, quarantined copies, repair source/provenance and unresolved divergence. *At M8:* `integrity` on `Replication` - checksum failures, unverified reads, lost logs, quarantines, scrubs with their partitions and bytes - per shard and per node; the source, the provenance and the unresolved digests are the repair record's ([F44](../features/repair.md)) |
 | Failover | Detection/election/recovery/reconnect intervals and client-visible outage |
 
 Aggregate by node/table/role by default; per-tablet series are opt-in to avoid unbounded collector
@@ -154,6 +163,20 @@ quorum. Metrics record the evidence, source, replaced generation and verified re
 Scheduled scrub/repair intervals and their default are a Q12 decision with a cost measurement;
 manual repair is available at M8. Replication is not a backup against deletion, operator mistakes
 or corruption applied consistently everywhere.
+
+*At M8 ([F44](../features/repair.md)):* every archive record is checksummed and verified at
+the one read path, and so are the checkpoint file and the retry sidecar; a scrub is a log
+entry every replica takes a canonical cut at, whose digest folds rows re-serialized in key
+order under the schema and the tablets and never sees archive bytes, so archive layout,
+compaction timing and residency cannot create a false report; a copy whose record failed its
+checksum or whose verified digest differs from a strict majority of the replica set is
+quarantined, locally on the spot and in the committed state a tick later; a repair installs
+from the leader's own cut, transferring the lead first when the leader's copy is not trusted;
+a split no majority can judge stops `Unresolved` with every digest recorded and installs
+nothing, and an operator's `source` is the explicit policy that resolves it. The scheduled
+half is `cluster.repair.scrub_interval`, off by default, verify only, priced by the background
+arm ([Q12](protocol.md#q12-at-m8)). What the metrics record is the repair record: the source,
+the targets, the boundary installed and the index verified.
 
 ## Alternatives rejected
 

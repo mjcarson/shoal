@@ -4650,6 +4650,7 @@ fn repair_as_process(cluster: &mut Cluster, node: usize, kind: &shoal::server::A
 fn wait_repair_done_via(cluster: &mut Cluster, node: usize, op: uuid::Uuid, within: Duration) -> Result<serde_json::Value, FixtureError> {
     let deadline = std::time::Instant::now() + within;
     loop {
+        // a node asked before its control state applied the record has no record yet
         let record = cluster.node_mut(node).command(&format!("REPAIR_STATUS {op}"))?["ok"].clone();
         let done = record["groups"]
             .as_object()
@@ -4697,7 +4698,15 @@ async fn repair_status(client: &Shoal<TestDbClient>, op: uuid::Uuid) -> Result<s
 async fn wait_repair_done(client: &Shoal<TestDbClient>, op: uuid::Uuid, within: Duration) -> Result<serde_json::Value, FixtureError> {
     let deadline = std::time::Instant::now() + within;
     loop {
-        let record = repair_status(client, op).await?;
+        // a node asked before its control state applied the record has no record yet
+        let record = match repair_status(client, op).await {
+            Ok(record) => record,
+            Err(FixtureError::NotReady(text)) if text.contains("is recorded") && std::time::Instant::now() <= deadline => {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         let done = record["groups"]
             .as_object()
             .is_some_and(|groups| !groups.is_empty() && groups.values().all(|group| group["phase"] == "Done"));

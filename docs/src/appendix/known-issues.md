@@ -66,11 +66,13 @@ in the other direction — it had one row left open, that row was fixed, and the
 [moved](resolved/claude-md-drift.md).
 
 **Baseline as of writing:** `cargo check --workspace --all-targets` passes with warnings;
-`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ ~~**1,382 tests**~~ **1,398 tests**, four ignored, plus ~~13~~ 14
+`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ ~~**1,382 tests**~~ ~~**1,398 tests**~~ **1,414 tests**, four ignored, plus ~~13~~ 14
 more behind `--features stage-profile` that a default run does not reach ([Test Coverage](test-coverage.md)) -
 with the fixture binary run at `--test-threads 6`, since at the default thirty-two nineteen of
-its ~~fifty-four~~ sixty-four fail under the load (item 100) and every one of them passes at six;
+its ~~fifty-four~~ ~~sixty-four~~ seventy-one fail under the load (item 100) and every one of them passes at six;
 two of `persistent_unsorted_table.rs` fail about one run in five of that binary (item 107).
+[F44](../features/repair.md) added 16 and took it to 1,414, resolving item 99 before its own
+work began and filing nothing new: what it left undone is on the todos page.
 [F43](../features/node-recovery.md) added 16 and took it to 1,398, resolving items 104 and 105
 before its own work began and filing 106 and 107 on the way.
 [F42](../features/primary-failover.md) added 21 and took it to 1,382, resolving item 101 and

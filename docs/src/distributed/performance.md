@@ -65,6 +65,12 @@ up, the restart and convergence marks and the seconds between them, the bytes an
 snapshots moved and the entries the log fed, and a per second series of its lag - and says
 `none` with the series kept when a run ends before the lag is held at zero, which is what both
 arms recorded at smoke scale on the development host, where the outage outlasts the absence.
+Since [F44](../features/repair.md) the background arm runs: `macro/cluster/background/repair`,
+the kill arm's placement and mixture with nothing killed and a `Repair` of the reference table
+in verify mode asked for a third of the way through, its record polled until every group is
+done. Its record carries `cluster.background` - the marks, the groups and how many were clean,
+what the scrubs hashed and read across every node, and the client's distribution before,
+during and after with a per second series - which is the interference this page asks for.
 The open-loop schedule is not built; the arms are closed loops at one depth.
 
 ## The design
@@ -156,7 +162,7 @@ expanded only into feasible combinations, not a Cartesian product that silently 
 | `macro/cluster/failover` | Outage and recovery under a specified fault schedule. `kill` since [F42](../features/primary-failover.md), on the `replication/` placement at a factor of three; a pause and a partition are the fixture's |
 | `macro/cluster/catchup/{log,snapshot}` | Time/bytes to catch up ~~at several foreground mutation rates~~ at the reference mixture. Both since [F43](../features/node-recovery.md), the `failover/kill` arm with the retention at the defaults and shortened past the absence; the mutation rate sweep is filed with the open-loop schedule |
 | `macro/cluster/rebalance/{add,decommission,remove,capacity_blocked}` | Transition progress and supported load envelope |
-| `macro/cluster/background/{repair,backup}` | Foreground interference, integrity work and restore preparation |
+| `macro/cluster/background/{repair,backup}` | Foreground interference, integrity work and restore preparation. `repair` since [F44](../features/repair.md), the `failover/kill` arm with a verify of the table in the background and nothing killed; `backup` is M10's |
 
 Extend ScaleFacts with separate read/write/durability policies, node count, desired/active RF,
 data/control/driver core allocation, table/tablet count, offered load and dataset size. Mirror
@@ -257,6 +263,7 @@ assign the gates. Generated cluster pages retain the book's scope/comparability 
 | `read_capture_records_barrier_and_application_wait` | A read arm's record carries the level, the session flag, the fanout and every node's barrier and application waits, summed and per node; an older record still loads | M5 |
 | `fault_capture_preserves_outage_time_series` | Failure/recovery window remains visible with separate before/during/after distributions | M6 |
 | `catchup_capture_records_convergence` | A returning node's record carries its restart and convergence marks, the split by log and by snapshot and the lag series; a run that ends unconverged says so and keeps the series | M7 |
+| `background_capture_records_scrub_interference` | A background repair's record carries its marks, the windows before, during and after it with their own distributions, a bucket per second and what the scrubs read; a run with no repair is all `before`; an older record loads without it | M8 |
 | `physical_cluster_records_each_node_environment` | Unequal real hardware and primary placement are retained in comparability metadata | M10 |
 
 ## Related

@@ -274,6 +274,41 @@ bounded in bytes with a forced purge behind the groups pinning it, an installing
 tablets refuse reads while the rest of the node serves, and two arms price the catch-up by log
 and by snapshot.
 
+**What F44 left undone, deliberately.** Recorded here so the next milestone starts from the
+list rather than from the diff:
+
+- **Routing around a quarantined copy per table.** The map names the quarantined group's
+  tablets on the member, and the ring is per tablet, so a holder is passed over for every
+  table's reads of those tablets while the refusal at the holder is exact. A ring per table is
+  what would narrow it, and nothing else on the read path is per table yet.
+- **A digest kept in the map.** A scrub reads every archived partition of a group once per
+  pass ([O54](optimizations.md#o54-a-scrub-reads-every-archived-partition-of-a-group-once-per-pass));
+  an incremental per-partition digest the compactor writes beside each entry would make a
+  pass a walk of the map - and would be a digest the compactor computed, which is not evidence
+  against the compactor.
+- **A default for `scrub_interval`.** Off until the background arm has run at full scale on
+  the benchmark host; the smoke run priced the loop's hashing and not the disk.
+- **A volatile copy's repair under test.** `QuarantineAction::Rebuild` restarts an ephemeral
+  group empty for its leader to feed, and no fixture test drives it, since every fault verb
+  needs an archive to fault; a fault verb over an ephemeral table's resident partitions would
+  be the test.
+- **A sorted table's canonical cut under the fixture.** The fold is unit-tested and the sorted
+  table's cut runs in no fixture test, the schema having no persistent sorted table; adding
+  one changes every cluster test's group count, which is why it was not.
+- **The archive generation on the record.** `Repaired` carries the boundary and the verified
+  index; the compactor tracks no generation number to carry.
+- **A rebuild-by-scan of a lost map.** The header and the size prefix now make an archive
+  self-describing, which a scan needs; the scan is still not written
+  ([archive checksums](#archive-checksums)).
+- **Retrying a scheduled scrub refused stale.** The proposal carries the map's version and a
+  version that moved between the tick and the commit refuses it; it waits for the next
+  interval rather than being sent again.
+- **Item 99's remainder.** A log truncated to a shorter one that still holds frames is fed by
+  the leader as a reversion and counted by nobody
+  ([Resolved #99](resolved/durable-log-reversion.md)).
+- **The background arm at full scale.** Smoke scale on the development host showed the shape
+  with every partition resident; the capture is the benchmark host's.
+
 **What F43 left undone, deliberately.** Recorded here so the next milestone starts from the
 list rather than from the diff:
 

@@ -139,7 +139,7 @@ current group before enabling replication acknowledgements or reads.
 | Matching retained history, behind | Fetch missing entries and commit/application progress | M4: openraft's replication from the retained log (`returning_node_catches_up_by_log_or_snapshot`, first half) |
 | Conflicting uncommitted suffix | Locate common history with the protocol and durably truncate WAL only; never roll authoritative archives backward | M4 for a volatile group; M8 for a durable one: a member whose log is shorter than it acknowledged is fed from the leader's log or a snapshot, counts `log_lost` and never stops the leader ([Resolved #99](../appendix/resolved/durable-log-reversion.md), `durable_log_reversion_is_fed_not_fatal`) |
 | Required history no longer retained | Install a complete checkpoint, then its subsequent log tail | M7: a snapshot per group at its checkpoint, the log strictly after it from the leader (`returning_node_catches_up_by_log_or_snapshot`, second half) |
-| Same index, mismatched checksums/state | Quarantine and use verified repair, not a claim that equal stamps imply equal data | M8 |
+| Same index, mismatched checksums/state | Quarantine and use verified repair, not a claim that equal stamps imply equal data | M8: a record that fails its checksum quarantines the copy on the read that met it, a scrub at a committed boundary finds a copy whose rows differ from a verified majority's and quarantines it, and a repair installs the leader's cut past the copy's held checkpoint by restarting its group from it ([F44](../features/repair.md), `corrupt_follower_is_quarantined_and_repaired_from_a_verified_source`) |
 | Obsolete configuration or removed identity | No autonomous voting/serving; follow C8/C9 replacement and orphan rules | M9 |
 
 Do not automatically move leadership back to a returning node. A later load-aware leadership
@@ -284,6 +284,9 @@ against node zero's committed positions, the record split by path
 | `retention_and_recovery_memory_are_bounded` | Slow follower and high write rate trigger bounded fallback/backpressure | M7 |
 | `down_within_grace_moves_no_replicas` | Election may change leadership; replica placement remains unchanged | M7 |
 | `whole_cluster_restart_preserves_durable_history` | Restart all nodes after pending writes and compaction; acknowledged operations remain | M7 |
+| `corrupt_follower_is_quarantined_and_repaired_from_a_verified_source` | A follower's flipped byte is refused by name and quarantined; a repair installs the leader's cut past the follower's held checkpoint, re-merges what the old generation had, verifies and lifts | M8 |
+| `repair_install_is_atomic_at_every_crash_point` | The target killed at each of the seven points of a repair install comes back quarantined, is redone or installed again, and converges with one generation | M8 |
+| `durable_log_reversion_is_fed_not_fatal` | A durable follower with its segments or its whole WAL directory removed is fed by log or snapshot, reports `log_lost`, and never stops the leader | M8 |
 
 ## Related
 

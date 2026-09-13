@@ -56,6 +56,12 @@ struct TabletPlacement {
 ```
 
 A `ReplicaProgress` distinguishes planned, installing, catching up, ready and quarantined copies.
+*At M8 ([F44](../features/repair.md)) quarantined is the first of those states the committed map
+carries: `MemberState::quarantined` names every copy a node holds under quarantine - the table,
+the group, its tablets and why - reported by the node on change and committed by the leader like
+its shard failures, put on `MapMember` and the topology frame, and read by `read_ring_for`,
+`preferred_holder` and `alternate_holder` to pass over a holder for those tablets. Installing is
+still the shard's own state and the report's; planned and catching up are M9a's.*
 A `LeaderHint` carries a term and address, but current authority is checked by the data group.
 Configuration ids, leader terms, snapshot generations and control-plane topology versions are
 separate types. “Has a copy”, “can vote”, “can count toward durability” and “can serve this read”

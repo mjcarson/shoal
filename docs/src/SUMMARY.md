@@ -105,6 +105,7 @@
   - [F41. Read consistency levels](features/read-consistency.md)
   - [F42. Primary failover](features/primary-failover.md)
   - [F43. Recovering a node brought back online](features/node-recovery.md)
+  - [F44. Repair](features/repair.md)
 
 # Direction
 

@@ -355,7 +355,8 @@ snapshot is per group, so a returning node installs every tablet its replica set
 than the ones it is behind on; a partial transfer survives a lane cut but not a receiver restart;
 the bench arms ran at smoke scale on the development host, where the outage outlasts the
 absence and neither arm shows a catch-up; item 99 (a durable follower's log reversion) stays
-for M8; and a member isolated on every lane long enough to inflate its term trips an openraft
+for M8, ~~where it is still open~~ where it was [fixed first](../appendix/resolved/durable-log-reversion.md);
+and a member isolated on every lane long enough to inflate its term trips an openraft
 debug assertion in the control plane when healed
 ([item 106](../appendix/known-issues.md#106-a-member-isolated-on-every-lane-long-enough-to-inflate-its-term-trips-an-openraft-debug-assertion-when-healed)).
 
@@ -394,6 +395,38 @@ forced purge behind the groups pinning it.
 
 ### M8. Repair
 
+**Delivered** on 2026-09-13 as [F44](../features/repair.md). All seven fixture rows below are
+runnable as `cargo test -p shoal --test cluster_fixture -- --test-threads 6`, the C10 rows as
+`cargo test -p shoal-bench`, with the archive record format, the checkpoint and sidecar
+checksums, the canonical fold, the judge and the `repair:` block's bounds as unit tests beside
+them. What was delivered, what was not, and the evidence are on the F page; the rest of this
+section is the gate as it was set. [Item 99](../appendix/resolved/durable-log-reversion.md),
+left for this milestone by M7, was reproduced and fixed first. *Not done, on purpose:* routing
+around a quarantined copy is per tablet rather than per table, and on the fixture's placement
+a read through the holding node is routed to another replica rather than refused, so the
+refusal by name is observed only in the window before the map carries the quarantine; a
+volatile copy's repair - the group restarted empty for its leader to feed - runs in no fixture
+test, since every fault verb needs an archive to fault; a sorted table's canonical cut is
+covered by the fold's unit test and no fixture test, the fixture's schema having no persistent
+sorted table; `Repaired` records the boundary and the verified index and no archive
+generation; a scheduled scrub whose proposal is refused stale waits for the next interval; and
+the background arm ran at smoke scale on the development host, where every partition is
+resident and the scrubs read nothing off the disk.
+
+| Test | Where | What it asserts |
+| --- | --- | --- |
+| `repair_detects_corrupt_primary_and_preserves_evidence` | `shoal/tests/cluster_fixture.rs` ([C9](operations.md)) | The leader's record of a group corrupted: a repair finds its copy invalid against two verified copies that agree, the leader hands the lead to one of them and that member repairs the old leader from a snapshot, `Repaired` naming a source that is not the corrupt primary. A different partition erased on each of two followers under valid checksums: a repair stops `Unresolved` with all three digests recorded and no invalid copy, nothing quarantined, nothing installed, and every copy readable as it was. An operator's `source` naming the leader resolves it: both are quarantined under the operator's word and repaired from it. Every key read through every node joins a ledger with the inserts that made it, and the oracle accepts the history |
+| `canonical_digest_ignores_archive_layout_at_same_boundary` | `shoal-core/src/server/replication/digest.rs`, `shoal/tests/cluster_fixture.rs` ([C9](operations.md)) | Unit: the fold depends on the rows and nothing else - a map built in either order, a tombstone-only partition beside a missing one, two rows that would run together as bytes. Fixture: three replicas holding the same rows merged into their archives thrice with deletes and updates between, once, and never, scrubbed at one committed index, report verified and equal; a verify of the table is clean on every group. A partition forgotten on one node is a verified digest that differs and a verify quarantines the copy: readiness and the frame name it, a read through it is routed elsewhere, a release lifts it. An erased partition differs the same way; a corrupted record is an invalid copy, refused by name to the read that met it and quarantined on the spot, with the quarantine outliving a restart. The fixture's independent fold agrees with every verdict |
+| `corrupt_follower_is_quarantined_and_repaired_from_a_verified_source` | `shoal/tests/cluster_fixture.rs` ([C7](failover.md)) | A follower's record flipped in place: the read that meets it is refused by name and quarantines the copy; a repair of that tablet scrubs, finds it invalid, cuts a snapshot on the leader past the follower's checkpoint - cutting again when the follower answers `Behind` - streams it, restarts the follower's group from its held checkpoint to install it, scrubs again and lifts the quarantine, `Repaired` from the leader to the follower at a verified index past the boundary. The follower alone installed a snapshot, the committed state clears, every key reads through the repaired copy, every digest agrees, and writes after the repair compact and move the held checkpoint on |
+| `repair_install_is_atomic_at_every_crash_point` | `shoal/tests/cluster_fixture.rs` ([C7](failover.md)) | Node two armed to die at each of the seven points of an install, its record corrupted and a repair asked for: the install kills it there. Restarted clean it is still quarantined by its marker, and a second repair finds the copy either installed already and agreeing, which lifts it, or still corrupt, which installs it again: at every point no quarantine is left anywhere, every digest agrees, every key of the group reads the survivors' value through node two, and nothing is left in its install directory |
+| `durable_log_reversion_is_fed_not_fatal` | `shoal/tests/cluster_fixture.rs` ([C7](failover.md), [item 99](../appendix/resolved/durable-log-reversion.md)) | Node two's WAL segments removed, then its whole WAL directory: both times the survivors are the processes they were, writes through the leader keep committing, node two is fed by log or by snapshot until every digest agrees, and it reports the log it lost |
+| `repair_is_authorized_versioned_and_resumable_by_id` | `shoal/tests/cluster_fixture.rs` ([C9](operations.md)) | A user who is not an admin is `Unauthorized`, a stale version `StaleVersion`, the same operation again `Repeated`; the record is readable through every node and completes clean on every group with three reports each. A second operation asked for and the control leader killed while its groups scrub: the drivers wait out the election, commit to the new leader, and the record completes through a survivor with every group done and nothing quarantined |
+| `scheduled_scrub_quarantines_without_an_operator` | `shoal/tests/cluster_fixture.rs` ([C9](operations.md)) | With `scrub_interval` at four seconds, two passes over clean copies quarantine nothing and every node was scrubbed; a partition forgotten on node one is found by the next pass, its copy quarantined `Divergent` and named in the committed state, a read of the group through it routed elsewhere, and no snapshot installed anywhere |
+| `archive_records_are_checksummed_and_a_flipped_byte_is_refused` | `shoal-core/src/server/tables/storage/fs/tests.rs` ([C9](operations.md)) | A format 2 record round-trips past the header and its prefix; a flipped byte on disk is `CorruptArchive` naming the archive and the partition, counted, and classed fatal. Beside it: a format 1 archive reads unverified and counts, and a torn record is refused |
+| `the_repair_block_parses_with_its_defaults`, `validation_refuses_what_is_not_built` | `shoal-core/src/server/conf/cluster.rs` | No scheduled scrub by default, a five minute timeout and one repair at a time; a timeout under the write timeout, an interval under the timeout and no repairs at a time refused by name |
+| `background_capture_records_scrub_interference` | `shoal-bench/src/workloads/harness/background.rs` ([C10](performance.md)) | A timeline cut at the repair's marks into three windows with the slower middle one and its failure, a bucket per second, the counters carried; a repair never asked for is a run that is all `before`; an F43 record loads without the block |
+| `the_background_arm_shares_the_replication_placement` | `shoal-bench/src/workloads/cluster_background.rs` ([C10](performance.md)) | The arm on the kill arm's durable placement and scale, no fault, a repair of a persistent table inside the run, its id appended after the catch-up arms |
+
 **Delivers.** Persistent integrity metadata, canonical digests at a common committed boundary,
 quarantine and verified source selection, atomic snapshot repair, authorization and progress metrics.
 Unresolved divergence preserves evidence instead of overwriting every copy from the primary.
@@ -405,6 +438,18 @@ Corrupt primary and followers separately; vary archive layout, deletes and check
 **Evidence/exit.** Corruption detected and repaired from justified evidence, or stopped with an
 actionable unresolved state. Measure scrub/repair resource and foreground-latency interference.
 Migration interaction is tested when its implementation arrives in M9a.
+*Met:* a corrupt primary and corrupt followers are found by their checksums and repaired from
+a verified majority, a split nobody can judge stops with every digest recorded and every copy
+as it was, and an operator's word resolves it; the layout, the deletes and the checkpoint
+boundaries vary across the three replicas of the digest test; every history the oracle judged
+is sequential. *Met in shape, not in number:* the background arm records the interference and
+the resource, and ran at smoke scale on the development host only - nine groups verified in a
+second, seventeen thousand partitions hashed on the loop, nothing read off the disk, the
+foreground's median twice what the run's ramp had it at; the capture is the benchmark host's.
+*Decided:* [Q12 at M8](protocol.md#q12-at-m8) - the scheduled half is verification only, off by
+default and priced by the arm; the destructive half is an operator's, under the majority rule
+or a named source, never automatic on an unresolved split; a backup as a second provenance and
+permanent quorum loss stay M10's.
 
 ## Group C — Elastic membership
 

@@ -21,6 +21,11 @@ A new leader resumes those records; it does not reconstruct a plan solely from â
 Only one configuration/migration transition per logical tablet is active at a time. Repair,
 removal, RF changes, same-node moves and leadership transfers must either cooperate with that
 transition or wait. A plan is not an in-memory task whose cancellation undoes committed steps.
+*At M8 ([F44](../features/repair.md)) a repair is driven one group at a time per shard
+(`cluster.repair.concurrent`) by the group's leader, its phase committed before every step and
+resumed by the next leader; that per-group serialization, and the record a group is done under,
+are what M9a's transition lock inherits and what `repair_serializes_with_migration_and_new_commits`
+will drive against a move.*
 
 Placement priorities:
 

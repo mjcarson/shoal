@@ -191,6 +191,7 @@ so they get worse by existing longer rather than under load.
 | **B9** | [**O50**](#o50-a-read-plan-is-built-and-cloned-per-share), [**O51**](#o51-every-committed-write-answers-with-a-forty-eight-byte-token) — a plan per share, a token per write | Argued — a clone of an `Rc` and a `Copy` per share; forty-eight bytes and one more `IoSlice` per committed write down a capable connection | S | `macro/cluster/replication/durable` for O51 | Contained | no |
 | **B10** | [**O52**](#o52-a-snapshot-copies-every-record-of-the-archives-into-one-file) — a snapshot copies the archives rather than pinning them | Argued — every byte of a group's tablets read, written, synced and read again per cut, on the table's one compactor, before a byte reaches the lane | L | `macro/cluster/catchup/snapshot` on the benchmark host | Contained on the wire, not on the compactor | no |
 | **B11** | [**O53**](#o53-the-assembler-keeps-a-map-of-received-chunks-and-forgets-them-on-a-restart) — the assembler keeps a map of received chunks and forgets them on a restart | Argued — a `BTreeMap` entry per chunk out of order, and a stream started over after the receiver restarts | S | `macro/cluster/catchup/snapshot` with a receiver restart, which no arm does | Contained | no |
+| **B12** | [**O54**](#o54-a-scrub-reads-every-archived-partition-of-a-group-once-per-pass) — a scrub reads every archived partition of a group once per pass | Measured in shape — the background arm's `bytes` is the group's archives whole, per pass | M | `macro/cluster/background/repair` at full scale, where the archives are wider than memory | Contained | no |
 
 **Tier C — blocked on a design pass, not on effort.**
 
@@ -2692,3 +2693,19 @@ Filed by [F43](../features/node-recovery.md). The map is the simpler structure a
 delivers in order, so it holds nothing in the common case; the restart is the real gap, and
 it was left because a restart mid-install is the crash matrix's problem and a restart
 mid-stream is only a slower catch-up.
+
+### O54. A scrub reads every archived partition of a group once per pass
+
+| | |
+| --- | --- |
+| **Rank** | **B12** — measured in shape, contained |
+| **Impact** | Measured in shape — a canonical cut hashes every resident partition on the loop and reads every non-resident one off the archives on a task, so a pass over a group costs the group's disk once: `cluster.background.bytes` on `macro/cluster/background/repair` is exactly that, and a scheduled scrub spends it every `scrub_interval`. At smoke scale on the development host every partition was resident and the cost was the loop's hashing alone; at full scale the archived pass is the whole of it |
+| **Difficulty** | M — an incremental per-partition digest kept in the archive map, written by the compactor beside each entry and folded by the cut without reading the record, would make a pass a walk of the map rather than of the disk; the digest has to be the canonical one over re-serialized rows, so the compactor pays the re-serialization it already does for the write, and a record read for any other reason still verifies its checksum |
+| **Blocks** | nothing; a scheduled default for `scrub_interval` ([Q12](../distributed/protocol.md#q12-at-m8)) waits on the full-scale measurement first |
+| **Tradeoff** | Contained — the map grows by eight bytes an entry and the `SerializedMap` format moves, and a digest in the map is a digest a corrupt map could misreport, which the map's own checksum covers |
+| **Benchmark** | `macro/cluster/background/repair`, whose `bytes` over `seconds` is the rate a pass reads at and whose `during` against `before` is what it costs the foreground |
+
+Filed by [F44](../features/repair.md). A cut that reads the disk was the smaller thing to get
+right first, and it is what makes the digest independent of anything the compactor wrote
+beside the record - which is worth keeping in mind before the map carries the digest, since a
+digest the compactor computed is not evidence against the compactor.
