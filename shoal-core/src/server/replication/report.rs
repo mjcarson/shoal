@@ -244,6 +244,13 @@ pub struct ReadStats {
     /// ([F42](../../../../docs/src/features/primary-failover.md))
     #[serde(default)]
     pub reroutes: u64,
+    /// Forwards a node refused because it no longer serves the tablet
+    /// ([F45](../../../../docs/src/features/replica-migration.md))
+    #[serde(default)]
+    pub stale_refusals: u64,
+    /// Queries this shard refused because no group here serves their tablet
+    #[serde(default)]
+    pub stale_served: u64,
 }
 
 impl ReadStats {
@@ -265,6 +272,8 @@ impl ReadStats {
         self.late_shares += other.late_shares;
         self.duplicate_shares += other.duplicate_shares;
         self.reroutes += other.reroutes;
+        self.stale_refusals += other.stale_refusals;
+        self.stale_served += other.stale_served;
     }
 
     /// Record one barrier, and whether it hopped

@@ -1145,6 +1145,8 @@ mod tests {
             late_shares: 3,
             duplicate_shares: 1,
             reroutes: 0,
+            stale_refusals: 0,
+            stale_served: 0,
         };
         let reports = vec![("n0".to_string(), busy), ("n1".to_string(), NodeReplication::default())];
         let arm = ReadArm {

@@ -565,6 +565,57 @@ fn markers_survive_the_deletion_of_their_segment() {
     });
 }
 
+/// A forgotten group leaves no state behind, in memory or across a reopen, and its frames
+/// are handed to no compactor while another group's in the same segment still are (F45)
+#[test]
+fn a_forgotten_group_leaves_no_log_behind() {
+    use openraft::storage::RaftLogStorage as _;
+    let mut runtime = GlommioRuntime::new(1);
+    runtime.block_on(async {
+        let dir = tempfile::tempdir().expect("failed to build a temp dir");
+        let path = dir.path().join("wal");
+        let (retired, kept) = (GroupId(11), GroupId(12));
+        let wal = ShardWal::open(&path, 1 << 30, 1 << 20).await.expect("failed to open");
+        let mut retiring = wal.store(retired);
+        let mut keeping = wal.store(kept);
+        // both groups' frames in one segment, with a vote and a commit for the one retiring
+        append_durably(&mut retiring, (1..=5).map(|index| normal(index, 32)).collect()).await;
+        append_durably(&mut keeping, (1..=3).map(|index| normal(index, 32)).collect()).await;
+        retiring.save_vote(&openraft::Vote::new(2, ShardAddr::from(1))).await.expect("failed to vote");
+        retiring.save_committed(Some(log_id(1, 5))).await.expect("failed to record the commit");
+        wal.flush().await.expect("failed to flush");
+        let generation = wal.active_generation();
+        assert_eq!(wal.frames_in(generation, &[(retired, 0), (kept, 0)]).len(), 8);
+        // forgotten: the state is gone, the segment no longer names it, the other group's frames stay
+        wal.forget(retired).expect("failed to forget");
+        wal.flush().await.expect("failed to flush the marker");
+        assert!(wal.frames_in(generation, &[(retired, 0)]).is_empty(), "a forgotten group's frames were handed");
+        assert_eq!(wal.frames_in(generation, &[(kept, 0)]).len(), 3);
+        let segment = wal.segments().into_iter().find(|segment| segment.generation == generation).expect("the segment");
+        assert!(!segment.last.contains_key(&retired), "the segment still names the forgotten group");
+        assert!(segment.last.contains_key(&kept));
+        assert_eq!(wal.vote_of(retired), None);
+        assert_eq!(wal.last_log_id_of(retired), None);
+        wal.close().await.expect("failed to close");
+        // reopened, the marker holds: nothing of the group is rebuilt from the frames before it
+        let reopened = ShardWal::open(&path, 1 << 30, 1 << 20).await.expect("failed to reopen");
+        let mut store = reopened.store(retired);
+        assert_eq!(reopened.vote_of(retired), None, "the vote came back");
+        assert_eq!(store.read_committed().await.expect("failed to read"), None, "the commit came back");
+        let state = store.get_log_state().await.expect("failed to read the log state");
+        assert_eq!(state.last_log_id, None, "the entries came back");
+        assert_eq!(reopened.last_log_id_of(kept).map(|log_id| log_id.index), Some(3), "the other group lost its log");
+        assert!(reopened.frames_in(generation, &[(retired, 0)]).is_empty());
+        assert_eq!(reopened.frames_in(generation, &[(kept, 0)]).len(), 3);
+        // a copy of the group added again starts clean and its new frames are its own
+        let mut again = reopened.store(retired);
+        append_durably(&mut again, vec![normal(1, 32)]).await;
+        reopened.flush().await.expect("failed to flush");
+        assert_eq!(reopened.last_log_id_of(retired).map(|log_id| log_id.index), Some(1));
+        reopened.close().await.expect("failed to close");
+    });
+}
+
 /// A membership set of shard addresses, for a membership entry
 fn members(ids: &[u64]) -> BTreeSet<ShardAddr> {
     ids.iter().map(|id| ShardAddr::from(*id)).collect()

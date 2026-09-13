@@ -38,6 +38,7 @@ use crate::server::database::ShoalDatabase;
 use crate::server::map::MapCell;
 use crate::server::messages::ServerMsg;
 use crate::server::replication::{DataConfig, GroupMachine, MachineState, ShardNetwork, ShardPeer};
+use crate::server::ServerError;
 use crate::shared::identity::{GroupId, ShardAddr};
 use crate::shared::traits::QuerySupport;
 
@@ -673,5 +674,393 @@ where
                 glommio::spawn_local(drive_group(context)).detach();
             }
         }
+    }
+}
+
+/// The directory under `wal/Shard-N/` a retired copy's marker lives in
+pub const RETIRED_DIR: &str = "retired";
+
+/// A retired copy's marker, as it is persisted
+///
+/// Written when the copy retires and removed once its files are reclaimed, so a restart
+/// inside the grace resumes the retirement rather than serving the files or leaking them.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct RetiredMarker {
+    /// The move that retired the copy
+    op: Uuid,
+    /// The table the group serves
+    table: crate::shared::identity::TableId,
+    /// The tablets it served
+    tablets: Vec<u16>,
+    /// Whether the group's log lived in memory alone
+    volatile: bool,
+    /// When the grace started, in milliseconds since the epoch
+    at_ms: u64,
+}
+
+/// Persist a retired copy's marker
+///
+/// # Arguments
+///
+/// * `wal_dir` - The shard's WAL directory
+/// * `group` - The group
+/// * `copy` - The retired copy
+pub async fn write_retired(wal_dir: &std::path::Path, group: GroupId, copy: &RetiredCopy) -> std::io::Result<()> {
+    let dir = wal_dir.join(RETIRED_DIR);
+    std::fs::create_dir_all(&dir)?;
+    let marker = RetiredMarker {
+        op: copy.op,
+        table: copy.table,
+        tablets: copy.tablets.clone(),
+        volatile: copy.volatile,
+        at_ms: now_ms().saturating_sub(u64::try_from(copy.at.elapsed().as_millis()).unwrap_or(0)),
+    };
+    let bytes = postcard::to_allocvec(&marker).map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    crate::server::wal::write_atomic(&dir, &format!("{group}"), bytes).await
+}
+
+/// Remove a retired copy's marker, once its files are reclaimed
+///
+/// # Arguments
+///
+/// * `wal_dir` - The shard's WAL directory
+/// * `group` - The group
+pub async fn clear_retired(wal_dir: &std::path::Path, group: GroupId) -> std::io::Result<()> {
+    let path = wal_dir.join(RETIRED_DIR).join(format!("{group}"));
+    match std::fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    }
+    // the removal is made durable like the write was
+    let directory = glommio::io::Directory::open(wal_dir.join(RETIRED_DIR))
+        .await
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    directory.sync().await.map_err(|error| std::io::Error::other(error.to_string()))?;
+    directory.close().await.map_err(|error| std::io::Error::other(error.to_string()))?;
+    Ok(())
+}
+
+/// Every retired copy's marker under a shard's WAL directory, by group
+///
+/// A marker that does not decode still retires the group by name: its files are never served,
+/// and the grace is counted from now.
+///
+/// # Arguments
+///
+/// * `wal_dir` - The shard's WAL directory
+#[must_use]
+pub fn scan_retired(wal_dir: &std::path::Path) -> std::collections::HashMap<GroupId, RetiredCopy> {
+    let mut found = std::collections::HashMap::new();
+    let Ok(entries) = std::fs::read_dir(wal_dir.join(RETIRED_DIR)) else {
+        return found;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        // a staged write that never renamed is not a marker
+        let Ok(group) = u64::from_str_radix(&name, 16) else {
+            continue;
+        };
+        let marker = std::fs::read(entry.path())
+            .ok()
+            .and_then(|bytes| postcard::from_bytes::<RetiredMarker>(&bytes).ok());
+        let copy = match marker {
+            Some(marker) => RetiredCopy {
+                table: marker.table,
+                tablets: marker.tablets,
+                op: marker.op,
+                at: Instant::now() - Duration::from_millis(now_ms().saturating_sub(marker.at_ms)),
+                volatile: marker.volatile,
+                reclaiming: false,
+            },
+            None => {
+                tracing::event!(tracing::Level::ERROR, msg = "a retired marker does not decode; the copy is held retired by name", group = name);
+                RetiredCopy {
+                    table: crate::shared::identity::TableId(0),
+                    tablets: Vec::new(),
+                    op: Uuid::nil(),
+                    at: Instant::now(),
+                    volatile: false,
+                    reclaiming: false,
+                }
+            }
+        };
+        found.insert(GroupId(group), copy);
+    }
+    found
+}
+
+impl<D: ShoalDatabase> Shard<D>
+where
+    [<<<D as ShoalDatabase>::ClientType as QuerySupport>::QueryKinds as rkyv::Archive>::Archived]:
+        rkyv::DeserializeUnsized<
+            [<<D as ShoalDatabase>::ClientType as QuerySupport>::QueryKinds],
+            rkyv::rancor::Strategy<rkyv::de::Pool, rkyv::rancor::Error>,
+        >,
+{
+    /// Retire this shard's copy of a group a published move took from it
+    ///
+    /// The handle is shut down - openraft would otherwise keep a removed member as a
+    /// candidate that never wins - the resident partitions are evicted, the log is forgotten,
+    /// and the copy is held with its files for the grace, refusing every query of its tablets
+    /// by name. A volatile copy has no files, so its grace is the marker alone
+    /// ([F45](../../../../docs/src/features/replica-migration.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group
+    /// * `slot` - The copy, taken out of the groups
+    /// * `op` - The move that retired it
+    pub(super) async fn retire_group(&mut self, group: GroupId, slot: super::groups::Group<D>, op: Uuid) -> Result<(), ServerError> {
+        use crate::shared::traits::TableNameSupport as _;
+        let table = slot.table;
+        let tablets = slot.spec.tablets.clone();
+        let volatile = slot.store.is_volatile();
+        event!(Level::WARN, msg = "retiring this shard's copy of a moved group", group = %group, %op, tablets = tablets.len(), volatile);
+        if let Some(raft) = slot.raft {
+            glommio::spawn_local(async move {
+                let _ = raft.shutdown().await;
+            })
+            .detach();
+        }
+        // the resident copies go now; the archived ones after the grace
+        self.tables.evict_tablets(table, &tablets);
+        let Some(replication) = self.replication.as_mut() else {
+            return Ok(());
+        };
+        // the log is dead history: forgotten, so a copy of the group added here later starts
+        // with none, and never handed to a compactor again
+        if volatile {
+            replication.volatile.forget(group);
+        } else if let Err(error) = replication.wal.forget(group) {
+            event!(Level::ERROR, msg = "a retired group's log could not be forgotten", group = %group, %error);
+        }
+        for batches in replication.parked.values_mut() {
+            batches.retain(|batch| batch.group != group);
+        }
+        replication.parked.retain(|_, batches| !batches.is_empty());
+        let copy = RetiredCopy {
+            table: table.table_id(),
+            tablets,
+            op,
+            at: Instant::now(),
+            volatile,
+            reclaiming: false,
+        };
+        let wal_dir = replication.wal_dir.clone();
+        if let Err(error) = write_retired(&wal_dir, group, &copy).await {
+            event!(Level::ERROR, msg = "a retired copy's marker could not be written", group = %group, %error);
+        }
+        if let Some(replication) = self.replication.as_mut() {
+            replication.retired.insert(group, copy);
+            // the checkpoint no longer names the group
+            replication.checkpoint_dirty = true;
+        }
+        self.write_checkpoint();
+        Ok(())
+    }
+
+    /// Start reclaiming every retired copy whose grace is over
+    ///
+    /// A durable copy's archived partitions are dropped by its table's compactor, which the
+    /// loop hears back from; a volatile copy has nothing on disk and is finished at once.
+    pub(super) async fn sweep_retired(&mut self) -> Result<(), ServerError> {
+        let grace = self
+            .conf
+            .cluster
+            .as_ref()
+            .map_or(Duration::from_secs(300), |cluster| cluster.migration.retire_after.duration());
+        let sinks: std::collections::HashMap<crate::shared::identity::TableId, kanal::AsyncSender<crate::storage::CompactionJob>> = {
+            use crate::shared::traits::TableNameSupport as _;
+            self.tables
+                .compaction_sinks()
+                .into_iter()
+                .map(|(table, sink)| (table.table_id(), sink))
+                .collect()
+        };
+        let Some(replication) = self.replication.as_mut() else {
+            return Ok(());
+        };
+        let mut finished = Vec::new();
+        for (group, copy) in replication.retired.iter_mut() {
+            if copy.reclaiming || copy.at.elapsed() < grace {
+                continue;
+            }
+            copy.reclaiming = true;
+            if copy.volatile {
+                finished.push(*group);
+                continue;
+            }
+            match sinks.get(&copy.table) {
+                Some(sink) => {
+                    event!(Level::INFO, msg = "a retired copy's grace is over; dropping its archived partitions", group = %group);
+                    let job = crate::storage::CompactionJob::Drop {
+                        group: *group,
+                        tablets: copy.tablets.clone(),
+                    };
+                    if sink.try_send(job).is_err() {
+                        event!(Level::WARN, msg = "a retired copy's compactor is not taking jobs; trying again next sweep", group = %group);
+                        copy.reclaiming = false;
+                    }
+                }
+                // a table this schema does not have holds nothing here
+                None => finished.push(*group),
+            }
+        }
+        for group in finished {
+            self.finish_retirement(group).await?;
+        }
+        Ok(())
+    }
+
+    /// Note that a retired copy's archived partitions are gone, or not
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group
+    /// * `outcome` - Whether the drop landed
+    pub(super) async fn handle_tablets_dropped(&mut self, group: GroupId, outcome: Result<u64, String>) -> Result<(), ServerError> {
+        match outcome {
+            Ok(removed) => {
+                event!(Level::INFO, msg = "a retired copy's archived partitions are gone", group = %group, removed);
+                self.finish_retirement(group).await
+            }
+            Err(error) => {
+                event!(Level::ERROR, msg = "a retired copy's partitions could not be dropped; trying again next sweep", group = %group, error);
+                if let Some(copy) = self.replication.as_mut().and_then(|replication| replication.retired.get_mut(&group)) {
+                    copy.reclaiming = false;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Finish a retirement: the group's snapshot, install and quarantine files and its marker
+    /// go, the copy is forgotten, and the groups are rebuilt in case the map names it again
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group
+    async fn finish_retirement(&mut self, group: GroupId) -> Result<(), ServerError> {
+        let Some(replication) = self.replication.as_mut() else {
+            return Ok(());
+        };
+        let wal_dir = replication.wal_dir.clone();
+        // every file the group left: its cut snapshots, a partial or pending install, a
+        // quarantine marker
+        let snapshots = wal_dir.join(crate::server::replication::snapshot::SNAPSHOTS_DIR);
+        if let Ok(entries) = std::fs::read_dir(&snapshots) {
+            for entry in entries.flatten() {
+                if entry.file_name().to_string_lossy().starts_with(&format!("{group}-")) {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
+        let _ = std::fs::remove_file(replication.installs.part_path(group));
+        let _ = std::fs::remove_file(replication.installs.marker_path(group));
+        replication.installs.retire(group);
+        replication.pending_installs.remove(&group);
+        replication.quarantines.remove(&group);
+        if let Err(error) = super::repair::clear_quarantine(&wal_dir, group).await {
+            event!(Level::WARN, msg = "a retired copy's quarantine marker could not be removed", group = %group, %error);
+        }
+        if let Err(error) = clear_retired(&wal_dir, group).await {
+            event!(Level::ERROR, msg = "a retired copy's marker could not be removed; it is retired again at the next start", group = %group, %error);
+        }
+        if let Some(replication) = self.replication.as_mut() {
+            replication.retired.remove(&group);
+            replication.checkpoint_dirty = true;
+            replication.sweep_due = true;
+        }
+        event!(Level::INFO, msg = "a retired copy is reclaimed", group = %group);
+        self.write_checkpoint();
+        // the map may have brought the group back here meanwhile
+        self.rebuild_groups().await
+    }
+
+    /// Refuse a query of a tablet no group on this shard serves, by name
+    ///
+    /// A query a peer forwarded is refused on a frame of its own, so the origin can send it
+    /// to another holder under the same attempt and slot; a client's is answered in the
+    /// query's own variant, for its retry budget to cover
+    /// ([F45](../../../../docs/src/features/replica-migration.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `meta` - The query's metadata
+    /// * `query` - The query
+    /// * `span` - The span to reply under
+    /// * `gathered_meta` - The metadata to answer with, if this is a share
+    /// * `tablet` - The tablet nobody here serves
+    pub(super) async fn answer_stale(
+        &mut self,
+        mut meta: crate::server::messages::QueryMetadata,
+        query: <D::ClientType as QuerySupport>::QueryKinds,
+        span: tracing::Span,
+        gathered_meta: Option<crate::server::messages::QueryMetadata>,
+        tablet: u16,
+    ) -> Result<(), ServerError> {
+        use crate::shared::protocol::error::ErrorCode;
+        self.read_stats.stale_served += 1;
+        let version = self.map.get().version;
+        let table = D::ClientType::query_table_name(&query);
+        event!(Level::INFO, msg = "refusing a query of a tablet no group here serves", tablet, %table, version, from_peer = meta.from_peer);
+        let msg = format!(
+            "tablet {tablet} of {table} is not served on this node at map version {version}: its copy retired here or was never here"
+        );
+        if meta.from_peer {
+            let payload = crate::shared::protocol::peer::encode_error_payload(ErrorCode::StaleTopology.as_u16(), &msg);
+            let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(payload.len());
+            aligned.extend_from_slice(&payload);
+            // a share answers under the gather's client, index and route; a whole answer under its own
+            let (client, id, index, end, route) = match &gathered_meta {
+                Some(gathered) => (gathered.client, gathered.id, gathered.index, gathered.end, (gathered.read.attempt, gathered.read.slot)),
+                None => (meta.client, meta.id, meta.index, meta.end, (meta.read.attempt, 0)),
+            };
+            meta.stamps.mark_exec_done();
+            meta.stamps.mark_replied();
+            return self
+                .reply_sealed(client, id, index, end, crate::server::messages::ReplyKind::Stale, span, meta.stamps, aligned, None, route)
+                .await;
+        }
+        let error = crate::shared::responses::ResponseError::new(ErrorCode::StaleTopology, msg);
+        self.answer_read_failure(meta, query, span, gathered_meta, error).await
+    }
+
+    /// Whether a group on this shard serves a table's tablet
+    ///
+    /// # Arguments
+    ///
+    /// * `table` - The table
+    /// * `tablet` - The tablet
+    pub(super) fn serves_tablet(&self, table: D::TableNames, tablet: u16) -> bool {
+        use crate::shared::traits::TableNameSupport as _;
+        self.replication
+            .as_ref()
+            .is_some_and(|replication| replication.tablets.contains_key(&(table.table_id(), tablet)))
+    }
+
+    /// The tablet of a query no group on this shard serves, if there is one
+    ///
+    /// A query routed here by a map older than the configuration its tablet now lives under:
+    /// the copy retired, or was never here. Refused by name rather than answered from files
+    /// the cluster no longer counts ([F45](../../../../docs/src/features/replica-migration.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `query` - The query
+    pub(super) fn stale_tablet(&self, query: &<D::ClientType as QuerySupport>::QueryKinds) -> Option<u16> {
+        use crate::shared::traits::{ShoalQuerySupport as _, TableNameSupport as _};
+        let replication = self.replication.as_ref()?;
+        let table = D::ClientType::query_table_name(query).table_id();
+        for key in query.partition_keys() {
+            // truncation cannot happen: a tablet id is twelve bits
+            #[allow(clippy::cast_possible_truncation)]
+            let tablet = crate::server::ring::Ring::tablet_of(*key) as u16;
+            if !replication.tablets.contains_key(&(table, tablet)) {
+                return Some(tablet);
+            }
+        }
+        None
     }
 }

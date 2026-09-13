@@ -805,6 +805,61 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         Ok(trailer)
     }
 
+    /// Remove every archived partition of some tablets, and tell the shard
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group whose copy retired
+    /// * `tablets` - The tablets
+    async fn drop_tablets(&mut self, group: GroupId, tablets: Vec<u16>) -> Result<(), ServerError> {
+        let outcome = self.drop_tablet_records(&tablets).await.map_err(|error| format!("{error:?}"));
+        self.shard_local_tx
+            .send(ServerMsg::TabletsDropped {
+                table: self.table_name,
+                group,
+                outcome,
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// The removal itself: every partition of the tablets the map names, through the intent log
+    ///
+    /// # Arguments
+    ///
+    /// * `tablets` - The tablets
+    async fn drop_tablet_records(&mut self, tablets: &[u16]) -> Result<u64, ServerError> {
+        // every partition of the tablets the map names is gone
+        let absent: Vec<u64> = self
+            .map
+            .to_archive
+            .borrow()
+            .keys()
+            .filter(|key| {
+                #[allow(clippy::cast_possible_truncation)]
+                let tablet = Ring::tablet_of(**key) as u16;
+                tablets.contains(&tablet)
+            })
+            .copied()
+            .collect();
+        for key in &absent {
+            write_map_intent!(self.map_writer, MapIntent::Remove(*key), Remove);
+            self.removals.push(*key);
+        }
+        // the map intent log durable before the map is repointed
+        self.map_writer.sync().await?;
+        for id in self.removals.drain(..) {
+            self.map.remove_partition(id);
+        }
+        event!(Level::INFO, msg = "dropped a retired copy's partitions from the archives", removed = absent.len());
+        // a map intent log that grew past its bound is compacted, as after any job
+        if self.map_writer.current_flushed_pos() > Byte::MEBIBYTE {
+            self.map_writer.close().await?;
+            self.map_writer = self.map.compact_map().await?;
+        }
+        Ok(absent.len() as u64)
+    }
+
     /// Inject a fault into one partition's archived copy, for the fixture
     ///
     /// The compactor owns the archives, so the fault is done here, between two jobs, where
@@ -1149,6 +1204,7 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                         .await?;
                 }
                 CompactionJob::Install { group, tablets, path } => self.install_snapshot(group, tablets, path).await?,
+                CompactionJob::Drop { group, tablets } => self.drop_tablets(group, tablets).await?,
                 CompactionJob::Fault { fault, key, reply } => {
                     // a fault the fixture asked for, answered with what was done
                     let outcome = self.inject_fault(fault, key).await;

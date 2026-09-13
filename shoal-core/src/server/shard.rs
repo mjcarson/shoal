@@ -548,6 +548,12 @@ async fn client_tx_relay<S: ShoalDatabase>(
                 ReplyKind::Whole | ReplyKind::Share => (MessageType::Response, true),
                 ReplyKind::Topology { .. } => (MessageType::Topology, false),
                 ReplyKind::Admin => (MessageType::AdminResponse, false),
+                // a stale refusal is a peer's frame and never a client's; one queued here is
+                // a bug in the shard, not something the client can read
+                ReplyKind::Stale => {
+                    event!(Level::ERROR, msg = "a stale refusal was queued to a client relay", %query_id);
+                    continue;
+                }
             };
             // a token a write minted goes between the id and the payload, but only down a
             // connection whose hello asked for one: a client that did not would read it as
@@ -2668,8 +2674,22 @@ where
         // applies it, so it never reaches the table from here
         // ([F40](../../../docs/src/features/replication.md))
         if self.replication.is_some() {
+            // a tablet no group on this shard serves was routed here by a map older than the
+            // configuration it lives under: refused by name, never answered from files the
+            // cluster no longer counts, and sent on by the origin to another holder
+            // ([F45](../../../docs/src/features/replica-migration.md))
             if let Some((table, key, payload)) = self.tables.write_command(&query) {
+                // a write names no partitions of its own, so its tablet is judged from its key
+                // truncation cannot happen: a tablet id is twelve bits
+                #[allow(clippy::cast_possible_truncation)]
+                let tablet = Ring::tablet_of(key) as u16;
+                if !self.serves_tablet(table, tablet) {
+                    return self.answer_stale(meta, query, span, gathered_meta, tablet).await;
+                }
                 return self.propose_write(meta, table, key, payload).await;
+            }
+            if let Some(tablet) = self.stale_tablet(&query) {
+                return self.answer_stale(meta, query, span, gathered_meta, tablet).await;
             }
             // a strong or session read waits for its barrier and its lower bounds first, on a
             // task of its own; it comes back here as `ReadReady` with its plan marked ready
@@ -2951,6 +2971,7 @@ where
                 span,
                 stamps,
             );
+            meta.from_peer = true;
             // the plan the coordinator resolved, or a `One` read with nothing to wait on for
             // an entry that carries none
             meta.read = match entry.read {
@@ -3029,6 +3050,9 @@ where
                 self.drive_repairs();
                 self.drive_moves();
                 self.schedule_scrubs();
+                // a retired copy whose grace is over is reclaimed
+                // ([F45](../../../docs/src/features/replica-migration.md))
+                self.sweep_retired().await?;
             }
         }
         Ok(())
@@ -3126,11 +3150,22 @@ where
                 meta.read.slot = preamble.slot;
                 self.handle_gathered(meta, response, false).await
             }
-            // a failure the peer produced is answered in the query's own variant
+            // a failure the peer produced is answered in the query's own variant; a stale
+            // refusal is sent once to another holder first, under the same attempt and slot,
+            // since nothing accepted it ([F45](../../../docs/src/features/replica-migration.md))
             ForwardedKind::Error => {
                 let (code, msg) = crate::shared::protocol::peer::decode_error_payload(&payload)?;
-                self.fail_forward(node, bundle, preamble.index, pending, ErrorCode::from_u16(code), &msg)
-                    .await
+                let code = ErrorCode::from_u16(code);
+                let pending = if code == ErrorCode::StaleTopology {
+                    self.read_stats.stale_refusals += 1;
+                    match self.reroute_pending(node, bundle, preamble.index, pending).await? {
+                        Some(pending) => pending,
+                        None => return Ok(()),
+                    }
+                } else {
+                    pending
+                };
+                self.fail_forward(node, bundle, preamble.index, pending, code, &msg).await
             }
         }
     }
@@ -3154,35 +3189,11 @@ where
         // same attempt and slot, since nothing under them was accepted and the gather's slot
         // still waits for exactly that share - else a definite refusal
         // ([F42](../../../docs/src/features/primary-failover.md))
+        let _ = (me, map);
         for ((bundle, index), pending) in refused {
-            if !pending.rerouted && Stamp::now() < pending.bundle_deadline {
-                if let Some(holder) = map.alternate_holder(&pending.partitions, me, node) {
-                    event!(
-                        Level::INFO,
-                        msg = "sending a forward the link never wrote to another holder",
-                        id = %bundle,
-                        index,
-                        from = %node,
-                        to = %holder,
-                    );
-                    self.read_stats.reroutes += 1;
-                    let mut entry = pending.entry.clone();
-                    entry.shard = holder.shard;
-                    let again = Pending {
-                        rerouted: true,
-                        sent_at: Stamp::now(),
-                        ..pending
-                    };
-                    let attempt = again.attempt;
-                    let base_index = usize::try_from(again.base_index).unwrap_or_default();
-                    let bundle_deadline = again.bundle_deadline;
-                    let body = again.body.clone();
-                    let mut remote = HashMap::new();
-                    remote.insert(holder.node, vec![(entry, again)]);
-                    self.flush_forwards(&body, bundle, base_index, attempt, bundle_deadline, remote).await?;
-                    continue;
-                }
-            }
+            let Some(pending) = self.reroute_pending(node, bundle, index, pending).await? else {
+                continue;
+            };
             self.fail_forward(node, bundle, index, pending, ErrorCode::Unavailable, "the link to this node went down before the query was sent")
                 .await?;
         }
@@ -3192,6 +3203,55 @@ where
                 .await?;
         }
         Ok(())
+    }
+
+    /// Send a forward nothing accepted to another holder of its partitions, once
+    ///
+    /// Under the same attempt and slot, since nothing under them was accepted and the
+    /// gather's slot still waits for exactly that share; only once per pending, only within
+    /// the bundle's budget, and only to a holder that is up and neither the failed node nor
+    /// this one.
+    ///
+    /// # Arguments
+    ///
+    /// * `node` - The node that did not take it
+    /// * `bundle` - The bundle
+    /// * `index` - The query's index in it
+    /// * `pending` - What was owed, handed back if it was not sent
+    #[allow(clippy::future_not_send)]
+    async fn reroute_pending(&mut self, node: NodeId, bundle: Uuid, index: u64, pending: Pending<D>) -> Result<Option<Pending<D>>, ServerError> {
+        if pending.rerouted || Stamp::now() >= pending.bundle_deadline {
+            return Ok(Some(pending));
+        }
+        let me = self.node_id();
+        let map = self.map.get();
+        let Some(holder) = map.alternate_holder(&pending.partitions, me, node) else {
+            return Ok(Some(pending));
+        };
+        event!(
+            Level::INFO,
+            msg = "sending a forward nothing accepted to another holder",
+            id = %bundle,
+            index,
+            from = %node,
+            to = %holder,
+        );
+        self.read_stats.reroutes += 1;
+        let mut entry = pending.entry.clone();
+        entry.shard = holder.shard;
+        let again = Pending {
+            rerouted: true,
+            sent_at: Stamp::now(),
+            ..pending
+        };
+        let attempt = again.attempt;
+        let base_index = usize::try_from(again.base_index).unwrap_or_default();
+        let bundle_deadline = again.bundle_deadline;
+        let body = again.body.clone();
+        let mut remote = HashMap::new();
+        remote.insert(holder.node, vec![(entry, again)]);
+        self.flush_forwards(&body, bundle, base_index, attempt, bundle_deadline, remote).await?;
+        Ok(None)
     }
 
     /// Answer every forwarded query that has waited longer than its deadline
@@ -3674,6 +3734,7 @@ where
                 ServerMsg::Quarantine { group, action, reply } => self.handle_quarantine(group, action, reply).await,
                 ServerMsg::RepairDone { op, group, phase } => self.handle_repair_done(op, group, phase),
                 ServerMsg::MoveDone { op, group, progress } => self.handle_move_done(op, group, progress),
+                ServerMsg::TabletsDropped { group, outcome, .. } => self.handle_tablets_dropped(group, outcome).await?,
                 ServerMsg::RepairInstall { group, path, manifest, reply } => {
                     let outcome = self.restart_group_for_install(group, path, manifest);
                     let _ = reply.send(outcome);

@@ -121,6 +121,12 @@ pub struct QueryMetadata {
     pub failed: Option<ResponseError>,
     /// How this query is served as a read, and which attempt and slot it answers under
     pub read: ReadPlan,
+    /// Whether a peer forwarded this query, so its answer is owed on a peer connection
+    ///
+    /// What lets a refusal by name go back as a frame of its own for the origin to act on,
+    /// rather than as a response only a client could read
+    /// ([F45](../../../docs/src/features/replica-migration.md)).
+    pub from_peer: bool,
 }
 
 impl QueryMetadata {
@@ -159,6 +165,7 @@ impl QueryMetadata {
             failed: None,
             // a plan that waits on nothing and never expires, until the coordinator sets one
             read: ReadPlan::one(Stamp::now().plus_nanos(u64::MAX / 4)),
+            from_peer: false,
         }
     }
 
@@ -263,6 +270,12 @@ pub enum ReplyKind {
     ///
     /// The bytes are the response's JSON.
     Admin,
+    /// A refusal of a forwarded query by a node that no longer serves its tablet
+    ///
+    /// The bytes are the error payload, which a peer relay frames as a forwarded error so the
+    /// origin can send the query to another holder; never queued to a client relay
+    /// ([F45](../../../docs/src/features/replica-migration.md)).
+    Stale,
 }
 
 /// An answer on its way to the relay that writes it
@@ -767,6 +780,16 @@ where
         /// The phase it committed last, which the map may not carry yet
         phase: crate::server::control::repair::RepairPhase,
     },
+    /// A retired copy's archived partitions are gone, or why they are not
+    /// ([F45](../../../docs/src/features/replica-migration.md))
+    TabletsDropped {
+        /// The table
+        table: D::TableNames,
+        /// The group whose copy retired
+        group: crate::shared::identity::GroupId,
+        /// Whether the drop landed
+        outcome: Result<u64, String>,
+    },
     /// A move driver finished with a group, for whatever reason
     /// ([F45](../../../docs/src/features/replica-migration.md))
     MoveDone {
@@ -915,6 +938,7 @@ impl<D: ShoalDatabase> Clone for ServerMsg<D> {
             ServerMsg::Quarantine { .. } => panic!("A quarantine is the holding shard's"),
             ServerMsg::RepairDone { .. } => panic!("A repair driver is one shard's"),
             ServerMsg::MoveDone { .. } => panic!("A move driver is one shard's"),
+            ServerMsg::TabletsDropped { .. } => panic!("A dropped copy is the retiring shard's"),
             ServerMsg::RepairInstall { .. } => panic!("A repair install is the holding shard's"),
             ServerMsg::RepairRotate { .. } => panic!("A rotation is one shard's"),
             ServerMsg::SnapshotBuilt { .. } => panic!("A built snapshot is the cutting shard's"),

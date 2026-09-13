@@ -126,6 +126,14 @@ pub enum ErrorCode {
     UnknownLineage = 53,
     /// The bundle asked for a read level this server does not serve
     UnsupportedReadLevel = 54,
+    /// The node asked no longer serves this tablet, and answered from a newer map
+    ///
+    /// A definite refusal: the query was routed by a map older than the configuration the
+    /// tablet now lives under - to a source whose copy retired, or to a node that never held
+    /// it - and nothing accepted it. The coordinator sends it once to another holder; a
+    /// client that meets it retries under the same identity
+    /// ([F45](../../../../docs/src/features/replica-migration.md)).
+    StaleTopology = 55,
     /// The connection's principal may not perform this administrative request
     Unauthorized = 60,
     /// The request named a topology version other than the current one
@@ -181,6 +189,7 @@ impl ErrorCode {
             52 => ErrorCode::WrongCluster,
             53 => ErrorCode::UnknownLineage,
             54 => ErrorCode::UnsupportedReadLevel,
+            55 => ErrorCode::StaleTopology,
             60 => ErrorCode::Unauthorized,
             61 => ErrorCode::StaleVersion,
             62 => ErrorCode::NotLeader,
@@ -211,6 +220,7 @@ impl ErrorCode {
             ErrorCode::WrongCluster => "WrongCluster",
             ErrorCode::UnknownLineage => "UnknownLineage",
             ErrorCode::UnsupportedReadLevel => "UnsupportedReadLevel",
+            ErrorCode::StaleTopology => "StaleTopology",
             ErrorCode::Unauthorized => "Unauthorized",
             ErrorCode::StaleVersion => "StaleVersion",
             ErrorCode::NotLeader => "NotLeader",

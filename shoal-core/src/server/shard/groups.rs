@@ -104,7 +104,7 @@ pub(super) struct Group<D: ShoalDatabase> {
 /// An apply batch stopped on a partition read
 pub(super) struct ParkedApply {
     /// The group the batch belongs to
-    group: GroupId,
+    pub(super) group: GroupId,
     /// The batch, the command that parked it at the front
     entries: VecDeque<EntryResponder<DataConfig>>,
     /// Fired once the batch is through
@@ -259,6 +259,9 @@ where
         // a quarantine decided before a restart holds through it
         // ([F44](../../../../docs/src/features/repair.md))
         let quarantines = super::repair::scan_quarantine(&dir);
+        // a copy retired before a restart stays retired until its files are reclaimed
+        // ([F45](../../../../docs/src/features/replica-migration.md))
+        let retired = super::migrate::scan_retired(&dir);
         let _ = setup;
         self.replication = Some(Replication {
             wal,
@@ -292,7 +295,7 @@ where
             next_scrub: HashMap::new(),
             driving_moves: HashSet::new(),
             driven_moves: HashMap::new(),
-            retired: HashMap::new(),
+            retired,
         });
         self.rebuild_groups().await?;
         Ok(())
@@ -356,10 +359,23 @@ where
             .collect();
         // a write waiting on a group the map dropped is answered below, once the borrow is done
         let mut orphaned = Vec::new();
+        // a group a published move took from this shard is retired rather than only stopped
+        // ([F45](../../../../docs/src/features/replica-migration.md))
+        let my_addr = ShardAddr::new(me, u16::try_from(shard_id).unwrap_or(u16::MAX));
+        let mut retiring = Vec::new();
         for id in gone {
-            if let Some(group) = replication.groups.remove(&id) {
+            if let Some(mut group) = replication.groups.remove(&id) {
+                orphaned.extend(std::mem::take(&mut group.waiting).into_iter().map(|waiting| (id, waiting)));
+                let moved = map
+                    .moves
+                    .iter()
+                    .find(|record| record.from == my_addr && record.groups.contains_key(&id) && record.is_published())
+                    .map(|record| record.op);
+                if let Some(op) = moved {
+                    retiring.push((id, group, op));
+                    continue;
+                }
                 event!(Level::INFO, msg = "stopping a tablet group the map no longer names", group = %id);
-                orphaned.extend(group.waiting.into_iter().map(|waiting| (id, waiting)));
                 if let Some(raft) = group.raft {
                     glommio::spawn_local(async move {
                         let _ = raft.shutdown().await;
@@ -371,6 +387,11 @@ where
         replication.tablets.clear();
         // build what it newly names
         for spec in specs {
+            // a group whose retired copy is still here is built once the copy is reclaimed
+            if replication.retired.contains_key(&spec.id) {
+                event!(Level::WARN, msg = "the map names a group whose retired copy is not reclaimed yet; building it once it is", group = %spec.id);
+                continue;
+            }
             for tablet in &spec.tablets {
                 replication.tablets.insert((spec.table, *tablet), spec.id);
             }
@@ -466,6 +487,10 @@ where
             };
             let config = group_config(&cluster, failover_ms, spec.id);
             spawn_group_start(tx.clone(), me, spec, config, network, store, machine, None);
+        }
+        // the copies a move took from here retire, with their files, for the grace
+        for (id, group, op) in retiring {
+            self.retire_group(id, group, op).await?;
         }
         // the writes that waited on a group this node no longer hosts are refused by name
         for (id, (meta, table, key, _)) in orphaned {

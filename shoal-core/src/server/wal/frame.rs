@@ -78,6 +78,12 @@ pub enum FrameKind {
     Purged = 6,
     /// Everything after the header's log id is dropped; a flag of zero means everything is
     Truncate = 7,
+    /// The group's log is forgotten whole: every frame of it before this one is dead
+    ///
+    /// Written when a copy retires under a move, so a re-added copy of the same group starts
+    /// with no log, no vote and no committed position of its own
+    /// ([F45](../../../../docs/src/features/replica-migration.md)).
+    Forget = 8,
 }
 
 impl FrameKind {
@@ -95,6 +101,7 @@ impl FrameKind {
             5 => Some(FrameKind::Committed),
             6 => Some(FrameKind::Purged),
             7 => Some(FrameKind::Truncate),
+            8 => Some(FrameKind::Forget),
             _ => None,
         }
     }
@@ -138,6 +145,12 @@ pub enum Frame {
         /// The last log id kept, or none for everything dropped
         keep_after: Option<WalLogId>,
     },
+    /// The group's log, vote and positions were forgotten whole
+    /// ([F45](../../../../docs/src/features/replica-migration.md))
+    Forget {
+        /// The group
+        group: GroupId,
+    },
 }
 
 impl Frame {
@@ -149,7 +162,8 @@ impl Frame {
             | Frame::Vote { group, .. }
             | Frame::Committed { group, .. }
             | Frame::Purged { group, .. }
-            | Frame::Truncate { group, .. } => *group,
+            | Frame::Truncate { group, .. }
+            | Frame::Forget { group } => *group,
         }
     }
 }
@@ -308,6 +322,7 @@ fn decode_hashed(hashed: &[u8]) -> Option<Frame> {
             group,
             keep_after: (flag != 0).then_some(log_id),
         },
+        FrameKind::Forget => Frame::Forget { group },
     };
     Some(frame)
 }
@@ -459,6 +474,7 @@ mod tests {
                 group,
                 keep_after: None,
             },
+            Frame::Forget { group },
         ];
         // encode every one into one buffer, the way a segment holds them
         let mut bytes = Vec::new();
@@ -476,6 +492,7 @@ mod tests {
                 Frame::Truncate { group, keep_after } => {
                     encode_marker(FrameKind::Truncate, *group, keep_after.as_ref()).unwrap()
                 }
+                Frame::Forget { group } => encode_marker(FrameKind::Forget, *group, None).unwrap(),
             };
             lens.push(encoded.len());
             bytes.extend_from_slice(&encoded);

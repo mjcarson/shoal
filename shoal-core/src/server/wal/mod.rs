@@ -577,6 +577,21 @@ impl WalInner {
             frame::Frame::Truncate { group, keep_after } => {
                 self.truncate_index(group, keep_after.map(|log_id| log_id.index));
             }
+            // a forgotten group: its state and every segment's memory of it are gone, and
+            // the frames before this one are dead ([F45](../../../../docs/src/features/replica-migration.md))
+            frame::Frame::Forget { group } => self.forget_group(group),
+        }
+    }
+
+    /// Drop a group's state whole, and every segment's memory of its frames
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group
+    fn forget_group(&mut self, group: GroupId) {
+        self.groups.remove(&group);
+        for segment in self.segments.values_mut() {
+            segment.last.remove(&group);
         }
     }
 }
@@ -1215,6 +1230,28 @@ impl ShardWal {
     #[must_use]
     pub fn segments(&self) -> Vec<SegmentView> {
         self.inner.borrow().segments.values().cloned().collect()
+    }
+
+    /// Forget a group's log whole: a marker frame, then its state and every segment's memory of it
+    ///
+    /// A retired copy's log is dead history: its frames stay in the sealed segments until they
+    /// are reclaimed with everything else in them, are never handed to a compactor again, and
+    /// a replay past the marker rebuilds nothing from them, so a copy of the same group added
+    /// to this shard later starts with no log, no vote and no committed position of its own
+    /// ([F45](../../../../docs/src/features/replica-migration.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group
+    ///
+    /// # Errors
+    ///
+    /// Fails if the marker could not be staged.
+    pub fn forget(&self, group: GroupId) -> io::Result<()> {
+        let frame = frame::encode_marker(frame::FrameKind::Forget, group, None)?;
+        self.stage(&frame, group, None)?;
+        self.inner.borrow_mut().forget_group(group);
+        Ok(())
     }
 
     /// Note that the loop handed a segment to the compactors
