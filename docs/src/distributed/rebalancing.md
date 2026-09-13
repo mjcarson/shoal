@@ -4,13 +4,23 @@
 
 A removed node causes rebalancing; a down node retains its assignments during grace. Migration
 must preserve acknowledged operations even when writes continue and a leader changes mid-move.
-The transfer mechanism and the placement policy are separate milestones, M9a and M9b.
+The transfer mechanism and the placement policy are separate milestones, M9a and M9b; the
+transfer is delivered ([F45](../features/replica-migration.md)).
 
 ## What exists today
 
 Logs and archive maps are per shard and table. `ShardCountMismatch` protects this layout. Archive
-entries name partition keys, so a per-tablet index can enumerate data, but existing compaction
-and log retention know nothing about replicated configurations or resumable migration.
+entries name partition keys, so a per-tablet index can enumerate data, ~~but existing compaction
+and log retention know nothing about replicated configurations or resumable migration~~ and
+since [F45](../features/replica-migration.md) a replica set moves: a `Move` names a tablet, a
+source and a destination, its record rides the map and is driven by each of the set's groups'
+leader through the phases the table below annotates, a published configuration overrides the
+placement rule for the set's tablets under the identity the rule minted, and the source's copy
+retires under a marker for a grace before its archived partitions are dropped through the map
+intent log and its frames in the shared WAL are forgotten without touching another group's.
+Compaction knows exactly that much: a retired group's frames are handed to no compactor, and a
+segment is reclaimed once the groups still in it purge past it. The rebalancer, the budgets and
+removal are still M9b's.
 
 ## The design
 
@@ -25,7 +35,12 @@ transition or wait. A plan is not an in-memory task whose cancellation undoes co
 (`cluster.repair.concurrent`) by the group's leader, its phase committed before every step and
 resumed by the next leader; that per-group serialization, and the record a group is done under,
 are what M9a's transition lock inherits and what `repair_serializes_with_migration_and_new_commits`
-will drive against a move.*
+will drive against a move.* *At M9a ([F45](../features/replica-migration.md)) the lock is
+per replica set and holds both ways: a move asked for under a repair of any of the set's groups,
+or a repair asked for under a move, is recorded `Queued { behind }` and released by the last
+group done of the transition ahead, in apply. A scheduled scrub leaves a moving set alone.
+Leadership transfers cooperate: a leader that is a move's source hands the lead to a member of
+the target before the transition. RF changes and same-node moves are not operations yet.*
 
 Placement priorities:
 
@@ -48,15 +63,15 @@ The initial transition schema records tablet, operation id, expected old configu
 configuration, source/destination, snapshot id/boundary, phase and last completed data-config id.
 Exact fields and Raft membership APIs are selected in Q1/Q2; these are the required semantics:
 
-| Phase | Action and durable completion condition |
-| --- | --- |
-| Plan | Commit transition intent after verifying capacity, source eligibility and expected configuration |
-| Add learner | Add destination as a non-voting learner through the data protocol; persist/report operation identity |
-| Install and catch up | C7 atomic snapshot plus retained tail; learner never counts toward quorum merely because bytes arrived |
-| Reconfigure | Execute the library's safe membership transition, including joint old/new quorum rules where required; drain/resolve old-configuration writes according to that protocol |
-| Activate | Establish the new committed configuration and required applied barrier; use a proper leadership transfer if moving the primary |
-| Publish | Record completed data configuration in control-plane placement; stale routers refresh/forward within bounds |
-| Retire | Remove source eligibility, retain files for grace/references, then durably tombstone and reclaim |
+| Phase | Action and durable completion condition | At M9a ([F45](../features/replica-migration.md)) |
+| --- | --- | --- |
+| Plan | Commit transition intent after verifying capacity, source eligibility and expected configuration | `ControlCommand::Move` applied whole: source a member of the set, destination an up member not in it, `expected` and `target` recorded, the set's every group as `Planned` - or `Queued` behind a transition already on the set. Capacity is not verified; there is no reserve yet |
+| Add learner | Add destination as a non-voting learner through the data protocol; persist/report operation identity | `Learner` committed, then `add_learner`; the destination's shard has built the group as a learner spec from the map, which never initializes and never elects; the stream's `SnapshotBegin.transition` carries the operation |
+| Install and catch up | C7 atomic snapshot plus retained tail; learner never counts toward quorum merely because bytes arrived | `CatchingUp` committed at the first matched index and left once `last - matched <= catchup_lag`; the bytes sent and the position reached go on the record. A leader that is the source transfers the lead here, over the lane, and steps aside |
+| Reconfigure | Execute the library's safe membership transition, including joint old/new quorum rules where required; drain/resolve old-configuration writes according to that protocol | `Reconfiguring` committed, then `change_membership(ReplaceAllVoters(target), retain: false)`: the joint `[expected, target]` under both majorities, then the uniform `target`; a leader lost between leaves the joint behind and the next call finishes it. `Configured` at the uniform entry's index, read from the committed membership |
+| Activate | Establish the new committed configuration and required applied barrier; use a proper leadership transfer if moving the primary | `Activated` once the destination's matched index has passed the uniform entry and it has answered an `Applied` probe past it. The driver leaves the group here |
+| Publish | Record completed data configuration in control-plane placement; stale routers refresh/forward within bounds | The last group's `Activated` publishes the set's `DataConfiguration` in apply and moves the topology version; a stale router's forward is refused `StaleTopology` and sent once to another holder |
+| Retire | Remove source eligibility, retain files for grace/references, then durably tombstone and reclaim | The source's shard retires the copy under `wal/Shard-N/retired/<group>`: handle down, partitions evicted, log forgotten with a marker frame; after `cluster.migration.retire_after` the archived partitions are dropped and the files go. `Retiring` then `Done` once the source answers `Retired`, is `Down`, or the grace and a timeout have passed |
 
 The essential barrier is not a cached zero-lag report. New writes can arrive between that report
 and DropReplica, and old-config requests can remain in flight. Membership transition rules must
@@ -177,7 +192,7 @@ checkpoint organization will be evaluated separately.
 ## Prerequisites
 
 [C7](failover.md) complete, C13 Q7–Q9, [C4](tablet-map.md), [C5](replication.md).
-M9a migration, M9b planner/removal, M9c local shard-count changes.
+~~M9a migration~~ M9a migration is delivered ([F45](../features/replica-migration.md)), M9b planner/removal, M9c local shard-count changes.
 
 ## How it would be measured
 

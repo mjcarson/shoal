@@ -49,7 +49,17 @@ unknown, and `Quarantine`, a driver's word to a member about its copy, answered 
 member's marker is durable; a repair snapshot rides the M7 stream with the operation on its
 begin, judged against the receiver's checkpoint and answered `Behind` when the cut has to be
 taken again. `PROTOCOL_VERSION` went to 4 for the scrub entry a peer built before could not
-tell from a write. Between a client and a node the same milestone spends the hello's reserved byte fourteen on
+tell from a write. **At M9a** ([F45](../features/replica-migration.md)) the replication lane
+gains `Applied`, a member's own applied index asked under a move's operation for the
+activation barrier; `Retired`, whether a member's retired copy of a group is gone; and
+`TransferLeader`, the library's transfer message, without which a transferring leader's own
+lease is the first to lapse and it wins its election back. A snapshot stream to a move's
+destination carries the operation in `SnapshotBegin.transition`, reserved and zero until
+then, and the manifest gained the sender's forgotten-identity watermark. A forwarded query a
+node no longer serves the tablet of is answered on the forward's own frame as an error the
+origin acts on - `StaleTopology`, code 55, with one more send from the origin and never a
+relayed second hop - and a write whose identity is older than the retry window is
+`IdentityExpired`, code 22, before it is proposed. Between a client and a node the same milestone spends the hello's reserved byte fourteen on
 a capability set, and only a granted bit puts a read options section behind a bundle's trace
 context or a session token ahead of a response's payload - the selected-version contract, with
 no version bump. **At M6** ([F42](../features/primary-failover.md)) the transport learns the

@@ -274,6 +274,35 @@ bounded in bytes with a forced purge behind the groups pinning it, an installing
 tablets refuse reads while the rest of the node serves, and two arms price the catch-up by log
 and by snapshot.
 
+**What F45 left undone, deliberately.** Recorded here so the next milestone starts from the
+list rather than from the diff:
+
+- **Transfer budgets.** Bytes per second per source, destination and device, a disk reserve for
+  the old and new generations, and a blocked reason when reserves are short
+  ([C8](../distributed/rebalancing.md#transfer-budgets)). A move feeds its learner as fast as the
+  bulk lane runs and `catchup_lag` is the only pacing. M9b.
+- **A per-tablet snapshot.** A learner is fed the whole group's cut, every tablet the set
+  shares, and one inside the retained log is fed a cut anyway when the leader has one newer
+  than its purge point ([O55](optimizations.md#o55-a-learner-inside-the-retained-log-is-fed-a-snapshot-when-the-leaders-cached-cut-is-newer-than-its-purge-point)).
+- **Same-node moves, replication factor changes and an operator-chosen destination shard.**
+  A move is one member replaced by another in place, on the shard the rule gives the set's
+  first tablet; a set's shard on a node is not a choice yet, and the factor is the policy's.
+  M9b for the factor, M9c for the shard.
+- **A second forward hop with a relayed answer.** A stale route is refused by the node that
+  meets it and sent once more by the origin; a middle node relaying a third node's answer would
+  reach the same holder in the same round trips and needs a frame path nothing else does.
+- **A stream retry.** A move whose snapshot transfer fails inside `cluster.migration.timeout`
+  is fed again by openraft's own backoff; past the timeout the move fails and is asked again.
+- **A move of a node's every set at once**, which is the rebalancer's plan rather than an
+  operator's request. M9b.
+- **A cluster-wide retirement grace.** `retire_after` is a node's setting; a stale router's
+  window is the source's.
+- **Apply-time expiry.** Expiry is judged on the coordinator's own replica; a replica that has
+  forgotten more refuses more. Making the watermark deterministic across replicas would need it
+  in the log.
+- **A volatile group that loses a majority's memory at once** elects an empty leader over a
+  full survivor ([item 109](known-issues.md#109-a-volatile-groups-survivor-trips-an-openraft-debug-assertion-when-a-majority-loses-its-memory-log-at-once)).
+
 **What F44 left undone, deliberately.** Recorded here so the next milestone starts from the
 list rather than from the diff:
 
@@ -314,7 +343,7 @@ list rather than from the diff:
 
 - **A snapshot per tablet.** A snapshot is per group, and a group is every tablet a replica
   set shares, so a returning node installs the whole table on the placements where every
-  tablet is on every node. A move or a split (M9a) is what would need a narrower cut, and the
+  tablet is on every node. A move ~~or a split (M9a) is what would need~~ feeds its learner the same whole cut ([F45](../features/replica-migration.md)), and a split would need a narrower one; the
   file's records are keyed by partition hash with the tablets in the manifest, so a per-tablet
   filter is a reader change rather than a format change.
 - **Pinning the archives instead of copying them.** The cut writes every record into one file;
@@ -346,10 +375,13 @@ list rather than from the diff:
   too much: an election puts it where it puts it and nothing transfers it. openraft has
   `trigger().transfer_leader()`; what is missing is the policy that would call it, which is
   M8's repair or a load-aware transfer C7 schedules separately.
-- **Identity expiry.** `retry_floor` is on the checkpoint and nothing reads it; an identity
+- ~~**Identity expiry.** `retry_floor` is on the checkpoint and nothing reads it; an identity
   below the floor is applied as new. M9a's `retry_identity_survives_snapshot_and_migration`
   is the test that will read it, and the answer for an identity below the floor should be a
-  refusal by name, not a second apply.
+  refusal by name, not a second apply.~~ Built by [F45](../features/replica-migration.md): the
+  refusal is by name, `IdentityExpired`, judged before proposal against the identity's own
+  time and the table's eviction watermark rather than the floor, which an identity a client
+  holds cannot be compared to.
 - **A stream retry.** `stream_with` ignores `retry`: a bundle that is open-ended has no answer
   to compare a second attempt against, and the ordered stream would have to know which indices
   the caller already saw. The single-bundle retry covers `send_one_with` and `exec_with`.
@@ -397,7 +429,7 @@ list rather than from the diff:
   way.
 - **A sorted table in the fixture.** A third table is nine more groups a node at a factor of
   three on every fixture test's start; the limit proof in `responses.rs` and `sorted.rs`'s own
-  limit tests cover the sorted shape until M9a needs a second persistent table anyway.
+  limit tests cover the sorted shape ~~until M9a needs a second persistent table anyway~~; M9a moved the fixture's two tables and needed no third.
 - **Drawing the two wait stamps.** `StageStamps` carries `barrier_wait` and `apply_wait` since
   F41 and the stage report renders neither, so the read arms stay out of the stage layer; the
   waits are on `cluster.reads` instead, summed and per node. Rendering them is the one change
@@ -419,7 +451,7 @@ list rather than from the diff:
 - ~~**A durable low-water mark for the retry table.** Dedup is a 4096-entry LRU per group, in
   memory, rebuilt from the log on restart; an identity older than that is applied as new. M6.~~
   Built by [F42](../features/primary-failover.md): `retries.bin` beside the checkpoint, the
-  floor on it; expiry is M9a's.
+  floor on it; expiry is ~~M9a's~~ [F45](../features/replica-migration.md)'s.
 - ~~**Stepping an isolated leader down at its lease.** It learns it is not one when its lease
   expires and a write through it before then is `OutcomeUnknown` at the write deadline; M6 turns
   that into `NotLeader` at the lease.~~ Built by [F42](../features/primary-failover.md) as a
@@ -448,8 +480,8 @@ list rather than from the diff:
 rather than from the diff:
 
 - **Per-tablet map records and deltas.** The map is an ordered node list pushed whole, which the
-  fanout spike prices at under 16 KiB for sixty-four members; per-tablet records arrive when a
-  tablet can move (M9a), and a delta arrives when a whole map is too large to push.
+  fanout spike prices at under 16 KiB for sixty-four members; ~~per-tablet records arrive when a
+  tablet can move (M9a)~~ a record per set that moved arrived with [F45](../features/replica-migration.md), and a delta arrives when a whole map is too large to push.
 - ~~**A second `Initialize`**, and placing anything on a node admitted after the first. M9a.~~
   Built by [F45](../features/replica-migration.md): a node admitted after the placement is
   placed by a `Move`, which brings it into a replica set under a data configuration; a second
@@ -882,8 +914,8 @@ applied a write.
 **Built for a cluster node by [F42](../features/primary-failover.md)**: the key is the bundle id
 a caller pins with `SendOptions::identity`, which every replicated command carries as its
 `RequestId`, and the server remembers the last 4096 per group across a restart and past the
-purge point. What remains is the standalone node, which has no retry table, and expiry, which
-is M9a's. The rest of this entry is the question as it was asked.
+purge point. What remains is the standalone node, which has no retry table ~~, and expiry, which
+is M9a's~~; expiry is [F45](../features/replica-migration.md)'s. The rest of this entry is the question as it was asked.
 
 A client cannot retry a write. `Get` and `Exists` are idempotent and `Insert`, `Update`, and
 `Delete` are not (`shared/responses.rs:27-39`), so a bundle lost to a dead socket can only be

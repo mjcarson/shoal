@@ -416,10 +416,16 @@ cluster:
     snapshot_timeout: "5m"        # after this a snapshot transfer is given up and tried again; no shorter than write_timeout
     install_bytes: "2GiB"         # partial snapshots a shard holds on disk before it refuses a new stream
     retained_bytes: "1GiB"        # sealed WAL a shard keeps for slow members before it forces a snapshot and a purge; at least two segments
+    retry_window: "5m"            # how long after a write's identity was minted a retry is still answered its first result (F45); no shorter than write_timeout
   repair:                         # scrubs and repairs (F44), node-local
     scrub_interval: null          # how often every group this node leads is verified on its own; absent or null is never, and a pass never installs
     timeout: "5m"                 # one scrub: the entry committed and every member's digest polled; no shorter than replication.write_timeout, and no longer than scrub_interval
     concurrent: 1                 # group repairs one shard drives at a time; at least one
+  migration:                      # moves of a replica set (F45), node-local
+    catchup_lag: 64               # entries behind the leader a move's learner may be when it is made a voter
+    timeout: "10m"                # one phase of a move; no shorter than replication.snapshot_timeout, since the learner phase is a transfer
+    retire_after: "5m"            # how long the source keeps a retired copy's files, refusing every query of them by name, before they are reclaimed
+    concurrent: 1                 # group moves one shard drives at a time; at least one
 ```
 
 Two settings have no default and are absent above: `advertise`, the address peers reach this

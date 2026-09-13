@@ -106,6 +106,7 @@
   - [F42. Primary failover](features/primary-failover.md)
   - [F43. Recovering a node brought back online](features/node-recovery.md)
   - [F44. Repair](features/repair.md)
+  - [F45. Safe replica migration](features/replica-migration.md)
 
 # Direction
 
@@ -194,6 +195,7 @@
   - [99. A durable follower's log reversion stopped the leader's whole process](appendix/resolved/durable-log-reversion.md)
   - [104. A restart merged every sealed segment below the checkpoint into the archives again](appendix/resolved/segments-recompacted-after-restart.md)
   - [105. A volatile group never checkpointed, so its log was never purged](appendix/resolved/volatile-groups-never-purged.md)
+  - [108. A cluster arm's server overrides were dropped on the way to every node](appendix/resolved/cluster-arm-overrides-dropped.md)
 - [TODOs and Unbuilt Work](appendix/todos.md)
 - [Review, August 2026](appendix/review-2026-08.md)
 - [Glossary](appendix/glossary.md)

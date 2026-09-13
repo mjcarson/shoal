@@ -42,8 +42,10 @@ zero so an M4 file still loads. At open a group is seeded from a sidecar only wh
 was written for exactly its checkpoint, and only with entries applied at or below it: a seeded
 entry above the checkpoint would make the replay answer `Duplicate` and skip the apply the
 table needs. The checkpoint counts as durable only once `checkpoint.json` itself landed, as
-before. Volatile groups persist nothing. Identity expiry is M9a's; the floor is what its check
-will read (`Retries::seed_for`, `MachineState::remembered_through`, `retry_floor`).
+before. Volatile groups persist nothing. ~~Identity expiry is M9a's; the floor is what its check
+will read~~ Identity expiry arrived with [F45](replica-migration.md), and it reads the
+identity's own time and the table's eviction watermark rather than the floor
+(`Retries::seed_for`, `MachineState::remembered_through`, `retry_floor`, `expired_before`).
 
 ### A lapsed lease is `NotLeader`, at once
 
@@ -242,8 +244,10 @@ driver is in process with node zero, as every cluster arm's is, and the record s
   ([item 103](../appendix/known-issues.md#103-a-returning-leader-is-refused-its-own-re-election-until-its-old-lease-lapses-and-hops-to-it-wait)).
 - **Leadership is not moved toward a reader or back to a returning node.** An election puts it
   where the election puts it; nothing transfers it.
-- **Identity expiry is M9a's.** The floor is recorded; nothing reads it yet. An identity below
-  the floor is applied as new, as at M4.
+- ~~**Identity expiry is M9a's.** The floor is recorded; nothing reads it yet. An identity below
+  the floor is applied as new, as at M4.~~ Built by [F45](replica-migration.md): a time-ordered
+  identity older than the retry window or the table's eviction watermark is `IdentityExpired`
+  before it is proposed; one that is not time-ordered is applied as new once forgotten, still.
 - **Streams never retry.** `stream_with` ignores `retry`; a bundle that is open-ended has no
   answer to compare a second attempt against.
 - **A rerouted share is rerouted once.** A second failure is `Unavailable`.

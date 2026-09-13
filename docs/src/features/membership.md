@@ -75,7 +75,8 @@ rebuilds its ring from the order with the M2 rule - tablet `t` on `nodes[t % N]`
 places every tablet on itself, which is the standalone ring with a name on it, and a joiner
 holds no tablets and answers every data query `NotInitialized`. `Initialize { nodes }` is the
 one explicit placement, applied once in the order given; a second is refused naming
-[M9a](../distributed/milestones.md#m9a-safe-replica-migration). `cluster.dial` says where a
+~~[M9a](../distributed/milestones.md#m9a-safe-replica-migration)~~ the `Move` operation
+([F45](replica-migration.md)). `cluster.dial` says where a
 member is dialled instead of where it advertises, for a split-horizon network and for the
 fixture's directional faults.
 
@@ -186,7 +187,8 @@ topology push and the report traffic.
 - **The map is an ordered node list, pushed whole.** At M3 a map is the members, the policy and
   the `Initialize` order; every shard rebuilds its ring from the same rule, so a push is a few
   kilobytes and not 4096 records, and a client is handed a frame it can hold as it is. Per-tablet
-  records arrive when tablets move (M9a), and a delta is the day a whole map is too large.
+  records ~~arrive when tablets move (M9a)~~ arrived with [F45](replica-migration.md) as a
+  configuration per set that moved, and a delta is the day a whole map is too large.
 - **Bodies are JSON** for `Topology`, `Admin`, `AdminResponse` and every control-lane RPC, as
   the control lane already was. Query bytes stay rkyv. A topology frame is read by an operator
   as often as by a program, and a control RPC is never on a query path.
@@ -282,9 +284,10 @@ every shard; a stranger's first question belongs on the lane the control thread 
 - **Data loaded before `Initialize` on a cluster of more than one node stays where the
   bootstrapper's rule put it.** `Initialize` places the tablets over every node, and a tablet
   that moved to another node under the new rule is read there, where it has no data. Moving a
-  tablet with data is M9a's; a cluster loads its tables after it initializes.
-- **`Initialize` is applied once.** A second is refused naming M9a. Adding a node after
-  initialization admits it, promotes it under the policy, and places nothing on it.
+  tablet with data is ~~M9a's~~ [F45](replica-migration.md)'s; a cluster loads its tables after it initializes.
+- **`Initialize` is applied once.** A second is refused naming ~~M9a~~ the `Move` operation. Adding a node after
+  initialization admits it, promotes it under the policy, and places nothing on it ~~.~~ until
+  a move brings it into a set ([F45](replica-migration.md)).
 - **`Down` moves nothing.** Grace expiry, `Leaving`, `Removing` and removal are M9b's; the
   episode is minted and recorded so that they have something to name.
 - **A certificate is still not bound to a node.** Q11's identity half is answered by the

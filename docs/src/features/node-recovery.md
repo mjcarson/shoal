@@ -377,6 +377,12 @@ hundred - the writes applied after the client recovered, not a backlog. The lag 
 against node zero's committed index per group, since a returning node cannot know how far behind
 it is until a leader tells it, and node zero's own report is what the arm reads for it.
 
+*Found at M9a ([Resolved #108](../appendix/resolved/cluster-arm-overrides-dropped.md)): the
+retention override never reached any node of either arm, node zero included - the harness
+rebuilt every node's block from the defaults after resolving it - so the smoke runs above ran
+at a thousand entries between snapshots and ten thousand kept, which is a second reason no
+snapshot was cut. Fixed there; the arms have not been run again since.*
+
 The snapshot arm's retention was moved from the plan's sixty-four and two hundred and fifty-six
 to sixteen and thirty-two on the way: the mixture writes a few hundred entries to each of a
 node's groups in the third of a run it is away at full scale, and the plan's numbers would have

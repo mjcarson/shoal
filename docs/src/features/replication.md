@@ -154,9 +154,11 @@ that makes a tablet's replica list a function of `t mod N` and `(t / N) mod shar
 number of distinct lists is `N × shards` per table whatever the tablet count. A group per
 tablet would be 4096 groups per table per node with a heartbeat each; a group per list is nine
 on the benchmark placement. The cost is that a tablet cannot move alone - moving one means
-moving its group, or splitting it - which is M9a's problem and is filed there. The identity is
-the hash of the table and the members so that every node derives the same id from the same
-map without agreeing about anything first.
+moving its group, or splitting it - ~~which is M9a's problem and is filed there~~ and
+[F45](replica-migration.md) moves the group, every table's over the set, under the identity
+the rule minted. The identity is
+the hash of the table and the members ~~so that~~ the rule first derived, so that every node derives the same id from the same
+map without agreeing about anything first, and a move keeps it.
 
 **The WAL is the log, and the log is shared.** C5 asked for logical histories independent and
 physical writes multiplexed, and Q3 asked whether the adapter could honor openraft's
@@ -265,8 +267,8 @@ node agreed about decides how fast a leader is missed. The fixture sets it to a 
 - ~~**Dedup is bounded by count, not by a durable session mark.** 4096 identities per group, in
   memory, rebuilt from the log; an identity older than that is applied as new. M6.~~ Since
   [F42](primary-failover.md) the table is persisted beside the checkpoint and seeded at open;
-  it is still 4096 identities, and the low-water mark the checkpoint records is what M9a's
-  expiry will read.
+  it is still 4096 identities, and the low-water mark the checkpoint records ~~is what M9a's
+  expiry will read~~ is beside the eviction watermark [F45](replica-migration.md)'s expiry reads.
 - **A checkpoint is per table, and the whole file is rewritten.** A shard with many tables
   rewrites every group's line when one moves; the file is small and the write is atomic.
 - **The proposer's answer waits on its own apply**, so a write through a follower costs the

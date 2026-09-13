@@ -380,6 +380,19 @@ What is *not* fixed is the discarding itself: a flipped bit mid-log still costs 
 after it ([Recovery](../storage/recovery.md#truncation-and-corruption)), on the compaction path
 as much as the recovery one.
 
+**A move is a record since [F45](../features/replica-migration.md).** `MoveStatus { op }` reads
+the operation's record through any node: the set's tablets, the source and the destination,
+`expected` and `target`, the record's own phase and each group's - `driver`, `config`, the
+outcome, and `stats` with the snapshot bytes sent, the destination's position at catch-up and
+the milliseconds each phase took - and the map's frame lists every configuration a move left
+and every move not done. The driver logs each phase at `INFO` with the operation and the group
+(`"driving a group's move"`, `"the destination caught up"`, `"the uniform membership naming
+the target is committed"`, `"the destination applied the uniform membership"`, `"the source's
+retired copy is gone"`), a hand-off or a failure at `INFO` or `ERROR` with the phase reached,
+and the source logs its retirement at `WARN` and its reclaim at `INFO`. `ReadStats` on the
+replication report counts `stale_served` on a shard that refused a query of a tablet no group
+there serves and `stale_refusals` on the coordinator that met the refusal and sent the query on.
+
 **Archives are covered too since [F44](../features/repair.md).** Every record of a format 2
 archive carries a checksum, and a read that meets one that does not hash logs an `ERROR`
 naming the archive and the partition, quarantines the copy the record belongs to (`ERROR`

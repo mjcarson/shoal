@@ -27,13 +27,20 @@ holding it and everything else to the primary; reads and writes both use it. **A
 table's reads are served at when a bundle does not say, from the control state's
 `SetTableReadPolicy` command (`TabletMap::read_level_of` falls back to `read_consistency`), and
 the topology frame names it by table name; a coordinator resolves a query's level from it
-once and forwards it resolved. What is not there
+once and forwards it resolved. ~~What is not there
 yet: per-tablet records, leader hints and deltas - the value has not widened, since nothing
-moves a tablet before M9a ~~and nothing replicates one before M4~~. Before that: `Ring` (`shoal-core/src/server/ring.rs`) stores
+moves a tablet before M9a~~ Since [F45](../features/replica-migration.md) a replica set that
+moved is a `DataConfiguration` on the map - its tablets, its members with the primary first,
+and each group's uniform membership index - beside the rule, and the moves not yet done ride
+it too: `replicas_of` answers the configuration's members for exactly its tablets and the
+rule's for the rest, `rule_replicas_of` is what a group's identity is minted from, `places`
+and the routing list take in every node a configuration or a move names, and the frame carries
+`configurations` and `moves`. The value has widened by exactly the sets that moved; leader
+hints and deltas are still not there ~~and nothing replicates one before M4~~. Before that: `Ring` (`shoal-core/src/server/ring.rs`) stores
 4096 `u16` shard assignments, derived from shard
 count at startup. `tablet_of` uses the partition hash's high twelve bits. ~~`Topology` and
-`STALE_TOPOLOGY` are reserved protocol surfaces~~ `Topology` is wired and `STALE_TOPOLOGY` is
-still reserved; [D7](../direction/shard-aware-routing.md)
+`STALE_TOPOLOGY` are reserved protocol surfaces~~ `Topology` is wired and ~~`STALE_TOPOLOGY` is
+still reserved~~ `StaleTopology` is `ErrorCode` 55 since [F45](../features/replica-migration.md), answered by a node no group of which serves the tablet asked, at the map version it holds; [D7](../direction/shard-aware-routing.md)
 describes the client half. Assignment is shared across all tables today.
 
 ## The design
@@ -61,7 +68,9 @@ carries: `MemberState::quarantined` names every copy a node holds under quaranti
 the group, its tablets and why - reported by the node on change and committed by the leader like
 its shard failures, put on `MapMember` and the topology frame, and read by `read_ring_for`,
 `preferred_holder` and `alternate_holder` to pass over a holder for those tablets. Installing is
-still the shard's own state and the report's; planned and catching up are M9a's.*
+still the shard's own state and the report's; ~~planned and catching up are M9a's~~ planned and
+catching up are the `MoveRecord`'s phases on the map since [F45](../features/replica-migration.md),
+and a destination's shard builds the set's groups as learners from them.*
 A `LeaderHint` carries a term and address, but current authority is checked by the data group.
 Configuration ids, leader terms, snapshot generations and control-plane topology versions are
 separate types. “Has a copy”, “can vote”, “can count toward durability” and “can serve this read”
@@ -169,7 +178,7 @@ as a durability or leadership generation. Initial cluster readiness becomes expl
 ## Prerequisites
 
 [C3](membership.md), [C13](protocol.md), [C2](transport.md). Bootstrap and map land in M3;
-replicated data configurations in M4; migration reconciliation in M9a.
+replicated data configurations in M4; ~~migration reconciliation in M9a~~ migration reconciliation delivered at M9a ([F45](../features/replica-migration.md)).
 
 ## How it would be measured
 

@@ -58,6 +58,17 @@ and `install_hold_ms`; a proxy link can be throttled to a byte rate so a stream 
 would carry in milliseconds takes seconds; `DIGEST` reads archived partitions beside resident
 ones, since after a restart or an install nothing is resident; and the helpers leave a node
 behind the purge point on purpose and wait for it to install and converge.
+Since [F45](../features/replica-migration.md) a child answers `MOVE <key-hex> <from> <to>`,
+which asks as the process for the set holding the key's tablet to move from one node to
+another and answers the operation, `MOVE_STATUS <op>`, the record, and `MOVE_CRASH_AT <phase>
+[<group>]`, which arms the child to exit right after its driver's commit of that phase is
+acknowledged - for one group when named, else for whichever commits it first, which on a set
+of two tables is two nodes at once; the builder sets `retire_after`, `catchup_lag`,
+`migration_timeout` and `retry_window`; and the helpers start three placed nodes with a spare
+beside them, find a pair one node leads and another completes, wait for a move's phase or its
+end, read a group's committed voters from `GROUPS`, and say whether a retired copy's marker or
+an archived partition is still on a node - the last by corrupting it, which on a copy the
+cluster no longer counts is harmless.
 A standalone node in the same test binary is started in process, since the fixture's
 directories all belong to the cluster. Benchmark
 readiness probes and tracing-based path assertions provide reusable patterns. There is no whole-engine deterministic simulator; this proposal does not require
@@ -120,7 +131,10 @@ At M7 the proxy can also throttle a lane to a byte rate, and the recovery row's 
 snapshot phase" is `CRASH_AT`, a child armed to exit at one of the seven points of an install
 (`snapshot_install_is_atomic_at_every_crash_point`); the storage row's checkpoint/manifest
 interruption is the same matrix, since the marker and the checkpoint are what the points
-straddle. Delayed and failed fsyncs are still `STALL_WAL`, ~~and torn writes, disk full and bit
+straddle. At M9a the migration row's "kill at every phase" is `MOVE_CRASH_AT`, a child armed to
+exit right after committing a move phase for one named group, beside the destination and the
+control leader killed by the fixture as the phase is reached
+(`migration_resumes_after_each_phase_failure`). Delayed and failed fsyncs are still `STALL_WAL`, ~~and torn writes, disk full and bit
 corruption are M8's~~ and at M8 bit corruption is `CORRUPT <table> <key>`, a byte of a
 partition's archived record flipped in place by the compactor that owns the archives, beside
 `FORGET` - the partition's map entry dropped - and `ERASE` - the partition rewritten with no live
