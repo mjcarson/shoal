@@ -176,6 +176,12 @@ where
     /// loop holds its batch, and this only stops the same read being asked for twice
     /// ([F40](../../../docs/src/features/replication.md)).
     loading: HashSet<u64>,
+    /// The partitions whose in-flight read was made stale by a snapshot install
+    ///
+    /// A read asked for before an install lands after it with the old generation's bytes; one
+    /// of these is asked for again from the new map entry instead of being kept
+    /// ([F43](../../../../docs/src/features/node-recovery.md)).
+    stale: HashSet<u64>,
     /// The total size of all data on this shard
     memory_usage: Arc<RefCell<usize>>,
     /// The most recently used tables/partitions on this shard
@@ -267,6 +273,7 @@ where
             loader_tx: loader_tx.clone(),
             blocked: HashMap::with_capacity(1000),
             loading: HashSet::new(),
+            stale: HashSet::new(),
             memory_usage: memory_usage.clone(),
             lru: lru.clone(),
             // nothing has been replayed yet so nothing has been discarded
@@ -338,6 +345,22 @@ where
         self.loading.remove(&partition_id);
         // and the span of the read that produced it, for the same reason
         let read_span = loaded.span.clone();
+        // a read a snapshot install made stale is asked for again from the new map entry, and
+        // whatever waits on it keeps waiting; a partition the install removed releases them
+        // to answer without a read ([F43](../../../../docs/src/features/node-recovery.md))
+        if self.stale.remove(&partition_id) {
+            if self
+                .storage
+                .load_partition(self.table_name, partition_id, &read_span, &self.loader_tx)
+                .await?
+            {
+                self.loading.insert(partition_id);
+                return Ok(PartitionLoad::Idle);
+            }
+            return Ok(PartitionLoad::Failed(
+                self.fail_partition(partition_id, &read_span, None).unwrap_or_default(),
+            ));
+        }
         // overlay any existing loaded partition data on this newly loaded partition
         match self.partitions.entry(loaded.partition_id) {
             hash_map::Entry::Occupied(mut entry) => {
@@ -1646,6 +1669,84 @@ where
         }
         records.sort_by_key(|(key, _)| *key);
         records
+    }
+
+    /// Drop every resident partition of some tablets, whatever generation it is stamped with
+    ///
+    /// What a snapshot install ends with on a persistent table: the archives now hold the
+    /// installed generation, and every resident copy of the covered tablets is the old one,
+    /// so all of them go and the next read of any of them comes from the archive. A read in
+    /// flight for one of them is marked stale, so it is asked for again when it lands rather
+    /// than kept ([F43](../../../../docs/src/features/node-recovery.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `tablets` - The tablets
+    pub fn evict_tablets(&mut self, tablets: &[u16]) {
+        let owned = |key: u64| {
+            // truncation cannot happen: a tablet id is twelve bits
+            #[allow(clippy::cast_possible_truncation)]
+            let tablet = crate::server::ring::Ring::tablet_of(key) as u16;
+            tablets.contains(&tablet)
+        };
+        let victims: Vec<u64> = self.partitions.keys().copied().filter(|key| owned(*key)).collect();
+        for victim in &victims {
+            if let Some(partition) = self.partitions.remove(victim) {
+                let size = partition.size();
+                let decreased = self.memory_usage.borrow().saturating_sub(size);
+                *self.memory_usage.borrow_mut() = decreased;
+                self.lru.borrow_mut().pop(&(self.table_name, *victim));
+            }
+        }
+        // a read in flight for a covered partition would land with the old generation
+        let in_flight: Vec<u64> = self
+            .loading
+            .iter()
+            .chain(self.blocked.keys())
+            .copied()
+            .filter(|key| owned(*key))
+            .collect();
+        self.stale.extend(in_flight);
+        event!(Level::INFO, msg = "evicted the resident partitions of installed tablets", evicted = victims.len(), stale = self.stale.len());
+    }
+
+    /// Replace every resident partition of some tablets with a snapshot's records
+    ///
+    /// What a snapshot install is on an ephemeral table, which has no archive: the covered
+    /// tablets' partitions are dropped, and each record is put in their place as a loaded
+    /// partition of the current generation ([F43](../../../../docs/src/features/node-recovery.md)).
+    /// A record that is not a partition of this table's row type is refused whole.
+    ///
+    /// # Arguments
+    ///
+    /// * `tablets` - The tablets
+    /// * `records` - The partitions, as their keys and archived bytes
+    ///
+    /// # Errors
+    ///
+    /// Fails if a record does not validate as a partition, before anything is replaced.
+    pub fn install_partitions(&mut self, tablets: &[u16], records: Vec<(u64, Vec<u8>)>) -> Result<(), ServerError> {
+        // every record validated and deserialized first, so a bad file changes nothing
+        let mut partitions = Vec::with_capacity(records.len());
+        for (key, bytes) in records {
+            let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(bytes.len());
+            aligned.extend_from_slice(&bytes);
+            let archived = <SortedPartition<R> as RkyvSupport>::access(&aligned)?;
+            let partition: SortedPartition<R> = <SortedPartition<R> as RkyvSupport>::deserialize(archived)?;
+            partitions.push((key, partition));
+        }
+        self.evict_tablets(tablets);
+        let generation = self.generation;
+        for (key, partition) in partitions {
+            // a record with nothing live in it is absence, not a partition
+            if !partition.rows.values().any(|row| matches!(row, MaybeRow::Row(_))) {
+                continue;
+            }
+            let size = partition.size();
+            self.partitions.insert(key, MaybeLoaded::Loaded { partition, generation });
+            *self.memory_usage.borrow_mut() += size;
+        }
+        Ok(())
     }
 
     /// Mark partitions as evictable if they are no longer in the intent log

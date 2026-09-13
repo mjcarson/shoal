@@ -24,7 +24,7 @@ use super::conf::FileSystemTableConf;
 use super::map::{ArchiveEntry, ArchiveMap, MapIntent, MapIntentKinds};
 use super::IntentLogReader;
 use crate::server::messages::ServerMsg;
-use crate::server::replication::snapshot::{self, SnapshotHeader, SnapshotManifest, SnapshotWriter};
+use crate::server::replication::snapshot::{self, SnapshotHeader, SnapshotManifest, SnapshotReader, SnapshotWriter};
 use crate::server::ring::Ring;
 use crate::server::wal::WalLogId;
 use crate::server::ServerError;
@@ -662,6 +662,155 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
         Ok((path, manifest))
     }
 
+    /// Install a received snapshot's records into the archives, and remove what it does not name
+    ///
+    /// The records are the sender's archived partitions as they were, validated here as the
+    /// row type this table holds - a foreign file is refused before a byte of it reaches an
+    /// archive - and written into the active archive with the same size prefix and map intent
+    /// a compaction writes. Every partition of the file's tablets the map names and the file
+    /// does not is removed, since a snapshot's absence is total. The data and the map intent
+    /// log are synced before the map is repointed, so a crash before the sync leaves the old
+    /// generation whole and one after it leaves the new; the loop hears the trailer once the
+    /// map is durable ([F43](../../../../../docs/src/features/node-recovery.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group
+    /// * `tablets` - The tablets the file covers
+    /// * `path` - The verified file
+    #[instrument(name = "FileSystemCompactor::install_snapshot", skip_all, err(Debug))]
+    async fn install_snapshot(&mut self, group: GroupId, tablets: Vec<u16>, path: PathBuf) -> Result<(), ServerError>
+    where
+        for<'a> <T as Archive>::Archived: rkyv::bytecheck::CheckBytes<
+            Strategy<
+                rkyv::validation::Validator<
+                    rkyv::validation::archive::ArchiveValidator<'a>,
+                    rkyv::validation::shared::SharedValidator,
+                >,
+                rkyv::rancor::Error,
+            >,
+        >,
+    {
+        let outcome = self.install_snapshot_records(&tablets, &path).await.map_err(|error| format!("{error:?}"));
+        // the loop hears the trailer, or why the archives were not touched
+        self.shard_local_tx
+            .send(ServerMsg::SnapshotInstalled {
+                table: self.table_name,
+                group,
+                outcome,
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// The install itself, apart from telling the shard about it
+    ///
+    /// # Arguments
+    ///
+    /// * `tablets` - The tablets the file covers
+    /// * `path` - The verified file
+    async fn install_snapshot_records(
+        &mut self,
+        tablets: &[u16],
+        path: &std::path::Path,
+    ) -> Result<Vec<(crate::shared::protocol::peer::RequestId, crate::server::replication::Remembered)>, ServerError>
+    where
+        for<'a> <T as Archive>::Archived: rkyv::bytecheck::CheckBytes<
+            Strategy<
+                rkyv::validation::Validator<
+                    rkyv::validation::archive::ArchiveValidator<'a>,
+                    rkyv::validation::shared::SharedValidator,
+                >,
+                rkyv::rancor::Error,
+            >,
+        >,
+    {
+        use crate::server::replication::install::{crash_point, CrashPoint};
+        let mut reader = SnapshotReader::open(path).await?;
+        // the file has to be this table's
+        if reader.header().table != self.table_name.table_id() {
+            return Err(ServerError::GlommioGeneric(format!(
+                "the snapshot is of table {} and this compactor is {}'s",
+                reader.header().table,
+                self.table_name
+            )));
+        }
+        let active_id = *self.map.active.borrow();
+        let mut written: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        let mut first = true;
+        while let Some((key, bytes)) = reader.next_record().await? {
+            // a record has to be a whole partition of this table's row type: validated as the
+            // archive it will be read back as, at its alignment
+            let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(bytes.len());
+            aligned.extend_from_slice(&bytes);
+            <T as RkyvSupport>::access(&aligned)?;
+            // and its key has to be one of the tablets the file claims
+            // truncation cannot happen: a tablet id is twelve bits
+            #[allow(clippy::cast_possible_truncation)]
+            let tablet = Ring::tablet_of(key) as u16;
+            if !tablets.contains(&tablet) {
+                return Err(ServerError::GlommioGeneric(format!(
+                    "the snapshot holds partition {key:016x} of tablet {tablet}, which it does not claim to cover"
+                )));
+            }
+            // written as a compaction writes a partition: the size, then the bytes, then the map intent
+            let size = bytes.len();
+            self.writer.write_all(&size.to_le_bytes()).await?;
+            let offset = self.writer.current_pos();
+            self.writer.write_all(&bytes).await?;
+            let intent = MapIntent::entry(key, active_id, offset, size);
+            let entry = write_map_intent!(self.map_writer, intent, Entry);
+            self.entries.push((key, entry));
+            written.insert(key);
+            if first {
+                first = false;
+                crash_point::hit(CrashPoint::MidInstall);
+                crash_point::held().await;
+            }
+        }
+        let trailer = reader.trailer().await?;
+        reader.close().await?;
+        // every partition of the covered tablets the map names and the file does not is gone
+        let absent: Vec<u64> = self
+            .map
+            .to_archive
+            .borrow()
+            .keys()
+            .filter(|key| {
+                #[allow(clippy::cast_possible_truncation)]
+                let tablet = Ring::tablet_of(**key) as u16;
+                tablets.contains(&tablet) && !written.contains(key)
+            })
+            .copied()
+            .collect();
+        for key in &absent {
+            write_map_intent!(self.map_writer, MapIntent::Remove(*key), Remove);
+            self.removals.push(*key);
+        }
+        // the data, then the map intent log, durable before the map is repointed
+        self.writer.sync().await?;
+        self.map_writer.sync().await?;
+        for (id, entry) in self.entries.drain(..) {
+            self.map.set_partition(id, entry);
+        }
+        for id in self.removals.drain(..) {
+            self.map.remove_partition(id);
+        }
+        crash_point::hit(CrashPoint::MapSaved);
+        event!(
+            Level::INFO,
+            msg = "installed a snapshot into the archives",
+            records = written.len(),
+            removed = absent.len(),
+        );
+        // a map intent log that grew past its bound is compacted, as after any job
+        if self.map_writer.current_flushed_pos() > Byte::MEBIBYTE {
+            self.map_writer.close().await?;
+            self.map_writer = self.map.compact_map().await?;
+        }
+        Ok(trailer)
+    }
+
     /// Compact archives with the least amount of active data
     #[instrument(name = "FileSystemCompactor::compact_archives", skip_all, err(Debug))]
     async fn compact_archives(&mut self) -> Result<(), ServerError> {
@@ -934,6 +1083,7 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                     self.cut_snapshot(group, schema_id, tablets, at_least, membership, retries, dir)
                         .await?;
                 }
+                CompactionJob::Install { group, tablets, path } => self.install_snapshot(group, tablets, path).await?,
                 CompactionJob::Archives => self.compact_archives().await?,
                 CompactionJob::Shutdown => {
                     // shutdown this compactor

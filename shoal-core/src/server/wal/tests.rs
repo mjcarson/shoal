@@ -519,6 +519,52 @@ fn frames_at_or_below_the_checkpoint_are_not_handed_again() {
     });
 }
 
+/// A group's vote, committed and purged markers survive the deletion of the segment they were written in
+///
+/// A group appends, votes, records a commit and purges, all into the first segment; the store
+/// rotates twice and deletes the first two segments, as the sweep does once a segment is
+/// compacted and purged past; reopened, the group's purge point, its vote and its committed
+/// position are what they were, because every rotation carries them into the new segment
+/// ([F43](../../../../docs/src/features/node-recovery.md)).
+#[test]
+fn markers_survive_the_deletion_of_their_segment() {
+    use openraft::storage::RaftLogStorage as _;
+    let mut runtime = GlommioRuntime::new(1);
+    runtime.block_on(async {
+        let dir = tempfile::tempdir().expect("failed to build a temp dir");
+        let path = dir.path().join("wal");
+        let group = GroupId(9);
+        let wal = ShardWal::open(&path, 1 << 30, 1 << 20).await.expect("failed to open");
+        let mut store = wal.store(group);
+        append_durably(&mut store, (1..=6).map(|index| normal(index, 32)).collect()).await;
+        let vote = openraft::Vote::new(3, ShardAddr::from(2));
+        store.save_vote(&vote).await.expect("failed to vote");
+        store.save_committed(Some(log_id(1, 6))).await.expect("failed to record the commit");
+        store.purge(log_id(1, 4)).await.expect("failed to purge");
+        wal.flush().await.expect("failed to flush");
+        // two rotations, and the segments the markers were first written in deleted
+        wal.rotate();
+        wal.flush().await.expect("failed to flush after rotating");
+        wal.rotate();
+        wal.flush().await.expect("failed to flush after rotating");
+        for generation in [1, 2] {
+            wal.delete_segment(generation).await.expect("failed to delete a sealed segment");
+        }
+        assert_eq!(wal.segments().len(), 1, "{:?}", wal.segments());
+        wal.close().await.expect("failed to close");
+        // reopened, the markers are what they were
+        let reopened = ShardWal::open(&path, 1 << 30, 1 << 20).await.expect("failed to reopen");
+        let mut store = reopened.store(group);
+        assert_eq!(store.purged_index(), Some(4), "the purge point was forgotten");
+        assert_eq!(reopened.vote_of(group), Some(vote), "the vote was forgotten");
+        assert_eq!(store.read_committed().await.expect("failed to read"), Some(log_id(1, 6)));
+        let state = store.get_log_state().await.expect("failed to read the log state");
+        assert_eq!(state.last_purged_log_id, Some(log_id(1, 4)));
+        assert_eq!(state.last_log_id, Some(log_id(1, 4)), "the entries above the purge point were in a deleted segment");
+        reopened.close().await.expect("failed to close");
+    });
+}
+
 /// A membership set of shard addresses, for a membership entry
 fn members(ids: &[u64]) -> BTreeSet<ShardAddr> {
     ids.iter().map(|id| ShardAddr::from(*id)).collect()

@@ -667,6 +667,16 @@ where
         /// The bytes
         bytes: Vec<u8>,
     },
+    /// A bulk lane from a peer ended, so every stream it carried is broken
+    ///
+    /// Broadcast to every shard by the listener that served the lane: a partial being fed by
+    /// it answers its end with a resume offset at once rather than waiting out the sender's
+    /// deadline for bytes that are in nobody's buffer any more
+    /// ([F43](../../../docs/src/features/node-recovery.md)).
+    BulkLaneEnded {
+        /// The peer the lane came from
+        node: crate::shared::identity::NodeId,
+    },
     /// A received snapshot is to be installed, from the group's state machine
     ///
     /// Posted by `GroupMachine::install_snapshot` on openraft's worker task, or on the task
@@ -684,6 +694,39 @@ where
         meta: openraft::type_config::alias::SnapshotMetaOf<crate::server::replication::DataConfig>,
         /// Fired once the install is durable, or with why it is not
         done: futures_channel::oneshot::Sender<Result<(), String>>,
+    },
+    /// A table's compactor installed a snapshot's records into its archives, or could not
+    ///
+    /// Carries the file's trailer - the remembered requests as of the boundary - which the
+    /// loop re-seeds the group's retry table from ([F43](../../../docs/src/features/node-recovery.md)).
+    SnapshotInstalled {
+        /// The table
+        table: D::TableNames,
+        /// The group
+        group: crate::shared::identity::GroupId,
+        /// The trailer, or why the install failed
+        outcome: Result<Vec<(crate::shared::protocol::peer::RequestId, crate::server::replication::Remembered)>, String>,
+    },
+    /// A volatile group's snapshot file was read, for the loop to put into its ephemeral table
+    SnapshotRecords {
+        /// The group
+        group: crate::shared::identity::GroupId,
+        /// The records and the trailer, or why the file could not be read
+        #[allow(clippy::type_complexity)]
+        outcome: Result<
+            (
+                Vec<(u64, Vec<u8>)>,
+                Vec<(crate::shared::protocol::peer::RequestId, crate::server::replication::Remembered)>,
+            ),
+            String,
+        >,
+    },
+    /// A snapshot install's marker and file are gone, so the install is complete
+    SnapshotCleaned {
+        /// The group
+        group: crate::shared::identity::GroupId,
+        /// Whether the cleanup landed
+        outcome: Result<(), String>,
     },
     /// The checkpoint file was written, so the groups it covers may snapshot at it
     CheckpointWritten {
@@ -808,6 +851,10 @@ impl<D: ShoalDatabase> Clone for ServerMsg<D> {
             ServerMsg::BuildSnapshot { .. } => panic!("A snapshot is built for the shard hosting the group"),
             ServerMsg::InstallSnapshot { .. } => panic!("A snapshot is installed on the shard hosting the group"),
             ServerMsg::SnapshotBytes { .. } => panic!("A snapshot chunk goes to the shard hosting its group"),
+            ServerMsg::BulkLaneEnded { node } => ServerMsg::BulkLaneEnded { node: *node },
+            ServerMsg::SnapshotInstalled { .. } => panic!("An installed snapshot is the installing shard's"),
+            ServerMsg::SnapshotRecords { .. } => panic!("A snapshot's records are the installing shard's"),
+            ServerMsg::SnapshotCleaned { .. } => panic!("A cleaned install is the installing shard's"),
             ServerMsg::SnapshotBuilt { .. } => panic!("A built snapshot is the cutting shard's"),
             ServerMsg::ReplicationView(_) => panic!("A replication view is asked of one shard"),
             ServerMsg::ReplicationVerb { .. } => panic!("A replication verb is for one shard"),

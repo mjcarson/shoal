@@ -218,6 +218,22 @@ pub enum CompactionJob {
         /// The directory the file goes in
         dir: PathBuf,
     },
+    /// Install a received snapshot of one group's tablets into the archives
+    ///
+    /// Every record of the file is written into the active archive as it is, every partition
+    /// of the group's tablets the map names and the file does not is removed, the data and
+    /// the map intent log are synced and the map repointed, and the shard hears
+    /// `SnapshotInstalled` with the file's trailer ([F43](../../../docs/src/features/node-recovery.md)).
+    /// Redoable: a record written twice is a new archive copy and a repoint, and a removal of
+    /// a key already absent is nothing.
+    Install {
+        /// The group
+        group: crate::shared::identity::GroupId,
+        /// The tablets the file covers, whose other partitions are removed
+        tablets: Vec<u16>,
+        /// The verified file
+        path: PathBuf,
+    },
     /// Compact this shards archive data
     Archives,
     /// Shutdown this compactor

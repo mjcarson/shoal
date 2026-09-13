@@ -312,7 +312,12 @@ impl WalInner {
     /// Move appends to the next generation
     ///
     /// The open batch, if any, is closed so nothing more lands in the old segment; the writer
-    /// seals the file when it reaches the first batch of the new generation.
+    /// seals the file when it reaches the first batch of the new generation. Every group's
+    /// vote, committed and purged markers are written again at the head of the new segment,
+    /// so a sealed segment is never the only place a marker lives: a segment that held only
+    /// a group's newest purge marker would otherwise be deleted as empty, and the group would
+    /// open with its purge point forgotten and its log starting at an index it no longer has
+    /// ([F43](../../../../docs/src/features/node-recovery.md)).
     fn rotate(&mut self) {
         self.close_open();
         // the segment being left is as large as it will ever be
@@ -329,6 +334,36 @@ impl WalInner {
                 ..SegmentView::default()
             },
         );
+        self.carry_markers();
+    }
+
+    /// Write every group's current markers into the active segment
+    ///
+    /// Called right after a rotation, so the new segment carries the state the old one held
+    /// whatever happens to the old one afterwards.
+    fn carry_markers(&mut self) {
+        let mut frames = Vec::new();
+        for (group, log) in &self.groups {
+            if let Some(vote) = &log.vote {
+                if let Ok(frame) = frame::encode_vote(*group, vote) {
+                    frames.push(frame);
+                }
+            }
+            if log.committed.is_some() {
+                if let Ok(frame) = frame::encode_marker(frame::FrameKind::Committed, *group, log.committed.as_ref()) {
+                    frames.push(frame);
+                }
+            }
+            if log.purged.is_some() {
+                if let Ok(frame) = frame::encode_marker(frame::FrameKind::Purged, *group, log.purged.as_ref()) {
+                    frames.push(frame);
+                }
+            }
+        }
+        // straight into the open batch of the new generation, ahead of every append
+        for frame in frames {
+            self.put(&frame);
+        }
     }
 
     /// Close the open batch, handing it to the writer
@@ -1177,9 +1212,14 @@ impl ShardWal {
     pub fn rotate(&self) {
         let mut inner = self.inner.borrow_mut();
         inner.rotate();
-        // an empty batch in the new generation is what makes the writer seal the old one
-        let generation = inner.generation;
-        inner.queued.push_back(Batch::new(generation, 0));
+        // the markers carried into the new generation are a batch in it, which is what makes
+        // the writer seal the old one; a store with no groups yet gets an empty batch for it
+        if inner.open.is_none() {
+            let generation = inner.generation;
+            inner.queued.push_back(Batch::new(generation, 0));
+        } else {
+            inner.close_open();
+        }
         if let Some(waker) = inner.waker.take() {
             waker.wake();
         }

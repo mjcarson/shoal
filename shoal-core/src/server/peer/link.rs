@@ -368,6 +368,12 @@ impl Link {
         self.queue.borrow().state == LinkState::Up
     }
 
+    /// Whether the link's owner let it go, after which nothing queued is ever written
+    #[must_use]
+    pub fn is_closed(&self) -> bool {
+        self.queue.borrow().closed
+    }
+
     /// The peer this link reaches
     #[must_use]
     pub fn node(&self) -> NodeId {

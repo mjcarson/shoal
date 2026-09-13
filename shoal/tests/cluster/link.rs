@@ -24,6 +24,12 @@ pub enum LinkState {
     Cut,
     /// Forward, after holding each new connection this long before it is opened
     Delay(Duration),
+    /// Forward at most this many bytes per second on each connection, in either direction
+    ///
+    /// What makes a snapshot stream take seconds on a loopback that would carry it in
+    /// milliseconds, so a cut can land in the middle of one
+    /// ([F43](../../../docs/src/features/node-recovery.md)).
+    Throttle(u64),
 }
 
 /// A directed proxy
@@ -96,6 +102,15 @@ impl Link {
         *self.state.lock().unwrap() = LinkState::Delay(delay);
     }
 
+    /// Forward every new connection at a bounded rate
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes_per_second` - The rate
+    pub fn throttle(&self, bytes_per_second: u64) {
+        *self.state.lock().unwrap() = LinkState::Throttle(bytes_per_second);
+    }
+
     /// Forward again
     pub fn heal(&self) {
         *self.state.lock().unwrap() = LinkState::Pass;
@@ -136,7 +151,7 @@ async fn accept_loop(
             // accepted and closed at once: the sender sees a connection that ended, which is
             // what a reconnect into a cut link is meant to see
             LinkState::Cut => drop(inbound),
-            LinkState::Pass | LinkState::Delay(_) => {
+            LinkState::Pass | LinkState::Delay(_) | LinkState::Throttle(_) => {
                 let handle = tokio::spawn(forward(inbound, target, current));
                 streams.lock().unwrap().push(handle);
             }
@@ -153,6 +168,39 @@ async fn forward(mut inbound: TcpStream, target: SocketAddr, state: LinkState) {
     let Ok(mut outbound) = TcpStream::connect(target).await else {
         return;
     };
+    // a throttled link copies each direction a chunk at a time, sleeping for the rate
+    if let LinkState::Throttle(rate) = state {
+        // both halves on this task, so aborting it on a cut ends both at once
+        let (in_rx, in_tx) = inbound.into_split();
+        let (out_rx, out_tx) = outbound.into_split();
+        tokio::join!(trickle(in_rx, out_tx, rate), trickle(out_rx, in_tx, rate));
+        return;
+    }
     // copy until one side closes; the error of a reset is the end of the stream
     let _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
+}
+
+/// Copy one direction at a bounded rate until it ends
+///
+/// # Arguments
+///
+/// * `from` - The side to read
+/// * `to` - The side to write
+/// * `rate` - Bytes per second
+async fn trickle(mut from: tokio::net::tcp::OwnedReadHalf, mut to: tokio::net::tcp::OwnedWriteHalf, rate: u64) {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let mut buffer = vec![0u8; 4096];
+    loop {
+        let read = match from.read(&mut buffer).await {
+            Ok(0) | Err(_) => break,
+            Ok(read) => read,
+        };
+        if to.write_all(&buffer[..read]).await.is_err() {
+            break;
+        }
+        // the time these bytes take at the rate
+        let nanos = (read as u64).saturating_mul(1_000_000_000) / rate.max(1);
+        tokio::time::sleep(Duration::from_nanos(nanos)).await;
+    }
+    let _ = to.shutdown().await;
 }

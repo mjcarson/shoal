@@ -966,6 +966,12 @@ impl Cluster {
                 "cluster.replication.write_timeout is longer than cluster.transport.forward_timeout; a proposal that outlives the forward deadline answers nobody".to_string(),
             )));
         }
+        // a chunk has to fit the bulk queue, or a stream waits for room that never comes
+        if self.replication.snapshot_chunk_bytes + 4096 > self.transport.bulk_queue_bytes {
+            return Err(ServerError::Shoal(ShoalError::InvalidConfig(
+                "cluster.replication.snapshot_chunk_bytes does not fit cluster.transport.bulk_queue_bytes with its heads".to_string(),
+            )));
+        }
         // a snapshot transfer that gives up before a write would is one that never completes
         // under load
         if self.replication.snapshot_timeout.duration() < self.replication.write_timeout.duration() {

@@ -162,6 +162,18 @@ pub struct StagedCluster {
     /// The bound on sealed WAL bytes a slow member may pin, if the test lowered it
     #[serde(default)]
     pub retained_bytes: Option<u64>,
+    /// How many bytes one snapshot chunk carries, if the test shrank it
+    #[serde(default)]
+    pub snapshot_chunk_bytes: Option<usize>,
+    /// The bulk lane's queue bound, if the test shrank it
+    #[serde(default)]
+    pub bulk_queue_bytes: Option<usize>,
+    /// A crash point the node arms as it starts, so its next install dies there
+    #[serde(default)]
+    pub crash_at: Option<String>,
+    /// How long every install on the node pauses after its first record, in milliseconds
+    #[serde(default)]
+    pub install_hold_ms: Option<u64>,
     /// The read level the bootstrapper seeds as the cluster's default, if the test set one
     /// ([F41](../../../docs/src/features/read-consistency.md))
     #[serde(default)]

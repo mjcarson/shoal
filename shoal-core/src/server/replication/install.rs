@@ -140,6 +140,8 @@ pub struct Partial {
     pub failed: Option<String>,
     /// Whether the partial was resumed from a held prefix
     pub resumed: bool,
+    /// Whether the lane feeding it ended since the last chunk, so its end answers a resume at once
+    pub lane_lost: bool,
 }
 
 impl Partial {
@@ -165,6 +167,7 @@ impl Partial {
             synced: false,
             failed: None,
             resumed: false,
+            lane_lost: false,
         }
     }
 }
@@ -232,10 +235,32 @@ impl CrashPoint {
 /// The crash point armed for this process, and where an install checks it
 pub mod crash_point {
     use super::CrashPoint;
-    use std::sync::atomic::{AtomicU8, Ordering};
+    use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 
     /// The armed point, as its discriminant; zero for none
     static ARMED: AtomicU8 = AtomicU8::new(0);
+
+    /// How long an install pauses after its first record, in milliseconds; zero for no pause
+    ///
+    /// The fixture's way of holding a group `installing` long enough to read through it.
+    static HOLD_MS: AtomicU64 = AtomicU64::new(0);
+
+    /// Make every install on this process pause after its first record
+    ///
+    /// # Arguments
+    ///
+    /// * `ms` - How long, or zero for no pause
+    pub fn hold(ms: u64) {
+        HOLD_MS.store(ms, Ordering::Relaxed);
+    }
+
+    /// The pause an install takes after its first record, if one is armed
+    pub async fn held() {
+        let ms = HOLD_MS.load(Ordering::Relaxed);
+        if ms > 0 {
+            glommio::timer::sleep(std::time::Duration::from_millis(ms)).await;
+        }
+    }
 
     /// Arm a point, or disarm every point with `None`
     ///

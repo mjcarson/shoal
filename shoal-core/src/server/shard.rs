@@ -2670,6 +2670,16 @@ where
             if !meta.read.ready && meta.read.needs_wait() {
                 return self.await_read_barrier(meta, query, span, gathered_meta);
             }
+            // a tablet whose group is installing a snapshot serves no read: what is resident
+            // is the old generation and what is on disk is half the new one
+            // ([F43](../../../docs/src/features/node-recovery.md))
+            if let Some(group) = self.installing_group(&query) {
+                let error = crate::shared::responses::ResponseError::new(
+                    ErrorCode::Unavailable,
+                    format!("group {group} is installing a snapshot; its tablets are not readable until it is installed"),
+                );
+                return self.answer_read_failure(meta, query, span, gathered_meta, error).await;
+            }
         }
         // try to handle this query
         if let Some((addr, query_id, mut stamps, answer)) = self.tables.handle(meta, query).await {
@@ -2982,9 +2992,6 @@ where
             // what it lost ([F43](../../../docs/src/features/node-recovery.md))
             PeerEvent::Link(LinkEvent::Down { node, lane: Lane::Bulk, reason, .. }) => {
                 event!(Level::WARN, msg = "a bulk link went down", %node, reason);
-                if let Some(replication) = self.replication.as_ref() {
-                    replication.network.bulk_down(node);
-                }
             }
             PeerEvent::Link(LinkEvent::Frame { lane: Lane::Bulk, .. }) => {}
             PeerEvent::Link(LinkEvent::Frame { node, header, head, payload, .. }) => {
@@ -3623,10 +3630,22 @@ where
                 // the checkpoint file landed
                 ServerMsg::BuildSnapshot { group, reply } => self.handle_build_snapshot(group, reply).await?,
                 ServerMsg::SnapshotBuilt { group, outcome } => self.handle_snapshot_built(group, outcome).await?,
-                ServerMsg::InstallSnapshot { group, done, .. } => self.handle_install_snapshot(group, done),
+                ServerMsg::InstallSnapshot {
+                    group,
+                    path,
+                    manifest,
+                    meta,
+                    done,
+                } => self.handle_install_snapshot(group, path, manifest, meta, done).await?,
+                ServerMsg::SnapshotInstalled { table, group, outcome } => {
+                    self.handle_snapshot_installed(table, group, outcome).await?;
+                }
+                ServerMsg::SnapshotRecords { group, outcome } => self.handle_snapshot_records(group, outcome).await?,
+                ServerMsg::SnapshotCleaned { group, outcome } => self.handle_snapshot_cleaned(group, outcome),
                 ServerMsg::SnapshotBytes { node, stream, offset, bytes } => {
                     self.handle_snapshot_bytes(node, stream, offset, bytes);
                 }
+                ServerMsg::BulkLaneEnded { node } => self.handle_bulk_lane_ended(node),
                 ServerMsg::CheckpointWritten { version, outcome } => {
                     self.handle_checkpoint_written(version, outcome)?;
                 }

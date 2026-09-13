@@ -150,6 +150,10 @@ pub(super) struct Replication<D: ShoalDatabase> {
     pub(super) snapshots: SnapshotStats,
     /// The snapshots being received, one partial per group at most
     pub(super) installs: super::snapshots::Installs,
+    /// The installs in progress, one per group at most
+    pub(super) active_installs: HashMap<GroupId, super::snapshots::ActiveInstall>,
+    /// The received snapshots verified at open and not yet installed, by group
+    pub(super) pending_installs: HashMap<GroupId, (PathBuf, SnapshotManifest)>,
     /// How many committed write replies to drop before answering clients again, for the fixture
     pub(super) drop_replies: u64,
     /// How many rebuilds of the groups there have been
@@ -224,11 +228,12 @@ where
         // the retry tables as of that checkpoint, written before it
         let retries = Retries::read(&dir).await.map_err(ServerError::IO)?;
         // where received snapshots are assembled, bounded in bytes on disk and in the queue
-        let installs = super::snapshots::Installs::new(
-            &dir,
-            cluster.replication.install_bytes,
-            cluster.transport.bulk_queue_bytes,
-        );
+        let installs = super::snapshots::Installs::new(&dir, cluster.replication.install_bytes);
+        let _ = setup;
+        // a received snapshot whose marker survived a crash is installed again when its group
+        // is built, or cleaned up if the checkpoint passed it meanwhile
+        // ([F43](../../../../docs/src/features/node-recovery.md))
+        let pending_installs = super::snapshots::scan_pending(&installs, &checkpoint).await;
         let _ = setup;
         self.replication = Some(Replication {
             wal,
@@ -246,6 +251,8 @@ where
             stats: ProposalStats::default(),
             snapshots: SnapshotStats::default(),
             installs,
+            active_installs: HashMap::new(),
+            pending_installs,
             drop_replies: 0,
             epoch: 0,
             ticks: 0,
@@ -365,7 +372,11 @@ where
             if !seed.is_empty() {
                 event!(Level::DEBUG, msg = "seeded a group's retry table from its sidecar", group = %spec.id, entries = seed.len());
             }
-            let state = Rc::new(RefCell::new(MachineState::at(checkpoint, membership, seed)));
+            let mut machine_state = MachineState::at(checkpoint, membership, seed);
+            // a received snapshot past the checkpoint, which openraft installs as it builds
+            // the group ([F43](../../../../docs/src/features/node-recovery.md))
+            machine_state.pending_install = replication.pending_installs.remove(&spec.id);
+            let state = Rc::new(RefCell::new(machine_state));
             let machine = GroupMachine::new(spec.id, state.clone(), tx.clone());
             let group = Group {
                 spec: spec.clone(),
@@ -1113,12 +1124,15 @@ where
     /// to it at open, and a crash between the two leaves a sidecar ahead of its checkpoint,
     /// which the seed rule ignores. The checkpoint counts as durable only once the checkpoint
     /// file itself landed.
-    fn write_checkpoint(&mut self) {
+    ///
+    /// Returns whether a write was started now; if not, a dirty checkpoint is written by the
+    /// next write, which is the version after the one in flight.
+    pub(super) fn write_checkpoint(&mut self) -> bool {
         let Some(replication) = self.replication.as_mut() else {
-            return;
+            return false;
         };
         if replication.checkpoint_writing || !replication.checkpoint_dirty {
-            return;
+            return false;
         }
         replication.checkpoint_writing = true;
         replication.checkpoint_dirty = false;
@@ -1162,6 +1176,7 @@ where
             let _ = tx.send(ServerMsg::CheckpointWritten { version, outcome }).await;
         })
         .detach();
+        true
     }
 
     /// Note that a checkpoint write landed, so the groups it covered may snapshot
@@ -1179,11 +1194,29 @@ where
             return Err(ServerError::GlommioGeneric(format!("the checkpoint file could not be written: {error}")));
         }
         if version == replication.checkpoint_version && !replication.checkpoint_dirty {
-            // every group's checkpoint is on disk as it stands
+            // every group's checkpoint is on disk as it stands, and a group whose checkpoint
+            // moved past its last snapshot is asked to build one now: openraft's own policy
+            // is judged as entries commit, and a checkpoint that becomes durable after the
+            // writes stopped would otherwise never be snapshotted or purged behind
+            // ([F43](../../../../docs/src/features/node-recovery.md))
             for slot in replication.groups.values() {
-                slot.state.borrow_mut().checkpoint_durable = true;
+                let moved = {
+                    let mut state = slot.state.borrow_mut();
+                    state.checkpoint_durable = true;
+                    state.checkpoint.is_some() && state.checkpoint != state.snapshot_at
+                };
+                if moved {
+                    if let Some(raft) = slot.raft.clone() {
+                        glommio::spawn_local(async move {
+                            let _ = raft.trigger().snapshot().await;
+                        })
+                        .detach();
+                    }
+                }
             }
         }
+        // an install whose state this write carried is durable now, and can be cleaned up
+        self.checkpoint_carried_installs(version);
         // a move that happened meanwhile is written next
         self.write_checkpoint();
         Ok(())
@@ -1535,23 +1568,6 @@ where
         Ok(())
     }
 
-    /// Install a received snapshot, from the group's state machine
-    ///
-    /// The install itself lands with the transfer; until then a received file is refused here,
-    /// which openraft reports as a storage error on the group.
-    ///
-    /// # Arguments
-    ///
-    /// * `group` - The group
-    /// * `done` - Fired once the install is durable, or with why it is not
-    pub(super) fn handle_install_snapshot(
-        &mut self,
-        group: GroupId,
-        done: oneshot::Sender<Result<(), String>>,
-    ) {
-        let _ = done.send(Err(format!("installing a snapshot for group {group} is not built yet")));
-    }
-
     /// Delete every retired snapshot file no transfer holds any more
     pub(super) async fn sweep_retired_snapshots(&mut self) {
         let Some(replication) = self.replication.as_mut() else {
@@ -1688,6 +1704,11 @@ fn group_config(cluster: &crate::server::conf::Cluster, failover_ms: u64, group:
         enable_leader_restore: Some(false),
         snapshot_policy: SnapshotPolicy::LogsSinceLast(cluster.replication.checkpoint_entries),
         max_in_snapshot_log_to_keep: cluster.replication.retained_entries,
+        // a whole transfer's budget: openraft's default is a fifth of a second, which no
+        // snapshot of any size completes in ([F43](../../../../docs/src/features/node-recovery.md))
+        // truncation cannot happen: a transfer's budget is minutes, not weeks
+        #[allow(clippy::cast_possible_truncation)]
+        install_snapshot_timeout: cluster.replication.snapshot_timeout.duration().as_millis() as u64,
         allow_log_reversion: Some(volatile),
         ..Config::default()
     };

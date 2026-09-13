@@ -417,7 +417,7 @@ where
     /// * `span` - The span to reply under
     /// * `gathered_meta` - The metadata to answer with, if this is a share
     /// * `error` - Why it cannot be served
-    async fn answer_read_failure(
+    pub(super) async fn answer_read_failure(
         &mut self,
         mut meta: QueryMetadata,
         query: <D::ClientType as QuerySupport>::QueryKinds,

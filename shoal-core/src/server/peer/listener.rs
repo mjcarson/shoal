@@ -739,6 +739,11 @@ async fn serve_bulk<S: ShoalDatabase>(
     if let Err(error) = outcome {
         event!(Level::WARN, msg = "a bulk lane ended", %origin, ?error);
     }
+    // every stream the lane carried is broken; the shards assembling one answer its end
+    // with a resume offset rather than waiting for bytes that will not come
+    if !routes.is_empty() {
+        let _ = ctx.comms.broadcast(&ServerMsg::BulkLaneEnded { node: origin }).await;
+    }
 }
 
 /// Keep the unused import lint honest about the read half the bulk lane splits off

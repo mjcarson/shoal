@@ -56,6 +56,9 @@ use crate::shared::protocol::MessageType;
 /// How long a sender waits before offering a shed chunk to the bulk queue again
 const SNAPSHOT_SHED_BACKOFF: Duration = Duration::from_millis(10);
 
+/// How long a sender waits before sending a snapshot RPC again after its link dropped
+const SNAPSHOT_RPC_RETRY: Duration = Duration::from_millis(100);
+
 /// What a group's network asks the shard loop for a snapshot file with
 pub type SnapshotBuilder = Rc<dyn Fn(GroupId, oneshot::Sender<Result<Rc<BuiltSnapshot>, String>>)>;
 
@@ -254,9 +257,11 @@ impl ReplicationLink {
 struct Shared {
     /// One link per peer node, opened on first use
     links: RefCell<HashMap<NodeId, Rc<ReplicationLink>>>,
-    /// One bulk link per peer node, opened on the first snapshot sent to it
-    /// ([F43](../../../../docs/src/features/node-recovery.md))
-    bulk: RefCell<HashMap<NodeId, Rc<peer::Link>>>,
+    /// One bulk link per peer node, opened on the first snapshot sent to it, each with the
+    /// number it was opened under ([F43](../../../../docs/src/features/node-recovery.md))
+    bulk: RefCell<HashMap<NodeId, (u64, Rc<peer::Link>)>>,
+    /// The number the next bulk link is opened under
+    next_bulk: Cell<u64>,
     /// How to ask the shard loop for a snapshot file
     builder: SnapshotBuilder,
     /// The groups' bounds: the chunk size a stream is cut into
@@ -312,6 +317,7 @@ impl ShardNetwork {
             shared: Rc::new(Shared {
                 links: RefCell::new(HashMap::new()),
                 bulk: RefCell::new(HashMap::new()),
+                next_bulk: Cell::new(1),
                 builder,
                 replication,
                 snapshots: RefCell::new(SnapshotStats::default()),
@@ -327,36 +333,45 @@ impl ShardNetwork {
 
     /// Get or open the bulk link to a peer node, for a snapshot stream
     ///
+    /// A link that goes down forgets itself, so the next stream dials afresh: the link's own
+    /// number is what it is forgotten by, since a transfer still holding an older link may
+    /// see that one drop after a newer one was opened, and must not forget the newer one.
+    ///
     /// # Arguments
     ///
     /// * `node` - The peer node
     pub fn bulk_link(&self, node: NodeId) -> Option<Rc<peer::Link>> {
         let entry = self.addr_of(node)?;
-        if let Some(link) = self.shared.bulk.borrow().get(&node) {
-            if *link.target() == entry {
+        if let Some((_, link)) = self.shared.bulk.borrow().get(&node) {
+            if *link.target() == entry && !link.is_closed() {
                 return Some(link.clone());
             }
         }
         let on_event = self.shared.on_event.clone();
+        let id = self.shared.next_bulk.get();
+        self.shared.next_bulk.set(id.wrapping_add(1));
+        let shared = Rc::downgrade(&self.shared);
         let link = Rc::new(peer::Link::spawn(
             Lane::Bulk,
             entry,
             self.shared.local.clone(),
             &self.shared.transport,
             self.shared.tls.clone(),
-            move |event| on_event(event),
+            move |event| {
+                // this link going down forgets this link, and no other
+                if let LinkEvent::Down { node, .. } = &event {
+                    if let Some(shared) = shared.upgrade() {
+                        let mut bulk = shared.bulk.borrow_mut();
+                        if bulk.get(node).is_some_and(|(held, _)| *held == id) {
+                            bulk.remove(node);
+                        }
+                    }
+                }
+                on_event(event);
+            },
         ));
-        self.shared.bulk.borrow_mut().insert(node, link.clone());
+        self.shared.bulk.borrow_mut().insert(node, (id, link.clone()));
         Some(link)
-    }
-
-    /// Drop the bulk link to a node, because it went down; the next stream dials afresh
-    ///
-    /// # Arguments
-    ///
-    /// * `node` - The peer
-    pub fn bulk_down(&self, node: NodeId) {
-        self.shared.bulk.borrow_mut().remove(&node);
     }
 
     /// What this shard's transfers have done, as the sender
@@ -532,13 +547,41 @@ impl ShardPeer {
         }))
     }
 
-    /// The same, for a streaming call
+    /// Send a snapshot RPC, trying again after a lost link until the transfer's deadline
+    ///
+    /// A replication RPC fails the moment its link drops, which a proposal wants; a snapshot
+    /// transfer is measured in its own deadline and a lane cut for a moment is what the
+    /// resume offset exists for, so the begin and the end are sent again after a short wait
+    /// rather than failing the transfer ([F43](../../../../docs/src/features/node-recovery.md)).
+    /// A refusal the peer answered is not retried.
     ///
     /// # Arguments
     ///
-    /// * `failure` - What went wrong
-    fn unreachable_streaming(failure: RpcFailure) -> StreamingError<DataConfig> {
-        unreachable(failure.to_string())
+    /// * `group` - The group
+    /// * `payload` - The RPC body
+    /// * `started` - When the transfer started
+    /// * `deadline` - How long it may take in all
+    async fn rpc_until(
+        &self,
+        group: GroupId,
+        payload: Vec<u8>,
+        started: Instant,
+        deadline: Duration,
+    ) -> Result<Vec<u8>, StreamingError<DataConfig>> {
+        loop {
+            let remaining = deadline.saturating_sub(started.elapsed());
+            if remaining.is_zero() {
+                return Err(unreachable("the snapshot transfer ran out of time".to_string()));
+            }
+            match self.rpc(ReplicateKind::Snapshot, group, payload.clone(), remaining).await {
+                Ok(answer) => return Ok(answer),
+                Err(RpcFailure::Remote(msg)) => return Err(unreachable(format!("the peer refused the rpc: {msg}"))),
+                // a lost link: wait for it to come back and ask again
+                Err(RpcFailure::NotSent(_) | RpcFailure::Unreachable(_)) => {
+                    glommio::timer::sleep(SNAPSHOT_RPC_RETRY).await;
+                }
+            }
+        }
     }
 
     /// Send one RPC to the member and wait for its answer
@@ -680,13 +723,8 @@ impl RaftNetworkV2<DataConfig> for GroupPeer {
             stream,
             manifest: manifest.clone(),
         })?;
-        let answer: SnapshotAnswer = decode(
-            &self
-                .peer
-                .rpc(ReplicateKind::Snapshot, group, begin, remaining)
-                .await
-                .map_err(ShardPeer::unreachable_streaming)?,
-        )?;
+        let answer: SnapshotAnswer = decode(&self.peer.rpc_until(group, begin, started, deadline).await?)?;
+        event!(Level::DEBUG, msg = "a snapshot stream begins", group = %group, %target, boundary = manifest.boundary.index, bytes = manifest.total, ?answer);
         let mut from = match answer {
             SnapshotAnswer::Resume { from } => from,
             SnapshotAnswer::Installed { vote } => return Ok(SnapshotResponse { vote }),
@@ -754,6 +792,7 @@ impl RaftNetworkV2<DataConfig> for GroupPeer {
                     network.shared.snapshots.borrow_mut().bytes_sent += read.len() as u64;
                     offset += read.len() as u64;
                 }
+                event!(Level::DEBUG, msg = "a snapshot stream's chunks are queued", group = %group, %target, from, total = manifest.total);
                 // the stream's end on the lane, then the end RPC that waits for the install
                 let end = SnapshotEnd {
                     stream,
@@ -768,19 +807,12 @@ impl RaftNetworkV2<DataConfig> for GroupPeer {
                 let frame = Frame::new(MessageType::SnapshotEnd, vec![bytes::Bytes::copy_from_slice(&end)], FrameKey::Bulk(0), max)
                     .map_err(|error| unreachable(format!("framing a snapshot end: {error:?}")))?;
                 enqueue_or_wait(&link, frame, &mut cancel, started, deadline).await?;
-                let remaining = deadline.saturating_sub(started.elapsed());
                 let end = encode(&SnapshotRpc::End {
                     stream,
                     total: manifest.total,
                     checksum: manifest.checksum,
                 })?;
-                let answer: SnapshotAnswer = decode(
-                    &self
-                        .peer
-                        .rpc(ReplicateKind::Snapshot, group, end, remaining)
-                        .await
-                        .map_err(ShardPeer::unreachable_streaming)?,
-                )?;
+                let answer: SnapshotAnswer = decode(&self.peer.rpc_until(group, end, started, deadline).await?)?;
                 match answer {
                     SnapshotAnswer::Installed { vote } => {
                         network.shared.snapshots.borrow_mut().sent += 1;
@@ -845,10 +877,19 @@ async fn enqueue_or_wait(
     started: Instant,
     deadline: Duration,
 ) -> Result<(), StreamingError<DataConfig>> {
+    let mut waited = 0u32;
     loop {
+        // a link its owner let go writes nothing: fail now, and the retry dials afresh
+        if link.is_closed() {
+            return Err(unreachable("the bulk link closed under the transfer".to_string()));
+        }
         match link.enqueue(frame) {
             Ok(()) => return Ok(()),
             Err((back, _)) => frame = back,
+        }
+        waited += 1;
+        if waited % 500 == 0 {
+            event!(Level::DEBUG, msg = "a snapshot chunk is waiting for room on the bulk queue", waited, link = ?link.view());
         }
         if started.elapsed() >= deadline {
             return Err(unreachable("the snapshot transfer ran out of time waiting for the bulk queue".to_string()));

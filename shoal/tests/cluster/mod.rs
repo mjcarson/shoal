@@ -144,6 +144,10 @@ pub struct ClusterBuilder {
     segment_bytes: Option<u64>,
     /// The bound on sealed WAL bytes a slow member may pin, if lowered
     retained_bytes: Option<u64>,
+    /// How many bytes one snapshot chunk carries, if shrunk
+    snapshot_chunk_bytes: Option<usize>,
+    /// The bulk lane's queue bound, if shrunk
+    bulk_queue_bytes: Option<usize>,
     /// The cluster's default read level, if set
     read_consistency: Option<String>,
     /// The bundle deadline, in milliseconds, if shortened
@@ -371,6 +375,28 @@ impl ClusterBuilder {
     #[must_use]
     pub fn retained_bytes(mut self, bytes: u64) -> Self {
         self.retained_bytes = Some(bytes);
+        self
+    }
+
+    /// Shrink how many bytes one snapshot chunk carries, so a stream is many chunks
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - The chunk size
+    #[must_use]
+    pub fn snapshot_chunk_bytes(mut self, bytes: usize) -> Self {
+        self.snapshot_chunk_bytes = Some(bytes);
+        self
+    }
+
+    /// Shrink the bulk lane's queue bound, so a sender waits for room chunk by chunk
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - The bound
+    #[must_use]
+    pub fn bulk_queue_bytes(mut self, bytes: usize) -> Self {
+        self.bulk_queue_bytes = Some(bytes);
         self
     }
 
@@ -650,6 +676,8 @@ impl Cluster {
             retained_entries: None,
             segment_bytes: None,
             retained_bytes: None,
+            snapshot_chunk_bytes: None,
+            bulk_queue_bytes: None,
             read_consistency: None,
             query_deadline_ms: None,
         }
@@ -1303,6 +1331,10 @@ fn build_membership_cluster(
             retained_entries: builder.retained_entries,
             segment_bytes: builder.segment_bytes,
             retained_bytes: builder.retained_bytes,
+            snapshot_chunk_bytes: builder.snapshot_chunk_bytes,
+            bulk_queue_bytes: builder.bulk_queue_bytes,
+            crash_at: None,
+            install_hold_ms: None,
             read_consistency: builder.read_consistency.clone(),
             query_deadline_ms: builder.query_deadline_ms,
         });
