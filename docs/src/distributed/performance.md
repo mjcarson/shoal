@@ -47,7 +47,16 @@ and maxima, session waits, timeouts and late and duplicate shares - mirrored int
 the same way. The harness waits for every peer to hold the placement before it seeds, and the
 cluster port blocks are numbered among the cluster arms so none sits in the ephemeral range
 (`ClusterOverride::feasibility`), which is what "not a Cartesian product that silently lowers
-RF" means in code. The open-loop schedule is not built; the arms are closed loops at one
+RF" means in code. Since [F42](../features/primary-failover.md) one fault arm runs:
+`macro/cluster/failover/kill`, the durable replication arm's placement and mixture driven for
+a fixed time by a client that does not retry, with node one killed a third of the way through
+and started again from the same identity two thirds through by a thread of the harness on the
+driver's clock. Its record carries `cluster.fault` - the kind, the node, the kill and restart
+marks, the client's first failure and its first sustained success, the outage between them,
+three windows each with its own distribution, and a per second series of operations, errors
+and percentiles - which is the time series this page asks for below, mirrored into the
+explorer whole; the timed driver behind it counts a failed operation rather than ending the
+run. The open-loop schedule is not built; the arms are closed loops at one
 depth.
 
 ## The design
@@ -136,7 +145,7 @@ expanded only into feasible combinations, not a Cartesian product that silently 
 | `macro/cluster/reads/{one,barrier,session}` | Read-only ~~and write-background~~ consistency costs. All three since [F41](../features/read-consistency.md), on the `replication/` placement at a factor of three and read against each other; the write-background variant is filed with the open-loop schedule |
 | `macro/cluster/fanout/{get,filter,limit,empty}` | Remote gathering, decoding, coverage and ordering. All four since [F41](../features/read-consistency.md), on the `nodes/3` placement at a factor of one |
 | `macro/cluster/writes/{insert,update,delete,conditional,retry}` | Result derivation, no-ops, deduplication and hot-key behavior |
-| `macro/cluster/failover` | Outage and recovery under a specified fault schedule |
+| `macro/cluster/failover` | Outage and recovery under a specified fault schedule. `kill` since [F42](../features/primary-failover.md), on the `replication/` placement at a factor of three; a pause and a partition are the fixture's |
 | `macro/cluster/catchup/{log,snapshot}` | Time/bytes to catch up at several foreground mutation rates |
 | `macro/cluster/rebalance/{add,decommission,remove,capacity_blocked}` | Transition progress and supported load envelope |
 | `macro/cluster/background/{repair,backup}` | Foreground interference, integrity work and restore preparation |

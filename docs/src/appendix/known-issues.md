@@ -32,9 +32,11 @@ Defects that have been fixed move to [Resolved Issues](resolved-issues.md), one 
 carrying the reasoning and the invariants the fix depends on. Item numbers are shared between
 the two pages and never reused, so a number appears on exactly one of them — which is why this
 list starts at 15 and skips 17, 25, 26, 31, 33, 34, 38, 39, 44, 45, 48, 51, 56, 57, 58, 61, 67, 68, 74,
-76, 78, 79, 80, 82, 83, 84, 85, 86, 88, 89, 90 and 94, and
-why ~~item 91~~ ~~item 97~~ item 100 is the newest entry here and item 100 the newest number, and why 17, 33, 78, 79, 80, 82,
-83, 84, 85, 86, 88, 89, 90 and 94 are on the resolved page. **33 moved at M5**
+76, 78, 79, 80, 82, 83, 84, 85, 86, 88, 89, 90, 94 and 101, and
+why ~~item 91~~ ~~item 97~~ ~~item 100~~ item 103 is the newest entry here and item 103 the newest number, and why 17, 33, 78, 79, 80, 82,
+83, 84, 85, 86, 88, 89, 90, 94 and 101 are on the resolved page. **101 never appeared here
+either**: it was found by an M6 test and fixed in the same change
+([Resolved #101](resolved/short-lived-member-detection.md)), reproduced first. **33 moved at M5**
 ([Resolved #33](resolved/gather-expiry.md)): it was the oldest open hang, and it was reproduced
 before it was fixed. **94 never appeared here either**: it
 was found and fixed while [F38](../features/inter-node-transport.md) made a peer link a client,
@@ -58,8 +60,12 @@ in the other direction — it had one row left open, that row was fixed, and the
 [moved](resolved/claude-md-drift.md).
 
 **Baseline as of writing:** `cargo check --workspace --all-targets` passes with warnings;
-`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ **1,361 tests**, four ignored, plus ~~13~~ 14
-more behind `--features stage-profile` that a default run does not reach ([Test Coverage](test-coverage.md)).
+`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ **1,382 tests**, four ignored, plus ~~13~~ 14
+more behind `--features stage-profile` that a default run does not reach ([Test Coverage](test-coverage.md)) -
+with the fixture binary run at `--test-threads 6`, since at the default thirty-two nineteen of
+its fifty-four fail under the load (item 100) and every one of them passes at six.
+[F42](../features/primary-failover.md) added 21 and took it to 1,382, resolving item 101 and
+filing 102 and 103 on the way.
 [F37](../features/node-identity-control-plane.md) took the total to 1,265 and did not update this
 line; [F38](../features/inter-node-transport.md) added 24 more and did;
 [F39](../features/membership.md) added 31 and took it to 1,320;
@@ -1860,6 +1866,59 @@ allocator makes the clone wait for cores, the fixture's `ready_timeout` is the b
 if the leader admitted the same incarnation from a second address, that is a fencing defect
 and this item moves up. Until then the suite is run at a lower thread count, which the
 [test-coverage](test-coverage.md) runbook now says.
+
+### 102. A deferred fixture node can lose its reserved port to an outbound connection
+
+`shoal/tests/cluster/mod.rs`, `build_membership_cluster`, `Cluster::start`, `start_deferred`
+
+The fixture reserves every node's data and control port with a bound, never-listening
+`SO_REUSEPORT` socket from the ephemeral range, and drops every reservation once the nodes it
+starts have bound. A node the builder deferred has not bound anything at that point, so its two
+ports are free until `start_deferred` runs - free for any other test in the suite to take as the
+*local* end of an outbound connection, which the kernel hands out from the same range. When that
+happens the deferred node fails to bind with `AddrInUse` and the test fails; the memory note on
+this host records that a listener cannot bind over a client-side `TIME_WAIT` whatever it sets,
+so the reservation trick cannot be extended to cover the gap.
+
+**Established by running it**: `minority_cannot_commit_membership_changes` failed once with
+`AddrInUse` on its deferred node under the full fixture suite at `--test-threads 6` while
+[F42](../features/primary-failover.md) ran it, and passes alone and in the next two suite runs.
+The M6 tests start no deferred node.
+
+**Fix direction:** keep a deferred node's reservations until it starts, by handing them to
+`start_deferred` rather than dropping them with the rest; or take the fixture's ports from a
+block under 32768 the way the benchmark harness does since [F41](../features/read-consistency.md),
+which is the fix that also stops a reservation colliding with a `TIME_WAIT`.
+
+### 103. A returning leader is refused its own re-election until its old lease lapses, and hops to it wait
+
+`shoal-core/src/server/shard/groups.rs`, `propose_through`, the `Electing` arm; openraft
+`engine_impl.rs`, `handle_vote_req`
+
+A tablet group's leader that is killed and started again before `election_timeout_max` - twice
+the failover base - has passed asks for its old term back, since its persisted vote names
+itself, and every follower refuses it: their lease of that same leader has not expired. It asks
+again at a higher term, is refused again, and its groups are led only once the lease lapses and
+an election runs, which at the default base of five seconds is ten to fifteen seconds after the
+kill however quickly the process came back. Meanwhile a write from another node that still
+names it as leader hops to it, lands on a member that is `Electing`, and waits for a leader
+within the forwarded deadline rather than being refused, so a client sees whole seconds with no
+answer instead of a burst of `NotLeader` it could retry elsewhere.
+
+**Established by running it**: the failover arm's smoke runs on the development host
+([F42](../features/primary-failover.md#performance)) restart node one 8.6 seconds after killing
+it, and the per second series shows zero completed operations for most of the seconds after the
+restart, with the write tail at the forwarded deadline, until the election; the first run's
+child logs show the restarted node's groups asking for term 1 and every follower answering
+`reject vote-request: leader lease has not yet expire`. The fixture's tests restart their
+killed leaders after the lease has lapsed, which is why none of them sees it.
+
+**Fix direction:** two halves. Answer a hop that lands on an `Electing` member `NotLeader` at
+once instead of waiting the election out, so the returning node's window is refusals rather
+than a stall - the client's retry covers it. And on a restart, have a group whose persisted
+vote names itself start as a plain follower rather than a candidate for its old term, so the
+survivors' election is not delayed by refusing it; whether openraft offers that short of
+clearing the vote is the question to answer first.
 
 ### 97. `stage_join.rs` had not compiled since F36, and needs `/opt/shoal` to run
 

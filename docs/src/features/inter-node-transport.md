@@ -68,7 +68,9 @@ query is validated and deserialized on the origin, where the merge is. `ErrorCod
 what a query gets when the queue to its node is full, `Unavailable` when the link went down
 before the frame was written, and the new `OutcomeUnknown` when it went down after, or when
 `forward_timeout` passed - a sweeper runs every tenth of that, never less than fifty
-milliseconds. Nothing retries at M2; the `attempt` field exists for M6.
+milliseconds. ~~Nothing retries at M2; the `attempt` field exists for M6.~~ Since
+[F42](primary-failover.md) a forward the link never wrote is sent to another holder once,
+under the same attempt; the client retries the rest under its identity.
 
 **Bytes are bounded on every queue.** Each lane to each peer has a bound in bytes
 (`data_queue_bytes` and `bulk_queue_bytes` 64 MiB, `control_queue_bytes` 8 MiB) and sheds
@@ -226,8 +228,10 @@ process keeps both true: a multi-node arm is one `run` command, and the children
   a placement is replaced, never extended; nothing observes a peer's topology version beyond the
   pong that carries it.~~ Since [F39](membership.md) the placement is the committed map, pushed
   whole to every shard, and the `placement` block is gone.
-- **Nothing retries.** `attempt` is always zero. A shed, a lost link and a deadline are answered
-  with a code; M6 owns the identity that makes a retry safe.
+- ~~**Nothing retries.** `attempt` is always zero. A shed, a lost link and a deadline are answered
+  with a code; M6 owns the identity that makes a retry safe.~~ Since [F42](primary-failover.md)
+  a never-written forward is rerouted once by the server and the client retries under
+  `SendOptions::identity`; a shed and a deadline are still answered with a code.
 - **Snapshots are counted, checksummed and discarded.** The bulk lane has a probe for a producer
   and a receiver that installs nothing; `full_snapshot` over the control lane is written and
   unexercised until ~~M4 and~~ M7 - [F40](replication.md)'s tablet groups refuse a snapshot by

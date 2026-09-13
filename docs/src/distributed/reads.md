@@ -22,9 +22,16 @@ replication lane when it does not - waits until its own replica has applied thro
 then reads (`shoal-core/src/server/shard/reads.rs`). A committed write's answer carries a session
 token, a read carrying one is served past it by any replica holding that lineage and refused by
 name by any other, every gather has a slot per share and a deadline, a bundle's level resolves
-per table, and all of it rides the wire under a negotiated capability byte. What the design below
+per table, and all of it rides the wire under a negotiated capability byte. ~~What the design below
 asked for and M5 did not build: a retry within the budget, a coverage list on the response
-frame, `Primary` as a level, and a token or a barrier through a leader change, which M6 gates.
+frame, `Primary` as a level, and a token or a barrier through a leader change, which M6 gates.~~
+Since M6 ([F42](../features/primary-failover.md)) a token and a barrier have been run through a
+leader change (`session_read_waits_for_committed_lower_bound`,
+`read_barrier_survives_leader_change_and_delayed_messages`): a barrier asked of a member that
+names another leader follows it, a lapsed lease refuses a barrier at once as
+`QuorumUnavailable`, and a read share the link never wrote is sent to another holder once
+within the budget. Still not built: a coverage list on the response frame and `Primary` as a
+level.
 Before that: `route_archived` splits queries across owning shards, `Shard::handle_gathered`
 merges responses, restores partition order and applies the final limit, and ~~existing gather
 state lacks expiry (item 33)~~ a gather expires at its bundle's deadline
@@ -47,7 +54,9 @@ Neither uses the control-plane Raft log per read.
 A strong read proves authority after invocation, chooses a safe committed position, waits for
 local application, and reads a consistent tablet view. A leader change during the operation
 must obey the chosen protocol's read-barrier contract - which is openraft's `ReadIndex`, and
-whose behaviour through a leader change is M6's to test.
+whose behaviour through a leader change ~~is M6's to test~~ M6 tested: an old leader's own
+barrier is refused at its lapsed lease, and a barrier through a follower hops to whoever the
+follower names.
 
 The original `Primary` lease-by-recent-contact and “maximum tuple wins” quorum merge are
 superseded. A delayed contact can arrive after replacement; a higher tuple can describe an
@@ -122,7 +131,10 @@ milliseconds remaining and the serving node counts down from arrival; a pending 
 at the sooner of its own timeout and the bundle's. An expired gather is answered `Timeout` once
 and forgets its pendings. A share is judged by the attempt and slot it names: late and duplicate
 ones are counted and dropped. Outstanding read work is not cancelled - a late share arrives and
-is dropped - and no retry reroutes within the budget; the attempt identity for one is minted.
+is dropped - ~~and no retry reroutes within the budget; the attempt identity for one is minted~~
+and since M6 a share the link never wrote is re-sent once, to another holder that is up, under
+the same attempt and slot, within the bundle's budget; a share the link wrote is never re-sent
+by the server ([F42](../features/primary-failover.md)).
 
 ### The per-bundle override
 
@@ -167,7 +179,7 @@ cannot expose apply-before-commit state from the original local write path.
 ## Prerequisites
 
 [C5](replication.md), [C7](failover.md), [C2](transport.md), C13 Q5/Q6.
-M5 builds the read paths; M6 validates them through leadership changes before claiming HA.
+M5 builds the read paths; M6 ~~validates~~ validated them through leadership changes before claiming HA.
 
 ## How it would be measured
 

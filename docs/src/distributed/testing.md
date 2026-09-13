@@ -44,7 +44,13 @@ keeps every share that shard would send for that long and sends each twice on re
 `GATHERS`, the resident gathers and every read counter folded over the node, and
 `SET_TABLE_READ_POLICY <table> <one|quorum|clear>`; the builder sets `read_consistency` and
 `query_deadline`; and the helpers read and write with `SendOptions` and keep a write's session
-token. A standalone node in the same test binary is started in process, since the fixture's
+token. Since [F42](../features/primary-failover.md) a child answers `STALL_SHARD <shard> <ms>`,
+which blocks that shard's executor for that long while the control thread keeps reporting -
+a data shard stalled under a live control plane - and `DROP_REPLIES <n>`, which drops the next
+`n` committed write replies on a shard so a client sees only its own deadline for a write that
+landed; the helpers ask a named node for a key's leader rather than node zero, since the M6
+tests kill node zero, and write and delete under a `SendOptions` identity with a retry budget.
+A standalone node in the same test binary is started in process, since the fixture's
 directories all belong to the cluster. Benchmark
 readiness probes and tracing-based path assertions provide reusable patterns. There is no whole-engine deterministic simulator; this proposal does not require
 building one before testing the new protocol state machine, and `shoal-model` is the pure model

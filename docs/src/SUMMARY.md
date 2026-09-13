@@ -103,6 +103,7 @@
   - [F39. Membership](features/membership.md)
   - [F40. Replication and quorum writes](features/replication.md)
   - [F41. Read consistency levels](features/read-consistency.md)
+  - [F42. Primary failover](features/primary-failover.md)
 
 # Direction
 
@@ -187,6 +188,7 @@
   - [90. Setting `RUST_LOG` could fragment every exported trace](appendix/resolved/divergent-layer-filters.md)
   - [94. An answer owed to a client that had left ended the shard](appendix/resolved/disconnected-client-cleanup.md)
   - [96. `cluster.transport.ping_interval` is parsed, documented and consumed by nothing](appendix/resolved/ping-interval-consumer.md)
+  - [101. A member that fell silent before its fifth report was never called Down](appendix/resolved/short-lived-member-detection.md)
 - [TODOs and Unbuilt Work](appendix/todos.md)
 - [Review, August 2026](appendix/review-2026-08.md)
 - [Glossary](appendix/glossary.md)

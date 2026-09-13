@@ -399,7 +399,7 @@ cluster:
     bulk_queue_bytes: "64MiB"     # the bulk lane's queue to one peer
     inflight_bytes: "64MiB"       # forwarded bytes one accepted connection may hold unanswered
     forward_timeout: "5s"         # after this a forwarded query is answered OutcomeUnknown
-    reconnect_min: "100ms"        # the first backoff after a lost link, with a quarter of jitter
+    reconnect_min: "100ms"        # the first backoff after a lost link, with a quarter of jitter; a link a frame wants never waits longer than this to redial (F42)
     reconnect_max: "5s"           # the longest
     handshake_timeout: "10s"      # to dial and finish the hello
     ping_interval: "1s"           # how often a node pings each member over its control lane
@@ -467,10 +467,18 @@ is versioned control state set by the `SetTableReadPolicy` admin operation - `on
 or nothing to clear it - and never a YAML setting, so every coordinator resolves a table the
 same way. `primary_failover_after` is the base the
 groups' timers derive from: a heartbeat every tenth of it, an election between one and two of
-it, and under 100 ms it is refused. `admins` names the principals an
+it, and under 100 ms it is refused. Since [F42](../features/primary-failover.md) every node's
+groups read it from the map rather than from their own file, and what it makes the failover
+window is worth knowing before tuning it: a follower refuses every vote for twice the base
+after it last heard from its leader, so a dead leader is replaced between two and three times
+the base later - ten to fifteen seconds at the default - and a leader that returns sooner is
+refused its old term until then ([C7](../distributed/failover.md#the-window-and-what-a-client-sees)).
+`admins` names the principals an
 authenticated client connection may change the cluster as; a mutation from anybody else is
 refused `Unauthorized`. `failure_detector` is the leader's: every member reports at
-`interval_ms`, the leader fits the last `window` arrivals once it has `min_samples`, and a
+`interval_ms`, the leader fits the last `window` arrivals ~~once it has `min_samples`~~ with the expected
+interval standing in for any of `min_samples` it has not seen yet
+([Resolved #101](../appendix/resolved/short-lived-member-detection.md)), and a
 member past `phi_threshold` is committed `Down` until it reports again. `seeds` are control
 addresses - `control_port`, not `port` - and a node names them or `bootstrap: true`, never
 both. A joiner's directory says so in its marker until a leader admits it, and is refused by

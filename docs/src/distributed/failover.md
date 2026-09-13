@@ -16,9 +16,23 @@ replay - a group starts at the checkpoint its table's archives are complete to
 and takes the rest from its leader; compaction is what moves the checkpoint, and a segment is
 handed to it only once every group applied past its frames and deleted only once every group
 purged past them, so an uncommitted suffix never reaches an archive and a lagging member's
-history stays until openraft says it is not needed. What is not there: a member behind the
-purge point cannot be fed a snapshot (M7), an isolated leader learns it is not one at its lease
-(M6), and leadership after a failover stays where the election put it (~~M5~~ M6). Before that: local
+history stays until openraft says it is not needed. **Failover is delivered at M6 by
+[F42](../features/primary-failover.md).** A tablet's election is its group's own: node-level
+`Down` is not a prerequisite (`shard_stall_with_live_control_plane_can_fail_over`), a cached
+report cannot choose a history (`stale_heartbeat_reports_cannot_lose_acked_write`), a
+topology commit authorizes nothing (`delayed_topology_cannot_authorize_old_primary`,
+`metadata_quorum_cannot_replace_a_missing_data_quorum`), and a minority never commits
+(`quorum_loss_is_unavailable_without_data_loss`). An isolated old primary learns it is not one
+at its lease and answers `NotLeader` before it appends; a strong read through it is refused
+(`strong_read_refuses_isolated_old_primary`). A retry under the same identity returns the
+original result across an election and across the purge point, from a retry table persisted
+beside the checkpoint. A node holding no copy of a tablet routes by health and a forward the
+link never wrote is sent to another holder once. The window is measured by the failover arm.
+What is not there: a member behind the purge point cannot be fed a snapshot (M7); leadership
+after a failover stays where the election put it and is not moved back to a returning node,
+whose groups are led again only once the lease it held lapses and an election runs
+([item 103](../appendix/known-issues.md#103-a-returning-leader-is-refused-its-own-re-election-until-its-old-lease-lapses-and-hops-to-it-wait)).
+Before that: local
 [recovery](../storage/recovery.md) replays per-shard/table logs and compacts them, which a
 standalone node still does. Archives
 hold current state, not historical versions. Once compaction merged an intent and deleted its
@@ -64,8 +78,15 @@ may remain stale during a partition, but only from an installed committed prefix
 ### The window, and what a client sees
 
 The proposed `primary_failover_after` is a base for the randomized tablet election timeout,
-not an extra sleep after `Down` commits and not a read lease. The exact mapping to the selected
-library is settled in Q1. Timeout tuning affects detection and contention, never safety.
+not an extra sleep after `Down` commits and not a read lease. ~~The exact mapping to the selected
+library is settled in Q1.~~ The mapping, since M4 and read from the map since M6: openraft's
+`election_timeout_min` is the base, `election_timeout_max` twice it, the heartbeat a tenth. What
+that makes the window: a follower refuses every vote for `election_timeout_max` after it last
+heard from its leader - openraft's follower lease - and a randomized timeout between the two
+follows, so a failover completes between two and three times the base: two to three seconds at
+the fixture's one, ten to fifteen at the default five. A killed leader that returns inside that
+lease is refused its old term by the same rule ([item 103](../appendix/known-issues.md#103-a-returning-leader-is-refused-its-own-re-election-until-its-old-lease-lapses-and-hops-to-it-wait)).
+Timeout tuning affects detection and contention, never safety.
 
 Record outage from the client's first failed/uncompleted operation until a sustained run of
 successful operations. Include reconnect, election, log recovery and application time. A target
@@ -76,7 +97,14 @@ throughput before and after losing one third of the hardware.
 Requests definitely refused before admission and requests with unknown outcomes are distinct.
 The client retries the latter using C5's stable identity. Bounded read retries may select another
 eligible replica within the original deadline. `One` availability through every instant of a
-kill is not guaranteed: an in-flight socket request can fail before detection.
+kill is not guaranteed: an in-flight socket request can fail before detection. *As built at
+M6:* a write refused at a lapsed lease, or whose hop the link never wrote, is `NotLeader`; one
+the link wrote and never answered, or that a leader could not commit within its deadline, is
+`OutcomeUnknown`; a forward the link never wrote is sent to another holder once by the server;
+and the client retries under `SendOptions::identity` and `retry` what says to try again, with
+`ShoalResponse::attempts()` saying how many times. The failover arm records what a client
+without the retry sees: the dead node's third of the writes refused within a hundred
+milliseconds, the rest served, until the election.
 
 ### A returning node
 
@@ -179,7 +207,8 @@ persistent metadata beyond the existing storage marker.
 [C13](protocol.md), [C5](replication.md), [C2](transport.md), [C4](tablet-map.md).
 ~~Design checkpoint/retention boundaries before M4~~ The boundaries are designed at M4
 ([Q3](protocol.md#q2-q3-and-q4-at-m4)); implement transfer at M7. C6 strong reads and
-M6 failover share an authority proof and must be validated together.
+M6 failover share an authority proof and ~~must be validated~~ were validated together
+(`strong_read_refuses_isolated_old_primary`, `read_barrier_survives_leader_change_and_delayed_messages`).
 
 ## How it would be measured
 
