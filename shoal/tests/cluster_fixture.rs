@@ -4276,13 +4276,15 @@ async fn installing_tablet_never_serves_partial_state() -> Result<(), FixtureErr
         Ok(_) | Err(shoal::client::Errors::QueryDidNotSucceed { .. }) => {}
         Err(error) => panic!("the ephemeral table was not served while a persistent group installed: {error:?}"),
     }
-    // once the pause is over, every key reads the new value through node two
+    // once the pause is over and every install is cleaned up - the digests agree once the
+    // archives hold the state, and a group is still installing until the checkpoint that
+    // carries it is durable - every key reads the new value through node two
     wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(60))?;
+    wait_not_installing(&mut cluster, 2, Duration::from_secs(30))?;
     for key in [installing_key, 21_000, 21_099] {
         let expected = read_note(&addr0, key).await.map_err(ok)?;
         wait_note(&addr2, key, expected.as_deref(), Duration::from_secs(10)).await?;
     }
-    wait_not_installing(&mut cluster, 2, Duration::from_secs(10))?;
     for id in 0..3 {
         assert_eq!(cluster.node(id).failure(), None, "node {id} died");
     }

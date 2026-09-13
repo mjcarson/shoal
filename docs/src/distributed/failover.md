@@ -28,10 +28,32 @@ at its lease and answers `NotLeader` before it appends; a strong read through it
 original result across an election and across the purge point, from a retry table persisted
 beside the checkpoint. A node holding no copy of a tablet routes by health and a forward the
 link never wrote is sent to another holder once. The window is measured by the failover arm.
-What is not there: a member behind the purge point cannot be fed a snapshot (M7); leadership
+**Recovery of a returning node is delivered at M7 by [F43](../features/node-recovery.md).** A
+member inside its group's retained log is fed from the log; one behind the purge point is fed
+a snapshot per group: one file cut by the table's compactor between two of its jobs, exactly the
+archives' state at the group's checkpoint with the dedup table's remembered results in its
+trailer, streamed in bounded chunks over the bulk lane with the control on the replication lane,
+resumable from the prefix the receiver holds, and installed atomically - a marker written and
+synced before the archives change, the install redone from it at open if the node dies before
+the checkpoint that carries the installed state is durable
+(`snapshot_install_is_atomic_at_every_crash_point`). Absence is total: every partition of a
+covered tablet not in the file is removed. A volatile group's snapshot is the same file
+installed into memory. While a group installs, a read of its tablets is refused and the rest
+of the node serves (`installing_tablet_never_serves_partial_state`); readiness and `GROUPS`
+count the install. The sealed WAL is bounded in bytes (`replication.retained_bytes`): a sweep
+past the budget forces the groups pinning the oldest segments to snapshot and purge, so a slow
+or cut member is fed a snapshot rather than pinning history
+(`retention_and_recovery_memory_are_bounded`). A `Down` member keeps its placement through the
+grace and returns into it (`down_within_grace_moves_no_replicas`); a whole cluster restarts
+with every acknowledged key once everywhere
+(`whole_cluster_restart_preserves_durable_history`). The catch-up is priced by the two
+catch-up arms. ~~What is not there: a member behind the purge point cannot be fed a snapshot
+(M7);~~ What is not there: leadership
 after a failover stays where the election put it and is not moved back to a returning node,
 whose groups are led again only once the lease it held lapses and an election runs
-([item 103](../appendix/known-issues.md#103-a-returning-leader-is-refused-its-own-re-election-until-its-old-lease-lapses-and-hops-to-it-wait)).
+([item 103](../appendix/known-issues.md#103-a-returning-leader-is-refused-its-own-re-election-until-its-old-lease-lapses-and-hops-to-it-wait));
+a snapshot is per group, so a returning node installs every tablet its replica set shares; and
+a partial transfer survives a lane cut but not a receiver restart.
 Before that: local
 [recovery](../storage/recovery.md) replays per-shard/table logs and compacts them, which a
 standalone node still does. Archives
@@ -112,17 +134,21 @@ Recover local storage without advertising readiness for its tablets. Restore ter
 configuration, checkpoint term/index, log history and deduplication state. Reconcile with the
 current group before enabling replication acknowledgements or reads.
 
-| Local condition | Recovery |
-| --- | --- |
-| Matching retained history, behind | Fetch missing entries and commit/application progress |
-| Conflicting uncommitted suffix | Locate common history with the protocol and durably truncate WAL only; never roll authoritative archives backward |
-| Required history no longer retained | Install a complete checkpoint, then its subsequent log tail |
-| Same index, mismatched checksums/state | Quarantine and use verified repair, not a claim that equal stamps imply equal data |
-| Obsolete configuration or removed identity | No autonomous voting/serving; follow C8/C9 replacement and orphan rules |
+| Local condition | Recovery | Delivered |
+| --- | --- | --- |
+| Matching retained history, behind | Fetch missing entries and commit/application progress | M4: openraft's replication from the retained log (`returning_node_catches_up_by_log_or_snapshot`, first half) |
+| Conflicting uncommitted suffix | Locate common history with the protocol and durably truncate WAL only; never roll authoritative archives backward | M4 for a volatile group; a durable group's reversion is [item 99](../appendix/known-issues.md), M8's |
+| Required history no longer retained | Install a complete checkpoint, then its subsequent log tail | M7: a snapshot per group at its checkpoint, the log strictly after it from the leader (`returning_node_catches_up_by_log_or_snapshot`, second half) |
+| Same index, mismatched checksums/state | Quarantine and use verified repair, not a claim that equal stamps imply equal data | M8 |
+| Obsolete configuration or removed identity | No autonomous voting/serving; follow C8/C9 replacement and orphan rules | M9 |
 
 Do not automatically move leadership back to a returning node. A later load-aware leadership
 transfer is separately scheduled. A node can serve its healthy tablets while another tablet
-installs a snapshot; per-tablet eligibility, not a node-wide `Up`, decides that.
+installs a snapshot; per-tablet eligibility, not a node-wide `Up`, decides that. *At M7* the
+eligibility is per group: `MachineState::installing` is set before the first archive write and
+cleared after the cleanup, a read of an installing group's tablets is answered `Unavailable`,
+a write still proposes, and readiness reports the installing count
+(`installing_tablet_never_serves_partial_state`).
 
 ### Snapshots and atomic installation
 
@@ -152,6 +178,18 @@ from the new generation must not survive installation. Reads see a stable pinned
 compaction must not delete files while a snapshot or query still owns them. Bounds apply to
 memory, disk space, transfer duration and concurrent installs. This is also C8's bootstrap path.
 
+*At M7* the six steps are [F43](../features/node-recovery.md#what-it-does): the cut is one
+file the compactor writes between two of its jobs at the group's merged boundary (Q3), pinned by
+the file itself rather than by references to the archives; the manifest is the `Begin` RPC on
+the replication lane; the chunks ride the bulk lane with a resumable stream id and the `End`
+RPC answers `Resume { from }` with the prefix held; the receiver writes into `install/`,
+fdatasyncs, writes and syncs a marker, and only then hands the file to openraft, whose
+`install_full_snapshot` runs the compactor's install job - every covered partition replaced or
+removed, the archive map repointed - and the marker is cleaned up once the checkpoint that
+carries the installed state is durable; the tail is openraft's replication past the boundary;
+and readiness is per group. Recovery at any of the seven crash points sees the old generation,
+the marker and a redo, or the new generation (`snapshot_install_is_atomic_at_every_crash_point`).
+
 The filesystem adapter must distinguish atomic name replacement from persistence after a crash.
 Consult [Linux rename](https://man7.org/linux/man-pages/man2/rename.2.html) for replacement semantics
 and [fsync/fdatasync](https://man7.org/linux/man-pages/man2/fsync.2.html) for completion and directory
@@ -166,6 +204,13 @@ without bound. When incremental catch-up is no longer possible, select a snapsho
 for the space required to retain both generations plus a tail. If incoming mutation rate exceeds
 catch-up throughput, throttle or reserve recovery capacity; never report a permanently growing
 backlog as healthy convergence.
+
+*At M7* the budget is `replication.retained_bytes` over the sealed WAL (Q9): a sweep past it
+forces the groups pinning the oldest segments to snapshot and purge, so the member behind is
+fed a snapshot rather than the WAL growing; the receiver's side is `replication.install_bytes`
+over the partials it holds, past which a `Begin` is refused. Neither throttles the foreground.
+The catch-up arms' record says `none` when a run ends before the lag is held at zero, and
+keeps the series (`retention_and_recovery_memory_are_bounded`, `catchup_capture_records_convergence`).
 
 ### No hinted handoff
 
@@ -206,7 +251,8 @@ persistent metadata beyond the existing storage marker.
 
 [C13](protocol.md), [C5](replication.md), [C2](transport.md), [C4](tablet-map.md).
 ~~Design checkpoint/retention boundaries before M4~~ The boundaries are designed at M4
-([Q3](protocol.md#q2-q3-and-q4-at-m4)); implement transfer at M7. C6 strong reads and
+([Q3](protocol.md#q2-q3-and-q4-at-m4)); ~~implement transfer at M7~~ the transfer is
+delivered at M7 ([Q3 and Q9](protocol.md#q3-and-q9-at-m7)). C6 strong reads and
 M6 failover share an authority proof and ~~must be validated~~ were validated together
 (`strong_read_refuses_isolated_old_primary`, `read_barrier_survives_leader_change_and_delayed_messages`).
 
@@ -214,7 +260,11 @@ M6 failover share an authority proof and ~~must be validated~~ were validated to
 
 [C10](performance.md) measures client-visible outage, recovery debt, before/during/after tails,
 and seconds to catch up by log and checkpoint at specified write rates. Report the failed node's
-role, pending data and surviving hardware with each result.
+role, pending data and surviving hardware with each result. *At M7* the seconds to catch up are
+`macro/cluster/catchup/{log,snapshot}`: the kill arm's shape with the survivors' retention at the
+defaults and shortened past what the node missed, the returning node sampled each second
+against node zero's committed positions, the record split by path
+([F43](../features/node-recovery.md#the-catch-up-arms)).
 
 ## Acceptance tests
 

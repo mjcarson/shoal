@@ -33,7 +33,7 @@ carrying the reasoning and the invariants the fix depends on. Item numbers are s
 the two pages and never reused, so a number appears on exactly one of them — which is why this
 list starts at 15 and skips 17, 25, 26, 31, 33, 34, 38, 39, 44, 45, 48, 51, 56, 57, 58, 61, 67, 68, 74,
 76, 78, 79, 80, 82, 83, 84, 85, 86, 88, 89, 90, 94, 101, 104 and 105, and
-why ~~item 91~~ ~~item 97~~ ~~item 100~~ item 103 is the newest entry here and item 105 the newest number, and why 17, 33, 78, 79, 80, 82,
+why ~~item 91~~ ~~item 97~~ ~~item 100~~ ~~item 103~~ item 107 is the newest entry here and the newest number, and why 17, 33, 78, 79, 80, 82,
 83, 84, 85, 86, 88, 89, 90, 94, 101, 104 and 105 are on the resolved page. **101 never appeared here
 either**: it was found by an M6 test and fixed in the same change
 ([Resolved #101](resolved/short-lived-member-detection.md)), reproduced first. **104 and 105
@@ -64,10 +64,13 @@ in the other direction — it had one row left open, that row was fixed, and the
 [moved](resolved/claude-md-drift.md).
 
 **Baseline as of writing:** `cargo check --workspace --all-targets` passes with warnings;
-`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ **1,382 tests**, four ignored, plus ~~13~~ 14
+`cargo test --workspace` passes — ~~**1,238 tests**~~ ~~**1,289 tests**~~ ~~**1,320 tests**~~ ~~**1,342 tests**~~ ~~**1,361 tests**~~ ~~**1,382 tests**~~ **1,398 tests**, four ignored, plus ~~13~~ 14
 more behind `--features stage-profile` that a default run does not reach ([Test Coverage](test-coverage.md)) -
 with the fixture binary run at `--test-threads 6`, since at the default thirty-two nineteen of
-its fifty-four fail under the load (item 100) and every one of them passes at six.
+its ~~fifty-four~~ sixty-four fail under the load (item 100) and every one of them passes at six;
+two of `persistent_unsorted_table.rs` fail about one run in five of that binary (item 107).
+[F43](../features/node-recovery.md) added 16 and took it to 1,398, resolving items 104 and 105
+before its own work began and filing 106 and 107 on the way.
 [F42](../features/primary-failover.md) added 21 and took it to 1,382, resolving item 101 and
 filing 102 and 103 on the way.
 [F37](../features/node-identity-control-plane.md) took the total to 1,265 and did not update this
@@ -1840,8 +1843,10 @@ is the same code path with a WAL directory removed by hand, which no test does.
 
 **Fix direction:** the follower is the one that is wrong, not the leader. Allow the reversion
 on durable groups too and have the leader log it at `ERROR` and reset that follower's progress,
-so a corrupted member is fed from the leader's log - or, past the purge point, from M7's
-snapshot - while the leader keeps serving; and report the member's `shards_failed` or a new
+so a corrupted member is fed from the leader's log - or, past the purge point, from ~~M7's
+snapshot~~ the snapshot [F43](../features/node-recovery.md) delivered, which is what a
+follower reset behind the purge point would now receive - while the leader keeps serving; and
+report the member's `shards_failed` or a new
 health so an operator sees it. What must not happen is what happens now: a quorum that was
 correct when it was taken losing its leader because a member later lost its disk.
 
@@ -1923,6 +1928,74 @@ than a stall - the client's retry covers it. And on a restart, have a group whos
 vote names itself start as a plain follower rather than a candidate for its old term, so the
 survivors' election is not delayed by refusing it; whether openraft offers that short of
 clearing the vote is the question to answer first.
+
+### 106. A member isolated on every lane long enough to inflate its term trips an openraft debug assertion when healed
+
+`shoal-core/src/server/control/`, the control group's `RaftCore`; openraft
+`engine/engine_impl.rs:1039`, `following_handler`
+
+A cluster node cut off on every lane - control and data, both directions - keeps electing: the
+control group's member on it times out, votes for itself at a higher term, is answered by
+nobody, and does it again, so after a minute of isolation its term is far above the survivors'.
+When the lanes are healed, the survivors' leader reaches it and the member's engine takes the
+following path with a vote that is its own uncommitted one, which openraft asserts is
+committed: `Expect the Leader vote to be committed: <T62-N8256a052-…/0:->` at
+`following_handler`, a `debug_assert!`, so the control thread panics and the child dies. A
+release build compiles the assertion out and what the engine does past it has not been
+looked at.
+
+**Established by running it**: the first shape of `retention_and_recovery_memory_are_bounded`
+isolated node two with `isolate` for about sixty seconds under wide writes and healed it; the
+child's panic is the line above, in the fixture's debug build, and the test failed on the
+`NotReady` its readiness wait got afterwards. Cutting only the data lanes, which is what the
+retention budget needs, leaves the control member a follower and the test passes; that is the
+shape the test kept ([F43](../features/node-recovery.md#limitations)). No M6 test isolates a
+node for longer than its control member's first few elections.
+
+A second assertion of the same family was seen once, in a child of the fixture suite run
+under a load that failed seven of its tests on timing: `leader.vote(<T1-N60bf…/0:Q>) >=
+state.vote(<T2-N60bf…/0:->)` at `engine_impl.rs:1000`, `try_leader_handler` - a node still
+holding a leader handle at term one after voting for itself at term two. Which child and which
+group is not known; the suite passed on the next run.
+
+**Fix direction:** establish first whether the assertion is openraft's bug or a state this
+node's runtime lets it reach - a `Vote` request the isolated member sent itself that the
+healed lane delivers late is the candidate. If it is the library's, pin the fix or work around
+it by having a member that has lost its quorum for longer than a bound stop electing, which
+is also what keeps its term from inflating; the phi-accrual detector already knows the member
+is `Down` on the leader's side. Either way a fixture test that isolates a node for a minute
+on every lane and heals it belongs beside the M6 partition tests.
+
+### 107. A get after a failed partition load can be answered by the load that failed
+
+`shoal/tests/persistent_unsorted_table.rs`, `a_get_whose_partition_cannot_be_read_does_not_hang`
+and `a_get_whose_archive_is_missing_does_not_end_its_shard`; `shoal-core/src/server/tables/persistent/unsorted.rs`,
+`load_partition` and `fail_partition`
+
+Both tests make a partition's archive unreadable - permissions off, or the file gone - get the
+row, expect `StorageRead` or `ArchiveMissing`, put the archive back and get the row again,
+which must read from disk. About one run in five of the binary at `--test-threads 6` the
+second get fails with the first get's error: `Server(GlommioIO { source: Os { code: 13, kind:
+PermissionDenied }, op: "Opening", path: Some(".../TestRecord/archives/<id>") })` or the
+`NotFound` twin, after the archive was restored. The shape says a second load of the same
+partition was requested before the first one's failure was delivered, ran against the
+unreadable file, and its failure was what answered the get issued after the restore - a
+failed load answering a query that joined it later, rather than the query asking for a fresh
+one.
+
+**Established by running it**, on 2026-09-13, on both the [F43](../features/node-recovery.md)
+tree and the [F42](../features/primary-failover.md) tree (`f5f9c76`) in a worktree: one
+failure in four runs on the first and one in six on the second, so it is not M7's; every run
+of either test alone passes. Not reproduced in isolation, and which of the two loads answered
+is a reading of the error, not a trace.
+
+**Fix direction:** a query that arrives for a partition whose load has failed should not be
+joined to a load that was requested before the failure; either the failed load's waiters are
+released and the pending request cleared before the failure is answered, or a load requested
+after a failure is keyed by a generation the failure bumped, the way F43's install marks a
+parked load `stale` so it is asked for again. The test that would catch it deterministically
+issues the second get inside the window: hold the first load's completion with a hook, issue
+the second get, restore the archive, release.
 
 ### 97. `stage_join.rs` had not compiled since F36, and needs `/opt/shoal` to run
 

@@ -56,8 +56,16 @@ marks, the client's first failure and its first sustained success, the outage be
 three windows each with its own distribution, and a per second series of operations, errors
 and percentiles - which is the time series this page asks for below, mirrored into the
 explorer whole; the timed driver behind it counts a failed operation rather than ending the
-run. The open-loop schedule is not built; the arms are closed loops at one
-depth.
+run. Since [F43](../features/node-recovery.md) two catch-up arms run:
+`macro/cluster/catchup/{log,snapshot}`, the kill arm's shape with the survivors' retention at
+the defaults and shortened past what the returning node missed, the returning node sampled
+each second once it is placed again with its lag judged against node zero's committed index
+per group. Their record carries `cluster.catchup` beside `cluster.fault` - how the node caught
+up, the restart and convergence marks and the seconds between them, the bytes and entries the
+snapshots moved and the entries the log fed, and a per second series of its lag - and says
+`none` with the series kept when a run ends before the lag is held at zero, which is what both
+arms recorded at smoke scale on the development host, where the outage outlasts the absence.
+The open-loop schedule is not built; the arms are closed loops at one depth.
 
 ## The design
 
@@ -146,7 +154,7 @@ expanded only into feasible combinations, not a Cartesian product that silently 
 | `macro/cluster/fanout/{get,filter,limit,empty}` | Remote gathering, decoding, coverage and ordering. All four since [F41](../features/read-consistency.md), on the `nodes/3` placement at a factor of one |
 | `macro/cluster/writes/{insert,update,delete,conditional,retry}` | Result derivation, no-ops, deduplication and hot-key behavior |
 | `macro/cluster/failover` | Outage and recovery under a specified fault schedule. `kill` since [F42](../features/primary-failover.md), on the `replication/` placement at a factor of three; a pause and a partition are the fixture's |
-| `macro/cluster/catchup/{log,snapshot}` | Time/bytes to catch up at several foreground mutation rates |
+| `macro/cluster/catchup/{log,snapshot}` | Time/bytes to catch up ~~at several foreground mutation rates~~ at the reference mixture. Both since [F43](../features/node-recovery.md), the `failover/kill` arm with the retention at the defaults and shortened past the absence; the mutation rate sweep is filed with the open-loop schedule |
 | `macro/cluster/rebalance/{add,decommission,remove,capacity_blocked}` | Transition progress and supported load envelope |
 | `macro/cluster/background/{repair,backup}` | Foreground interference, integrity work and restore preparation |
 
@@ -248,6 +256,7 @@ assign the gates. Generated cluster pages retain the book's scope/comparability 
 | `capacity_capture_records_lag_and_offered_load` | Capacity records include scheduled load, completion/error/tail and every replica's debt | M4 |
 | `read_capture_records_barrier_and_application_wait` | A read arm's record carries the level, the session flag, the fanout and every node's barrier and application waits, summed and per node; an older record still loads | M5 |
 | `fault_capture_preserves_outage_time_series` | Failure/recovery window remains visible with separate before/during/after distributions | M6 |
+| `catchup_capture_records_convergence` | A returning node's record carries its restart and convergence marks, the split by log and by snapshot and the lag series; a run that ends unconverged says so and keeps the series | M7 |
 | `physical_cluster_records_each_node_environment` | Unequal real hardware and primary placement are retained in comparability metadata | M10 |
 
 ## Related

@@ -10,7 +10,9 @@ the medium-priority task queue (`.../fs.rs:130-133`).
 ```rust
 pub enum CompactionJob {
     IntentLog { path: PathBuf, generation: u64 },
-    Segment { path: PathBuf, generation: u64, frames: Vec<(u64, u32)> },
+    Segment { path: PathBuf, generation: u64, frames: Vec<(u64, u32)>, positions: Vec<(GroupId, WalLogId)> },
+    Snapshot { group: GroupId, schema_id: u64, tablets: Vec<u16>, at_least: Option<WalLogId>, membership, retries, dir: PathBuf },
+    Install { group: GroupId, tablets: Vec<u16>, path: PathBuf },
     Archives,
     Shutdown,
 }
@@ -25,8 +27,23 @@ one sealed WAL segment and the offsets of this table's command frames in it, in 
 group, once every group with frames in the segment has applied past them - so nothing
 uncommitted is ever merged - and the compactor reads those frames, applies them exactly as it
 applies intents, and reports `SegmentCompacted` so the groups' checkpoints can move and the
-segment can go once every group has purged past it. `compact_if_needed` never fires on a
-cluster node; the sweep that resolves segments runs on the loop's tick.
+segment can go once every group has purged past it. Since [F43](../features/node-recovery.md)
+the segment job also carries `positions`, the highest log id it holds per group, which the
+compactor keeps as its merged boundary, and only frames above each group's checkpoint are
+handed to it after a restart ([item 104](../appendix/resolved/segments-recompacted-after-restart.md)).
+`Snapshot` and `Install` are the cluster node's too ([F43](../features/node-recovery.md)):
+`Snapshot` cuts one group's tablets out of the archives as they stand between two jobs - the
+compactor is the only writer and runs one job at a time, so the map between two segment jobs
+is exactly the state after every frame merged so far - into one file under `dir` at the
+merged boundary or the loop's checkpoint, whichever is higher, with the group's remembered
+requests filtered to the boundary in its trailer, and reports `SnapshotBuilt`; `Install`
+writes every record of a verified file into the active archive as it is, removes every
+partition of the covered tablets the map names and the file does not, syncs the data and the
+map intent log, repoints the map and reports `SnapshotInstalled` with the trailer. Both are
+redoable: a record written twice is a new archive copy and a repoint, and removing an absent
+key is nothing, which is what lets the install be started over from its marker after a crash.
+`compact_if_needed` never fires on a cluster node; the sweep that resolves segments runs on
+the loop's tick.
 
 ## Triggering
 

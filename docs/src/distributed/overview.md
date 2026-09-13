@@ -40,11 +40,18 @@ token and a fan-out — as [F41](../features/read-consistency.md). And
 point, a lapsed lease answered `NotLeader` before anything is appended, a barrier that follows
 the leader, routing by health with a never-written share sent to another holder once, a client
 identity and an opt-in retry, and one arm that records the outage as a time series — as
-[F42](../features/primary-failover.md). What is not there: ~~strong
+[F42](../features/primary-failover.md). And
+[M7](milestones.md#m7-recover-a-node-brought-back-online) — recovery: a member behind the
+purge point fed a snapshot per group, one file cut where the archives stand still, streamed in
+resumable chunks over the bulk lane and installed atomically under a marker with the install
+redone at open, the sealed WAL bounded in bytes with a forced purge behind the groups pinning
+it, an installing group's tablets refusing reads while the rest of the node serves, and two
+arms that price the catch-up by log and by snapshot — as
+[F43](../features/node-recovery.md). What is not there: ~~strong
 reads (M5),~~ ~~failover that
-moves leadership and the retry table's durable mark (M6),~~ leadership moved toward a reader or
-back to a returning node, a member behind the purge point
-catching up (M7), and everything from rebalancing on. They extend the unbuilt
+moves leadership and the retry table's durable mark (M6),~~ ~~a member behind the purge point
+catching up (M7),~~ leadership moved toward a reader or
+back to a returning node, and everything from rebalancing on. They extend the unbuilt
 [Distribution](../appendix/todos.md#distribution) and
 [Rebalancing](../appendix/todos.md#rebalancing) entries.
 
@@ -145,7 +152,7 @@ groups can operate if their data quorum survives, while topology changes stop.
 | C2 onward → C9 | Compatibility and admin authorization are designed early, exercised throughout |
 
 M5 and M6 together ~~establish~~ established strong-read behavior during failover. C7's snapshot/checkpoint
-contract is designed before M4, although transfer lands in M7. M9 separates migration mechanics,
+contract is designed before M4, although transfer ~~lands~~ landed in M7. M9 separates migration mechanics,
 placement policy and changing shard counts. See the detailed exit gates on the milestones page.
 
 ## How a C page is written

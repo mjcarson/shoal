@@ -21,7 +21,14 @@ tablet group a node hosts with its table, members, leader, applied, committed an
 indexes, pending bytes and whether it is volatile and up, folded per node into groups hosted
 and led, the widest committed-to-applied gap, pending and volatile bytes and the writes
 answered unknown or rejected - which readiness carries too, and which is the replication debt
-this page asks an operator to see; `shoalctl` does not draw it yet. It has no distributed
+this page asks an operator to see; `shoalctl` does not draw it yet. Since
+[F43](../features/node-recovery.md) the report carries the recovery row of the metrics table
+below - per group whether it is installing a snapshot, per shard the segments being compacted
+and the snapshot counters (built, sent, installed, bytes each way, chunks, duplicates, drops,
+resumes, aborts, redos, forced purges and entries installed), per node the installing count
+- and readiness counts a node's installing groups, so a node with a tablet installing is not
+ready for that tablet and is for the rest; the sealed WAL's budget is `replication.retained_bytes`.
+It has no distributed
 repair, migration, backup/restore ~~or cluster-admin API~~ and the rest of the admin families are
 their milestones'. Existing disk archives do not have the
 end-to-end integrity metadata required by this design.
@@ -70,7 +77,7 @@ resumable by id. Record state changes so automated and manual removal are equall
 | Replication | Durable/commit/apply lag in entries, bytes and age; missing quorum and under-replicated tablets |
 | Writes | End-to-end and quorum/application wait histograms; success, rejection and unknown outcomes |
 | Reads | Barrier/application wait, stale/session routing, retry/timeout and incomplete-share errors |
-| Recovery | Retained history bytes/oldest position, snapshot generation/progress, blocked recovery and time to catch up |
+| Recovery | Retained history bytes/oldest position, snapshot generation/progress, blocked recovery and time to catch up. *At M7:* the snapshot counters and the installing flag on `Replication`; the time to catch up is the catch-up arms' record |
 | Resources | Pending bytes, lane queue bytes, memory caps, free disk reserve, transfer throughput and I/O failures |
 | Integrity | Checksum failures, quarantined copies, repair source/provenance and unresolved divergence |
 | Failover | Detection/election/recovery/reconnect intervals and client-visible outage |

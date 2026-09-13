@@ -22,7 +22,13 @@ complete to (`wal/Shard-N/checkpoint.json`), re-applies the shared WAL from ther
 it had committed - on a task of its own, never on the shard loop, since the apply is the
 loop's - and takes everything after that from its leader. A torn tail of the WAL is cut at
 open; an uncommitted suffix is truncated by the leader rather than replayed into anything;
-and a member behind its leader's purge point waits for M7. The rest of this page - the
+~~and a member behind its leader's purge point waits for M7~~ and a member behind its leader's
+purge point is fed a snapshot per group ([F43](../features/node-recovery.md)): one file cut by
+the compactor at the leader's checkpoint, installed under a marker in `wal/Shard-N/install/`
+that a restart between the marker and the next durable checkpoint finds and redoes, so a crash
+inside an install leaves the old archives or the new and never a mix. A restart also hands the
+compactor only the frames above each group's checkpoint
+([item 104](../appendix/resolved/segments-recompacted-after-restart.md)). The rest of this page - the
 three-phase replay, what is discarded, forced compaction - describes the standalone node.
 
 ## Replay order

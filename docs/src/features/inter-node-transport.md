@@ -232,10 +232,14 @@ process keeps both true: a multi-node arm is one `run` command, and the children
   with a code; M6 owns the identity that makes a retry safe.~~ Since [F42](primary-failover.md)
   a never-written forward is rerouted once by the server and the client retries under
   `SendOptions::identity`; a shed and a deadline are still answered with a code.
-- **Snapshots are counted, checksummed and discarded.** The bulk lane has a probe for a producer
+- ~~**Snapshots are counted, checksummed and discarded.** The bulk lane has a probe for a producer
   and a receiver that installs nothing; `full_snapshot` over the control lane is written and
   unexercised until ~~M4 and~~ M7 - [F40](replication.md)'s tablet groups refuse a snapshot by
-  name over their own lane, the fourth one on the data port.
+  name over their own lane, the fourth one on the data port.~~ Since [F43](node-recovery.md)
+  the bulk lane carries a tablet group's snapshot - `SnapshotBegin`, chunks and `SnapshotEnd`
+  routed to the target shard - with its control on the replication lane; the probe stays for
+  the lane's own test, and `full_snapshot` over the control lane is still unexercised, since
+  the control group's members never fall behind its snapshot.
 - **`ShoalPool::transport()` reaches shard zero.** The pool asks one shard for its links; the
   relay that would gather every shard's view is not built. A four-shard node's artifact shows
   shard zero's links, which for the hop arms is the whole story on one-shard node zero and an

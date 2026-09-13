@@ -114,7 +114,8 @@ group, the target shard, the kind (`AppendEntries`, `Vote`, `Propose`, `Snapshot
 deadline, and a postcard body. A shard holds one link per peer node with its own correlation
 table, bounded by `transport.replication_queue_bytes`; a refused append is one openraft
 retries. A request for a group the receiving shard does not host, or for a kind this build
-does not serve - `Snapshot` is M7's - is answered by name.
+does not serve ~~- `Snapshot` is M7's -~~ is answered by name; `Snapshot` is served since
+[F43](node-recovery.md).
 
 **Configuration.** A `replication:` block under `cluster:`, node-local, with every default
 written on the [configuration page](../getting-started/configuration.md#cluster):
@@ -248,9 +249,10 @@ node agreed about decides how fast a leader is missed. The fixture sets it to a 
 
 ## Limitations
 
-- **A member behind the purge point cannot catch up.** `install_snapshot` and the `Snapshot`
+- ~~**A member behind the purge point cannot catch up.** `install_snapshot` and the `Snapshot`
   kind on the lane are refused naming M7. Within `retained_entries` a lagging member is fed
-  from the log; past it, it is stuck until M7 transfers the archives.
+  from the log; past it, it is stuck until M7 transfers the archives.~~ Since
+  [F43](node-recovery.md) a member past the purge point is fed a snapshot per group.
 - ~~**A node holding no replica of a tablet routes its writes to the placement primary's node.**
   When that node is down, those writes fail `Unavailable` until the map moves - which nothing
   does before M6's failover; a node holding a replica is unaffected.~~ Since

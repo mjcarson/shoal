@@ -189,6 +189,8 @@ so they get worse by existing longer rather than under load.
 | **B7** | [**O48**](#o48-resolving-a-segment-scans-every-groups-whole-index) — resolving a segment scans every group's whole index | Argued — `groups × retained_entries` comparisons per handoff, off every query path | S | — | Contained | no |
 | **B8** | [**O49**](#o49-one-barrier-per-group-per-bundle-rather-than-per-read) — one barrier per group per bundle rather than per read | Indicated — 590 µs a barrier at smoke scale, paid once per `Quorum` read whatever the bundle | M | `macro/cluster/reads/barrier` at a depth above one query a bundle, which no arm sends yet | Contained | no |
 | **B9** | [**O50**](#o50-a-read-plan-is-built-and-cloned-per-share), [**O51**](#o51-every-committed-write-answers-with-a-forty-eight-byte-token) — a plan per share, a token per write | Argued — a clone of an `Rc` and a `Copy` per share; forty-eight bytes and one more `IoSlice` per committed write down a capable connection | S | `macro/cluster/replication/durable` for O51 | Contained | no |
+| **B10** | [**O52**](#o52-a-snapshot-copies-every-record-of-the-archives-into-one-file) — a snapshot copies the archives rather than pinning them | Argued — every byte of a group's tablets read, written, synced and read again per cut, on the table's one compactor, before a byte reaches the lane | L | `macro/cluster/catchup/snapshot` on the benchmark host | Contained on the wire, not on the compactor | no |
+| **B11** | [**O53**](#o53-the-assembler-keeps-a-map-of-received-chunks-and-forgets-them-on-a-restart) — the assembler keeps a map of received chunks and forgets them on a restart | Argued — a `BTreeMap` entry per chunk out of order, and a stream started over after the receiver restarts | S | `macro/cluster/catchup/snapshot` with a receiver restart, which no arm does | Contained | no |
 
 **Tier C — blocked on a design pass, not on effort.**
 
@@ -2650,3 +2652,38 @@ few hundred, and one more slice in a vectored write that was already two. Filed 
 gated because the alternative - a client that decides per send whether it will want the token of
 a write it has not yet seen the answer to - is a worse API than the bytes are a cost, until a
 capture says otherwise.
+
+### O52. A snapshot copies every record of the archives into one file
+
+| | |
+| --- | --- |
+| **Rank** | **B10** — argued, contained on the wire and not on the compactor |
+| **Impact** | Argued — `cut_snapshot_file` reads every partition of every tablet the group covers, writes each into the snapshot file, fdatasyncs it and hands the path to the lane, which reads it again; a group's snapshot costs the table's compactor twice the archives' bytes in I/O before a byte moves, and the sender holds a second copy of the rows on disk until the transfer's retirement |
+| **Difficulty** | L — pinning means the compactor may not delete or rewrite a partition file under a snapshot, so the archive map needs a reference per generation and the lane a reader that walks the pinned set in a stable order; the manifest already carries the boundary and the checksum a pinned set would have to be computed over lazily |
+| **Blocks** | nothing |
+| **Tradeoff** | Contained on the wire — the receiver's format is the same either way; not contained on the sender, where a pinned generation is what O9's rotation walk and the compactor's merges would have to respect |
+| **Benchmark** | `macro/cluster/catchup/snapshot` on the benchmark host, whose `snapshot_bytes` and `seconds_to_converge` are the cut's cost plus the transfer's; the fixture's `snapshot_has_one_stable_boundary_under_writes` is what keeps a pinned cut honest |
+
+Filed by [F43](../features/node-recovery.md). The copy was chosen because it makes the cut's
+boundary a property of one file rather than of a set of files and a map, which is what the
+crash matrix and the checksum are computed over, and because the table's compactor is the one
+writer of the archives, so cutting there needs no lock. The cost is paid once per snapshot per
+group, off the foreground, and a snapshot is taken only when a member is behind the purge
+point or the retention budget forces one. Filed rather than gated because a cut that is one
+file was the smaller thing to get right first.
+
+### O53. The assembler keeps a map of received chunks and forgets them on a restart
+
+| | |
+| --- | --- |
+| **Rank** | **B11** — argued, contained |
+| **Impact** | Argued — `Assembler` keeps a `BTreeMap` of the chunks received past the prefix, one entry per out of order chunk, and its state lives in memory; a receiver that restarts mid-stream answers the next `End` with `Resume { from: 0 }` and the sender starts over, whatever was on disk |
+| **Difficulty** | S — a bitmap over `total / chunk` bits replaces the map, and the prefix's extent written beside the partial after each fdatasync is what a restart would resume from; the marker and the redo at open already know the directory |
+| **Blocks** | nothing |
+| **Tradeoff** | Contained — the sender's side is unchanged, since `Resume { from }` is already the protocol |
+| **Benchmark** | `macro/cluster/catchup/snapshot` with a receiver restarted mid-stream, which no arm does; the fixture's `snapshot_duplicates_and_resume_are_safe` covers the resume within a process |
+
+Filed by [F43](../features/node-recovery.md). The map is the simpler structure and a lane
+delivers in order, so it holds nothing in the common case; the restart is the real gap, and
+it was left because a restart mid-install is the crash matrix's problem and a restart
+mid-stream is only a slower catch-up.

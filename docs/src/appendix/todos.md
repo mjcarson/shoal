@@ -266,7 +266,43 @@ a session token and a fan-out. M6 is delivered as [F42](../features/primary-fail
 retry table survives the purge point, a lapsed lease is `NotLeader` before anything is
 appended, a barrier follows the leader, a non-holder routes by health and a never-written share
 is sent to another holder once, a client pins its identity and retries under a budget, and one
-arm records a kill and a restart as a time series.
+arm records a kill and a restart as a time series. M7 is delivered as
+[F43](../features/node-recovery.md): a member behind the purge point is fed a snapshot per
+group - a file the compactor cuts at the checkpoint, streamed in resumable chunks over the bulk
+lane, installed atomically under a marker with the install redone at open - the sealed WAL is
+bounded in bytes with a forced purge behind the groups pinning it, an installing group's
+tablets refuse reads while the rest of the node serves, and two arms price the catch-up by log
+and by snapshot.
+
+**What F43 left undone, deliberately.** Recorded here so the next milestone starts from the
+list rather than from the diff:
+
+- **A snapshot per tablet.** A snapshot is per group, and a group is every tablet a replica
+  set shares, so a returning node installs the whole table on the placements where every
+  tablet is on every node. A move or a split (M9a) is what would need a narrower cut, and the
+  file's records are keyed by partition hash with the tablets in the manifest, so a per-tablet
+  filter is a reader change rather than a format change.
+- **Pinning the archives instead of copying them.** The cut writes every record into one file;
+  the archives could be pinned and streamed in place
+  ([O52](optimizations.md#o52-a-snapshot-copies-every-record-of-the-archives-into-one-file)).
+- **A partial that survives a receiver restart.** The assembler's state is in memory, so a
+  receiver that restarts mid-stream starts the stream over; writing the received prefix's
+  extent beside the partial would let it resume
+  ([O53](optimizations.md#o53-the-assembler-keeps-a-map-of-received-chunks-and-forgets-them-on-a-restart)).
+- **A time budget for retention.** `retained_bytes` is bytes of sealed WAL; a budget in
+  seconds is the other half of what Q9 asked for and nothing reads a segment's age.
+- **Telling a stream that cannot keep up to stop.** A member fed snapshots faster than it can
+  install them is fed another; nothing counts the repeats per member or refuses past a count.
+- **A returning node's own retry table under test.** The identity test goes through the
+  leader; a test that makes the returning node lead its group after the install would exercise
+  the reseeded table itself.
+- **The catch-up arms at full scale.** Smoke scale on the development host showed the shape
+  and no catch-up, since the outage outlasts the absence there; the capture is the benchmark
+  host's, and a smoke schedule long enough for the survivors to serve writes while the node is
+  away would be a third arm rather than a change to these two.
+- **Item 106.** A member isolated on every lane long enough to inflate its term trips an
+  openraft debug assertion in the control plane when healed
+  ([item 106](known-issues.md#106-a-member-isolated-on-every-lane-long-enough-to-inflate-its-term-trips-an-openraft-debug-assertion-when-healed)).
 
 **What F42 left undone, deliberately.** Recorded here so the next milestone starts from the
 list rather than from the diff:
@@ -340,9 +376,11 @@ list rather than from the diff:
 **What F40 left undone, deliberately.** Recorded here so the next milestone starts from the
 list rather than from the diff:
 
-- **Installing a snapshot.** A member behind its leader's purge point is refused by name over
+- ~~**Installing a snapshot.** A member behind its leader's purge point is refused by name over
   the replication lane and in the state machine; M7 transfers the archives, and until then
-  `retained_entries` is the whole catch-up budget.
+  `retained_entries` is the whole catch-up budget.~~ Built by [F43](../features/node-recovery.md):
+  a snapshot per group, streamed over the bulk lane and installed under a marker, with
+  `retained_bytes` bounding the sealed WAL.
 - ~~**A durable low-water mark for the retry table.** Dedup is a 4096-entry LRU per group, in
   memory, rebuilt from the log on restart; an identity older than that is applied as new. M6.~~
   Built by [F42](../features/primary-failover.md): `retries.bin` beside the checkpoint, the

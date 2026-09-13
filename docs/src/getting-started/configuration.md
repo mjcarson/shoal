@@ -412,6 +412,10 @@ cluster:
     retained_entries: 10000       # entries kept behind the snapshot for a slow member to catch up from
     log_cache_bytes: "16MiB"      # entries the WAL keeps in memory past its durable tail
     volatile_log_bytes: "256MiB"  # every ephemeral table's in-memory log together; a write past it is shed
+    snapshot_chunk_bytes: "1MiB"  # one chunk of a snapshot stream on the bulk lane (F43); under max_frame_bytes and bulk_queue_bytes
+    snapshot_timeout: "5m"        # after this a snapshot transfer is given up and tried again; no shorter than write_timeout
+    install_bytes: "2GiB"         # partial snapshots a shard holds on disk before it refuses a new stream
+    retained_bytes: "1GiB"        # sealed WAL a shard keeps for slow members before it forces a snapshot and a purge; at least two segments
 ```
 
 Two settings have no default and are absent above: `advertise`, the address peers reach this
