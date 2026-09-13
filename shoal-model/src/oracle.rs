@@ -454,7 +454,10 @@ mod tests {
     }
 
     fn read() -> ClientOp {
-        ClientOp::Read { key: Key(1) }
+        ClientOp::Read {
+            key: Key(1),
+            level: crate::event::ReadLevel::One,
+        }
     }
 
     fn saw(v: Option<u32>) -> Outcome {
@@ -469,7 +472,15 @@ mod tests {
             id: OpId(2),
             retry: 0,
         };
-        ledger.invoke(other, TabletId::new(1, 0), ClientOp::Read { key: Key(2) }, 3);
+        ledger.invoke(
+            other,
+            TabletId::new(1, 0),
+            ClientOp::Read {
+                key: Key(2),
+                level: crate::event::ReadLevel::One,
+            },
+            3,
+        );
         ledger.complete(other, 4, saw(Some(9)));
         let error = check(&ledger).unwrap_err();
         assert!(matches!(error, OracleError::NotLinearizable { key: Key(2), .. }), "{error:?}");

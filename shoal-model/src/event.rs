@@ -153,6 +153,12 @@ pub enum Body {
         entries: Vec<Entry>,
         /// The leader's commit index
         leader_commit: LogIndex,
+        /// Which heartbeat round this belongs to, so a strong read counts only rounds it started
+        ///
+        /// Zero before any read barrier was asked for, and unwritten in a schedule then
+        /// ([C6](../../docs/src/distributed/reads.md)).
+        #[serde(default, skip_serializing_if = "is_zero")]
+        probe: u64,
     },
     /// A follower answers a replication
     AppendResponse {
@@ -164,6 +170,9 @@ pub enum Body {
         durable: bool,
         /// Where the leader should retry from after a mismatch
         conflict_hint: LogIndex,
+        /// The round of the append this answers, echoed
+        #[serde(default, skip_serializing_if = "is_zero")]
+        probe: u64,
     },
     /// A node tells the observer how far its log reaches
     ProgressReport {
@@ -189,16 +198,43 @@ pub enum Body {
     },
 }
 
+/// The level a read is served at
+///
+/// `One` is what every read was before M5; `Strong` is the read barrier
+/// ([C6](../../docs/src/distributed/reads.md)): a leader records its commit index, confirms
+/// its term with a heartbeat round a majority answers, waits until it has applied through that
+/// index, and only then reads. A saved schedule from before the level existed names none and
+/// reads as `One`, which keeps it byte-canonical.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadLevel {
+    /// Whatever the node asked has applied
+    #[default]
+    One,
+    /// Everything acknowledged before the read began
+    Strong,
+}
+
+impl ReadLevel {
+    /// Whether this is the default level, which a schedule leaves unwritten
+    pub fn is_one(&self) -> bool {
+        *self == ReadLevel::One
+    }
+}
+
 /// What a client asks for
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ClientOp {
     /// A mutation, ordered by the tablet's leader
     Mutate(MutationOp),
-    /// A `One` read of a key from whichever node it was sent to
+    /// A read of a key from whichever node it was sent to, at a level
     Read {
         /// The key
         key: Key,
+        /// The level, `One` unless the schedule says otherwise
+        #[serde(default, skip_serializing_if = "ReadLevel::is_one")]
+        level: ReadLevel,
     },
 }
 
@@ -207,9 +243,18 @@ impl ClientOp {
     pub fn key(&self) -> Key {
         match self {
             ClientOp::Mutate(op) => op.key(),
-            ClientOp::Read { key } => *key,
+            ClientOp::Read { key, .. } => *key,
         }
     }
+}
+
+/// Whether a probe number is the zero a schedule leaves unwritten
+///
+/// # Arguments
+///
+/// * `probe` - The number
+fn is_zero(probe: &u64) -> bool {
+    *probe == 0
 }
 
 /// A mutation of one key
@@ -389,6 +434,33 @@ pub enum Effect {
         tablet: TabletId,
         /// The log index the mutation holds
         index: LogIndex,
+    },
+    /// A node took on a strong read, before it did anything for it
+    ///
+    /// The checker notes what had been acknowledged on the key at this instant; the read that
+    /// completes later has to observe at least that ([C6](../../docs/src/distributed/reads.md)).
+    StrongReadBegan {
+        /// The attempt
+        attempt: Attempt,
+        /// Which node
+        node: NodeId,
+        /// Which tablet
+        tablet: TabletId,
+        /// The key
+        key: Key,
+    },
+    /// A node answered a strong read
+    StrongRead {
+        /// The attempt
+        attempt: Attempt,
+        /// Which node
+        node: NodeId,
+        /// Which tablet
+        tablet: TabletId,
+        /// The key
+        key: Key,
+        /// The applied index it answered from
+        observed: LogIndex,
     },
     /// A node answered a read
     Read {

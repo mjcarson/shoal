@@ -14,10 +14,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::event::{Actor, Body, ClientOp, Effect, Event, Input, Message, Output};
-use crate::ids::{Attempt, LogIndex, NodeId, TabletId, Term};
+use crate::event::{Actor, Body, ClientOp, Effect, Event, Input, Message, Output, ReadLevel};
+use crate::ids::{Attempt, Key, LogIndex, NodeId, TabletId, Term};
 use crate::oracle::Outcome;
-use crate::policy::{AckTiming, AsyncReceipt, DuplicateAck, Election, Policy, QuorumRule, Visibility};
+use crate::policy::{
+    AckTiming, AsyncReceipt, BarrierRule, DuplicateAck, Election, Policy, QuorumRule, Visibility,
+};
 use crate::storage::{AppliedState, Checkpoint, Command, Entry, StableStorage, Volatile};
 
 /// The committed voter configuration, which is what a quorum is counted over
@@ -73,6 +75,22 @@ pub enum Role {
     Leader(LeaderState),
 }
 
+/// A strong read a leader has taken on and not yet answered (C6)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingRead {
+    /// The attempt
+    pub attempt: Attempt,
+    /// The key
+    pub key: Key,
+    /// The index the leader has to have applied through before it answers
+    pub read_index: LogIndex,
+    /// The heartbeat round that has to be answered by a majority: only rounds started after
+    /// the read index was recorded confirm that the leader still led then
+    pub probe: u64,
+    /// The voters that answered such a round, the leader itself among them
+    pub acks: BTreeSet<NodeId>,
+}
+
 /// What a leader tracks about its followers
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LeaderState {
@@ -86,6 +104,10 @@ pub struct LeaderState {
     pub ack_tally: Vec<(NodeId, LogIndex)>,
     /// The attempts waiting on each index
     pub pending: BTreeMap<LogIndex, Vec<Attempt>>,
+    /// The heartbeat round the leader's appends currently carry
+    pub probe: u64,
+    /// The strong reads waiting on a round and an application
+    pub pending_reads: Vec<PendingRead>,
 }
 
 /// One tablet's replica on one node
@@ -101,6 +123,8 @@ pub struct Group {
     pub role: Role,
     /// Who last sent this replica entries in its term, so it knows where to send acks
     pub leader_hint: Option<NodeId>,
+    /// The heartbeat round of the last append this replica accepted, echoed on a late ack
+    pub last_probe: u64,
 }
 
 /// One node: its status and its groups
@@ -160,6 +184,7 @@ impl Node {
                             volatile: Volatile::default(),
                             role: Role::Follower,
                             leader_hint: None,
+                            last_probe: 0,
                         },
                     )
                 })
@@ -422,6 +447,7 @@ impl Group {
                 prev_term,
                 entries,
                 leader_commit,
+                probe,
             } => self.on_append_entries(
                 ctx,
                 from,
@@ -430,6 +456,7 @@ impl Group {
                 prev_term,
                 entries,
                 leader_commit,
+                probe,
                 out,
             ),
             Body::AppendResponse {
@@ -437,6 +464,7 @@ impl Group {
                 durable_to,
                 durable,
                 conflict_hint,
+                probe,
             } => self.on_append_response(
                 ctx,
                 from,
@@ -445,6 +473,7 @@ impl Group {
                 durable_to,
                 durable,
                 conflict_hint,
+                probe,
                 out,
             ),
             // reports go to the observer, up lists are handled by the node
@@ -657,6 +686,7 @@ impl Group {
                 prev_term,
                 entries,
                 leader_commit: self.volatile.commit_index,
+                probe: state.probe,
             },
         )));
     }
@@ -701,7 +731,63 @@ impl Group {
                 // our own copy may already count, under the unsafe timing
                 self.try_advance_commit(ctx, out);
             }
-            ClientOp::Read { key } => {
+            ClientOp::Read {
+                key,
+                level: ReadLevel::Strong,
+            } => {
+                // only a leader serves a strong read; anyone else refuses outright, the way a
+                // node the real system would forward from refuses here (C6)
+                if !self.is_leader() {
+                    out.push(Output::Client {
+                        attempt,
+                        outcome: Outcome::Rejected,
+                    });
+                    return;
+                }
+                out.push(Output::Effect(Effect::StrongReadBegan {
+                    attempt,
+                    node: ctx.me,
+                    tablet: self.tablet,
+                    key,
+                }));
+                // POLICY C6: the contract records the read index, confirms the term with a
+                // heartbeat round started after that, and applies through the index before it
+                // reads; the unsafe setting trusts what the node believes and answers at once
+                match ctx.policy.barrier {
+                    BarrierRule::CachedLeaderUnconfirmed => self.answer_strong_read(ctx, attempt, key, out),
+                    BarrierRule::QuorumConfirmed => {
+                        // the read index is the commit index, or the first entry of this term
+                        // until one of them is committed: an earlier term's acknowledgements
+                        // are only bounded once this term has committed something
+                        let read_index = if self.committed_own_term() {
+                            self.volatile.commit_index
+                        } else {
+                            self.len().max(self.volatile.commit_index)
+                        };
+                        let Role::Leader(state) = &mut self.role else {
+                            return;
+                        };
+                        state.probe += 1;
+                        let mut acks = BTreeSet::new();
+                        acks.insert(ctx.me);
+                        state.pending_reads.push(PendingRead {
+                            attempt,
+                            key,
+                            read_index,
+                            probe: state.probe,
+                            acks,
+                        });
+                        // and the round that confirms it starts now
+                        self.send_append_to_all(ctx, out);
+                        // a leader alone in its configuration confirms itself
+                        self.answer_ready_reads(ctx, out);
+                    }
+                }
+            }
+            ClientOp::Read {
+                key,
+                level: ReadLevel::One,
+            } => {
                 // POLICY P4: the contract answers from the committed, applied prefix; the unsafe
                 // setting answers from the appended suffix too
                 let (value, observed) = match ctx.policy.visibility {
@@ -752,6 +838,7 @@ impl Group {
         prev_term: Term,
         entries: Vec<Entry>,
         leader_commit: LogIndex,
+        probe: u64,
         out: &mut Vec<Output>,
     ) {
         // an old leader is refused with our term, and learns it from the reply
@@ -764,6 +851,7 @@ impl Group {
                     durable_to: LogIndex(0),
                     durable: true,
                     conflict_hint: LogIndex(0),
+                    probe,
                 },
             )));
             return;
@@ -797,6 +885,7 @@ impl Group {
                     durable_to: LogIndex(0),
                     durable: true,
                     conflict_hint: hint,
+                    probe,
                 },
             )));
             return;
@@ -838,6 +927,8 @@ impl Group {
         }
         // and the bound only ever grows within a term
         self.volatile.match_bound = self.volatile.match_bound.max(matched);
+        // the round this append belongs to, for an acknowledgement sent after its fsync
+        self.last_probe = probe;
         // commit what the leader has, as far as we match it
         let commit = leader_commit.min(self.volatile.match_bound);
         if commit > self.volatile.commit_index {
@@ -856,6 +947,7 @@ impl Group {
                     durable_to: durable_now,
                     durable: true,
                     conflict_hint: LogIndex(0),
+                    probe,
                 },
             )));
             out.push(Output::Effect(Effect::DurableClaim {
@@ -876,6 +968,7 @@ impl Group {
                     durable_to: self.volatile.match_bound,
                     durable: true,
                     conflict_hint: LogIndex(0),
+                    probe,
                 },
             )));
             out.push(Output::Effect(Effect::DurableClaim {
@@ -895,6 +988,7 @@ impl Group {
                     durable_to: self.volatile.match_bound,
                     durable: false,
                     conflict_hint: LogIndex(0),
+                    probe,
                 },
             )));
         }
@@ -976,6 +1070,7 @@ impl Group {
                     durable_to,
                     durable: true,
                     conflict_hint: LogIndex(0),
+                    probe: self.last_probe,
                 },
             )));
             out.push(Output::Effect(Effect::DurableClaim {
@@ -997,6 +1092,7 @@ impl Group {
         durable_to: LogIndex,
         durable: bool,
         conflict_hint: LogIndex,
+        probe: u64,
         out: &mut Vec<Output>,
     ) {
         // a newer term ends our leadership
@@ -1034,7 +1130,63 @@ impl Group {
             self.send_append(ctx, from, out);
             return;
         }
+        // a successful answer to a round confirms our term to the strong reads that started
+        // that round or an earlier one; only a voter's answer counts towards a majority
+        if ctx.cfg.voters.contains(&from) {
+            if let Role::Leader(state) = &mut self.role {
+                for read in &mut state.pending_reads {
+                    if probe >= read.probe {
+                        read.acks.insert(from);
+                    }
+                }
+            }
+        }
         self.try_advance_commit(ctx, out);
+        self.answer_ready_reads(ctx, out);
+    }
+
+    /// Answer every strong read whose round a majority has confirmed and whose index is applied
+    fn answer_ready_reads(&mut self, ctx: &Ctx<'_>, out: &mut Vec<Output>) {
+        let applied = self.volatile.applied.last_applied;
+        let Role::Leader(state) = &mut self.role else {
+            return;
+        };
+        let mut ready = Vec::new();
+        state.pending_reads.retain(|read| {
+            let confirmed = ctx.cfg.is_majority(read.acks.len());
+            if confirmed && applied >= read.read_index {
+                ready.push((read.attempt, read.key));
+                false
+            } else {
+                true
+            }
+        });
+        for (attempt, key) in ready {
+            self.answer_strong_read(ctx, attempt, key, out);
+        }
+    }
+
+    /// Answer a strong read from the applied state, saying what index it saw
+    ///
+    /// # Arguments
+    ///
+    /// * `ctx` - The node around this group
+    /// * `attempt` - The read
+    /// * `key` - The key
+    /// * `out` - Where the answer and its effect go
+    fn answer_strong_read(&self, ctx: &Ctx<'_>, attempt: Attempt, key: Key, out: &mut Vec<Output>) {
+        let value = self.volatile.applied.rows.get(&key).copied();
+        out.push(Output::Effect(Effect::StrongRead {
+            attempt,
+            node: ctx.me,
+            tablet: self.tablet,
+            key,
+            observed: self.volatile.applied.last_applied,
+        }));
+        out.push(Output::Client {
+            attempt,
+            outcome: Outcome::Ok(crate::event::OpResult::Value(value)),
+        });
     }
 
     /// The evidence for an index being replicated, and the population it is judged against
@@ -1136,6 +1288,8 @@ impl Group {
                 }));
             }
         }
+        // a strong read waiting on this application may be answerable now
+        self.answer_ready_reads(_ctx, out);
     }
 
     /// The heartbeat timer fired
@@ -1143,6 +1297,13 @@ impl Group {
         if self.is_leader() {
             self.send_append_to_all(ctx, out);
         }
+    }
+
+    /// Whether this leader has committed an entry of its own term, which is what makes its
+    /// commit index a bound on everything earlier leaders acknowledged (Raft 5.4.2, 8)
+    fn committed_own_term(&self) -> bool {
+        self.entry(self.volatile.commit_index)
+            .is_some_and(|entry| entry.term == self.stable.term)
     }
 
     /// Report our progress to the observer

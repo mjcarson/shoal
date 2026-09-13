@@ -5,7 +5,7 @@
 //! to the violation it records and a fresh one minimizes to a reproducible core (C11), and the
 //! oracle tells the three outcome contracts apart (C11).
 
-use shoal_model::event::{ClientOp, MutationOp, OpResult};
+use shoal_model::event::{ClientOp, MutationOp, OpResult, ReadLevel};
 use shoal_model::ids::{Attempt, Key, NodeId, OpId, TabletId, Value};
 use shoal_model::minimize::minimize;
 use shoal_model::oracle::{check, Ledger, OracleError, Outcome};
@@ -51,6 +51,7 @@ fn protocol_model_preserves_acknowledged_history() {
     assert!(coverage.retries > 0, "no attempt was retried: {coverage:?}");
     assert!(coverage.unknown_outcomes > 0, "no outcome was unknown: {coverage:?}");
     assert!(coverage.commits > 0, "nothing was committed: {coverage:?}");
+    assert!(coverage.strong_reads > 0, "no strong read completed: {coverage:?}");
     // every way of breaking it is caught, by the property it breaks
     let saved = Schedule::load_all();
     for (name, policy, property) in Policy::unsafe_knobs() {
@@ -202,7 +203,10 @@ fn history_oracle_distinguishes_unknown_and_rejected() {
     let key = Key(1);
     let insert = |v: u32| ClientOp::Mutate(MutationOp::Insert { key, value: Value(v) });
     let delete = || ClientOp::Mutate(MutationOp::Delete { key });
-    let read = || ClientOp::Read { key };
+    let read = || ClientOp::Read {
+        key,
+        level: ReadLevel::One,
+    };
     let saw = |v: Option<u32>| Outcome::Ok(OpResult::Value(v.map(Value)));
     let applied = |b| Outcome::Ok(OpResult::Applied(b));
     // (a) an unknown insert, then a read that sees it: it may have happened
