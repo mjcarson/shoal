@@ -50,6 +50,13 @@ pub struct GroupReport {
     /// ([F43](../../../../docs/src/features/node-recovery.md))
     #[serde(default)]
     pub installing: bool,
+    /// The voters of the group's committed membership, as this shard's handle has it
+    /// ([F45](../../../../docs/src/features/replica-migration.md))
+    #[serde(default)]
+    pub voters: Vec<ShardAddr>,
+    /// Whether this shard hosts the group as a move's learner
+    #[serde(default)]
+    pub learner: bool,
     /// Why this shard's copy is quarantined, if it is ([F44](../../../../docs/src/features/repair.md))
     #[serde(default)]
     pub quarantined: Option<crate::server::control::repair::QuarantineReason>,

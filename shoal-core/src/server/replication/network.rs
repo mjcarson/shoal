@@ -268,6 +268,9 @@ struct Shared {
     replication: Replication,
     /// What this shard's transfers have done, as the sender
     snapshots: RefCell<SnapshotStats>,
+    /// Snapshot bytes sent per group and member, which a move's record is charged with
+    /// ([F45](../../../../docs/src/features/replica-migration.md))
+    stream_bytes: RefCell<HashMap<(GroupId, ShardAddr), u64>>,
     /// The map this shard holds, which is where every member's address comes from
     map: MapCell,
     /// Where particular members are dialled instead of where they advertise
@@ -321,6 +324,7 @@ impl ShardNetwork {
                 builder,
                 replication,
                 snapshots: RefCell::new(SnapshotStats::default()),
+                stream_bytes: RefCell::new(HashMap::new()),
                 map,
                 dial,
                 local,
@@ -329,6 +333,34 @@ impl ShardNetwork {
                 on_event,
             }),
         }
+    }
+
+    /// The snapshot bytes this shard has sent one member of a group
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group
+    /// * `target` - The member
+    #[must_use]
+    pub fn bytes_sent_to(&self, group: GroupId, target: ShardAddr) -> u64 {
+        self.shared.stream_bytes.borrow().get(&(group, target)).copied().unwrap_or(0)
+    }
+
+    /// The move a stream to a member of a group serves, if the map carries one
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group
+    /// * `target` - The member
+    #[must_use]
+    pub fn transition_of(&self, group: GroupId, target: ShardAddr) -> Option<Uuid> {
+        self.shared
+            .map
+            .get()
+            .moves
+            .iter()
+            .find(|record| record.to == target && record.groups.contains_key(&group))
+            .map(|record| record.op)
     }
 
     /// Get or open the bulk link to a peer node, for a snapshot stream
@@ -569,6 +601,42 @@ impl ShardPeer {
         self.rpc(ReplicateKind::Quarantine, group, action, deadline).await
     }
 
+    /// Ask the member how far it has applied a group's log
+    ///
+    /// The move's activation barrier: the answer is the index the member's own apply has
+    /// passed ([F45](../../../../docs/src/features/replica-migration.md)).
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group
+    /// * `op` - The move
+    /// * `index` - The index asked about
+    /// * `deadline` - How long to wait
+    ///
+    /// # Errors
+    ///
+    /// Says whether the peer refused it or could not be reached.
+    pub async fn applied(&self, group: GroupId, op: uuid::Uuid, index: u64, deadline: Duration) -> Result<u64, RpcFailure> {
+        let payload = postcard::to_allocvec(&(op, index)).map_err(|error| RpcFailure::NotSent(error.to_string()))?;
+        let bytes = self.rpc(ReplicateKind::Applied, group, payload, deadline).await?;
+        postcard::from_bytes::<u64>(&bytes).map_err(|error| RpcFailure::Remote(format!("decoding an applied answer: {error}")))
+    }
+
+    /// Ask the member whether its retired copy of a group is gone
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group
+    /// * `deadline` - How long to wait
+    ///
+    /// # Errors
+    ///
+    /// Says whether the peer refused it or could not be reached.
+    pub async fn retired(&self, group: GroupId, deadline: Duration) -> Result<bool, RpcFailure> {
+        let bytes = self.rpc(ReplicateKind::Retired, group, Vec::new(), deadline).await?;
+        postcard::from_bytes::<bool>(&bytes).map_err(|error| RpcFailure::Remote(format!("decoding a retired answer: {error}")))
+    }
+
     /// Turn a link error into openraft's retriable unreachable
     ///
     /// # Arguments
@@ -718,6 +786,28 @@ impl RaftNetworkV2<DataConfig> for GroupPeer {
         })
     }
 
+    /// Tell the member the lead is being handed to it, or to another
+    ///
+    /// The library's transfer message on the lane: the member named elects at once if its
+    /// log is up to date, so the lead moves before the old leader's lease lapses
+    /// ([F45](../../../../docs/src/features/replica-migration.md)).
+    async fn transfer_leader(
+        &mut self,
+        req: openraft::raft::TransferLeaderRequest<DataConfig>,
+        option: RPCOption,
+    ) -> Result<openraft::raft::TransferLeaderResponse<DataConfig>, RPCError<DataConfig>> {
+        let payload = postcard::to_allocvec(&req)
+            .map_err(|error| ShardPeer::unreachable(RpcFailure::NotSent(format!("encoding transfer_leader: {error}"))))?;
+        let answer = self
+            .peer
+            .rpc(ReplicateKind::TransferLeader, self.group, payload, option.hard_ttl())
+            .await
+            .map_err(ShardPeer::unreachable)?;
+        postcard::from_bytes(&answer).map_err(|error| {
+            ShardPeer::unreachable(RpcFailure::Unreachable(format!("decoding transfer_leader: {error}")))
+        })
+    }
+
     /// Send a whole snapshot to the member: control on the replication lane, bytes on the bulk lane
     ///
     /// The file is the loop's, cut at or past the handle's checkpoint; the manifest's boundary
@@ -848,6 +938,9 @@ impl GroupPeer {
         let network = self.peer.network.clone();
         let target = self.peer.target;
         let stream = *Uuid::new_v4().as_bytes();
+        // the move this stream serves, if the receiver is a move's destination
+        // ([F45](../../../../docs/src/features/replica-migration.md))
+        let transition = network.transition_of(group, target).map_or([0u8; 16], |op| *op.as_bytes());
         let mut cancel = Box::pin(cancel);
         // begin: what is coming, and where the receiver wants it from
         let remaining = deadline.saturating_sub(started.elapsed());
@@ -886,7 +979,7 @@ impl GroupPeer {
                 .map_err(|error| unreachable(format!("encoding a bulk route: {error}")))?;
                 let begin = SnapshotBegin {
                     stream,
-                    transition: [0u8; 16],
+                    transition,
                     boundary: manifest.boundary.index,
                     total: manifest.total,
                     manifest_len: u32::try_from(route.len()).unwrap_or(u32::MAX),
@@ -925,6 +1018,7 @@ impl GroupPeer {
                     .map_err(|error| unreachable(format!("framing a snapshot chunk: {error:?}")))?;
                     enqueue_or_wait(&link, frame, &mut cancel, started, deadline).await?;
                     network.shared.snapshots.borrow_mut().bytes_sent += read.len() as u64;
+                    *network.shared.stream_bytes.borrow_mut().entry((group, target)).or_default() += read.len() as u64;
                     offset += read.len() as u64;
                 }
                 event!(Level::DEBUG, msg = "a snapshot stream's chunks are queued", group = %group, %target, from, total = manifest.total);

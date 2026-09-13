@@ -2,6 +2,7 @@
 
 mod gather;
 mod groups;
+pub mod migrate;
 mod reads;
 pub mod repair;
 mod snapshots;
@@ -1517,8 +1518,10 @@ where
         // ([F40](../../../docs/src/features/replication.md))
         self.rebuild_groups().await?;
         // a repair the map carries is driven by whoever leads its groups
-        // ([F44](../../../docs/src/features/repair.md))
+        // ([F44](../../../docs/src/features/repair.md)), and so is a move
+        // ([F45](../../../docs/src/features/replica-migration.md))
         self.drive_repairs();
+        self.drive_moves();
         // every subscribed client hears of it; the relay folds a run of them to the newest
         self.push_topology(&map);
         Ok(())
@@ -3021,8 +3024,10 @@ where
                 self.sweep_gathers().await?;
                 self.sweep_deadlines().await?;
                 self.maybe_report_replication();
-                // a repair a group this shard now leads is waiting on, and a scrub that is due
+                // a repair or a move a group this shard now leads is waiting on, and a scrub
+                // that is due
                 self.drive_repairs();
+                self.drive_moves();
                 self.schedule_scrubs();
             }
         }
@@ -3668,6 +3673,7 @@ where
                 ServerMsg::Digested { group, op, outcome } => self.handle_digested(group, op, outcome),
                 ServerMsg::Quarantine { group, action, reply } => self.handle_quarantine(group, action, reply).await,
                 ServerMsg::RepairDone { op, group, phase } => self.handle_repair_done(op, group, phase),
+                ServerMsg::MoveDone { op, group, progress } => self.handle_move_done(op, group, progress),
                 ServerMsg::RepairInstall { group, path, manifest, reply } => {
                     let outcome = self.restart_group_for_install(group, path, manifest);
                     let _ = reply.send(outcome);

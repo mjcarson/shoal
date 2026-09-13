@@ -88,6 +88,26 @@ pub enum ReplicateKind {
     /// action, and the member answers once its marker is durable
     /// ([F44](../../../../../docs/src/features/repair.md)).
     Quarantine = 7,
+    /// Ask a member how far it has applied a group's log, for a move's activation barrier
+    ///
+    /// The payload is the move's operation and the index asked about; the member answers the
+    /// index it has applied, so the driver knows the destination's own apply has passed the
+    /// uniform membership rather than trusting a lag report
+    /// ([F45](../../../../../docs/src/features/replica-migration.md)).
+    Applied = 8,
+    /// Ask a member whether its retired copy of a group is gone
+    ///
+    /// Carries no payload. The source of a move answers whether the copy it retired has been
+    /// reclaimed - its files deleted after the grace - or was never held here at all
+    /// ([F45](../../../../../docs/src/features/replica-migration.md)).
+    Retired = 9,
+    /// The consensus library's transfer leader message: the leader tells a member to stand
+    ///
+    /// The payload is the library's request; the member hands it to its handle, which elects
+    /// at once if it is the one named and its log is up to date. Without it a transferring
+    /// leader's own lease is the first to lapse and it wins its own election back
+    /// ([F45](../../../../../docs/src/features/replica-migration.md)).
+    TransferLeader = 10,
 }
 
 impl ReplicateKind {
@@ -112,6 +132,9 @@ impl ReplicateKind {
             5 => Ok(ReplicateKind::ReadBarrier),
             6 => Ok(ReplicateKind::Digest),
             7 => Ok(ReplicateKind::Quarantine),
+            8 => Ok(ReplicateKind::Applied),
+            9 => Ok(ReplicateKind::Retired),
+            10 => Ok(ReplicateKind::TransferLeader),
             unknown => Err(ProtocolError::UnknownReplicateKind(unknown)),
         }
     }
@@ -127,6 +150,9 @@ impl ReplicateKind {
             ReplicateKind::ReadBarrier => "read_barrier",
             ReplicateKind::Digest => "digest",
             ReplicateKind::Quarantine => "quarantine",
+            ReplicateKind::Applied => "applied",
+            ReplicateKind::Retired => "retired",
+            ReplicateKind::TransferLeader => "transfer_leader",
         }
     }
 }

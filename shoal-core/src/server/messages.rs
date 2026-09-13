@@ -767,6 +767,16 @@ where
         /// The phase it committed last, which the map may not carry yet
         phase: crate::server::control::repair::RepairPhase,
     },
+    /// A move driver finished with a group, for whatever reason
+    /// ([F45](../../../docs/src/features/replica-migration.md))
+    MoveDone {
+        /// The operation
+        op: Uuid,
+        /// The group
+        group: crate::shared::identity::GroupId,
+        /// Where it left the group, which the map may not carry yet
+        progress: crate::server::control::migrate::GroupMove,
+    },
     /// A snapshot install's marker and file are gone, so the install is complete
     SnapshotCleaned {
         /// The group
@@ -904,6 +914,7 @@ impl<D: ShoalDatabase> Clone for ServerMsg<D> {
             ServerMsg::Digested { .. } => panic!("A digest is the scrubbing shard's"),
             ServerMsg::Quarantine { .. } => panic!("A quarantine is the holding shard's"),
             ServerMsg::RepairDone { .. } => panic!("A repair driver is one shard's"),
+            ServerMsg::MoveDone { .. } => panic!("A move driver is one shard's"),
             ServerMsg::RepairInstall { .. } => panic!("A repair install is the holding shard's"),
             ServerMsg::RepairRotate { .. } => panic!("A rotation is one shard's"),
             ServerMsg::SnapshotBuilt { .. } => panic!("A built snapshot is the cutting shard's"),

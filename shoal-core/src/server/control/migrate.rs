@@ -144,6 +144,9 @@ pub struct MoveStats {
     pub entries: u64,
     /// How long each phase took, in milliseconds, by the phase's name
     pub phase_ms: BTreeMap<String, u64>,
+    /// When the current phase was entered, in milliseconds since the epoch; zero before any
+    #[serde(default)]
+    pub since: u64,
 }
 
 /// One group's progress under a move

@@ -181,6 +181,13 @@ pub(super) struct Replication<D: ShoalDatabase> {
     pub(super) driven: HashMap<(Uuid, GroupId), crate::server::control::repair::RepairPhase>,
     /// When each group this shard leads is next due a scheduled scrub
     pub(super) next_scrub: HashMap<GroupId, Instant>,
+    /// The group moves this shard is driving right now, by operation and group
+    /// ([F45](../../../../docs/src/features/replica-migration.md))
+    pub(super) driving_moves: HashSet<(Uuid, GroupId)>,
+    /// The progress each move driver here committed last, which the map may be behind on
+    pub(super) driven_moves: HashMap<(Uuid, GroupId), crate::server::control::migrate::GroupMove>,
+    /// The copies this shard retired under a move, kept for the grace, by group
+    pub(super) retired: HashMap<GroupId, super::migrate::RetiredCopy>,
 }
 
 impl<D: ShoalDatabase> Shard<D>
@@ -283,6 +290,9 @@ where
             driving: HashSet::new(),
             driven: HashMap::new(),
             next_scrub: HashMap::new(),
+            driving_moves: HashSet::new(),
+            driven_moves: HashMap::new(),
+            retired: HashMap::new(),
         });
         self.rebuild_groups().await?;
         Ok(())
@@ -689,8 +699,9 @@ where
                 for (meta, table, key, payload) in waiting {
                     self.propose_write(meta, table, key, payload).await?;
                 }
-                // a repair waiting on this group is driven once it is led
+                // a repair or a move waiting on this group is driven once it is led
                 self.drive_repairs();
+                self.drive_moves();
             }
             // a handle built for a group the map has since dropped
             (None, Ok(raft)) => {
@@ -1189,6 +1200,13 @@ where
             let _ = reply.try_send(ReplicateReply::error(head.id, "this node hosts no tablet groups"));
             return;
         };
+        // whether a retired copy is gone is asked of a shard that may not host the group at all
+        // ([F45](../../../../docs/src/features/replica-migration.md))
+        if head.kind == ReplicateKind::Retired {
+            let gone = !replication.groups.contains_key(&group) && !replication.retired.contains_key(&group);
+            let _ = reply.try_send(encode_reply(head.id, &gone));
+            return;
+        }
         let Some(slot) = replication.groups.get(&group) else {
             let _ = reply.try_send(ReplicateReply::error(head.id, format!("group {group} is not hosted on this shard")));
             return;
@@ -1227,6 +1245,13 @@ where
             }
             return;
         }
+        // how far this copy has applied is answered from what the loop holds
+        // ([F45](../../../../docs/src/features/replica-migration.md))
+        if head.kind == ReplicateKind::Applied {
+            let applied = slot.state.borrow().applied.as_ref().map_or(0, |log_id| log_id.index);
+            let _ = reply.try_send(encode_reply(head.id, &applied));
+            return;
+        }
         // a digest is answered from what the loop holds
         // ([F44](../../../../docs/src/features/repair.md))
         if head.kind == ReplicateKind::Digest {
@@ -1258,6 +1283,15 @@ where
                     },
                     Err(error) => ReplicateReply::error(head.id, format!("decoding vote: {error}")),
                 },
+                // the lead handed to this member, or to another it is told about
+                // ([F45](../../../../docs/src/features/replica-migration.md))
+                ReplicateKind::TransferLeader => match postcard::from_bytes(&payload) {
+                    Ok(request) => match raft.handle_transfer_leader(request).await {
+                        Ok(response) => encode_reply(head.id, &response),
+                        Err(error) => ReplicateReply::error(head.id, format!("transfer_leader: {error}")),
+                    },
+                    Err(error) => ReplicateReply::error(head.id, format!("decoding transfer_leader: {error}")),
+                },
                 ReplicateKind::Propose => match Command::decode(&payload) {
                     Ok(command) => {
                         // one hop only: a proposal that arrived here is not forwarded again
@@ -1267,7 +1301,11 @@ where
                     Err(error) => ReplicateReply::error(head.id, format!("decoding a proposal: {error}")),
                 },
                 // a snapshot rpc and a digest are judged on the loop, so they are answered before this task
-                ReplicateKind::Snapshot | ReplicateKind::Digest | ReplicateKind::Quarantine => {
+                ReplicateKind::Snapshot
+                | ReplicateKind::Digest
+                | ReplicateKind::Quarantine
+                | ReplicateKind::Applied
+                | ReplicateKind::Retired => {
                     unreachable!("answered on the loop")
                 }
                 // a read barrier: confirm leadership with a heartbeat round and answer the
@@ -1693,6 +1731,11 @@ where
                     volatile: slot.store.is_volatile(),
                     up: slot.raft.is_some(),
                     installing: state.installing,
+                    voters: metrics
+                        .as_ref()
+                        .map(|metrics| metrics.committed_membership_config.voter_ids().collect())
+                        .unwrap_or_default(),
+                    learner: slot.spec.learner,
                     quarantined: state.quarantined.map(|quarantine| quarantine.reason),
                 }
             })
