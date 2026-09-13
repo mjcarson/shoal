@@ -21,6 +21,7 @@
 use std::collections::VecDeque;
 
 use super::snapshot::{FileHasher, SnapshotManifest};
+use crate::server::wal::Vote;
 use crate::shared::identity::NodeId;
 
 /// What the assembler says about a chunk
@@ -122,6 +123,12 @@ pub struct Partial {
     pub from: NodeId,
     /// The stream, so a chunk of another stream is not written into this one
     pub stream: [u8; 16],
+    /// The sender's vote, which the install is handed to openraft under
+    ///
+    /// The sender's and never this replica's own: openraft judges it as it judges an append,
+    /// and a replica that has been electing itself while cut off holds an uncommitted vote of
+    /// its own that no install may be run under.
+    pub vote: Vote,
     /// What is coming
     pub manifest: SnapshotManifest,
     /// Where the prefix ends and what it hashes to
@@ -151,13 +158,15 @@ impl Partial {
     ///
     /// * `from` - The peer sending it
     /// * `stream` - The stream
+    /// * `vote` - The sender's vote
     /// * `manifest` - What is coming
     #[must_use]
-    pub fn new(from: NodeId, stream: [u8; 16], manifest: SnapshotManifest) -> Self {
+    pub fn new(from: NodeId, stream: [u8; 16], vote: Vote, manifest: SnapshotManifest) -> Self {
         let total = manifest.total;
         Partial {
             from,
             stream,
+            vote,
             manifest,
             assembler: Assembler::new(total),
             queue: VecDeque::new(),

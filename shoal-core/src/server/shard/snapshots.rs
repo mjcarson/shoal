@@ -289,10 +289,7 @@ where
             }
         };
         let answer = match rpc {
-            SnapshotRpc::Begin { vote, stream, manifest } => {
-                let _ = vote;
-                self.begin_snapshot(origin, group, stream, manifest)
-            }
+            SnapshotRpc::Begin { vote, stream, manifest } => self.begin_snapshot(origin, group, stream, vote, manifest),
             SnapshotRpc::End { stream, total, checksum } => {
                 self.end_snapshot(origin, group, stream, total, checksum, head, reply);
                 return;
@@ -308,8 +305,16 @@ where
     /// * `origin` - The peer
     /// * `group` - The group
     /// * `stream` - The stream
+    /// * `vote` - The sender's vote
     /// * `manifest` - What is coming
-    fn begin_snapshot(&mut self, origin: NodeId, group: GroupId, stream: [u8; 16], manifest: SnapshotManifest) -> SnapshotAnswer {
+    fn begin_snapshot(
+        &mut self,
+        origin: NodeId,
+        group: GroupId,
+        stream: [u8; 16],
+        vote: crate::server::wal::Vote,
+        manifest: SnapshotManifest,
+    ) -> SnapshotAnswer {
         let schema_id = <D::ClientType as QuerySupport>::SCHEMA_ID;
         let Some(replication) = self.replication.as_mut() else {
             return SnapshotAnswer::Refused("this node hosts no tablet groups".to_string());
@@ -381,7 +386,7 @@ where
         replication
             .installs
             .partials
-            .insert(group, Rc::new(RefCell::new(Partial::new(origin, stream, manifest))));
+            .insert(group, Rc::new(RefCell::new(Partial::new(origin, stream, vote, manifest))));
         SnapshotAnswer::Resume { from: 0 }
     }
 
@@ -519,9 +524,9 @@ where
             }
         }
         let deadline = Duration::from_millis(u64::from(head.deadline_ms.max(1)));
-        // the install is handed to openraft under the group's current vote, which is the
-        // sender's if it still leads and a higher one it answers with if not
-        let vote = raft.metrics().borrow_watched().vote.clone();
+        // the install is handed to openraft under the sender's vote, which it judges as it
+        // judges an append: a stale one is refused with this replica's own
+        let vote = partial.borrow().vote.clone();
         glommio::spawn_local(async move {
             let started = Instant::now();
             // where the prefix stood when it last grew, and when

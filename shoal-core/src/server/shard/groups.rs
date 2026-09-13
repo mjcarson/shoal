@@ -1056,7 +1056,68 @@ where
         for generation in compacted_now {
             self.advance_checkpoints(generation, None);
         }
+        self.enforce_retention();
         Ok(())
+    }
+
+    /// Force the groups pinning the oldest sealed segments past them once the budget is passed
+    ///
+    /// The entries budget is a preference and the bytes budget is a bound
+    /// ([Q9](../../../../docs/src/distributed/protocol.md)): when the sealed segments still on
+    /// disk hold more than `retained_bytes`, every group with frames in the oldest of them is
+    /// asked to snapshot at its checkpoint and purge through it, so the next sweep can delete
+    /// them. A member behind the forced purge point falls to the snapshot path; nothing pins
+    /// the leader's log for a follower ([F43](../../../../docs/src/features/node-recovery.md)).
+    fn enforce_retention(&mut self) {
+        let budget = self.conf.cluster.as_ref().map_or(u64::MAX, |cluster| cluster.replication.retained_bytes);
+        let Some(replication) = self.replication.as_mut() else {
+            return;
+        };
+        let sealed: Vec<_> = replication.wal.segments().into_iter().filter(|segment| segment.sealed).collect();
+        let mut held: u64 = sealed.iter().map(|segment| segment.bytes).sum();
+        if held <= budget {
+            return;
+        }
+        // the oldest segments, until what is left fits the budget
+        let mut forced = 0u64;
+        for segment in &sealed {
+            if held <= budget {
+                break;
+            }
+            held = held.saturating_sub(segment.bytes);
+            for (group, last) in &segment.last {
+                let Some(slot) = replication.groups.get(group) else { continue };
+                let (checkpoint, purged) = {
+                    let state = slot.state.borrow();
+                    (state.checkpoint_index(), slot.store.purged_index().unwrap_or(0))
+                };
+                // a group not yet compacted past the segment cannot purge it; one purged past
+                // it already is not what pins it
+                if checkpoint < last.index || purged >= last.index {
+                    continue;
+                }
+                let Some(raft) = slot.raft.clone() else { continue };
+                forced += 1;
+                event!(
+                    Level::WARN,
+                    msg = "the retention budget is passed; forcing a group past a sealed segment",
+                    group = %group,
+                    generation = segment.generation,
+                    checkpoint,
+                    purged,
+                    lag = checkpoint.saturating_sub(purged),
+                    held_bytes = held,
+                    budget,
+                );
+                glommio::spawn_local(async move {
+                    // the snapshot first, so the purge has one to stop at
+                    let _ = raft.trigger().snapshot().await;
+                    let _ = raft.trigger().purge_log(checkpoint).await;
+                })
+                .detach();
+            }
+        }
+        replication.snapshots.forced += forced;
     }
 
     /// Note that a table's compactor finished a segment

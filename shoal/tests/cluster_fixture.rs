@@ -4423,6 +4423,296 @@ async fn snapshot_duplicates_and_resume_are_safe() -> Result<(), FixtureError> {
     Ok(())
 }
 
+/// Retention and recovery memory are bounded (C7 M7, Q9)
+///
+/// Node two's lanes are cut both ways and the leader takes wide writes well past
+/// `retained_bytes`, at a segment size that makes the budget four segments. The sealed WAL
+/// on the leader stays under twice the budget, since every sweep past it forces the groups
+/// pinning the oldest segments to snapshot and purge; the leader's memory grows by less than
+/// a bound; writes keep committing on the majority throughout. Healed, node two is behind
+/// the forced purge point, installs snapshots, and converges
+/// ([F43](../../docs/src/features/node-recovery.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn retention_and_recovery_memory_are_bounded() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lane_links(true)
+        .checkpoint_entries(8)
+        .retained_entries(4096)
+        .segment_bytes(1024 * 1024)
+        .retained_bytes(4 * 1024 * 1024)
+        .write_timeout(Duration::from_secs(3))
+        .query_deadline(Duration::from_secs(3))
+        .start()
+        .await?;
+    let ok = |error: shoal::client::Errors| FixtureError::NotReady(format!("{error:?}"));
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    let client = Shoal::<TestDbClient>::new(&addr0).await.map_err(ok)?;
+    for key in 24_000..24_010u64 {
+        client.send_one(Note { key, text: format!("base-{key}") }).await.map_err(ok)?;
+    }
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    // node two's data lanes cut both ways - its control lanes stay up, so the control plane is
+    // not what this measures (item 106) - and the leader written to well past the budget
+    for (from, to) in [(0, 2), (1, 2), (2, 0), (2, 1)] {
+        cluster.data_link(from, to).cut();
+    }
+    let rss_before = cluster.node(0).rss_kib();
+    let wal_dir = cluster.dir(0).join("wal").join("Shard-0");
+    let sealed_bytes = |dir: &std::path::Path| -> u64 {
+        std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".wal"))
+            .filter_map(|entry| entry.metadata().ok().map(|meta| meta.len()))
+            .sum()
+    };
+    let wide = "r".repeat(20_000);
+    let mut most_held = 0u64;
+    for key in 24_100..24_900u64 {
+        write_note_eventually(&addr0, key, &format!("{wide}-{key}"), Duration::from_secs(15)).await?;
+        if key % 25 == 0 {
+            // a sweep every so often, and the budget judged after it
+            let _ = cluster.node_mut(0).command("COMPACT")?;
+            most_held = most_held.max(sealed_bytes(&wal_dir));
+        }
+    }
+    let _ = cluster.node_mut(0).command("COMPACT")?;
+    std::thread::sleep(Duration::from_secs(2));
+    let _ = cluster.node_mut(0).command("COMPACT")?;
+    most_held = most_held.max(sealed_bytes(&wal_dir));
+    let stats = snapshots_of(&mut cluster, 0)?;
+    // sixteen megabytes of rows went through a four megabyte budget of one megabyte segments:
+    // the WAL never held more than twice the budget and the active segment, and purges were forced
+    assert!(
+        most_held <= 3 * 4 * 1024 * 1024,
+        "the sealed WAL on the leader reached {most_held} bytes against a {} byte budget: {stats}",
+        4 * 1024 * 1024
+    );
+    assert!(stats["forced"].as_u64().unwrap_or(0) >= 1, "no purge was ever forced: {stats}");
+    let rss_after = cluster.node(0).rss_kib();
+    assert!(
+        rss_after.saturating_sub(rss_before) < 400 * 1024,
+        "the leader grew by {} KiB while a follower was cut off",
+        rss_after.saturating_sub(rss_before)
+    );
+    // healed, node two is behind the forced purge point: it installs and converges
+    for (from, to) in [(0, 2), (1, 2), (2, 0), (2, 1)] {
+        cluster.data_link(from, to).heal();
+    }
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(180))?;
+    wait_not_installing(&mut cluster, 2, Duration::from_secs(10))?;
+    let installed = snapshots_of(&mut cluster, 2)?;
+    assert!(installed["installed"].as_u64().unwrap_or(0) >= 1, "node two caught up without a snapshot: {installed}");
+    for id in 0..3 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
+
+/// A member called `Down` within the grace keeps its placement, and comes back into it (C3/C7 M7)
+///
+/// Node one, which leads a third of the groups, is killed and called `Down`: the groups it led
+/// elect elsewhere, and the placement and every group's members are unchanged on both
+/// survivors. Enough is written to purge past what it held. Restarted within the grace it is
+/// `Up` again in the same placement, catches up by snapshot, and leads nothing until an
+/// election it wins ([F43](../../docs/src/features/node-recovery.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn down_within_grace_moves_no_replicas() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lane_links(true)
+        .detector_interval_ms(200)
+        .checkpoint_entries(8)
+        .retained_entries(16)
+        .write_timeout(Duration::from_secs(3))
+        .query_deadline(Duration::from_secs(3))
+        .start()
+        .await?;
+    let ok = |error: shoal::client::Errors| FixtureError::NotReady(format!("{error:?}"));
+    let (key, group) = key_led_by(&mut cluster, "Note", 1, 25_000)?;
+    let addrs: Vec<String> = (0..3).map(|id| cluster.node(id).endpoints.client.to_string()).collect();
+    let client = Shoal::<TestDbClient>::new(&addrs[0]).await.map_err(ok)?;
+    for key in 25_500..25_510u64 {
+        client.send_one(Note { key, text: format!("base-{key}") }).await.map_err(ok)?;
+        client.send_one(Row { key, data: format!("base-{key}") }).await.map_err(ok)?;
+    }
+    write_note(&addrs[1], key, "v1").await.map_err(ok)?;
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Row", Duration::from_secs(30))?;
+    let placement_of = |cluster: &mut Cluster, at: usize| -> Result<serde_json::Value, FixtureError> {
+        Ok(cluster.node_mut(at).command("MAP")?["ok"]["placement"].clone())
+    };
+    let members_of = |cluster: &mut Cluster, at: usize| -> Result<std::collections::BTreeMap<u64, serde_json::Value>, FixtureError> {
+        let view = groups_of(cluster, at)?;
+        let mut members = std::collections::BTreeMap::new();
+        for shard in view["shards"].as_array().into_iter().flatten() {
+            for group in shard["groups"].as_array().into_iter().flatten() {
+                members.insert(group["group"].as_u64().unwrap_or_default(), group["members"].clone());
+            }
+        }
+        Ok(members)
+    };
+    let placement_before = placement_of(&mut cluster, 0)?;
+    let members_before = members_of(&mut cluster, 0)?;
+    // node one dies and is called down; the groups it led elect elsewhere; nothing moves
+    leave_behind_purge(&mut cluster, 1, 0, 25_100, 100, "away").await?;
+    let victim = cluster.node_ids()[1].clone();
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        let members = cluster.members(0)?;
+        let member = members["members"]
+            .as_array()
+            .and_then(|members| members.iter().find(|m| m["record"]["node"] == victim).cloned())
+            .unwrap_or_default();
+        if member["health"] == "down" {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "the dead member was never called down: {members}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let (elected, leader) = wait_group_leader_change(&mut cluster, 0, "Note", key, 1)?;
+    assert_eq!(elected, group);
+    assert_ne!(leader, 1);
+    for at in [0, 2] {
+        assert_eq!(placement_of(&mut cluster, at)?, placement_before, "the placement moved on node {at}");
+        assert_eq!(members_of(&mut cluster, at)?, members_before, "node {at}'s groups moved");
+    }
+    // back within the grace: up, in the same placement, caught up by snapshot, leading nothing yet
+    cluster.restart(1, NodeKind::Server)?;
+    cluster.wait_joined(&[1])?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        if health_of(&mut cluster, 0, 1)? == "up" && health_of(&mut cluster, 2, 1)? == "up" {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "the restarted member was never called up");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(placement_of(&mut cluster, 1)?, placement_before);
+    assert_eq!(members_of(&mut cluster, 1)?, members_before);
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(90))?;
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Row", Duration::from_secs(60))?;
+    wait_not_installing(&mut cluster, 1, Duration::from_secs(10))?;
+    let stats = snapshots_of(&mut cluster, 1)?;
+    assert!(stats["installed"].as_u64().unwrap_or(0) >= 1, "the returning member caught up without a snapshot: {stats}");
+    // it leads nothing on its return: every group it hosted is led by a survivor
+    let view = groups_of(&mut cluster, 1)?;
+    let leading = view["leading"].as_u64().unwrap_or(0);
+    assert_eq!(leading, 0, "the returning member leads {leading} groups before any election: {view}");
+    for id in 0..3 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
+
+/// A whole-cluster restart preserves the durable history (C7 M7)
+///
+/// Writes land with one node's WAL completions held back and a batch of replies dropped on
+/// the leader, so some keys are acknowledged, some unknown to their client and some in one
+/// node's log only; every node rotates and compacts; every node is killed at once and
+/// restarted. Every acknowledged key is on every node once, every unknown key holds one value
+/// everywhere, the digests agree, and no segment below a checkpoint was compacted again
+/// ([F43](../../docs/src/features/node-recovery.md),
+/// [Resolved #104](../../docs/src/appendix/resolved/segments-recompacted-after-restart.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn whole_cluster_restart_preserves_durable_history() -> Result<(), FixtureError> {
+    use shoal::client::SendOptions;
+    use shoal::shared::protocol::error::ErrorCode;
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lane_links(true)
+        .checkpoint_entries(8)
+        .retained_entries(16)
+        .write_timeout(Duration::from_secs(2))
+        .query_deadline(Duration::from_secs(2))
+        .start()
+        .await?;
+    let ok = |error: shoal::client::Errors| FixtureError::NotReady(format!("{error:?}"));
+    let (key, group) = key_led_by(&mut cluster, "Note", 0, 26_000)?;
+    let keys = keys_in_group(&mut cluster, "Note", &group, key, 40)?;
+    let addrs: Vec<String> = (0..3).map(|id| cluster.node(id).endpoints.client.to_string()).collect();
+    // the first half acknowledged plainly
+    let mut acknowledged: Vec<(u64, String)> = Vec::new();
+    for key in &keys[..20] {
+        let text = format!("ack-{key}");
+        write_note(&addrs[0], *key, &text).await.map_err(ok)?;
+        acknowledged.push((*key, text));
+    }
+    // node two's completions held back and four replies dropped on the leader: the next
+    // writes commit on nodes zero and one, some with their answers lost
+    let stalled = cluster.node_mut(2).command(&format!("STALL_WAL {group}"))?;
+    assert!(stalled.get("ok").is_some(), "{stalled}");
+    let dropped = cluster.node_mut(0).command("DROP_REPLIES 4")?;
+    assert!(dropped.get("ok").is_some(), "{dropped}");
+    let mut unknown: Vec<u64> = Vec::new();
+    for key in &keys[20..30] {
+        let text = format!("maybe-{key}");
+        match write_note_as(&addrs[0], *key, &text, &SendOptions::new().deadline(Duration::from_secs(1))).await {
+            Ok(_) => acknowledged.push((*key, text)),
+            Err(error) => {
+                assert!(
+                    matches!(failure_code(&Err::<(), _>(error)), Some(ErrorCode::Timeout | ErrorCode::OutcomeUnknown)),
+                    "a write was refused for another reason"
+                );
+                unknown.push(*key);
+            }
+        }
+    }
+    let released = cluster.node_mut(2).command(&format!("RELEASE_WAL {group}"))?;
+    assert!(released.get("ok").is_some(), "{released}");
+    // the rest acknowledged, then every node rotates and compacts past everything
+    for key in &keys[30..] {
+        let text = format!("late-{key}");
+        write_note_eventually(&addrs[0], *key, &text, Duration::from_secs(15)).await?;
+        acknowledged.push((*key, text.clone()));
+    }
+    let token = write_note_token(&addrs[0], 26_999, "last").await.map_err(ok)?.expect("a committed write carries a token");
+    wait_checkpoint_past(&mut cluster, &[0, 1, 2], &group, token.index, Duration::from_secs(60))?;
+    let before = wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    // every node killed at once, then every node started again
+    for id in 0..3 {
+        cluster.node_mut(id).kill().map_err(|error| FixtureError::NotReady(format!("{error}")))?;
+    }
+    for id in 0..3 {
+        cluster.restart(id, NodeKind::Server)?;
+    }
+    cluster.wait_joined(&[0, 1, 2])?;
+    let addrs: Vec<String> = (0..3).map(|id| cluster.node(id).endpoints.client.to_string()).collect();
+    let after = wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(60))?;
+    assert_eq!(after["hash"], before["hash"], "the history changed across the restart");
+    // no segment below a checkpoint was compacted again on any node
+    for id in 0..3 {
+        let _ = cluster.node_mut(id).command("COMPACT")?;
+        let compacting = compacting_of(&mut cluster, id)?;
+        assert!(compacting.is_empty(), "node {id} is compacting a segment below its checkpoint again: {compacting:?}");
+    }
+    // every acknowledged key is on every node, and every unknown key holds one value everywhere
+    for (key, text) in &acknowledged {
+        for addr in &addrs {
+            assert_eq!(read_note(addr, *key).await.map_err(ok)?.as_deref(), Some(text.as_str()), "key {key} through {addr}");
+        }
+    }
+    for key in &unknown {
+        let values: std::collections::BTreeSet<Option<String>> = {
+            let mut set = std::collections::BTreeSet::new();
+            for addr in &addrs {
+                set.insert(read_note(addr, *key).await.map_err(ok)?);
+            }
+            set
+        };
+        assert_eq!(values.len(), 1, "unknown key {key} holds several values: {values:?}");
+    }
+    for id in 0..3 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
+
 /// Conditional results follow committed order on every replica (C5 M4, Q4)
 ///
 /// Every key is inserted once, then updates, deletes and no-ops on a small key set are sent

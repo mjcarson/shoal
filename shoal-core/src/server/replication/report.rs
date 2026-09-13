@@ -81,6 +81,9 @@ pub struct SnapshotStats {
     pub aborted: u64,
     /// Installs redone at open from a pending marker
     pub redone: u64,
+    /// Purges forced by the retention budget, one per group per sweep that was over it
+    #[serde(default)]
+    pub forced: u64,
 }
 
 impl SnapshotStats {
@@ -101,6 +104,7 @@ impl SnapshotStats {
         self.resumed += other.resumed;
         self.aborted += other.aborted;
         self.redone += other.redone;
+        self.forced += other.forced;
     }
 }
 
