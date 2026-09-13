@@ -1152,6 +1152,20 @@ mod tests {
     }
 
     #[test]
+    /// A config that never mentions the query deadline gets ten seconds, and one that does is read
+    ///
+    /// The same reason as the frame bound: `shoal.yml` is committed and captured against, so a
+    /// required key would have invalidated the baseline (F41).
+    fn a_config_without_a_query_deadline_gets_the_default() {
+        let (_dir, conf) = load("resources:\n  memory: \"4Gi\"\n");
+        let conf = conf.expect("a config with no networking section failed to load");
+        assert_eq!(conf.networking.query_deadline.duration(), std::time::Duration::from_secs(10));
+        let (_dir, conf) = load("networking:\n  query_deadline: 2s\n");
+        let conf = conf.expect("a config naming a query deadline failed to load");
+        assert_eq!(conf.networking.query_deadline.duration(), std::time::Duration::from_secs(2));
+    }
+
+    #[test]
     /// A config with no tls section produces a plaintext listener
     ///
     /// The same case, and the same reason, as `auth_defaults_to_off` below: this is what every

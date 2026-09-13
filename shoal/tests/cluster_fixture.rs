@@ -1410,6 +1410,14 @@ fn handle_command(
             Some(count) => admin(AdminKind::SetControlVoters { count }),
             None => Err("SET_VOTERS needs a count".to_string()),
         },
+        // set or clear one table's read level ([F41](../../docs/src/features/read-consistency.md))
+        "SET_TABLE_READ_POLICY" => match (parts.next(), parts.next()) {
+            (Some(table), Some(level)) => admin(AdminKind::SetTableReadPolicy {
+                table: table.to_string(),
+                level: (level != "clear").then(|| level.to_string()),
+            }),
+            _ => Err("SET_TABLE_READ_POLICY needs a table and one, quorum or clear".to_string()),
+        },
         // any administrative request, as json
         "ADMIN" => {
             let json = line.trim_start_matches("ADMIN").trim();
@@ -2822,6 +2830,50 @@ async fn read_mixed(
     Ok((row, note))
 }
 
+/// Some note keys placed on each node, under the placement the map names
+///
+/// Under a factor of one a node hosts only its own tablets, so a key is placed by the rule
+/// the ring routes with - the tablet of its hashed partition key to `placement[t % N]` -
+/// rather than by asking a node which group serves it
+/// ([C4](../../docs/src/distributed/tablet-map.md)).
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `per_node` - How many keys to find on each node
+/// * `from` - The first key to try
+fn keys_placed_per_node(cluster: &mut Cluster, per_node: usize, from: u64) -> Result<Vec<Vec<u64>>, FixtureError> {
+    let map = cluster.node_mut(0).command("MAP")?;
+    let placement: Vec<String> = map["ok"]["placement"]
+        .as_array()
+        .expect("a placement")
+        .iter()
+        .map(|node| node.as_str().expect("a node id").to_string())
+        .collect();
+    // where each fixture node sits in the placement
+    let positions: Vec<usize> = (0..cluster.pids().len())
+        .map(|id| {
+            let node = cluster.node(id).endpoints.node.clone().expect("a node id");
+            placement.iter().position(|placed| *placed == node).expect("a placed node")
+        })
+        .collect();
+    let mut keys: Vec<Vec<u64>> = vec![Vec::new(); positions.len()];
+    for key in from..from + 100_000 {
+        if keys.iter().all(|found| found.len() >= per_node) {
+            break;
+        }
+        // the ring hashes the partition key before it picks a tablet, as the table does
+        let hashed = <Note as shoal::shared::traits::PartitionKeySupport>::get_partition_key_from_values(&key);
+        let slot = shoal::server::ring::Ring::tablet_of(hashed) % placement.len();
+        if let Some(node) = positions.iter().position(|position| *position == slot) {
+            if keys[node].len() < per_node {
+                keys[node].push(key);
+            }
+        }
+    }
+    Ok(keys)
+}
+
 /// The read counters a node's shards report, folded
 ///
 /// # Arguments
@@ -3709,5 +3761,263 @@ async fn session_token_lineage_is_checked_by_name() -> Result<(), FixtureError> 
             break;
         }
     }
+    Ok(())
+}
+
+/// The rows each node's shard of a get contributes are counted by slot, so an empty partition,
+/// a deleted row and a missing share are three different answers (C6 M5, F41)
+///
+/// Three nodes at a factor of one, three keys placed one per node. A get over six keys - the
+/// three and three never written - through node zero returns exactly three rows and succeeds,
+/// since an empty share covers its slot. The node two key deleted through node two: two rows. A
+/// get over unwritten keys alone is a successful empty answer. The lane between zero and two
+/// cut: the six key get is one error, never two rows presented as the answer, since a share
+/// that never arrives covers nothing. Healed: two rows again, and no gather left resident.
+#[tokio::test(flavor = "multi_thread")]
+async fn empty_and_deleted_partitions_have_explicit_coverage() -> Result<(), FixtureError> {
+    use shoal::client::SendOptions;
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .lane_links(true)
+        .query_deadline(Duration::from_secs(2))
+        .start()
+        .await?;
+    // one key per node, placed by the rule the ring routes with
+    let keys: Vec<u64> = keys_placed_per_node(&mut cluster, 1, 5000)?.into_iter().map(|found| found[0]).collect();
+    let addrs: Vec<String> = (0..3).map(|id| cluster.node(id).endpoints.client.to_string()).collect();
+    for (node, key) in keys.iter().enumerate() {
+        write_note(&addrs[0], *key, &format!("on node {node}")).await?;
+    }
+    // three present and three that were never written, in one get: three rows, and success
+    let never = [9_000_001u64, 9_000_002, 9_000_003];
+    let mut asked: Vec<u64> = keys.clone();
+    asked.extend(never);
+    let options = SendOptions::default();
+    let found = read_notes(&addrs[0], &asked, None, &options).await?;
+    assert_eq!(found.len(), 3, "{found:?}");
+    for (node, key) in keys.iter().enumerate() {
+        assert!(found.contains(&(*key, format!("on node {node}"))), "{found:?}");
+    }
+    // the node two key deleted through node two is gone from the answer, not resurrected
+    delete_note(&addrs[2], keys[2]).await?;
+    let found = read_notes(&addrs[0], &asked, None, &options).await?;
+    assert_eq!(found.len(), 2, "{found:?}");
+    assert!(!found.iter().any(|(key, _)| *key == keys[2]), "{found:?}");
+    // a get over nothing but unwritten keys is a successful empty answer
+    assert!(read_notes(&addrs[0], &never, None, &options).await?.is_empty());
+    // with node two unreachable, the get is one error and never the two rows that did arrive
+    cluster.data_link(0, 2).cut();
+    cluster.data_link(2, 0).cut();
+    let missing = read_notes(&addrs[0], &asked, None, &options).await;
+    assert!(missing.is_err(), "a get missing a share answered {missing:?}");
+    assert!(
+        matches!(failure_code(&missing), Some(shoal::shared::protocol::error::ErrorCode::Timeout | shoal::shared::protocol::error::ErrorCode::OutcomeUnknown | shoal::shared::protocol::error::ErrorCode::Unavailable)),
+        "{missing:?}"
+    );
+    // healed, the two rows again, and nothing left resident
+    cluster.data_link(0, 2).heal();
+    cluster.data_link(2, 0).heal();
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        match read_notes(&addrs[0], &asked, None, &options).await {
+            Ok(found) if found.len() == 2 => break,
+            Ok(found) => panic!("the healed get answered {found:?}"),
+            Err(error) => {
+                assert!(std::time::Instant::now() < deadline, "the healed get never succeeded: {error:?}");
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        }
+    }
+    let stats = read_stats(&mut cluster, 0)?;
+    assert_eq!(stats["resident"].as_u64(), Some(0), "{stats}");
+    Ok(())
+}
+
+/// A limited get over several nodes keeps the first rows in the order it named, and never
+/// answers with fewer required shares than it has (C6 M5, F41)
+///
+/// Six keys over three nodes at a factor of one. A get over all six with a limit of four
+/// answers the first four in the order the get named them, which is the first four `One` reads
+/// would give. With node one's shares held, the same get is `Timeout` rather than the four
+/// rows the other two nodes could have supplied. The unit half of this row is in
+/// `shoal-proto`'s `responses.rs`, where the pushdown is proved over random layouts.
+#[tokio::test(flavor = "multi_thread")]
+async fn limits_apply_after_complete_ordered_gather() -> Result<(), FixtureError> {
+    use shoal::client::SendOptions;
+    use shoal::shared::protocol::error::ErrorCode;
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .query_deadline(Duration::from_secs(1))
+        .start()
+        .await?;
+    // two keys per node, interleaved so every prefix of the get spans nodes
+    let placed = keys_placed_per_node(&mut cluster, 2, 6000)?;
+    let keys: Vec<u64> = (0..2).flat_map(|round| placed.iter().map(move |found| found[round])).collect();
+    let addr = cluster.node(0).endpoints.client.to_string();
+    for (at, key) in keys.iter().enumerate() {
+        write_note(&addr, *key, &format!("row {at}")).await?;
+    }
+    // the limited get is the first four, in named order
+    let options = SendOptions::default();
+    let found = read_notes(&addr, &keys, Some(4), &options).await?;
+    let expected: Vec<(u64, String)> = keys.iter().take(4).enumerate().map(|(at, key)| (*key, format!("row {at}"))).collect();
+    assert_eq!(found, expected);
+    // and the same get named in the reverse order is the first four of that order
+    let reversed: Vec<u64> = keys.iter().rev().copied().collect();
+    let found = read_notes(&addr, &reversed, Some(4), &options).await?;
+    let expected: Vec<(u64, String)> = reversed.iter().take(4).map(|key| (*key, format!("row {}", keys.iter().position(|k| k == key).expect("a key")))).collect();
+    assert_eq!(found, expected);
+    // with one node's shares held, the answer is a timeout and never four rows of six
+    let held = cluster.node_mut(1).command("HOLD_SHARES 0 3000")?;
+    assert_eq!(held["ok"]["holding"], true, "{held}");
+    let missing = read_notes(&addr, &keys, Some(4), &options).await;
+    assert_eq!(failure_code(&missing), Some(ErrorCode::Timeout), "{missing:?}");
+    // once released, the answer is whole again
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let found = read_notes(&addr, &keys, Some(4), &options).await?;
+    assert_eq!(found.len(), 4);
+    Ok(())
+}
+
+/// A gather that expires answers once, a late share is dropped, and a duplicate is too
+/// (C6 M5, F41)
+///
+/// Three nodes at a factor of one, node one holding every share it would send for three
+/// seconds and sending each twice on release, node two holding its own for four. A bundle of a
+/// six key get and a single node zero key get, with a half second deadline: the first is one
+/// `Timeout`, the second succeeds, and the stream ends once; the held shares arrive late. A
+/// second six key get with the server's budget completes when node two releases; node one's
+/// second copy arrived while it was still waiting on node two and is a duplicate. Afterwards
+/// no gather is resident and both kinds of dropped share were counted.
+#[tokio::test(flavor = "multi_thread")]
+async fn gather_timeout_completes_once_and_discards_late_replies() -> Result<(), FixtureError> {
+    use shoal::client::{QuerySuceededOpts, SendOptions};
+    use shoal::shared::protocol::error::ErrorCode;
+    let mut cluster = Cluster::builder().cluster(3, CoreClaim::Count(1)).start().await?;
+    // two keys per node
+    let placed = keys_placed_per_node(&mut cluster, 2, 7000)?;
+    let keys: Vec<u64> = (0..2).flat_map(|round| placed.iter().map(move |found| found[round])).collect();
+    let addr = cluster.node(0).endpoints.client.to_string();
+    for (at, key) in keys.iter().enumerate() {
+        write_note(&addr, *key, &format!("row {at}")).await?;
+    }
+    // hold node one's shares, sending each twice when they go, and node two's a second longer
+    let held = cluster.node_mut(1).command("HOLD_SHARES 0 3000 dup")?;
+    assert_eq!(held["ok"]["dup"], true, "{held}");
+    let held = cluster.node_mut(2).command("HOLD_SHARES 0 4000")?;
+    assert_eq!(held["ok"]["dup"], false, "{held}");
+    // a bundle: a get that needs node one, then one that does not, at a half second deadline
+    let client = Shoal::<TestDbClient>::new(&addr).await?;
+    let queries = client.query().add(NoteGet::new(keys.clone())).add(NoteGet::new(vec![keys[0]]));
+    let mut stream = client.send_with(queries, &SendOptions::new().deadline(Duration::from_millis(500))).await?;
+    let first = stream.next().await?.expect("the first answer");
+    assert_eq!(first.get_index(), 0);
+    match first.suceeded(QuerySuceededOpts::default()) {
+        Err(shoal::client::Errors::Server { code, .. }) => assert_eq!(code, ErrorCode::Timeout),
+        other => panic!("the held get answered {other:?}"),
+    }
+    let second = stream.next().await?.expect("the second answer");
+    assert_eq!(second.get_index(), 1);
+    second.suceeded(QuerySuceededOpts::default())?;
+    assert_eq!(second.access::<Note>()?.map(|notes| notes.len()), Some(1));
+    // the stream ends once, and only once
+    assert!(stream.next().await?.is_none());
+    // a second get under the server's own budget completes when the last hold releases
+    let started = std::time::Instant::now();
+    let found = read_notes(&addr, &keys, None, &SendOptions::default()).await?;
+    assert_eq!(found.len(), 6, "{found:?}");
+    assert!(started.elapsed() >= Duration::from_millis(2500), "the held get answered before the release: {:?}", started.elapsed());
+    // the late copies and the duplicate copies were dropped and counted, and nothing is resident
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let stats = read_stats(&mut cluster, 0)?;
+    assert_eq!(stats["resident"].as_u64(), Some(0), "{stats}");
+    assert!(stats["stats"]["timeouts"].as_u64().unwrap_or(0) >= 1, "{stats}");
+    assert!(stats["stats"]["late_shares"].as_u64().unwrap_or(0) >= 1, "{stats}");
+    assert!(stats["stats"]["duplicate_shares"].as_u64().unwrap_or(0) >= 1, "{stats}");
+    Ok(())
+}
+
+/// A mixed bundle resolves each table's read policy on its own, and an override covers both
+/// (C6 M5, F41)
+///
+/// Three nodes at a factor of three. `Note` is set to `quorum` through the control plane; a
+/// bundle of a `Row` get and a `Note` get through node one with no override obtains one barrier,
+/// with a `Quorum` override two, with a `One` override none. Node one cut from the others, the
+/// `Note` half of the bundle is `Timeout` and the `Row` half succeeds. A table the schema does
+/// not have is refused by name, and `read_consistency: All` is refused at validation
+/// (`validation_refuses_what_is_not_built`). The control state's own rules are the unit half,
+/// `mixed_table_bundle_resolves_each_table_policy` in `control/types.rs`.
+#[tokio::test(flavor = "multi_thread")]
+async fn mixed_table_bundle_resolves_each_table_policy() -> Result<(), FixtureError> {
+    use shoal::client::{ReadLevel, SendOptions};
+    use shoal::shared::protocol::error::ErrorCode;
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lane_links(true)
+        .write_timeout(Duration::from_millis(500))
+        .query_deadline(Duration::from_secs(2))
+        .start()
+        .await?;
+    // a key of each table, both led by node zero
+    let (row_key, _) = key_led_by(&mut cluster, "Row", 0, 8000)?;
+    let (note_key, _) = key_led_by(&mut cluster, "Note", 0, 8000)?;
+    let addrs: Vec<String> = (0..3).map(|id| cluster.node(id).endpoints.client.to_string()).collect();
+    {
+        let client = Shoal::<TestDbClient>::new(&addrs[0]).await?;
+        client.send_one(Row { key: row_key, data: "a row".to_string() }).await?;
+    }
+    write_note(&addrs[0], note_key, "a note").await?;
+    // notes are served at quorum unless a bundle says otherwise; every node learns it
+    let set = cluster.node_mut(0).command("SET_TABLE_READ_POLICY Note quorum")?;
+    let version = set["ok"]["version"].as_u64().unwrap_or_else(|| panic!("{set}"));
+    cluster.wait_map_version(&[0, 1, 2], version)?;
+    let map = cluster.node_mut(1).command("MAP")?;
+    assert!(map["ok"]["table_read_policy"].to_string().contains("Quorum"), "{map}");
+    // both halves are seen through node one, and only the note half paid a barrier
+    let barriers = |cluster: &mut Cluster| -> Result<u64, FixtureError> {
+        Ok(read_stats(cluster, 1)?["stats"]["barriers"].as_u64().unwrap_or(0))
+    };
+    let before = barriers(&mut cluster)?;
+    let (row, note) = read_mixed(&addrs[1], row_key, note_key, &SendOptions::default()).await?;
+    assert_eq!(row?.as_deref(), Some("a row"));
+    assert_eq!(note?.as_deref(), Some("a note"));
+    assert_eq!(barriers(&mut cluster)? - before, 1, "an inherited policy did not resolve per table");
+    // an override to quorum covers both halves
+    let before = barriers(&mut cluster)?;
+    let (row, note) = read_mixed(&addrs[1], row_key, note_key, &SendOptions::new().read(ReadLevel::Quorum)).await?;
+    assert_eq!(row?.as_deref(), Some("a row"));
+    assert_eq!(note?.as_deref(), Some("a note"));
+    assert_eq!(barriers(&mut cluster)? - before, 2, "a quorum override did not cover both tables");
+    // and an override to one covers neither
+    let before = barriers(&mut cluster)?;
+    let (row, note) = read_mixed(&addrs[1], row_key, note_key, &SendOptions::new().read(ReadLevel::One)).await?;
+    assert_eq!(row?.as_deref(), Some("a row"));
+    assert_eq!(note?.as_deref(), Some("a note"));
+    assert_eq!(barriers(&mut cluster)? - before, 0, "a one override still paid a barrier");
+    // node one cut off: the note half cannot obtain a barrier, the row half is served
+    for (from, to) in [(0, 1), (1, 0), (1, 2), (2, 1)] {
+        cluster.data_link(from, to).cut();
+    }
+    let (row, note) = read_mixed(&addrs[1], row_key, note_key, &SendOptions::default()).await?;
+    assert_eq!(row?.as_deref(), Some("a row"));
+    assert_eq!(failure_code(&note), Some(ErrorCode::Timeout), "the note half answered {note:?}");
+    for (from, to) in [(0, 1), (1, 0), (1, 2), (2, 1)] {
+        cluster.data_link(from, to).heal();
+    }
+    // a table the schema does not have is refused by name, and an unknown level too
+    let refused = cluster.node_mut(0).command("SET_TABLE_READ_POLICY Nope quorum")?;
+    assert!(refused["error"].to_string().contains("Nope"), "{refused}");
+    let refused = cluster.node_mut(0).command("SET_TABLE_READ_POLICY Note all")?;
+    assert!(refused["error"].to_string().contains("not a read level"), "{refused}");
+    // clearing puts the note back at the cluster's default
+    let cleared = cluster.node_mut(0).command("SET_TABLE_READ_POLICY Note clear")?;
+    let version = cleared["ok"]["version"].as_u64().unwrap_or_else(|| panic!("{cleared}"));
+    cluster.wait_map_version(&[1], version)?;
+    let before = barriers(&mut cluster)?;
+    let (row, note) = read_mixed(&addrs[1], row_key, note_key, &SendOptions::default()).await?;
+    assert_eq!(row?.as_deref(), Some("a row"));
+    assert_eq!(note?.as_deref(), Some("a note"));
+    assert_eq!(barriers(&mut cluster)? - before, 0, "a cleared policy still paid a barrier");
     Ok(())
 }

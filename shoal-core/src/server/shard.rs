@@ -3002,18 +3002,39 @@ where
             head.try_into().map_err(|_| ProtocolError::MalformedForward("a forwarded head is the wrong size"))?;
         let preamble = crate::shared::protocol::peer::ForwardedPreamble::decode(&raw)?;
         let bundle = Uuid::from_bytes(preamble.bundle);
-        // find what we were owed; a frame with no pending entry is late or duplicate and dropped
+        use crate::shared::protocol::peer::ForwardedKind;
+        // find what we were owed; a frame with no pending entry is late or duplicate. A share is
+        // still put to its gather, which judges it by attempt and slot and counts it either way;
+        // a whole answer with nobody waiting is late by definition
+        // ([F41](../../../docs/src/features/read-consistency.md))
         let Some(mut pending) = self
             .peers
             .as_mut()
             .and_then(|peers| peers.take(bundle, preamble.index, node))
         else {
-            event!(Level::WARN, msg = "a peer answered a query we were not waiting for", %node, index = preamble.index);
+            if preamble.kind == ForwardedKind::Share {
+                let response = <<D::ClientType as QuerySupport>::ResponseKinds as crate::shared::traits::RkyvSupport>::deserialize(
+                    <<D::ClientType as QuerySupport>::ResponseKinds as crate::shared::traits::RkyvSupport>::access(&payload)?,
+                )?;
+                let span = info_span!(parent: None, "Shoal::late_share", id = %bundle, index = preamble.index);
+                let mut meta = QueryMetadata::untimed(
+                    Uuid::nil(),
+                    bundle,
+                    preamble.index as usize,
+                    false,
+                    Some(self.info.contact.clone()),
+                    span,
+                );
+                meta.read.attempt = preamble.attempt;
+                meta.read.slot = preamble.slot;
+                return self.handle_gathered(meta, response, false).await;
+            }
+            self.read_stats.late_shares += 1;
+            event!(Level::DEBUG, msg = "a peer answered a query we were not waiting for", %node, index = preamble.index);
             return Ok(());
         };
         // the peer ran the query, so it knows what kind it was; this record did not until now
         pending.stamps.adopt_served(preamble.served);
-        use crate::shared::protocol::peer::ForwardedKind;
         match preamble.kind {
             // a whole answer is bytes for the client, never re-validated on this node
             ForwardedKind::Whole => {

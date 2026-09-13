@@ -468,10 +468,8 @@ where
     ///
     /// * `table` - The table
     fn policy_level(&self, table: D::TableNames) -> ReadLevel {
-        let _ = table;
-        // the per-table policy is the control plane's, and lands with it; until then the
-        // cluster's default is the only level a bundle can inherit
-        match self.map.get().read_consistency {
+        // the table's own level from the committed state, else the cluster's default
+        match self.map.get().read_level_of(table.table_id()) {
             crate::server::conf::cluster::Consistency::Quorum | crate::server::conf::cluster::Consistency::All => {
                 ReadLevel::Quorum
             }

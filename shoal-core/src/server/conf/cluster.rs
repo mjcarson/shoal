@@ -813,6 +813,14 @@ impl Cluster {
     /// Every refusal is a [`ShoalError::NotImplemented`] or a [`ShoalError::InvalidConfig`],
     /// and the first one found is returned.
     pub fn validate(&self, interface: &str) -> Result<(), ServerError> {
+        // the strong read level is Quorum; there is no read that waits on every replica
+        // ([C6](../../../../docs/src/distributed/reads.md))
+        if self.read_consistency == Consistency::All {
+            return Err(ServerError::Shoal(ShoalError::InvalidConfig(
+                "cluster.read_consistency: All is not a read level anything serves; C6 names One                  and Quorum, and Quorum is the strong one"
+                    .to_string(),
+            )));
+        }
         // a node bootstraps or joins; one that has a cluster to create has nothing to discover
         if !self.seeds.is_empty() && self.bootstrap {
             return Err(ServerError::Shoal(ShoalError::InvalidConfig(
@@ -999,6 +1007,18 @@ mod tests {
         assert!(format!("{error}").contains("not both"), "{error}");
         // a node that does neither is nothing
         assert!(Cluster::default().validate("127.0.0.1").is_err());
+        // the strong read level is Quorum; All is refused naming C6 (F41)
+        let error = Cluster::default()
+            .bootstrap(true)
+            .read_consistency(Consistency::All)
+            .validate("127.0.0.1")
+            .expect_err("read_consistency All was accepted");
+        assert!(format!("{error}").contains("C6"), "{error}");
+        Cluster::default()
+            .bootstrap(true)
+            .read_consistency(Consistency::Quorum)
+            .validate("127.0.0.1")
+            .expect("read_consistency Quorum was refused");
         // a dial override has to be an address, and one that is parses
         let node = super::NodeId::mint();
         assert!(Cluster::default()
