@@ -1555,21 +1555,41 @@ where
     ///
     /// Every live row, in partition then sort order, hashed as its partition key and its
     /// archived bytes; tombstones and archives alike are folded in as rows, so a resident copy
-    /// and one still in its archive hash the same. Returns how many rows there are and the hash.
-    #[must_use]
-    pub fn digest(&self) -> (u64, u64) {
+    /// and one still in its archive hash the same. A partition that is not resident is read
+    /// from its archive, so a replica holding nothing in memory hashes the same state as one
+    /// that applied every write itself ([F43](../../../../docs/src/features/node-recovery.md)).
+    /// Returns how many rows there are and the hash.
+    ///
+    /// # Errors
+    ///
+    /// Fails if an archived partition cannot be read.
+    pub async fn digest(&self) -> Result<(u64, u64), ServerError> {
+        // every key, resident or archived, in one order on every replica
         let mut keys: Vec<u64> = self.partitions.keys().copied().collect();
+        keys.extend(self.storage.archived_keys());
         keys.sort_unstable();
+        keys.dedup();
         let mut rows = 0u64;
         let mut acc = 0u64;
         for key in keys {
-            let Some(entry) = self.partitions.get(&key) else { continue };
             // a resident partition as it is, an archived one read back whole
             let owned;
-            let partition: &SortedPartition<R> = match entry {
-                MaybeLoaded::Loaded { partition, .. } => partition,
-                MaybeLoaded::Accessible(read) => {
+            let partition: &SortedPartition<R> = match self.partitions.get(&key) {
+                Some(MaybeLoaded::Loaded { partition, .. }) => partition,
+                Some(MaybeLoaded::Accessible(read)) => {
                     owned = SortedPartition::<R>::deserialize(read.archived()).ok();
+                    match &owned {
+                        Some(partition) => partition,
+                        None => continue,
+                    }
+                }
+                // not resident: the archive's copy is the state
+                None => {
+                    let Some(read) = self.storage.load_partition_direct(key).await? else {
+                        continue;
+                    };
+                    let archived = <SortedPartition<R> as RkyvSupport>::access(&read)?;
+                    owned = SortedPartition::<R>::deserialize(archived).ok();
                     match &owned {
                         Some(partition) => partition,
                         None => continue,
@@ -1588,7 +1608,7 @@ where
                 }
             }
         }
-        (rows, acc)
+        Ok((rows, acc))
     }
 
     /// Mark partitions as evictable if they are no longer in the intent log

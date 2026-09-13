@@ -386,7 +386,7 @@ pub fn add(
     let digest_arms = fields.named.iter().zip(variants).map(|(field, variant_ident)| {
         let field_ident = field.ident.as_ref().unwrap();
         quote! {
-            #table_names_ident::#variant_ident => self.#field_ident.digest(),
+            #table_names_ident::#variant_ident => self.#field_ident.digest().await,
         }
     });
     // build our table-of-id arms
@@ -657,8 +657,8 @@ pub fn add(
                 sinks
             }
 
-            /// Hash a table's applied state
-            fn digest_table(&self, table: Self::TableNames) -> (u64, u64) {
+            /// Hash a table's applied state, archived partitions included
+            async fn digest_table(&self, table: Self::TableNames) -> Result<(u64, u64), ::shoal::server::ServerError> {
                 match table {
                     #(#digest_arms)*
                 }

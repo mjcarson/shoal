@@ -61,6 +61,12 @@ pub struct ShardReplication {
     pub volatile_bytes: usize,
     /// How many segments the shard's WAL holds
     pub segments: usize,
+    /// The sealed segments handed to a compactor and not yet merged by every table in them
+    ///
+    /// What the fixture reads to catch a segment between two merges
+    /// ([Resolved #104](../../../../docs/src/appendix/resolved/segments-recompacted-after-restart.md)).
+    #[serde(default)]
+    pub compacting: Vec<u64>,
     /// Proposals answered unknown since the shard started
     pub unknown_outcomes: u64,
     /// Proposals refused since the shard started

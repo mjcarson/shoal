@@ -716,6 +716,11 @@ impl<D: ShoalDatabase> StorageSupport for FileSystem<D> {
         }
     }
 
+    /// Every partition key the archive map holds a copy of
+    fn archived_keys(&self) -> Vec<u64> {
+        self.map.to_archive.borrow().keys().copied().collect()
+    }
+
     /// Note the WAL generation a replicated command is applied in
     fn observe_generation(&mut self, observed: u64) {
         if let LogSink::Shared { generation } = &mut self.sink {

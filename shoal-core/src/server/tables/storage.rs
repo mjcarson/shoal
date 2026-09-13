@@ -597,6 +597,16 @@ pub trait StorageSupport: Sized {
         partition_id: u64,
     ) -> Result<Option<ReadResult>, ServerError>;
 
+    /// Every partition key this engine holds an archived copy of
+    ///
+    /// What a digest reads beside the resident partitions, so a replica that was restarted or
+    /// installed a snapshot - and so holds nothing in memory - hashes the same state as one
+    /// that applied every write itself ([F43](../../../docs/src/features/node-recovery.md)).
+    /// An engine that stores nothing has none.
+    fn archived_keys(&self) -> Vec<u64> {
+        Vec::new()
+    }
+
     /// Note the WAL generation a replicated command is applied in
     ///
     /// On a cluster node the shard's shared WAL is the log and this engine writes none of its

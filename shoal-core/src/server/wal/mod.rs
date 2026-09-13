@@ -185,6 +185,11 @@ pub struct SegmentView {
     pub handed: bool,
     /// The last entry of each group with frames in it, as the index stands now
     pub last: HashMap<GroupId, WalLogId>,
+    /// How many bytes the file holds, as of its seal or its open
+    ///
+    /// What the retention budget is judged against ([F43](../../../../docs/src/features/node-recovery.md)):
+    /// a sealed segment's size is fixed, and the active one's is not counted.
+    pub bytes: u64,
 }
 
 /// A batch of frames waiting to be written, or being written
@@ -310,6 +315,11 @@ impl WalInner {
     /// seals the file when it reaches the first batch of the new generation.
     fn rotate(&mut self) {
         self.close_open();
+        // the segment being left is as large as it will ever be
+        let size = self.next_offset;
+        if let Some(segment) = self.segments.get_mut(&self.generation) {
+            segment.bytes = size;
+        }
         self.generation += 1;
         self.next_offset = 0;
         self.segments.insert(
@@ -994,6 +1004,7 @@ impl ShardWal {
                 SegmentView {
                     generation: *generation,
                     sealed: Some(*generation) != last,
+                    bytes: whole,
                     ..SegmentView::default()
                 },
             );
@@ -1097,17 +1108,22 @@ impl ShardWal {
 
     /// The command frames of some groups that lie in a segment, in index order per group
     ///
+    /// Only the frames above each group's checkpoint: a frame at or below it is one the
+    /// archives already hold the effect of, and merging it again would put an older write over
+    /// a newer one once the partition is read back from disk
+    /// ([Resolved #104](../../../../docs/src/appendix/resolved/segments-recompacted-after-restart.md)).
+    ///
     /// # Arguments
     ///
     /// * `generation` - The segment
-    /// * `groups` - The groups
+    /// * `groups` - The groups, each with the index its archives are complete to
     #[must_use]
-    pub fn frames_in(&self, generation: u64, groups: &[GroupId]) -> Vec<FrameRef> {
+    pub fn frames_in(&self, generation: u64, groups: &[(GroupId, u64)]) -> Vec<FrameRef> {
         let inner = self.inner.borrow();
         let mut frames = Vec::new();
-        for group in groups {
+        for (group, since) in groups {
             if let Some(log) = inner.groups.get(group) {
-                for (index, slot) in &log.index {
+                for (index, slot) in log.index.range((Bound::Excluded(*since), Bound::Unbounded)) {
                     // a blank or a membership entry has nothing for an archive
                     if slot.command && slot.loc.generation == generation {
                         frames.push(FrameRef {

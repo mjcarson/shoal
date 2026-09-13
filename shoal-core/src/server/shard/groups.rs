@@ -948,11 +948,14 @@ where
             self.tables.compaction_sinks().into_iter().collect();
         let mut compacted_now = Vec::new();
         for segment in handoffs {
-            // this table's frames, per table, in log order per group
-            let mut by_table: HashMap<D::TableNames, Vec<GroupId>> = HashMap::new();
+            // this table's frames, per table, in log order per group, each group from its
+            // checkpoint: a frame at or below it was merged before, and after a restart every
+            // sealed segment looks unhanded ([Resolved #104](../../../../docs/src/appendix/resolved/segments-recompacted-after-restart.md))
+            let mut by_table: HashMap<D::TableNames, Vec<(GroupId, u64)>> = HashMap::new();
             for group in segment.last.keys() {
                 if let Some(slot) = replication.groups.get(group) {
-                    by_table.entry(slot.table).or_default().push(*group);
+                    let since = slot.state.borrow().checkpoint_index();
+                    by_table.entry(slot.table).or_default().push((*group, since));
                 }
             }
             let mut tables = HashSet::new();
@@ -1184,6 +1187,12 @@ where
             pending_bytes: groups.iter().map(|group| group.pending_bytes).sum(),
             volatile_bytes: replication.volatile.bytes(),
             segments: replication.wal.segments().len(),
+            compacting: replication
+                .compacting
+                .iter()
+                .filter(|(_, tables)| !tables.is_empty())
+                .map(|(generation, _)| *generation)
+                .collect(),
             unknown_outcomes: replication.stats.unknown,
             rejected: replication.stats.rejected,
             reads: self.read_stats,
@@ -1229,7 +1238,7 @@ where
                 let Some(name) = D::table_of_id(table) else {
                     return Err(format!("no table has identity {table}"));
                 };
-                let (rows, hash) = self.tables.digest_table(name);
+                let (rows, hash) = self.tables.digest_table(name).await.map_err(|error| format!("{error:?}"))?;
                 let groups: BTreeMap<String, u64> = replication
                     .groups
                     .values()

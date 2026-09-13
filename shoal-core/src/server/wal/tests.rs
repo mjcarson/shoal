@@ -472,6 +472,53 @@ fn retry_table_survives_the_purge_point() {
     });
 }
 
+/// A frame at or below a group's checkpoint is never handed to a compactor again, across a reopen
+///
+/// One group appends across two forced rotations. Asked for the frames of the first segment
+/// with the checkpoint at its second entry, the store names only the third; with the
+/// checkpoint at the last entry of the second segment it names nothing there; and the same
+/// holds once the directory is reopened, when every sealed segment looks unhanded and the
+/// index has been rebuilt from the files
+/// ([Resolved #104](../../../../docs/src/appendix/resolved/segments-recompacted-after-restart.md)).
+#[test]
+fn frames_at_or_below_the_checkpoint_are_not_handed_again() {
+    let mut runtime = GlommioRuntime::new(1);
+    runtime.block_on(async {
+        let dir = tempfile::tempdir().expect("failed to build a temp dir");
+        let path = dir.path().join("wal");
+        let group = GroupId(4);
+        let wal = ShardWal::open(&path, 1 << 30, 1 << 20).await.expect("failed to open");
+        let mut store = wal.store(group);
+        // three entries in the first segment, three in the second
+        append_durably(&mut store, (1..=3).map(|index| normal(index, 64)).collect()).await;
+        wal.rotate();
+        wal.flush().await.expect("failed to flush after rotating");
+        append_durably(&mut store, (4..=6).map(|index| normal(index, 64)).collect()).await;
+        wal.rotate();
+        wal.flush().await.expect("failed to flush after rotating");
+        // the judgement, on the live index and again on one rebuilt from the files
+        let judge = |wal: &ShardWal| {
+            let indexes = |generation: u64, since: u64| -> Vec<u64> {
+                wal.frames_in(generation, &[(group, since)]).iter().map(|frame| frame.index).collect()
+            };
+            assert_eq!(indexes(1, 0), vec![1, 2, 3], "nothing checkpointed: every frame is handed");
+            assert_eq!(indexes(1, 2), vec![3], "the checkpoint at two leaves the third");
+            assert_eq!(indexes(1, 3), Vec::<u64>::new(), "a segment below the checkpoint hands nothing");
+            assert_eq!(indexes(2, 3), vec![4, 5, 6], "the next segment is whole above it");
+            assert_eq!(indexes(2, 6), Vec::<u64>::new(), "and nothing once the checkpoint passed it");
+            // the sealed segments know their size, which the retention budget reads
+            let sealed: Vec<_> = wal.segments().into_iter().filter(|segment| segment.sealed).collect();
+            assert_eq!(sealed.len(), 2);
+            assert!(sealed.iter().all(|segment| segment.bytes > 0), "{sealed:?}");
+        };
+        judge(&wal);
+        wal.close().await.expect("failed to close");
+        let reopened = ShardWal::open(&path, 1 << 30, 1 << 20).await.expect("failed to reopen");
+        judge(&reopened);
+        reopened.close().await.expect("failed to close");
+    });
+}
+
 /// A membership set of shard addresses, for a membership entry
 fn members(ids: &[u64]) -> BTreeSet<ShardAddr> {
     ids.iter().map(|id| ShardAddr::from(*id)).collect()

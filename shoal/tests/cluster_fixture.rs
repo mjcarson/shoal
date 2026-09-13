@@ -2779,6 +2779,56 @@ async fn write_note(addr: &str, key: u64, text: &str) -> Result<(), shoal::clien
     Ok(())
 }
 
+/// Write many notes through a node in one bundle, each answered
+///
+/// # Arguments
+///
+/// * `addr` - The endpoint
+/// * `keys` - The keys
+/// * `text` - The text every note gets
+async fn write_notes_batch(addr: &str, keys: &[u64], text: &str) -> Result<(), FixtureError> {
+    use shoal::client::QuerySuceededOpts;
+    let client = Shoal::<TestDbClient>::new(addr).await.map_err(|error| FixtureError::NotReady(format!("{error:?}")))?;
+    let mut queries = client.query();
+    for key in keys {
+        queries = queries.add(Note {
+            key: *key,
+            text: text.to_string(),
+        });
+    }
+    let mut stream = client.send(queries).await.map_err(|error| FixtureError::NotReady(format!("{error:?}")))?;
+    let mut answered = 0usize;
+    while let Some(response) = stream.next().await.map_err(|error| FixtureError::NotReady(format!("{error:?}")))? {
+        response
+            .suceeded(QuerySuceededOpts::default())
+            .map_err(|error| FixtureError::NotReady(format!("a note in the batch was refused: {error:?}")))?;
+        answered += 1;
+    }
+    if answered != keys.len() {
+        return Err(FixtureError::NotReady(format!("{answered} of {} notes were answered", keys.len())));
+    }
+    Ok(())
+}
+
+/// The sealed segments a node's shards are still compacting, ascending
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `node` - The node
+fn compacting_of(cluster: &mut Cluster, node: usize) -> Result<Vec<u64>, FixtureError> {
+    let view = groups_of(cluster, node)?;
+    let mut generations: Vec<u64> = view["shards"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|shard| shard["compacting"].as_array().into_iter().flatten())
+        .filter_map(serde_json::Value::as_u64)
+        .collect();
+    generations.sort_unstable();
+    Ok(generations)
+}
+
 /// Wait until a note reads back with a text through a node, or say it never did
 ///
 /// # Arguments
@@ -3452,6 +3502,71 @@ async fn uncommitted_suffix_never_enters_checkpoint() -> Result<(), FixtureError
         }
         assert!(std::time::Instant::now() < deadline, "the segment never resolved: {compacted}");
         std::thread::sleep(Duration::from_millis(200));
+    }
+    Ok(())
+}
+
+
+/// A restart does not merge a segment below the checkpoint again (Resolved #104)
+///
+/// Five hundred notes at `v1` are sealed and compacted on every node, then the same five
+/// hundred at `v2`, and the group's checkpoint passes both. Node two is restarted: every sealed
+/// segment looks unhanded again, and before the fix the sweep handed both to the compactor,
+/// which merged the `v1` generation over archives already holding `v2`. In the window between
+/// the two merges the archive - and so anything read from it, and the digest - is `v1`. After
+/// the fix a frame at or below the checkpoint is never handed, so nothing is compacting after
+/// the sweep and the digest agrees with node zero's at once
+/// ([Resolved #104](../../docs/src/appendix/resolved/segments-recompacted-after-restart.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn restart_does_not_recompact_segments_below_the_checkpoint() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lane_links(true)
+        .start()
+        .await?;
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    let keys: Vec<u64> = (7000..7500).collect();
+    let (group, _) = group_of(&mut cluster, 0, "Note", keys[0])?;
+    // the first generation, sealed and compacted past on every node
+    write_notes_batch(&addr0, &keys, "v1").await?;
+    let first = write_note_token(&addr0, 7999, "v1").await?.expect("a committed write carries a token");
+    wait_checkpoint_past(&mut cluster, &[0, 1, 2], &group, first.index, Duration::from_secs(60))?;
+    // the second generation over the same keys, compacted past too
+    write_notes_batch(&addr0, &keys, "v2").await?;
+    let second = write_note_token(&addr0, 7999, "v2").await?.expect("a committed write carries a token");
+    wait_checkpoint_past(&mut cluster, &[0, 1, 2], &group, second.index, Duration::from_secs(60))?;
+    let expected = wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    // node two comes back with nothing resident and every sealed segment looking unhanded
+    cluster.restart(2, NodeKind::Server)?;
+    cluster.wait_joined(&[2])?;
+    let compacted = cluster.node_mut(2).command("COMPACT")?;
+    assert!(compacted["ok"][0]["handed"].as_u64().unwrap_or(0) >= 2, "the sealed segments were not judged: {compacted}");
+    let initial = compacting_of(&mut cluster, 2)?;
+    // before the fix: wait for the first merge to finish while a later one is still to come,
+    // which is the window in which the archive holds the older generation
+    if let Some(first_handed) = initial.first().copied() {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let now = compacting_of(&mut cluster, 2)?;
+            if now.is_empty() || !now.contains(&first_handed) {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "the first merge never finished: {now:?}");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+    let digest = digest_of(&mut cluster, 2, "Note")?;
+    assert_eq!(
+        (digest["rows"].clone(), digest["hash"].clone()),
+        (expected["rows"].clone(), expected["hash"].clone()),
+        "node two's archives no longer hold the state its checkpoint names: {digest} vs {expected}"
+    );
+    assert!(initial.is_empty(), "a segment below the checkpoint was handed to the compactor again: {initial:?}");
+    // and the node converges with the rest, as ever
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    for id in 0..3 {
+        assert_eq!(cluster.node(id).failure(), None, "node {id} died");
     }
     Ok(())
 }

@@ -341,10 +341,14 @@ where
 
     /// Hash a table's applied state, for a fixture comparing replicas
     ///
+    /// Reads the archived partitions beside the resident ones, so it is asynchronous
+    /// ([F43](../../../docs/src/features/node-recovery.md)).
+    ///
     /// # Arguments
     ///
     /// * `table` - The table
-    fn digest_table(&self, table: Self::TableNames) -> (u64, u64);
+    #[allow(async_fn_in_trait)]
+    async fn digest_table(&self, table: Self::TableNames) -> Result<(u64, u64), ServerError>;
 
     /// The table a stable identity names, if the schema has it
     ///

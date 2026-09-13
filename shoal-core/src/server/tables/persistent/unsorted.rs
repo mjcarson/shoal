@@ -1254,29 +1254,52 @@ where
     /// Hash the applied state, for a fixture comparing replicas at a common boundary
     ///
     /// Every live row, in partition order, hashed as its partition key and its archived bytes;
-    /// a resident copy and one still in its archive hash the same. Returns how many rows there
-    /// are and the hash.
-    #[must_use]
-    pub fn digest(&self) -> (u64, u64) {
+    /// a resident copy and one still in its archive hash the same. A partition that is not
+    /// resident is read from its archive, so a replica that holds nothing in memory - one just
+    /// restarted, or one that just installed a snapshot - hashes the same state as one that
+    /// applied every write itself ([F43](../../../../docs/src/features/node-recovery.md)); a
+    /// resident copy shadows the archived one, since it is the newer of the two. Returns how
+    /// many rows there are and the hash.
+    ///
+    /// # Errors
+    ///
+    /// Fails if an archived partition cannot be read.
+    pub async fn digest(&self) -> Result<(u64, u64), ServerError> {
+        // every key, resident or archived, in one order on every replica
         let mut keys: Vec<u64> = self.partitions.keys().copied().collect();
+        keys.extend(self.storage.archived_keys());
         keys.sort_unstable();
+        keys.dedup();
         let mut rows = 0u64;
         let mut acc = 0u64;
         for key in keys {
-            let Some(entry) = self.partitions.get(&key) else { continue };
             // a resident row as it is, an archived one read back
-            let bytes = match entry {
-                MaybeLoaded::Loaded { partition, .. } => match &partition.row {
+            let bytes = match self.partitions.get(&key) {
+                Some(MaybeLoaded::Loaded { partition, .. }) => match &partition.row {
                     MaybeRow::Row(row) => RkyvSupport::serialize(row),
                     MaybeRow::Tombstone => continue,
                 },
-                MaybeLoaded::Accessible(read) => match &read.archived().row {
+                Some(MaybeLoaded::Accessible(read)) => match &read.archived().row {
                     ArchivedMaybeRow::Row(row) => match <R as RkyvSupport>::deserialize(row) {
                         Ok(row) => RkyvSupport::serialize(&row),
                         Err(_) => continue,
                     },
                     ArchivedMaybeRow::Tombstone => continue,
                 },
+                // not resident: the archive's copy is the state
+                None => {
+                    let Some(read) = self.storage.load_partition_direct(key).await? else {
+                        continue;
+                    };
+                    let archived = <UnsortedPartition<R> as RkyvSupport>::access(&read)?;
+                    match &archived.row {
+                        ArchivedMaybeRow::Row(row) => match <R as RkyvSupport>::deserialize(row) {
+                            Ok(row) => RkyvSupport::serialize(&row),
+                            Err(_) => continue,
+                        },
+                        ArchivedMaybeRow::Tombstone => continue,
+                    }
+                }
             };
             rows += 1;
             let mut fold = Vec::with_capacity(16 + bytes.len());
@@ -1285,7 +1308,7 @@ where
             fold.extend_from_slice(&bytes);
             acc = gxhash::gxhash64(&fold, 0);
         }
-        (rows, acc)
+        Ok((rows, acc))
     }
 
     /// Mark partitions as evictable if they are no longer in the intent log
