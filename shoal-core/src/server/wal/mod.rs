@@ -562,7 +562,9 @@ impl WalInner {
             frame::Frame::Entry { group, entry } => {
                 // a replayed entry supersedes whatever the index held at that position
                 let log_id = entry.log_id();
-                let command = matches!(entry.payload, EntryPayload::Normal(_));
+                // a scrub is log alone, like a blank: it reaches no archive
+                // ([F44](../../../../docs/src/features/repair.md))
+                let command = matches!(&entry.payload, EntryPayload::Normal(command) if command.scrub_op().is_none());
                 self.index_entry(group, &log_id, command, loc);
             }
             frame::Frame::Vote { group, vote } => self.group(group).vote = Some(vote),
@@ -1735,7 +1737,8 @@ impl RaftLogStorage<DataConfig> for GroupStore {
                     let callback = (at == last).then(|| callback_slot.take()).flatten();
                     let loc = wal.stage(&encoded, self.group, callback)?;
                     let log_id = entry.log_id();
-                    let command = matches!(entry.payload, EntryPayload::Normal(_));
+                    // a scrub is log alone, like a blank: it reaches no archive
+                    let command = matches!(&entry.payload, EntryPayload::Normal(command) if command.scrub_op().is_none());
                     let mut inner = wal.inner.borrow_mut();
                     inner.index_entry(self.group, &log_id, command, loc);
                     inner.cache_entry(self.group, entry, encoded.len());

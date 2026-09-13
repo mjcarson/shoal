@@ -25,6 +25,7 @@ pub mod detector;
 pub mod listener;
 pub mod network;
 pub mod plane;
+pub mod repair;
 pub mod runtime;
 pub mod store;
 pub mod types;

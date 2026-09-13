@@ -37,6 +37,7 @@ use openraft::type_config::alias::{SnapshotMetaOf, SnapshotOf, StoredMembershipO
 use openraft::{OptionalSend, Snapshot, SnapshotMeta, StoredMembership};
 
 use super::digest::{DigestAnswer, KEPT_REPORTS};
+use crate::server::control::repair::Quarantine;
 use super::snapshot::SnapshotManifest;
 use super::types::{DataConfig, Remembered};
 use crate::server::database::ShoalDatabase;
@@ -104,6 +105,12 @@ pub struct MachineState {
     /// `Pending` from the apply until the cut's task posts, then the report; the leader polls
     /// these over the lane ([F44](../../../../docs/src/features/repair.md)).
     pub digests: VecDeque<(Uuid, DigestAnswer)>,
+    /// Why this replica's copy is quarantined, if it is
+    ///
+    /// While set the group's tablets serve no read through this shard; writes still propose,
+    /// since the log is checksummed and independent of the archives
+    /// ([F44](../../../../docs/src/features/repair.md)).
+    pub quarantined: Option<Quarantine>,
 }
 
 impl MachineState {
@@ -137,6 +144,7 @@ impl MachineState {
             installing: false,
             pending_install: None,
             digests: VecDeque::new(),
+            quarantined: None,
         }
     }
 

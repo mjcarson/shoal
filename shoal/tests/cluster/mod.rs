@@ -144,6 +144,10 @@ pub struct ClusterBuilder {
     segment_bytes: Option<u64>,
     /// The bound on sealed WAL bytes a slow member may pin, if lowered
     retained_bytes: Option<u64>,
+    /// How often every group a node leads is scrubbed on its own, if set
+    scrub_interval_ms: Option<u64>,
+    /// How long one scrub may take, if shortened
+    repair_timeout_ms: Option<u64>,
     /// How many bytes one snapshot chunk carries, if shrunk
     snapshot_chunk_bytes: Option<usize>,
     /// The bulk lane's queue bound, if shrunk
@@ -342,6 +346,27 @@ impl ClusterBuilder {
     #[must_use]
     pub fn checkpoint_entries(mut self, entries: u64) -> Self {
         self.checkpoint_entries = Some(entries);
+        self
+    }
+
+    /// Scrub every group a node leads on an interval, without an operator
+    /// ([F44](../../../docs/src/features/repair.md))
+    ///
+    /// # Arguments
+    ///
+    /// * `interval` - The interval
+    pub fn scrub_interval(mut self, interval: Duration) -> Self {
+        self.scrub_interval_ms = Some(interval.as_millis() as u64);
+        self
+    }
+
+    /// Shorten how long one scrub may take
+    ///
+    /// # Arguments
+    ///
+    /// * `timeout` - The deadline
+    pub fn repair_timeout(mut self, timeout: Duration) -> Self {
+        self.repair_timeout_ms = Some(timeout.as_millis() as u64);
         self
     }
 
@@ -676,6 +701,8 @@ impl Cluster {
             retained_entries: None,
             segment_bytes: None,
             retained_bytes: None,
+            scrub_interval_ms: None,
+            repair_timeout_ms: None,
             snapshot_chunk_bytes: None,
             bulk_queue_bytes: None,
             read_consistency: None,
@@ -1337,6 +1364,8 @@ fn build_membership_cluster(
             install_hold_ms: None,
             read_consistency: builder.read_consistency.clone(),
             query_deadline_ms: builder.query_deadline_ms,
+            scrub_interval_ms: builder.scrub_interval_ms,
+            repair_timeout_ms: builder.repair_timeout_ms,
         });
     }
     Ok(StagedPlan { per_node, reservations })

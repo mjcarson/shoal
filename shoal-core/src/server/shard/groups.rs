@@ -170,6 +170,14 @@ pub(super) struct Replication<D: ShoalDatabase> {
     pub(super) stopping: bool,
     /// Whether a segment sweep is wanted before the next message
     pub(super) sweep_due: bool,
+    /// The shard's WAL directory, where quarantine markers live
+    pub(super) wal_dir: PathBuf,
+    /// The quarantines found at open, applied to their groups as they are built
+    pub(super) quarantines: HashMap<GroupId, crate::server::control::repair::Quarantine>,
+    /// The group repairs this shard is driving right now, by operation and group
+    pub(super) driving: HashSet<(Uuid, GroupId)>,
+    /// When each group this shard leads is next due a scheduled scrub
+    pub(super) next_scrub: HashMap<GroupId, Instant>,
 }
 
 impl<D: ShoalDatabase> Shard<D>
@@ -238,6 +246,9 @@ where
         // is built, or cleaned up if the checkpoint passed it meanwhile
         // ([F43](../../../../docs/src/features/node-recovery.md))
         let pending_installs = super::snapshots::scan_pending(&installs, &checkpoint).await;
+        // a quarantine decided before a restart holds through it
+        // ([F44](../../../../docs/src/features/repair.md))
+        let quarantines = super::repair::scan_quarantine(&dir);
         let _ = setup;
         self.replication = Some(Replication {
             wal,
@@ -264,6 +275,10 @@ where
             last_report: None,
             stopping: false,
             sweep_due: false,
+            wal_dir: dir.clone(),
+            quarantines,
+            driving: HashSet::new(),
+            next_scrub: HashMap::new(),
         });
         self.rebuild_groups().await?;
         Ok(())
@@ -404,6 +419,11 @@ where
             // a received snapshot past the checkpoint, which openraft installs as it builds
             // the group ([F43](../../../../docs/src/features/node-recovery.md))
             machine_state.pending_install = replication.pending_installs.remove(&spec.id);
+            // a quarantine that outlived a restart
+            if let Some(quarantine) = replication.quarantines.remove(&spec.id) {
+                event!(Level::WARN, msg = "a copy is still quarantined from before the restart", group = %spec.id, reason = quarantine.reason.as_str());
+                machine_state.quarantined = Some(quarantine);
+            }
             let state = Rc::new(RefCell::new(machine_state));
             let machine = GroupMachine::new(spec.id, state.clone(), tx.clone());
             let group = Group {
@@ -474,6 +494,8 @@ where
                 for (meta, table, key, payload) in waiting {
                     self.propose_write(meta, table, key, payload).await?;
                 }
+                // a repair waiting on this group is driven once it is led
+                self.drive_repairs();
             }
             // a handle built for a group the map has since dropped
             (None, Ok(raft)) => {
@@ -986,6 +1008,30 @@ where
             self.handle_snapshot_rpc(origin, head, payload, reply);
             return;
         }
+        // a quarantine is the holding shard's to persist, on the loop, and answered once it is
+        // ([F44](../../../../docs/src/features/repair.md))
+        if head.kind == ReplicateKind::Quarantine {
+            match postcard::from_bytes::<crate::server::control::repair::QuarantineAction>(&payload) {
+                Ok(action) => {
+                    let tx = self.shard_local_tx.clone();
+                    glommio::spawn_local(async move {
+                        let (done_tx, done) = oneshot::channel();
+                        let _ = tx.send(ServerMsg::Quarantine { group, action, reply: Some(done_tx) }).await;
+                        let answer = match done.await {
+                            Ok(Ok(())) => encode_reply(head.id, &()),
+                            Ok(Err(error)) => ReplicateReply::error(head.id, error),
+                            Err(_) => ReplicateReply::error(head.id, "the quarantine was dropped".to_string()),
+                        };
+                        let _ = reply.send(answer).await;
+                    })
+                    .detach();
+                }
+                Err(error) => {
+                    let _ = reply.try_send(ReplicateReply::error(head.id, format!("decoding a quarantine: {error}")));
+                }
+            }
+            return;
+        }
         // a digest is answered from what the loop holds
         // ([F44](../../../../docs/src/features/repair.md))
         if head.kind == ReplicateKind::Digest {
@@ -1026,7 +1072,9 @@ where
                     Err(error) => ReplicateReply::error(head.id, format!("decoding a proposal: {error}")),
                 },
                 // a snapshot rpc and a digest are judged on the loop, so they are answered before this task
-                ReplicateKind::Snapshot | ReplicateKind::Digest => unreachable!("answered on the loop"),
+                ReplicateKind::Snapshot | ReplicateKind::Digest | ReplicateKind::Quarantine => {
+                    unreachable!("answered on the loop")
+                }
                 // a read barrier: confirm leadership with a heartbeat round and answer the
                 // read log id, or say who leads instead. A lapsed lease is answered by name
                 // rather than waited out, since its heartbeat round cannot complete
@@ -1445,6 +1493,7 @@ where
                     volatile: slot.store.is_volatile(),
                     up: slot.raft.is_some(),
                     installing: state.installing,
+                    quarantined: state.quarantined.map(|quarantine| quarantine.reason),
                 }
             })
             .collect::<Vec<_>>();

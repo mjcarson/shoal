@@ -493,6 +493,11 @@ impl<T: IntentReadSupport<R>, R: PartitionKeySupport, S: ShoalDatabase>
                         path.display()
                     )));
                 };
+                // a scrub entry carries no intent; the WAL's index never names one for
+                // compaction, and one that reached here is skipped rather than decoded
+                if command.scrub_op().is_some() {
+                    continue;
+                }
                 let (partition_key, intent) = T::partition_key_and_intent_checked(&command.payload)?;
                 self.changes.entry(partition_key).or_default().push(intent);
             }

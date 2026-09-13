@@ -33,8 +33,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::runtime::GlommioRuntime;
+use super::repair::{GroupRepair, QuarantinedCopy, RepairMode, RepairOutcome, RepairPhase, RepairRecord, KEPT_REPAIRS};
 use crate::server::conf::cluster::{BootstrapPolicy, Consistency};
-use crate::shared::identity::{ClusterId, NodeId, TableId};
+use crate::shared::identity::{ClusterId, GroupId, NodeId, TableId};
 
 declare_raft_types!(
     /// The control group's type configuration
@@ -157,6 +158,10 @@ pub struct MemberState {
     /// The shards that have failed on it, by index, as it last reported
     #[serde(default)]
     pub shards_failed: Vec<u16>,
+    /// The copies it holds that are quarantined, as it last reported
+    /// ([F44](../../../../docs/src/features/repair.md))
+    #[serde(default)]
+    pub quarantined: Vec<QuarantinedCopy>,
     /// The topology version its health last changed at
     #[serde(default)]
     pub since: u64,
@@ -271,6 +276,53 @@ pub enum ControlCommand {
         /// The level, or none to fall back to the cluster's default
         level: Option<Consistency>,
     },
+    /// Scrub a table's groups, judge the copies, and repair or release
+    /// ([F44](../../../../docs/src/features/repair.md))
+    Repair {
+        /// The identity of the operation
+        op: Uuid,
+        /// Who asked
+        principal: String,
+        /// The topology version the request was written against
+        expected_version: u64,
+        /// The table
+        table: TableId,
+        /// One tablet, or every tablet of the table
+        tablet: Option<u16>,
+        /// What was asked
+        mode: RepairMode,
+        /// The copy an operator named as trusted
+        source: Option<NodeId>,
+        /// Whether to lift the quarantines rather than judge
+        release: bool,
+    },
+    /// A group's driver says where its repair stands
+    ///
+    /// A node's proposal, not an operator's: it carries no operation id of its own and no
+    /// version, and moves the topology so every node's map carries the progress
+    /// ([F44](../../../../docs/src/features/repair.md)).
+    RepairProgress {
+        /// The operation
+        op: Uuid,
+        /// The group
+        group: GroupId,
+        /// The node driving it
+        node: NodeId,
+        /// The incarnation it drives at
+        incarnation: u64,
+        /// Where the group stands now
+        progress: GroupRepair,
+    },
+    /// A member says which of its copies are quarantined
+    /// ([F44](../../../../docs/src/features/repair.md))
+    ReportQuarantine {
+        /// The member
+        node: NodeId,
+        /// The incarnation it reported at
+        incarnation: u64,
+        /// Every quarantined copy it holds
+        copies: Vec<QuarantinedCopy>,
+    },
 }
 
 impl ControlCommand {
@@ -298,6 +350,12 @@ impl ControlCommand {
                 expected_version,
                 ..
             } => Some((*op, principal, "set_table_read_policy", *expected_version)),
+            ControlCommand::Repair {
+                op,
+                principal,
+                expected_version,
+                ..
+            } => Some((*op, principal, "repair", *expected_version)),
             _ => None,
         }
     }
@@ -322,6 +380,13 @@ impl fmt::Display for ControlCommand {
             ControlCommand::SetControlVoters { count, .. } => write!(f, "SetControlVoters({count})"),
             ControlCommand::SetTableReadPolicy { table, level, .. } => {
                 write!(f, "SetTableReadPolicy({table} {})", level.map_or("clear", |level| level.as_str()))
+            }
+            ControlCommand::Repair { op, table, mode, .. } => write!(f, "Repair({op} {table} {})", mode.as_str()),
+            ControlCommand::RepairProgress { op, group, progress, .. } => {
+                write!(f, "RepairProgress({op} {group} {:?})", progress.phase)
+            }
+            ControlCommand::ReportQuarantine { node, copies, .. } => {
+                write!(f, "ReportQuarantine({node} {} copies)", copies.len())
             }
         }
     }
@@ -415,6 +480,10 @@ pub struct ControlState {
     /// ([F41](../../../../docs/src/features/read-consistency.md)).
     #[serde(default)]
     pub table_read_policy: BTreeMap<TableId, Consistency>,
+    /// The repair operations, by identity, the newest `KEPT_REPAIRS` of them
+    /// ([F44](../../../../docs/src/features/repair.md))
+    #[serde(default)]
+    pub repairs: BTreeMap<Uuid, RepairRecord>,
 }
 
 impl ControlState {
@@ -509,6 +578,7 @@ impl ControlState {
                         health: MemberHealth::Up,
                         role,
                         shards_failed: Vec::new(),
+                        quarantined: Vec::new(),
                         since: self.topology_version,
                         episode: None,
                     },
@@ -706,6 +776,146 @@ impl ControlState {
                 self.topology_version += 1;
                 self.applied()
             }
+            // a repair: the record, with its groups derived from the placement as it stands
+            ControlCommand::Repair {
+                op,
+                principal,
+                expected_version,
+                table,
+                tablet,
+                mode,
+                source,
+                release,
+            } => {
+                if self.policy.is_none() || self.initialized.is_none() {
+                    return ControlResponse::Refused {
+                        reason: "no placement has been initialized to repair".to_string(),
+                    };
+                }
+                if !self.tables.iter().any(|(_, id)| id == table) {
+                    return ControlResponse::Refused {
+                        reason: format!("table {table} is not one the placement was initialized with"),
+                    };
+                }
+                if let Some(node) = source {
+                    if !self.members.contains_key(node) {
+                        return ControlResponse::Refused {
+                            reason: format!("{node} is not a member, so cannot be a source"),
+                        };
+                    }
+                }
+                if let Some(refusal) = self.check_version(*expected_version) {
+                    return refusal;
+                }
+                // the groups the placement derives for the table, or the one holding the tablet
+                let map = crate::server::map::TabletMap::from_state(self, None, &self.tables.clone());
+                let groups: BTreeMap<GroupId, GroupRepair> = map
+                    .groups_of(*table)
+                    .into_iter()
+                    .filter(|(_, _, tablets)| tablet.is_none_or(|wanted| tablets.contains(&wanted)))
+                    .map(|(id, _, _)| (id, GroupRepair::default()))
+                    .collect();
+                if groups.is_empty() {
+                    return ControlResponse::Refused {
+                        reason: match tablet {
+                            Some(tablet) => format!("no group of {table} serves tablet {tablet}"),
+                            None => format!("the placement derives no groups for {table}"),
+                        },
+                    };
+                }
+                self.topology_version += 1;
+                self.repairs.insert(
+                    *op,
+                    RepairRecord {
+                        op: *op,
+                        table: *table,
+                        tablet: *tablet,
+                        mode: *mode,
+                        source: *source,
+                        release: *release,
+                        principal: principal.clone(),
+                        requested_at: self.topology_version,
+                        groups,
+                    },
+                );
+                // forget the oldest once too many are kept
+                while self.repairs.len() > KEPT_REPAIRS {
+                    let oldest = self.repairs.values().min_by_key(|record| record.requested_at).map(|record| record.op);
+                    match oldest {
+                        Some(op) => {
+                            self.repairs.remove(&op);
+                        }
+                        None => break,
+                    }
+                }
+                self.applied()
+            }
+            // a driver's word on where a group stands
+            ControlCommand::RepairProgress {
+                op,
+                group,
+                node,
+                incarnation,
+                progress,
+            } => {
+                let Some(member) = self.members.get(node) else {
+                    return ControlResponse::Refused {
+                        reason: format!("{node} is not a member, so cannot drive a repair"),
+                    };
+                };
+                if *incarnation < member.record.incarnation {
+                    return ControlResponse::Fenced {
+                        node: *node,
+                        committed: member.record.incarnation,
+                        offered: *incarnation,
+                    };
+                }
+                let Some(record) = self.repairs.get_mut(op) else {
+                    return ControlResponse::Refused {
+                        reason: format!("no repair operation {op} is recorded"),
+                    };
+                };
+                let Some(current) = record.groups.get_mut(group) else {
+                    return ControlResponse::Refused {
+                        reason: format!("group {group} is not part of repair {op}"),
+                    };
+                };
+                // a group that is done stays done, whatever a late driver says
+                if current.is_done() {
+                    return self.applied();
+                }
+                if current == progress {
+                    return self.applied();
+                }
+                *current = progress.clone();
+                self.topology_version += 1;
+                self.applied()
+            }
+            // a member's quarantined copies
+            ControlCommand::ReportQuarantine {
+                node,
+                incarnation,
+                copies,
+            } => {
+                let Some(state) = self.members.get(node) else {
+                    return ControlResponse::Refused {
+                        reason: format!("{node} is not a member, so has no copies to report"),
+                    };
+                };
+                if *incarnation < state.record.incarnation {
+                    return ControlResponse::Fenced {
+                        node: *node,
+                        committed: state.record.incarnation,
+                        offered: *incarnation,
+                    };
+                }
+                if state.quarantined == *copies {
+                    return self.applied();
+                }
+                self.topology_version += 1;
+                self.members.get_mut(node).expect("checked above").quarantined = copies.clone();
+                self.applied()
+            }
         }
     }
 
@@ -738,6 +948,7 @@ impl ControlState {
                         health: MemberHealth::Joining,
                         role: MemberRole::Learner,
                         shards_failed: Vec::new(),
+                        quarantined: Vec::new(),
                         since: version,
                         episode: None,
                     },
@@ -863,6 +1074,7 @@ impl ControlState {
                             health: MemberHealth::Joining,
                             role,
                             shards_failed: Vec::new(),
+                            quarantined: Vec::new(),
                             since: self.topology_version + 1,
                             episode: None,
                         },

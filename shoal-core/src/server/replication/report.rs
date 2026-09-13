@@ -50,6 +50,9 @@ pub struct GroupReport {
     /// ([F43](../../../../docs/src/features/node-recovery.md))
     #[serde(default)]
     pub installing: bool,
+    /// Why this shard's copy is quarantined, if it is ([F44](../../../../docs/src/features/repair.md))
+    #[serde(default)]
+    pub quarantined: Option<crate::server::control::repair::QuarantineReason>,
 }
 
 /// What a shard's snapshots have done since it started
@@ -127,6 +130,9 @@ pub struct IntegrityStats {
     pub checksum_failures: u64,
     /// Archive records read from an archive with no checksums, which nothing could verify
     pub unverified_reads: u64,
+    /// Copies quarantined on this shard since it started, by a checksum failure or a verdict
+    #[serde(default)]
+    pub quarantined: u64,
     /// Groups built at open whose checkpoint or archives had no log behind them
     ///
     /// A durable member that lost its WAL: what it acknowledged is gone, and the leader feeds
@@ -154,6 +160,7 @@ impl IntegrityStats {
         self.checksum_failures += other.checksum_failures;
         self.unverified_reads += other.unverified_reads;
         self.log_lost += other.log_lost;
+        self.quarantined += other.quarantined;
         self.scrubs += other.scrubs;
         self.scrub_bytes += other.scrub_bytes;
         self.scrub_partitions += other.scrub_partitions;
@@ -349,6 +356,9 @@ pub struct NodeReplication {
     /// How many groups are installing a snapshot right now
     #[serde(default)]
     pub installing: usize,
+    /// How many of the node's copies are quarantined ([F44](../../../../docs/src/features/repair.md))
+    #[serde(default)]
+    pub quarantined: usize,
     /// What the node's storage has seen of its own integrity, folded over its shards
     /// ([F44](../../../../docs/src/features/repair.md))
     #[serde(default)]
@@ -384,6 +394,10 @@ impl NodeReplication {
             installing: shards
                 .iter()
                 .map(|shard| shard.groups.iter().filter(|group| group.installing).count())
+                .sum(),
+            quarantined: shards
+                .iter()
+                .map(|shard| shard.groups.iter().filter(|group| group.quarantined.is_some()).count())
                 .sum(),
             integrity: shards.iter().fold(IntegrityStats::default(), |mut folded, shard| {
                 folded.absorb(&shard.integrity);

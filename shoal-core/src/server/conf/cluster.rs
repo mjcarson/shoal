@@ -538,6 +538,56 @@ impl Default for Replication {
     }
 }
 
+/// The default deadline for one scrub of a group: every member's digest polled
+fn default_repair_timeout() -> DurationSpec {
+    DurationSpec(Duration::from_secs(300))
+}
+
+/// The default number of group repairs one shard drives at a time
+fn default_repair_concurrent() -> u32 {
+    1
+}
+
+/// The repair settings, which are this node's alone
+///
+/// A scrub is a cut of a group's rows at a committed boundary and a read of everything the
+/// group archived, so what it costs is the group's size on disk; the interval decides how often
+/// that is paid without an operator asking, and nothing here installs anything - a scheduled
+/// pass verifies and quarantines, and the destructive half is an operator's `Repair`
+/// ([F44](../../../../docs/src/features/repair.md), Q12).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Repair {
+    /// How often every group this node leads is scrubbed on its own, or never
+    ///
+    /// Absent or `null` is never, which is the default: the cost is the group's size on disk
+    /// per pass, and the measurement that would justify a default is the background arm's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scrub_interval: Option<DurationSpec>,
+    /// How long one scrub may take: the entry committed and every member's digest polled
+    ///
+    /// Has to be no shorter than `replication.write_timeout`, since the scrub entry is a write.
+    #[serde(default = "default_repair_timeout")]
+    pub timeout: DurationSpec,
+    /// How many group repairs one shard drives at a time
+    ///
+    /// A repair reads a group's archives whole, so two at once on one shard contend for the
+    /// same device; the rest of a record's groups wait their turn.
+    #[serde(default = "default_repair_concurrent")]
+    pub concurrent: u32,
+}
+
+impl Default for Repair {
+    /// The defaults the configuration page writes down: no scheduled scrub
+    fn default() -> Self {
+        Repair {
+            scrub_interval: None,
+            timeout: default_repair_timeout(),
+            concurrent: default_repair_concurrent(),
+        }
+    }
+}
+
 /// The replication policy a bootstrap seeds into the cluster
 ///
 /// Everything in the `cluster:` block that belongs to the cluster rather than to one node, in
@@ -658,6 +708,10 @@ pub struct Cluster {
     /// The tablet groups' timers and bounds, which are this node's alone
     #[serde(default)]
     pub replication: Replication,
+    /// The scrub and repair settings, which are this node's alone
+    /// ([F44](../../../../docs/src/features/repair.md))
+    #[serde(default)]
+    pub repair: Repair,
     /// Where this node dials particular members, keyed by their identity, when not where they advertise
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub dial: std::collections::BTreeMap<NodeId, DialOverride>,
@@ -686,6 +740,7 @@ impl Default for Cluster {
             tls: None,
             transport: Transport::default(),
             replication: Replication::default(),
+            repair: Repair::default(),
             dial: std::collections::BTreeMap::new(),
         }
     }
@@ -979,6 +1034,26 @@ impl Cluster {
                 "cluster.replication.snapshot_timeout is shorter than write_timeout".to_string(),
             )));
         }
+        // a scrub that gives up before a write would is one whose entry never commits under load
+        if self.repair.timeout.duration() < self.replication.write_timeout.duration() {
+            return Err(ServerError::Shoal(ShoalError::InvalidConfig(
+                "cluster.repair.timeout is shorter than replication.write_timeout".to_string(),
+            )));
+        }
+        // a scrub interval under its own timeout would queue passes faster than they finish
+        if let Some(interval) = &self.repair.scrub_interval {
+            if interval.duration() < self.repair.timeout.duration() {
+                return Err(ServerError::Shoal(ShoalError::InvalidConfig(
+                    "cluster.repair.scrub_interval is shorter than repair.timeout".to_string(),
+                )));
+            }
+        }
+        // no repairs at a time is no repairs at all
+        if self.repair.concurrent == 0 {
+            return Err(ServerError::Shoal(ShoalError::InvalidConfig(
+                "cluster.repair.concurrent is zero; at least one group repair has to be driven at a time".to_string(),
+            )));
+        }
         // the retention budget has to hold the active segment and one sealed one, or every
         // sweep forces a snapshot
         if self.replication.retained_bytes < 2 * self.replication.segment_bytes {
@@ -1173,6 +1248,51 @@ mod tests {
             .validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES)
             .expect_err("a retention budget under two segments was accepted");
         assert!(format!("{error}").contains("retained_bytes"), "{error}");
+        // the repair settings have bounds of their own ([F44](../../../../docs/src/features/repair.md))
+        let mut short_scrub = Cluster::default().bootstrap(true);
+        short_scrub.repair.timeout = DurationSpec(Duration::from_secs(1));
+        let error = short_scrub
+            .validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES)
+            .expect_err("a repair timeout under the write timeout was accepted");
+        assert!(format!("{error}").contains("repair.timeout"), "{error}");
+        let mut tight_interval = Cluster::default().bootstrap(true);
+        tight_interval.repair.scrub_interval = Some(DurationSpec(Duration::from_secs(60)));
+        let error = tight_interval
+            .validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES)
+            .expect_err("a scrub interval under the repair timeout was accepted");
+        assert!(format!("{error}").contains("scrub_interval"), "{error}");
+        let mut none_at_once = Cluster::default().bootstrap(true);
+        none_at_once.repair.concurrent = 0;
+        let error = none_at_once
+            .validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES)
+            .expect_err("no repairs at a time was accepted");
+        assert!(format!("{error}").contains("repair.concurrent"), "{error}");
+        let mut scheduled = Cluster::default().bootstrap(true);
+        scheduled.repair.scrub_interval = Some(DurationSpec(Duration::from_secs(3600)));
+        scheduled
+            .validate("127.0.0.1", crate::shared::protocol::DEFAULT_MAX_FRAME_BYTES)
+            .expect("an hourly scrub was refused");
+    }
+
+    /// The repair block's defaults are the documented ones, and every field parses
+    #[test]
+    fn the_repair_block_parses_with_its_defaults() {
+        let defaults = super::Repair::default();
+        assert_eq!(defaults.scrub_interval, None, "a scheduled scrub is off by default");
+        assert_eq!(defaults.timeout.duration(), Duration::from_secs(300));
+        assert_eq!(defaults.concurrent, 1);
+        // a block naming every field
+        let parsed: super::Repair = serde_yaml::from_str("scrub_interval: \"6h\"\ntimeout: \"2m\"\nconcurrent: 2\n")
+            .expect("a full repair block parses");
+        assert_eq!(parsed.scrub_interval.map(|spec| spec.duration()), Some(Duration::from_secs(6 * 3600)));
+        assert_eq!(parsed.timeout.duration(), Duration::from_secs(120));
+        assert_eq!(parsed.concurrent, 2);
+        // an explicit null is never, an empty block is the defaults, an unknown field is refused
+        let never: super::Repair = serde_yaml::from_str("scrub_interval: null\n").expect("null parses");
+        assert_eq!(never.scrub_interval, None);
+        let empty: super::Repair = serde_yaml::from_str("{}").expect("an empty block parses");
+        assert_eq!(empty, defaults);
+        assert!(serde_yaml::from_str::<super::Repair>("install: true\n").is_err());
     }
 
     /// The replication block's defaults are the documented ones, and every field parses

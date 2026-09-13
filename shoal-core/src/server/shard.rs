@@ -1516,6 +1516,9 @@ where
         // the groups this shard hosts follow the placement
         // ([F40](../../../docs/src/features/replication.md))
         self.rebuild_groups().await?;
+        // a repair the map carries is driven by whoever leads its groups
+        // ([F44](../../../docs/src/features/repair.md))
+        self.drive_repairs();
         // every subscribed client hears of it; the relay folds a run of them to the newest
         self.push_topology(&map);
         Ok(())
@@ -2681,6 +2684,16 @@ where
                 );
                 return self.answer_read_failure(meta, query, span, gathered_meta, error).await;
             }
+            // a tablet whose copy is quarantined serves no read either: the copy is not to be
+            // trusted until a verified repair or an operator lifts it
+            // ([F44](../../../docs/src/features/repair.md))
+            if let Some((group, reason)) = self.quarantined_group(&query) {
+                let error = crate::shared::responses::ResponseError::new(
+                    ErrorCode::Quarantined,
+                    format!("this node's copy of group {group} is quarantined ({}); read it through another replica", reason.as_str()),
+                );
+                return self.answer_read_failure(meta, query, span, gathered_meta, error).await;
+            }
         }
         // try to handle this query
         if let Some((addr, query_id, mut stamps, answer)) = self.tables.handle(meta, query).await {
@@ -3008,6 +3021,9 @@ where
                 self.sweep_gathers().await?;
                 self.sweep_deadlines().await?;
                 self.maybe_report_replication();
+                // a repair a group this shard now leads is waiting on, and a scrub that is due
+                self.drive_repairs();
+                self.schedule_scrubs();
             }
         }
         Ok(())
@@ -3547,6 +3563,12 @@ where
                     error,
                 } => {
                     let failed = error.is_some();
+                    // a record that failed its checksum quarantines the copy it belongs to,
+                    // before the queries parked on it hear why
+                    // ([F44](../../../docs/src/features/repair.md))
+                    if error.as_ref().is_some_and(|error| error.code == ErrorCode::CorruptArchive.as_u16()) {
+                        self.quarantine_for_checksum(table, partition_id).await;
+                    }
                     self.tables
                         .fail_partition(
                             table,
@@ -3644,6 +3666,8 @@ where
                 ServerMsg::SnapshotRecords { group, outcome } => self.handle_snapshot_records(group, outcome).await?,
                 ServerMsg::SnapshotCleaned { group, outcome } => self.handle_snapshot_cleaned(group, outcome),
                 ServerMsg::Digested { group, op, outcome } => self.handle_digested(group, op, outcome),
+                ServerMsg::Quarantine { group, action, reply } => self.handle_quarantine(group, action, reply).await,
+                ServerMsg::RepairDone { op, group } => self.handle_repair_done(op, group),
                 ServerMsg::SnapshotBytes { node, stream, offset, bytes } => {
                     self.handle_snapshot_bytes(node, stream, offset, bytes);
                 }

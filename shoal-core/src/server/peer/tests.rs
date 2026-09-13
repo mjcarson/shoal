@@ -49,6 +49,7 @@ fn two_nodes(cluster: ClusterId, a: NodeId, b: NodeId) -> MapCell {
         health: MemberHealth::Up,
         incarnation: 1,
         shards_failed: Vec::new(),
+        quarantined: Vec::new(),
     };
     let map = TabletMap {
         version: 1,

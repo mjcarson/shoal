@@ -212,4 +212,8 @@ pub struct StatusReport {
     /// The peers this node can currently reach over its control lane, with the round trip in
     /// microseconds, as a local observation and nothing more
     pub reachability: Vec<(NodeId, u32)>,
+    /// The copies this node holds that are quarantined, which the leader commits on change
+    /// ([F44](../../../../../docs/src/features/repair.md))
+    #[serde(default)]
+    pub quarantined: Vec<super::super::admin::QuarantinedMember>,
 }

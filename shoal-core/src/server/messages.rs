@@ -731,6 +731,23 @@ where
         /// The report, or why there is none
         outcome: Result<crate::server::replication::DigestReport, String>,
     },
+    /// Quarantine a copy this shard holds, or lift it, and answer once the marker is durable
+    /// ([F44](../../../docs/src/features/repair.md))
+    Quarantine {
+        /// The group
+        group: crate::shared::identity::GroupId,
+        /// What to do
+        action: crate::server::control::repair::QuarantineAction,
+        /// Where to say it is done, if anybody waits
+        reply: Option<futures_channel::oneshot::Sender<Result<(), String>>>,
+    },
+    /// A repair driver finished with a group, for whatever reason
+    RepairDone {
+        /// The operation
+        op: Uuid,
+        /// The group
+        group: crate::shared::identity::GroupId,
+    },
     /// A snapshot install's marker and file are gone, so the install is complete
     SnapshotCleaned {
         /// The group
@@ -866,6 +883,8 @@ impl<D: ShoalDatabase> Clone for ServerMsg<D> {
             ServerMsg::SnapshotRecords { .. } => panic!("A snapshot's records are the installing shard's"),
             ServerMsg::SnapshotCleaned { .. } => panic!("A cleaned install is the installing shard's"),
             ServerMsg::Digested { .. } => panic!("A digest is the scrubbing shard's"),
+            ServerMsg::Quarantine { .. } => panic!("A quarantine is the holding shard's"),
+            ServerMsg::RepairDone { .. } => panic!("A repair driver is one shard's"),
             ServerMsg::SnapshotBuilt { .. } => panic!("A built snapshot is the cutting shard's"),
             ServerMsg::ReplicationView(_) => panic!("A replication view is asked of one shard"),
             ServerMsg::ReplicationVerb { .. } => panic!("A replication verb is for one shard"),

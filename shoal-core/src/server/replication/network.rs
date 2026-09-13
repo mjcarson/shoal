@@ -554,6 +554,21 @@ impl ShardPeer {
         self.rpc(ReplicateKind::Digest, group, op.into_bytes().to_vec(), deadline).await
     }
 
+    /// Tell the member what to do with its copy's quarantine
+    ///
+    /// # Arguments
+    ///
+    /// * `group` - The group
+    /// * `action` - The action, serialized
+    /// * `deadline` - How long to wait
+    ///
+    /// # Errors
+    ///
+    /// Says whether the peer refused it or could not be reached.
+    pub async fn quarantine(&self, group: GroupId, action: Vec<u8>, deadline: Duration) -> Result<Vec<u8>, RpcFailure> {
+        self.rpc(ReplicateKind::Quarantine, group, action, deadline).await
+    }
+
     /// Turn a link error into openraft's retriable unreachable
     ///
     /// # Arguments

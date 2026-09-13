@@ -1164,6 +1164,13 @@ async fn cluster_server_child() {
             if let Some(bytes) = staged.bulk_queue_bytes {
                 block.transport.bulk_queue_bytes = bytes;
             }
+            // the scrub schedule and deadline ([F44](../../docs/src/features/repair.md))
+            if let Some(ms) = staged.repair_timeout_ms {
+                block.repair.timeout = Duration::from_millis(ms).into();
+            }
+            if let Some(ms) = staged.scrub_interval_ms {
+                block.repair.scrub_interval = Some(Duration::from_millis(ms).into());
+            }
             // the default read level, which every bundle without an override inherits
             // ([F41](../../docs/src/features/read-consistency.md))
             if let Some(level) = &staged.read_consistency {
@@ -1613,6 +1620,53 @@ fn handle_command(
                     })
             }
             None => Err("SNAPSHOT needs a group id in hex".to_string()),
+        },
+        // ask for a repair as the process, with the request's kind as JSON, and answer the
+        // operation it was recorded under ([F44](../../docs/src/features/repair.md))
+        "REPAIR" => {
+            let json = line.trim_start_matches("REPAIR").trim();
+            match serde_json::from_str::<AdminKind>(json) {
+                Ok(kind) => {
+                    let op = uuid::Uuid::new_v4();
+                    let mut last = String::new();
+                    let mut answer = None;
+                    for _ in 0..8 {
+                        let version = pool.topology().map(|topology| topology.version).unwrap_or(0);
+                        match pool.admin(AdminRequest { op, expected_version: version, kind: kind.clone() }) {
+                            Ok(response) => match response.outcome {
+                                Ok(shoal::shared::protocol::admin::AdminOutcome::Applied { version })
+                                | Ok(shoal::shared::protocol::admin::AdminOutcome::Repeated { version }) => {
+                                    answer = Some(Ok(serde_json::json!({ "op": op.to_string(), "version": version })));
+                                    break;
+                                }
+                                Ok(other) => {
+                                    answer = Some(Err(format!("REPAIR answered {other:?}")));
+                                    break;
+                                }
+                                Err(error) if error.code() == shoal::shared::protocol::error::ErrorCode::StaleVersion => {
+                                    last = format!("{}: {}", error.code(), error.msg);
+                                    std::thread::sleep(Duration::from_millis(100));
+                                }
+                                Err(error) => {
+                                    answer = Some(Err(format!("{}: {}", error.code(), error.msg)));
+                                    break;
+                                }
+                            },
+                            Err(error) => {
+                                answer = Some(Err(format!("{error:?}")));
+                                break;
+                            }
+                        }
+                    }
+                    answer.unwrap_or(Err(last))
+                }
+                Err(error) => Err(format!("REPAIR: {error}")),
+            }
+        }
+        // the record of a repair, by its operation
+        "REPAIR_STATUS" => match parts.next().and_then(|text| text.parse::<uuid::Uuid>().ok()) {
+            Some(op) => admin(AdminKind::RepairStatus { op }),
+            None => Err("REPAIR_STATUS needs an operation id".to_string()),
         },
         // propose a scrub of a group through this node, which has to lead it, and poll every
         // member's digest ([F44](../../docs/src/features/repair.md))
@@ -4386,6 +4440,19 @@ async fn canonical_digest_ignores_archive_layout_at_same_boundary() -> Result<()
     let clean = reports[0].1["digest"].clone();
     let rows = reports[0].1["rows"].as_u64().unwrap_or(0);
     assert!(rows > 0, "the group holds rows: {scrub}");
+    // the same through the admin frame: a verify of the whole table is clean on every group
+    let verify = |tablet: Option<u16>, release: bool| shoal::server::AdminKind::Repair {
+        table: "Note".to_string(),
+        tablet,
+        mode: "verify".to_string(),
+        source: None,
+        release,
+    };
+    let op = repair_as_process(&mut cluster, 0, &verify(None, false))?;
+    let record = wait_repair_done_via(&mut cluster, 0, op, Duration::from_secs(60))?;
+    for (id, progress) in record["groups"].as_object().expect("groups") {
+        assert!(progress["outcome"]["Clean"].is_object(), "group {id} is not clean: {progress}");
+    }
     // three live keys of the group: the first twenty of every round were deleted or rewritten,
     // so the live ones are chosen from past them
     let live: Vec<u64> = keys_in_group(&mut cluster, "Note", &group, 23_020, 12)?
@@ -4409,6 +4476,38 @@ async fn canonical_digest_ignores_archive_layout_at_same_boundary() -> Result<()
     let after_forget = digest_of(&mut cluster, 1, "Note")?;
     assert_ne!(after_forget["hash"], independent["hash"]);
     assert_eq!(digest_of(&mut cluster, 0, "Note")?["hash"], independent["hash"]);
+    // a verify of that tablet judges node one divergent and quarantines its copy
+    let tablet = tablet_of(forgotten) as u16;
+    let op = repair_as_process(&mut cluster, 0, &verify(Some(tablet), false))?;
+    let record = wait_repair_done_via(&mut cluster, 0, op, Duration::from_secs(60))?;
+    let group_id = u64::from_str_radix(&group, 16).expect("a group id");
+    let progress = &record["groups"][group_id.to_string()];
+    let quarantined = &progress["outcome"]["Divergent"]["quarantined"];
+    assert_eq!(quarantined.as_array().map_or(0, Vec::len), 1, "the forgotten copy was not quarantined: {record}");
+    assert_eq!(quarantined[0][0]["node"], cluster.node_ids()[1], "{record}");
+    assert_eq!(quarantined[0][1], "Divergent", "{record}");
+    // the node reports it and readiness counts it
+    let one = groups_of(&mut cluster, 1)?;
+    assert_eq!(one["quarantined"], 1, "{one}");
+    assert!(one["integrity"]["quarantined"].as_u64().unwrap_or(0) >= 1, "{}", one["integrity"]);
+    // the copy reaches the committed state through the node's report, a tick or two later,
+    // and the frame every client is handed names it
+    let member = wait_member_quarantined(&mut cluster, 1, true, Duration::from_secs(20))?;
+    assert_eq!(member["quarantined"][0]["group"], group_id, "{member}");
+    assert_eq!(member["quarantined"][0]["reason"], "Divergent", "{member}");
+    // a read of the group through node one is routed to another holder and served from
+    // there, never from the quarantined copy; the local refusal is the backstop for the
+    // window before the map carries the quarantine
+    let addr1 = cluster.node(1).endpoints.client.to_string();
+    wait_note_routed(&addr1, erased, &format!("note-{erased}"), Duration::from_secs(20)).await?;
+    assert_eq!(groups_of(&mut cluster, 1)?["quarantined"], 1);
+    // an operator releases it after reading the record, and it serves again
+    let op = repair_as_process(&mut cluster, 0, &verify(Some(tablet), true))?;
+    let record = wait_repair_done_via(&mut cluster, 0, op, Duration::from_secs(60))?;
+    assert_eq!(record["groups"][group_id.to_string()]["outcome"], "Released", "{record}");
+    wait_note(&addr1, erased, Some(&format!("note-{erased}")), Duration::from_secs(10)).await?;
+    assert_eq!(groups_of(&mut cluster, 1)?["quarantined"], 0);
+    wait_member_quarantined(&mut cluster, 1, false, Duration::from_secs(20))?;
     // erase a partition on node zero: a valid record whose content changed
     let answer = cluster.node_mut(0).command(&format!("ERASE Note {:016x}", hashed(erased)))?;
     assert_eq!(answer["ok"]["fault"], "erase", "{answer}");
@@ -4426,20 +4525,412 @@ async fn canonical_digest_ignores_archive_layout_at_same_boundary() -> Result<()
     let reports = reports_by_node(&cluster, &scrub);
     assert_eq!(reports[1].1["integrity"]["Invalid"]["checksum_failures"], 1, "the corrupt record was not found: {scrub}");
     assert_eq!(reports[2].1["digest"], clean, "node two changed without cause: {scrub}");
-    // and a read of that key through node one is refused by name, not answered from bad bytes
-    let addr1 = cluster.node(1).endpoints.client.to_string();
+    // and a read of that key through node one is refused by name, not answered from bad
+    // bytes: the read that met the record answers with the checksum, or - when the gather
+    // tried the share again after the failure - with the quarantine that failure decided
     let read = read_note(&addr1, corrupted).await;
-    assert_eq!(
-        failure_code(&read),
-        Some(shoal::shared::protocol::error::ErrorCode::CorruptArchive),
+    assert!(
+        matches!(
+            failure_code(&read),
+            Some(shoal::shared::protocol::error::ErrorCode::CorruptArchive | shoal::shared::protocol::error::ErrorCode::Quarantined)
+        ),
         "the corrupt record was served: {read:?}"
     );
-    // the integrity counters say what happened on each node
+    // the read that met it quarantined the copy on the spot: the next read, inside the
+    // window before the map carries the quarantine, is refused for that by name
+    let again = read_note(&addr1, corrupted).await;
+    assert_eq!(failure_code(&again), Some(shoal::shared::protocol::error::ErrorCode::Quarantined), "{again:?}");
     let one = groups_of(&mut cluster, 1)?;
+    assert_eq!(one["quarantined"], 1, "{one}");
+    // the integrity counters say what happened on the node, before a restart resets them
     assert!(one["integrity"]["checksum_failures"].as_u64().unwrap_or(0) >= 1, "{}", one["integrity"]);
     assert!(one["integrity"]["scrubs"].as_u64().unwrap_or(0) >= 4, "{}", one["integrity"]);
+    assert!(one["integrity"]["quarantined"].as_u64().unwrap_or(0) >= 2, "{}", one["integrity"]);
+    // once the map carries it, a read through node one is served from another holder
+    wait_member_quarantined(&mut cluster, 1, true, Duration::from_secs(20))?;
+    wait_note_routed(&addr1, corrupted, &format!("note-{corrupted}"), Duration::from_secs(20)).await?;
+    // and the marker outlives a restart: node one comes back with the copy still quarantined
+    cluster.restart(1, NodeKind::Server)?;
+    cluster.wait_joined(&[1])?;
+    let addr1 = cluster.node(1).endpoints.client.to_string();
+    wait_note_routed(&addr1, corrupted, &format!("note-{corrupted}"), Duration::from_secs(20)).await?;
+    assert_eq!(groups_of(&mut cluster, 1)?["quarantined"], 1, "the quarantine did not outlive the restart");
     for id in 0..3 {
         assert_eq!(cluster.node(id).failure(), None, "node {id} died");
+    }
+    Ok(())
+}
+
+/// Wait until the committed state does, or does not, name a member's copies as quarantined
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `node` - The member
+/// * `some` - Whether to wait for at least one quarantined copy, or for none
+/// * `within` - How long to wait
+fn wait_member_quarantined(cluster: &mut Cluster, node: usize, some: bool, within: Duration) -> Result<serde_json::Value, FixtureError> {
+    let deadline = std::time::Instant::now() + within;
+    let id = cluster.node_ids()[node].clone();
+    loop {
+        let members = cluster.members(0)?;
+        let member = members["members"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|member| member["record"]["node"] == id)
+            .cloned()
+            .unwrap_or_default();
+        let has = member["quarantined"].as_array().is_some_and(|copies| !copies.is_empty());
+        if has == some {
+            return Ok(member);
+        }
+        if std::time::Instant::now() > deadline {
+            return Err(FixtureError::NotReady(format!("node {node}'s committed quarantines never became {some}: {member}")));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// Wait until a note reads through a node, treating a quarantine refusal as not yet
+///
+/// A read through a node holding a quarantined copy is refused by name until the map carries
+/// the quarantine and the node routes the read elsewhere
+/// ([F44](../../docs/src/features/repair.md)).
+///
+/// # Arguments
+///
+/// * `addr` - The endpoint
+/// * `key` - The key
+/// * `expected` - The text expected
+/// * `within` - How long to wait
+async fn wait_note_routed(addr: &str, key: u64, expected: &str, within: Duration) -> Result<(), FixtureError> {
+    let deadline = std::time::Instant::now() + within;
+    loop {
+        let read = read_note(addr, key).await;
+        match read {
+            Ok(Some(text)) if text == expected => return Ok(()),
+            Err(shoal::client::Errors::Server { code: shoal::shared::protocol::error::ErrorCode::Quarantined, .. }) | Ok(_) => {}
+            Err(error) => return Err(FixtureError::NotReady(format!("{error:?}"))),
+        }
+        if std::time::Instant::now() > deadline {
+            return Err(FixtureError::NotReady(format!("note {key} through {addr} never read as {expected:?}: {read:?}")));
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// Ask for a repair as the process through a node, and hand back the operation
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `node` - The node to ask
+/// * `kind` - The request
+fn repair_as_process(cluster: &mut Cluster, node: usize, kind: &shoal::server::AdminKind) -> Result<uuid::Uuid, FixtureError> {
+    let json = serde_json::to_string(kind).expect("a kind serializes");
+    let reply = cluster.node_mut(node).command(&format!("REPAIR {json}"))?;
+    reply["ok"]["op"]
+        .as_str()
+        .and_then(|op| op.parse().ok())
+        .ok_or_else(|| FixtureError::NotReady(format!("the repair was not recorded: {reply}")))
+}
+
+/// Wait until every group of a repair is done, asking a node as the process
+///
+/// # Arguments
+///
+/// * `cluster` - The cluster
+/// * `node` - The node to ask
+/// * `op` - The operation
+/// * `within` - How long to wait
+fn wait_repair_done_via(cluster: &mut Cluster, node: usize, op: uuid::Uuid, within: Duration) -> Result<serde_json::Value, FixtureError> {
+    let deadline = std::time::Instant::now() + within;
+    loop {
+        let record = cluster.node_mut(node).command(&format!("REPAIR_STATUS {op}"))?["ok"].clone();
+        let done = record["groups"]
+            .as_object()
+            .is_some_and(|groups| !groups.is_empty() && groups.values().all(|group| group["phase"] == "Done"));
+        if done {
+            return Ok(record);
+        }
+        if std::time::Instant::now() > deadline {
+            return Err(FixtureError::NotReady(format!("repair {op} never finished: {record}")));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// Ask a node for a repair's record, as the control state holds it
+///
+/// # Arguments
+///
+/// * `client` - A client on the node to ask
+/// * `op` - The operation
+async fn repair_status(client: &Shoal<TestDbClient>, op: uuid::Uuid) -> Result<serde_json::Value, FixtureError> {
+    use shoal::server::{AdminKind, AdminRequest};
+    use shoal::shared::protocol::admin::AdminOutcome;
+    let response = client
+        .admin(&AdminRequest {
+            op: uuid::Uuid::new_v4(),
+            expected_version: 0,
+            kind: AdminKind::RepairStatus { op },
+        })
+        .await
+        .map_err(|error| FixtureError::NotReady(format!("{error:?}")))?;
+    match response.outcome {
+        Ok(AdminOutcome::Read(value)) => Ok(value),
+        other => Err(FixtureError::NotReady(format!("no record of {op}: {other:?}"))),
+    }
+}
+
+/// Wait until every group of a repair is done, and hand back the record
+///
+/// # Arguments
+///
+/// * `client` - A client on the node to ask
+/// * `op` - The operation
+/// * `within` - How long to wait
+async fn wait_repair_done(client: &Shoal<TestDbClient>, op: uuid::Uuid, within: Duration) -> Result<serde_json::Value, FixtureError> {
+    let deadline = std::time::Instant::now() + within;
+    loop {
+        let record = repair_status(client, op).await?;
+        let done = record["groups"]
+            .as_object()
+            .is_some_and(|groups| !groups.is_empty() && groups.values().all(|group| group["phase"] == "Done"));
+        if done {
+            return Ok(record);
+        }
+        if std::time::Instant::now() > deadline {
+            return Err(FixtureError::NotReady(format!("repair {op} never finished: {record}")));
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// Ask for a repair through a client, retrying only a stale version, and hand back the operation
+///
+/// # Arguments
+///
+/// * `client` - A client on the node to ask, whose principal has to be an admin
+/// * `cluster` - The cluster, for the version
+/// * `kind` - The request
+async fn ask_repair(
+    client: &Shoal<TestDbClient>,
+    cluster: &mut Cluster,
+    kind: shoal::server::AdminKind,
+) -> Result<uuid::Uuid, FixtureError> {
+    use shoal::server::AdminRequest;
+    use shoal::shared::protocol::admin::AdminOutcome;
+    use shoal::shared::protocol::error::ErrorCode;
+    let op = uuid::Uuid::new_v4();
+    for _ in 0..10 {
+        let version = cluster.members(0)?["version"].as_u64().expect("a version");
+        let response = client
+            .admin(&AdminRequest { op, expected_version: version, kind: kind.clone() })
+            .await
+            .map_err(|error| FixtureError::NotReady(format!("{error:?}")))?;
+        match response.outcome {
+            Ok(AdminOutcome::Applied { .. } | AdminOutcome::Repeated { .. }) => return Ok(op),
+            Err(error) if error.code() == ErrorCode::StaleVersion => tokio::time::sleep(Duration::from_millis(200)).await,
+            other => return Err(FixtureError::NotReady(format!("the repair was not applied: {other:?}"))),
+        }
+    }
+    Err(FixtureError::NotReady("the cluster's version kept moving under the repair request".to_string()))
+}
+
+/// A repair is authorized, versioned, idempotent and readable by its id from any node (C9 M8)
+///
+/// A user who is not an admin is refused, a stale version is refused, the same operation sent
+/// again is answered as the first time, and the record is readable through every node until
+/// every group of the table is done and clean. A second operation is asked for and the control
+/// leader killed while its groups scrub: the drivers wait out the election, commit their
+/// progress to the new leader, and the record completes through a survivor
+/// ([F44](../../docs/src/features/repair.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn repair_is_authorized_versioned_and_resumable_by_id() -> Result<(), FixtureError> {
+    use shoal::server::{AdminKind, AdminRequest};
+    use shoal::shared::auth::Credentials;
+    use shoal::shared::protocol::admin::AdminOutcome;
+    use shoal::shared::protocol::error::ErrorCode;
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lane_links(true)
+        .auth("alice", "alpha")
+        .auth("bob", "bravo")
+        .admins(vec!["alice".to_string()])
+        .checkpoint_entries(8)
+        .retained_entries(64)
+        .write_timeout(Duration::from_secs(3))
+        .repair_timeout(Duration::from_secs(20))
+        .query_deadline(Duration::from_secs(3))
+        .start()
+        .await?;
+    cluster.wait_voters(0, 3)?;
+    let ok = |error: shoal::client::Errors| FixtureError::NotReady(format!("{error:?}"));
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    let alice = Shoal::<TestDbClient>::with_credentials(&addr0, Credentials::scram("alice", "alpha")).await.map_err(ok)?;
+    let bob = Shoal::<TestDbClient>::with_credentials(&addr0, Credentials::scram("bob", "bravo")).await.map_err(ok)?;
+    // rows on every node, compacted everywhere so the scrub has archives to read
+    for key in 25_000..25_040u64 {
+        alice.send_one(Note { key, text: format!("note-{key}") }).await.map_err(ok)?;
+    }
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    for node in 0..3 {
+        compact_now(&mut cluster, node, "Note")?;
+    }
+    let verify = AdminKind::Repair {
+        table: "Note".to_string(),
+        tablet: None,
+        mode: "verify".to_string(),
+        source: None,
+        release: false,
+    };
+    let version = cluster.members(0)?["version"].as_u64().expect("a version");
+    let op = uuid::Uuid::new_v4();
+    // not an admin: refused by name
+    let refused = bob
+        .admin(&AdminRequest { op, expected_version: version, kind: verify.clone() })
+        .await
+        .map_err(ok)?;
+    assert_eq!(refused.outcome.as_ref().expect_err("bob was allowed").code(), ErrorCode::Unauthorized, "{refused:?}");
+    // a stale version: refused by name
+    let stale = alice
+        .admin(&AdminRequest { op, expected_version: version + 7, kind: verify.clone() })
+        .await
+        .map_err(ok)?;
+    assert_eq!(stale.outcome.as_ref().expect_err("a stale version was applied").code(), ErrorCode::StaleVersion, "{stale:?}");
+    // the right one: applied, and the same request again is the same answer
+    let mut applied = None;
+    for _ in 0..10 {
+        let version = cluster.members(0)?["version"].as_u64().expect("a version");
+        let answer = alice
+            .admin(&AdminRequest { op, expected_version: version, kind: verify.clone() })
+            .await
+            .map_err(ok)?;
+        match answer.outcome {
+            Ok(AdminOutcome::Applied { version }) => {
+                applied = Some(version);
+                break;
+            }
+            Err(error) if error.code() == ErrorCode::StaleVersion => tokio::time::sleep(Duration::from_millis(200)).await,
+            other => panic!("the repair was not applied: {other:?}"),
+        }
+    }
+    let applied = applied.expect("the repair never applied");
+    let repeated = alice
+        .admin(&AdminRequest { op, expected_version: applied, kind: verify.clone() })
+        .await
+        .map_err(ok)?;
+    assert!(matches!(repeated.outcome, Ok(AdminOutcome::Repeated { .. })), "{repeated:?}");
+    // the record is readable through every node, and completes clean
+    let record = wait_repair_done(&alice, op, Duration::from_secs(60)).await?;
+    assert_eq!(record["mode"], "Verify", "{record}");
+    assert_eq!(record["principal"], "alice", "{record}");
+    let groups = record["groups"].as_object().expect("groups");
+    assert!(!groups.is_empty(), "{record}");
+    for (group, progress) in groups {
+        assert!(progress["outcome"]["Clean"].is_object(), "group {group} is not clean: {progress}");
+        assert_eq!(progress["outcome"]["Clean"]["unreported"], serde_json::json!([]), "{progress}");
+        assert!(progress["boundary"].as_u64().unwrap_or(0) > 0, "{progress}");
+        assert_eq!(progress["reports"].as_array().map_or(0, Vec::len), 3, "{progress}");
+    }
+    for node in 1..3 {
+        let addr = cluster.node(node).endpoints.client.to_string();
+        let client = Shoal::<TestDbClient>::with_credentials(&addr, Credentials::scram("bob", "bravo")).await.map_err(ok)?;
+        let through = repair_status(&client, op).await?;
+        assert_eq!(through["groups"], record["groups"], "node {node} holds another record");
+    }
+    // a second operation, and the control leader killed while its groups are scrubbing
+    let leader = cluster.leader_index(0)?.expect("a control leader");
+    let survivor = (0..3).find(|node| *node != leader).expect("a survivor");
+    let addr = cluster.node(survivor).endpoints.client.to_string();
+    let alice_elsewhere = Shoal::<TestDbClient>::with_credentials(&addr, Credentials::scram("alice", "alpha")).await.map_err(ok)?;
+    let second = ask_repair(&alice_elsewhere, &mut cluster, verify.clone()).await?;
+    cluster.kill(leader)?;
+    let record = wait_repair_done(&alice_elsewhere, second, Duration::from_secs(120)).await?;
+    for (group, progress) in record["groups"].as_object().expect("groups") {
+        assert_eq!(progress["phase"], "Done", "group {group}: {progress}");
+        // the killed member reported or did not, depending on when it died; either way the
+        // outcome is named and nothing was quarantined
+        let outcome = &progress["outcome"];
+        assert!(
+            outcome["Clean"].is_object() || outcome["Unresolved"].is_object(),
+            "group {group} came to something else: {progress}"
+        );
+        assert!(outcome["Divergent"].is_null(), "group {group} quarantined a copy: {progress}");
+    }
+    for node in 0..3 {
+        if node != leader {
+            assert_eq!(cluster.node(node).failure(), None, "node {node} died");
+        }
+    }
+    Ok(())
+}
+
+/// A scheduled scrub quarantines a divergent copy with no operator, and installs nothing (C9 M8)
+///
+/// With `cluster.repair.scrub_interval` set, every group's leader verifies the group on the
+/// interval. A partition forgotten on one node is found by the next pass: that node's copy is
+/// quarantined and reads through it refused, the committed state names the copy, and no
+/// snapshot is installed anywhere - a scheduled pass is verification only, which is Q12's
+/// answer ([F44](../../docs/src/features/repair.md)).
+#[tokio::test(flavor = "multi_thread")]
+async fn scheduled_scrub_quarantines_without_an_operator() -> Result<(), FixtureError> {
+    let mut cluster = Cluster::builder()
+        .cluster(3, CoreClaim::Count(1))
+        .replication_factor(3)
+        .lane_links(true)
+        .checkpoint_entries(8)
+        .retained_entries(64)
+        .write_timeout(Duration::from_secs(3))
+        .repair_timeout(Duration::from_secs(4))
+        .scrub_interval(Duration::from_secs(4))
+        .query_deadline(Duration::from_secs(3))
+        .start()
+        .await?;
+    let ok = |error: shoal::client::Errors| FixtureError::NotReady(format!("{error:?}"));
+    let addr0 = cluster.node(0).endpoints.client.to_string();
+    let client = Shoal::<TestDbClient>::new(&addr0).await.map_err(ok)?;
+    let hashed = |key: u64| <Note as shoal::shared::traits::PartitionKeySupport>::get_partition_key_from_values(&key);
+    for key in 27_000..27_040u64 {
+        client.send_one(Note { key, text: format!("note-{key}") }).await.map_err(ok)?;
+    }
+    wait_digests_equal(&mut cluster, &[0, 1, 2], "Note", Duration::from_secs(30))?;
+    for node in 0..3 {
+        compact_now(&mut cluster, node, "Note")?;
+    }
+    // a pass or two with nothing wrong quarantines nothing
+    std::thread::sleep(Duration::from_secs(9));
+    for node in 0..3 {
+        let view = groups_of(&mut cluster, node)?;
+        assert_eq!(view["quarantined"], 0, "node {node} quarantined a clean copy: {}", view["integrity"]);
+        assert!(view["integrity"]["scrubs"].as_u64().unwrap_or(0) >= 1, "node {node} was never scrubbed: {}", view["integrity"]);
+    }
+    // a partition forgotten on node one is found by the next pass
+    let forgotten = 27_010u64;
+    let answer = cluster.node_mut(1).command(&format!("FORGET Note {:016x}", hashed(forgotten)))?;
+    assert_eq!(answer["ok"]["fault"], "forget", "{answer}");
+    let member = wait_member_quarantined(&mut cluster, 1, true, Duration::from_secs(40))?;
+    assert_eq!(member["quarantined"][0]["reason"], "Divergent", "{member}");
+    let (group, _) = group_of(&mut cluster, 0, "Note", forgotten)?;
+    assert_eq!(member["quarantined"][0]["group"], u64::from_str_radix(&group, 16).expect("a group id"), "{member}");
+    // the copy is quarantined on node one, and a read of the group through it is routed to
+    // another holder and served from there
+    assert_eq!(groups_of(&mut cluster, 1)?["quarantined"], 1);
+    let addr1 = cluster.node(1).endpoints.client.to_string();
+    let probe = keys_in_group(&mut cluster, "Note", &group, 27_000, 40)?
+        .into_iter()
+        .find(|key| *key != forgotten && *key < 27_040)
+        .expect("another live key of the group");
+    wait_note_routed(&addr1, probe, &format!("note-{probe}"), Duration::from_secs(20)).await?;
+    assert_eq!(read_note(&addr0, probe).await.map_err(ok)?, Some(format!("note-{probe}")));
+    // and nothing was installed anywhere: a scheduled pass verifies and stops
+    for node in 0..3 {
+        let view = groups_of(&mut cluster, node)?;
+        assert_eq!(view["snapshots"]["installed"], 0, "node {node} installed a snapshot: {}", view["snapshots"]);
+        assert_eq!(cluster.node(node).failure(), None, "node {node} died");
     }
     Ok(())
 }

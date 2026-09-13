@@ -181,6 +181,13 @@ pub struct StagedCluster {
     /// The bundle deadline in milliseconds, if the test shortened it
     #[serde(default)]
     pub query_deadline_ms: Option<u64>,
+    /// How often every group the node leads is scrubbed on its own, in milliseconds, if set
+    /// ([F44](../../../docs/src/features/repair.md))
+    #[serde(default)]
+    pub scrub_interval_ms: Option<u64>,
+    /// How long one scrub may take, in milliseconds, if the test shortened it
+    #[serde(default)]
+    pub repair_timeout_ms: Option<u64>,
 }
 
 /// The endpoints a child bound, and the identity it reported

@@ -82,6 +82,12 @@ pub enum ReplicateKind {
     /// task its apply of the scrub spawned has posted, then the report, and `Unknown` for a
     /// scrub it never applied ([F44](../../../../../docs/src/features/repair.md)).
     Digest = 6,
+    /// Tell a member to quarantine its copy of the group, or to lift the quarantine
+    ///
+    /// The driver's word after a judged scrub, or an operator's release; the payload is the
+    /// action, and the member answers once its marker is durable
+    /// ([F44](../../../../../docs/src/features/repair.md)).
+    Quarantine = 7,
 }
 
 impl ReplicateKind {
@@ -105,6 +111,7 @@ impl ReplicateKind {
             4 => Ok(ReplicateKind::Snapshot),
             5 => Ok(ReplicateKind::ReadBarrier),
             6 => Ok(ReplicateKind::Digest),
+            7 => Ok(ReplicateKind::Quarantine),
             unknown => Err(ProtocolError::UnknownReplicateKind(unknown)),
         }
     }
@@ -119,6 +126,7 @@ impl ReplicateKind {
             ReplicateKind::Snapshot => "snapshot",
             ReplicateKind::ReadBarrier => "read_barrier",
             ReplicateKind::Digest => "digest",
+            ReplicateKind::Quarantine => "quarantine",
         }
     }
 }
